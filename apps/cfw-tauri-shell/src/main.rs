@@ -262,6 +262,13 @@ fn provision_core_binary_from_resources(app: &AppHandle) -> Result<CoreProvision
 fn core_resource_candidates(app: &AppHandle) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
+        // Tauri keeps the "resources/" prefix, so the bundled core lands here.
+        candidates.push(
+            resource_dir
+                .join("resources")
+                .join("cores")
+                .join(DEFAULT_CORE_BINARY_NAME),
+        );
         candidates.push(resource_dir.join("cores").join(DEFAULT_CORE_BINARY_NAME));
         candidates.push(resource_dir.join(DEFAULT_CORE_BINARY_NAME));
         candidates.push(

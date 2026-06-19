@@ -25,10 +25,10 @@
     <key>Label</key>
     <string>com.bill.clashformac.helper</string>
     <key>BundleProgram</key>
-    <string>Contents/Resources/helpers/cfw-helper</string>
+    <string>Contents/Resources/resources/helpers/cfw-helper</string>
     <key>ProgramArguments</key>
     <array>
-        <string>Contents/Resources/helpers/cfw-helper</string>
+        <string>Contents/Resources/resources/helpers/cfw-helper</string>
         <string>serve</string>
     </array>
     <key>AssociatedBundleIdentifiers</key>

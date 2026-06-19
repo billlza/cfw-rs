@@ -24,8 +24,10 @@ cd "$repo_root"
 
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Zi ang Li (YKUPL7Z869)}"
 PLIST_SRC="apps/cfw-tauri-shell/macos/com.bill.clashformac.helper.plist"
-HELPER_REL="Contents/Resources/helpers/cfw-helper"
-CORE_REL="Contents/Resources/cores/clash-darwin"
+# Tauri bundles tauri.conf resources under Contents/Resources/<original prefix>,
+# so resources/helpers and resources/cores keep their "resources/" segment.
+HELPER_REL="Contents/Resources/resources/helpers/cfw-helper"
+CORE_REL="Contents/Resources/resources/cores/clash-darwin"
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   echo "==> cargo tauri build (release)"

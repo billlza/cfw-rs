@@ -3,20 +3,24 @@
 <plist version="1.0">
 <dict>
     <!--
-      Privileged helper daemon registered via SMAppService (macOS 13+).
-      Staged into the app bundle at Contents/Library/LaunchDaemons/ by
-      scripts/bundle_service_mode.sh, then registered from the app
-      (cfw-platform::ServiceModeService::enable_service_mode). launchd runs this
-      as root so mihomo can open a utun device for TUN mode.
+      Privileged helper daemon registered via SMAppService (macOS 13+). Staged
+      into the app bundle at Contents/Library/LaunchDaemons/ by
+      scripts/bundle_service_mode.sh and signed (Developer ID, Team YKUPL7Z869).
+      launchd runs it as root so mihomo can open a utun device for TUN mode.
 
-      BundleProgram is resolved relative to the .app bundle root; the helper is
-      shipped at Contents/Resources/helpers/cfw-helper by build_helper_resource.sh.
+      Lifecycle is driven entirely by launchd + the app-written control file at
+      /Library/Application Support/com.bill.clashformac/active-session.json:
+        - KeepAlive PathState starts the `serve` supervisor while that file
+          exists and stops it when the app removes it, so the unprivileged app
+          never needs to start a system daemon itself (it cannot).
+        - `serve` reads the control file to learn the active user's app-home and
+          config (it CANNOT use $HOME, which is /var/root under launchd), and
+          runs/stops the core based on want_core/generation/heartbeat.
 
-      RunAtLoad is intentionally false: the root daemon must learn the active
-      user's app-home (e.g. /Users/<u>/Library/Application Support/Clash for Mac)
-      before it can spawn the core with a valid config. The app kickstarts the
-      daemon on demand once that coordination path is wired (real-machine TODO);
-      a root run with the wrong (/var/root) home would just fail MissingConfig.
+      ProgramArguments carries no --app-home: the daemon self-discovers it from
+      the control file. This plist is signed INTO the bundle, so RunAtLoad and
+      KeepAlive must be correct before the first SMAppService.register(), else a
+      change forces a re-sign and a re-approval in System Settings.
     -->
     <key>Label</key>
     <string>com.bill.clashformac.helper</string>
@@ -32,9 +36,15 @@
         <string>com.bill.clashformac</string>
     </array>
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
     <key>KeepAlive</key>
-    <false/>
+    <dict>
+        <key>PathState</key>
+        <dict>
+            <key>/Library/Application Support/com.bill.clashformac/active-session.json</key>
+            <true/>
+        </dict>
+    </dict>
     <key>StandardOutPath</key>
     <string>/Library/Logs/com.bill.clashformac.helper.log</string>
     <key>StandardErrorPath</key>

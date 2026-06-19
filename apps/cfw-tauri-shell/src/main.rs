@@ -13,8 +13,8 @@ use cfw_controller::{
     ProvidersSnapshot, ProxiesSnapshot, ProxyDelayResult, RulesSnapshot, StructuredLogEntry,
 };
 use cfw_core::{
-    DeepLinkIntent, FeatureSet, PRODUCT_NAME, PersistedSettings, ProductBlueprint, QualityTargets,
-    SettingsSkeleton, SettingsSnapshot, SettingsStore, UiPage, parse_deep_link,
+    ControlSession, DeepLinkIntent, FeatureSet, PRODUCT_NAME, PersistedSettings, ProductBlueprint,
+    QualityTargets, SettingsSkeleton, SettingsSnapshot, SettingsStore, UiPage, parse_deep_link,
 };
 use cfw_platform::{
     HelperInstallRequest, HelperService, LaunchAgentSpec, LaunchdDomain, LaunchdService,
@@ -27,7 +27,7 @@ use cfw_profiles::{
 };
 use cfw_runtime::{
     CoreInstallRequest, CoreInstallResult, CoreInstaller, CoreManager, CoreProcessSpec,
-    CoreRuntimeError, CoreStatus, DEFAULT_CORE_BINARY_NAME, PINNED_MIHOMO_VERSION,
+    CoreProcessState, CoreRuntimeError, CoreStatus, DEFAULT_CORE_BINARY_NAME, PINNED_MIHOMO_VERSION,
 };
 use futures_util::StreamExt;
 use qrcode::QrCode;
@@ -414,33 +414,136 @@ fn disable_service_mode() -> Result<(), String> {
 
 #[tauri::command]
 async fn set_tun_enabled(
+    app: AppHandle,
     core: State<'_, ManagedCore>,
     enabled: bool,
 ) -> Result<SettingsSnapshot, String> {
     if enabled {
-        MacOsPlatformService
-            .install_tun_runtime()
-            .map_err(|err| err.to_string())?;
-        MacOsPlatformService
-            .start_tun()
-            .map_err(|err| err.to_string())?;
+        set_tun_on(&core).await
     } else {
-        MacOsPlatformService
-            .stop_tun()
-            .map_err(|err| err.to_string())?;
+        set_tun_off(&app, &core).await
     }
+}
+
+/// TUN ON: hand core ownership to the root daemon. Register/verify Service Mode,
+/// render the tun-enabled config, stop the in-process core to free the ports,
+/// then ask the daemon (via the control file) to run the core as root.
+async fn set_tun_on(core: &ManagedCore) -> Result<SettingsSnapshot, String> {
+    // SMAppService register + status check; bails with an actionable
+    // "approve in System Settings" message if approval is still pending.
+    MacOsPlatformService
+        .install_tun_runtime()
+        .map_err(|err| err.to_string())?;
+    MacOsPlatformService
+        .start_tun()
+        .map_err(|err| err.to_string())?;
+
     let snapshot = update_settings(|settings| {
-        settings.tun_mode = enabled;
+        settings.tun_mode = true;
         Ok(())
     })?;
-    let config_path = render_runtime_config_from_settings()?;
-    if managed_core_is_running(&core)? {
-        controller_client_from_settings()?
-            .reload_config(&config_path.to_string_lossy(), true)
-            .await
-            .map_err(|err| err.to_string())?;
-    }
+    let _ = render_runtime_config_from_settings()?;
+
+    // Free both ports for the root core: stop the unprivileged in-process core.
+    stop_managed_core(core)?;
+    wait_for_ports_free(&[
+        snapshot.settings.mixed_port,
+        snapshot.settings.external_controller_port,
+    ])
+    .await?;
+
+    // Hand the core to the daemon and wait for its controller to come up.
+    write_control_session(true)?;
+    wait_for_controller_ready().await?;
     Ok(snapshot)
+}
+
+/// TUN OFF: take core ownership back. Tell the daemon to stop, remove the
+/// control file (launchd then stops the daemon), then restart the in-process
+/// unprivileged core with a tun-free config.
+async fn set_tun_off(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnapshot, String> {
+    let snapshot = update_settings(|settings| {
+        settings.tun_mode = false;
+        Ok(())
+    })?;
+    let _ = render_runtime_config_from_settings()?;
+
+    let _ = write_control_session(false);
+    ControlSession::remove().map_err(|err| err.to_string())?;
+    MacOsPlatformService
+        .stop_tun()
+        .map_err(|err| err.to_string())?;
+
+    // Let the root core release the controller port before respawning ours.
+    let _ = wait_for_ports_free(&[snapshot.settings.external_controller_port]).await;
+    start_managed_core(app, core).await?;
+    Ok(snapshot)
+}
+
+/// True when the privileged root daemon (not the in-process child) owns the core.
+fn service_mode_owns_core() -> Result<bool, String> {
+    let settings = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())?;
+    Ok(settings.tun_mode && MacOsPlatformService.service_mode_status() == ServiceModeStatus::Enabled)
+}
+
+/// Write the app->daemon control file from current settings, bumping the
+/// generation so the daemon's supervise loop reloads.
+fn write_control_session(want_core: bool) -> Result<(), String> {
+    let snapshot = settings_store()?.snapshot().map_err(|err| err.to_string())?;
+    let generation = ControlSession::read()
+        .ok()
+        .flatten()
+        .map(|session| session.generation + 1)
+        .unwrap_or(1);
+    ControlSession {
+        app_home: snapshot.paths.app_home.clone(),
+        config_file: snapshot.paths.config_file.clone(),
+        mixed_port: snapshot.settings.mixed_port,
+        controller_port: snapshot.settings.external_controller_port,
+        secret: snapshot.settings.secret.clone(),
+        want_core,
+        generation,
+        heartbeat_epoch_secs: now_epoch_secs(),
+    }
+    .write_atomic()
+    .map_err(|err| err.to_string())
+}
+
+/// Poll the controller until it answers (no in-process Child handle — used when
+/// the root daemon owns the core).
+async fn wait_for_controller_ready() -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        match controller_client_from_settings()?.configs().await {
+            Ok(_) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(format!(
+                    "core controller not ready (see /Library/Logs/com.bill.clashformac.helper.log): {error}"
+                ));
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Wait until every listed loopback port can be bound (i.e. is free).
+async fn wait_for_ports_free(ports: &[u16]) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if ports
+            .iter()
+            .all(|port| TcpListener::bind(("127.0.0.1", *port)).is_ok())
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("core ports are still in use after waiting".into());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[tauri::command]
@@ -1412,6 +1515,27 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// How often the app refreshes its heartbeat in the control file while the root
+/// daemon owns the core. Must stay well under the daemon's stale threshold (60s)
+/// so the daemon only tears down the root core when the app is genuinely gone.
+const HELPER_HEARTBEAT_TICK: Duration = Duration::from_secs(20);
+
+/// Background task: while Service Mode owns the core, bump the control file's
+/// heartbeat so the root daemon knows the app is alive. Touches only the
+/// heartbeat (not generation), so it never triggers a core respawn.
+async fn run_helper_heartbeat() {
+    loop {
+        tokio::time::sleep(HELPER_HEARTBEAT_TICK).await;
+        if !service_mode_owns_core().unwrap_or(false) {
+            continue;
+        }
+        if let Ok(Some(mut session)) = ControlSession::read() {
+            session.heartbeat_epoch_secs = now_epoch_secs();
+            let _ = session.write_atomic();
+        }
+    }
+}
+
 #[tauri::command]
 async fn update_profile(id: String) -> Result<ProfileImportResult, String> {
     let store = settings_store()?;
@@ -1740,6 +1864,25 @@ async fn start_core(app: AppHandle, core: State<'_, ManagedCore>) -> Result<Core
 }
 
 async fn start_managed_core(app: &AppHandle, core: &ManagedCore) -> Result<CoreStatus, String> {
+    // Under Service Mode/TUN the root daemon owns the core. Never spawn an
+    // in-process child (it would fight the root core for the ports); instead make
+    // sure the daemon is asked to run the core and wait for its controller.
+    if service_mode_owns_core()? {
+        ensure_core_binary_available(app).await?;
+        if apply_active_profile_if_selected()?.is_none() {
+            let _ = write_default_config_from_settings()?;
+        }
+        write_control_session(true)?;
+        wait_for_controller_ready().await?;
+        let spec = core_manager_from_settings()?.spec().clone();
+        return Ok(CoreStatus {
+            state: CoreProcessState::Running,
+            pid: None,
+            spec,
+            message: "Clash core running under Service Mode (root daemon)".into(),
+        });
+    }
+
     let initial_manager = core_manager_from_settings()?;
     {
         let mut child = core.child.lock().map_err(|err| err.to_string())?;
@@ -1869,8 +2012,29 @@ fn stop_managed_core(core: &ManagedCore) -> Result<(), String> {
 
 fn cleanup_runtime(core: &ManagedCore) -> Vec<String> {
     let mut errors = Vec::new();
-    if let Err(error) = stop_managed_core(core) {
-        errors.push(error);
+    // If the root daemon owns the core, tell it to stop and remove the control
+    // file (launchd PathState then stops the daemon) so no orphaned root core
+    // keeps holding utun + routes. Keep Service Mode registered for next launch.
+    match service_mode_owns_core() {
+        Ok(true) => {
+            if let Err(error) = write_control_session(false) {
+                errors.push(error);
+            }
+            if let Err(error) = ControlSession::remove() {
+                errors.push(error.to_string());
+            }
+        }
+        Ok(false) => {
+            if let Err(error) = stop_managed_core(core) {
+                errors.push(error);
+            }
+        }
+        Err(error) => {
+            errors.push(error);
+            if let Err(error) = stop_managed_core(core) {
+                errors.push(error);
+            }
+        }
     }
 
     let should_restore_proxy = settings_store()
@@ -2297,6 +2461,7 @@ fn main() {
             });
             let scheduler_handle = app.handle().clone();
             tauri::async_runtime::spawn(run_profile_update_scheduler(scheduler_handle));
+            tauri::async_runtime::spawn(run_helper_heartbeat());
             ensure_main_window(app.handle())?;
             build_tray(app.handle())?;
             emit_deep_links(app.handle(), Vec::new());

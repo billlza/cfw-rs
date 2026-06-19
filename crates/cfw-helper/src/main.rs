@@ -1,9 +1,27 @@
-use std::process::Command;
+//! Privileged helper for Clash for Mac (cfw-rs).
+//!
+//! Installed as a root launchd daemon via SMAppService. Its `serve` command is
+//! the long-running supervisor launchd starts (KeepAlive=PathState on the
+//! control file): it reads the app-written [`ControlSession`], validates it for
+//! root use, and spawns/supervises the mihomo core as root so the core can open
+//! a utun device for TUN mode. The other subcommands (status/run-core/stop-core)
+//! remain for diagnostics and accept an explicit `--app-home`.
+
+use std::process::{Child, Command};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use cfw_core::{MacOsAppPaths, SettingsStore};
-use cfw_runtime::{CoreManager, CoreProcessSpec};
+use cfw_core::{ControlSession, MacOsAppPaths, SettingsStore};
+use cfw_runtime::{
+    CORE_LOG_FILE_NAME, CoreManager, CoreProcessSpec, DEFAULT_CORE_BINARY_NAME,
+};
 use serde::Serialize;
+
+/// How often the supervisor re-reads the control file.
+const SUPERVISE_POLL: Duration = Duration::from_millis(500);
+/// Tear the root core down if the app's heartbeat is older than this (app died).
+const HEARTBEAT_STALE_SECS: u64 = 60;
 
 #[derive(Debug, Serialize)]
 struct HelperOutcome<T> {
@@ -45,31 +63,125 @@ fn run() -> Result<()> {
                 .spawn()
                 .context("failed to spawn Clash core")?;
             let pid = child.id();
-            // Detach unless launched as the long-running daemon command.
+            // Detach unless launched as the long-running supervisor.
             drop(child);
             print_outcome("run-core", PidPayload { pid })
         }
-        "serve" => {
-            let mut child = manager(&options)?
-                .spawn()
-                .context("failed to spawn Clash core")?;
-            let pid = child.id();
-            print_outcome("serve", PidPayload { pid })?;
-            let status = child
-                .wait()
-                .context("failed while waiting for Clash core")?;
-            if status.success() {
-                Ok(())
-            } else {
-                bail!("Clash core exited with status {status}")
-            }
-        }
+        // The launchd daemon entrypoint: supervise the root core off the control
+        // file. Always returns Ok so launchd (KeepAlive) never crash-loops.
+        "serve" => supervise(),
         "stop-core" => {
             let stopped = stop_core(&options)?;
             print_outcome("stop-core", StopPayload { stopped })
         }
         other => bail!("unsupported helper command: {other}"),
     }
+}
+
+/// Long-running root supervisor. Never exits non-zero while it might be wanted —
+/// it exits 0 (clean) only when the app no longer wants the core, so launchd's
+/// PathState/KeepAlive does not thrash it.
+fn supervise() -> Result<()> {
+    let mut child: Option<Child> = None;
+    let mut running_generation: Option<u64> = None;
+
+    loop {
+        let session = match ControlSession::read() {
+            Ok(Some(session)) => session,
+            // File gone -> the app wants Service Mode off; launchd is stopping us.
+            Ok(None) => {
+                stop_child(&mut child);
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("control session unreadable, tearing down: {error}");
+                stop_child(&mut child);
+                return Ok(());
+            }
+        };
+
+        // The app bumps heartbeat on a timer; a stale heartbeat means it died
+        // without cleaning up. Remove the file (we are root) so PathState stops
+        // us, and tear the orphaned core + routes down.
+        if now_epoch_secs().saturating_sub(session.heartbeat_epoch_secs) > HEARTBEAT_STALE_SECS {
+            eprintln!("control session heartbeat is stale; tearing down orphaned core");
+            stop_child(&mut child);
+            let _ = ControlSession::remove();
+            return Ok(());
+        }
+
+        if !session.want_core {
+            // Transient state before the app removes the file; idle, don't exit
+            // (exiting with the file still present would relaunch in a loop).
+            stop_child(&mut child);
+            running_generation = None;
+            thread::sleep(SUPERVISE_POLL);
+            continue;
+        }
+
+        // want_core = true: only ever act on a session that is safe for root.
+        if let Err(error) = session.validate_for_root() {
+            eprintln!("refusing unsafe control session: {error}");
+            stop_child(&mut child);
+            running_generation = None;
+            thread::sleep(SUPERVISE_POLL);
+            continue;
+        }
+
+        let core_dead = child
+            .as_mut()
+            .map(|process| matches!(process.try_wait(), Ok(Some(_)) | Err(_)))
+            .unwrap_or(true);
+        let generation_changed = running_generation != Some(session.generation);
+        if core_dead || generation_changed {
+            stop_child(&mut child);
+            match spawn_core_for_session(&session) {
+                Ok(process) => {
+                    child = Some(process);
+                    running_generation = Some(session.generation);
+                }
+                Err(error) => {
+                    // Log and keep supervising; never exit non-zero under KeepAlive.
+                    eprintln!("core spawn failed: {error:#}");
+                    running_generation = None;
+                }
+            }
+        }
+
+        thread::sleep(SUPERVISE_POLL);
+    }
+}
+
+/// Build a core spec straight from the validated control session (NOT from
+/// `$HOME`, which is `/var/root` under launchd) and spawn the core as root.
+fn spawn_core_for_session(session: &ControlSession) -> Result<Child> {
+    let paths = MacOsAppPaths::from_app_home(&session.app_home);
+    let spec = CoreProcessSpec {
+        binary_path: paths.cores_dir.join(DEFAULT_CORE_BINARY_NAME),
+        config_path: session.config_file.clone(),
+        home_dir: paths.app_home.clone(),
+        log_file: paths.logs_dir.join(CORE_LOG_FILE_NAME),
+        controller_host: "127.0.0.1".into(),
+        controller_port: session.controller_port,
+        mixed_port: session.mixed_port,
+    };
+    CoreManager::new(spec)
+        .spawn()
+        .context("failed to spawn Clash core as root")
+}
+
+fn stop_child(child: &mut Option<Child>) {
+    if let Some(mut process) = child.take() {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+}
+
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Default)]

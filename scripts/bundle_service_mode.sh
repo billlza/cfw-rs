@@ -82,6 +82,12 @@ Done. Next (on your Mac):
      xcrun notarytool submit "<zipped app>" --keychain-profile <profile> --wait
      xcrun stapler staple "$APP_PATH"
 
-Known TODO (real-machine): wire the root daemon's app-home discovery so its core
-spawns with the active user's config (plist RunAtLoad is false until then).
+How it works at runtime: enabling TUN registers this daemon (you approve it once
+in System Settings), and the app writes a control file at
+/Library/Application Support/com.bill.clashformac/active-session.json carrying the
+active user's app-home + config + ports. launchd's KeepAlive PathState starts the
+root 'serve' supervisor while that file exists; the supervisor reads+validates it
+and runs the mihomo core as root so TUN/utun works. Turning TUN off removes the
+file, which stops the daemon. (If the app cannot create that /Library dir while
+unprivileged, run the app from an admin account or pre-create the dir once.)
 EOF

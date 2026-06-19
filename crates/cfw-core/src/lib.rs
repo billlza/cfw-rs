@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+mod control_session;
 mod protocol;
 mod settings;
 
+pub use control_session::{
+    CONTROL_SESSION_DIR, CONTROL_SESSION_FILE, ControlSession, ControlSessionError,
+};
 pub use protocol::{DeepLinkAction, DeepLinkIntent, DeepLinkParseError, parse_deep_link};
 pub use settings::{
     APP_CONFIG_FILE_NAME, APP_HOME_DIR_NAME, CORES_DIR_NAME, HELPERS_DIR_NAME, LOGS_DIR_NAME,

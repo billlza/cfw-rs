@@ -1,0 +1,11 @@
+[package]
+name = "cfw-helper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+cfw-core = { path = "../cfw-core" }
+cfw-runtime = { path = "../cfw-runtime" }
+serde.workspace = true
+serde_json.workspace = true

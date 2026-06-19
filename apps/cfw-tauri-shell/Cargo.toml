@@ -1,0 +1,33 @@
+[package]
+name = "cfw-tauri-shell"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+autobins = false
+
+[[bin]]
+name = "clash-for-mac"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+cfw-controller = { path = "../../crates/cfw-controller" }
+cfw-core = { path = "../../crates/cfw-core" }
+cfw-platform = { path = "../../crates/cfw-platform" }
+cfw-profiles = { path = "../../crates/cfw-profiles" }
+cfw-runtime = { path = "../../crates/cfw-runtime" }
+futures-util.workspace = true
+qrcode.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+urlencoding.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

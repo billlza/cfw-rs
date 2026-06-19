@@ -1,0 +1,18 @@
+sample: Clash.for.Windows-0.20.39-arm64.dmg
+sha256: 479d9cef5932d70506592869b01e6e12a4c61411307c0d83615ba3f6c2b41631
+
+sample: Clash.for.Windows-0.20.39-arm64-mac.7z
+sha256: fab650bed23604702302a67042e1d210331bcb482107838717b19e8883f746f9
+
+asar: Contents/Resources/app.asar
+sha256: b6905dc463f622e5c09f49810e83abc7aba4eaa346fe026869aecb3a5e8a526c
+
+binary: static/files/darwin/arm64/clash-darwin
+sha256: 973f5c63cc83f3d69ac0058f95a1ce837418a2fb323488489043185d215c0f86
+
+binary: static/files/darwin/arm64/sysproxy
+sha256: b73f9add924c2b8c7c51ec2f85d371530e0be448355e5559a1992be80a40a108
+
+binary: static/files/darwin/arm64/service/clash-core-service
+sha256: 6209c2619a83183720ffaf979624756f7701d7812c76573abf04babfc8fff381
+

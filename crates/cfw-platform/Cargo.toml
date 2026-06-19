@@ -1,0 +1,15 @@
+[package]
+name = "cfw-platform"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+cfw-core = { path = "../cfw-core" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSURL"] }
+objc2-service-management = "0.3"

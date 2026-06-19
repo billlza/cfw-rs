@@ -1,0 +1,1 @@
+{"main-capability":{"identifier":"main-capability","description":"Main desktop capability for Clash for Mac","local":true,"windows":["main"],"permissions":["core:path:default","core:event:default","core:window:default","core:app:default","core:resources:default","core:menu:default","core:tray:default"]}}

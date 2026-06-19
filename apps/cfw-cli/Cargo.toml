@@ -1,0 +1,21 @@
+[package]
+name = "cfw-cli"
+version = "0.1.0"
+edition = "2024"
+description = "Headless command-line control for Clash for Mac (cfw-rs)"
+
+[[bin]]
+name = "cfw-cli"
+path = "src/main.rs"
+
+[dependencies]
+cfw-core = { path = "../../crates/cfw-core" }
+cfw-runtime = { path = "../../crates/cfw-runtime" }
+cfw-controller = { path = "../../crates/cfw-controller" }
+cfw-profiles = { path = "../../crates/cfw-profiles" }
+cfw-platform = { path = "../../crates/cfw-platform" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+clap = { version = "4", features = ["derive"] }

@@ -1,0 +1,17 @@
+# Rust build output
+/target
+
+# Atomic-write staging files
+**/*.tmp
+
+# macOS junk
+.DS_Store
+
+# Large, reproducibly-downloadable artifacts. The mihomo core is pinned by
+# version+SHA-256 in cfw-runtime; re-fetch with scripts/fetch_core.sh. The helper
+# resource is produced by scripts/build_helper_resource.sh at build time.
+/apps/cfw-tauri-shell/resources/cores/clash-darwin
+/apps/cfw-tauri-shell/resources/helpers/cfw-helper
+
+# Playwright cache
+/.playwright-cli

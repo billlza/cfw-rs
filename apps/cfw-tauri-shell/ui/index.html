@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clash for Mac</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="status-bar" data-tauri-drag-region>
+      <div class="status-progress" aria-hidden="true"><i id="traffic-progress"></i></div>
+      <span id="status-title">Clash for Mac</span>
+      <button id="reload-button" class="status-button" title="Reload dashboard">Reload</button>
+    </header>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <section class="traffic-pane">
+          <div class="traffic-row">
+            <span aria-hidden="true">&uarr;</span>
+            <strong id="upload-rate">0.0 MB/s</strong>
+          </div>
+          <div class="traffic-row">
+            <span aria-hidden="true">&darr;</span>
+            <strong id="download-rate">0.0 MB/s</strong>
+          </div>
+        </section>
+
+        <nav id="nav" class="nav-list" aria-label="Primary navigation"></nav>
+
+        <section class="runtime-pane">
+          <span>Running Time</span>
+          <strong id="runtime-value">00:00:00</strong>
+        </section>
+
+        <section class="sidebar-meta">
+          <p class="connected-line"><i id="sidebar-status-dot"></i><strong id="sidebar-status">Disconnected</strong></p>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <h2 id="page-title" class="visually-hidden">General</h2>
+        <p id="page-summary" class="visually-hidden">Runtime overview</p>
+        <section id="page" class="page" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <script src="./main.js"></script>
+  </body>
+</html>

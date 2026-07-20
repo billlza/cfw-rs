@@ -98,4 +98,5 @@ xcrun stapler staple "target/release/bundle/dmg/Clash for Mac_0.1.0_aarch64.dmg"
 
 ### P3 — explicitly deferred
 - Screenshot parity, 3× CI gates, SSID, Monaco diff, DHCP, Sparkle auto-update, proxied terminal, child-process log tail
+- MaxMind license-key download path (URL update works; CFW token→tarball path not ported)
 

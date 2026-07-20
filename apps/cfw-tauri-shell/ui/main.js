@@ -160,6 +160,9 @@ const state = {
   coreStartedAt: null,
   // Real SMAppService registration state (service_mode_status command).
   serviceModeStatus: null,
+  // Live GeoIP DB status from app home (geoip.metadb / Country.mmdb).
+  geoipStatus: null,
+  geoipUpdating: false,
   connectionStream: {
     at: 0,
     uploadTotal: 0,
@@ -255,6 +258,31 @@ const invoke = async (command, args = {}) => {
     if (command === "update_all_rule_providers") return emptyProviderBatch("update-rule");
     if (command === "health_check_all_proxy_providers") return emptyProviderBatch("health-check-proxy");
     if (command === "service_mode_status") return "Unknown";
+    if (command === "enable_service_mode") return "RequiresApproval";
+    if (command === "disable_service_mode") return null;
+    if (command === "geoip_database_status") {
+      return {
+        present: false,
+        file_name: "geoip.metadb",
+        path: `${fallbackSettingsSnapshot.paths.app_home}/geoip.metadb`,
+        mtime_ms: null,
+        size_bytes: null,
+      };
+    }
+    if (command === "update_geoip_database") {
+      const now = Date.now();
+      return {
+        status: {
+          present: true,
+          file_name: "geoip.metadb",
+          path: `${fallbackSettingsSnapshot.paths.app_home}/geoip.metadb`,
+          mtime_ms: now,
+          size_bytes: 1024,
+        },
+        source_url: "https://example.invalid/geoip.metadb",
+        bytes: 1024,
+      };
+    }
     if (command === "refresh_tray_menu") return null;
     if (command === "start_connections_stream") return null;
     if (command === "start_log_stream") return null;
@@ -345,6 +373,21 @@ function serviceModeLabel(status) {
     default:
       return "Unknown";
   }
+}
+
+function serviceModeNeedsAttention(status) {
+  return status !== "Enabled";
+}
+
+function formatGeoipLabel(status, updating) {
+  if (updating) return "Updating…";
+  if (!status) return "Loading…";
+  if (!status.present) return "Missing";
+  if (status.mtime_ms == null) return status.file_name || "Present";
+  const date = new Date(status.mtime_ms);
+  if (Number.isNaN(date.getTime())) return status.file_name || "Present";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function formatBytes(bytes) {
@@ -781,15 +824,15 @@ function renderGeneral() {
         <div class="cfw-row">
           <div class="cfw-row-left">GeoIP Database</div>
           <div class="cfw-row-right">
-            <span class="cfw-link-value">Unknown</span>
+            <button class="cfw-text-button" data-action="update-geoip-database" title="${state.geoipStatus?.path ? escapeHtml(state.geoipStatus.path) : "Download / refresh GeoIP database"}">${escapeHtml(formatGeoipLabel(state.geoipStatus, state.geoipUpdating))}</button>
           </div>
         </div>
 
         <div class="cfw-row">
-          <div class="cfw-row-left">Service Mode <span class="tiny-warn">!</span></div>
+          <div class="cfw-row-left">Service Mode${serviceModeNeedsAttention(state.serviceModeStatus) ? ' <span class="tiny-warn">!</span>' : ""}</div>
           <div class="cfw-row-right">
             <span class="cfw-link-value">${serviceMode}</span>
-            <button class="cfw-text-button" data-action="install-helper-service">Manage</button>
+            <button class="cfw-text-button" data-action="manage-service-mode">Manage</button>
           </div>
         </div>
 
@@ -2521,6 +2564,51 @@ async function handleAction(action) {
     await loadSettingsSnapshot();
     appendLog("info", "settings", "cfw-settings.yaml reloaded");
   }
+  if (action === "manage-service-mode") {
+    try {
+      const status = await invoke("enable_service_mode");
+      state.serviceModeStatus = status;
+      if (status === "RequiresApproval") {
+        appendLog(
+          "warning",
+          "service",
+          'Service Mode needs approval: System Settings → General → Login Items & Extensions → enable "Clash for Mac"'
+        );
+      } else if (status === "Enabled") {
+        appendLog("info", "service", "Service Mode enabled");
+      } else {
+        appendLog("warning", "service", `Service Mode status: ${serviceModeLabel(status)}`);
+      }
+    } catch (error) {
+      appendLog("warning", "service", `Service Mode enable failed: ${error.message ?? String(error)}`);
+    }
+    await loadCoreStatus();
+  }
+  if (action === "update-geoip-database") {
+    if (state.geoipUpdating) return;
+    const custom = window.prompt(
+      "GeoIP database URL (leave blank for MetaCubeX geoip.metadb):",
+      ""
+    );
+    if (custom === null) return;
+    state.geoipUpdating = true;
+    renderPage();
+    try {
+      const result = await invoke("update_geoip_database", {
+        url: custom.trim() ? custom.trim() : null,
+      });
+      state.geoipStatus = result.status;
+      appendLog(
+        "info",
+        "geoip",
+        `Updated ${result.status.file_name} (${formatBytes(result.bytes)}) from ${result.source_url}`
+      );
+    } catch (error) {
+      appendLog("warning", "geoip", `GeoIP update failed: ${error.message ?? String(error)}`);
+    } finally {
+      state.geoipUpdating = false;
+    }
+  }
   if (action === "install-helper-service") {
     try {
       const snapshot = await invoke("install_helper_service");
@@ -2768,6 +2856,12 @@ async function loadCoreStatus() {
     state.serviceModeStatus = await invoke("service_mode_status");
   } catch (_error) {
     state.serviceModeStatus = null;
+  }
+  try {
+    state.geoipStatus = await invoke("geoip_database_status");
+  } catch (error) {
+    state.geoipStatus = null;
+    appendLog("warning", "geoip", `Unable to read GeoIP database: ${error.message ?? String(error)}`);
   }
 }
 

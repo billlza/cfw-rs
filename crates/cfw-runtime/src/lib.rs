@@ -13,7 +13,12 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 mod config;
+mod geoip;
 pub use config::{default_config_mapping, write_default_config};
+pub use geoip::{
+    COUNTRY_MMDB_NAME, DEFAULT_COUNTRY_MMDB_URL, DEFAULT_GEOIP_METADB_URL, GEOIP_METADB_NAME,
+    GeoIpDatabaseStatus, GeoIpUpdateResult, geoip_database_status, update_geoip_database,
+};
 
 pub const DEFAULT_CORE_BINARY_NAME: &str = "clash-darwin";
 pub const CORE_LOG_FILE_NAME: &str = "clash-core.log";

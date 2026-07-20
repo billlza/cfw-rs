@@ -1661,6 +1661,22 @@ fn reveal_logs_directory() -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+fn geoip_database_status() -> Result<cfw_runtime::GeoIpDatabaseStatus, String> {
+    let store = settings_store()?;
+    store.ensure_layout().map_err(|err| err.to_string())?;
+    Ok(cfw_runtime::geoip_database_status(store.paths()))
+}
+
+#[tauri::command]
+async fn update_geoip_database(url: Option<String>) -> Result<cfw_runtime::GeoIpUpdateResult, String> {
+    let store = settings_store()?;
+    store.ensure_layout().map_err(|err| err.to_string())?;
+    cfw_runtime::update_geoip_database(store.paths(), url.as_deref())
+        .await
+        .map_err(|err| err.to_string())
+}
+
 fn apply_active_profile_if_selected() -> Result<Option<ProfileApplyResult>, String> {
     let store = settings_store()?;
     let settings = store.read_or_default().map_err(|err| err.to_string())?;
@@ -2497,6 +2513,8 @@ fn main() {
             profile_qrcode_svg,
             reveal_home_directory,
             reveal_logs_directory,
+            geoip_database_status,
+            update_geoip_database,
             apply_active_profile,
             set_proxy_mode,
             set_allow_lan,

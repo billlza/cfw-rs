@@ -23,6 +23,7 @@ Items marked beta-out-of-scope do not block distribution.
 - [x] Service Mode via SMAppService + privileged helper
 - [x] TUN lifecycle handoff to root daemon (fails loudly if unsigned / unapproved)
 - [x] Reveal home directory action
+- [x] GeoIP database status + click-to-update (`geoip.metadb` / `Country.mmdb`)
 - [ ] Every original CFW setting with full migration *(partial — extra flattened)*
 - [ ] Proxied terminal actions *(beta out of scope)*
 

@@ -1595,6 +1595,51 @@ fn reveal_profile(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_profile_externally(id: String) -> Result<(), String> {
+    let store = settings_store()?;
+    let path = ProfileManager::new(store.paths().clone())
+        .map_err(|err| err.to_string())?
+        .profile_path(&id)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("profile not found: {id}"))?;
+    let status = Command::new("/usr/bin/open")
+        .arg(&path)
+        .status()
+        .map_err(|err| err.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("open profile externally failed with status {status}"))
+    }
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+        return Err("only http(s) URLs can be opened".into());
+    }
+    let status = Command::new("/usr/bin/open")
+        .arg(trimmed)
+        .status()
+        .map_err(|err| err.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("open url failed with status {status}"))
+    }
+}
+
+#[tauri::command]
+fn update_profile_info(id: String, name: String, url: Option<String>) -> Result<(), String> {
+    let store = settings_store()?;
+    ProfileManager::new(store.paths().clone())
+        .map_err(|err| err.to_string())?
+        .update_info(&id, name, url)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn read_profile_text(id: String) -> Result<ProfileText, String> {
     let store = settings_store()?;
     ProfileManager::new(store.paths().clone())
@@ -2547,6 +2592,9 @@ fn main() {
             profiles_snapshot,
             delete_profile,
             reveal_profile,
+            open_profile_externally,
+            open_external_url,
+            update_profile_info,
             read_profile_text,
             save_profile_text,
             profile_qrcode_svg,

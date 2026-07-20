@@ -175,6 +175,10 @@ const state = {
   },
   profiles: [],
   profileInspector: null,
+  /** @type {{ id: string, x: number, y: number } | null} */
+  profileContextMenu: null,
+  /** @type {{ kind: "copy" | "settings" | "delete" | "reset-settings" | "geoip", id?: string } | null} */
+  glassDialog: null,
   proxyGroups: [],
   logs: [],
   connections: [],
@@ -318,6 +322,9 @@ const invoke = async (command, args = {}) => {
     if (command === "profiles_snapshot") return [];
     if (command === "delete_profile") return true;
     if (command === "reveal_profile") return null;
+    if (command === "open_profile_externally") return null;
+    if (command === "open_external_url") return null;
+    if (command === "update_profile_info") return null;
     if (command === "reveal_home_directory") return null;
     if (command === "reveal_logs_directory") return null;
     if (command === "apply_active_profile") throw new Error("Profile apply is unavailable outside the Tauri runtime");
@@ -1032,11 +1039,6 @@ function hostFromUrl(value) {
 }
 
 function subscriptionLabel(profile) {
-  if (profile.subscriptionUserinfo) {
-    const parsed = parseSubscriptionUserinfo(profile.subscriptionUserinfo);
-    if (parsed?.expireLabel) return parsed.expireLabel;
-    return "remote";
-  }
   if (profile.updateInterval) return `interval ${profile.updateInterval}`;
   return profile.sourceUrl ? "remote" : "local";
 }
@@ -1059,22 +1061,453 @@ function parseSubscriptionUserinfo(raw) {
   if (Number.isFinite(total) && total > 0) {
     percent = Math.max(0, Math.min(100, (used / total) * 100));
   }
-  let expireLabel = null;
+  let expireDate = null;
   if (Number.isFinite(expire) && expire > 0) {
     const date = new Date(expire * 1000);
     if (!Number.isNaN(date.getTime())) {
       const pad = (n) => String(n).padStart(2, "0");
-      expireLabel = `exp ${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+      expireDate = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
     }
   }
-  return { used, total: Number.isFinite(total) ? total : null, percent, expireLabel };
+  return {
+    used,
+    total: Number.isFinite(total) && total > 0 ? total : null,
+    percent,
+    expireDate,
+  };
+}
+
+function formatQuotaBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "0B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  // CFW-style: 29.8GB / 300.0GB (no space, one decimal for KB+)
+  if (unit === 0) return `${Math.round(value)}B`;
+  return `${value.toFixed(1)}${units[unit]}`;
+}
+
+function formatRelativeUpdated(epochSecs) {
+  if (!Number.isFinite(epochSecs) || epochSecs <= 0) return "unknown";
+  const deltaMs = Date.now() - epochSecs * 1000;
+  if (deltaMs < 0) return new Date(epochSecs * 1000).toLocaleString();
+  const seconds = Math.floor(deltaMs / 1000);
+  if (seconds < 45) return "a few seconds";
+  if (seconds < 90) return "1 minute";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes`;
+  if (seconds < 5400) return "1 hour";
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours`;
+  return new Date(epochSecs * 1000).toLocaleString();
+}
+
+function profileUsageSpans(profile) {
+  const parsed = parseSubscriptionUserinfo(profile.subscriptionUserinfo);
+  if (parsed && (parsed.total != null || parsed.expireDate)) {
+    const spans = [];
+    if (parsed.total != null) {
+      spans.push(`<span>${escapeHtml(formatQuotaBytes(parsed.used))}</span>`);
+      spans.push(`<span>${escapeHtml(formatQuotaBytes(parsed.total))}</span>`);
+    } else {
+      spans.push(`<span>${escapeHtml(formatQuotaBytes(parsed.used))}</span>`);
+    }
+    if (parsed.expireDate) {
+      spans.push(`<span>${escapeHtml(parsed.expireDate)}</span>`);
+    }
+    return spans.join("");
+  }
+  return `
+    <span>${escapeHtml(profile.traffic)}</span>
+    <span>${profile.rules.toLocaleString()} rules</span>
+    <span>${escapeHtml(subscriptionLabel(profile))}</span>
+  `;
 }
 
 function profileProgressWidth(profile) {
   const parsed = parseSubscriptionUserinfo(profile.subscriptionUserinfo);
   if (parsed?.percent != null) return parsed.percent;
-  // No usage quota from the subscription — keep the bar empty (never invent %).
   return 0;
+}
+
+/** CFW profile context-menu items — same actions, macOS liquid-glass chrome. */
+const PROFILE_MENU_ACTIONS = [
+  { id: "open-web", label: "Open web page", icon: "home", remoteOnly: false, needsHomeWeb: true },
+  { id: "edit", label: "Edit", icon: "edit" },
+  { id: "edit-external", label: "Edit externally", icon: "edit" },
+  { id: "update", label: "Update", icon: "refresh", remoteOnly: true },
+  { id: "reveal", label: "Show in folder", icon: "folder" },
+  { id: "diff", label: "Diff", icon: "diff", remoteOnly: true },
+  { id: "proxies", label: "Proxies", icon: "send" },
+  { id: "rules", label: "Rules", icon: "rules" },
+  { id: "copy", label: "Copy", icon: "copy" },
+  { id: "qrcode", label: "QRCode", icon: "qr", remoteOnly: true },
+  { id: "parsers", label: "Parsers", icon: "tree", remoteOnly: true },
+  { id: "run-script", label: "Run script", icon: "code" },
+  { id: "settings", label: "Settings", icon: "gear" },
+  { id: "delete", label: "Delete", icon: "trash", danger: true },
+];
+
+function profileMenuIcon(kind) {
+  const icons = {
+    home: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 3.2 3.8 10.2v9.6h5.4v-5.4h5.6v5.4h5.4v-9.6L12 3.2z"/></svg>`,
+    edit: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4.5 16.9 15.8 5.6l2.6 2.6L7.1 19.5H4.5v-2.6zm14.3-11.7 1.5 1.5c.4.4.4 1 0 1.4l-1.2 1.2-2.6-2.6 1.2-1.2c.4-.4 1-.4 1.4 0z"/></svg>`,
+    refresh: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 5a7 7 0 0 1 6.3 4H16v2h5.5V5.5H19v1.7A9 9 0 1 0 21 12h-2a7 7 0 1 1-7-7z"/></svg>`,
+    folder: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3.5 6.5A2 2 0 0 1 5.5 4.5h4l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-11z"/></svg>`,
+    diff: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 4h2v5H7V4zm0 11h2v5H7v-5zm8-7.5 3.5 3.5L15 14.5V12h-4v-2h4V7.5zM5 10h6v2H5v-2z"/></svg>`,
+    send: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3.2 11.2 20 3.5 12.3 20.8l-1.7-6.4-7.4-3.2zm4.4 2.3 4.2 1.8 3.3-7.4-7.5 5.6z"/></svg>`,
+    rules: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M5 5h14v2H5V5zm0 6h14v2H5v-2zm0 6h10v2H5v-2z"/></svg>`,
+    copy: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 7h10v12H8V7zm-3 3H4V4h11v2H5v4zm3-1h2v10h8v2H8V9z"/></svg>`,
+    qr: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h7v7H4V4zm2 2v3h3V6H6zm7-2h7v7h-7V4zm2 2v3h3V6h-3zM4 13h7v7H4v-7zm2 2v3h3v-3H6zm9 0h2v2h-2v-2zm4 0h2v2h-2v-2zm-4 4h2v2h-2v-2zm2 2h4v2h-4v-2zm2-4h2v4h-2v-4z"/></svg>`,
+    tree: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10 3h4v4h-4V3zm-5 7h4v4H5v-4zm10 0h4v4h-4v-4zM7 13h2v3h6v-3h2v5H7v-5z"/></svg>`,
+    code: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="m8.2 7.2 1.4 1.4L6.8 12l2.8 3.4-1.4 1.4L4 12l4.2-4.8zm7.6 0L20 12l-4.2 4.8-1.4-1.4 2.8-3.4-2.8-3.4 1.4-1.4z"/></svg>`,
+    gear: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M11 3h2l.4 2.2a6.8 6.8 0 0 1 1.8.8l2-1.1 1.4 1.4-1.1 2a6.8 6.8 0 0 1 .8 1.8L20.5 11v2l-2.2.4a6.8 6.8 0 0 1-.8 1.8l1.1 2-1.4 1.4-2-1.1a6.8 6.8 0 0 1-1.8.8L13 20.5h-2l-.4-2.2a6.8 6.8 0 0 1-1.8-.8l-2 1.1-1.4-1.4 1.1-2a6.8 6.8 0 0 1-.8-1.8L3.5 13v-2l2.2-.4a6.8 6.8 0 0 1 .8-1.8l-1.1-2 1.4-1.4 2 1.1a6.8 6.8 0 0 1 1.8-.8L11 3zm1 6.5A2.5 2.5 0 1 0 12 14a2.5 2.5 0 0 0 0-5z"/></svg>`,
+    trash: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9 4h6l1 2h4v2H4V6h4l1-2zm1 5h2v9h-2V9zm4 0h2v9h-2V9zM7 9h2v9H7V9z"/></svg>`,
+  };
+  return icons[kind] ?? icons.gear;
+}
+
+function closeGlassOverlays() {
+  state.profileContextMenu = null;
+  state.glassDialog = null;
+  renderGlassOverlays();
+}
+
+function openProfileContextMenu(id, clientX, clientY) {
+  state.glassDialog = null;
+  state.profileContextMenu = { id, x: clientX, y: clientY };
+  renderGlassOverlays();
+}
+
+function renderGlassOverlays() {
+  const root = document.getElementById("glass-menu-root");
+  if (!root) return;
+
+  const parts = [];
+  if (state.profileContextMenu) {
+    const profile = state.profiles.find((item) => item.id === state.profileContextMenu.id);
+    if (profile) {
+      const remote = Boolean(profile.sourceUrl);
+      const items = PROFILE_MENU_ACTIONS.filter((action) => {
+        if (action.needsHomeWeb && !profile.homeWeb) return false;
+        if (action.remoteOnly && !remote) return false;
+        return true;
+      });
+      const menuHtml = items.map((action) => `
+        <button type="button" class="glass-menu-item ${action.danger ? "danger" : ""}" data-profile-menu="${action.id}" data-profile-id="${escapeHtml(profile.id)}">
+          <span class="glass-menu-icon">${profileMenuIcon(action.icon)}</span>
+          <span>${escapeHtml(action.label)}</span>
+        </button>
+      `).join("");
+      parts.push(`
+        <div class="glass-menu-backdrop" data-glass-dismiss></div>
+        <div class="glass-menu" role="menu" style="left:${Math.round(state.profileContextMenu.x)}px;top:${Math.round(state.profileContextMenu.y)}px">
+          <div class="glass-menu-scroll" data-glass-menu-scroll>
+            ${menuHtml}
+          </div>
+          <div class="glass-menu-more" data-glass-menu-more hidden>
+            <span>scroll to view more</span>
+            <span aria-hidden="true">▾</span>
+          </div>
+        </div>
+      `);
+    }
+  }
+
+  if (state.glassDialog) {
+    const dialog = state.glassDialog;
+    const profile = dialog.id ? state.profiles.find((item) => item.id === dialog.id) : null;
+    if (profile && dialog.kind === "copy") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Copy profile">
+          <h3>Copy profile</h3>
+          <label>Name<input data-glass-copy-name value="${escapeHtml(`${profile.name} copy`)}" /></label>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Cancel</button>
+            <button type="button" class="glass-btn" data-glass-copy-confirm="${escapeHtml(profile.id)}">Copy</button>
+          </div>
+        </div>
+      `);
+    } else if (profile && dialog.kind === "settings") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Edit profile information">
+          <h3>Edit profile information</h3>
+          <label>Name<input data-glass-settings-name value="${escapeHtml(profile.name)}" /></label>
+          <label>URL<input data-glass-settings-url value="${escapeHtml(profile.sourceUrl ?? "")}" placeholder="https://..." /></label>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Cancel</button>
+            <button type="button" class="glass-btn" data-glass-settings-confirm="${escapeHtml(profile.id)}">Save</button>
+          </div>
+        </div>
+      `);
+    } else if (profile && dialog.kind === "delete") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Delete profile">
+          <h3>Delete profile</h3>
+          <p class="glass-dialog-copy">Are you sure to delete “${escapeHtml(profile.name)}”? This removes the managed YAML file.</p>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>No</button>
+            <button type="button" class="glass-btn danger" data-glass-delete-confirm="${escapeHtml(profile.id)}">Yes</button>
+          </div>
+        </div>
+      `);
+    } else if (dialog.kind === "reset-settings") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Reset settings">
+          <h3>Reset all settings</h3>
+          <p class="glass-dialog-copy">Reset Clash for Mac settings to defaults? Imported profile files are kept, but the active profile pointer and runtime toggles reset.</p>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>No</button>
+            <button type="button" class="glass-btn danger" data-glass-reset-confirm>Yes</button>
+          </div>
+        </div>
+      `);
+    } else if (dialog.kind === "geoip") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Update GeoIP database">
+          <h3>Update GeoIP database</h3>
+          <p class="glass-dialog-copy">Leave URL blank to use MetaCubeX geoip.metadb.</p>
+          <label>URL<input data-glass-geoip-url placeholder="https://..." value="" /></label>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Cancel</button>
+            <button type="button" class="glass-btn" data-glass-geoip-confirm>Update</button>
+          </div>
+        </div>
+      `);
+    }
+  }
+
+  root.innerHTML = parts.join("");
+  positionGlassMenu();
+  bindGlassOverlayEvents();
+}
+
+function positionGlassMenu() {
+  const menu = document.querySelector(".glass-menu");
+  if (!menu || !state.profileContextMenu) return;
+  const pad = 10;
+  const rect = menu.getBoundingClientRect();
+  let left = state.profileContextMenu.x;
+  let top = state.profileContextMenu.y;
+  if (left + rect.width > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - rect.width - pad);
+  if (top + rect.height > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - rect.height - pad);
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+
+  const scroll = menu.querySelector("[data-glass-menu-scroll]");
+  const more = menu.querySelector("[data-glass-menu-more]");
+  if (scroll && more) {
+    const updateMore = () => {
+      const overflow = scroll.scrollHeight > scroll.clientHeight + 2;
+      const atBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 2;
+      more.hidden = !overflow || atBottom;
+    };
+    scroll.addEventListener("scroll", updateMore, { passive: true });
+    updateMore();
+  }
+}
+
+function bindGlassOverlayEvents() {
+  document.querySelectorAll("[data-glass-dismiss]").forEach((node) => {
+    node.addEventListener("click", () => closeGlassOverlays());
+  });
+
+  document.querySelectorAll("[data-profile-menu]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const action = event.currentTarget.dataset.profileMenu;
+      const id = event.currentTarget.dataset.profileId;
+      state.profileContextMenu = null;
+      renderGlassOverlays();
+      try {
+        await runProfileMenuAction(action, id);
+      } catch (error) {
+        appendLog("error", "profile", `${action} failed: ${error.message ?? String(error)}`);
+      }
+      renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-glass-copy-confirm]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const id = event.currentTarget.dataset.glassCopyConfirm;
+      const name = document.querySelector("[data-glass-copy-name]")?.value?.trim();
+      if (!name) return;
+      try {
+        const text = await invoke("read_profile_text", { id });
+        const result = await invoke("import_profile_text", { name, body: text.body, activate: false });
+        await loadProfilesSnapshot();
+        closeGlassOverlays();
+        appendLog("info", "profile", `Copied profile to ${result.name}`);
+      } catch (error) {
+        appendLog("error", "profile", `Copy failed: ${error.message ?? String(error)}`);
+      }
+      renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-glass-settings-confirm]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const id = event.currentTarget.dataset.glassSettingsConfirm;
+      const name = document.querySelector("[data-glass-settings-name]")?.value?.trim() ?? "";
+      const url = document.querySelector("[data-glass-settings-url]")?.value?.trim() ?? "";
+      try {
+        await invoke("update_profile_info", { id, name, url });
+        await loadProfilesSnapshot();
+        closeGlassOverlays();
+        appendLog("info", "profile", `Profile settings saved: ${name}`);
+      } catch (error) {
+        appendLog("error", "profile", `Settings failed: ${error.message ?? String(error)}`);
+      }
+      renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-glass-delete-confirm]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const id = event.currentTarget.dataset.glassDeleteConfirm;
+      const profile = state.profiles.find((item) => item.id === id);
+      try {
+        const deleted = await invoke("delete_profile", { id });
+        await loadProfilesSnapshot();
+        closeGlassOverlays();
+        appendLog(
+          deleted ? "warning" : "info",
+          "profile",
+          deleted ? `Profile deleted: ${profile?.name ?? id}` : `Profile already missing: ${id}`,
+        );
+      } catch (error) {
+        appendLog("error", "profile", `Delete failed: ${error.message ?? String(error)}`);
+      }
+      renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-glass-reset-confirm]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        const snapshot = await invoke("reset_settings_snapshot");
+        applyPersistedSettings(snapshot);
+        await loadProfilesSnapshot();
+        closeGlassOverlays();
+        appendLog("warning", "settings", "cfw-settings.yaml reset to defaults");
+      } catch (error) {
+        appendLog("error", "settings", `Reset failed: ${error.message ?? String(error)}`);
+      }
+      renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-glass-geoip-confirm]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (state.geoipUpdating) return;
+      const custom = document.querySelector("[data-glass-geoip-url]")?.value?.trim() ?? "";
+      closeGlassOverlays();
+      state.geoipUpdating = true;
+      renderPage();
+      try {
+        const result = await invoke("update_geoip_database", {
+          url: custom ? custom : null,
+        });
+        state.geoipStatus = result.status;
+        appendLog(
+          "info",
+          "geoip",
+          `Updated ${result.status.file_name} (${formatBytes(result.bytes)}) from ${result.source_url}`,
+        );
+      } catch (error) {
+        appendLog("warning", "geoip", `GeoIP update failed: ${error.message ?? String(error)}`);
+      } finally {
+        state.geoipUpdating = false;
+        renderPage();
+      }
+    });
+  });
+}
+
+async function runProfileMenuAction(action, id) {
+  const profile = state.profiles.find((item) => item.id === id);
+  if (!profile) throw new Error(`profile not found: ${id}`);
+
+  switch (action) {
+    case "open-web": {
+      if (!profile.homeWeb) throw new Error("no profile-web-page-url for this subscription");
+      await invoke("open_external_url", { url: profile.homeWeb });
+      appendLog("info", "profile", `Opened web page for ${profile.name}`);
+      return;
+    }
+    case "edit":
+    case "proxies":
+    case "rules":
+      await openProfileInspector(id, "edit");
+      appendLog("info", "profile", `${action} editor opened for ${profile.name}`);
+      return;
+    case "edit-external":
+      await invoke("open_profile_externally", { id });
+      appendLog("info", "profile", `Opened ${profile.name} externally`);
+      return;
+    case "update": {
+      if (!profile.sourceUrl) throw new Error("local profile has no subscription URL");
+      const wasActive = profile.active;
+      const result = await invoke("update_profile", { id });
+      await loadProfilesSnapshot();
+      if (wasActive) await invoke("apply_active_profile");
+      appendLog("info", "profile", `${result.name} subscription updated${wasActive ? " and config.yaml reapplied" : ""}`);
+      return;
+    }
+    case "reveal":
+      await invoke("reveal_profile", { id });
+      appendLog("info", "profile", `Show in folder: ${profile.name}`);
+      return;
+    case "diff":
+      await openProfileInspector(id, "diff");
+      appendLog("info", "profile", `Diff opened for ${profile.name}`);
+      return;
+    case "copy":
+      state.glassDialog = { kind: "copy", id };
+      renderGlassOverlays();
+      return;
+    case "qrcode":
+      await openProfileInspector(id, "qrcode");
+      appendLog("info", "profile", `QRCode opened for ${profile.name}`);
+      return;
+    case "parsers":
+      await openProfileInspector(id, "parsers");
+      appendLog("info", "profile", `Parsers opened for ${profile.name}`);
+      return;
+    case "run-script":
+      await openProfileInspector(id, "parsers");
+      if (profile.active) {
+        await invoke("apply_active_profile");
+        appendLog("info", "profile", `Run script: reapplied parsers/mixin for active profile ${profile.name}`);
+      } else {
+        appendLog("info", "profile", `Run script: parser pipeline runs on apply; select ${profile.name} to execute against config.yaml`);
+      }
+      return;
+    case "settings":
+      state.glassDialog = { kind: "settings", id };
+      renderGlassOverlays();
+      return;
+    case "delete":
+      // WKWebView often swallows window.confirm (always false) — use in-app glass dialog.
+      state.glassDialog = { kind: "delete", id };
+      renderGlassOverlays();
+      return;
+    default:
+      throw new Error(`unknown profile menu action: ${action}`);
+  }
 }
 
 function renderProfiles() {
@@ -1099,9 +1532,7 @@ function renderProfiles() {
               <h3>${escapeHtml(profile.name)}</h3>
               <p>${escapeHtml(profile.sourceUrl ? hostFromUrl(profile.sourceUrl) : "local file")} (${escapeHtml(profile.updated)})</p>
               <div class="profile-usage">
-                <span>${escapeHtml(profile.traffic)}</span>
-                <span>${profile.rules.toLocaleString()} rules</span>
-                <span>${escapeHtml(subscriptionLabel(profile))}</span>
+                ${profileUsageSpans(profile)}
               </div>
               <div class="profile-progress" title="${profile.subscriptionUserinfo ? escapeHtml(profile.subscriptionUserinfo) : "No subscription usage quota"}"><b style="width:${profileProgressWidth(profile).toFixed(1)}%"></b></div>
             </div>
@@ -1832,6 +2263,7 @@ function renderPage() {
   renderNav();
   document.getElementById("page").innerHTML = (pageRenderers[state.activePage] ?? renderGeneral)();
   bindPageEvents();
+  renderGlassOverlays();
 }
 
 function updateStatusBar() {
@@ -2081,16 +2513,20 @@ function bindPageEvents() {
   document.querySelectorAll("[data-delete-profile]").forEach((button) => {
     button.addEventListener("click", async (event) => {
       const id = event.currentTarget.dataset.deleteProfile;
-      const profile = state.profiles.find((item) => item.id === id);
-      if (!window.confirm(`Delete profile "${profile?.name ?? id}"? This removes the managed YAML file.`)) return;
       try {
-        const deleted = await invoke("delete_profile", { id });
-        await loadProfilesSnapshot();
-        appendLog(deleted ? "warning" : "info", "profile", deleted ? `Profile deleted: ${id}` : `Profile already missing: ${id}`);
+        await runProfileMenuAction("delete", id);
       } catch (error) {
         appendLog("error", "profile", `Delete failed: ${error.message ?? String(error)}`);
       }
       renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-profile-card]").forEach((card) => {
+    card.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openProfileContextMenu(card.dataset.profileCard, event.clientX, event.clientY);
     });
   });
 
@@ -2253,6 +2689,13 @@ function bindPageEvents() {
 function bindGlobalEvents() {
   if (globalEventsBound) return;
   globalEventsBound = true;
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && (state.profileContextMenu || state.glassDialog)) {
+      event.preventDefault();
+      closeGlassOverlays();
+    }
+  });
 
   document.addEventListener("click", (event) => {
     const eventTarget = event.target instanceof Element ? event.target : event.target?.parentElement;
@@ -2671,6 +3114,28 @@ async function handleAction(action) {
   if (action === "clear-logs") {
     state.logs = [];
   }
+  if (action === "copy-logs") {
+    const text = state.logs.map((entry) => {
+      const time = entry.time ?? entry.at ?? "";
+      const level = entry.level ?? "info";
+      const message = entry.message ?? entry.payload ?? String(entry);
+      return `[${time}] ${level} ${message}`;
+    }).join("\n");
+    try {
+      await navigator.clipboard.writeText(text || "(no logs)");
+      appendLog("info", "logs", `Copied ${state.logs.length} log line(s) to clipboard`);
+    } catch (error) {
+      appendLog("warning", "logs", `Copy logs refused: ${error.message ?? String(error)}`);
+    }
+  }
+  if (action === "reveal-logs") {
+    try {
+      await invoke("reveal_logs_directory");
+      appendLog("info", "logs", "Logs folder opened in Finder");
+    } catch (error) {
+      appendLog("warning", "logs", `Open Folder failed: ${error.message ?? String(error)}`);
+    }
+  }
   if (action === "toggle-connection-stream") {
     state.connectionPaused = !state.connectionPaused;
     appendLog("info", "connections", `Connection view ${state.connectionPaused ? "frozen" : "unfrozen"}`);
@@ -2720,28 +3185,10 @@ async function handleAction(action) {
   }
   if (action === "update-geoip-database") {
     if (state.geoipUpdating) return;
-    const custom = window.prompt(
-      "GeoIP database URL (leave blank for MetaCubeX geoip.metadb):",
-      ""
-    );
-    if (custom === null) return;
-    state.geoipUpdating = true;
-    renderPage();
-    try {
-      const result = await invoke("update_geoip_database", {
-        url: custom.trim() ? custom.trim() : null,
-      });
-      state.geoipStatus = result.status;
-      appendLog(
-        "info",
-        "geoip",
-        `Updated ${result.status.file_name} (${formatBytes(result.bytes)}) from ${result.source_url}`
-      );
-    } catch (error) {
-      appendLog("warning", "geoip", `GeoIP update failed: ${error.message ?? String(error)}`);
-    } finally {
-      state.geoipUpdating = false;
-    }
+    // WKWebView often swallows window.prompt — use in-app glass dialog.
+    state.glassDialog = { kind: "geoip" };
+    renderGlassOverlays();
+    return;
   }
   if (action === "install-helper-service") {
     try {
@@ -2784,13 +3231,10 @@ async function handleAction(action) {
     }
   }
   if (action === "reset-settings") {
-    if (!window.confirm("Reset all Clash for Mac settings to defaults? Imported profile files are kept, but the active profile pointer and runtime toggles reset.")) {
-      return;
-    }
-    const snapshot = await invoke("reset_settings_snapshot");
-    applyPersistedSettings(snapshot);
-    await loadProfilesSnapshot();
-    appendLog("warning", "settings", "cfw-settings.yaml reset to defaults");
+    // WKWebView often swallows window.confirm — use in-app glass dialog.
+    state.glassDialog = { kind: "reset-settings" };
+    renderGlassOverlays();
+    return;
   }
   if (action === "quit-app") {
     await invoke("quit_app");
@@ -3093,24 +3537,26 @@ async function loadProfilesSnapshot() {
   try {
     const profiles = await invoke("profiles_snapshot");
     if (!Array.isArray(profiles)) return false;
-    if (tauriApi()?.core?.invoke) {
-      state.profiles = profiles.map((profile) => ({
-        id: profile.id,
-        name: profile.name,
-        type: profile.source_url ? "Remote" : "Local",
-        updated: profile.updated_epoch_secs ? new Date(profile.updated_epoch_secs * 1000).toLocaleString() : "unknown",
-        rules: profile.rule_count ?? 0,
-        traffic: formatBytes(profile.bytes ?? 0),
-        active: Boolean(profile.active),
-        path: profile.path,
-        sourceUrl: profile.source_url ?? null,
-        subscriptionUserinfo: profile.subscription_userinfo ?? null,
-        updateInterval: profile.update_interval ?? null,
-      }));
-    }
+    state.profiles = profiles.map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      type: profile.source_url ? "Remote" : "Local",
+      updated: profile.updated_epoch_secs
+        ? formatRelativeUpdated(profile.updated_epoch_secs)
+        : "unknown",
+      updatedEpochSecs: profile.updated_epoch_secs ?? null,
+      rules: profile.rule_count ?? 0,
+      traffic: formatBytes(profile.bytes ?? 0),
+      active: Boolean(profile.active),
+      path: profile.path,
+      sourceUrl: profile.source_url ?? null,
+      subscriptionUserinfo: profile.subscription_userinfo ?? null,
+      updateInterval: profile.update_interval ?? null,
+      homeWeb: profile.home_web ?? null,
+    }));
     return true;
   } catch (error) {
-    if (tauriApi()?.core?.invoke) state.profiles = [];
+    state.profiles = [];
     appendLog("warning", "profile", error.message ?? String(error));
     return false;
   }

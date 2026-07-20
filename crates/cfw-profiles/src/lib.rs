@@ -70,6 +70,8 @@ pub struct ProfileRecord {
     pub source_url: Option<String>,
     pub subscription_userinfo: Option<String>,
     pub update_interval: Option<String>,
+    /// From Clash `profile-web-page-url` response header (CFW "Open web page").
+    pub home_web: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +85,7 @@ pub struct ProfileText {
     pub source_url: Option<String>,
     pub subscription_userinfo: Option<String>,
     pub update_interval: Option<String>,
+    pub home_web: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,16 +149,32 @@ impl ProfileManager {
         let headers = response.headers().clone();
         let subscription_userinfo = header_to_string(&headers, "subscription-userinfo");
         let update_interval = header_to_string(&headers, "profile-update-interval");
+        let home_web = header_to_string(&headers, "profile-web-page-url");
         let body = response.text().await?;
         validate_profile_yaml(&body)?;
 
         fs::create_dir_all(&self.paths.profiles_dir)?;
+        // CFW uses Content-Disposition filename when present (e.g. iKuuu_V2.yaml),
+        // not the opaque /link/<token> path segment.
         let name = request
             .name
-            .filter(|name| !name.trim().is_empty())
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| profile_name_from_content_disposition(&headers))
             .unwrap_or_else(|| profile_name_from_url(&parsed));
-        let id = profile_id(&name, parsed.as_str());
-        let path = self.paths.profiles_dir.join(format!("{id}.yaml"));
+
+        // Same subscription URL → update the existing card in place (stable id).
+        let existing = self.find_by_source_url(parsed.as_str())?;
+        let id = existing
+            .as_ref()
+            .map(|profile| profile.id.clone())
+            .unwrap_or_else(|| profile_id(&name, parsed.as_str()));
+        let path = existing
+            .as_ref()
+            .map(|profile| profile.path.clone())
+            .unwrap_or_else(|| self.paths.profiles_dir.join(format!("{id}.yaml")));
         let tmp_path = path.with_extension("yaml.tmp");
         fs::write(&tmp_path, body.as_bytes())?;
         fs::rename(&tmp_path, &path)?;
@@ -167,6 +186,7 @@ impl ProfileManager {
                 source_url: Some(parsed.to_string()),
                 subscription_userinfo,
                 update_interval,
+                home_web,
             },
         )?;
 
@@ -202,6 +222,26 @@ impl ProfileManager {
                 .then_with(|| left.name.cmp(&right.name))
         });
         Ok(profiles)
+    }
+
+    fn find_by_source_url(&self, source_url: &str) -> Result<Option<ProfileRecord>, ProfileError> {
+        if !self.paths.profiles_dir.exists() {
+            return Ok(None);
+        }
+        let target = source_url.trim();
+        if target.is_empty() {
+            return Ok(None);
+        }
+        Ok(fs::read_dir(&self.paths.profiles_dir)?
+            .filter_map(Result::ok)
+            .filter_map(|entry| profile_record_from_entry(entry, None))
+            .find(|profile| {
+                profile
+                    .source_url
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|url| url == target)
+            }))
     }
 
     pub fn import_file(
@@ -332,7 +372,8 @@ impl ProfileManager {
                 store,
                 ProfileImportRequest {
                     url: source_url,
-                    name: Some(metadata.name),
+                    // Let Content-Disposition refresh the display name on update.
+                    name: None,
                     activate: store.read_or_default()?.active_profile.as_deref() == Some(id),
                 },
             )
@@ -368,8 +409,50 @@ impl ProfileManager {
             subscription_userinfo: metadata
                 .as_ref()
                 .and_then(|metadata| metadata.subscription_userinfo.clone()),
-            update_interval: metadata.and_then(|metadata| metadata.update_interval),
+            update_interval: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.update_interval.clone()),
+            home_web: metadata.and_then(|metadata| metadata.home_web),
         })
+    }
+
+    /// CFW "Settings" / Edit profile information — update display name and optional source URL.
+    pub fn update_info(
+        &self,
+        id: &str,
+        name: String,
+        source_url: Option<String>,
+    ) -> Result<(), ProfileError> {
+        validate_profile_id(id)?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ProfileError::InvalidProfileId("profile name is empty".into()));
+        }
+        let path = self
+            .profile_path(id)?
+            .ok_or_else(|| ProfileError::ActiveProfileMissing(id.into()))?;
+        let meta_path = metadata_path_for_profile(&path);
+        let mut metadata = read_profile_metadata(&meta_path).unwrap_or(ProfileMetadata {
+            id: id.to_string(),
+            name: name.to_string(),
+            ..ProfileMetadata::default()
+        });
+        metadata.id = id.to_string();
+        metadata.name = name.to_string();
+        if let Some(url) = source_url {
+            let url = url.trim();
+            if url.is_empty() {
+                metadata.source_url = None;
+            } else {
+                let parsed = Url::parse(url)?;
+                match parsed.scheme() {
+                    "http" | "https" => metadata.source_url = Some(parsed.to_string()),
+                    scheme => return Err(ProfileError::UnsupportedUrl(scheme.into())),
+                }
+            }
+        }
+        write_profile_metadata(&meta_path, &metadata)?;
+        Ok(())
     }
 
     pub fn save_text(
@@ -506,6 +589,65 @@ fn header_to_string(headers: &reqwest::header::HeaderMap, name: &str) -> Option<
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn profile_name_from_content_disposition(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let raw = header_to_string(headers, "content-disposition")?;
+    // Prefer RFC 5987 filename*=UTF-8''... then plain filename=
+    if let Some(encoded) = raw
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("filename*="))
+    {
+        let value = encoded.trim().trim_matches('"');
+        if let Some((_charset, rest)) = value.split_once("''") {
+            let decoded = percent_decode_str(rest);
+            let trimmed = trim_profile_extension(decoded.trim());
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    let filename = raw
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("filename="))
+        .map(|value| value.trim().trim_matches('"').trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let trimmed = trim_profile_extension(&filename);
+    if trimmed.is_empty() {
+        None
+    } else {
+        // Keep the .yaml suffix in the display name when CFW-style filenames include it.
+        Some(if filename.to_ascii_lowercase().ends_with(".yaml")
+            || filename.to_ascii_lowercase().ends_with(".yml")
+        {
+            filename
+        } else {
+            trimmed.to_string()
+        })
+    }
+}
+
+fn percent_decode_str(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[index + 1] as char).to_digit(16),
+                (bytes[index + 2] as char).to_digit(16),
+            ) {
+                out.push(((hi << 4) | lo) as u8);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn inject_runtime_settings(
@@ -1001,6 +1143,9 @@ fn profile_record_from_entry(
     let update_interval = profile_metadata
         .as_ref()
         .and_then(|metadata| metadata.update_interval.clone());
+    let home_web = profile_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.home_web.clone());
     Some(ProfileRecord {
         name: profile_metadata
             .as_ref()
@@ -1015,6 +1160,7 @@ fn profile_record_from_entry(
         source_url,
         subscription_userinfo,
         update_interval,
+        home_web,
     })
 }
 
@@ -1036,6 +1182,7 @@ struct ProfileMetadata {
     source_url: Option<String>,
     subscription_userinfo: Option<String>,
     update_interval: Option<String>,
+    home_web: Option<String>,
 }
 
 fn metadata_path_for_profile(path: &std::path::Path) -> PathBuf {
@@ -1124,6 +1271,21 @@ mod tests {
     fn profile_name_falls_back_to_last_path_segment() {
         let url = Url::parse("https://example.com/a/b/sub.yaml?token=1").unwrap();
         assert_eq!(profile_name_from_url(&url), "sub");
+    }
+
+    #[test]
+    fn content_disposition_filename_is_preferred() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename=iKuuu_V2.yaml"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            profile_name_from_content_disposition(&headers).as_deref(),
+            Some("iKuuu_V2.yaml")
+        );
     }
 
     #[test]

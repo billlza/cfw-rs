@@ -557,6 +557,17 @@ fn inject_runtime_settings(
         mapping.remove(yaml_key("tun"));
     }
 
+    // Persist selector group choices across core reloads (CFW / mihomo profile.store-selected).
+    // Only set the default when the profile did not already declare `profile:`.
+    if !mapping.contains_key(&yaml_key("profile")) {
+        let mut profile = serde_yaml::Mapping::new();
+        set_yaml_value(&mut profile, "store-selected", true)?;
+        mapping.insert(
+            serde_yaml::Value::String("profile".into()),
+            serde_yaml::Value::Mapping(profile),
+        );
+    }
+
     Ok(())
 }
 
@@ -1226,7 +1237,14 @@ mod tests {
                 .and_then(|dns| dns.get(yaml_key("enable"))),
             Some(&serde_yaml::Value::Bool(true))
         );
-        assert!(!mapping.contains_key(yaml_key("profile")));
+        // Mixin deleted `profile:`; runtime injection restores store-selected default.
+        assert_eq!(
+            mapping
+                .get(yaml_key("profile"))
+                .and_then(|value| value.as_mapping())
+                .and_then(|profile| profile.get(yaml_key("store-selected"))),
+            Some(&serde_yaml::Value::Bool(true))
+        );
         assert_eq!(
             mapping.get(yaml_key("mixed-port")),
             Some(&serde_yaml::to_value(7899_u16).unwrap())
@@ -1401,6 +1419,36 @@ mod tests {
             .apply_active(&store)
             .unwrap_err();
         assert!(matches!(error, ProfileError::InvalidMixinRoot));
+
+        fs::remove_dir_all(paths.app_home).unwrap();
+    }
+
+    #[test]
+    fn store_selected_defaults_when_profile_block_missing() {
+        let paths = test_paths("store-selected");
+        let store = SettingsStore::new(paths.clone());
+        store.ensure_layout().unwrap();
+        fs::write(
+            paths.profiles_dir.join("demo.yaml"),
+            "proxies: []\nproxy-groups: []\nrules: []\n",
+        )
+        .unwrap();
+        store
+            .write(&PersistedSettings {
+                active_profile: Some("demo".into()),
+                ..PersistedSettings::default()
+            })
+            .unwrap();
+
+        let result = ProfileManager::new(paths.clone())
+            .unwrap()
+            .apply_active(&store)
+            .unwrap();
+        let rendered = fs::read_to_string(result.config_path).unwrap();
+        assert!(
+            rendered.contains("store-selected: true"),
+            "expected default store-selected, got:\n{rendered}"
+        );
 
         fs::remove_dir_all(paths.app_home).unwrap();
     }

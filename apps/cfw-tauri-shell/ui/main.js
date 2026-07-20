@@ -68,6 +68,7 @@ const fallbackSettingsSnapshot = {
     runtime_mode: "Rule",
     active_profile: null,
     system_proxy: false,
+    proxy_bypass: [],
     tun_mode: false,
     mixin: false,
     mixin_yaml: "",
@@ -286,6 +287,7 @@ const invoke = async (command, args = {}) => {
     if (command === "delete_profile") return true;
     if (command === "reveal_profile") return null;
     if (command === "reveal_home_directory") return null;
+    if (command === "reveal_logs_directory") return null;
     if (command === "apply_active_profile") throw new Error("Profile apply is unavailable outside the Tauri runtime");
     if (command === "set_proxy_mode") return null;
     if (command === "set_allow_lan") {
@@ -444,6 +446,10 @@ function persistedSettingsFromUi() {
     runtime_mode: state.mode,
     logLevel: state.logLevel,
     system_proxy: state.toggles.systemProxy,
+    proxy_bypass: (document.querySelector("[data-proxy-bypass]")?.value ?? (state.settingsSnapshot?.settings?.proxy_bypass ?? []).join("\n"))
+      .split(/[\n,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean),
     tun_mode: state.toggles.tunMode,
     mixin: state.toggles.mixin,
     mixin_yaml: document.querySelector("[data-mixin-yaml]")?.value ?? state.mixinYaml ?? current.mixin_yaml ?? "",
@@ -1165,6 +1171,8 @@ function renderLogs() {
         </div>
         <div class="toolbar-actions">
           <button class="button ghost" data-action="toggle-log-stream">${state.logsPaused ? "Start" : "Stop"}</button>
+          <button class="button ghost" data-action="copy-logs">Copy</button>
+          <button class="button ghost" data-action="reveal-logs">Open Folder</button>
           <button class="button ghost" data-action="clear-logs">Clear</button>
         </div>
       </section>
@@ -1518,8 +1526,8 @@ function renderQuality() {
     <section class="panel quality-panel">
       <div>
         <p class="label">Quality target</p>
-        <h3>${perf.multiplier_vs_cfw_02039}x faster and more stable than CFW 0.20.39</h3>
-        <p class="muted">Budgets are kept in Rust so the UI, tests and platform services share one contract.</p>
+        <h3>Interim quality budgets (target ${perf.multiplier_vs_cfw_02039}× vs CFW 0.20.39)</h3>
+        <p class="muted">These are engineering budgets, not yet proven with side-by-side benchmarks on this machine.</p>
       </div>
       <dl class="budget-grid">
         <div><dt>Cold start p95</dt><dd>${perf.cold_start_p95_ms} ms</dd></div>
@@ -1549,7 +1557,21 @@ function renderSettings() {
       renderSettingSelect("Theme", theme, [{ value: "light", label: "Light" }, { value: "dark", label: "Dark" }], "Persisted app theme applied at boot.", "data-theme-setting"),
       renderSettingInput("Font", fontFamily, "Avenir Next", "Override dashboard font family; blank uses the CFW-like default.", "data-font-family"),
     ]],
-    ["System Proxy", [renderToggle("systemProxy", "System Proxy", "Enable macOS system HTTP/HTTPS/SOCKS proxy."), renderSettingValue("Bypass", "LAN, localhost, captive portals", "Original bypass list maps to sysproxy -bypass.")]],
+    ["System Proxy", [
+      renderToggle("systemProxy", "System Proxy", "Enable macOS system HTTP/HTTPS/SOCKS proxy."),
+      renderToggle("proxyDelayIndicator", "Tray delay indicator", "Show selected-node latency in the menu-bar tooltip."),
+      (() => {
+        const bypass = (persisted.proxy_bypass ?? []).join("\n");
+        return `
+          <label class="setting-row setting-control-row">
+            <span>
+              <b>Bypass Domains</b>
+              <small>One host or CIDR per line. Empty uses the built-in LAN/localhost defaults. Applied when System Proxy turns on.</small>
+            </span>
+            <textarea class="mixin-editor" data-proxy-bypass spellcheck="false" rows="5">${escapeHtml(bypass)}</textarea>
+          </label>`;
+      })(),
+    ]],
     ["Mixin", [renderToggle("mixin", "Mixin", "Merge YAML/JS mixin before profile apply."), renderSettingValue("Mixin YAML", "Editor active", "The YAML merge editor below is persisted and applied before config reload.")]],
     ["Proxies", [renderToggle("hideUnavailable", "Hide unavailable proxies", "Keep proxy group list compact."), renderSettingValue("Delay test URL", "http://www.gstatic.com/generate_204", "Original delay/liveness settings are kept visible.")]],
     ["Connections", [renderToggle("breakOnProxyChange", "Break connections", "Disconnect sockets after proxy or profile changes."), renderSettingValue("Show Process", "Controller metadata", "Original can display process path on supported platforms.")]],
@@ -1558,12 +1580,12 @@ function renderSettings() {
     ["Child Processes", [renderSettingValue("Processes", "Action runner", "Spawn child processes through a typed Rust command boundary.")]],
     ["Profiles", [renderSettingValue("Parsers", "Safe script active", "Apply parser scripts before mixin/runtime config generation."), renderSettingValue("Headers", "Captured", "Remote imports persist subscription-userinfo and profile-update-interval metadata.")]],
     ["Logs", [renderSettingValue("Request Logs", "Preload + stream", "Original supports log preload, filters and log-level changes.")]],
-    ["SSID", [renderSettingValue("SSID Policy", "Not configured", "Original can vary proxy/profile behavior by network SSID.")]],
+    ["SSID", [renderSettingValue("SSID Policy", "Not in 0.1.0 beta", "CFW could vary proxy/profile by Wi-Fi SSID. Deferred — this toggle is intentionally unavailable.")]],
     ["Actions", [renderSettingValue("Tray Script", "Rust action runner", "Run Tray Script action is executable from settings and tray.")]],
     ["Shortcuts", [renderSettingValue("Mode shortcuts", "Active", "Cmd+1..6, Cmd+G/R/D/S/P/T/M mirror original dashboard shortcuts.")]],
-    ["CFW Editor", [renderSettingValue("Diff Editor", "Pending", "Original uses Monaco for profile/provider editing and diff.")]],
+    ["CFW Editor", [renderSettingValue("Diff Editor", "Not in 0.1.0 beta", "Built-in YAML edit exists on Profiles; Monaco-style side-by-side diff is deferred.")]],
     ["Cache", [renderSettingAction("Fake IP Cache", "Controller-backed", "Flush Mihomo fake-ip cache through /cache/fakeip/flush.", "flush-fake-ip-cache", "Flush")]],
-    ["Experimental Features", [renderSettingValue("DHCP Server", "macOS experimental", "Original has a macOS DHCP Server switch."), renderToggle("enableIpv6", "IPv6", "Expose IPv6 option in generated Clash config.")]],
+    ["Experimental Features", [renderSettingValue("DHCP Server", "Not in 0.1.0 beta", "CFW macOS DHCP server switch is not shipped in this beta."), renderToggle("enableIpv6", "IPv6", "Expose IPv6 option in generated Clash config.")]],
   ];
   return `
     <div class="settings-layout">

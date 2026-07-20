@@ -105,6 +105,7 @@ pub struct PersistedSettings {
     pub secret: Option<String>,
     pub retain_window_bounds: bool,
     pub show_tray_proxy_delay_indicator: bool,
+    pub proxy_bypass: Vec<String>,
     pub only_arm64_macos_supported: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_yaml::Value>,
@@ -132,6 +133,7 @@ impl Default for PersistedSettings {
             secret: None,
             retain_window_bounds: skeleton.retain_window_bounds,
             show_tray_proxy_delay_indicator: skeleton.show_tray_proxy_delay_indicator,
+            proxy_bypass: Vec::new(),
             only_arm64_macos_supported: skeleton.only_arm64_macos_supported,
             extra: BTreeMap::new(),
         }

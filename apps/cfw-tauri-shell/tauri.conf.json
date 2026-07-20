@@ -24,31 +24,36 @@
       }
     ],
     "security": {
-      "capabilities": ["main-capability"]
+      "capabilities": [
+        "main-capability"
+      ]
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "app"
+    ],
     "icon": [
       "icons/icon.icns",
       "icons/icon_512.png",
       "icons/logo_64.png"
     ],
     "macOS": {
-      "minimumSystemVersion": "13.0"
+      "minimumSystemVersion": "13.0",
+      "entitlements": "macos/entitlements.plist"
     },
     "resources": [
       "resources/helpers",
-      "resources/cores",
-      "../../reverse/cfw-0.20.39-arm64/metadata",
-      "../../reverse/cfw-0.20.39-arm64/asar/package.json"
+      "resources/cores"
     ]
   },
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["clash"]
+        "schemes": [
+          "clash"
+        ]
       }
     }
   }

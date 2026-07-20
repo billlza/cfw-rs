@@ -1,49 +1,45 @@
-# cfw-rs
+# Clash for Mac (`cfw-rs`)
 
-`cfw-rs` is an Apple Silicon-only rebuild of Clash for Windows for macOS.
+Apple Silicon–only rebuild of Clash for Windows (CFW `0.20.39`) for macOS.
 
-This workspace is organized around a very deliberate constraint set:
+- Target: `aarch64-apple-darwin` / macOS 13+
+- Shell: Tauri 2 + WebKit UI
+- Core: pinned mihomo (`clash-darwin`)
+- Privileged path: SMAppService helper for Service Mode / TUN
 
-- Target only `aarch64-apple-darwin`
-- Rebuild the original product behavior and information architecture first
-- Move privileged macOS operations out of the UI shell
-- Keep platform glue thin so core behavior remains testable and replaceable
+Release gate: [`RELEASE.md`](./RELEASE.md) · Parity: [`docs/parity-checklist.md`](./docs/parity-checklist.md) · Changes: [`CHANGELOG.md`](./CHANGELOG.md)
 
-## Why This Layout
+## Install (signed beta · Apple Silicon)
 
-The original macOS build bundles four distinct responsibilities into one app:
+1. Download `Clash for Mac_0.1.0_aarch64.dmg` (or `.zip`) from the [GitHub Releases](https://github.com/billlza/cfw-rs/releases) page.
+2. Open the DMG and drag **Clash for Mac** into `/Applications`.
+3. Launch once. If macOS prompts, use **Open** (app is Developer ID + notarized).
+4. Before enabling **TUN / Service Mode**, approve the helper under **System Settings → General → Login Items & Extensions**.
 
-1. UI shell and tray/menu behavior
-2. Core process orchestration
-3. System proxy / helper / privilege flow
-4. Settings and profile lifecycle
+Local rebuild / resign (maintainers): see [`RELEASE.md`](./RELEASE.md).
 
-That coupling made the product easy to ship, but it also made long-term
-maintenance brittle. This workspace separates those boundaries up front.
+## Develop
+
+```bash
+cargo test --workspace
+cargo run -p cfw-tauri-shell
+# or:
+cargo tauri dev --manifest-path apps/cfw-tauri-shell/Cargo.toml
+```
 
 ## Workspace
 
-- `apps/cfw-tauri-shell`
-  Thin desktop shell. This is where the Apple Silicon-only desktop app will
-  live. The recommended implementation is a Rust-first Tauri 2 shell with a
-  WebKit-backed UI for high visual fidelity.
-- `crates/cfw-core`
-  Product domain and orchestration model: profiles, proxies, modes, settings,
-  controller state, and helper command contracts.
-- `crates/cfw-platform`
-  Platform integration boundary. This crate should expose traits and macOS
-  implementations for proxy control, launchd helper install, and app lifecycle
-  integration.
-- `crates/cfw-helper`
-  Privileged helper binary boundary for root-required actions such as service
-  install, launchd registration, and network helper lifecycle.
+| Path | Role |
+|------|------|
+| `apps/cfw-tauri-shell` | Desktop app (`clash-for-mac`) |
+| `apps/cfw-cli` | Headless / debug CLI |
+| `crates/cfw-core` | Domain + settings |
+| `crates/cfw-controller` | Clash REST/WS client |
+| `crates/cfw-runtime` | Core process + mihomo install |
+| `crates/cfw-profiles` | Profile import/apply/mixin |
+| `crates/cfw-platform` | sysproxy / launchd / SMAppService / TUN |
+| `crates/cfw-helper` | Privileged helper binary |
 
-## Product Scope
+## License
 
-The rebuild target is not "a Clash GUI for macOS" in the abstract. It is a
-behaviorally compatible replacement for the final `0.20.39` Apple Silicon CFW
-experience, with modernized internals and explicit removal of Intel support.
-
-Current reverse-engineering findings are tracked in
-[`docs/architecture.md`](./docs/architecture.md).
-
+MIT — see [`LICENSE`](./LICENSE).

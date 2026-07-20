@@ -139,6 +139,7 @@ struct TrayProxyGroup {
     name: String,
     now: Option<String>,
     options: Vec<String>,
+    selected_delay_ms: Option<u32>,
 }
 
 #[tauri::command]
@@ -385,7 +386,7 @@ fn set_system_proxy_enabled(enabled: bool) -> Result<SettingsSnapshot, String> {
             SystemProxyMode::Off
         };
         MacOsPlatformService
-            .set_system_proxy_mode(mode, settings.mixed_port)
+            .set_system_proxy_mode(mode, settings.mixed_port, &settings.proxy_bypass)
             .map_err(|err| err.to_string())?;
         settings.system_proxy = enabled;
         Ok(())
@@ -1645,6 +1646,21 @@ fn reveal_home_directory() -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+fn reveal_logs_directory() -> Result<(), String> {
+    let store = settings_store()?;
+    store.ensure_layout().map_err(|err| err.to_string())?;
+    let status = Command::new("/usr/bin/open")
+        .arg(store.paths().logs_dir.clone())
+        .status()
+        .map_err(|err| err.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("open failed with status {status}"))
+    }
+}
+
 fn apply_active_profile_if_selected() -> Result<Option<ProfileApplyResult>, String> {
     let store = settings_store()?;
     let settings = store.read_or_default().map_err(|err| err.to_string())?;
@@ -2099,14 +2115,33 @@ fn tray_proxy_groups_from_snapshot(snapshot: ProxiesSnapshot) -> Vec<TrayProxyGr
         .map(|group| group.options.clone())
         .unwrap_or_default();
 
+    let delay_by_name = snapshot
+        .proxies
+        .iter()
+        .filter_map(|proxy| {
+            proxy
+                .history
+                .last()
+                .map(|entry| (proxy.name.clone(), entry.delay))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
     let mut groups = snapshot
         .groups
         .into_iter()
         .filter(|group| !group.options.is_empty())
-        .map(|group| TrayProxyGroup {
-            name: group.name,
-            now: group.now,
-            options: group.options,
+        .map(|group| {
+            let selected_delay_ms = group
+                .now
+                .as_ref()
+                .and_then(|name| delay_by_name.get(name).copied())
+                .or_else(|| group.history.last().map(|entry| entry.delay));
+            TrayProxyGroup {
+                name: group.name,
+                now: group.now,
+                options: group.options,
+                selected_delay_ms,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -2308,6 +2343,26 @@ fn update_tray_menu(app: &AppHandle, proxy_groups: &[TrayProxyGroup]) -> tauri::
     let menu = build_tray_menu(app, proxy_groups)?;
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         tray.set_menu(Some(menu))?;
+        let settings = current_settings_for_tray();
+        let tooltip = if settings.show_tray_proxy_delay_indicator {
+            let delays = proxy_groups
+                .iter()
+                .filter_map(|group| {
+                    group
+                        .selected_delay_ms
+                        .map(|delay| format!("{} {}ms", group.name, delay))
+                })
+                .take(3)
+                .collect::<Vec<_>>();
+            if delays.is_empty() {
+                PRODUCT_NAME.to_string()
+            } else {
+                format!("{} · {}", PRODUCT_NAME, delays.join(" · "))
+            }
+        } else {
+            PRODUCT_NAME.to_string()
+        };
+        let _ = tray.set_tooltip(Some(tooltip));
     }
     Ok(())
 }
@@ -2441,6 +2496,7 @@ fn main() {
             save_profile_text,
             profile_qrcode_svg,
             reveal_home_directory,
+            reveal_logs_directory,
             apply_active_profile,
             set_proxy_mode,
             set_allow_lan,

@@ -21,7 +21,7 @@ const SYSTEM_PROXY_SNAPSHOT_FILE: &str = "system-proxy-snapshot.json";
 /// runs `cfw-helper serve` as root, which is what lets mihomo open a utun device
 /// for TUN mode. Must match the plist filename staged into the bundle.
 pub const HELPER_DAEMON_PLIST_NAME: &str = "com.bill.clashformac.helper.plist";
-const DEFAULT_BYPASS_DOMAINS: &[&str] = &[
+pub const DEFAULT_BYPASS_DOMAINS: &[&str] = &[
     "127.0.0.1",
     "localhost",
     "*.local",
@@ -103,7 +103,7 @@ impl MacOsPlatformDesign {
 
 pub trait SystemProxyService {
     fn read_system_proxy_state(&self) -> Result<SystemProxyState>;
-    fn set_system_proxy_mode(&self, mode: SystemProxyMode, port: u16) -> Result<()>;
+    fn set_system_proxy_mode(&self, mode: SystemProxyMode, port: u16, bypass: &[String]) -> Result<()>;
     fn restore_original_system_proxy_state(&self) -> Result<()>;
 }
 
@@ -351,7 +351,7 @@ impl MacOsPlatformService {
         Ok(())
     }
 
-    fn apply_clash_proxy(&self, port: u16, target_services: &[String]) -> Result<()> {
+    fn apply_clash_proxy(&self, port: u16, target_services: &[String], bypass: &[String]) -> Result<()> {
         let mut rollback_snapshot = self.read_proxy_snapshot()?;
         rollback_snapshot.target_services = target_services.to_vec();
         let result = (|| -> Result<()> {
@@ -359,13 +359,15 @@ impl MacOsPlatformService {
                 set_protocol_proxy(service, ProxyProtocol::Web, PROXY_HOST, port)?;
                 set_protocol_proxy(service, ProxyProtocol::SecureWeb, PROXY_HOST, port)?;
                 set_protocol_proxy(service, ProxyProtocol::Socks, PROXY_HOST, port)?;
-                set_bypass_domains(
-                    service,
-                    &DEFAULT_BYPASS_DOMAINS
+                let domains = if bypass.is_empty() {
+                    DEFAULT_BYPASS_DOMAINS
                         .iter()
                         .map(ToString::to_string)
-                        .collect::<Vec<_>>(),
-                )?;
+                        .collect::<Vec<_>>()
+                } else {
+                    bypass.to_vec()
+                };
+                set_bypass_domains(service, &domains)?;
             }
             Ok(())
         })();
@@ -546,7 +548,7 @@ impl SystemProxyService for MacOsPlatformService {
         })
     }
 
-    fn set_system_proxy_mode(&self, mode: SystemProxyMode, port: u16) -> Result<()> {
+    fn set_system_proxy_mode(&self, mode: SystemProxyMode, port: u16, bypass: &[String]) -> Result<()> {
         match mode {
             SystemProxyMode::Off => self.restore_original_system_proxy_state(),
             SystemProxyMode::GlobalHttp | SystemProxyMode::RulePacLike => {
@@ -555,7 +557,7 @@ impl SystemProxyService for MacOsPlatformService {
                 }
                 let target_services = self.proxy_target_services()?;
                 self.capture_snapshot_for_targets(&target_services)?;
-                self.apply_clash_proxy(port, &target_services)
+                self.apply_clash_proxy(port, &target_services, bypass)
             }
         }
     }

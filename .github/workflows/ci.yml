@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    name: cargo test (macOS arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Test workspace
+        run: cargo test --workspace
+
+  # Full tauri bundle needs secrets + signing; keep compile check light here.
+  check-shell:
+    name: check tauri shell
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Fetch pinned core (for resource path existence)
+        run: ./scripts/fetch_core.sh
+      - name: Build helper resource
+        run: ./scripts/build_helper_resource.sh
+      - name: cargo check shell
+        run: cargo check -p cfw-tauri-shell

@@ -99,6 +99,12 @@ pub fn default_config_mapping(
             serde_yaml::Value::Mapping(tun),
         );
     }
+    let mut profile = serde_yaml::Mapping::new();
+    insert_yaml(&mut profile, "store-selected", true)?;
+    config.insert(
+        serde_yaml::Value::String("profile".into()),
+        serde_yaml::Value::Mapping(profile),
+    );
     insert_yaml(&mut config, "proxies", Vec::<serde_yaml::Value>::new())?;
     insert_yaml(&mut config, "proxy-groups", Vec::<serde_yaml::Value>::new())?;
     insert_yaml(&mut config, "rules", vec!["MATCH,DIRECT"])?;
@@ -126,6 +132,16 @@ mod tests {
         let mapping = default_config_mapping(&PersistedSettings::default()).unwrap();
         assert!(mapping.contains_key(serde_yaml::Value::String("mixed-port".into())));
         assert!(mapping.contains_key(serde_yaml::Value::String("external-controller".into())));
+        let profile = mapping
+            .get(serde_yaml::Value::String("profile".into()))
+            .and_then(serde_yaml::Value::as_mapping)
+            .unwrap();
+        assert_eq!(
+            profile
+                .get(serde_yaml::Value::String("store-selected".into()))
+                .and_then(serde_yaml::Value::as_bool),
+            Some(true)
+        );
         let rules = mapping
             .get(serde_yaml::Value::String("rules".into()))
             .and_then(serde_yaml::Value::as_sequence)

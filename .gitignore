@@ -15,3 +15,11 @@
 
 # Playwright cache
 /.playwright-cli
+
+# Cursor local agent config
+.cursor/
+
+# Local build / notary logs (may contain machine paths)
+/build-release.log
+/notarize.log
+/*.log

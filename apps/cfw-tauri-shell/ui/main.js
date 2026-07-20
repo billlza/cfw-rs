@@ -151,6 +151,7 @@ const state = {
     hideUnavailable: true,
     enableIpv6: false,
     proxyDelayIndicator: true,
+    showProxyFilter: true,
   },
   traffic: {
     upload: 0,
@@ -905,6 +906,29 @@ function isManualProxyGroup(type) {
   return ["selector", "relay"].includes(String(type ?? "").toLowerCase());
 }
 
+/** CFW Proxies toolbar glyphs (filled, ~18px). */
+function proxyToolIcon(kind) {
+  const common = 'width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"';
+  switch (kind) {
+    case "filter":
+      // Globe + magnifying glass (Show Filter)
+      return `<svg ${common} fill="currentColor"><path d="M12 2a10 10 0 1 0 9.95 11H14a2 2 0 0 1-2-2V2.05A10 10 0 0 0 12 2zm1 0v8h8A9 9 0 0 0 13 2z"/><path d="M16.5 15.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm0 1.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"/><path d="M19.2 19.2 22 22" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>`;
+    case "break":
+      // Octagon + exclamation (Break / close connections)
+      return `<svg ${common} fill="currentColor"><path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2zm1.03 2L4 8.89v6.22L8.89 20h6.22L20 15.11V8.89L15.11 4H8.89z"/><rect x="11" y="7" width="2" height="7" rx="1"/><circle cx="12" cy="17" r="1.2"/></svg>`;
+    case "delay":
+      // Wi‑Fi bars with slash (Latency test)
+      return `<svg ${common} fill="currentColor"><path d="M12 18.5a1.75 1.75 0 1 0 0 3.5 1.75 1.75 0 0 0 0-3.5zm-4.24-3.05a6 6 0 0 1 8.48 0l-1.42 1.41a4 4 0 0 0-5.64 0l-1.42-1.41zm-2.83-2.83a10 10 0 0 1 14.14 0l-1.41 1.41a8 8 0 0 0-11.32 0L4.93 12.62z"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>`;
+    case "eye":
+      // Eye (Hide unavailable)
+      return `<svg ${common} fill="currentColor"><path d="M12 5c-5 0-9.27 3.11-11 7 1.73 3.89 6 7 11 7s9.27-3.11 11-7c-1.73-3.89-6-7-11-7zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-2.5A2.5 2.5 0 1 0 12 9a2.5 2.5 0 0 0 0 5z"/></svg>`;
+    case "eye-off":
+      return `<svg ${common} fill="currentColor"><path d="M2.1 3.51 3.5 2.1l18.4 18.4-1.41 1.41-3.1-3.1A12.4 12.4 0 0 1 12 19c-5 0-9.27-3.11-11-7a13.3 13.3 0 0 1 4.2-4.86L2.1 3.51zM12 7c5 0 9.27 3.11 11 7a13.2 13.2 0 0 1-3.36 4.22l-2.2-2.2A5 5 0 0 0 9 8.56L7.2 6.75C8.66 7.1 10.26 7 12 7zm-2.12 2.12A2.5 2.5 0 0 1 14.9 14.1l-4.99-4.98z"/></svg>`;
+    default:
+      return "";
+  }
+}
+
 function renderProxies() {
   const filter = state.proxyFilter.trim().toLowerCase();
   const groups = state.proxyGroups
@@ -924,6 +948,8 @@ function renderProxies() {
     ?? groups[0]
     ?? null;
   const manual = activeGroup ? isManualProxyGroup(activeGroup.type) : false;
+  const hideUnavailable = Boolean(state.toggles.hideUnavailable);
+  const showFilter = state.toggles.showProxyFilter !== false;
   return `
     <div class="proxy-layout">
       <div class="mode-switch proxy-mode-header" role="group" aria-label="Proxy mode">
@@ -942,14 +968,11 @@ function renderProxies() {
               <b>${escapeHtml(activeGroup.now ?? "")}</b>
             </div>
             <div class="cfw-proxy-tools">
-              <input class="proxy-filter" data-proxy-filter placeholder="Filter" value="${escapeHtml(state.proxyFilter)}" aria-label="Filter proxies" />
-              <button class="proxy-tool" data-action="delay-test" title="Delay Test">⟳</button>
-              <button class="proxy-tool" data-action="open-providers" title="Providers">◆</button>
-              <button class="proxy-tool" data-action="reload-proxies" title="Reload">◉</button>
-              <label class="proxy-tool check" title="Hide unavailable">
-                <input type="checkbox" data-toggle="hideUnavailable" ${state.toggles.hideUnavailable ? "checked" : ""}>
-                <span>◌</span>
-              </label>
+              ${showFilter ? `<input class="proxy-filter" data-proxy-filter placeholder="Filter" value="${escapeHtml(state.proxyFilter)}" aria-label="Filter proxies" />` : ""}
+              <button class="proxy-tool ${showFilter ? "active" : ""}" data-action="toggle-proxy-filter" title="Show Filter">${proxyToolIcon("filter")}</button>
+              <button class="proxy-tool" data-action="break-proxy-connections" title="Break Connections">${proxyToolIcon("break")}</button>
+              <button class="proxy-tool" data-action="delay-test" title="Latency Test">${proxyToolIcon("delay")}</button>
+              <button class="proxy-tool ${hideUnavailable ? "active" : ""}" data-action="toggle-hide-unavailable" title="Hide Unavailable">${proxyToolIcon(hideUnavailable ? "eye-off" : "eye")}</button>
             </div>
           </div>
           <div class="cfw-proxy-content">
@@ -2330,6 +2353,23 @@ async function applyToggle(key, checked, source) {
 async function handleAction(action) {
   if (action === "open-settings") {
     state.activePage = "settings";
+  }
+  if (action === "toggle-proxy-filter") {
+    state.toggles.showProxyFilter = !state.toggles.showProxyFilter;
+    if (!state.toggles.showProxyFilter) state.proxyFilter = "";
+  }
+  if (action === "toggle-hide-unavailable") {
+    state.toggles.hideUnavailable = !state.toggles.hideUnavailable;
+  }
+  if (action === "break-proxy-connections") {
+    const count = state.connections.length;
+    try {
+      await invoke("close_all_connections");
+      appendLog("warning", "proxy", `Broke ${count} connection(s)`);
+      await loadControllerSnapshot();
+    } catch (error) {
+      appendLog("warning", "proxy", `Break connections failed: ${error.message ?? String(error)}`);
+    }
   }
   if (action === "open-providers") {
     state.activePage = "providers";

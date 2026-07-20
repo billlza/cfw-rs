@@ -926,6 +926,11 @@ dd {
   gap: 10px;
 }
 
+.cfw-proxy-tools {
+  margin-left: auto;
+  gap: 14px;
+}
+
 .cfw-proxy-title h2 {
   margin: 0;
   font-size: 20px;
@@ -968,9 +973,21 @@ dd {
   place-items: center;
   border: 0;
   background: transparent;
-  color: #111;
+  color: #222;
   font-size: 18px;
   font-weight: 700;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.proxy-tool svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
+.proxy-tool.active {
+  color: var(--accent, #3bb273);
 }
 
 .proxy-tool.check input {

@@ -1346,6 +1346,7 @@ dd {
   border-radius: 3px;
   background: var(--general-item-bgc);
   padding: 9px 42px 8px 0;
+  cursor: pointer;
 }
 
 .cfw-profile-card > i {

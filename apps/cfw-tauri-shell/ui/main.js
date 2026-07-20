@@ -1134,6 +1134,7 @@ function profileProgressWidth(profile) {
 
 /** CFW profile context-menu items — same actions, macOS liquid-glass chrome. */
 const PROFILE_MENU_ACTIONS = [
+  { id: "select", label: "Select", icon: "check", needsInactive: true },
   { id: "open-web", label: "Open web page", icon: "home", remoteOnly: false, needsHomeWeb: true },
   { id: "edit", label: "Edit", icon: "edit" },
   { id: "edit-external", label: "Edit externally", icon: "edit" },
@@ -1152,6 +1153,7 @@ const PROFILE_MENU_ACTIONS = [
 
 function profileMenuIcon(kind) {
   const icons = {
+    check: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9.2 16.6 4.8 12.2l1.4-1.4 3 3 8.6-8.6 1.4 1.4-10 10z"/></svg>`,
     home: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 3.2 3.8 10.2v9.6h5.4v-5.4h5.6v5.4h5.4v-9.6L12 3.2z"/></svg>`,
     edit: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4.5 16.9 15.8 5.6l2.6 2.6L7.1 19.5H4.5v-2.6zm14.3-11.7 1.5 1.5c.4.4.4 1 0 1.4l-1.2 1.2-2.6-2.6 1.2-1.2c.4-.4 1-.4 1.4 0z"/></svg>`,
     refresh: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 5a7 7 0 0 1 6.3 4H16v2h5.5V5.5H19v1.7A9 9 0 1 0 21 12h-2a7 7 0 1 1-7-7z"/></svg>`,
@@ -1193,6 +1195,7 @@ function renderGlassOverlays() {
       const items = PROFILE_MENU_ACTIONS.filter((action) => {
         if (action.needsHomeWeb && !profile.homeWeb) return false;
         if (action.remoteOnly && !remote) return false;
+        if (action.needsInactive && profile.active) return false;
         return true;
       });
       const menuHtml = items.map((action) => `
@@ -1442,6 +1445,9 @@ async function runProfileMenuAction(action, id) {
   if (!profile) throw new Error(`profile not found: ${id}`);
 
   switch (action) {
+    case "select":
+      await selectProfileById(id);
+      return;
     case "open-web": {
       if (!profile.homeWeb) throw new Error("no profile-web-page-url for this subscription");
       await invoke("open_external_url", { url: profile.homeWeb });
@@ -2288,6 +2294,45 @@ function scheduleRender() {
   });
 }
 
+async function selectProfileById(id) {
+  const profile = state.profiles.find((item) => item.id === id);
+  if (!profile) throw new Error(`profile not found: ${id}`);
+  if (profile.active) {
+    appendLog("info", "profile", `${profile.name} is already active`);
+    return false;
+  }
+  const previousActiveProfile = activeProfile().active ? activeProfile().id : null;
+  const snapshot = await invoke("write_settings_snapshot", {
+    settings: { ...persistedSettingsFromUi(), active_profile: id },
+  });
+  applyPersistedSettings(snapshot);
+  await loadProfilesSnapshot();
+  try {
+    const applied = await invoke("apply_active_profile");
+    appendLog(
+      "info",
+      "profile",
+      `Profile switched to ${activeProfile().name}; config.yaml updated (${formatBytes(applied.bytes ?? 0)})`,
+    );
+    if (state.toggles.breakOnProxyChange) {
+      await closeConnectionsAfterProxyChange("profile");
+    }
+    return true;
+  } catch (error) {
+    const rollback = await invoke("write_settings_snapshot", {
+      settings: { ...persistedSettingsFromUi(), active_profile: previousActiveProfile },
+    });
+    applyPersistedSettings(rollback);
+    await loadProfilesSnapshot();
+    appendLog(
+      "error",
+      "profile",
+      `Could not switch to ${profile.name}: ${error.message ?? String(error)}`,
+    );
+    throw error;
+  }
+}
+
 function bindPageEvents() {
   document.querySelectorAll("[data-toggle]").forEach((input) => {
     input.addEventListener("change", async (event) => {
@@ -2457,19 +2502,13 @@ function bindPageEvents() {
 
   document.querySelectorAll("[data-profile]").forEach((button) => {
     button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       const id = event.currentTarget.dataset.profile;
-      const previousActiveProfile = activeProfile().active ? activeProfile().id : null;
-      const snapshot = await invoke("write_settings_snapshot", { settings: { ...persistedSettingsFromUi(), active_profile: id } });
-      applyPersistedSettings(snapshot);
-      await loadProfilesSnapshot();
       try {
-        const applied = await invoke("apply_active_profile");
-        appendLog("info", "profile", `Profile switched to ${activeProfile().name}; config.yaml updated (${formatBytes(applied.bytes ?? 0)})`);
+        await selectProfileById(id);
       } catch (error) {
-        const rollback = await invoke("write_settings_snapshot", { settings: { ...persistedSettingsFromUi(), active_profile: previousActiveProfile } });
-        applyPersistedSettings(rollback);
-        await loadProfilesSnapshot();
-        appendLog("error", "profile", `Profile switched, but config apply failed: ${error.message ?? String(error)}`);
+        appendLog("error", "profile", `Profile switch failed: ${error.message ?? String(error)}`);
       }
       renderPage();
     });
@@ -2523,6 +2562,18 @@ function bindPageEvents() {
   });
 
   document.querySelectorAll("[data-profile-card]").forEach((card) => {
+    card.addEventListener("click", async (event) => {
+      // CFW: clicking the card selects it. Ignore clicks on action buttons/icons.
+      if (event.target.closest("button, a, input, textarea, select")) return;
+      const id = card.dataset.profileCard;
+      if (!id) return;
+      try {
+        await selectProfileById(id);
+      } catch (_error) {
+        // selectProfileById already logged
+      }
+      renderPage();
+    });
     card.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();

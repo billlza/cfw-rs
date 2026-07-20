@@ -58,7 +58,10 @@ pub enum LaunchdDomain {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TunDriverKind {
-    NetworkExtensionPacketTunnel,
+    /// TUN via SMAppService-registered privileged helper running mihomo as root.
+    /// (Not Apple NetworkExtension — that name was an early planning placeholder.)
+    #[serde(alias = "NetworkExtensionPacketTunnel")]
+    SmAppServiceRootHelper,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,9 +95,9 @@ impl MacOsPlatformDesign {
         Self {
             target: PlatformTarget::MacOsArm64,
             system_proxy_strategy: "macOS network service proxy manager with explicit snapshot/restore",
-            helper_strategy: "privileged helper boundary separated from UI shell",
+            helper_strategy: "SMAppService privileged helper (Login Items approval required)",
             launchd_strategy: "typed launchd contract, no ad-hoc shell scripts in product logic",
-            tun_strategy: TunDriverKind::NetworkExtensionPacketTunnel,
+            tun_strategy: TunDriverKind::SmAppServiceRootHelper,
             intel_supported: false,
             minimum_macos: "13.0",
         }

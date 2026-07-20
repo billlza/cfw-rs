@@ -1,6 +1,7 @@
 const fallbackPayload = {
   product: {
     name: "Clash for Mac",
+    version: "0.1.0",
     parity_source: "Clash for Windows 0.20.39 macOS arm64 public release artifact",
   },
   pages: [
@@ -26,9 +27,9 @@ const fallbackPayload = {
     minimum_macos: "13.0",
     intel_supported: false,
     system_proxy_strategy: "native SystemConfiguration manager with explicit snapshot/restore",
-    helper_strategy: "privileged helper boundary separated from UI shell",
+    helper_strategy: "SMAppService privileged helper (Login Items approval required)",
     launchd_strategy: "typed launchd contract, no ad-hoc shell scripts in product logic",
-    tun_strategy: "NetworkExtensionPacketTunnel",
+    tun_strategy: "SmAppServiceRootHelper",
   },
   quality: {
     performance: {
@@ -89,6 +90,8 @@ const fallbackSettingsSnapshot = {
     secret: null,
     retain_window_bounds: true,
     show_tray_proxy_delay_indicator: true,
+    randomMixedPort: false,
+    delayTestUrl: "http://www.gstatic.com/generate_204",
     only_arm64_macos_supported: true,
   },
 };
@@ -508,6 +511,12 @@ function persistedSettingsFromUi() {
     theme: document.querySelector("[data-theme-setting]")?.value ?? current.theme ?? "light",
     font_family: document.querySelector("[data-font-family]")?.value?.trim() ?? current.font_family ?? "",
     "interface-name": document.querySelector("[data-outbound-interface]")?.value?.trim() ?? current["interface-name"] ?? current.interfaceName ?? "",
+    randomMixedPort: document.querySelector("[data-random-mixed-port]")?.checked
+      ?? Boolean(current.randomMixedPort ?? current.random_mixed_port),
+    delayTestUrl: document.querySelector("[data-delay-test-url]")?.value?.trim()
+      || current.delayTestUrl
+      || current.delay_test_url
+      || "http://www.gstatic.com/generate_204",
   };
 }
 
@@ -752,19 +761,22 @@ function renderStatusPill(label, value, tone = "neutral") {
 function renderGeneral() {
   const profile = activeProfile();
   const persisted = state.settingsSnapshot?.settings ?? fallbackSettingsSnapshot.settings;
+  const product = state.payload.product ?? fallbackPayload.product;
+  const appVersion = product.version ?? "0.1.0";
   const core = state.coreStatus ?? fallbackCoreStatus;
   const coreRunning = core.state === "Running";
   const controller = `${persisted.external_controller_host}:${persisted.external_controller_port}`;
   const statusDot = coreRunning ? "cfw-status-dot on" : "cfw-status-dot";
   const logLevel = state.logLevel ?? persisted.logLevel ?? persisted["log-level"] ?? "info";
   const serviceMode = serviceModeLabel(state.serviceModeStatus);
+  const randomPort = Boolean(persisted.randomMixedPort ?? persisted.random_mixed_port);
   return `
     <div class="cfw-general-view">
       <section class="cfw-header">
         <div class="cfw-app-mark">${renderCatLogo()}</div>
         <div class="cfw-title">
           <span>Clash for Mac</span>
-          <small>v0.20.39</small>
+          <small>v${escapeHtml(appVersion)}</small>
         </div>
       </section>
 
@@ -772,9 +784,11 @@ function renderGeneral() {
         <div class="cfw-row">
           <div class="cfw-row-left">Port</div>
           <div class="cfw-row-right">
-            <button class="inline-icon" data-action="open-settings" title="Open terminal with proxy">▣</button>
-            <span>random ${persisted.randomMixedPort ? "on" : "off"}</span>
-            <input class="cfw-number" data-mixed-port type="number" min="1" max="65535" value="${persisted.mixed_port}" aria-label="mixed-port">
+            <label class="proxy-tool check" title="Pick a free loopback port when the core starts">
+              <input type="checkbox" data-random-mixed-port ${randomPort ? "checked" : ""} />
+              <span>random ${randomPort ? "on" : "off"}</span>
+            </label>
+            <input class="cfw-number" data-mixed-port type="number" min="1" max="65535" value="${persisted.mixed_port}" aria-label="mixed-port" ${randomPort ? "disabled" : ""}>
           </div>
         </div>
 
@@ -1487,15 +1501,15 @@ function renderFeedback() {
       <section class="panel hero-panel">
         <div>
           <p class="label">Feedback</p>
-          <h3>${escapeHtml(product.name)}</h3>
-          <p class="muted">Original CFW route: /home/about. This screen keeps version/source attribution and migration notes close to the dashboard.</p>
+          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.1.0")}</h3>
+          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.1.0")}).</p>
         </div>
         <span class="badge">ARM64 macOS only</span>
       </section>
 
       <section class="panel">
         <p class="label">Parity source</p>
-        <h3>CFW 0.20.39 macOS arm64</h3>
+        <h3>CFW 0.20.39 (reference)</h3>
         <p class="muted">${escapeHtml(product.parity_source ?? "reverse artifact")}</p>
         <dl class="ports-list feedback-list">
           <div><dt>main</dt><dd>reverse/cfw-0.20.39-arm64/asar/main.js</dd></div>
@@ -1614,10 +1628,20 @@ function renderSettings() {
             <textarea class="mixin-editor" data-proxy-bypass spellcheck="false" rows="5">${escapeHtml(bypass)}</textarea>
           </label>`;
       })(),
+      renderSettingValue("PAC Script", "Not in 0.1.0 beta", "CFW PAC editor is deferred; System Proxy uses HTTP/HTTPS/SOCKS + bypass list."),
     ]],
     ["Mixin", [renderToggle("mixin", "Mixin", "Merge YAML/JS mixin before profile apply."), renderSettingValue("Mixin YAML", "Editor active", "The YAML merge editor below is persisted and applied before config reload.")]],
-    ["Proxies", [renderToggle("hideUnavailable", "Hide unavailable proxies", "Keep proxy group list compact."), renderSettingValue("Delay test URL", "http://www.gstatic.com/generate_204", "Original delay/liveness settings are kept visible.")]],
-    ["Connections", [renderToggle("breakOnProxyChange", "Break connections", "Disconnect sockets after proxy or profile changes."), renderSettingValue("Show Process", "Controller metadata", "Original can display process path on supported platforms.")]],
+    ["Proxies", [
+      renderToggle("hideUnavailable", "Hide unavailable proxies", "Keep proxy group list compact."),
+      renderSettingInput(
+        "Delay test URL",
+        persisted.delayTestUrl ?? persisted.delay_test_url ?? "http://www.gstatic.com/generate_204",
+        "http://www.gstatic.com/generate_204",
+        "Used by Proxies → Delay Test against the live controller.",
+        "data-delay-test-url"
+      ),
+    ]],
+    ["Connections", [renderToggle("breakOnProxyChange", "Break connections", "Disconnect sockets after proxy or profile changes."), renderSettingValue("Show Process", "Not in 0.1.0 beta", "CFW process-path column is deferred on this macOS beta.")]],
     ["Providers", [renderSettingValue("Use CFW Editor", "Profile editor active", "Profile YAML edit/diff is built in; provider file editor remains behind controller metadata."), renderSettingValue("Update All", "Controller-backed", "Proxy and rule providers expose bulk update actions.")]],
     ["Outbound", [renderSettingInput("Interface Name", outboundInterface, recommendedInterface, "Bind Clash outbound sockets to a macOS BSD interface; blank keeps Clash automatic.", "data-outbound-interface")]],
     ["Child Processes", [renderSettingValue("Processes", "Action runner", "Spawn child processes through a typed Rust command boundary.")]],
@@ -1630,6 +1654,7 @@ function renderSettings() {
     ["Cache", [renderSettingAction("Fake IP Cache", "Controller-backed", "Flush Mihomo fake-ip cache through /cache/fakeip/flush.", "flush-fake-ip-cache", "Flush")]],
     ["Experimental Features", [renderSettingValue("DHCP Server", "Not in 0.1.0 beta", "CFW macOS DHCP server switch is not shipped in this beta."), renderToggle("enableIpv6", "IPv6", "Expose IPv6 option in generated Clash config.")]],
   ];
+  const serviceMode = serviceModeLabel(state.serviceModeStatus);
   return `
     <div class="settings-layout">
       <section class="panel toolbar-panel settings-toolbar">
@@ -1672,13 +1697,13 @@ function renderSettings() {
         renderSettingValue("Minimum macOS", platform.minimum_macos ?? "13.0", "ARM64-only app baseline."),
         renderSettingValue("Intel support", platform.intel_supported ? "Enabled" : "Disabled", "Removed to optimize Apple Silicon runtime."),
         renderSettingValue("System proxy", platform.system_proxy_strategy ?? "native manager", "Rust SystemConfiguration boundary."),
-        renderSettingAction("Privileged Helper", persisted.service_mode === "installed" ? "Installed" : "Not Installed", "LaunchDaemon wrapper for service mode and privileged core startup.", "install-helper-service", "Install"),
-        renderSettingAction("Remove Helper", "launchd", "Bootout and remove the privileged helper plist.", "uninstall-helper-service", "Remove"),
+        renderSettingValue("Service Mode", serviceMode, "Live SMAppService status for the privileged helper."),
+        renderSettingAction("Service Mode", serviceMode, "Register the SMAppService helper (approve under Login Items if prompted).", "manage-service-mode", "Manage"),
       ])}
       ${renderNetworkDiagnostics()}
       ${renderSettingsGroup("Experimental", [
         renderToggle("hideUnavailable", "Hide unavailable proxies", "Keep proxy pages readable when providers degrade."),
-        renderSettingValue("TUN", platform.tun_strategy ?? "NetworkExtensionPacketTunnel", "NetworkExtension packet tunnel target."),
+        renderSettingValue("TUN", platform.tun_strategy ?? "SmAppServiceRootHelper", "Root mihomo via SMAppService helper — not NetworkExtension."),
         renderSettingValue("launchd", platform.launchd_strategy ?? "typed launchd contract", "No product-layer ad-hoc scripts."),
       ])}
       <section class="panel settings-index">
@@ -1815,6 +1840,24 @@ function bindPageEvents() {
       if (event.key === "Enter") {
         event.currentTarget.blur();
       }
+    });
+  });
+
+  document.querySelectorAll("[data-random-mixed-port]").forEach((input) => {
+    input.addEventListener("change", async (event) => {
+      try {
+        const snapshot = await invoke("write_settings_snapshot", {
+          settings: {
+            ...persistedSettingsFromUi(),
+            randomMixedPort: event.currentTarget.checked,
+          },
+        });
+        applyPersistedSettings(snapshot);
+        appendLog("info", "settings", `Random mixed-port ${event.currentTarget.checked ? "enabled" : "disabled"}`);
+      } catch (error) {
+        appendLog("error", "settings", `Random mixed-port refused: ${error.message ?? String(error)}`);
+      }
+      renderPage();
     });
   });
 
@@ -2277,7 +2320,10 @@ async function handleAction(action) {
       if (!names.length) {
         appendLog("warning", "proxy", "No proxy nodes available for delay test");
       } else {
-        const results = await invoke("test_proxy_delays", { proxies: names, url: null, timeoutMs: 5000 });
+        const delayUrl = state.settingsSnapshot?.settings?.delayTestUrl
+          ?? state.settingsSnapshot?.settings?.delay_test_url
+          ?? null;
+        const results = await invoke("test_proxy_delays", { proxies: names, url: delayUrl, timeoutMs: 5000 });
         const delayByName = new Map((results ?? []).filter((item) => Number.isFinite(item.delay)).map((item) => [item.name, item.delay]));
         const errorByName = new Map((results ?? []).filter((item) => item.error).map((item) => [item.name, item.error]));
         state.proxyGroups.forEach((group) => {

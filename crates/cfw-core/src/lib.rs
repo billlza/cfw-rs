@@ -15,6 +15,9 @@ pub use settings::{
 };
 
 pub const PRODUCT_NAME: &str = "Clash for Mac";
+/// Ship version for UI / About (must match `apps/cfw-tauri-shell/tauri.conf.json`).
+pub const PRODUCT_VERSION: &str = "0.1.0";
+pub const DEFAULT_DELAY_TEST_URL: &str = "http://www.gstatic.com/generate_204";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppTarget {
@@ -248,6 +251,7 @@ impl QualityTargets {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductBlueprint<P> {
     pub name: String,
+    pub version: String,
     pub target: AppTarget,
     pub features: FeatureSet,
     pub platform: P,
@@ -258,6 +262,7 @@ impl<P> ProductBlueprint<P> {
     pub fn arm64_macos_only(features: FeatureSet, platform: P) -> Self {
         Self {
             name: PRODUCT_NAME.into(),
+            version: PRODUCT_VERSION.into(),
             target: AppTarget::Cfw02039Parity,
             features,
             platform,

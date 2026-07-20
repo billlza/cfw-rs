@@ -7,7 +7,7 @@ use std::sync::atomic::{self, AtomicU64};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{PRODUCT_NAME, RuntimeMode, SettingsSkeleton};
+use crate::{DEFAULT_DELAY_TEST_URL, PRODUCT_NAME, RuntimeMode, SettingsSkeleton};
 
 /// Process-wide counter making each settings temp file name unique.
 static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -106,9 +106,19 @@ pub struct PersistedSettings {
     pub retain_window_bounds: bool,
     pub show_tray_proxy_delay_indicator: bool,
     pub proxy_bypass: Vec<String>,
+    /// When true, pick a free loopback mixed-port on core start (CFW `randomMixedPort`).
+    #[serde(default, rename = "randomMixedPort", alias = "random_mixed_port")]
+    pub random_mixed_port: bool,
+    /// URL used by Proxies delay tests (CFW delay/liveness URL).
+    #[serde(default = "default_delay_test_url", rename = "delayTestUrl", alias = "delay_test_url")]
+    pub delay_test_url: String,
     pub only_arm64_macos_supported: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_yaml::Value>,
+}
+
+fn default_delay_test_url() -> String {
+    DEFAULT_DELAY_TEST_URL.into()
 }
 
 impl Default for PersistedSettings {
@@ -134,6 +144,8 @@ impl Default for PersistedSettings {
             retain_window_bounds: skeleton.retain_window_bounds,
             show_tray_proxy_delay_indicator: skeleton.show_tray_proxy_delay_indicator,
             proxy_bypass: Vec::new(),
+            random_mixed_port: false,
+            delay_test_url: default_delay_test_url(),
             only_arm64_macos_supported: skeleton.only_arm64_macos_supported,
             extra: BTreeMap::new(),
         }
@@ -216,9 +228,24 @@ impl SettingsStore {
 /// field-level migration becomes necessary.
 fn migrate_settings(settings: &mut PersistedSettings) {
     if settings.schema_version < CURRENT_SETTINGS_SCHEMA_VERSION {
-        // No field-level migrations are required yet; record the upgrade so the
-        // next write persists the current schema version.
         settings.schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
+    }
+    // Promote legacy CFW keys that previously lived only in `extra`.
+    if let Some(value) = settings.extra.remove("randomMixedPort") {
+        if let Some(flag) = value.as_bool() {
+            settings.random_mixed_port = flag;
+        }
+    }
+    if let Some(value) = settings.extra.remove("delayTestUrl") {
+        if let Some(url) = value.as_str() {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                settings.delay_test_url = trimmed.to_string();
+            }
+        }
+    }
+    if settings.delay_test_url.trim().is_empty() {
+        settings.delay_test_url = default_delay_test_url();
     }
 }
 

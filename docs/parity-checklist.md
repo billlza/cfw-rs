@@ -24,6 +24,8 @@ Items marked beta-out-of-scope do not block distribution.
 - [x] TUN lifecycle handoff to root daemon (fails loudly if unsigned / unapproved)
 - [x] Reveal home directory action
 - [x] GeoIP database status + click-to-update (`geoip.metadb` / `Country.mmdb`)
+- [x] Honest product version badge (`0.1.0`; CFW 0.20.39 is parity target only)
+- [x] Random mixed-port toggle wired to core start
 - [ ] Every original CFW setting with full migration *(partial — extra flattened)*
 - [ ] Proxied terminal actions *(beta out of scope)*
 
@@ -66,10 +68,11 @@ Items marked beta-out-of-scope do not block distribution.
 - [x] Full taxonomy visible; read/write `cfw-settings.yaml`
 - [x] Fake-IP cache flush via controller
 - [x] Editable system-proxy bypass list (Settings)
-- [ ] Editable PAC script UI *(beta polish)*
+- [ ] Editable PAC script UI *(Not in 0.1.0 beta — labeled honestly)*
 - [ ] SSID policy *(not implemented — must not claim configured)*
 - [ ] DHCP server experimental *(not implemented)*
 - [ ] Shortcut capture UI *(keyboard shortcuts exist; no recorder)*
+- [ ] Connection process column *(Not in 0.1.0 beta)*
 
 ## Tray And Protocol
 

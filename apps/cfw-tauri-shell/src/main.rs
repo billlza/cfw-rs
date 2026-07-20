@@ -1848,7 +1848,20 @@ async fn test_proxy_delays(
     url: Option<String>,
     timeout_ms: Option<u16>,
 ) -> Result<Vec<ProxyDelayResult>, String> {
-    let target_url = url.unwrap_or_else(|| "http://www.gstatic.com/generate_204".into());
+    let target_url = match url.filter(|value| !value.trim().is_empty()) {
+        Some(value) => value,
+        None => {
+            let settings = settings_store()?
+                .read_or_default()
+                .map_err(|err| err.to_string())?;
+            let configured = settings.delay_test_url.trim();
+            if configured.is_empty() {
+                cfw_core::DEFAULT_DELAY_TEST_URL.to_string()
+            } else {
+                configured.to_string()
+            }
+        }
+    };
     let timeout = timeout_ms.unwrap_or(5000);
     Ok(controller_client_from_settings()?
         .proxy_delays(proxies, target_url, timeout)
@@ -1937,6 +1950,32 @@ async fn start_managed_core(app: &AppHandle, core: &ManagedCore) -> Result<CoreS
     if apply_active_profile_if_selected()?.is_none() {
         let _ = write_default_config_from_settings()?;
     }
+
+    // CFW randomMixedPort: pick a free loopback port before spawn when enabled.
+    {
+        let settings = settings_store()?
+            .read_or_default()
+            .map_err(|err| err.to_string())?;
+        if settings.random_mixed_port {
+            let start = if settings.mixed_port > 0 {
+                settings.mixed_port
+            } else {
+                7890
+            };
+            let port = next_available_loopback_port(start)
+                .ok_or_else(|| "no available loopback mixed-port found".to_string())?;
+            if port != settings.mixed_port {
+                update_settings(|settings| {
+                    settings.mixed_port = port;
+                    Ok(())
+                })?;
+                if apply_active_profile_if_selected()?.is_none() {
+                    let _ = write_default_config_from_settings()?;
+                }
+            }
+        }
+    }
+
     let mut manager = core_manager_from_settings()?;
     let mut process = match manager.spawn() {
         Ok(process) => process,

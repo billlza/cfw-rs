@@ -1009,9 +1009,49 @@ function hostFromUrl(value) {
 }
 
 function subscriptionLabel(profile) {
-  if (profile.subscriptionUserinfo) return profile.subscriptionUserinfo;
+  if (profile.subscriptionUserinfo) {
+    const parsed = parseSubscriptionUserinfo(profile.subscriptionUserinfo);
+    if (parsed?.expireLabel) return parsed.expireLabel;
+    return "remote";
+  }
   if (profile.updateInterval) return `interval ${profile.updateInterval}`;
   return profile.sourceUrl ? "remote" : "local";
+}
+
+/** Parse Clash `subscription-userinfo` header: upload=; download=; total=; expire=. */
+function parseSubscriptionUserinfo(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const parts = Object.create(null);
+  for (const chunk of raw.split(/[;\s]+/)) {
+    const idx = chunk.indexOf("=");
+    if (idx <= 0) continue;
+    parts[chunk.slice(0, idx).trim().toLowerCase()] = chunk.slice(idx + 1).trim();
+  }
+  const upload = Number(parts.upload);
+  const download = Number(parts.download);
+  const total = Number(parts.total);
+  const expire = Number(parts.expire);
+  const used = (Number.isFinite(upload) ? upload : 0) + (Number.isFinite(download) ? download : 0);
+  let percent = null;
+  if (Number.isFinite(total) && total > 0) {
+    percent = Math.max(0, Math.min(100, (used / total) * 100));
+  }
+  let expireLabel = null;
+  if (Number.isFinite(expire) && expire > 0) {
+    const date = new Date(expire * 1000);
+    if (!Number.isNaN(date.getTime())) {
+      const pad = (n) => String(n).padStart(2, "0");
+      expireLabel = `exp ${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    }
+  }
+  return { used, total: Number.isFinite(total) ? total : null, percent, expireLabel };
+}
+
+function profileProgressWidth(profile) {
+  const parsed = parseSubscriptionUserinfo(profile.subscriptionUserinfo);
+  if (parsed?.percent != null) return parsed.percent;
+  // No usage quota from the subscription — keep the bar empty (never invent %).
+  return 0;
 }
 
 function renderProfiles() {
@@ -1040,7 +1080,7 @@ function renderProfiles() {
                 <span>${profile.rules.toLocaleString()} rules</span>
                 <span>${escapeHtml(subscriptionLabel(profile))}</span>
               </div>
-              <div class="profile-progress"><b style="width:${profile.active ? 68 : 12}%"></b></div>
+              <div class="profile-progress" title="${profile.subscriptionUserinfo ? escapeHtml(profile.subscriptionUserinfo) : "No subscription usage quota"}"><b style="width:${profileProgressWidth(profile).toFixed(1)}%"></b></div>
             </div>
             <div class="profile-card-primary">
               ${profile.sourceUrl

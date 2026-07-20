@@ -974,8 +974,6 @@ dd {
   border: 0;
   background: transparent;
   color: #222;
-  font-size: 18px;
-  font-weight: 700;
   cursor: pointer;
   flex: 0 0 auto;
 }
@@ -987,15 +985,35 @@ dd {
 }
 
 .proxy-tool.active {
+  color: #222;
+}
+
+.proxy-tool.active svg {
   color: var(--accent, #3bb273);
 }
 
-.proxy-tool.check input {
-  display: none;
+.port-random {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--fgc);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
 }
 
-.proxy-tool.check input:checked + span {
-  color: var(--accent);
+.port-random input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent, #3bb273);
+}
+
+.cfw-link-value {
+  white-space: nowrap;
 }
 
 .cfw-proxy-content {

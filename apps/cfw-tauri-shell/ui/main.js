@@ -358,9 +358,10 @@ function escapeHtml(value) {
 }
 
 function formatRuntime(seconds) {
-  const hours = Math.floor(seconds / 3600).toString().padStart(2, "0");
-  const minutes = Math.floor((seconds % 3600) / 60).toString().padStart(2, "0");
-  const secs = Math.floor(seconds % 60).toString().padStart(2, "0");
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600).toString().padStart(2, "0");
+  const minutes = Math.floor((total % 3600) / 60).toString().padStart(2, "0");
+  const secs = Math.floor(total % 60).toString().padStart(2, "0");
   return `${hours} : ${minutes} : ${secs}`;
 }
 
@@ -785,7 +786,7 @@ function renderGeneral() {
         <div class="cfw-row">
           <div class="cfw-row-left">Port</div>
           <div class="cfw-row-right">
-            <label class="proxy-tool check" title="Pick a free loopback port when the core starts">
+            <label class="port-random" title="Pick a free loopback port when the core starts">
               <input type="checkbox" data-random-mixed-port ${randomPort ? "checked" : ""} />
               <span>random ${randomPort ? "on" : "off"}</span>
             </label>
@@ -820,7 +821,7 @@ function renderGeneral() {
         </div>
 
         <div class="cfw-row">
-          <div class="cfw-row-left">Clash Core <button class="inline-icon" data-action="open-settings" title="Core settings">⚙</button><button class="inline-icon" data-action="open-settings" title="Core list">▤</button></div>
+          <div class="cfw-row-left">Clash Core</div>
           <div class="cfw-row-right core-action-zone" data-action="${core.state === "MissingBinary" ? "install-latest-core" : coreRunning ? "stop-core" : "start-core"}" title="${coreRunning ? "Stop core" : "Start core"}">
             <i class="${statusDot}"></i>
             <span class="cfw-link-value core-state-button">${coreRunning ? "Connected" : escapeHtml(core.state)}</span>
@@ -852,7 +853,7 @@ function renderGeneral() {
         </div>
 
         <div class="cfw-row">
-          <div class="cfw-row-left">TUN Mode <span class="tiny-info">i</span><button class="inline-icon" data-action="open-settings">⚙</button><button class="inline-icon" data-action="open-settings">↻</button></div>
+          <div class="cfw-row-left">TUN Mode</div>
           <div class="cfw-row-right">
             <span class="cfw-link-value">${state.toggles.tunMode ? serviceMode : "Service Mode required"}</span>
             ${renderInlineSwitch("tunMode", "TUN Mode")}
@@ -860,7 +861,7 @@ function renderGeneral() {
         </div>
 
         <div class="cfw-row">
-          <div class="cfw-row-left">Mixin <span class="tiny-info">i</span><button class="inline-icon" data-action="open-settings">⚙</button></div>
+          <div class="cfw-row-left">Mixin</div>
           <div class="cfw-row-right">${renderInlineSwitch("mixin", "Mixin")}</div>
         </div>
 
@@ -906,24 +907,23 @@ function isManualProxyGroup(type) {
   return ["selector", "relay"].includes(String(type ?? "").toLowerCase());
 }
 
-/** CFW Proxies toolbar glyphs (filled, ~18px). */
+/** CFW Proxies toolbar glyphs — monochrome, consistent weight. */
 function proxyToolIcon(kind) {
-  const common = 'width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"';
+  const common = 'width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
   switch (kind) {
     case "filter":
-      // Globe + magnifying glass (Show Filter)
-      return `<svg ${common} fill="currentColor"><path d="M12 2a10 10 0 1 0 9.95 11H14a2 2 0 0 1-2-2V2.05A10 10 0 0 0 12 2zm1 0v8h8A9 9 0 0 0 13 2z"/><path d="M16.5 15.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm0 1.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"/><path d="M19.2 19.2 22 22" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>`;
+      // Globe
+      return `<svg ${common}><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg>`;
     case "break":
-      // Octagon + exclamation (Break / close connections)
-      return `<svg ${common} fill="currentColor"><path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2zm1.03 2L4 8.89v6.22L8.89 20h6.22L20 15.11V8.89L15.11 4H8.89z"/><rect x="11" y="7" width="2" height="7" rx="1"/><circle cx="12" cy="17" r="1.2"/></svg>`;
+      // Stop / break connections
+      return `<svg ${common}><path d="M8 3h8l5 5v8l-5 5H8l-5-5V8l5-5z"/><path d="M12 8v5M12 16.5v.5"/></svg>`;
     case "delay":
-      // Wi‑Fi bars with slash (Latency test)
-      return `<svg ${common} fill="currentColor"><path d="M12 18.5a1.75 1.75 0 1 0 0 3.5 1.75 1.75 0 0 0 0-3.5zm-4.24-3.05a6 6 0 0 1 8.48 0l-1.42 1.41a4 4 0 0 0-5.64 0l-1.42-1.41zm-2.83-2.83a10 10 0 0 1 14.14 0l-1.41 1.41a8 8 0 0 0-11.32 0L4.93 12.62z"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>`;
+      // Latency bars
+      return `<svg ${common}><path d="M2 12a10 10 0 0 1 20 0"/><path d="M5 12a7 7 0 0 1 14 0"/><path d="M8.5 12a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg>`;
     case "eye":
-      // Eye (Hide unavailable)
-      return `<svg ${common} fill="currentColor"><path d="M12 5c-5 0-9.27 3.11-11 7 1.73 3.89 6 7 11 7s9.27-3.11 11-7c-1.73-3.89-6-7-11-7zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-2.5A2.5 2.5 0 1 0 12 9a2.5 2.5 0 0 0 0 5z"/></svg>`;
+      return `<svg ${common}><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
     case "eye-off":
-      return `<svg ${common} fill="currentColor"><path d="M2.1 3.51 3.5 2.1l18.4 18.4-1.41 1.41-3.1-3.1A12.4 12.4 0 0 1 12 19c-5 0-9.27-3.11-11-7a13.3 13.3 0 0 1 4.2-4.86L2.1 3.51zM12 7c5 0 9.27 3.11 11 7a13.2 13.2 0 0 1-3.36 4.22l-2.2-2.2A5 5 0 0 0 9 8.56L7.2 6.75C8.66 7.1 10.26 7 12 7zm-2.12 2.12A2.5 2.5 0 0 1 14.9 14.1l-4.99-4.98z"/></svg>`;
+      return `<svg ${common}><path d="M2 12s3.5-7 10-7c2.1 0 3.9.6 5.4 1.4M22 12s-3.5 7-10 7c-2.1 0-3.9-.6-5.4-1.4"/><path d="M9.9 9.9A3 3 0 0 0 12 15a3 3 0 0 0 2.1-.9M4 4l16 16"/></svg>`;
     default:
       return "";
   }
@@ -2436,6 +2436,11 @@ async function handleAction(action) {
   if (action === "start-core") {
     try {
       state.coreStatus = await invoke("start_core");
+      if (state.coreStatus?.state === "Running") {
+        state.coreStartedAt = Date.now();
+        state.traffic.runtimeSeconds = 0;
+        updateStatusBar();
+      }
       appendLog("info", "core", state.coreStatus.message);
       await loadControllerSnapshot();
     } catch (error) {
@@ -2456,6 +2461,9 @@ async function handleAction(action) {
   if (action === "stop-core") {
     try {
       state.coreStatus = await invoke("stop_core");
+      state.coreStartedAt = null;
+      state.traffic.runtimeSeconds = 0;
+      updateStatusBar();
       appendLog("warning", "core", state.coreStatus.message);
     } catch (error) {
       appendLog("error", "core", error.message ?? String(error));
@@ -2972,12 +2980,24 @@ async function loadNetworkDiagnostics() {
 }
 
 async function loadCoreStatus() {
+  const previousState = state.coreStatus?.state;
   try {
     state.coreStatus = await invoke("core_status");
   } catch (error) {
     state.coreStatus = fallbackCoreStatus;
     appendLog("warning", "core", error.message ?? String(error));
   }
+  const nextState = state.coreStatus?.state;
+  if (nextState === "Running") {
+    if (previousState !== "Running" || !state.coreStartedAt) {
+      state.coreStartedAt = Date.now();
+    }
+    state.traffic.runtimeSeconds = Math.floor((Date.now() - state.coreStartedAt) / 1000);
+  } else {
+    state.coreStartedAt = null;
+    state.traffic.runtimeSeconds = 0;
+  }
+  updateStatusBar();
   try {
     state.serviceModeStatus = await invoke("service_mode_status");
   } catch (_error) {
@@ -3239,7 +3259,7 @@ async function bootstrap() {
       state.traffic.runtimeSeconds = 0;
     }
     updateStatusBar();
-  }, 2000);
+  }, 1000);
 }
 
 async function importProfileFromPath(path) {

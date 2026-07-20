@@ -16,11 +16,17 @@ use crate::CoreRuntimeError;
 pub const GEOIP_METADB_NAME: &str = "geoip.metadb";
 pub const COUNTRY_MMDB_NAME: &str = "Country.mmdb";
 
-/// Default GeoIP database for mihomo Meta (same family as the pinned core).
+/// Default / pinned GeoIP database for mihomo Meta (checksum-verified on update).
+///
+/// MetaCubeX publishes under the rolling `latest` tag; we pin the URL *and* SHA-256
+/// so updates stay reproducible until this pin is intentionally bumped.
 pub const DEFAULT_GEOIP_METADB_URL: &str =
-    "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geoip.metadb";
+    "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb";
+pub const PINNED_GEOIP_METADB_SHA256: &str =
+    "0f904f0eafb9a43bebd309c0d193166454d1f28844f7426d8b9083dfe36528ae";
 
 /// Classic MaxMind Country DB URL (CFW default). Written as `Country.mmdb`.
+/// Custom / non-pinned URLs skip SHA-256 verification (size floor still applies).
 pub const DEFAULT_COUNTRY_MMDB_URL: &str =
     "https://github.com/Dreamacro/maxmind-geoip/releases/latest/download/Country.mmdb";
 
@@ -133,6 +139,20 @@ pub async fn update_geoip_database(
             "GeoIP download too small ({} bytes); expected at least {MIN_GEOIP_BYTES}",
             bytes.len()
         )));
+    }
+
+    // Verify the pinned metadb checksum when using the default URL (or an
+    // identical pinned path). Custom Country.mmdb / override URLs skip this.
+    let using_pinned_metadb = source_url == DEFAULT_GEOIP_METADB_URL
+        || source_url.ends_with("/meta-rules-dat/releases/download/latest/geoip.metadb");
+    if using_pinned_metadb {
+        let actual = crate::sha256_hex(&bytes);
+        if !actual.eq_ignore_ascii_case(PINNED_GEOIP_METADB_SHA256) {
+            return Err(CoreRuntimeError::ChecksumMismatch {
+                expected: PINNED_GEOIP_METADB_SHA256.into(),
+                actual,
+            });
+        }
     }
 
     fs::create_dir_all(&paths.app_home)?;

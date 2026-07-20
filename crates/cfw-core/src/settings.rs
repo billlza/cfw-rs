@@ -106,6 +106,12 @@ pub struct PersistedSettings {
     pub retain_window_bounds: bool,
     pub show_tray_proxy_delay_indicator: bool,
     pub proxy_bypass: Vec<String>,
+    /// When true with system_proxy, apply PAC via macOS Auto Proxy URL instead of manual HTTP/SOCKS.
+    #[serde(default, rename = "usePacScript", alias = "use_pac_script")]
+    pub use_pac_script: bool,
+    /// PAC body used when `use_pac_script` is enabled. Empty → generate PROXY/SOCKS for mixed-port.
+    #[serde(default, rename = "pacScript", alias = "pac_script")]
+    pub pac_script: String,
     /// When true, pick a free loopback mixed-port on core start (CFW `randomMixedPort`).
     #[serde(default, rename = "randomMixedPort", alias = "random_mixed_port")]
     pub random_mixed_port: bool,
@@ -144,6 +150,8 @@ impl Default for PersistedSettings {
             retain_window_bounds: skeleton.retain_window_bounds,
             show_tray_proxy_delay_indicator: skeleton.show_tray_proxy_delay_indicator,
             proxy_bypass: Vec::new(),
+            use_pac_script: false,
+            pac_script: String::new(),
             random_mixed_port: false,
             delay_test_url: default_delay_test_url(),
             only_arm64_macos_supported: skeleton.only_arm64_macos_supported,

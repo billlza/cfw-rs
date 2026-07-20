@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Silent Start hides the main window on launch when enabled; tray still opens the dashboard
+- Profile Proxies/Rules context actions open the YAML editor focused on that section
+- System Proxy: optional PAC mode (`usePacScript` + editor → macOS Auto Proxy URL / `proxy.pac`)
+- Connections: Show Process column from `metadata.processPath`
+- Tray delay indicator also sets the macOS menu-bar title (`Nms`)
+- Primary nav includes Providers and Rules
+- Pinned mihomo core **v1.19.28** (REST `/proxies` no longer merges provider nodes; use `/providers/proxies`)
+- GeoIP metadb updates verify a pinned SHA-256
+- Docs: TUN shipping path is SMAppService root helper (not NetworkExtension)
+
 ## 0.1.0 — 2026-07-20
 
 ### Beta release candidate

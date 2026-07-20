@@ -90,14 +90,15 @@ xcrun stapler staple "target/release/bundle/dmg/Clash for Mac_0.1.0_aarch64.dmg"
 - [x] `.cursor/` gitignored; broken `sign_and_dmg.command` removed
 - [x] Editable system-proxy bypass list (Settings textarea → `networksetup`)
 - [x] GeoIP status/update (no `Unknown` placeholder)
-- [x] Honesty pass: version badge `0.1.0`, TUN=`SmAppServiceRootHelper`, Service Mode Manage→SMAppService, delay URL editable, Show Process/PAC labeled deferred
+- [x] Editable PAC script UI + Use PAC Script (macOS Auto Proxy URL)
+- [x] Connections Show Process column
+- [x] Tray delay title + tooltip sync
+- [x] Providers / Rules in primary nav
+- [x] Pinned mihomo v1.19.28 + GeoIP metadb SHA-256
 
 ### P2 — polish (not blocking beta)
-- [ ] Tray delay **icon** visual sync (tooltip works when `show_tray_proxy_delay_indicator`)
-- [ ] Editable PAC script UI (bypass list is done; PAC editor still missing)
 - [ ] Update-all cancel mid-flight
 - [ ] Shortcut capture UI / full CFW settings migration
-- [ ] Connection process-path column
 
 ### P3 — explicitly deferred
 - Screenshot parity, 3× CI gates, SSID, Monaco diff, DHCP, Sparkle auto-update, proxied terminal, child-process log tail

@@ -347,13 +347,19 @@ async fn install_core_from_url(
 }
 
 #[tauri::command]
-async fn install_latest_mihomo_core() -> Result<CoreInstallResult, String> {
+async fn install_pinned_mihomo_core() -> Result<CoreInstallResult, String> {
     let store = settings_store()?;
     CoreInstaller::new(store.paths().clone())
         .map_err(|err| err.to_string())?
-        .install_latest_mihomo_arm64()
+        .install_pinned_mihomo_arm64()
         .await
         .map_err(|err| err.to_string())
+}
+
+/// Deprecated alias — installs the same pinned build as [`install_pinned_mihomo_core`].
+#[tauri::command]
+async fn install_latest_mihomo_core() -> Result<CoreInstallResult, String> {
+    install_pinned_mihomo_core().await
 }
 
 #[tauri::command]
@@ -380,13 +386,24 @@ fn reset_settings_snapshot() -> Result<SettingsSnapshot, String> {
 #[tauri::command]
 fn set_system_proxy_enabled(enabled: bool) -> Result<SettingsSnapshot, String> {
     update_settings(|settings| {
-        let mode = if enabled {
-            SystemProxyMode::GlobalHttp
-        } else {
+        let mode = if !enabled {
             SystemProxyMode::Off
+        } else if settings.use_pac_script {
+            SystemProxyMode::RulePacLike
+        } else {
+            SystemProxyMode::GlobalHttp
         };
         MacOsPlatformService
-            .set_system_proxy_mode(mode, settings.mixed_port, &settings.proxy_bypass)
+            .set_system_proxy_mode(
+                mode,
+                settings.mixed_port,
+                &settings.proxy_bypass,
+                if settings.use_pac_script {
+                    Some(settings.pac_script.as_str())
+                } else {
+                    None
+                },
+            )
             .map_err(|err| err.to_string())?;
         settings.system_proxy = enabled;
         Ok(())
@@ -2182,6 +2199,9 @@ fn emit_page(app: &AppHandle, page: &str) {
 }
 
 fn emit_deep_links(app: &AppHandle, urls: Vec<String>) {
+    if urls.is_empty() {
+        return;
+    }
     let _ = app.emit("cfw://deep-link", urls);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -2463,6 +2483,17 @@ fn update_tray_menu(app: &AppHandle, proxy_groups: &[TrayProxyGroup]) -> tauri::
             PRODUCT_NAME.to_string()
         };
         let _ = tray.set_tooltip(Some(tooltip));
+
+        // macOS menu-bar title next to the tray icon (CFW-style delay chip).
+        let title = if settings.show_tray_proxy_delay_indicator {
+            proxy_groups
+                .iter()
+                .find_map(|group| group.selected_delay_ms.map(|delay| format!("{delay}ms")))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let _ = tray.set_title(Some(title));
     }
     Ok(())
 }
@@ -2532,6 +2563,21 @@ fn ensure_main_window(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Honor Settings → Silent Start: launch to tray only; left-click tray still shows the window.
+fn apply_silent_start_on_launch(app: &AppHandle) {
+    let silent = settings_store()
+        .ok()
+        .and_then(|store| store.read_or_default().ok())
+        .map(|settings| settings.silent_start)
+        .unwrap_or(false);
+    if !silent {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(ManagedCore::default())
@@ -2552,6 +2598,7 @@ fn main() {
             current_platform_design,
             provision_core_binary,
             install_core_from_url,
+            install_pinned_mihomo_core,
             install_latest_mihomo_core,
             system_proxy_state,
             network_diagnostics,
@@ -2632,6 +2679,7 @@ fn main() {
             tauri::async_runtime::spawn(run_helper_heartbeat());
             ensure_main_window(app.handle())?;
             build_tray(app.handle())?;
+            apply_silent_start_on_launch(app.handle());
             emit_deep_links(app.handle(), Vec::new());
             Ok(())
         })

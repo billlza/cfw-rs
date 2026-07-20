@@ -68,11 +68,11 @@ Items marked beta-out-of-scope do not block distribution.
 - [x] Full taxonomy visible; read/write `cfw-settings.yaml`
 - [x] Fake-IP cache flush via controller
 - [x] Editable system-proxy bypass list (Settings)
-- [ ] Editable PAC script UI *(Not in 0.1.0 beta — labeled honestly)*
+- [x] Editable PAC script UI *(Use PAC Script + editor → Auto Proxy URL)*
 - [ ] SSID policy *(not implemented — must not claim configured)*
 - [ ] DHCP server experimental *(not implemented)*
 - [ ] Shortcut capture UI *(keyboard shortcuts exist; no recorder)*
-- [ ] Connection process column *(Not in 0.1.0 beta)*
+- [x] Connection process column *(Show Process toggle + processPath)*
 
 ## Tray And Protocol
 
@@ -80,10 +80,11 @@ Items marked beta-out-of-scope do not block distribution.
 - [x] `clash://install-config|install-profile|quit`
 - [x] QR generation UI for profiles
 - [x] Tray delay tooltip when `show_tray_proxy_delay_indicator`
-- [ ] Tray delay icon visual sync *(icon swap not wired — P2)*
+- [x] Tray delay menu-bar title (`set_title`) when indicator on
 
 ## Providers And Rules
 
 - [x] Providers + Rules routes
+- [x] Providers / Rules in primary navigation
 - [x] Live `/providers/*` + `/rules` snapshots
 - [x] Provider update + health-check commands (single + batch)

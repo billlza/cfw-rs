@@ -1716,6 +1716,19 @@ dd {
   padding: 8px 0;
 }
 
+.cfw-conn-item.with-process {
+  grid-template-columns: minmax(0, 1fr) minmax(72px, 120px) 210px 88px;
+}
+
+.conn-process {
+  overflow: hidden;
+  color: var(--muted, #7a8290);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .conn-main h3 {
   margin: 0;
   overflow: hidden;

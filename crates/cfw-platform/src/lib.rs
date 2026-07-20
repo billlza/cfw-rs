@@ -106,7 +106,13 @@ impl MacOsPlatformDesign {
 
 pub trait SystemProxyService {
     fn read_system_proxy_state(&self) -> Result<SystemProxyState>;
-    fn set_system_proxy_mode(&self, mode: SystemProxyMode, port: u16, bypass: &[String]) -> Result<()>;
+    fn set_system_proxy_mode(
+        &self,
+        mode: SystemProxyMode,
+        port: u16,
+        bypass: &[String],
+        pac_script: Option<&str>,
+    ) -> Result<()>;
     fn restore_original_system_proxy_state(&self) -> Result<()>;
 }
 
@@ -388,6 +394,49 @@ impl MacOsPlatformService {
         Ok(())
     }
 
+    fn apply_clash_pac(&self, port: u16, target_services: &[String], pac_script: &str) -> Result<()> {
+        let paths = SettingsStore::default_for_current_user()?.paths().clone();
+        fs::create_dir_all(&paths.app_home)?;
+        let pac_path = paths.app_home.join("proxy.pac");
+        let body = if pac_script.trim().is_empty() {
+            format!(
+                "function FindProxyForURL(url, host) {{\n  return \"PROXY {host}:{port}; SOCKS5 {host}:{port}; DIRECT\";\n}}\n",
+                host = PROXY_HOST,
+                port = port,
+            )
+        } else {
+            pac_script.to_string()
+        };
+        fs::write(&pac_path, body.as_bytes())?;
+        let pac_url = format!("file://{}", pac_path.display());
+
+        let mut rollback_snapshot = self.read_proxy_snapshot()?;
+        rollback_snapshot.target_services = target_services.to_vec();
+        let result = (|| -> Result<()> {
+            for service in target_services {
+                // Prefer Auto Proxy URL; clear manual HTTP/HTTPS/SOCKS for this service.
+                run_networksetup(&["-setautoproxyurl", service, &pac_url])?;
+                run_networksetup(&["-setautoproxystate", service, "on"])?;
+                run_networksetup(&[ProxyProtocol::Web.state_arg(), service, "off"])?;
+                run_networksetup(&[ProxyProtocol::SecureWeb.state_arg(), service, "off"])?;
+                run_networksetup(&[ProxyProtocol::Socks.state_arg(), service, "off"])?;
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            if let Err(rollback_error) = self.apply_snapshot(&rollback_snapshot) {
+                bail!(
+                    "failed to apply Clash PAC system proxy: {error}; rollback also failed: {rollback_error}"
+                );
+            }
+            return Err(error.context(
+                "failed to apply Clash PAC system proxy; restored previous macOS proxy state",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn network_diagnostics(&self) -> Result<NetworkDiagnostics> {
         let active_services = self.active_network_services()?;
         let service_order = self.network_service_order()?;
@@ -551,16 +600,30 @@ impl SystemProxyService for MacOsPlatformService {
         })
     }
 
-    fn set_system_proxy_mode(&self, mode: SystemProxyMode, port: u16, bypass: &[String]) -> Result<()> {
+    fn set_system_proxy_mode(
+        &self,
+        mode: SystemProxyMode,
+        port: u16,
+        bypass: &[String],
+        pac_script: Option<&str>,
+    ) -> Result<()> {
         match mode {
             SystemProxyMode::Off => self.restore_original_system_proxy_state(),
-            SystemProxyMode::GlobalHttp | SystemProxyMode::RulePacLike => {
+            SystemProxyMode::GlobalHttp => {
                 if port == 0 {
                     bail!("mixed-port must be greater than 0 before enabling system proxy")
                 }
                 let target_services = self.proxy_target_services()?;
                 self.capture_snapshot_for_targets(&target_services)?;
                 self.apply_clash_proxy(port, &target_services, bypass)
+            }
+            SystemProxyMode::RulePacLike => {
+                if port == 0 {
+                    bail!("mixed-port must be greater than 0 before enabling PAC system proxy")
+                }
+                let target_services = self.proxy_target_services()?;
+                self.capture_snapshot_for_targets(&target_services)?;
+                self.apply_clash_pac(port, &target_services, pac_script.unwrap_or(""))
             }
         }
     }

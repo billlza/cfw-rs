@@ -90,6 +90,8 @@ const fallbackSettingsSnapshot = {
     secret: null,
     retain_window_bounds: true,
     show_tray_proxy_delay_indicator: true,
+    usePacScript: false,
+    pacScript: "",
     randomMixedPort: false,
     delayTestUrl: "http://www.gstatic.com/generate_204",
     only_arm64_macos_supported: true,
@@ -128,6 +130,7 @@ const state = {
   connectionSearch: "",
   ruleSearch: "",
   mixinYaml: "",
+  pacScript: "",
   profileParserScript: "",
   trayScript: "",
   childProcessCommand: "",
@@ -152,6 +155,8 @@ const state = {
     enableIpv6: false,
     proxyDelayIndicator: true,
     showProxyFilter: true,
+    usePacScript: false,
+    showProcess: true,
   },
   traffic: {
     upload: 0,
@@ -201,7 +206,7 @@ const navInitials = {
   feedback: "?",
 };
 
-const primaryNavIds = new Set(["general", "proxies", "profiles", "logs", "connections", "settings", "feedback"]);
+const primaryNavIds = new Set(["general", "proxies", "profiles", "providers", "logs", "connections", "rules", "settings", "feedback"]);
 const MAX_LOG_ROWS = 200;
 const MAX_CONNECTION_ROWS = 500;
 let renderFrame = null;
@@ -225,7 +230,7 @@ const invoke = async (command, args = {}) => {
         message: "Bundled core provisioning is unavailable outside Tauri",
       };
     }
-    if (command === "install_core_from_url" || command === "install_latest_mihomo_core") {
+    if (command === "install_core_from_url" || command === "install_latest_mihomo_core" || command === "install_pinned_mihomo_core") {
       throw new Error("Core installer is unavailable outside the Tauri runtime");
     }
     if (command === "system_proxy_state") return state.toggles.systemProxy ? "Enabled" : "Disabled";
@@ -491,6 +496,8 @@ function applyPersistedSettings(snapshot) {
   state.toggles.silentStart = Boolean(settings.silent_start);
   state.toggles.breakOnProxyChange = Boolean(settings.break_connections_on_proxy_change);
   state.toggles.proxyDelayIndicator = Boolean(settings.show_tray_proxy_delay_indicator);
+  state.toggles.usePacScript = Boolean(settings.usePacScript ?? settings.use_pac_script);
+  state.pacScript = settings.pacScript ?? settings.pac_script ?? state.pacScript ?? "";
   applyAppearance(settings);
 }
 
@@ -517,6 +524,8 @@ function persistedSettingsFromUi() {
     silent_start: state.toggles.silentStart,
     break_connections_on_proxy_change: state.toggles.breakOnProxyChange,
     show_tray_proxy_delay_indicator: state.toggles.proxyDelayIndicator,
+    usePacScript: state.toggles.usePacScript,
+    pacScript: document.querySelector("[data-pac-script]")?.value ?? state.pacScript ?? current.pacScript ?? current.pac_script ?? "",
     theme: document.querySelector("[data-theme-setting]")?.value ?? current.theme ?? "light",
     font_family: document.querySelector("[data-font-family]")?.value?.trim() ?? current.font_family ?? "",
     "interface-name": document.querySelector("[data-outbound-interface]")?.value?.trim() ?? current["interface-name"] ?? current.interfaceName ?? "",
@@ -829,7 +838,7 @@ function renderGeneral() {
 
         <div class="cfw-row">
           <div class="cfw-row-left">Clash Core</div>
-          <div class="cfw-row-right core-action-zone" data-action="${core.state === "MissingBinary" ? "install-latest-core" : coreRunning ? "stop-core" : "start-core"}" title="${coreRunning ? "Stop core" : "Start core"}">
+          <div class="cfw-row-right core-action-zone" data-action="${core.state === "MissingBinary" ? "install-pinned-core" : coreRunning ? "stop-core" : "start-core"}" title="${coreRunning ? "Stop core" : "Install pinned mihomo core"}">
             <i class="${statusDot}"></i>
             <span class="cfw-link-value core-state-button">${coreRunning ? "Connected" : escapeHtml(core.state)}</span>
             ${core.state === "MissingBinary" ? '<span class="cfw-text-button">Install</span>' : ""}
@@ -1141,8 +1150,8 @@ const PROFILE_MENU_ACTIONS = [
   { id: "update", label: "Update", icon: "refresh", remoteOnly: true },
   { id: "reveal", label: "Show in folder", icon: "folder" },
   { id: "diff", label: "Diff", icon: "diff", remoteOnly: true },
-  { id: "proxies", label: "Proxies", icon: "send" },
-  { id: "rules", label: "Rules", icon: "rules" },
+  { id: "proxies", label: "Edit proxies section", icon: "send" },
+  { id: "rules", label: "Edit rules section", icon: "rules" },
   { id: "copy", label: "Copy", icon: "copy" },
   { id: "qrcode", label: "QRCode", icon: "qr", remoteOnly: true },
   { id: "parsers", label: "Parsers", icon: "tree", remoteOnly: true },
@@ -1455,10 +1464,16 @@ async function runProfileMenuAction(action, id) {
       return;
     }
     case "edit":
-    case "proxies":
-    case "rules":
       await openProfileInspector(id, "edit");
-      appendLog("info", "profile", `${action} editor opened for ${profile.name}`);
+      appendLog("info", "profile", `edit editor opened for ${profile.name}`);
+      return;
+    case "proxies":
+      await openProfileInspector(id, "edit", "proxies");
+      appendLog("info", "profile", `proxies section editor opened for ${profile.name}`);
+      return;
+    case "rules":
+      await openProfileInspector(id, "edit", "rules");
+      appendLog("info", "profile", `rules section editor opened for ${profile.name}`);
       return;
     case "edit-external":
       await invoke("open_profile_externally", { id });
@@ -1751,11 +1766,22 @@ function renderLogs() {
   `;
 }
 
+function connectionProcessLabel(connection) {
+  const path = connection.metadata?.processPath
+    ?? connection.metadata?.process_path
+    ?? connection.processPath
+    ?? "";
+  if (!path) return "—";
+  const parts = String(path).split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] || String(path);
+}
+
 function renderConnections() {
   const connections = visibleConnections();
   const detail = state.connections.find((connection) => connection.id === state.connectionDetailId);
   const totalUp = formatBytes(state.connectionStream.uploadTotal);
   const totalDown = formatBytes(state.connectionStream.downloadTotal);
+  const showProcess = state.toggles.showProcess !== false;
   return `
     <div class="connections-layout">
       <section class="cfw-conn-header">
@@ -1786,7 +1812,7 @@ function renderConnections() {
 
       <section class="cfw-conn-scroll">
         ${connections.map((connection) => `
-          <article class="cfw-conn-item">
+          <article class="cfw-conn-item${showProcess ? " with-process" : ""}">
             <div class="conn-main">
               <h3>${escapeHtml(connection.host)}</h3>
               <div class="conn-chips">
@@ -1795,6 +1821,7 @@ function renderConnections() {
                 <span class="conn7">${escapeHtml(connection.metadata?.network ?? connection.metadata?.type ?? "tcp")}</span>
               </div>
             </div>
+            ${showProcess ? `<div class="conn-process" title="${escapeHtml(connection.metadata?.processPath ?? connection.metadata?.process_path ?? "")}">${escapeHtml(connectionProcessLabel(connection))}</div>` : ""}
             <div class="conn-traffic">
               <b>↑ ${escapeHtml(connection.upload)}</b>
               <b>↓ ${escapeHtml(connection.download)}</b>
@@ -2116,19 +2143,27 @@ function renderSettings() {
     ]],
     ["System Proxy", [
       renderToggle("systemProxy", "System Proxy", "Enable macOS system HTTP/HTTPS/SOCKS proxy."),
-      renderToggle("proxyDelayIndicator", "Tray delay indicator", "Show selected-node latency in the menu-bar tooltip."),
+      renderToggle("proxyDelayIndicator", "Tray delay indicator", "Show selected-node latency in the menu-bar title/tooltip."),
+      renderToggle("usePacScript", "Use PAC Script", "When System Proxy is on, apply Auto Proxy URL (PAC) instead of manual HTTP/HTTPS/SOCKS."),
       (() => {
         const bypass = (persisted.proxy_bypass ?? []).join("\n");
+        const pac = persisted.pacScript ?? persisted.pac_script ?? state.pacScript ?? "";
         return `
           <label class="setting-row setting-control-row">
             <span>
               <b>Bypass Domains</b>
-              <small>One host or CIDR per line. Empty uses the built-in LAN/localhost defaults. Applied when System Proxy turns on.</small>
+              <small>One host or CIDR per line. Empty uses the built-in LAN/localhost defaults. Applied when System Proxy turns on (manual mode).</small>
             </span>
             <textarea class="mixin-editor" data-proxy-bypass spellcheck="false" rows="5">${escapeHtml(bypass)}</textarea>
+          </label>
+          <label class="setting-row setting-control-row">
+            <span>
+              <b>PAC Script</b>
+              <small>FindProxyForURL body. Empty generates PROXY/SOCKS5 for the current mixed-port. Written to app-home proxy.pac when Use PAC Script is on.</small>
+            </span>
+            <textarea class="mixin-editor" data-pac-script spellcheck="false" rows="8" placeholder="function FindProxyForURL(url, host) {&#10;  return &quot;PROXY 127.0.0.1:7890; SOCKS5 127.0.0.1:7890; DIRECT&quot;;&#10;}">${escapeHtml(pac)}</textarea>
           </label>`;
       })(),
-      renderSettingValue("PAC Script", "Not in 0.1.0 beta", "CFW PAC editor is deferred; System Proxy uses HTTP/HTTPS/SOCKS + bypass list."),
     ]],
     ["Mixin", [renderToggle("mixin", "Mixin", "Merge YAML/JS mixin before profile apply."), renderSettingValue("Mixin YAML", "Editor active", "The YAML merge editor below is persisted and applied before config reload.")]],
     ["Proxies", [
@@ -2141,7 +2176,10 @@ function renderSettings() {
         "data-delay-test-url"
       ),
     ]],
-    ["Connections", [renderToggle("breakOnProxyChange", "Break connections", "Disconnect sockets after proxy or profile changes."), renderSettingValue("Show Process", "Not in 0.1.0 beta", "CFW process-path column is deferred on this macOS beta.")]],
+    ["Connections", [
+      renderToggle("breakOnProxyChange", "Break connections", "Disconnect sockets after proxy or profile changes."),
+      renderToggle("showProcess", "Show Process", "Show connection process name from metadata.processPath when the core reports it."),
+    ]],
     ["Providers", [renderSettingValue("Use CFW Editor", "Profile editor active", "Profile YAML edit/diff is built in; provider file editor remains behind controller metadata."), renderSettingValue("Update All", "Controller-backed", "Proxy and rule providers expose bulk update actions.")]],
     ["Outbound", [renderSettingInput("Interface Name", outboundInterface, recommendedInterface, "Bind Clash outbound sockets to a macOS BSD interface; blank keeps Clash automatic.", "data-outbound-interface")]],
     ["Child Processes", [renderSettingValue("Processes", "Action runner", "Spawn child processes through a typed Rust command boundary.")]],
@@ -2270,6 +2308,9 @@ function renderPage() {
   document.getElementById("page").innerHTML = (pageRenderers[state.activePage] ?? renderGeneral)();
   bindPageEvents();
   renderGlassOverlays();
+  if (state.profileInspector?.mode === "edit" && state.profileInspector.focusKey) {
+    requestAnimationFrame(() => focusProfileEditorSection(state.profileInspector.focusKey));
+  }
 }
 
 function updateStatusBar() {
@@ -2836,6 +2877,11 @@ async function applyToggle(key, checked, source) {
     } else {
       const snapshot = await invoke("write_settings_snapshot", { settings: persistedSettingsFromUi() });
       applyPersistedSettings(snapshot);
+      if (key === "usePacScript" && state.toggles.systemProxy) {
+        const refreshed = await invoke("set_system_proxy_enabled", { enabled: true });
+        applyPersistedSettings(refreshed);
+        await loadNetworkDiagnostics();
+      }
     }
     appendLog("info", source, `${key} changed to ${checked ? "on" : "off"}`);
   } catch (error) {
@@ -2942,12 +2988,12 @@ async function handleAction(action) {
       appendLog("error", "core", error.message ?? String(error));
     }
   }
-  if (action === "install-latest-core") {
+  if (action === "install-pinned-core" || action === "install-latest-core") {
     try {
-      appendLog("info", "core", "Checking pinned darwin-arm64 Mihomo core package...");
-      const result = await invoke("install_latest_mihomo_core");
+      appendLog("info", "core", "Installing pinned darwin-arm64 Mihomo core package...");
+      const result = await invoke("install_pinned_mihomo_core");
       state.coreStatus = await invoke("core_status");
-      appendLog("info", "core", `Core installed: ${formatBytes(result.bytes ?? 0)} · ${String(result.sha256 ?? "").slice(0, 12)}`);
+      appendLog("info", "core", `Pinned core installed: ${formatBytes(result.bytes ?? 0)} · ${String(result.sha256 ?? "").slice(0, 12)}`);
     } catch (error) {
       appendLog("error", "core", `Core install failed: ${error.message ?? String(error)}`);
     }
@@ -3203,6 +3249,11 @@ async function handleAction(action) {
   if (action === "save-settings") {
     const snapshot = await invoke("write_settings_snapshot", { settings: persistedSettingsFromUi() });
     applyPersistedSettings(snapshot);
+    if (state.toggles.systemProxy) {
+      const refreshed = await invoke("set_system_proxy_enabled", { enabled: true });
+      applyPersistedSettings(refreshed);
+      await loadNetworkDiagnostics();
+    }
     if (activeProfile().active) {
       const applied = await invoke("apply_active_profile");
       appendLog("info", "settings", `cfw-settings.yaml saved; active config reapplied (${formatBytes(applied.bytes ?? 0)})`);
@@ -3420,9 +3471,9 @@ async function closeConnectionsAfterProxyChange(reason) {
   }
 }
 
-async function openProfileInspector(id, mode) {
+async function openProfileInspector(id, mode, focusKey = null) {
   const profile = await invoke("read_profile_text", { id });
-  const inspector = { id, mode, profile };
+  const inspector = { id, mode, profile, focusKey };
   if (mode === "qrcode") {
     try {
       inspector.svg = await invoke("profile_qrcode_svg", { id });
@@ -3431,6 +3482,22 @@ async function openProfileInspector(id, mode) {
     }
   }
   state.profileInspector = inspector;
+}
+
+function focusProfileEditorSection(key) {
+  if (!key) return;
+  const editor = document.querySelector("[data-profile-editor]");
+  if (!(editor instanceof HTMLTextAreaElement)) return;
+  const body = editor.value;
+  const match = body.match(new RegExp(`^${key}\\s*:`, "im"));
+  if (!match || match.index == null) return;
+  const start = match.index;
+  editor.focus();
+  editor.setSelectionRange(start, start + match[0].length);
+  const before = body.slice(0, start);
+  const line = before.split("\n").length - 1;
+  const lineHeight = Number.parseFloat(getComputedStyle(editor).lineHeight) || 18;
+  editor.scrollTop = Math.max(0, line * lineHeight - 40);
 }
 
 async function reloadPayload() {

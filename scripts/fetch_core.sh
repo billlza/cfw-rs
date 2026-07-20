@@ -9,9 +9,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-VERSION="v1.19.27"
+VERSION="v1.19.28"
 URL="https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-darwin-arm64-${VERSION}.gz"
-SHA256="6f01da0543dc3043b7e1a79fae421f0f3003cc05bcd6a1d0a211eb9ddc5656d6"
+SHA256="55b7286331cb30a54b2564013b02b84a0c280e8b690bd1e5da4b9d4f4ca007ac"
 DEST="apps/cfw-tauri-shell/resources/cores/clash-darwin"
 
 if [[ -f "$DEST" ]] && shasum -a 256 "$DEST" | grep -qi "$SHA256"; then

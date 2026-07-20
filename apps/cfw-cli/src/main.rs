@@ -358,7 +358,7 @@ fn sysproxy(cli: &Cli, action: &SysproxyAction) -> Result<()> {
             let mut settings = store.read_or_default()?;
             let port = port.unwrap_or(settings.mixed_port);
             MacOsPlatformService
-                .set_system_proxy_mode(SystemProxyMode::GlobalHttp, port, &[])
+                .set_system_proxy_mode(SystemProxyMode::GlobalHttp, port, &[], None)
                 .map_err(|err| anyhow!("failed to enable system proxy: {err}"))?;
             settings.system_proxy = true;
             store.write(&settings)?;

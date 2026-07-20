@@ -29,11 +29,11 @@ const MIHOMO_LATEST_RELEASE_API: &str =
 /// binary is bundled into the app. The checksum is of the *decompressed* Mach-O
 /// binary, which is what [`CoreInstaller::install_from_url`] verifies after it
 /// gunzips the downloaded `.gz` asset.
-pub const PINNED_MIHOMO_VERSION: &str = "v1.19.27";
+pub const PINNED_MIHOMO_VERSION: &str = "v1.19.28";
 pub const PINNED_MIHOMO_ARM64_URL: &str =
-    "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.27/mihomo-darwin-arm64-v1.19.27.gz";
+    "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.28/mihomo-darwin-arm64-v1.19.28.gz";
 pub const PINNED_MIHOMO_ARM64_SHA256: &str =
-    "6f01da0543dc3043b7e1a79fae421f0f3003cc05bcd6a1d0a211eb9ddc5656d6";
+    "55b7286331cb30a54b2564013b02b84a0c280e8b690bd1e5da4b9d4f4ca007ac";
 
 #[derive(Debug, Error)]
 pub enum CoreRuntimeError {
@@ -179,12 +179,17 @@ impl CoreInstaller {
     /// could trust for an arbitrary "latest" asset. Use
     /// [`CoreInstaller::latest_mihomo_arm64_asset`] only to surface that a newer
     /// release exists, not to install one unattended.
-    pub async fn install_latest_mihomo_arm64(&self) -> Result<CoreInstallResult, CoreRuntimeError> {
+    pub async fn install_pinned_mihomo_arm64(&self) -> Result<CoreInstallResult, CoreRuntimeError> {
         self.install_from_url(CoreInstallRequest {
             url: PINNED_MIHOMO_ARM64_URL.to_string(),
             sha256: Some(PINNED_MIHOMO_ARM64_SHA256.to_string()),
         })
         .await
+    }
+
+    /// Deprecated name kept for callers; identical to [`Self::install_pinned_mihomo_arm64`].
+    pub async fn install_latest_mihomo_arm64(&self) -> Result<CoreInstallResult, CoreRuntimeError> {
+        self.install_pinned_mihomo_arm64().await
     }
 
     pub async fn install_from_url(
@@ -302,7 +307,7 @@ fn validate_arm64_macho(bytes: &[u8]) -> Result<(), CoreRuntimeError> {
     Ok(())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }

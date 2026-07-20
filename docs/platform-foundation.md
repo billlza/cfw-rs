@@ -28,7 +28,9 @@ The Rust platform boundary for the rebuild lives in
 - launchd strategy:
   typed contract, no ad-hoc product-layer shell scripts
 - TUN strategy:
-  `NetworkExtension` packet tunnel as the long-term target
+  **current:** privileged helper via `SMAppService` + root helper for TUN
+  (`SmAppServiceRootHelper`). **long-term optional:** `NetworkExtension`
+  packet tunnel — not the shipping path for 0.1.x.
 
 ## Why This Matters
 

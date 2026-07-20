@@ -114,7 +114,7 @@ pub struct ProfileManager {
 /// providers gate the Clash node list behind a `clash`/`meta` UA substring and
 /// return an HTML landing page (which fails YAML validation) to unknown agents,
 /// so we must present a Clash-compatible UA on every profile fetch.
-pub const PROFILE_FETCH_USER_AGENT: &str = "clash.meta/v1.19.27 (cfw-rs)";
+pub const PROFILE_FETCH_USER_AGENT: &str = "clash.meta/v1.19.28 (cfw-rs)";
 
 impl ProfileManager {
     pub fn new(paths: MacOsAppPaths) -> Result<Self, ProfileError> {

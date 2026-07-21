@@ -2811,11 +2811,82 @@ async fn install_available_update(app: AppHandle) -> Result<serde_json::Value, S
             "current": env!("CARGO_PKG_VERSION"),
         }));
     };
-    let _version = update.version.clone();
+    let version = update.version.clone();
+    let _ = app.emit(
+        "cfw://update-progress",
+        serde_json::json!({
+            "phase": "downloading",
+            "version": version,
+            "downloaded": 0u64,
+            "total": serde_json::Value::Null,
+            "percent": serde_json::Value::Null,
+        }),
+    );
+
+    let progress_app = app.clone();
+    let progress_version = version.clone();
+    let downloaded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let downloaded_for_cb = downloaded.clone();
+    let last_emit_pct = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(999));
+    let last_emit_pct_cb = last_emit_pct.clone();
     update
-        .download_and_install(|_chunk, _total| {}, || {})
+        .download_and_install(
+            move |chunk_len, content_length| {
+                let so_far = downloaded_for_cb
+                    .fetch_add(chunk_len as u64, std::sync::atomic::Ordering::Relaxed)
+                    + chunk_len as u64;
+                let percent = content_length.map(|total| {
+                    if total == 0 {
+                        0
+                    } else {
+                        ((so_far.min(total) as f64 / total as f64) * 100.0).round() as u64
+                    }
+                });
+                // Throttle UI events — every whole percent (or unknown-total heartbeat every ~512KiB).
+                let should_emit = match percent {
+                    Some(pct) => {
+                        let prev = last_emit_pct_cb.load(std::sync::atomic::Ordering::Relaxed);
+                        if pct != prev {
+                            last_emit_pct_cb.store(pct, std::sync::atomic::Ordering::Relaxed);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    None => so_far == chunk_len as u64 || so_far % (512 * 1024) < chunk_len as u64,
+                };
+                if !should_emit {
+                    return;
+                }
+                let _ = progress_app.emit(
+                    "cfw://update-progress",
+                    serde_json::json!({
+                        "phase": "downloading",
+                        "version": progress_version,
+                        "downloaded": so_far,
+                        "total": content_length,
+                        "percent": percent,
+                    }),
+                );
+            },
+            || {},
+        )
         .await
         .map_err(|err| err.to_string())?;
+
+    let _ = app.emit(
+        "cfw://update-progress",
+        serde_json::json!({
+            "phase": "installing",
+            "version": version,
+            "downloaded": downloaded.load(std::sync::atomic::Ordering::Relaxed),
+            "total": serde_json::Value::Null,
+            "percent": 100u64,
+        }),
+    );
+
+    // Give the UI a beat to paint “Installing…” before process replace.
+    tokio::time::sleep(Duration::from_millis(350)).await;
     app.restart();
 }
 

@@ -560,7 +560,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "cfw-cli"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "cfw-controller",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-controller"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-core"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-helper"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "cfw-core",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-platform"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "cfw-core",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-profiles"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "cfw-core",
  "reqwest",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-runtime"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "cfw-core",
  "flate2",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "cfw-tauri-shell"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "cfw-controller",

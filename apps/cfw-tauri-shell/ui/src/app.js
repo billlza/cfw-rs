@@ -503,7 +503,7 @@ async function promptInstallUpdate(result) {
   applyUpdateInfo(result);
   openProductAboutDialog({
     autoCheck: true,
-    checking: false,
+    phase: "idle",
     result,
   });
 }
@@ -520,21 +520,43 @@ function openProductAboutDialog(options = {}) {
         date: options.result.date ?? null,
       }
     : state.updateInfo;
+  const phase = options.phase
+    ?? (options.checking ? "checking" : options.installing ? "installing" : "idle");
   state.glassDialog = {
     kind: "product-about",
     payload: {
-      checking: Boolean(options.checking),
+      phase,
+      checking: phase === "checking",
+      installing: phase === "downloading" || phase === "installing",
       autoCheck: Boolean(options.autoCheck),
+      progress: options.progress ?? null,
       update,
     },
   };
   renderGlassOverlays();
 }
 
+function formatUpdateBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function productAboutStatusText(payload) {
-  if (payload?.checking) return "Checking for updates…";
+  const phase = payload?.phase ?? (payload?.checking ? "checking" : "idle");
   const update = payload?.update;
-  if (update?.error) return `Update check failed: ${update.error}`;
+  const progress = payload?.progress;
+  if (phase === "checking") return "Checking for updates…";
+  if (phase === "downloading") {
+    if (typeof progress?.percent === "number") {
+      const total = progress.total ? ` of ${formatUpdateBytes(progress.total)}` : "";
+      return `Downloading update… ${progress.percent}% (${formatUpdateBytes(progress.downloaded)}${total})`;
+    }
+    return "Downloading update…";
+  }
+  if (phase === "installing") return "Installing update and restarting…";
+  if (update?.error) return `Update failed: ${update.error}`;
   if (update?.available && update?.version) {
     return `Update available: v${update.version}`;
   }
@@ -548,7 +570,7 @@ function productAboutStatusText(payload) {
 function renderGeneral() {
   const persisted = state.settingsSnapshot?.settings ?? fallbackSettingsSnapshot.settings;
   const product = state.payload.product ?? fallbackPayload.product;
-  const appVersion = product.version ?? "0.3.4";
+  const appVersion = product.version ?? "0.3.5";
   const update = state.updateInfo;
   const updateBadge = update?.available && update?.version
     ? `<button type="button" class="cfw-update-badge" data-action="check-for-updates" title="Update available — click to download">→ v${escapeHtml(String(update.version))}</button>`
@@ -1350,11 +1372,28 @@ function renderGlassOverlays() {
       `);
     } else if (dialog.kind === "product-about") {
       const product = state.payload?.product ?? fallbackPayload.product;
-      const version = product.version ?? "0.3.4";
+      const version = product.version ?? "0.3.5";
       const status = productAboutStatusText(dialog.payload);
       const update = dialog.payload?.update;
-      const canInstall = Boolean(update?.available && update?.version && !dialog.payload?.checking);
+      const phase = dialog.payload?.phase ?? (dialog.payload?.checking ? "checking" : "idle");
+      const busy = phase === "checking" || phase === "downloading" || phase === "installing";
+      const canInstall = Boolean(update?.available && update?.version && !busy);
+      const percent = typeof dialog.payload?.progress?.percent === "number"
+        ? Math.max(0, Math.min(100, dialog.payload.progress.percent))
+        : null;
       const notes = update?.notes ? `<p class="product-about-notes">${escapeHtml(String(update.notes).slice(0, 280))}</p>` : "";
+      const progressBlock = (phase === "downloading" || phase === "installing")
+        ? `<div class="product-about-progress" aria-hidden="true"><i style="width:${percent == null ? 18 : percent}%"></i></div>`
+        : "";
+      const primaryLabel = phase === "checking"
+        ? "Checking…"
+        : phase === "downloading"
+          ? (percent == null ? "Downloading…" : `Downloading… ${percent}%`)
+          : phase === "installing"
+            ? "Installing…"
+            : canInstall
+              ? `Download & Install v${escapeHtml(String(update.version))}`
+              : "";
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
         <div class="glass-dialog product-about" role="dialog" aria-label="About Clash for Mac">
@@ -1366,11 +1405,13 @@ function renderGlassOverlays() {
             <div>发布于 Jul 21, 2026</div>
           </div>
           <div class="product-about-status">${escapeHtml(status)}</div>
+          ${progressBlock}
           ${notes}
           <div class="glass-dialog-actions column">
-            ${canInstall ? `<button type="button" class="glass-btn" data-glass-install-update>Download &amp; Install v${escapeHtml(String(update.version))}</button>` : ""}
-            <button type="button" class="glass-btn ghost" data-glass-check-update ${dialog.payload?.checking ? "disabled" : ""}>${dialog.payload?.checking ? "Checking…" : "Check for Update"}</button>
-            <button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button>
+            ${canInstall ? `<button type="button" class="glass-btn" data-glass-install-update>${primaryLabel}</button>` : ""}
+            ${busy && !canInstall ? `<button type="button" class="glass-btn" disabled>${primaryLabel}</button>` : ""}
+            <button type="button" class="glass-btn ghost" data-glass-check-update ${busy ? "disabled" : ""}>${phase === "checking" ? "Checking…" : "Check for Update"}</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss ${busy ? "disabled" : ""}>Close</button>
           </div>
           <div class="product-about-copy">© Clash for Mac · MIT</div>
         </div>
@@ -1709,7 +1750,7 @@ function bindGlassOverlayEvents() {
 
   document.querySelectorAll("[data-glass-check-update]").forEach((button) => {
     button.addEventListener("click", async () => {
-      openProductAboutDialog({ autoCheck: true, checking: true, result: state.updateInfo });
+      openProductAboutDialog({ autoCheck: true, phase: "checking", result: state.updateInfo });
       try {
         const result = await invoke("check_for_updates");
         applyUpdateInfo(result);
@@ -1720,12 +1761,12 @@ function bindGlassOverlayEvents() {
             ? `Update ${result.version} available`
             : `Already up to date (${result?.current ?? "current"})`,
         );
-        openProductAboutDialog({ autoCheck: true, checking: false, result });
+        openProductAboutDialog({ autoCheck: true, phase: "idle", result });
       } catch (error) {
         appendLog("warning", "updater", `Update check failed: ${error.message ?? String(error)}`);
         openProductAboutDialog({
           autoCheck: true,
-          checking: false,
+          phase: "idle",
           result: { available: false, error: error.message ?? String(error), current: state.payload?.product?.version },
         });
       }
@@ -1734,19 +1775,37 @@ function bindGlassOverlayEvents() {
 
   document.querySelectorAll("[data-glass-install-update]").forEach((button) => {
     button.addEventListener("click", async () => {
+      const targetVersion = state.updateInfo?.version ?? "update";
       try {
-        appendLog("info", "updater", "Downloading and installing update…");
+        appendLog("info", "updater", `Downloading and installing ${targetVersion}…`);
         openProductAboutDialog({
           autoCheck: true,
-          checking: true,
-          result: { ...state.updateInfo, available: true },
+          phase: "downloading",
+          progress: { downloaded: 0, total: null, percent: null },
+          result: { ...state.updateInfo, available: true, error: null },
         });
-        await invoke("install_available_update");
+        const result = await invoke("install_available_update");
+        if (result && result.installed === false) {
+          const reason = result.reason ?? "no update available";
+          appendLog("warning", "updater", `Install skipped: ${reason}`);
+          openProductAboutDialog({
+            autoCheck: true,
+            phase: "idle",
+            result: { ...state.updateInfo, available: false, error: reason },
+          });
+          return;
+        }
+        openProductAboutDialog({
+          autoCheck: true,
+          phase: "installing",
+          progress: { downloaded: 0, total: null, percent: 100 },
+          result: { ...state.updateInfo, available: true, error: null },
+        });
       } catch (error) {
         appendLog("warning", "updater", `Install failed: ${error.message ?? String(error)}`);
         openProductAboutDialog({
           autoCheck: true,
-          checking: false,
+          phase: "idle",
           result: { ...state.updateInfo, error: error.message ?? String(error) },
         });
       }
@@ -2407,8 +2466,8 @@ function renderFeedback() {
   const product = state.payload.product ?? fallbackPayload.product;
   const update = state.updateInfo;
   const updateLine = update?.available && update?.version
-    ? `New version available: v${escapeHtml(String(update.version))} (current v${escapeHtml(String(update.current ?? product.version ?? "0.3.4"))}).`
-    : `Current build v${escapeHtml(product.version ?? "0.3.4")} — menu bar Clash for Mac → Check for Update… also works.`;
+    ? `New version available: v${escapeHtml(String(update.version))} (current v${escapeHtml(String(update.current ?? product.version ?? "0.3.5"))}).`
+    : `Current build v${escapeHtml(product.version ?? "0.3.5")} — menu bar Clash for Mac → Check for Update… also works.`;
   const bench = state.kernelCompare?.comparison;
   const benchHtml = bench
     ? `<p class="muted">${escapeHtml(bench.narrative?.speed ?? "")}</p>
@@ -2421,8 +2480,8 @@ function renderFeedback() {
       <section class="panel hero-panel">
         <div>
           <p class="label">Feedback</p>
-          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.3.4")}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
-          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.3.4")}).</p>
+          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.3.5")}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
+          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.3.5")}).</p>
         </div>
         <span class="badge">ARM64 macOS only</span>
       </section>
@@ -4013,14 +4072,14 @@ async function handleAction(action) {
   }
   if (action === "check-for-updates") {
     try {
-      openProductAboutDialog({ autoCheck: true, checking: true });
+      openProductAboutDialog({ autoCheck: true, phase: "checking" });
       const result = await invoke("check_for_updates");
       await promptInstallUpdate(result);
     } catch (error) {
       appendLog("warning", "updater", `Update check failed: ${error.message ?? String(error)}`);
       openProductAboutDialog({
         autoCheck: true,
-        checking: false,
+        phase: "idle",
         result: { available: false, error: error.message ?? String(error), current: state.payload?.product?.version },
       });
     }
@@ -4560,17 +4619,64 @@ async function bootstrap() {
   await listen("cfw://product-about", (event) => {
     openProductAboutDialog({
       autoCheck: Boolean(event.payload?.auto_check),
-      checking: Boolean(event.payload?.checking),
+      phase: event.payload?.checking ? "checking" : "idle",
       result: state.updateInfo,
+    });
+  });
+
+  await listen("cfw://update-progress", (event) => {
+    const payload = event.payload ?? {};
+    if (state.glassDialog?.kind !== "product-about") return;
+    const phase = payload.phase === "installing" ? "installing" : "downloading";
+    const nextProgress = {
+      downloaded: Number(payload.downloaded) || 0,
+      total: payload.total == null ? null : Number(payload.total),
+      percent: payload.percent == null ? null : Number(payload.percent),
+    };
+    const prev = state.glassDialog.payload?.progress;
+    // Avoid full dialog rebuild on every tiny chunk — only when percent/phase changes.
+    if (
+      state.glassDialog.payload?.phase === phase
+      && prev
+      && prev.percent === nextProgress.percent
+      && phase === "downloading"
+    ) {
+      const status = document.querySelector(".product-about-status");
+      const bar = document.querySelector(".product-about-progress > i");
+      if (status) {
+        status.textContent = productAboutStatusText({
+          ...state.glassDialog.payload,
+          phase,
+          progress: nextProgress,
+        });
+      }
+      if (bar && typeof nextProgress.percent === "number") {
+        bar.style.width = `${Math.max(0, Math.min(100, nextProgress.percent))}%`;
+      }
+      state.glassDialog.payload.progress = nextProgress;
+      return;
+    }
+    openProductAboutDialog({
+      autoCheck: true,
+      phase,
+      progress: nextProgress,
+      result: {
+        ...(state.updateInfo ?? {}),
+        available: true,
+        version: payload.version ?? state.updateInfo?.version,
+        error: null,
+      },
     });
   });
 
   await listen("cfw://update-available", (event) => {
     applyUpdateInfo(event.payload);
-    if (state.glassDialog?.kind === "product-about") {
+    const phase = state.glassDialog?.payload?.phase;
+    // Don't clobber an in-flight download/install with a fresh "available" dialog.
+    if (state.glassDialog?.kind === "product-about" && phase !== "downloading" && phase !== "installing") {
       openProductAboutDialog({
         autoCheck: true,
-        checking: false,
+        phase: "idle",
         result: event.payload,
       });
     }
@@ -4584,7 +4690,7 @@ async function bootstrap() {
       if (event.payload?.error) {
         appendLog("warning", "updater", `Update check failed: ${event.payload.error}`);
         applyUpdateInfo(event.payload);
-        openProductAboutDialog({ autoCheck: true, checking: false, result: event.payload });
+        openProductAboutDialog({ autoCheck: true, phase: "idle", result: event.payload });
         renderPage();
         return;
       }

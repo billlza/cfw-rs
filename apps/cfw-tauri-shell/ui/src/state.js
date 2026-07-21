@@ -1,7 +1,7 @@
 export const fallbackPayload = {
   product: {
     name: "Clash for Mac",
-    version: "0.3.4",
+    version: "0.3.5",
     parity_source: "Clash for Windows 0.20.39 macOS arm64 public release artifact",
   },
   pages: [

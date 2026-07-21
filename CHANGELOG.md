@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.5 — 2026-07-21
+
+Updater download progress UI (fixes “stuck on Checking…” after Download & Install).
+
+### Updater
+- Separate phases: checking / downloading / installing (no longer misuse Checking for downloads)
+- Live percent + progress bar via `cfw://update-progress`
+- Ignore `update-available` events while a download is in flight
+- Handle “no update available” install result instead of leaving the dialog busy forever
+
+
 ## 0.3.4 — 2026-07-21
 
 Quieter live streams + connections/log Diagnostics fixes (so Check for Update from 0.3.3 can pick this up).

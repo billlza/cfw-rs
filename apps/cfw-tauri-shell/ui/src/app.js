@@ -392,15 +392,124 @@ function serviceModeIconTone(status) {
   return "muted";
 }
 
+function renderKernelCompareRow() {
+  const report = state.kernelCompare;
+  if (!report?.comparison) {
+    return `
+      <div class="cfw-row">
+        <div class="cfw-row-left">Core Bench</div>
+        <div class="cfw-row-right">
+          <button type="button" class="cfw-text-button" data-action="load-kernel-compare">Load measured clash-rs vs mihomo</button>
+        </div>
+      </div>
+    `;
+  }
+  const headline = report.comparison.headline ?? {};
+  const narrative = report.comparison.narrative ?? {};
+  const cold = headline.cold_start_speedup_x != null ? `${headline.cold_start_speedup_x}×` : "n/a";
+  const api = headline.controller_api_speedup_x != null ? `${headline.controller_api_speedup_x}×` : "n/a";
+  const weak = headline.weak_net_success_delta_pp != null
+    ? `${headline.weak_net_success_delta_pp >= 0 ? "+" : ""}${headline.weak_net_success_delta_pp}pp`
+    : "n/a";
+  const measured = report.measured_at ? String(report.measured_at).slice(0, 10) : "local";
+  return `
+    <div class="cfw-row cfw-row-bench">
+      <div class="cfw-row-left">
+        <span>Core Bench</span>
+        <span class="general-icons">
+          ${generalIconButton("show-kernel-compare", "info", "Show measured clash-rs vs mihomo details")}
+        </span>
+      </div>
+      <div class="cfw-row-right">
+        <button type="button" class="cfw-text-button" data-action="show-kernel-compare" title="${escapeHtml(narrative.speed ?? "")} ${escapeHtml(narrative.weak_net ?? "")}">
+          clash-rs ${escapeHtml(cold)} cold · ${escapeHtml(api)} API · weak-net ${escapeHtml(weak)} · ${escapeHtml(measured)}
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function applyUpdateInfo(payload) {
+  if (!payload || typeof payload !== "object") return;
+  state.updateInfo = {
+    available: Boolean(payload.available),
+    current: payload.current ?? state.payload?.product?.version,
+    version: payload.version ?? null,
+    notes: payload.notes ?? null,
+    error: payload.error ?? null,
+  };
+}
+
+async function loadKernelCompare(force = false) {
+  if (state.kernelCompare && !force) return state.kernelCompare;
+  try {
+    state.kernelCompare = await invoke("kernel_compare_report");
+    return state.kernelCompare;
+  } catch (error) {
+    appendLog("warning", "bench", `Kernel compare unavailable: ${error.message ?? String(error)}`);
+    return null;
+  }
+}
+
+async function promptInstallUpdate(result) {
+  applyUpdateInfo(result);
+  openProductAboutDialog({
+    autoCheck: true,
+    checking: false,
+    result,
+  });
+}
+
+function openProductAboutDialog(options = {}) {
+  const product = state.payload?.product ?? fallbackPayload.product;
+  const update = options.result
+    ? {
+        available: Boolean(options.result.available),
+        current: options.result.current ?? product.version,
+        version: options.result.version ?? null,
+        notes: options.result.notes ?? null,
+        error: options.result.error ?? null,
+        date: options.result.date ?? null,
+      }
+    : state.updateInfo;
+  state.glassDialog = {
+    kind: "product-about",
+    payload: {
+      checking: Boolean(options.checking),
+      autoCheck: Boolean(options.autoCheck),
+      update,
+    },
+  };
+  renderGlassOverlays();
+}
+
+function productAboutStatusText(payload) {
+  if (payload?.checking) return "Checking for updates…";
+  const update = payload?.update;
+  if (update?.error) return `Update check failed: ${update.error}`;
+  if (update?.available && update?.version) {
+    return `Update available: v${update.version}`;
+  }
+  if (update && update.available === false) {
+    return `You’re up to date (v${update.current ?? state.payload?.product?.version ?? "—"})`;
+  }
+  return "Check GitHub releases for new builds.";
+}
+
+
 function renderGeneral() {
   const persisted = state.settingsSnapshot?.settings ?? fallbackSettingsSnapshot.settings;
   const product = state.payload.product ?? fallbackPayload.product;
-  const appVersion = product.version ?? "0.3.1";
+  const appVersion = product.version ?? "0.3.3";
+  const update = state.updateInfo;
+  const updateBadge = update?.available && update?.version
+    ? `<button type="button" class="cfw-update-badge" data-action="check-for-updates" title="Update available — click to download">→ v${escapeHtml(String(update.version))}</button>`
+    : "";
   const core = state.coreStatus ?? fallbackCoreStatus;
   const coreRunning = core.state === "Running";
   const controllerHost = persisted.external_controller_host ?? "127.0.0.1";
   const controllerPort = persisted.external_controller_port ?? 9090;
-  const controller = `${controllerHost}:${controllerPort}`;
+  const coreKind = persisted.coreKind ?? persisted.core_kind ?? "clash_rs";
   const coreVersion = state.controllerVersion?.version ?? (coreRunning ? "Connected" : core.state);
   const statusDot = coreRunning ? "cfw-status-dot on" : "cfw-status-dot";
   const logLevel = state.logLevel ?? persisted.logLevel ?? persisted["log-level"] ?? "info";
@@ -415,7 +524,7 @@ function renderGeneral() {
         <div class="cfw-app-mark">${renderCatLogo()}</div>
         <div class="cfw-title">
           <span>Clash for Mac</span>
-          <small>v${escapeHtml(appVersion)}</small>
+          <small>v${escapeHtml(appVersion)}${updateBadge}</small>
         </div>
       </section>
 
@@ -475,11 +584,13 @@ function renderGeneral() {
           <div class="cfw-row-right">
             <button type="button" class="cfw-text-button core-version-link" data-action="open-controller-dashboard" title="Open controller dashboard">
               <i class="${statusDot}"></i>
-              <span>${escapeHtml(coreVersion)}${coreRunning ? ` (${escapeHtml(String(controllerPort))})` : ""}</span>
+              <span>${escapeHtml(String(coreKind))} · ${escapeHtml(coreVersion)}${coreRunning ? ` (${escapeHtml(String(controllerPort))})` : ""}</span>
             </button>
-            <button type="button" class="general-icon" data-action="${core.state === "MissingBinary" ? "install-pinned-core" : coreRunning ? "stop-core" : "start-core"}" title="${coreRunning ? "Stop core" : core.state === "MissingBinary" ? "Install pinned mihomo core" : "Start core"}">${coreRunning ? "■" : "▶"}</button>
+            <button type="button" class="general-icon" data-action="${core.state === "MissingBinary" ? "install-pinned-core" : coreRunning ? "stop-core" : "start-core"}" title="${coreRunning ? "Stop core" : core.state === "MissingBinary" ? "Install pinned core" : "Start core"}">${coreRunning ? "■" : "▶"}</button>
           </div>
         </div>
+
+        ${renderKernelCompareRow()}
 
         <div class="cfw-row">
           <div class="cfw-row-left">Home Directory</div>
@@ -518,7 +629,7 @@ function renderGeneral() {
             </span>
           </div>
           <div class="cfw-row-right">
-            <span class="cfw-link-value">${tunModeValueLabel(state.toggles.tunMode, state.serviceModeStatus)}</span>
+            <span class="cfw-link-value">${tunModeValueLabel(state.tunRuntime?.tun_mode ?? state.toggles.tunMode, state.serviceModeStatus, state.tunRuntime)}</span>
             ${renderInlineSwitch("tunMode", "TUN Mode", { disabled: !serviceModeReady })}
           </div>
         </div>
@@ -1183,6 +1294,33 @@ function renderGlassOverlays() {
           <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button></div>
         </div>
       `);
+    } else if (dialog.kind === "product-about") {
+      const product = state.payload?.product ?? fallbackPayload.product;
+      const version = product.version ?? "0.3.3";
+      const status = productAboutStatusText(dialog.payload);
+      const update = dialog.payload?.update;
+      const canInstall = Boolean(update?.available && update?.version && !dialog.payload?.checking);
+      const notes = update?.notes ? `<p class="product-about-notes">${escapeHtml(String(update.notes).slice(0, 280))}</p>` : "";
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog product-about" role="dialog" aria-label="About Clash for Mac">
+          <div class="product-about-icon">${renderCatLogo()}</div>
+          <div class="product-about-name">Clash for Mac</div>
+          <div class="product-about-sub">Powered by clash-rs &amp; mihomo</div>
+          <div class="product-about-meta">
+            <div>版本 ${escapeHtml(String(version))}</div>
+            <div>发布于 Jul 21, 2026</div>
+          </div>
+          <div class="product-about-status">${escapeHtml(status)}</div>
+          ${notes}
+          <div class="glass-dialog-actions column">
+            ${canInstall ? `<button type="button" class="glass-btn" data-glass-install-update>Download &amp; Install v${escapeHtml(String(update.version))}</button>` : ""}
+            <button type="button" class="glass-btn ghost" data-glass-check-update ${dialog.payload?.checking ? "disabled" : ""}>${dialog.payload?.checking ? "Checking…" : "Check for Update"}</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button>
+          </div>
+          <div class="product-about-copy">© Clash for Mac · MIT</div>
+        </div>
+      `);
     }
   }
 
@@ -1511,6 +1649,52 @@ function bindGlassOverlayEvents() {
         appendLog("info", "service", "Opened Login Items settings");
       } catch (error) {
         appendLog("warning", "service", error.message ?? String(error));
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-glass-check-update]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      openProductAboutDialog({ autoCheck: true, checking: true, result: state.updateInfo });
+      try {
+        const result = await invoke("check_for_updates");
+        applyUpdateInfo(result);
+        appendLog(
+          result?.available ? "info" : "info",
+          "updater",
+          result?.available
+            ? `Update ${result.version} available`
+            : `Already up to date (${result?.current ?? "current"})`,
+        );
+        openProductAboutDialog({ autoCheck: true, checking: false, result });
+      } catch (error) {
+        appendLog("warning", "updater", `Update check failed: ${error.message ?? String(error)}`);
+        openProductAboutDialog({
+          autoCheck: true,
+          checking: false,
+          result: { available: false, error: error.message ?? String(error), current: state.payload?.product?.version },
+        });
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-glass-install-update]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        appendLog("info", "updater", "Downloading and installing update…");
+        openProductAboutDialog({
+          autoCheck: true,
+          checking: true,
+          result: { ...state.updateInfo, available: true },
+        });
+        await invoke("install_available_update");
+      } catch (error) {
+        appendLog("warning", "updater", `Install failed: ${error.message ?? String(error)}`);
+        openProductAboutDialog({
+          autoCheck: true,
+          checking: false,
+          result: { ...state.updateInfo, error: error.message ?? String(error) },
+        });
       }
     });
   });
@@ -2184,13 +2368,24 @@ function renderActionRunnerSettings() {
 
 function renderFeedback() {
   const product = state.payload.product ?? fallbackPayload.product;
+  const update = state.updateInfo;
+  const updateLine = update?.available && update?.version
+    ? `New version available: v${escapeHtml(String(update.version))} (current v${escapeHtml(String(update.current ?? product.version ?? "0.3.3"))}).`
+    : `Current build v${escapeHtml(product.version ?? "0.3.3")} — menu bar Clash for Mac → Check for Update… also works.`;
+  const bench = state.kernelCompare?.comparison;
+  const benchHtml = bench
+    ? `<p class="muted">${escapeHtml(bench.narrative?.speed ?? "")}</p>
+       <p class="muted">${escapeHtml(bench.narrative?.stability ?? "")}</p>
+       <p class="muted">${escapeHtml(bench.narrative?.weak_net ?? "")}</p>
+       <p class="muted">Measured ${escapeHtml(String(state.kernelCompare.measured_at ?? "local"))}. Not a CFW 3× claim.</p>`
+    : `<p class="muted">Measured report not loaded yet.</p>`;
   return `
     <div class="feedback-layout">
       <section class="panel hero-panel">
         <div>
           <p class="label">Feedback</p>
-          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.3.1")}</h3>
-          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.3.1")}).</p>
+          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.3.3")}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
+          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.3.3")}).</p>
         </div>
         <span class="badge">ARM64 macOS only</span>
       </section>
@@ -2198,9 +2393,18 @@ function renderFeedback() {
       <section class="panel">
         <p class="label">Updates</p>
         <h3>Check for Updates</h3>
-        <p class="muted">Uses tauri-plugin-updater against GitHub Releases (<code>latest.json</code>).</p>
+        <p class="muted">${updateLine}</p>
         <div class="toolbar-actions">
           <button class="button" data-action="check-for-updates">Check for Updates</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <p class="label">Measured</p>
+        <h3>clash-rs vs mihomo</h3>
+        ${benchHtml}
+        <div class="toolbar-actions">
+          <button class="button ghost" data-action="show-kernel-compare">Show Bench Details</button>
         </div>
       </section>
 
@@ -3068,6 +3272,8 @@ async function applyToggle(key, checked, source) {
     if (key === "systemProxy") {
       const snapshot = await invoke("set_system_proxy_enabled", { enabled: checked });
       applyPersistedSettings(snapshot);
+      // System Proxy must never flip TUN; re-sync runtime truth after settings write.
+      await loadTunRuntimeState();
       await loadNetworkDiagnostics();
     } else if (key === "tunMode") {
       if (checked && state.serviceModeStatus !== "Enabled") {
@@ -3081,6 +3287,8 @@ async function applyToggle(key, checked, source) {
       }
       const snapshot = await invoke("set_tun_enabled", { enabled: checked });
       applyPersistedSettings(snapshot);
+      await loadTunRuntimeState();
+      await loadCoreStatus();
     } else if (key === "mixin") {
       const snapshot = await invoke("write_settings_snapshot", { settings: { ...persistedSettingsFromUi(), mixin: checked } });
       applyPersistedSettings(snapshot);
@@ -3745,21 +3953,39 @@ async function handleAction(action) {
   }
   if (action === "check-for-updates") {
     try {
+      openProductAboutDialog({ autoCheck: true, checking: true });
       const result = await invoke("check_for_updates");
-      if (!result?.available) {
-        appendLog("info", "updater", `Already up to date (${result?.current ?? "current"})`);
-      } else {
-        const notes = result.notes ? ` — ${String(result.notes).slice(0, 160)}` : "";
-        appendLog("info", "updater", `Update ${result.version} available${notes}`);
-        const install = window.confirm(`Update to ${result.version} is available. Download and install now?`);
-        if (install) {
-          appendLog("info", "updater", `Installing ${result.version}…`);
-          await invoke("install_available_update");
-        }
-      }
+      await promptInstallUpdate(result);
     } catch (error) {
       appendLog("warning", "updater", `Update check failed: ${error.message ?? String(error)}`);
+      openProductAboutDialog({
+        autoCheck: true,
+        checking: false,
+        result: { available: false, error: error.message ?? String(error), current: state.payload?.product?.version },
+      });
     }
+  }
+  if (action === "load-kernel-compare" || action === "show-kernel-compare") {
+    const report = await loadKernelCompare(action === "load-kernel-compare");
+    if (!report?.comparison) {
+      appendLog("warning", "bench", "No measured kernel compare report found");
+      return;
+    }
+    const n = report.comparison.narrative ?? {};
+    const h = report.comparison.headline ?? {};
+    window.alert(
+      [
+        `Measured clash-rs vs mihomo (${report.measured_at ?? "local"})`,
+        "",
+        n.speed ?? "",
+        n.stability ?? "",
+        n.weak_net ?? "",
+        "",
+        `Headline: cold ${h.cold_start_speedup_x ?? "n/a"}× · API ${h.controller_api_speedup_x ?? "n/a"}× · weak-net ${h.weak_net_success_delta_pp ?? "n/a"} pp`,
+        "Not a CFW 3× claim — same-machine core-vs-core only.",
+      ].join("\n"),
+    );
+    renderPage();
   }
   if (action === "reload-settings") {
     await loadSettingsSnapshot();
@@ -4017,6 +4243,17 @@ async function loadSystemProxyState() {
   }
 }
 
+async function loadTunRuntimeState() {
+  try {
+    state.tunRuntime = await invoke("tun_runtime_state");
+    // Only show On when handoff is actually live (utun + managed root core).
+    state.toggles.tunMode = Boolean(state.tunRuntime?.active);
+  } catch (error) {
+    state.tunRuntime = null;
+    appendLog("warning", "tun", `Unable to read TUN runtime: ${error.message ?? String(error)}`);
+  }
+}
+
 async function loadNetworkDiagnostics() {
   try {
     state.networkDiagnostics = await invoke("network_diagnostics");
@@ -4237,9 +4474,11 @@ async function bootstrap() {
   state.payload = await invoke("boot_payload");
   await loadSettingsSnapshot();
   await loadSystemProxyState();
+  await loadTunRuntimeState();
   await loadNetworkDiagnostics();
   await loadCoreStatus();
   await loadProfilesSnapshot();
+  await loadKernelCompare().catch(() => null);
   renderPage();
   Promise.all([loadControllerSnapshotWithRetry(), loadProvidersSnapshot()]).finally(renderPage);
 
@@ -4248,6 +4487,50 @@ async function bootstrap() {
   await listen("cfw://page", (event) => {
     state.activePage = event.payload;
     renderPage();
+  });
+
+  await listen("cfw://settings-changed", async (event) => {
+    if (event.payload) applyPersistedSettings(event.payload);
+    await loadTunRuntimeState();
+    await loadCoreStatus();
+    renderPage();
+  });
+
+  await listen("cfw://product-about", (event) => {
+    openProductAboutDialog({
+      autoCheck: Boolean(event.payload?.auto_check),
+      checking: Boolean(event.payload?.checking),
+      result: state.updateInfo,
+    });
+  });
+
+  await listen("cfw://update-available", (event) => {
+    applyUpdateInfo(event.payload);
+    if (state.glassDialog?.kind === "product-about") {
+      openProductAboutDialog({
+        autoCheck: true,
+        checking: false,
+        result: event.payload,
+      });
+    }
+    if (state.activePage === "general" || state.activePage === "settings" || state.activePage === "feedback") {
+      renderPage();
+    }
+  });
+
+  await listen("cfw://menu-check-for-update", async (event) => {
+    try {
+      if (event.payload?.error) {
+        appendLog("warning", "updater", `Update check failed: ${event.payload.error}`);
+        applyUpdateInfo(event.payload);
+        openProductAboutDialog({ autoCheck: true, checking: false, result: event.payload });
+        renderPage();
+        return;
+      }
+      await promptInstallUpdate(event.payload);
+    } catch (error) {
+      appendLog("warning", "updater", `Update flow failed: ${error.message ?? String(error)}`);
+    }
   });
 
   await listen("cfw://deep-link", (event) => {

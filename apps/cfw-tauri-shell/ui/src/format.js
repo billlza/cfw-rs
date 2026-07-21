@@ -76,10 +76,23 @@ export const invoke = async (command, args = {}) => {
     if (command === "open_login_items_settings") return null;
     if (command === "apply_restore_dns_servers") return "updated DNS on 0/0 service(s)";
     if (command === "check_for_updates") {
-      return { available: false, current: "0.2.0" };
+      return { available: false, current: "0.3.3" };
     }
     if (command === "install_available_update") {
       return { installed: false, reason: "preview" };
+    }
+    if (command === "tun_runtime_state") {
+      return {
+        tun_mode: false,
+        service_mode: "Unknown",
+        want_core: false,
+        managed_core_pid: null,
+        tun_enable: false,
+        active: false,
+      };
+    }
+    if (command === "kernel_compare_report") {
+      return null;
     }
     if (command === "disable_service_mode") return null;
 
@@ -209,7 +222,10 @@ export function serviceModeNeedsAttention(status) {
   return status !== "Enabled";
 }
 
-export function tunModeValueLabel(tunEnabled, serviceStatus) {
+export function tunModeValueLabel(tunEnabled, serviceStatus, runtime = null) {
+  if (serviceStatus !== "Enabled" && !tunEnabled) return "Service Mode required";
+  if (runtime?.active) return "On";
+  if (tunEnabled && runtime && !runtime.active) return "Starting…";
   if (tunEnabled) return "On";
   if (serviceStatus === "Enabled") return "Off";
   return "Service Mode required";

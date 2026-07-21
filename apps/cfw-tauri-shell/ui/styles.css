@@ -431,6 +431,32 @@ input::placeholder {
   color: var(--muted);
   font-size: 14px;
   font-weight: 400;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cfw-update-badge {
+  border: 0;
+  background: #e8f3ff;
+  color: #1d4ed8;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.cfw-update-badge:hover {
+  background: #dbeafe;
+}
+
+.cfw-row-bench .cfw-text-button {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cfw-content {
@@ -2274,6 +2300,79 @@ pre {
 .glass-dialog-wide {
   width: min(720px, calc(100vw - 32px));
   max-height: min(80vh, 720px);
+}
+
+.glass-dialog.product-about {
+  width: min(340px, calc(100vw - 32px));
+  justify-items: center;
+  text-align: center;
+  padding: 28px 24px 18px;
+  gap: 8px;
+}
+
+.product-about-icon {
+  width: 72px;
+  height: 72px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 4px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.product-about-icon .cfw-cat-logo {
+  width: 52px;
+  height: 44px;
+}
+
+.product-about-name {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.product-about-sub,
+.product-about-meta,
+.product-about-status,
+.product-about-notes,
+.product-about-copy {
+  color: #6e6e73;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.product-about-meta {
+  margin-top: 6px;
+}
+
+.product-about-status {
+  margin-top: 10px;
+  color: #1d1d1f;
+  font-weight: 500;
+}
+
+.product-about-notes {
+  max-width: 100%;
+  margin: 0;
+  font-size: 12px;
+}
+
+.product-about-copy {
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.glass-dialog-actions.column {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.glass-dialog-actions.column .glass-btn {
+  width: 100%;
+  justify-content: center;
 }
 
 .glass-code,

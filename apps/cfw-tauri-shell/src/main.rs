@@ -37,7 +37,9 @@ use qrcode::QrCode;
 use qrcode::render::svg;
 use serde::{Deserialize, Serialize};
 use tauri::Wry;
-use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{
+    CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu,
+};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -388,6 +390,13 @@ fn read_settings_snapshot() -> Result<SettingsSnapshot, String> {
 #[tauri::command]
 fn write_settings_snapshot(settings: PersistedSettings) -> Result<SettingsSnapshot, String> {
     let store = settings_store()?;
+    // TUN ownership is exclusively via `set_tun_enabled` (root handoff). Saving
+    // other settings must never ghost-flip `tun_mode` and leave UI/disk lying.
+    let current = store
+        .read_or_default()
+        .map_err(|err| err.to_string())?;
+    let mut settings = settings;
+    settings.tun_mode = current.tun_mode;
     store.write(&settings).map_err(|err| err.to_string())?;
     invalidate_controller_client_cache();
     store.snapshot().map_err(|err| err.to_string())
@@ -405,6 +414,7 @@ fn reset_settings_snapshot() -> Result<SettingsSnapshot, String> {
 
 #[tauri::command]
 fn set_system_proxy_enabled(enabled: bool) -> Result<SettingsSnapshot, String> {
+    // System Proxy and TUN are independent. This path must never mutate `tun_mode`.
     update_settings(|settings| {
         let mode = if !enabled {
             SystemProxyMode::Off
@@ -512,6 +522,9 @@ async fn set_tun_on(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnaps
 
     let mut stopped_in_process = false;
     let outcome = async {
+        // Service Mode always runs mihomo for TUN — stage the binary before handoff.
+        ensure_core_binary_for_kind(app, CoreKind::Mihomo).await?;
+
         // Persist tun_mode=true only long enough to render the tun block; rolled
         // back below if handoff fails.
         update_settings(|settings| {
@@ -538,7 +551,10 @@ async fn set_tun_on(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnaps
     .await;
 
     match outcome {
-        Ok(snapshot) => Ok(snapshot),
+        Ok(snapshot) => {
+            emit_settings_changed(app);
+            Ok(snapshot)
+        }
         Err(error) => {
             let _ = update_settings(|settings| {
                 settings.tun_mode = previous_tun;
@@ -557,6 +573,7 @@ async fn set_tun_on(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnaps
                     );
                 }
             }
+            emit_settings_changed(app);
             Err(error)
         }
     }
@@ -616,13 +633,17 @@ async fn set_tun_off(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnap
     .await;
 
     match outcome {
-        Ok(snapshot) => Ok(snapshot),
+        Ok(snapshot) => {
+            emit_settings_changed(app);
+            Ok(snapshot)
+        }
         Err(error) => {
             // Keep disk aligned with the last successful runtime intent when off fails mid-way.
             let _ = update_settings(|settings| {
                 settings.tun_mode = previous_tun;
                 Ok(())
             });
+            emit_settings_changed(app);
             Err(error)
         }
     }
@@ -727,7 +748,18 @@ fn service_mode_owns_core() -> Result<bool, String> {
     let settings = settings_store()?
         .read_or_default()
         .map_err(|err| err.to_string())?;
-    Ok(settings.tun_mode && MacOsPlatformService.service_mode_status() == ServiceModeStatus::Enabled)
+    if !settings.tun_mode {
+        return Ok(false);
+    }
+    if MacOsPlatformService.service_mode_status() != ServiceModeStatus::Enabled {
+        return Ok(false);
+    }
+    let want_core = ControlSession::read()
+        .ok()
+        .flatten()
+        .map(|session| session.want_core)
+        .unwrap_or(false);
+    Ok(want_core)
 }
 
 /// Ensure `/Library/Application Support/com.bill.clashformac` exists and is
@@ -908,13 +940,36 @@ fn write_control_session(want_core: bool) -> Result<(), String> {
     .map_err(|err| err.to_string())
 }
 
-/// Poll the controller until it answers (no in-process Child handle — used when
-/// the root daemon owns the core).
+/// Poll until **our** managed core answers on the controller port (never treat a
+/// foreign Clash for Windows / other clash on the same port as success), and the
+/// live config reports `tun.enable` when we asked for TUN.
 async fn wait_for_controller_ready() -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let port = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())?
+        .external_controller_port;
+    let deadline = Instant::now() + Duration::from_secs(12);
     loop {
+        if find_managed_core_listener_pid(port).is_none() {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "Service Mode helper did not start a managed core on :{port} (see /Library/Logs/com.bill.clashformac.helper.log). Another app may be using the port."
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
         match controller_client_from_settings()?.configs().await {
-            Ok(_) => return Ok(()),
+            Ok(cfg) => {
+                if tun_enable_from_clash_config(&cfg) {
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err(
+                        "root core is up but tun.enable is not true — TUN handoff incomplete".into(),
+                    );
+                }
+            }
             Err(error) if Instant::now() >= deadline => {
                 return Err(format!(
                     "core controller not ready (see /Library/Logs/com.bill.clashformac.helper.log): {error}"
@@ -924,6 +979,43 @@ async fn wait_for_controller_ready() -> Result<(), String> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+fn tun_enable_from_clash_config(cfg: &cfw_controller::ClashConfig) -> bool {
+    cfg.extra
+        .get("tun")
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => map.get("enable").and_then(|v| v.as_bool()),
+            serde_json::Value::Bool(flag) => Some(*flag),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+async fn tun_runtime_state() -> Result<serde_json::Value, String> {
+    let settings = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())?;
+    let service_mode = format!("{:?}", MacOsPlatformService.service_mode_status());
+    let session = ControlSession::read().ok().flatten();
+    let want_core = session.as_ref().map(|s| s.want_core).unwrap_or(false);
+    let managed_core_pid = find_managed_core_listener_pid(settings.external_controller_port);
+    let mut tun_enable = false;
+    if managed_core_pid.is_some() {
+        if let Ok(cfg) = controller_client_from_settings()?.configs().await {
+            tun_enable = tun_enable_from_clash_config(&cfg);
+        }
+    }
+    let active = settings.tun_mode && want_core && managed_core_pid.is_some() && tun_enable;
+    Ok(serde_json::json!({
+        "tun_mode": settings.tun_mode,
+        "service_mode": service_mode,
+        "want_core": want_core,
+        "managed_core_pid": managed_core_pid,
+        "tun_enable": tun_enable,
+        "active": active,
+    }))
 }
 
 /// Wait until every listed loopback port can be bound (i.e. is free).
@@ -2258,12 +2350,19 @@ async fn reload_running_core_config(
 
 /// Launch-time TUN reconcile: if settings say TUN is on, run the full root
 /// handoff (same as set_tun_on). Otherwise start the in-process core.
+/// Always emits `cfw://settings-changed` when `tun_mode` is corrected so the UI
+/// does not keep a ghost On switch after a failed handoff.
 async fn reconcile_core_on_launch(app: &AppHandle, core: &ManagedCore) -> Result<CoreStatus, String> {
     let settings = settings_store()?
         .read_or_default()
         .map_err(|err| err.to_string())?;
     if !settings.tun_mode {
-        return start_managed_core(app, core).await;
+        // Clear any orphaned control file left from a previous crash so helper
+        // PathState does not keep a stale session around.
+        let _ = ControlSession::remove();
+        let status = start_managed_core(app, core).await?;
+        emit_settings_changed(app);
+        return Ok(status);
     }
 
     match MacOsPlatformService.service_mode_status() {
@@ -2277,6 +2376,7 @@ async fn reconcile_core_on_launch(app: &AppHandle, core: &ManagedCore) -> Result
             // Prefer full handoff so utun/routes are rebuilt after reboot.
             match set_tun_on(app, core).await {
                 Ok(_) => {
+                    emit_settings_changed(app);
                     let spec = core_manager_from_settings()?.spec().clone();
                     Ok(CoreStatus {
                         state: CoreProcessState::Running,
@@ -2297,6 +2397,8 @@ async fn reconcile_core_on_launch(app: &AppHandle, core: &ManagedCore) -> Result
                         Ok(())
                     });
                     let _ = render_runtime_config_from_settings();
+                    let _ = ControlSession::remove();
+                    emit_settings_changed(app);
                     start_managed_core(app, core).await
                 }
             }
@@ -2315,8 +2417,16 @@ async fn reconcile_core_on_launch(app: &AppHandle, core: &ManagedCore) -> Result
                 Ok(())
             });
             let _ = render_runtime_config_from_settings();
+            let _ = ControlSession::remove();
+            emit_settings_changed(app);
             start_managed_core(app, core).await
         }
+    }
+}
+
+fn emit_settings_changed(app: &AppHandle) {
+    if let Ok(snapshot) = settings_store().and_then(|store| store.snapshot().map_err(|e| e.to_string())) {
+        let _ = app.emit("cfw://settings-changed", snapshot);
     }
 }
 
@@ -2439,17 +2549,25 @@ async fn check_for_updates(app: AppHandle) -> Result<serde_json::Value, String> 
     use tauri_plugin_updater::UpdaterExt;
     let updater = app.updater().map_err(|err| err.to_string())?;
     match updater.check().await.map_err(|err| err.to_string())? {
-        Some(update) => Ok(serde_json::json!({
-            "available": true,
-            "current": env!("CARGO_PKG_VERSION"),
-            "version": update.version,
-            "notes": update.body,
-            "date": update.date.map(|d| d.to_string()),
-        })),
-        None => Ok(serde_json::json!({
-            "available": false,
-            "current": env!("CARGO_PKG_VERSION"),
-        })),
+        Some(update) => {
+            let payload = serde_json::json!({
+                "available": true,
+                "current": env!("CARGO_PKG_VERSION"),
+                "version": update.version,
+                "notes": update.body,
+                "date": update.date.map(|d| d.to_string()),
+            });
+            let _ = app.emit("cfw://update-available", payload.clone());
+            Ok(payload)
+        }
+        None => {
+            let payload = serde_json::json!({
+                "available": false,
+                "current": env!("CARGO_PKG_VERSION"),
+            });
+            let _ = app.emit("cfw://update-available", payload.clone());
+            Ok(payload)
+        }
     }
 }
 
@@ -2470,6 +2588,153 @@ async fn install_available_update(app: AppHandle) -> Result<serde_json::Value, S
         .await
         .map_err(|err| err.to_string())?;
     app.restart();
+}
+
+#[tauri::command]
+fn kernel_compare_report(app: AppHandle) -> Result<serde_json::Value, String> {
+    for candidate in kernel_compare_candidates(&app) {
+        if candidate.is_file() {
+            let text = fs::read_to_string(&candidate).map_err(|err| err.to_string())?;
+            let value: serde_json::Value =
+                serde_json::from_str(&text).map_err(|err| err.to_string())?;
+            return Ok(value);
+        }
+    }
+    Err(
+        "kernel compare report missing; run scripts/kernel_compare.py and rebuild".into(),
+    )
+}
+
+fn kernel_compare_candidates(app: &AppHandle) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(
+            resource_dir
+                .join("resources")
+                .join("benchmarks")
+                .join("kernel-compare-latest.json"),
+        );
+        candidates.push(
+            resource_dir
+                .join("benchmarks")
+                .join("kernel-compare-latest.json"),
+        );
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(
+        manifest_dir
+            .join("resources")
+            .join("benchmarks")
+            .join("kernel-compare-latest.json"),
+    );
+    candidates
+}
+
+fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+    let about = MenuItem::with_id(
+        app,
+        "menu-about-product",
+        "About Clash for Mac",
+        true,
+        None::<&str>,
+    )?;
+    let check_update = MenuItem::with_id(
+        app,
+        "menu-check-for-update",
+        "Check for Update…",
+        true,
+        None::<&str>,
+    )?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let services = PredefinedMenuItem::services(app, None)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let hide = PredefinedMenuItem::hide(app, None)?;
+    let hide_others = PredefinedMenuItem::hide_others(app, None)?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
+    let quit = PredefinedMenuItem::quit(app, None)?;
+
+    let app_submenu = Submenu::with_items(
+        app,
+        PRODUCT_NAME,
+        true,
+        &[
+            &about,
+            &check_update,
+            &sep1,
+            &services,
+            &sep2,
+            &hide,
+            &hide_others,
+            &sep3,
+            &quit,
+        ],
+    )?;
+
+    let edit = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let window = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+
+    Menu::with_items(app, &[&app_submenu, &edit, &window])
+}
+
+fn handle_app_menu_event(app: &AppHandle, id: &str) {
+    match id {
+        "menu-about-product" => {
+            restore_main_ui_from_tray(app);
+            let _ = app.emit(
+                "cfw://product-about",
+                serde_json::json!({ "auto_check": false }),
+            );
+        }
+        "menu-check-for-update" => {
+            restore_main_ui_from_tray(app);
+            let _ = app.emit(
+                "cfw://product-about",
+                serde_json::json!({ "auto_check": true, "checking": true }),
+            );
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match check_for_updates(handle.clone()).await {
+                    Ok(payload) => {
+                        let _ = handle.emit("cfw://menu-check-for-update", payload);
+                    }
+                    Err(error) => {
+                        let _ = handle.emit(
+                            "cfw://menu-check-for-update",
+                            serde_json::json!({
+                                "available": false,
+                                "error": error,
+                                "current": env!("CARGO_PKG_VERSION"),
+                            }),
+                        );
+                    }
+                }
+            });
+        }
+        _ => {}
+    }
 }
 
 #[tauri::command]
@@ -3468,6 +3733,8 @@ fn main() {
             apply_restore_dns_servers,
             check_for_updates,
             install_available_update,
+            kernel_compare_report,
+            tun_runtime_state,
             open_login_items_settings,
             dns_query,
             controller_version,
@@ -3485,6 +3752,8 @@ fn main() {
             stop_core
         ])
         .setup(|app| {
+            let menu = build_app_menu(app.handle())?;
+            app.set_menu(menu)?;
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let core = app_handle.state::<ManagedCore>();
@@ -3494,6 +3763,11 @@ fn main() {
                     }
                     Err(error) => emit_stream_error(&app_handle, "core", error),
                 }
+            });
+            // Silent update check so General can show “→ vX.Y.Z” when available.
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = check_for_updates(update_handle).await;
             });
             let scheduler_handle = app.handle().clone();
             tauri::async_runtime::spawn(run_profile_update_scheduler(scheduler_handle));
@@ -3505,6 +3779,9 @@ fn main() {
             apply_silent_start_on_launch(app.handle());
             emit_deep_links(app.handle(), Vec::new());
             Ok(())
+        })
+        .on_menu_event(|app, event| {
+            handle_app_menu_event(app, event.id().as_ref());
         })
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {

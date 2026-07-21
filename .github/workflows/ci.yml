@@ -56,8 +56,13 @@ jobs:
         run: ./scripts/assert_apple_silicon.sh
       - name: Fetch clash-rs + smoke
         run: |
-          chmod +x scripts/fetch_clash_rs.sh scripts/clash_rs_smoke.sh scripts/assert_apple_silicon.sh
+          chmod +x scripts/fetch_clash_rs.sh scripts/clash_rs_smoke.sh scripts/assert_apple_silicon.sh scripts/fetch_core.sh scripts/kernel_compare.py
           ./scripts/clash_rs_smoke.sh
+      - name: Measured kernel compare
+        run: |
+          ./scripts/fetch_core.sh
+          python3 scripts/kernel_compare.py
+          test -f apps/cfw-tauri-shell/resources/benchmarks/kernel-compare-latest.json
 
   cfw-perf-gate:
     name: cfw-perf-gate (arm64 record only)

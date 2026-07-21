@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.3 — 2026-07-21
+
+TUN truthfulness + product About / update feedback.
+
+### TUN (fixed)
+- Switch reflects **live handoff** (`tun.enable` + managed root core), not a stale disk flag
+- Fresh launch defaults to **Off** unless Service Mode actually owns a TUN-capable core
+- Service Mode always spawns **mihomo** for TUN (clash-rs controller-ready ≠ working utun)
+- Handoff waits for **our** managed core on the controller port — never a foreign Clash for Windows listener
+- System Proxy toggles **never** mutate `tun_mode`; UI re-syncs TUN after proxy changes
+- `write_settings_snapshot` cannot ghost-flip TUN; reconcile emits `cfw://settings-changed`
+
+### About / Check for Update
+- App menu **About Clash for Mac** and **Check for Update…** open a ChatGPT-style product card (version, release date, status)
+- Checking / up-to-date / update-available / install all show in that dialog (no silent no-op)
+
+## 0.3.2 — 2026-07-21
+
+Update UX + measured clash-rs vs mihomo answers on Apple Silicon.
+
+### Updates
+- macOS app menu: **Check for Update…** under About Clash for Mac
+- Startup silent check; General header shows **→ vX.Y.Z** when a newer release exists
+- Confirm → download/install via `tauri-plugin-updater` (GitHub `latest.json`)
+
+### Measured kernel compare (not docs-only)
+- `scripts/kernel_compare.py` runs clash-rs and mihomo on high localhost ports
+- Ships `resources/benchmarks/kernel-compare-latest.json` with cold-start, controller API, delay, and weak-timeout burst metrics
+- General **Core Bench** row + Feedback panel show the measured speedup / reliability deltas
+- This host’s run: **~1.27×** faster cold start & controller API vs mihomo; weak-net / delay success tied at 100% — **not** a CFW 「3×」 claim
+
 ## 0.3.1 — 2026-07-21
 
 Apple Silicon–only hardening with a Rust core default. Version stays **0.3.1**.

@@ -3,10 +3,12 @@
 **Apple Silicon only** rebuild of Clash for Windows (CFW `0.20.39`) for macOS.
 
 - **Platform: `aarch64-apple-darwin` / macOS 13+ only** — Intel Mac and Universal Binary are **never** supported
-- **Shell: Tauri 2 + WebKit** (`apps/cfw-tauri-shell/ui/`) — this is the product UI (React is not a replacement for Tauri)
+- Shell: Tauri 2 + WebKit (`apps/cfw-tauri-shell/ui/`) — this is the product UI (React is not a replacement for Tauri)
 - **Core (default): clash-rs (Rust)** — mihomo remains automatic fallback
+- **Updates:** App menu **Check for Update…** + in-app badge when a newer GitHub release exists
+- **Measured bench:** General → Core Bench shows clash-rs vs mihomo cold-start / API / weak-net results (`scripts/kernel_compare.py`)
 - Privileged TUN: SMAppService helper (**production**). Network Extension / App Sandbox are **not** the production path
-- Updates: `tauri-plugin-updater` (Sparkle is not used)
+- Updates transport: `tauri-plugin-updater` (Sparkle is not used)
 
 Release gate: [`RELEASE.md`](./RELEASE.md) · Parity: [`docs/parity-checklist.md`](./docs/parity-checklist.md) · Changes: [`CHANGELOG.md`](./CHANGELOG.md)
 

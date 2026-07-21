@@ -1,0 +1,156 @@
+{
+  "schema": 1,
+  "product": "Clash for Mac",
+  "measured_at": "2026-07-21T10:03:08Z",
+  "host": {
+    "os": "darwin",
+    "machine": "arm64"
+  },
+  "claim_3x_cfw": false,
+  "note": "Measured clash-rs vs mihomo on this Apple Silicon host. Not a CFW 3\u00d7 claim.",
+  "cores": {
+    "clash_rs": {
+      "name": "clash-rs",
+      "binary": "resources/cores/clash-rs",
+      "cold_start_ms": {
+        "runs": [
+          17.486,
+          56.035,
+          55.679
+        ],
+        "p50_ms": 55.679,
+        "p95_ms": 56.035,
+        "mean_ms": 43.067
+      },
+      "controller_api": {
+        "/configs": {
+          "samples": 24,
+          "failures": 0,
+          "success_rate": 1.0,
+          "p50_ms": 1.235,
+          "p95_ms": 1.641
+        },
+        "/proxies": {
+          "samples": 24,
+          "failures": 0,
+          "success_rate": 1.0,
+          "p50_ms": 1.629,
+          "p95_ms": 1.929
+        },
+        "/connections": {
+          "samples": 24,
+          "failures": 0,
+          "success_rate": 1.0,
+          "p50_ms": 1.518,
+          "p95_ms": 1.725
+        },
+        "/version": {
+          "samples": 24,
+          "failures": 0,
+          "success_rate": 1.0,
+          "p50_ms": 1.495,
+          "p95_ms": 1.757
+        }
+      },
+      "weak_net": {
+        "bursts": 48,
+        "timeout_s": 0.08,
+        "successes": 48,
+        "success_rate": 1.0,
+        "p50_ms": 1.375,
+        "p95_ms": 1.561
+      },
+      "delay_probe": {
+        "samples": 8,
+        "failures": 0,
+        "success_rate": 1.0,
+        "p50_ms": 191.0,
+        "p95_ms": 213.0
+      },
+      "summary": {
+        "controller_p95_ms": 1.641,
+        "weak_net_success_rate": 1.0,
+        "delay_success_rate": 1.0
+      }
+    },
+    "mihomo": {
+      "name": "mihomo",
+      "binary": "resources/cores/clash-darwin",
+      "cold_start_ms": {
+        "runs": [
+          55.211,
+          54.274,
+          54.751
+        ],
+        "p50_ms": 54.751,
+        "p95_ms": 55.211,
+        "mean_ms": 54.745
+      },
+      "controller_api": {
+        "/configs": {
+          "samples": 24,
+          "failures": 0,
+          "success_rate": 1.0,
+          "p50_ms": 0.885,
+          "p95_ms": 2.083
+        },
+        "/proxies": {
+          "samples": 24,
+          "failures": 0,
+          "success_rate": 1.0,
+          "p50_ms": 1.671,
+          "p95_ms": 2.152
+        },
+        "/connections": {
+          "samples": 24,
+          "failures": 0,
+          "success_rate": 1.0,
+          "p50_ms": 1.29,
+          "p95_ms": 1.473
+        },
+        "/version": {
+          "samples": 24,
+          "failures": 0,
+          "success_rate": 1.0,
+          "p50_ms": 1.301,
+          "p95_ms": 1.525
+        }
+      },
+      "weak_net": {
+        "bursts": 48,
+        "timeout_s": 0.08,
+        "successes": 48,
+        "success_rate": 1.0,
+        "p50_ms": 1.098,
+        "p95_ms": 3.668
+      },
+      "delay_probe": {
+        "samples": 8,
+        "failures": 0,
+        "success_rate": 1.0,
+        "p50_ms": 391.5,
+        "p95_ms": 429.0
+      },
+      "summary": {
+        "controller_p95_ms": 2.083,
+        "weak_net_success_rate": 1.0,
+        "delay_success_rate": 1.0
+      }
+    }
+  },
+  "comparison": {
+    "headline": {
+      "cold_start_speedup_x": 1.271,
+      "controller_api_speedup_x": 1.269,
+      "weak_net_success_delta_pp": 0.0,
+      "delay_success_delta_pp": 0.0,
+      "winner_speed": "clash-rs",
+      "winner_reliability": "clash-rs"
+    },
+    "narrative": {
+      "speed": "Cold start mean: clash-rs 43.067 ms vs mihomo 54.745 ms (1.271\u00d7 faster). Controller /configs p95: clash-rs 1.641 ms vs mihomo 2.083 ms (1.269\u00d7 faster).",
+      "stability": "Delay probe success: clash-rs 100% vs mihomo 100% (+0.0 pp).",
+      "weak_net": "Short-timeout burst success: clash-rs 100% vs mihomo 100% (+0.0 pp)."
+    }
+  }
+}

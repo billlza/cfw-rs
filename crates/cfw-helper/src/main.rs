@@ -171,19 +171,30 @@ fn supervise() -> Result<()> {
 
 /// Build a core spec straight from the validated control session (NOT from
 /// `$HOME`, which is `/var/root` under launchd) and spawn the core as root.
+///
+/// Service Mode exists so the core can open utun. Always use **mihomo** here:
+/// clash-rs may answer the controller without a working TUN path, which made the
+/// app toggle look "On" while traffic never entered the tunnel.
 fn spawn_core_for_session(session: &ControlSession) -> Result<Child> {
     let paths = MacOsAppPaths::from_app_home(&session.app_home);
-    let settings = SettingsStore::new(paths.clone())
+    let _settings = SettingsStore::new(paths.clone())
         .read_or_default()
         .unwrap_or_else(|_| PersistedSettings::default());
-    let mut kind = resolve_core_kind(&settings);
-    let mut binary_path = paths.cores_dir.join(core_binary_name(kind));
-    if kind == CoreKind::ClashRs && !binary_path.exists() {
-        // Service Mode must stay up; fall back to mihomo without claiming cutover.
-        eprintln!("clash-rs binary missing under Service Mode; falling back to mihomo");
-        kind = CoreKind::Mihomo;
-        binary_path = paths.cores_dir.join(MIHOMO_CORE_BINARY_NAME);
+    let kind = CoreKind::Mihomo;
+    let binary_path = paths.cores_dir.join(MIHOMO_CORE_BINARY_NAME);
+    if !binary_path.exists() {
+        // Last resort only — prefer the bundled mihomo name from settings resolve.
+        let fallback = paths.cores_dir.join(core_binary_name(resolve_core_kind(&_settings)));
+        bail!(
+            "mihomo binary missing for Service Mode TUN at {} (also checked {})",
+            binary_path.display(),
+            fallback.display()
+        );
     }
+    eprintln!(
+        "Service Mode spawning mihomo for TUN (ignoring preferred coreKind={:?})",
+        resolve_core_kind(&_settings)
+    );
     let spec = CoreProcessSpec {
         binary_path,
         config_path: session.config_file.clone(),

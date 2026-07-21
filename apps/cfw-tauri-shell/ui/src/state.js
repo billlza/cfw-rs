@@ -1,7 +1,7 @@
 export const fallbackPayload = {
   product: {
     name: "Clash for Mac",
-    version: "0.3.1",
+    version: "0.3.3",
     parity_source: "Clash for Windows 0.20.39 macOS arm64 public release artifact",
   },
   pages: [
@@ -189,6 +189,9 @@ export const state = {
   profileInspector: null,
   /** @type {{ id: string, x: number, y: number } | null} */
   profileContextMenu: null,
+  updateInfo: null,
+  kernelCompare: null,
+  tunRuntime: null,
   /** @type {{ kind: string, id?: string, payload?: any } | null} */
   glassDialog: null,
   proxyGroups: [],

@@ -351,8 +351,10 @@ impl ControllerClient {
         proxies: Vec<String>,
         url: String,
         timeout_ms: u16,
+        concurrency: usize,
     ) -> Vec<ProxyDelayResult> {
         let client = self.clone();
+        let limit = concurrency.clamp(1, 32);
         stream::iter(proxies)
             .map(|name| {
                 let client = client.clone();
@@ -366,13 +368,13 @@ impl ControllerClient {
                         },
                         Err(error) => ProxyDelayResult {
                             name,
-                            delay: None,
+                            delay: Some(0),
                             error: Some(error.to_string()),
                         },
                     }
                 }
             })
-            .buffer_unordered(8)
+            .buffer_unordered(limit)
             .collect()
             .await
     }

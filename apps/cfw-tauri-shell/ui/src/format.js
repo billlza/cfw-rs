@@ -145,6 +145,7 @@ export const invoke = async (command, args = {}) => {
     if (command === "reveal_home_directory") return null;
     if (command === "reveal_logs_directory") return null;
     if (command === "apply_active_profile") throw new Error("Profile apply is unavailable outside the Tauri runtime");
+    if (command === "reapply_runtime_config") return "/tmp/config.yaml";
     if (command === "set_proxy_mode") return null;
     if (command === "set_allow_lan") {
       return { ...fallbackSettingsSnapshot, persisted: true, settings: { ...fallbackSettingsSnapshot.settings, allow_lan: args.enabled } };

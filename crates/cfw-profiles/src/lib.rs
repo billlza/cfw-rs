@@ -726,13 +726,17 @@ fn render_profile_with_settings(
 fn mihomo_tun_config(settings: &PersistedSettings) -> Result<serde_yaml::Value, ProfileError> {
     let mut tun = serde_yaml::Mapping::new();
     set_yaml_value(&mut tun, "enable", true)?;
-    let stack = setting_string(settings, &["tun-stack", "tunStack"]).unwrap_or_else(|| "system".into());
+    let mut stack = setting_string(settings, &["tun-stack", "tunStack"]).unwrap_or_else(|| "mixed".into());
+    // Prefer mixed/gvisor on Apple Silicon; `system` is kept when user explicitly picks it.
+    if stack.eq_ignore_ascii_case("lwip") {
+        stack = "mixed".into();
+    }
     set_yaml_value(&mut tun, "stack", stack)?;
     let auto_route = setting_bool(settings, &["tun-auto-route", "tunAutoRoute"]).unwrap_or(true);
     set_yaml_value(&mut tun, "auto-route", auto_route)?;
     set_yaml_value(&mut tun, "auto-detect-interface", true)?;
     let strict_route =
-        setting_bool(settings, &["tun-strict-route", "tunStrictRoute"]).unwrap_or(false);
+        setting_bool(settings, &["tun-strict-route", "tunStrictRoute"]).unwrap_or(true);
     set_yaml_value(&mut tun, "strict-route", strict_route)?;
     let dns_hijack = setting_string(settings, &["tun-dns-hijack", "tunDnsHijack"])
         .map(|value| {
@@ -744,7 +748,12 @@ fn mihomo_tun_config(settings: &PersistedSettings) -> Result<serde_yaml::Value, 
                 .collect::<Vec<_>>()
         })
         .filter(|items| !items.is_empty())
-        .unwrap_or_else(|| vec![serde_yaml::Value::String("any:53".into())]);
+        .unwrap_or_else(|| {
+            vec![
+                serde_yaml::Value::String("any:53".into()),
+                serde_yaml::Value::String("[::]:53".into()),
+            ]
+        });
     set_yaml_value(&mut tun, "dns-hijack", dns_hijack)?;
     Ok(serde_yaml::Value::Mapping(tun))
 }
@@ -1569,15 +1578,18 @@ mod tests {
         );
         assert_eq!(
             tun.get("stack"),
-            Some(&serde_yaml::Value::String("system".into()))
+            Some(&serde_yaml::Value::String("mixed".into()))
         );
         assert_eq!(
-            tun.get("dns-hijack")
-                .and_then(|value| value.as_sequence())
-                .and_then(|values| values.first())
-                .and_then(|value| value.as_str()),
-            Some("any:53")
+            tun.get("strict-route"),
+            Some(&serde_yaml::Value::Bool(true))
         );
+        let hijack = tun
+            .get("dns-hijack")
+            .and_then(|value| value.as_sequence())
+            .unwrap();
+        assert_eq!(hijack[0].as_str(), Some("any:53"));
+        assert_eq!(hijack[1].as_str(), Some("[::]:53"));
     }
 
     #[test]

@@ -104,7 +104,7 @@ pub fn default_config_mapping(
             .get("tun-stack")
             .or_else(|| settings.extra.get("tunStack"))
             .and_then(serde_yaml::Value::as_str)
-            .unwrap_or("system");
+            .unwrap_or("mixed");
         insert_yaml(&mut tun, "stack", stack)?;
         let auto_route = settings
             .extra
@@ -119,7 +119,7 @@ pub fn default_config_mapping(
             .get("tun-strict-route")
             .or_else(|| settings.extra.get("tunStrictRoute"))
             .and_then(serde_yaml::Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(true);
         insert_yaml(&mut tun, "strict-route", strict_route)?;
         let dns_hijack = settings
             .extra
@@ -135,7 +135,7 @@ pub fn default_config_mapping(
                     .collect::<Vec<_>>()
             })
             .filter(|items| !items.is_empty())
-            .unwrap_or_else(|| vec!["any:53".into()]);
+            .unwrap_or_else(|| vec!["any:53".into(), "[::]:53".into()]);
         insert_yaml(&mut tun, "dns-hijack", dns_hijack)?;
         config.insert("tun",
             serde_yaml::Value::Mapping(tun),

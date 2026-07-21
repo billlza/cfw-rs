@@ -1408,6 +1408,11 @@ impl MacOsPlatformService {
         }
     }
 
+    /// BSD name of the current default route interface (e.g. `en0`), if any.
+    pub fn default_route_interface(&self) -> Result<Option<String>> {
+        default_route_interface()
+    }
+
     /// Set DNS server addresses for a network service via SCPreferences.
     /// Empty `servers` clears custom DNS (DHCP). Falls back is caller's job.
     pub fn apply_dns_servers_sc(&self, service: &str, servers: &[String]) -> Result<()> {

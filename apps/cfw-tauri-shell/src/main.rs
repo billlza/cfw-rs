@@ -1933,6 +1933,32 @@ async fn run_helper_heartbeat() {
     }
 }
 
+/// Poll default-route interface changes (light NWPathMonitor stand-in) and notify
+/// the UI so delay badges can be marked stale without auto-retesting.
+async fn run_network_path_monitor(app: AppHandle) {
+    let mut last = MacOsPlatformService
+        .default_route_interface()
+        .ok()
+        .flatten();
+    loop {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let current = MacOsPlatformService
+            .default_route_interface()
+            .ok()
+            .flatten();
+        if current != last {
+            last = current.clone();
+            let _ = app.emit(
+                "cfw://network-path",
+                serde_json::json!({
+                    "interface": current,
+                    "epoch_secs": now_epoch_secs(),
+                }),
+            );
+        }
+    }
+}
+
 #[tauri::command]
 async fn update_profile(id: String) -> Result<ProfileImportResult, String> {
     let store = settings_store()?;
@@ -2183,9 +2209,10 @@ fn core_should_be_running(core: &State<'_, ManagedCore>) -> Result<bool, String>
 
 /// Hot-reload runtime config into whatever owns the core.
 ///
-/// Prefer Clash `PUT /configs?force=true` (works for both in-process and root
-/// daemon). If that fails while Service Mode owns the core, bump the control
-/// session generation so the daemon respawns with the on-disk config.
+/// Prefer Clash `PUT /configs?force=true` when TUN is off. When TUN is on (or
+/// Service Mode owns the core and utun routes may need rebuild), always bump the
+/// control-session generation so the root daemon respawns — hot reload alone
+/// often leaves stale routes / no utun.
 async fn reload_running_core_config(
     core: &State<'_, ManagedCore>,
     config_path: &std::path::Path,
@@ -2193,17 +2220,84 @@ async fn reload_running_core_config(
     if !core_should_be_running(core)? {
         return Ok(());
     }
-    let path = config_path.to_string_lossy().into_owned();
-    if let Ok(client) = controller_client_from_settings() {
-        if client.reload_config(&path, true).await.is_ok() {
-            return Ok(());
-        }
-    }
-    if service_mode_owns_core().unwrap_or(false) {
+    let tun_owns = service_mode_owns_core().unwrap_or(false);
+    if tun_owns {
+        let _ = config_path;
         write_control_session(true)?;
         wait_for_controller_ready().await?;
+        return Ok(());
+    }
+    let path = config_path.to_string_lossy().into_owned();
+    if let Ok(client) = controller_client_from_settings()
+        && client.reload_config(&path, true).await.is_ok()
+    {
+        return Ok(());
     }
     Ok(())
+}
+
+/// Launch-time TUN reconcile: if settings say TUN is on, run the full root
+/// handoff (same as set_tun_on). Otherwise start the in-process core.
+async fn reconcile_core_on_launch(app: &AppHandle, core: &ManagedCore) -> Result<CoreStatus, String> {
+    let settings = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())?;
+    if !settings.tun_mode {
+        return start_managed_core(app, core).await;
+    }
+
+    match MacOsPlatformService.service_mode_status() {
+        ServiceModeStatus::Enabled => {
+            emit_shell_log(
+                app,
+                "info",
+                "tun",
+                "Reconciling TUN: Service Mode enabled — handing core to root helper",
+            );
+            // Prefer full handoff so utun/routes are rebuilt after reboot.
+            match set_tun_on(app, core).await {
+                Ok(_) => {
+                    let spec = core_manager_from_settings()?.spec().clone();
+                    Ok(CoreStatus {
+                        state: CoreProcessState::Running,
+                        pid: None,
+                        spec,
+                        message: "Clash core running under Service Mode (root daemon)".into(),
+                    })
+                }
+                Err(error) => {
+                    emit_shell_log(
+                        app,
+                        "warning",
+                        "tun",
+                        format!("TUN reconcile failed ({error}); falling back to in-process core without TUN"),
+                    );
+                    let _ = update_settings(|settings| {
+                        settings.tun_mode = false;
+                        Ok(())
+                    });
+                    let _ = render_runtime_config_from_settings();
+                    start_managed_core(app, core).await
+                }
+            }
+        }
+        other => {
+            emit_shell_log(
+                app,
+                "warning",
+                "tun",
+                format!(
+                    "tun_mode was on but Service Mode is {other:?}; disabling TUN until you approve the helper"
+                ),
+            );
+            let _ = update_settings(|settings| {
+                settings.tun_mode = false;
+                Ok(())
+            });
+            let _ = render_runtime_config_from_settings();
+            start_managed_core(app, core).await
+        }
+    }
 }
 
 #[tauri::command]
@@ -2212,6 +2306,15 @@ async fn apply_active_profile(core: State<'_, ManagedCore>) -> Result<ProfileApp
         .ok_or_else(|| "no active profile is selected".to_string())?;
     reload_running_core_config(&core, &result.config_path).await?;
     Ok(result)
+}
+
+/// Re-render on-disk runtime config from settings and reload/restart the core.
+/// Used after TUN stack/DNS settings change (works with or without an active profile).
+#[tauri::command]
+async fn reapply_runtime_config(core: State<'_, ManagedCore>) -> Result<String, String> {
+    let config_path = render_runtime_config_from_settings()?;
+    reload_running_core_config(&core, &config_path).await?;
+    Ok(config_path.display().to_string())
 }
 
 #[tauri::command]
@@ -2456,6 +2559,7 @@ async fn test_proxy_delays(
     proxies: Vec<String>,
     url: Option<String>,
     timeout_ms: Option<u16>,
+    concurrency: Option<usize>,
 ) -> Result<Vec<ProxyDelayResult>, String> {
     let target_url = match url.filter(|value| !value.trim().is_empty()) {
         Some(value) => value,
@@ -2472,8 +2576,9 @@ async fn test_proxy_delays(
         }
     };
     let timeout = timeout_ms.unwrap_or(5000);
+    let limit = concurrency.unwrap_or(8).clamp(1, 32);
     Ok(controller_client_from_settings()?
-        .proxy_delays(proxies, target_url, timeout)
+        .proxy_delays(proxies, target_url, timeout, limit)
         .await)
 }
 
@@ -3262,6 +3367,7 @@ fn main() {
             geoip_database_status,
             update_geoip_database,
             apply_active_profile,
+            reapply_runtime_config,
             set_proxy_mode,
             set_allow_lan,
             apply_restore_dns_servers,
@@ -3287,7 +3393,7 @@ fn main() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let core = app_handle.state::<ManagedCore>();
-                match start_managed_core(&app_handle, &core).await {
+                match reconcile_core_on_launch(&app_handle, &core).await {
                     Ok(status) => {
                         let _ = app_handle.emit("cfw://core-status", status);
                     }
@@ -3297,6 +3403,8 @@ fn main() {
             let scheduler_handle = app.handle().clone();
             tauri::async_runtime::spawn(run_profile_update_scheduler(scheduler_handle));
             tauri::async_runtime::spawn(run_helper_heartbeat());
+            let path_handle = app.handle().clone();
+            tauri::async_runtime::spawn(run_network_path_monitor(path_handle));
             ensure_main_window(app.handle())?;
             build_tray(app.handle())?;
             apply_silent_start_on_launch(app.handle());

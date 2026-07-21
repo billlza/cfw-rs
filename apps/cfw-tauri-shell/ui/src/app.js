@@ -387,7 +387,7 @@ function serviceModeIconTone(status) {
 function renderGeneral() {
   const persisted = state.settingsSnapshot?.settings ?? fallbackSettingsSnapshot.settings;
   const product = state.payload.product ?? fallbackPayload.product;
-  const appVersion = product.version ?? "0.2.0";
+  const appVersion = product.version ?? "0.3.0";
   const core = state.coreStatus ?? fallbackCoreStatus;
   const coreRunning = core.state === "Running";
   const controllerHost = persisted.external_controller_host ?? "127.0.0.1";
@@ -542,7 +542,7 @@ function renderGeneral() {
 
 function delayClass(delay) {
   if (delay === null || delay === undefined) return "pending";
-  // Mihomo uses 0 for timeout; negative is our local failure marker.
+  // Mihomo uses 0 for timeout; negative is our local failure marker — both are Timeout.
   if (delay <= 0) return "dead";
   if (delay < 80) return "fast";
   if (delay < 180) return "mid";
@@ -551,9 +551,97 @@ function delayClass(delay) {
 
 function delayLabel(delay) {
   if (delay === null || delay === undefined) return "Pending";
-  if (delay < 0) return "N/A";
-  if (delay === 0) return "Timeout";
+  if (delay <= 0) return "Timeout";
   return `${delay} ms`;
+}
+
+function delayConcurrency() {
+  if (typeof document !== "undefined" && document.hidden) return 2;
+  const cores = Number(navigator.hardwareConcurrency) || 8;
+  return Math.max(4, Math.min(16, cores));
+}
+
+function cancelDelayTest() {
+  runtime.delayTestGeneration = (runtime.delayTestGeneration ?? 0) + 1;
+  state.toggles.testingDelays = false;
+}
+
+function visibleProxyNodeNames() {
+  const grid = document.querySelector("[data-proxy-node-grid]");
+  if (!grid) return [];
+  const viewport = grid.getBoundingClientRect();
+  const visible = [];
+  grid.querySelectorAll("[data-proxy-node]").forEach((el) => {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom >= viewport.top && rect.top <= viewport.bottom) {
+      const name = el.getAttribute("data-proxy-node");
+      if (name) visible.push(name);
+    }
+  });
+  return visible;
+}
+
+function orderNamesVisibleFirst(names) {
+  const visible = new Set(visibleProxyNodeNames());
+  const head = [];
+  const tail = [];
+  for (const name of names) {
+    if (visible.has(name)) head.push(name);
+    else tail.push(name);
+  }
+  return head.length ? [...head, ...tail] : names;
+}
+
+function applyDelayToProxyNodes(name, delay) {
+  const value = typeof delay === "number" && Number.isFinite(delay) ? delay : 0;
+  state.proxyGroups.forEach((group) => {
+    group.options.forEach((node) => {
+      if (node.name === name) {
+        node.delay = value;
+        node.dead = value <= 0;
+      }
+    });
+  });
+}
+
+function patchProxyDelayLabels(names) {
+  const nameSet = names ? new Set(names) : null;
+  document.querySelectorAll("[data-proxy-delay]").forEach((el) => {
+    const name = el.getAttribute("data-proxy-delay");
+    if (!name || (nameSet && !nameSet.has(name))) return;
+    let delay = null;
+    for (const group of state.proxyGroups) {
+      const node = group.options.find((item) => item.name === name);
+      if (node) {
+        delay = node.delay;
+        break;
+      }
+    }
+    el.className = delayClass(delay);
+    el.textContent = delayLabel(delay);
+  });
+  const tool = document.querySelector('[data-action="delay-test"]');
+  if (tool) {
+    tool.classList.toggle("active", Boolean(state.toggles.testingDelays));
+    tool.disabled = Boolean(state.toggles.testingDelays);
+  }
+}
+
+function finalizeDelayTestNames(names) {
+  names.forEach((name) => {
+    let found = null;
+    for (const group of state.proxyGroups) {
+      const node = group.options.find((item) => item.name === name);
+      if (node) {
+        found = node;
+        break;
+      }
+    }
+    if (found && (found.delay === null || found.delay === undefined)) {
+      applyDelayToProxyNodes(name, 0);
+    }
+  });
+  patchProxyDelayLabels(names);
 }
 
 function slugDomId(value) {
@@ -595,7 +683,7 @@ function proxyToolIcon(kind) {
 function isTimedOutProxy(node) {
   if (!node) return false;
   if (node.dead) return true;
-  // Mihomo reports timeout as delay 0; we also use -1 for failed probes.
+  // Mihomo reports timeout as delay 0; failures are normalized to 0 (Timeout).
   return typeof node.delay === "number" && node.delay <= 0;
 }
 
@@ -656,7 +744,7 @@ function renderProxies() {
                     <strong>${nodePrefix(node.name)}${escapeHtml(node.name)}</strong>
                     <small>${escapeHtml(node.kind ?? "Proxy")} ${node.udp === false ? "" : "<em>UDP</em>"}</small>
                   </span>
-                  <b class="${delayClass(node.delay)}">${delayLabel(node.delay)}</b>
+                  <b class="${delayClass(node.delay)}" data-proxy-delay="${escapeHtml(node.name)}">${delayLabel(node.delay)}</b>
                 </button>
               `).join("")}
             </div>
@@ -1038,12 +1126,12 @@ function renderGlassOverlays() {
           <h3>TUN settings</h3>
           <label>Stack
             <select data-glass-tun-stack>
-              ${["system", "gvisor", "mixed", "lwip"].map((s) => `<option value="${s}" ${p.stack === s ? "selected" : ""}>${s}</option>`).join("")}
+              ${["mixed", "gvisor", "system", "lwip"].map((s) => `<option value="${s}" ${p.stack === s ? "selected" : ""}>${s}</option>`).join("")}
             </select>
           </label>
           <label class="glass-check"><input type="checkbox" data-glass-tun-auto-route ${p.autoRoute ? "checked" : ""} /> auto-route</label>
           <label class="glass-check"><input type="checkbox" data-glass-tun-strict-route ${p.strictRoute ? "checked" : ""} /> strict-route</label>
-          <label>DNS hijack (one per line)<textarea data-glass-tun-dns-hijack rows="4" spellcheck="false">${escapeHtml(p.dnsHijack ?? "any:53")}</textarea></label>
+          <label>DNS hijack (one per line)<textarea data-glass-tun-dns-hijack rows="4" spellcheck="false">${escapeHtml(p.dnsHijack ?? "any:53\n[::]:53")}</textarea></label>
           <div class="glass-dialog-actions">
             <button type="button" class="glass-btn ghost" data-glass-dismiss>Cancel</button>
             <button type="button" class="glass-btn" data-glass-tun-settings-confirm>Save</button>
@@ -1318,10 +1406,10 @@ function bindGlassOverlayEvents() {
 
   document.querySelectorAll("[data-glass-tun-settings-confirm]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const stack = document.querySelector("[data-glass-tun-stack]")?.value ?? "system";
+      const stack = document.querySelector("[data-glass-tun-stack]")?.value ?? "mixed";
       const autoRoute = Boolean(document.querySelector("[data-glass-tun-auto-route]")?.checked);
       const strictRoute = Boolean(document.querySelector("[data-glass-tun-strict-route]")?.checked);
-      const dnsHijack = document.querySelector("[data-glass-tun-dns-hijack]")?.value ?? "any:53";
+      const dnsHijack = document.querySelector("[data-glass-tun-dns-hijack]")?.value ?? "any:53\n[::]:53";
       try {
         const current = persistedSettingsFromUi();
         const snapshot = await invoke("write_settings_snapshot", {
@@ -1340,7 +1428,14 @@ function bindGlassOverlayEvents() {
         applyPersistedSettings(snapshot);
         closeGlassOverlays();
         appendLog("info", "tun", `TUN settings saved (stack=${stack})`);
-        if (state.toggles.tunMode && activeProfile().active) await invoke("apply_active_profile");
+        if (state.toggles.tunMode) {
+          try {
+            await invoke("reapply_runtime_config");
+            appendLog("info", "tun", "Runtime config reapplied (root core respawn when TUN owns core)");
+          } catch (error) {
+            appendLog("warning", "tun", `Reapply after TUN settings failed: ${error.message ?? String(error)}`);
+          }
+        }
       } catch (error) {
         appendLog("warning", "tun", `TUN settings failed: ${error.message ?? String(error)}`);
       }
@@ -2086,8 +2181,8 @@ function renderFeedback() {
       <section class="panel hero-panel">
         <div>
           <p class="label">Feedback</p>
-          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.2.0")}</h3>
-          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.2.0")}).</p>
+          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.3.0")}</h3>
+          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.3.0")}).</p>
         </div>
         <span class="badge">ARM64 macOS only</span>
       </section>
@@ -2234,7 +2329,7 @@ function renderSettings() {
     ]],
     ["Mixin", [renderToggle("mixin", "Mixin", "Merge YAML/JS mixin before profile apply."), renderSettingValue("Mixin YAML", "Editor active", "The YAML merge editor below is persisted and applied before config reload.")]],
     ["Proxies", [
-      renderToggle("hideUnavailable", "Hide timed-out proxies", "Hide nodes that failed latency tests (N/A), matching CFW Show/Hide timed-out proxies."),
+      renderToggle("hideUnavailable", "Hide timed-out proxies", "Hide nodes that failed latency tests (Timeout), matching CFW Show/Hide timed-out proxies."),
       renderSettingInput(
         "Delay test URL",
         persisted.delayTestUrl ?? persisted.delay_test_url ?? "http://www.gstatic.com/generate_204",
@@ -2308,7 +2403,7 @@ function renderSettings() {
       ])}
       ${renderNetworkDiagnostics()}
       ${renderSettingsGroup("Experimental", [
-        renderToggle("hideUnavailable", "Hide timed-out proxies", "Hide nodes that failed latency tests (N/A)."),
+        renderToggle("hideUnavailable", "Hide timed-out proxies", "Hide nodes that failed latency tests (Timeout)."),
         renderSettingValue("TUN", platform.tun_strategy ?? "SmAppServiceRootHelper", "Root mihomo via SMAppService helper — not NetworkExtension."),
         renderSettingValue("launchd", platform.launchd_strategy ?? "typed launchd contract", "No product-layer ad-hoc scripts."),
       ])}
@@ -2540,6 +2635,7 @@ function bindPageEvents() {
 
   document.querySelectorAll("[data-proxy-group-tab]").forEach((button) => {
     button.addEventListener("click", (event) => {
+      cancelDelayTest();
       state.activeProxyGroup = event.currentTarget.dataset.proxyGroupTab;
       renderPage();
     });
@@ -2558,6 +2654,7 @@ function bindPageEvents() {
   document.querySelectorAll("[data-page]").forEach((button) => {
     button.addEventListener("click", async (event) => {
       const page = event.currentTarget.dataset.page;
+      if (page !== "proxies") cancelDelayTest();
       state.activePage = page;
       await invoke("open_page", { page });
       renderPage();
@@ -3044,17 +3141,25 @@ async function handleAction(action) {
     }
   }
   if (action === "delay-test") {
-    if (state.toggles.testingDelays) return;
+    if (state.toggles.testingDelays) {
+      cancelDelayTest();
+      appendLog("info", "proxy", "Delay test cancelled");
+      patchProxyDelayLabels();
+      return;
+    }
     const activeGroup = state.proxyGroups.find((group) => group.name === state.activeProxyGroup)
       ?? state.proxyGroups.find((group) => isManualProxyGroup(group.type) && group.name.toUpperCase() !== "GLOBAL")
       ?? state.proxyGroups[0]
       ?? null;
     // CFW only latency-tests the current section's `all` list — not every group.
-    const names = [...new Set((activeGroup?.options ?? []).map((node) => node.name))]
-      .filter((name) => !["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"].includes(String(name).toUpperCase()));
+    const names = orderNamesVisibleFirst(
+      [...new Set((activeGroup?.options ?? []).map((node) => node.name))]
+        .filter((name) => !["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"].includes(String(name).toUpperCase())),
+    );
     if (!names.length) {
       appendLog("warning", "proxy", "No proxy nodes available for delay test");
     } else if (tauriApi()?.core?.invoke) {
+      const generation = (runtime.delayTestGeneration = (runtime.delayTestGeneration ?? 0) + 1);
       state.toggles.testingDelays = true;
       if (activeGroup) {
         activeGroup.options.forEach((node) => {
@@ -3064,58 +3169,67 @@ async function handleAction(action) {
           }
         });
       }
-      renderPage();
+      patchProxyDelayLabels(names);
       try {
         const delayUrl = state.settingsSnapshot?.settings?.delayTestUrl
           ?? state.settingsSnapshot?.settings?.delay_test_url
           ?? null;
-        // Probe in chunks so the grid updates while CFW-style testing runs.
         const delayByName = new Map();
-        const errorByName = new Map();
-        const chunkSize = 8;
-        for (let offset = 0; offset < names.length; offset += chunkSize) {
-          const chunk = names.slice(offset, offset + chunkSize);
+        let offset = 0;
+        while (offset < names.length) {
+          if (generation !== runtime.delayTestGeneration) break;
+          const concurrency = delayConcurrency();
+          const chunk = names.slice(offset, offset + concurrency);
+          offset += chunk.length;
           const results = await invoke("test_proxy_delays", {
             proxies: chunk,
             url: delayUrl,
             timeout_ms: 5000,
             timeoutMs: 5000,
+            concurrency,
           });
+          if (generation !== runtime.delayTestGeneration) break;
+          const seen = new Set();
           for (const item of results ?? []) {
+            seen.add(item.name);
             if (Number.isFinite(item.delay) && item.delay > 0) {
               delayByName.set(item.name, item.delay);
-              errorByName.delete(item.name);
-            } else if (item.delay === 0) {
+              applyDelayToProxyNodes(item.name, item.delay);
+            } else {
+              // timeout (0), missing delay, or error → Timeout
               delayByName.set(item.name, 0);
-              errorByName.delete(item.name);
-            } else if (item.error) {
-              errorByName.set(item.name, item.error);
+              applyDelayToProxyNodes(item.name, 0);
             }
           }
-          state.proxyGroups.forEach((group) => {
-            group.options.forEach((node) => {
-              if (delayByName.has(node.name)) {
-                node.delay = delayByName.get(node.name);
-                node.dead = node.delay <= 0;
-              } else if (errorByName.has(node.name)) {
-                node.delay = -1;
-                node.dead = true;
-              }
-            });
-          });
-          renderPage();
+          for (const name of chunk) {
+            if (!seen.has(name) && !delayByName.has(name)) {
+              delayByName.set(name, 0);
+              applyDelayToProxyNodes(name, 0);
+            }
+          }
+          patchProxyDelayLabels(chunk);
         }
-        const failed = errorByName.size + [...delayByName.values()].filter((delay) => delay <= 0).length;
-        const ok = [...delayByName.values()].filter((delay) => delay > 0).length;
-        appendLog(
-          failed ? "warning" : "info",
-          "proxy",
-          `Delay test (${activeGroup?.name ?? "group"}): ${ok} ok${failed ? `, ${failed} timed out/failed` : ""}`,
-        );
+        if (generation === runtime.delayTestGeneration) {
+          finalizeDelayTestNames(names);
+          const failed = [...delayByName.values()].filter((delay) => delay <= 0).length
+            + names.filter((name) => !delayByName.has(name)).length;
+          const ok = [...delayByName.values()].filter((delay) => delay > 0).length;
+          appendLog(
+            failed ? "warning" : "info",
+            "proxy",
+            `Delay test (${activeGroup?.name ?? "group"}): ${ok} ok${failed ? `, ${failed} timed out` : ""} · concurrency ${delayConcurrency()}`,
+          );
+        }
       } catch (error) {
-        appendLog("warning", "proxy", `Delay test failed: ${error.message ?? String(error)}`);
+        if ((runtime.delayTestGeneration ?? 0) === generation) {
+          finalizeDelayTestNames(names);
+          appendLog("warning", "proxy", `Delay test failed: ${error.message ?? String(error)}`);
+        }
       } finally {
-        state.toggles.testingDelays = false;
+        if ((runtime.delayTestGeneration ?? 0) === generation) {
+          state.toggles.testingDelays = false;
+          patchProxyDelayLabels(names);
+        }
       }
     } else {
       state.proxyGroups.forEach((group) => {
@@ -3278,10 +3392,10 @@ async function handleAction(action) {
     state.glassDialog = {
       kind: "tun-settings",
       payload: {
-        stack: settings["tun-stack"] ?? settings.tunStack ?? "system",
+        stack: settings["tun-stack"] ?? settings.tunStack ?? "mixed",
         autoRoute: settings["tun-auto-route"] ?? settings.tunAutoRoute ?? true,
-        strictRoute: settings["tun-strict-route"] ?? settings.tunStrictRoute ?? false,
-        dnsHijack: settings["tun-dns-hijack"] ?? settings.tunDnsHijack ?? "any:53",
+        strictRoute: settings["tun-strict-route"] ?? settings.tunStrictRoute ?? true,
+        dnsHijack: settings["tun-dns-hijack"] ?? settings.tunDnsHijack ?? "any:53\n[::]:53",
       },
     };
     renderGlassOverlays();
@@ -4090,6 +4204,23 @@ async function bootstrap() {
       appendLog("error", "tray", error.message ?? String(error));
       renderPage();
     });
+  });
+
+  await listen("cfw://network-path", (event) => {
+    const iface = event.payload?.interface ?? "unknown";
+    cancelDelayTest();
+    state.proxyGroups.forEach((group) => {
+      group.options.forEach((node) => {
+        if (typeof node.delay === "number") {
+          node.delay = null;
+          node.dead = false;
+        }
+      });
+    });
+    if (state.activePage === "proxies") {
+      patchProxyDelayLabels();
+    }
+    appendLog("info", "network", `Default route changed (${iface}); delay badges marked stale — re-run Delay Test`);
   });
 
   await listen("cfw://connections-snapshot", (event) => {

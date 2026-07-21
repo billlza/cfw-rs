@@ -14,6 +14,9 @@ Quieter live streams + connections/log Diagnostics fixes (so Check for Update fr
 - Clean WS close / log-level restart no longer logged as errors
 - Core `[TUN] default interface changed …` remapped to **INFO** (expected mihomo monitor noise)
 
+### Updater
+- Pack `app.tar.gz` with `COPYFILE_DISABLE=1` and reject AppleDouble `._*` entries (fixes `failed to unpack ._Clash for Mac.app`)
+
 ## 0.3.3 — 2026-07-21
 
 TUN truthfulness + product About / update feedback + Proxies/profile recovery.

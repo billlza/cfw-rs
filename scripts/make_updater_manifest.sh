@@ -32,10 +32,31 @@ NOTES="${NOTES:-Clash for Mac ${VERSION}}"
 
 echo "==> packing updater archive: $ARCHIVE_PATH"
 rm -f "$ARCHIVE_PATH"
+# macOS bsdtar otherwise embeds AppleDouble `._*` sidecars for xattrs
+# (com.apple.provenance). Tauri's updater then fails with:
+#   failed to unpack ._Clash for Mac.app into .../tauri_updated_app...
+export COPYFILE_DISABLE=1
+# Drop non-essential xattrs so a future packer without COPYFILE_DISABLE stays clean.
+xattr -cr "$APP_ABS" 2>/dev/null || true
 (
   cd "$APP_DIR"
-  tar -czf "$ARCHIVE_PATH" "$APP_NAME"
+  COPYFILE_DISABLE=1 tar -czf "$ARCHIVE_PATH" --exclude='._*' --exclude='.DS_Store' "$APP_NAME"
 )
+
+python3 - "$ARCHIVE_PATH" <<'PY'
+import sys, tarfile
+path = sys.argv[1]
+with tarfile.open(path, "r:gz") as tf:
+    bad = [m.name for m in tf.getmembers() if m.name.startswith("._") or "/._" in m.name or m.name.endswith(".DS_Store")]
+    tops = sorted({m.name.split("/", 1)[0] for m in tf.getmembers()})
+if bad:
+    raise SystemExit(f"error: updater archive contains AppleDouble/junk entries: {bad[:8]}")
+if tops != ["Clash for Mac.app"] and not (len(tops) == 1 and tops[0].endswith(".app")):
+    # Allow only the single .app root (name may vary if productName changes).
+    if len(tops) != 1 or not tops[0].endswith(".app"):
+        raise SystemExit(f"error: updater archive top-level must be a single .app, got {tops}")
+print(f"==> archive OK ({len(tops)} top-level: {tops[0]})")
+PY
 
 export TAURI_SIGNING_PRIVATE_KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$repo_root/.tauri/cfw-rs.key}"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"

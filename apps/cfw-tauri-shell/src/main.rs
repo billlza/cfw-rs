@@ -15,8 +15,8 @@ use cfw_controller::{
 };
 use cfw_core::{
     CONTROL_SESSION_DIR, ControlSession, CoreKind, DeepLinkIntent, FeatureSet, PRODUCT_NAME,
-    PersistedSettings, ProductBlueprint, QualityTargets, SettingsSkeleton, SettingsSnapshot,
-    SettingsStore, UiPage, parse_deep_link,
+    PersistedSettings, ProductBlueprint, QualityTargets, RuntimeMode, SettingsSkeleton,
+    SettingsSnapshot, SettingsStore, UiPage, parse_deep_link,
 };
 use cfw_platform::{
     HelperInstallRequest, HelperService, LaunchdDomain, LaunchdService, MacOsPlatformDesign,
@@ -544,6 +544,16 @@ async fn set_tun_on(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnaps
             )
         })?;
         wait_for_controller_ready().await?;
+        // Re-apply Rule/Global from settings so TUN handoff cannot leave live
+        // mode stuck on Global+DIRECT (looks like “TUN broken”).
+        if let Err(error) = sync_runtime_mode_to_controller().await {
+            emit_shell_log(
+                app,
+                "warning",
+                "tun",
+                format!("TUN up but mode sync failed: {error}"),
+            );
+        }
         settings_store()?
             .snapshot()
             .map_err(|err| err.to_string())
@@ -2129,7 +2139,7 @@ fn now_epoch_secs() -> u64 {
 /// How often the app refreshes its heartbeat in the control file while the root
 /// daemon owns the core. Must stay well under the daemon's stale threshold (60s)
 /// so the daemon only tears down the root core when the app is genuinely gone.
-const HELPER_HEARTBEAT_TICK: Duration = Duration::from_secs(20);
+const HELPER_HEARTBEAT_TICK: Duration = Duration::from_secs(10);
 
 /// Background task: while Service Mode owns the core, bump the control file's
 /// heartbeat so the root daemon knows the app is alive. Touches only the
@@ -2439,13 +2449,64 @@ async fn reload_running_core_config(
         let _ = config_path;
         write_control_session(true)?;
         wait_for_controller_ready().await?;
+        sync_runtime_mode_to_controller().await?;
         return Ok(());
     }
     let path = config_path.to_string_lossy().into_owned();
-    if let Ok(client) = controller_client_from_settings()
-        && client.reload_config(&path, true).await.is_ok()
-    {
-        return Ok(());
+    match controller_client_from_settings() {
+        Ok(client) => client
+            .reload_config(&path, true)
+            .await
+            .map_err(|err| err.to_string())?,
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+/// Push persisted `runtime_mode` to the live controller and escape Global+DIRECT
+/// blackholes that look like “TUN is broken”.
+async fn sync_runtime_mode_to_controller() -> Result<(), String> {
+    let settings = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())?;
+    let mode = match settings.runtime_mode {
+        RuntimeMode::Global => "Global",
+        RuntimeMode::Direct => "Direct",
+        RuntimeMode::Script => "Script",
+        RuntimeMode::Rule => "Rule",
+    };
+    let client = controller_client_from_settings()?;
+    client
+        .patch_configs(ConfigPatch {
+            mode: Some(mode.into()),
+            ..ConfigPatch::default()
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+
+    if mode == "Global" {
+        if let Ok(proxies) = client.proxies().await {
+            let global_now = proxies
+                .groups
+                .iter()
+                .find(|group| group.name.eq_ignore_ascii_case("GLOBAL"))
+                .and_then(|group| group.now.clone())
+                .unwrap_or_default();
+            if global_now.eq_ignore_ascii_case("DIRECT") || global_now.is_empty() {
+                // Escape the common “TUN On but everything times out” trap.
+                client
+                    .patch_configs(ConfigPatch {
+                        mode: Some("Rule".into()),
+                        ..ConfigPatch::default()
+                    })
+                    .await
+                    .map_err(|err| err.to_string())?;
+                let _ = update_settings(|settings| {
+                    settings.runtime_mode = RuntimeMode::Rule;
+                    Ok(())
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -2551,13 +2612,33 @@ async fn reapply_runtime_config(core: State<'_, ManagedCore>) -> Result<String, 
 
 #[tauri::command]
 async fn set_proxy_mode(mode: String) -> Result<(), String> {
+    let normalized = match mode.trim().to_ascii_lowercase().as_str() {
+        "global" => "Global",
+        "rule" => "Rule",
+        "direct" => "Direct",
+        "script" => "Script",
+        other => {
+            return Err(format!("unsupported proxy mode: {other}"));
+        }
+    };
+    let runtime_mode = match normalized {
+        "Global" => RuntimeMode::Global,
+        "Direct" => RuntimeMode::Direct,
+        "Script" => RuntimeMode::Script,
+        _ => RuntimeMode::Rule,
+    };
     controller_client_from_settings()?
         .patch_configs(ConfigPatch {
-            mode: Some(mode),
+            mode: Some(normalized.to_string()),
             ..ConfigPatch::default()
         })
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    update_settings(|settings| {
+        settings.runtime_mode = runtime_mode;
+        Ok(())
+    })?;
+    Ok(())
 }
 
 

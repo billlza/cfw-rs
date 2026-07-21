@@ -223,10 +223,9 @@ export function serviceModeNeedsAttention(status) {
 }
 
 export function tunModeValueLabel(tunEnabled, serviceStatus, runtime = null) {
-  if (serviceStatus !== "Enabled" && !tunEnabled) return "Service Mode required";
+  if (serviceStatus !== "Enabled" && !runtime?.active) return "Service Mode required";
   if (runtime?.active) return "On";
   if (tunEnabled && runtime && !runtime.active) return "Starting…";
-  if (tunEnabled) return "On";
   if (serviceStatus === "Enabled") return "Off";
   return "Service Mode required";
 }

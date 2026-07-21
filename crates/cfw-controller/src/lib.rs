@@ -108,9 +108,10 @@ impl ControllerClient {
     }
 
     pub async fn snapshot(&self) -> Result<ControllerSnapshot, ControllerError> {
-        let (config, proxies, connections) =
-            futures_util::future::try_join3(self.configs(), self.proxies(), self.connections())
-                .await?;
+        // Connections are best-effort: a brief TUN respawn must not wipe proxies.
+        let (config, proxies) =
+            futures_util::future::try_join(self.configs(), self.proxies()).await?;
+        let connections = self.connections().await.unwrap_or_default();
         Ok(ControllerSnapshot {
             config,
             proxies,

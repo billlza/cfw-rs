@@ -23,7 +23,7 @@ use serde::Serialize;
 /// Fallback wake interval when FSEvents miss an event (also used for heartbeat).
 const SUPERVISE_FALLBACK: Duration = Duration::from_secs(5);
 /// Tear the root core down if the app's heartbeat is older than this (app died).
-const HEARTBEAT_STALE_SECS: u64 = 60;
+const HEARTBEAT_STALE_SECS: u64 = 90;
 
 #[derive(Debug, Serialize)]
 struct HelperOutcome<T> {

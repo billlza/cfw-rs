@@ -2,21 +2,28 @@
 
 ## 0.3.3 — 2026-07-21
 
-TUN truthfulness + product About / update feedback.
+TUN truthfulness + product About / update feedback + Proxies/profile recovery.
 
 ### TUN (fixed)
 - Switch reflects **live handoff** (`tun.enable` + managed root core), not a stale disk flag
 - Fresh launch defaults to **Off** unless Service Mode actually owns a TUN-capable core
 - Service Mode always spawns **mihomo** for TUN (clash-rs controller-ready ≠ working utun)
-- Handoff readiness uses **controller API + netstat** — unprivileged `lsof` cannot see root listeners and previously false-failed while utun was already up
+- Handoff readiness uses **controller API + netstat** — unprivileged `lsof` cannot see root listeners
 - Failed handoff scrub `cache.db` (root-owned) and wait for ports before restarting in-process core
 - Helper `serve` processes an existing control session **immediately** (no 5s first-wait race)
+- After TUN up: sync persisted **Rule/Global** mode; auto-escape **Global+DIRECT** blackhole (looked like “TUN broken”)
+- Heartbeat 10s / stale 90s to reduce helper tearing down a live TUN session
 - System Proxy toggles **never** mutate `tun_mode`; UI re-syncs TUN after proxy changes
-- `write_settings_snapshot` cannot ghost-flip TUN; reconcile emits `cfw://settings-changed`
+
+### Proxies / Profiles
+- Entering Proxies, TUN toggle, settings-changed, and profile switch all **re-fetch controller snapshot**
+- Empty mode chrome hidden when controller has no groups; clearer empty copy
+- Removed meaningless Profiles hover 4-icon bar (use card click + right-click menu)
+- Profile switch rollback re-applies previous profile; `controller_snapshot` no longer fails wholly when connections lag
+- `set_proxy_mode` persists `runtime_mode`; hot-reload failures are no longer silent success
 
 ### About / Check for Update
-- App menu **About Clash for Mac** and **Check for Update…** open a ChatGPT-style product card (version, release date, status)
-- Checking / up-to-date / update-available / install all show in that dialog (no silent no-op)
+- App menu **About Clash for Mac** and **Check for Update…** open a ChatGPT-style product card
 
 ## 0.3.2 — 2026-07-21
 

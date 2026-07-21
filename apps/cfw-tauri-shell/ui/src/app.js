@@ -129,24 +129,23 @@ function applyControllerSnapshot(snapshot) {
   const proxyNodes = new Map((snapshot.proxies?.proxies ?? []).map((node) => [node.name, node]));
   const groups = snapshot.proxies?.groups ?? [];
   const groupsByName = new Map(groups.map((group) => [group.name, group]));
-  if (groups.length) {
-    state.proxyGroups = groups.map((group) => ({
-      name: group.name,
-      type: group.kind,
-      now: group.now ?? group.options?.[0] ?? "DIRECT",
-      options: (group.options ?? []).map((name) => {
-        const node = proxyNodes.get(name);
-        const nestedGroup = groupsByName.get(name);
-        return {
-          name,
-          delay: latestDelay(node?.history ?? nestedGroup?.history ?? []),
-          dead: false,
-          kind: node?.kind ?? node?.type ?? nestedGroup?.kind ?? group.kind ?? "Proxy",
-          udp: node?.udp ?? null,
-        };
-      }),
-    }));
-  }
+  // Always replace — empty groups must clear stale iKuuu UI after a failed/empty profile.
+  state.proxyGroups = groups.map((group) => ({
+    name: group.name,
+    type: group.kind,
+    now: group.now ?? group.options?.[0] ?? "DIRECT",
+    options: (group.options ?? []).map((name) => {
+      const node = proxyNodes.get(name);
+      const nestedGroup = groupsByName.get(name);
+      return {
+        name,
+        delay: latestDelay(node?.history ?? nestedGroup?.history ?? []),
+        dead: false,
+        kind: node?.kind ?? node?.type ?? nestedGroup?.kind ?? group.kind ?? "Proxy",
+        udp: node?.udp ?? null,
+      };
+    }),
+  }));
 
   applyConnectionsSnapshot(snapshot.connections);
   state.controllerStatus = "controller live";
@@ -828,13 +827,19 @@ function renderProxies() {
   const hideTimedOut = Boolean(state.toggles.hideUnavailable);
   const showProxiesList = state.toggles.showProxiesList !== false;
   const blinkNode = state.proxyBlinkNode;
-  return `
-    <div class="proxy-layout">
+  const controllerLive = state.controllerStatus === "controller live" && state.proxyGroups.length > 0;
+  const emptyMessage = state.controllerStatus === "controller live" && state.proxyGroups.length === 0
+    ? "Active profile has no proxy groups. Switch to a subscription with nodes."
+    : "Controller unavailable. No live proxy groups are being displayed.";
+  const modeSwitch = controllerLive ? `
       <div class="mode-switch proxy-mode-header" role="group" aria-label="Proxy mode">
         ${["Global", "Rule", "Direct", "Script"].map((mode) => `
           <button class="${state.mode === mode ? "selected" : ""}" data-mode="${mode}">${mode} <span>${modeIcon(mode)}</span></button>
         `).join("")}
-      </div>
+      </div>` : "";
+  return `
+    <div class="proxy-layout">
+      ${modeSwitch}
 
       <div class="cfw-proxy-page">
         ${activeGroup ? `
@@ -874,7 +879,7 @@ function renderProxies() {
               `).join("")}
             </aside>
           </div>
-        ` : '<p class="empty">Controller unavailable. No live proxy groups are being displayed.</p>'}
+        ` : `<p class="empty">${escapeHtml(emptyMessage)}</p>`}
       </div>
     </div>
   `;
@@ -1813,13 +1818,6 @@ function renderProfiles() {
                 ? `<button data-update-profile="${escapeHtml(profile.id)}" title="Update subscription">⟳</button>`
                 : `<button data-profile-action="edit" data-profile-id="${escapeHtml(profile.id)}" title="Edit local profile">‹›</button>`}
             </div>
-            <div class="profile-card-secondary">
-              ${profile.active ? "" : `<button data-profile="${escapeHtml(profile.id)}" title="Select profile">✓</button>`}
-              <button data-profile-action="diff" data-profile-id="${escapeHtml(profile.id)}" title="Diff">≋</button>
-              <button data-profile-action="qrcode" data-profile-id="${escapeHtml(profile.id)}" ${profile.sourceUrl ? "" : "disabled"} title="QRCode">▦</button>
-              <button data-reveal-profile="${escapeHtml(profile.id)}" title="Show in Finder">⌕</button>
-              <button data-delete-profile="${escapeHtml(profile.id)}" title="Delete">×</button>
-            </div>
           </article>
         `).join("") : `
           <div class="empty-profile-state">
@@ -2745,6 +2743,7 @@ async function selectProfileById(id) {
       "profile",
       `Profile switched to ${activeProfile().name}; config.yaml updated (${formatBytes(applied.bytes ?? 0)})`,
     );
+    await loadControllerSnapshotWithRetry(state.toggles.tunMode ? 10 : 6, 500);
     if (state.toggles.breakOnProxyChange) {
       await closeConnectionsAfterProxyChange("profile");
     }
@@ -2755,6 +2754,18 @@ async function selectProfileById(id) {
     });
     applyPersistedSettings(rollback);
     await loadProfilesSnapshot();
+    if (previousActiveProfile) {
+      try {
+        await invoke("apply_active_profile");
+      } catch (reapplyError) {
+        appendLog(
+          "warning",
+          "profile",
+          `Rollback re-apply failed: ${reapplyError.message ?? String(reapplyError)}`,
+        );
+      }
+    }
+    await loadControllerSnapshotWithRetry(6, 400).catch(() => false);
     appendLog(
       "error",
       "profile",
@@ -2910,6 +2921,10 @@ function bindPageEvents() {
       state.activePage = page;
       await invoke("open_page", { page });
       renderPage();
+      if (page === "proxies") {
+        await loadControllerSnapshotWithRetry(6, 400);
+        renderPage();
+      }
       if (page === "rules") {
         await loadRulesSnapshot();
         renderPage();
@@ -3289,6 +3304,7 @@ async function applyToggle(key, checked, source) {
       applyPersistedSettings(snapshot);
       await loadTunRuntimeState();
       await loadCoreStatus();
+      await loadControllerSnapshotWithRetry(checked ? 12 : 6, 500);
     } else if (key === "mixin") {
       const snapshot = await invoke("write_settings_snapshot", { settings: { ...persistedSettingsFromUi(), mixin: checked } });
       applyPersistedSettings(snapshot);
@@ -4493,6 +4509,7 @@ async function bootstrap() {
     if (event.payload) applyPersistedSettings(event.payload);
     await loadTunRuntimeState();
     await loadCoreStatus();
+    await loadControllerSnapshotWithRetry(8, 400).catch(() => false);
     renderPage();
   });
 

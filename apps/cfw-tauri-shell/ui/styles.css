@@ -1507,25 +1507,7 @@ dd {
   transform: translateY(-50%);
 }
 
-.profile-card-secondary {
-  position: absolute;
-  right: 10px;
-  bottom: -22px;
-  z-index: 2;
-  display: flex;
-  gap: 5px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease;
-}
-
-.cfw-profile-card:hover .profile-card-secondary {
-  opacity: 1;
-  pointer-events: auto;
-}
-
 .profile-card-primary button,
-.profile-card-secondary button,
 .profile-current {
   display: grid;
   width: 18px;
@@ -1536,12 +1518,6 @@ dd {
   color: #111;
   font-size: 16px;
   font-weight: 700;
-}
-
-.profile-card-secondary button {
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.88);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
 }
 
 .profile-current {

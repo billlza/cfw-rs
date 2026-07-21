@@ -107,6 +107,8 @@ struct DeepLinkParseOutcome {
 struct StreamError {
     stream: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1563,8 +1565,8 @@ fn start_connections_stream(app: AppHandle, streams: State<'_, LiveStreams>) -> 
             match controller_client_from_settings() {
                 Ok(client) => match run_connections_websocket(&app, &client).await {
                     Ok(()) => {
+                        // Clean close / level-driven restart — reconnect quietly.
                         last_error = None;
-                        emit_stream_error(&app, "connections", "connections stream closed".into());
                     }
                     Err(error) => {
                         emit_unique_stream_error(&app, "connections", &mut last_error, error);
@@ -1636,8 +1638,8 @@ fn start_log_stream(app: AppHandle, streams: State<'_, LiveStreams>) -> Result<(
                     .await
                 {
                     Ok(()) => {
+                        // Clean close or log-level change — reconnect quietly.
                         last_error = None;
-                        emit_stream_error(&app, "request-logs", "request log stream closed".into());
                     }
                     Err(error) => {
                         emit_unique_stream_error(&app, "request-logs", &mut last_error, error);
@@ -1684,7 +1686,14 @@ async fn emit_connections_poll_fallback(app: &AppHandle, client: &ControllerClie
         Ok(snapshot) => {
             let _ = app.emit("cfw://connections-snapshot", snapshot);
         }
-        Err(error) => emit_stream_error(app, "connections-fallback", error.to_string()),
+        Err(error) => {
+            let message = error.to_string();
+            // During TUN/interface flaps the controller is briefly unreachable —
+            // HTTP fallback failing is expected; don't spam Diagnostics.
+            if !is_transient_controller_disconnect(&message) {
+                emit_stream_error(app, "connections-fallback", message);
+            }
+        }
     }
 }
 
@@ -1764,12 +1773,43 @@ fn decode_log_message(message: Message) -> Result<Option<StructuredLogEntry>, St
         .map_err(|err| err.to_string())
 }
 
+fn is_transient_controller_disconnect(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "connection reset",
+        "connection refused",
+        "broken pipe",
+        "network is unreachable",
+        "host is down",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+        "error sending request",
+        "error reading",
+        "os error 54", // ECONNRESET on macOS
+        "os error 61", // ECONNREFUSED
+        "os error 57", // ENOTCONN
+        "os error 32", // EPIPE
+        "websocket protocol error",
+        "failed to lookup address",
+        "dns error",
+        "stream closed",
+        "connection closed",
+    ];
+    NEEDLES.iter().any(|needle| lower.contains(needle))
+}
+
 fn emit_unique_stream_error(
     app: &AppHandle,
     stream: &str,
     last_error: &mut Option<String>,
     message: String,
 ) {
+    if is_transient_controller_disconnect(&message) {
+        // Quiet reconnect loop — TUN interface changes and core handoffs reset WS often.
+        *last_error = Some(message);
+        return;
+    }
     if last_error.as_deref() != Some(message.as_str()) {
         *last_error = Some(message.clone());
         emit_stream_error(app, stream, message);
@@ -1782,6 +1822,7 @@ fn emit_stream_error(app: &AppHandle, stream: &str, message: String) {
         StreamError {
             stream: stream.to_string(),
             message,
+            level: Some("warning".into()),
         },
     );
 }
@@ -1835,13 +1876,18 @@ fn initial_log_offset(log_file: &std::path::Path) -> u64 {
 }
 
 fn parse_log_line(raw: &str) -> LogLinePayload {
-    let level = extract_log_field(raw, "level")
+    let mut level = extract_log_field(raw, "level")
         .or_else(|| infer_log_level(raw))
         .unwrap_or_else(|| "info".into());
     let time = extract_log_field(raw, "time")
         .map(|value| display_time(&value))
         .unwrap_or_else(|| "live".into());
     let message = extract_log_field(raw, "msg").unwrap_or_else(|| raw.trim().to_string());
+
+    // Mihomo/clash-rs logs TUN default-route flaps as warn; that's expected noise for users.
+    if message.to_ascii_lowercase().contains("default interface changed") {
+        level = "info".into();
+    }
 
     LogLinePayload {
         time,

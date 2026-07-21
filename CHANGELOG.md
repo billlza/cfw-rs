@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.4 — 2026-07-21
+
+Quieter live streams + connections/log Diagnostics fixes (so Check for Update from 0.3.3 can pick this up).
+
+### Diagnostics
+- clash-rs `/connections` ports accept **int or string** (stops `invalid type: integer` spam)
+- Logs level filter: event delegation + stream-only patch so ALL/INFO/WARNING clicks are not eaten by full re-renders
+- Proxy delay **Pending** styled on `cfw-node-card`; in-flight tests keep Pending across snapshot refreshes
+
+### Live streams (WARNING noise)
+- Transient controller disconnects (`Connection reset`, `error sending request`, WS protocol reset) reconnect **quietly** — no Diagnostics WARNING spam when TUN flaps `en0`
+- Clean WS close / log-level restart no longer logged as errors
+- Core `[TUN] default interface changed …` remapped to **INFO** (expected mihomo monitor noise)
+
 ## 0.3.3 — 2026-07-21
 
 TUN truthfulness + product About / update feedback + Proxies/profile recovery.

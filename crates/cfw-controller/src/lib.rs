@@ -804,6 +804,77 @@ where
     Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// clash-rs emits ports as integers; mihomo often emits strings. Accept either.
+fn string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Visitor;
+
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or number")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if value.fract() == 0.0 && value >= 0.0 && value <= u64::MAX as f64 {
+                Ok((value as u64).to_string())
+            } else {
+                Ok(value.to_string())
+            }
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(String::new())
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(String::new())
+        }
+    }
+
+    deserializer.deserialize_any(Visitor)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Connection {
@@ -828,9 +899,17 @@ pub struct ConnectionMetadata {
     pub source_ip: String,
     #[serde(rename = "destinationIP", alias = "destination_ip")]
     pub destination_ip: String,
-    #[serde(rename = "sourcePort", alias = "source_port")]
+    #[serde(
+        rename = "sourcePort",
+        alias = "source_port",
+        deserialize_with = "string_or_number"
+    )]
     pub source_port: String,
-    #[serde(rename = "destinationPort", alias = "destination_port")]
+    #[serde(
+        rename = "destinationPort",
+        alias = "destination_port",
+        deserialize_with = "string_or_number"
+    )]
     pub destination_port: String,
     pub host: String,
     #[serde(rename = "dnsMode", alias = "dns_mode")]
@@ -1037,6 +1116,59 @@ mod tests {
         let snapshot = ControllerClient::decode_connections_stream_message(raw).unwrap();
         assert_eq!(snapshot.upload, 0);
         assert!(snapshot.connections.is_empty());
+    }
+
+    #[test]
+    fn connections_snapshot_accepts_integer_ports_from_clash_rs() {
+        let raw = r#"
+        {
+          "uploadTotal": 1,
+          "downloadTotal": 2,
+          "connections": [
+            {
+              "id": "1",
+              "upload": 8,
+              "download": 16,
+              "start": "2026-07-21T12:03:07.517274Z",
+              "chains": ["Proxy"],
+              "rule": "MATCH",
+              "rulePayload": "",
+              "metadata": {
+                "network": "Tcp",
+                "type": "HttpConnect",
+                "sourceIP": "127.0.0.1",
+                "destinationIP": "",
+                "sourcePort": 52724,
+                "destinationPort": 443,
+                "host": "example.com"
+              }
+            },
+            {
+              "id": "2",
+              "upload": 1,
+              "download": 2,
+              "start": "2026-07-21T12:03:08Z",
+              "chains": ["DIRECT"],
+              "rule": "MATCH",
+              "rulePayload": "",
+              "metadata": {
+                "network": "Udp",
+                "type": "Socks5",
+                "sourceIP": "127.0.0.1",
+                "destinationIP": "1.1.1.1",
+                "sourcePort": "12345",
+                "destinationPort": "53",
+                "host": "dns"
+              }
+            }
+          ]
+        }
+        "#;
+        let snapshot = ControllerClient::decode_connections_stream_message(raw).unwrap();
+        assert_eq!(snapshot.connections[0].metadata.source_port, "52724");
+        assert_eq!(snapshot.connections[0].metadata.destination_port, "443");
+        assert_eq!(snapshot.connections[1].metadata.source_port, "12345");
+        assert_eq!(snapshot.connections[1].metadata.destination_port, "53");
     }
 
     #[test]

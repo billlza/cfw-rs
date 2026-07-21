@@ -16,7 +16,7 @@ pub use settings::{
 
 pub const PRODUCT_NAME: &str = "Clash for Mac";
 /// Ship version for UI / About (must match `apps/cfw-tauri-shell/tauri.conf.json`).
-pub const PRODUCT_VERSION: &str = "0.3.3";
+pub const PRODUCT_VERSION: &str = "0.3.4";
 pub const DEFAULT_DELAY_TEST_URL: &str = "http://www.gstatic.com/generate_204";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

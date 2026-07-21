@@ -1,7 +1,7 @@
 export const fallbackPayload = {
   product: {
     name: "Clash for Mac",
-    version: "0.3.3",
+    version: "0.3.4",
     parity_source: "Clash for Windows 0.20.39 macOS arm64 public release artifact",
   },
   pages: [
@@ -222,6 +222,7 @@ export const MAX_CONNECTION_ROWS = 500;
 export const runtime = {
   renderFrame: null,
   connectionsPatchFrame: null,
+  logStreamFrame: null,
   globalEventsBound: false,
   connectionRowEls: null,
   delayTestGeneration: 0,

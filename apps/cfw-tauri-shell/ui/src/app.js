@@ -129,6 +129,14 @@ function applyControllerSnapshot(snapshot) {
   const proxyNodes = new Map((snapshot.proxies?.proxies ?? []).map((node) => [node.name, node]));
   const groups = snapshot.proxies?.groups ?? [];
   const groupsByName = new Map(groups.map((group) => [group.name, group]));
+  const previousDelays = new Map();
+  if (state.toggles.testingDelays) {
+    state.proxyGroups.forEach((group) => {
+      group.options.forEach((node) => {
+        previousDelays.set(node.name, node.delay);
+      });
+    });
+  }
   // Always replace — empty groups must clear stale iKuuu UI after a failed/empty profile.
   state.proxyGroups = groups.map((group) => ({
     name: group.name,
@@ -137,9 +145,14 @@ function applyControllerSnapshot(snapshot) {
     options: (group.options ?? []).map((name) => {
       const node = proxyNodes.get(name);
       const nestedGroup = groupsByName.get(name);
+      let delay = latestDelay(node?.history ?? nestedGroup?.history ?? []);
+      if (state.toggles.testingDelays && previousDelays.has(name)) {
+        // Keep in-flight Pending / partial results while a delay test runs.
+        delay = previousDelays.get(name);
+      }
       return {
         name,
-        delay: latestDelay(node?.history ?? nestedGroup?.history ?? []),
+        delay,
         dead: false,
         kind: node?.kind ?? node?.type ?? nestedGroup?.kind ?? group.kind ?? "Proxy",
         udp: node?.udp ?? null,
@@ -226,11 +239,47 @@ function applyProvidersSnapshot(snapshot) {
 function visibleLogs() {
   const regex = safeRegex(state.logSearch);
   return state.logs.filter((line) => {
-    const matchesLevel = state.logFilter === "all" || line.level === state.logFilter;
-    const haystack = [line.time, line.level, line.source, line.message, ...(line.fields ?? []).map((field) => `${field.key}=${field.value}`)].join(" ");
+    const level = normalizeLevel(line.level);
+    const matchesLevel = state.logFilter === "all" || level === state.logFilter;
+    const haystack = [line.time, level, line.source, line.message, ...(line.fields ?? []).map((field) => `${field.key}=${field.value}`)].join(" ");
     const matchesSearch = !state.logSearch || (regex ? regex.test(haystack) : haystack.toLowerCase().includes(state.logSearch.toLowerCase()));
     return matchesLevel && matchesSearch;
   }).slice(0, MAX_LOG_ROWS);
+}
+
+function renderLogStreamHtml() {
+  const logs = visibleLogs();
+  return logs.map((line) => `
+          <article class="log-line ${escapeHtml(line.level)}">
+            <time>${escapeHtml(line.time)}</time>
+            <b>${escapeHtml(line.level)}</b>
+            <span>${escapeHtml(line.source)}</span>
+            <p>
+              ${escapeHtml(line.message)}
+              ${(line.fields ?? []).length ? `<small>${line.fields.map((field) => `${escapeHtml(field.key)}=${escapeHtml(field.value)}`).join(" · ")}</small>` : ""}
+            </p>
+          </article>
+        `).join("") || `<p class="empty">No ${state.logFilter === "all" ? "" : `${state.logFilter.toUpperCase()} `}logs for this filter.</p>`;
+}
+
+function patchLogStream() {
+  const stream = document.querySelector(".log-stream");
+  if (!stream) return false;
+  const heading = document.querySelector(".logs-layout .toolbar-panel h3");
+  if (heading) {
+    heading.textContent = `${visibleLogs().length} log entries${state.logsPaused ? " paused" : ""}`;
+  }
+  stream.innerHTML = renderLogStreamHtml();
+  return true;
+}
+
+function scheduleLogStreamPatch() {
+  if (runtime.logStreamFrame !== null) return;
+  runtime.logStreamFrame = window.requestAnimationFrame(() => {
+    runtime.logStreamFrame = null;
+    if (state.activePage !== "logs") return;
+    if (!patchLogStream()) scheduleRender();
+  });
 }
 
 function visibleConnections() {
@@ -499,7 +548,7 @@ function productAboutStatusText(payload) {
 function renderGeneral() {
   const persisted = state.settingsSnapshot?.settings ?? fallbackSettingsSnapshot.settings;
   const product = state.payload.product ?? fallbackPayload.product;
-  const appVersion = product.version ?? "0.3.3";
+  const appVersion = product.version ?? "0.3.4";
   const update = state.updateInfo;
   const updateBadge = update?.available && update?.version
     ? `<button type="button" class="cfw-update-badge" data-action="check-for-updates" title="Update available — click to download">→ v${escapeHtml(String(update.version))}</button>`
@@ -1301,7 +1350,7 @@ function renderGlassOverlays() {
       `);
     } else if (dialog.kind === "product-about") {
       const product = state.payload?.product ?? fallbackPayload.product;
-      const version = product.version ?? "0.3.3";
+      const version = product.version ?? "0.3.4";
       const status = productAboutStatusText(dialog.payload);
       const update = dialog.payload?.update;
       const canInstall = Boolean(update?.available && update?.version && !dialog.payload?.checking);
@@ -1985,31 +2034,21 @@ function renderLogs() {
         <div class="search-box">
           <input value="${escapeHtml(state.logSearch)}" data-log-search aria-label="Search logs" placeholder="Search logs or regex" />
         </div>
-        <div class="segmented">
+        <div class="segmented" data-log-filters>
           ${["all", "info", "debug", "warning", "error"].map((level) => `
-            <button class="${state.logFilter === level ? "selected" : ""}" data-log-filter="${level}">${level.toUpperCase()}</button>
+            <button type="button" class="${state.logFilter === level ? "selected" : ""}" data-log-filter="${level}">${level.toUpperCase()}</button>
           `).join("")}
         </div>
         <div class="toolbar-actions">
-          <button class="button ghost" data-action="toggle-log-stream">${state.logsPaused ? "Start" : "Stop"}</button>
-          <button class="button ghost" data-action="copy-logs">Copy</button>
-          <button class="button ghost" data-action="reveal-logs">Open Folder</button>
-          <button class="button ghost" data-action="clear-logs">Clear</button>
+          <button type="button" class="button ghost" data-action="toggle-log-stream">${state.logsPaused ? "Start" : "Stop"}</button>
+          <button type="button" class="button ghost" data-action="copy-logs">Copy</button>
+          <button type="button" class="button ghost" data-action="reveal-logs">Open Folder</button>
+          <button type="button" class="button ghost" data-action="clear-logs">Clear</button>
         </div>
       </section>
 
       <section class="panel log-stream">
-        ${logs.map((line) => `
-          <article class="log-line ${escapeHtml(line.level)}">
-            <time>${escapeHtml(line.time)}</time>
-            <b>${escapeHtml(line.level)}</b>
-            <span>${escapeHtml(line.source)}</span>
-            <p>
-              ${escapeHtml(line.message)}
-              ${(line.fields ?? []).length ? `<small>${line.fields.map((field) => `${escapeHtml(field.key)}=${escapeHtml(field.value)}`).join(" · ")}</small>` : ""}
-            </p>
-          </article>
-        `).join("") || '<p class="empty">No logs for this filter.</p>'}
+        ${renderLogStreamHtml()}
       </section>
     </div>
   `;
@@ -2368,8 +2407,8 @@ function renderFeedback() {
   const product = state.payload.product ?? fallbackPayload.product;
   const update = state.updateInfo;
   const updateLine = update?.available && update?.version
-    ? `New version available: v${escapeHtml(String(update.version))} (current v${escapeHtml(String(update.current ?? product.version ?? "0.3.3"))}).`
-    : `Current build v${escapeHtml(product.version ?? "0.3.3")} — menu bar Clash for Mac → Check for Update… also works.`;
+    ? `New version available: v${escapeHtml(String(update.version))} (current v${escapeHtml(String(update.current ?? product.version ?? "0.3.4"))}).`
+    : `Current build v${escapeHtml(product.version ?? "0.3.4")} — menu bar Clash for Mac → Check for Update… also works.`;
   const bench = state.kernelCompare?.comparison;
   const benchHtml = bench
     ? `<p class="muted">${escapeHtml(bench.narrative?.speed ?? "")}</p>
@@ -2382,8 +2421,8 @@ function renderFeedback() {
       <section class="panel hero-panel">
         <div>
           <p class="label">Feedback</p>
-          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.3.3")}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
-          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.3.3")}).</p>
+          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.3.4")}${update?.available && update?.version ? ` → v${escapeHtml(String(update.version))}` : ""}</h3>
+          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.3.4")}).</p>
         </div>
         <span class="badge">ARM64 macOS only</span>
       </section>
@@ -3115,18 +3154,11 @@ function bindPageEvents() {
     });
   });
 
-  document.querySelectorAll("[data-log-filter]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      state.logFilter = event.currentTarget.dataset.logFilter;
-      renderPage();
-    });
-  });
-
   const logSearch = document.querySelector("[data-log-search]");
   if (logSearch) {
     logSearch.addEventListener("input", (event) => {
       state.logSearch = event.currentTarget.value;
-      renderPage();
+      patchLogStream();
     });
   }
 
@@ -3224,6 +3256,18 @@ function bindGlobalEvents() {
 
   document.addEventListener("click", (event) => {
     const eventTarget = event.target instanceof Element ? event.target : event.target?.parentElement;
+    const filter = eventTarget?.closest("[data-log-filter]");
+    if (filter) {
+      event.preventDefault();
+      const next = filter.dataset.logFilter || "all";
+      if (state.logFilter === next) return;
+      state.logFilter = next;
+      document.querySelectorAll("[data-log-filter]").forEach((button) => {
+        button.classList.toggle("selected", button.dataset.logFilter === state.logFilter);
+      });
+      patchLogStream();
+      return;
+    }
     const target = eventTarget?.closest("[data-action]");
     if (!target) return;
     event.preventDefault();
@@ -4604,13 +4648,18 @@ async function bootstrap() {
   await listen("cfw://log-lines", (event) => {
     if (state.logsPaused) return;
     appendLogLines(event.payload);
-    if (state.activePage === "logs") scheduleRender();
+    if (state.activePage === "logs") scheduleLogStreamPatch();
   });
 
   await listen("cfw://stream-error", (event) => {
     const payload = event.payload ?? {};
-    appendLog("warning", payload.stream ?? "stream", payload.message ?? "stream unavailable");
-    if (state.activePage === "logs" || state.activePage === "connections") scheduleRender();
+    const level = payload.level ?? "warning";
+    appendLog(level, payload.stream ?? "stream", payload.message ?? "stream unavailable");
+    if (state.activePage === "logs") {
+      scheduleLogStreamPatch();
+    } else if (state.activePage === "connections") {
+      scheduleRender();
+    }
   });
 
   await listen("tauri://drag-drop", async (event) => {

@@ -1166,6 +1166,23 @@ dd {
   font-size: 13px;
 }
 
+.cfw-node-card b.pending {
+  color: var(--muted, #9a9a9a);
+  font-weight: 600;
+}
+
+.cfw-node-card b.fast {
+  color: var(--accent);
+}
+
+.cfw-node-card b.mid {
+  color: var(--blue, #3d7eff);
+}
+
+.cfw-node-card b.slow {
+  color: #c9851a;
+}
+
 .cfw-node-card b.dead {
   color: red;
 }

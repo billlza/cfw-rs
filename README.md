@@ -11,7 +11,7 @@ Release gate: [`RELEASE.md`](./RELEASE.md) · Parity: [`docs/parity-checklist.md
 
 ## Install (signed beta · Apple Silicon)
 
-1. Download `Clash for Mac_0.1.0_aarch64.dmg` (or `.zip`) from the [GitHub Releases](https://github.com/billlza/cfw-rs/releases) page.
+1. Download `Clash for Mac_0.2.0_aarch64.dmg` (or `.zip`) from the [GitHub Releases](https://github.com/billlza/cfw-rs/releases) page.
 2. Open the DMG and drag **Clash for Mac** into `/Applications`.
 3. Launch once. If macOS prompts, use **Open** (app is Developer ID + notarized).
 4. Before enabling **TUN / Service Mode**, approve the helper under **System Settings → General → Login Items & Extensions**.

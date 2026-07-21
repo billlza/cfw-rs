@@ -8,7 +8,7 @@
 //! remain for diagnostics and accept an explicit `--app-home`.
 
 use std::process::{Child, Command};
-use std::thread;
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -16,10 +16,11 @@ use cfw_core::{ControlSession, MacOsAppPaths, SettingsStore};
 use cfw_runtime::{
     CORE_LOG_FILE_NAME, CoreManager, CoreProcessSpec, DEFAULT_CORE_BINARY_NAME,
 };
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 
-/// How often the supervisor re-reads the control file.
-const SUPERVISE_POLL: Duration = Duration::from_millis(500);
+/// Fallback wake interval when FSEvents miss an event (also used for heartbeat).
+const SUPERVISE_FALLBACK: Duration = Duration::from_secs(5);
 /// Tear the root core down if the app's heartbeat is older than this (app died).
 const HEARTBEAT_STALE_SECS: u64 = 60;
 
@@ -85,7 +86,26 @@ fn supervise() -> Result<()> {
     let mut child: Option<Child> = None;
     let mut running_generation: Option<u64> = None;
 
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = RecommendedWatcher::new(
+        move |result: notify::Result<notify::Event>| {
+            let _ = tx.send(result);
+        },
+        notify::Config::default(),
+    )
+    .context("failed to create control-session watcher")?;
+
+    let dir = ControlSession::dir();
+    let _ = std::fs::create_dir_all(&dir);
+    watcher
+        .watch(&dir, RecursiveMode::NonRecursive)
+        .with_context(|| format!("failed to watch {}", dir.display()))?;
+
     loop {
+        // Block until FSEvents/kqueue reports a change, or fall back for heartbeat.
+        let _ = rx.recv_timeout(SUPERVISE_FALLBACK);
+        while rx.try_recv().is_ok() {}
+
         let session = match ControlSession::read() {
             Ok(Some(session)) => session,
             // File gone -> the app wants Service Mode off; launchd is stopping us.
@@ -115,7 +135,6 @@ fn supervise() -> Result<()> {
             // (exiting with the file still present would relaunch in a loop).
             stop_child(&mut child);
             running_generation = None;
-            thread::sleep(SUPERVISE_POLL);
             continue;
         }
 
@@ -124,7 +143,6 @@ fn supervise() -> Result<()> {
             eprintln!("refusing unsafe control session: {error}");
             stop_child(&mut child);
             running_generation = None;
-            thread::sleep(SUPERVISE_POLL);
             continue;
         }
 
@@ -147,8 +165,6 @@ fn supervise() -> Result<()> {
                 }
             }
         }
-
-        thread::sleep(SUPERVISE_POLL);
     }
 }
 

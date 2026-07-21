@@ -1,13 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-07-21
 
-- Fix TUN/System Proxy ghost toggles: transactional `tun_mode`, writable control-session dir on Service Mode install, reap orphan managed clash-darwin by port
-- General page CFW action icons: proxy export copy, bind/interfaces, core config preview, DNS query, Script note, TUN settings + restore DNS, Mixin editor, Service Mode manage trio
-- Fix Service Mode / TUN under daemon ownership: hot-reload running core, auto restore DNS on TUN off (`Empty` clears), TUN row On/Off labels, bind↔Allow LAN symmetry, open Razord dashboard
-- Fix glass dialog handlers nested inside GeoIP confirm (Service Mode Install / bind / Mixin / TUN settings were dead)
-- Silent Start; PAC system proxy; Connections process column; tray delay title; Providers/Rules nav
-- Pinned mihomo v1.19.28 + GeoIP metadb SHA-256; SMAppService TUN docs
+Apple Silicon performance and platform hardening release (P0–P2).
+
+### P0
+- ControllerClient process-wide singleton / reqwest connection pool reuse
+- cfw-helper control-session supervision is FSEvents/`notify` event-driven (5s heartbeat fallback; no fixed 500ms poll)
+
+### P1
+- Connections page incremental DOM patching (no full-page `innerHTML` on every WS tick)
+- Silent Start uses `ActivationPolicy::Accessory` + Dock hide; tray Show restores Regular + Dock
+- Start at Login uses `SMAppService::mainAppService` Login Item (migrates off user LaunchAgent)
+
+### P2
+- DNS set/restore via SCPreferences (`kSCEntNetDNS` / `kSCPropNetDNSServerAddresses`) with `networksetup` fallback
+- `tauri-plugin-updater` + GitHub Releases `latest.json` (arm64); Settings/Feedback “Check for Updates”
+
+### Stack (carried from Unreleased)
+- Rust **1.97.1**; YAML via noyalib `compat-serde-yaml`; reqwest **0.13**; Tauri **2.11.5**
+- System Proxy SCPreferences path; UI `ui/src/` + esbuild
 
 ## 0.1.0 — 2026-07-20
 

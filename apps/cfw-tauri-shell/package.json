@@ -1,0 +1,10 @@
+{
+  "name": "cfw-tauri-shell-ui",
+  "private": true,
+  "scripts": {
+    "build": "esbuild ui/src/main.js --bundle --minify --target=safari16 --outfile=ui/main.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

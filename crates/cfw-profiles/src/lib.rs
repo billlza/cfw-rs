@@ -658,8 +658,8 @@ fn inject_runtime_settings(
         .as_mapping_mut()
         .ok_or(ProfileError::InvalidConfigRoot)?;
     set_yaml_value(mapping, "mixed-port", settings.mixed_port)?;
-    mapping.remove(yaml_key("port"));
-    mapping.remove(yaml_key("socks-port"));
+    mapping.remove("port");
+    mapping.remove("socks-port");
     set_yaml_value(mapping, "allow-lan", settings.allow_lan)?;
     set_yaml_value(mapping, "ipv6", settings.enable_ipv6)?;
     set_yaml_value(mapping, "mode", runtime_mode_name(settings.runtime_mode))?;
@@ -679,7 +679,7 @@ fn inject_runtime_settings(
     {
         set_yaml_value(mapping, "secret", secret)?;
     } else {
-        mapping.remove(yaml_key("secret"));
+        mapping.remove("secret");
     }
 
     if let Some(log_level) = setting_string(settings, &["log-level", "logLevel"]) {
@@ -688,31 +688,25 @@ fn inject_runtime_settings(
     if let Some(interface_name) = setting_string(settings, &["interface-name", "interfaceName"]) {
         set_yaml_value(mapping, "interface-name", interface_name)?;
     } else {
-        mapping.remove(yaml_key("interface-name"));
+        mapping.remove("interface-name");
     }
     if let Some(bind_address) = setting_string(settings, &["bind-address", "bindAddress"]) {
         set_yaml_value(mapping, "bind-address", bind_address)?;
     } else {
-        mapping.remove(yaml_key("bind-address"));
+        mapping.remove("bind-address");
     }
     if settings.tun_mode {
-        mapping.insert(
-            serde_yaml::Value::String("tun".into()),
-            mihomo_tun_config(settings)?,
-        );
+        mapping.insert("tun", mihomo_tun_config(settings)?);
     } else {
-        mapping.remove(yaml_key("tun"));
+        mapping.remove("tun");
     }
 
     // Persist selector group choices across core reloads (CFW / mihomo profile.store-selected).
     // Only set the default when the profile did not already declare `profile:`.
-    if !mapping.contains_key(&yaml_key("profile")) {
+    if !mapping.contains_key("profile") {
         let mut profile = serde_yaml::Mapping::new();
         set_yaml_value(&mut profile, "store-selected", true)?;
-        mapping.insert(
-            serde_yaml::Value::String("profile".into()),
-            serde_yaml::Value::Mapping(profile),
-        );
+        mapping.insert("profile", serde_yaml::Value::Mapping(profile));
     }
 
     Ok(())
@@ -912,19 +906,16 @@ fn set_yaml_path_keys(
     let mapping = value
         .as_mapping_mut()
         .ok_or(ProfileError::InvalidConfigRoot)?;
-    let key = serde_yaml::Value::String(keys[0].into());
+    let key = keys[0];
     if keys.len() == 1 {
         mapping.insert(key, new_value);
         return Ok(());
     }
-    if !mapping.contains_key(&key) {
-        mapping.insert(
-            key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
+    if !mapping.contains_key(key) {
+        mapping.insert(key, serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     }
     let child = mapping
-        .get_mut(&key)
+        .get_mut(key)
         .ok_or_else(|| ProfileError::InvalidParserCommand {
             line,
             message: format!("cannot create path '{}'", keys.join(".")),
@@ -956,12 +947,12 @@ fn delete_yaml_path_keys(value: &mut serde_yaml::Value, keys: &[&str]) -> Result
     let mapping = value
         .as_mapping_mut()
         .ok_or(ProfileError::InvalidConfigRoot)?;
-    let key = serde_yaml::Value::String(keys[0].into());
+    let key = keys[0];
     if keys.len() == 1 {
-        mapping.remove(&key);
+        mapping.remove(key);
         return Ok(());
     }
-    if let Some(child) = mapping.get_mut(&key) {
+    if let Some(child) = mapping.get_mut(key) {
         delete_yaml_path_keys(child, &keys[1..])?;
     }
     Ok(())
@@ -1004,17 +995,17 @@ fn sequence_at_yaml_path_keys<'a>(
     let mapping = value
         .as_mapping_mut()
         .ok_or(ProfileError::InvalidConfigRoot)?;
-    let key = serde_yaml::Value::String(keys[0].into());
-    if !mapping.contains_key(&key) {
+    let key = keys[0];
+    if !mapping.contains_key(key) {
         let default_value = if keys.len() == 1 {
             serde_yaml::Value::Sequence(Vec::new())
         } else {
             serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
         };
-        mapping.insert(key.clone(), default_value);
+        mapping.insert(key, default_value);
     }
     let child = mapping
-        .get_mut(&key)
+        .get_mut(key)
         .ok_or_else(|| ProfileError::InvalidParserCommand {
             line,
             message: format!("cannot create path '{}'", keys.join(".")),
@@ -1111,12 +1102,8 @@ fn set_yaml_value<T: Serialize>(
     key: &str,
     value: T,
 ) -> Result<(), ProfileError> {
-    mapping.insert(yaml_key(key), serde_yaml::to_value(value)?);
+    mapping.insert(key, serde_yaml::to_value(value)?);
     Ok(())
-}
-
-fn yaml_key(key: &str) -> serde_yaml::Value {
-    serde_yaml::Value::String(key.into())
 }
 
 fn setting_bool(settings: &PersistedSettings, keys: &[&str]) -> Option<bool> {
@@ -1201,7 +1188,7 @@ fn count_profile_rules(path: &std::path::Path) -> Result<usize, ProfileError> {
     let config = serde_yaml::from_str::<serde_yaml::Value>(&raw)?;
     Ok(config
         .as_mapping()
-        .and_then(|mapping| mapping.get(yaml_key("rules")))
+        .and_then(|mapping| mapping.get("rules"))
         .and_then(serde_yaml::Value::as_sequence)
         .map_or(0, Vec::len))
 }
@@ -1359,37 +1346,37 @@ mod tests {
         let mapping = yaml.as_mapping().unwrap();
 
         assert_eq!(
-            mapping.get(yaml_key("mixed-port")),
+            mapping.get("mixed-port"),
             Some(&serde_yaml::to_value(7899_u16).unwrap())
         );
-        assert!(!mapping.contains_key(yaml_key("port")));
-        assert!(!mapping.contains_key(yaml_key("socks-port")));
+        assert!(!mapping.contains_key("port"));
+        assert!(!mapping.contains_key("socks-port"));
         assert_eq!(
-            mapping.get(yaml_key("allow-lan")),
+            mapping.get("allow-lan"),
             Some(&serde_yaml::to_value(true).unwrap())
         );
         assert_eq!(
-            mapping.get(yaml_key("ipv6")),
+            mapping.get("ipv6"),
             Some(&serde_yaml::to_value(true).unwrap())
         );
         assert_eq!(
-            mapping.get(yaml_key("mode")),
+            mapping.get("mode"),
             Some(&serde_yaml::Value::String("global".into()))
         );
         assert_eq!(
-            mapping.get(yaml_key("external-controller")),
+            mapping.get("external-controller"),
             Some(&serde_yaml::Value::String("127.0.0.1:19090".into()))
         );
         assert_eq!(
-            mapping.get(yaml_key("secret")),
+            mapping.get("secret"),
             Some(&serde_yaml::Value::String("runtime-secret".into()))
         );
         assert_eq!(
-            mapping.get(yaml_key("log-level")),
+            mapping.get("log-level"),
             Some(&serde_yaml::Value::String("debug".into()))
         );
         assert_eq!(
-            mapping.get(yaml_key("interface-name")),
+            mapping.get("interface-name"),
             Some(&serde_yaml::Value::String("en0".into()))
         );
 
@@ -1426,25 +1413,25 @@ mod tests {
 
         assert_eq!(
             mapping
-                .get(yaml_key("dns"))
+                .get("dns")
                 .and_then(|value| value.as_mapping())
-                .and_then(|dns| dns.get(yaml_key("enable"))),
+                .and_then(|dns| dns.get("enable")),
             Some(&serde_yaml::Value::Bool(true))
         );
         // Mixin deleted `profile:`; runtime injection restores store-selected default.
         assert_eq!(
             mapping
-                .get(yaml_key("profile"))
+                .get("profile")
                 .and_then(|value| value.as_mapping())
-                .and_then(|profile| profile.get(yaml_key("store-selected"))),
+                .and_then(|profile| profile.get("store-selected")),
             Some(&serde_yaml::Value::Bool(true))
         );
         assert_eq!(
-            mapping.get(yaml_key("mixed-port")),
+            mapping.get("mixed-port"),
             Some(&serde_yaml::to_value(7899_u16).unwrap())
         );
         assert_eq!(
-            mapping.get(yaml_key("unified-delay")),
+            mapping.get("unified-delay"),
             Some(&serde_yaml::Value::Bool(true))
         );
 
@@ -1483,7 +1470,7 @@ mod tests {
         let yaml = serde_yaml::from_str::<serde_yaml::Value>(&config).unwrap();
         let mapping = yaml.as_mapping().unwrap();
         let rules = mapping
-            .get(yaml_key("rules"))
+            .get("rules")
             .and_then(|value| value.as_sequence())
             .unwrap();
 
@@ -1495,19 +1482,19 @@ mod tests {
             rules.last().and_then(|value| value.as_str()),
             Some("MATCH,DIRECT")
         );
-        assert!(!mapping.contains_key(yaml_key("proxy-providers")));
+        assert!(!mapping.contains_key("proxy-providers"));
         assert_eq!(
             mapping
-                .get(yaml_key("dns"))
+                .get("dns")
                 .and_then(|value| value.as_mapping())
-                .and_then(|dns| dns.get(yaml_key("enable"))),
+                .and_then(|dns| dns.get("enable")),
             Some(&serde_yaml::Value::Bool(true))
         );
         assert_eq!(
             mapping
-                .get(yaml_key("dns"))
+                .get("dns")
                 .and_then(|value| value.as_mapping())
-                .and_then(|dns| dns.get(yaml_key("prefer-h3"))),
+                .and_then(|dns| dns.get("prefer-h3")),
             Some(&serde_yaml::Value::Bool(true))
         );
 
@@ -1527,7 +1514,7 @@ mod tests {
         assert_eq!(
             config
                 .as_mapping()
-                .and_then(|mapping| mapping.get(yaml_key("dns")))
+                .and_then(|mapping| mapping.get("dns"))
                 .and_then(|value| value.as_str()),
             Some("disabled")
         );
@@ -1552,7 +1539,7 @@ mod tests {
         assert_eq!(
             config
                 .as_mapping()
-                .and_then(|mapping| mapping.get(yaml_key("rules")))
+                .and_then(|mapping| mapping.get("rules"))
                 .and_then(|value| value.as_str()),
             Some("MATCH,DIRECT")
         );
@@ -1572,20 +1559,20 @@ mod tests {
         let tun = yaml
             .as_mapping()
             .unwrap()
-            .get(yaml_key("tun"))
+            .get("tun")
             .and_then(|value| value.as_mapping())
             .unwrap();
 
         assert_eq!(
-            tun.get(yaml_key("enable")),
+            tun.get("enable"),
             Some(&serde_yaml::Value::Bool(true))
         );
         assert_eq!(
-            tun.get(yaml_key("stack")),
+            tun.get("stack"),
             Some(&serde_yaml::Value::String("system".into()))
         );
         assert_eq!(
-            tun.get(yaml_key("dns-hijack"))
+            tun.get("dns-hijack")
                 .and_then(|value| value.as_sequence())
                 .and_then(|values| values.first())
                 .and_then(|value| value.as_str()),

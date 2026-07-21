@@ -1,0 +1,9 @@
+[package]
+name = "serde_yaml"
+version = "0.9.34-compat"
+edition = "2024"
+publish = false
+description = "Workspace shim: noyalib compat-serde-yaml re-exported as serde_yaml"
+
+[dependencies]
+noyalib = { workspace = true }

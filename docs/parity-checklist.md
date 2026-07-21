@@ -1,6 +1,6 @@
 # Clash for Mac Parity Checklist
 
-Honest status vs CFW 0.20.39 for the **0.1.0 beta** gate in [`RELEASE.md`](../RELEASE.md).
+Honest status vs CFW 0.20.39 for the **0.2.0** gate in [`RELEASE.md`](../RELEASE.md).
 Items marked beta-out-of-scope do not block distribution.
 
 ## Current Self-Audit
@@ -27,7 +27,7 @@ Items marked beta-out-of-scope do not block distribution.
 - [x] TUN lifecycle handoff to root daemon (fails loudly if unsigned / unapproved)
 - [x] Reveal home directory action
 - [x] GeoIP database status + click-to-update (`geoip.metadb` / `Country.mmdb`)
-- [x] Honest product version badge (`0.1.0`; CFW 0.20.39 is parity target only)
+- [x] Honest product version badge (`0.2.0`; CFW 0.20.39 is parity target only)
 - [x] Random mixed-port toggle wired to core start
 - [ ] Mode switcher on General page *(lives on Proxies; CFW also keeps modes there)*
 - [ ] Every original CFW setting with full migration *(partial — extra flattened)*

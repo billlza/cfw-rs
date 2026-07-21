@@ -137,15 +137,13 @@ pub fn default_config_mapping(
             .filter(|items| !items.is_empty())
             .unwrap_or_else(|| vec!["any:53".into()]);
         insert_yaml(&mut tun, "dns-hijack", dns_hijack)?;
-        config.insert(
-            serde_yaml::Value::String("tun".into()),
+        config.insert("tun",
             serde_yaml::Value::Mapping(tun),
         );
     }
     let mut profile = serde_yaml::Mapping::new();
     insert_yaml(&mut profile, "store-selected", true)?;
-    config.insert(
-        serde_yaml::Value::String("profile".into()),
+    config.insert("profile",
         serde_yaml::Value::Mapping(profile),
     );
     insert_yaml(&mut config, "proxies", Vec::<serde_yaml::Value>::new())?;
@@ -160,7 +158,7 @@ fn insert_yaml<T: serde::Serialize>(
     value: T,
 ) -> Result<(), CoreRuntimeError> {
     mapping.insert(
-        serde_yaml::Value::String(key.into()),
+        key,
         serde_yaml::to_value(value).map_err(|err| CoreRuntimeError::Config(err.to_string()))?,
     );
     Ok(())
@@ -173,20 +171,20 @@ mod tests {
     #[test]
     fn default_config_has_core_keys_and_match_rule() {
         let mapping = default_config_mapping(&PersistedSettings::default()).unwrap();
-        assert!(mapping.contains_key(serde_yaml::Value::String("mixed-port".into())));
-        assert!(mapping.contains_key(serde_yaml::Value::String("external-controller".into())));
+        assert!(mapping.contains_key("mixed-port"));
+        assert!(mapping.contains_key("external-controller"));
         let profile = mapping
-            .get(serde_yaml::Value::String("profile".into()))
+            .get("profile")
             .and_then(serde_yaml::Value::as_mapping)
             .unwrap();
         assert_eq!(
             profile
-                .get(serde_yaml::Value::String("store-selected".into()))
+                .get("store-selected")
                 .and_then(serde_yaml::Value::as_bool),
             Some(true)
         );
         let rules = mapping
-            .get(serde_yaml::Value::String("rules".into()))
+            .get("rules")
             .and_then(serde_yaml::Value::as_sequence)
             .unwrap();
         assert_eq!(rules.last().unwrap().as_str(), Some("MATCH,DIRECT"));
@@ -195,7 +193,7 @@ mod tests {
     #[test]
     fn tun_block_present_only_when_enabled() {
         let without = default_config_mapping(&PersistedSettings::default()).unwrap();
-        assert!(!without.contains_key(serde_yaml::Value::String("tun".into())));
+        assert!(!without.contains_key("tun"));
 
         let settings = PersistedSettings {
             tun_mode: true,
@@ -203,11 +201,11 @@ mod tests {
         };
         let with = default_config_mapping(&settings).unwrap();
         let tun = with
-            .get(serde_yaml::Value::String("tun".into()))
+            .get("tun")
             .and_then(serde_yaml::Value::as_mapping)
             .unwrap();
         assert_eq!(
-            tun.get(serde_yaml::Value::String("enable".into()))
+            tun.get("enable")
                 .and_then(serde_yaml::Value::as_bool),
             Some(true)
         );

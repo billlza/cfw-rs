@@ -1,6 +1,6 @@
 [package]
 name = "cfw-tauri-shell"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 build = "build.rs"
 autobins = false
@@ -21,13 +21,14 @@ qrcode.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-updater = "2"
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 urlencoding.workspace = true
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.6.3", features = [] }

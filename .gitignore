@@ -23,3 +23,10 @@
 /build-release.log
 /notarize.log
 /*.log
+
+# UI esbuild
+/apps/cfw-tauri-shell/node_modules/
+
+# Tauri updater private signing key (public key lives in tauri.conf.json)
+/.tauri/*.key
+/.tauri/*.log

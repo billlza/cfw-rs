@@ -26,7 +26,7 @@
    - Tray + `clash://install-config` deep link work
 
 4. **Ship hygiene**
-   - Version ≥ `0.1.0` with CHANGELOG entry
+   - Version ≥ `0.2.0` with CHANGELOG entry
    - LICENSE present (MIT per Cargo.toml)
    - CI: test on push/PR; release build documented or automated
    - `docs/parity-checklist.md` matches reality (no stale unchecked items that are already done)
@@ -35,7 +35,27 @@
    - Pixel-perfect screenshot parity vs CFW
    - Proven 3× performance CI gates
    - SSID policy, Monaco editor, DHCP server, full PAC editor
-   - In-app Sparkle auto-update
+   - In-app Sparkle auto-update *(superseded in 0.2.0 by tauri-plugin-updater)*
+
+
+
+## Gate beta4 regression (macOS 27 `26A5388g`)
+
+Run on the Golden Gate beta4 machine after dependency successors land:
+
+1. `rustc -V` shows **1.97.1**; `cargo test --workspace` green
+2. Service Mode Install → Login Items approve → TUN on/off (no ghost toggle)
+3. System Proxy on/off via **SCPreferences** path; quit restores snapshot
+4. Subscription update + GeoIP download (reqwest 0.13 / rustls platform-verifier)
+5. Profile mixin / parser YAML round-trip (noyalib compat Value DOM)
+6. Notarization staple: briefly **disable system proxy** first — CloudKit/staple can hang otherwise
+
+```bash
+sw_vers
+rustc -V
+cargo test --workspace
+npm --prefix apps/cfw-tauri-shell run build
+```
 
 ## Verification commands
 

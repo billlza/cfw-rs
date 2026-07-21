@@ -1,6 +1,6 @@
 [package]
 name = "cfw-platform"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -13,3 +13,6 @@ serde_json.workspace = true
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSURL"] }
 objc2-service-management = "0.3"
+objc2-system-configuration = "0.3"
+objc2-core-foundation = { version = "0.3", features = ["CFDictionary", "CFString", "CFNumber", "CFArray"] }
+

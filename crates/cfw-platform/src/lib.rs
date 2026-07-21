@@ -8,12 +8,15 @@ use anyhow::{Context, Result, bail};
 use cfw_core::SettingsStore;
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
+mod sysproxy_sc;
+
 const NETWORKSETUP: &str = "/usr/sbin/networksetup";
 const ROUTE: &str = "/sbin/route";
 const LAUNCHCTL: &str = "/bin/launchctl";
 const ID: &str = "/usr/bin/id";
 const CODESIGN: &str = "/usr/bin/codesign";
-const PROXY_HOST: &str = "127.0.0.1";
+pub(crate) const PROXY_HOST: &str = "127.0.0.1";
 const PRIVILEGED_HELPER_TOOLS: &str = "/Library/PrivilegedHelperTools";
 const SYSTEM_PROXY_SNAPSHOT_FILE: &str = "system-proxy-snapshot.json";
 /// Name of the privileged helper daemon plist embedded in the app bundle at
@@ -94,7 +97,7 @@ impl MacOsPlatformDesign {
     pub fn arm64_baseline() -> Self {
         Self {
             target: PlatformTarget::MacOsArm64,
-            system_proxy_strategy: "macOS network service proxy manager with explicit snapshot/restore",
+            system_proxy_strategy: "objc2 SystemConfiguration SCPreferences (proxy+DNS) with networksetup fallback",
             helper_strategy: "SMAppService privileged helper (Login Items approval required)",
             launchd_strategy: "typed launchd contract, no ad-hoc shell scripts in product logic",
             tun_strategy: TunDriverKind::SmAppServiceRootHelper,
@@ -217,7 +220,7 @@ struct SystemProxySnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct NetworkServiceProxySnapshot {
+pub(crate) struct NetworkServiceProxySnapshot {
     service: String,
     web: ProxyProtocolState,
     secure_web: ProxyProtocolState,
@@ -226,7 +229,7 @@ struct NetworkServiceProxySnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ProxyProtocolState {
+pub(crate) struct ProxyProtocolState {
     enabled: bool,
     server: Option<String>,
     port: Option<u16>,
@@ -251,6 +254,12 @@ impl SystemProxySnapshot {
 
 impl MacOsPlatformService {
     fn active_network_services(&self) -> Result<Vec<String>> {
+        #[cfg(target_os = "macos")]
+        if let Ok(services) = sysproxy_sc::list_network_services() {
+            if !services.is_empty() {
+                return Ok(services);
+            }
+        }
         let output = run_networksetup(&["-listallnetworkservices"])?;
         Ok(parse_network_services(&output))
     }
@@ -284,6 +293,10 @@ impl MacOsPlatformService {
     }
 
     fn read_service_proxy_snapshot(&self, service: String) -> Result<NetworkServiceProxySnapshot> {
+        #[cfg(target_os = "macos")]
+        if let Ok(snapshot) = sysproxy_sc::read_service_proxy_snapshot(&service) {
+            return Ok(snapshot);
+        }
         Ok(NetworkServiceProxySnapshot {
             web: read_protocol_state(&service, "-getwebproxy")?,
             secure_web: read_protocol_state(&service, "-getsecurewebproxy")?,
@@ -348,6 +361,10 @@ impl MacOsPlatformService {
 
     fn apply_snapshot(&self, snapshot: &SystemProxySnapshot) -> Result<()> {
         for service in snapshot.services_for_restore() {
+            #[cfg(target_os = "macos")]
+            if sysproxy_sc::apply_service_snapshot(service).is_ok() {
+                continue;
+            }
             apply_protocol_state(&service.service, ProxyProtocol::Web, &service.web)?;
             apply_protocol_state(
                 &service.service,
@@ -365,9 +382,6 @@ impl MacOsPlatformService {
         rollback_snapshot.target_services = target_services.to_vec();
         let result = (|| -> Result<()> {
             for service in target_services {
-                set_protocol_proxy(service, ProxyProtocol::Web, PROXY_HOST, port)?;
-                set_protocol_proxy(service, ProxyProtocol::SecureWeb, PROXY_HOST, port)?;
-                set_protocol_proxy(service, ProxyProtocol::Socks, PROXY_HOST, port)?;
                 let domains = if bypass.is_empty() {
                     DEFAULT_BYPASS_DOMAINS
                         .iter()
@@ -376,6 +390,13 @@ impl MacOsPlatformService {
                 } else {
                     bypass.to_vec()
                 };
+                #[cfg(target_os = "macos")]
+                if sysproxy_sc::apply_clash_proxy(service, port, &domains).is_ok() {
+                    continue;
+                }
+                set_protocol_proxy(service, ProxyProtocol::Web, PROXY_HOST, port)?;
+                set_protocol_proxy(service, ProxyProtocol::SecureWeb, PROXY_HOST, port)?;
+                set_protocol_proxy(service, ProxyProtocol::Socks, PROXY_HOST, port)?;
                 set_bypass_domains(service, &domains)?;
             }
             Ok(())
@@ -414,6 +435,10 @@ impl MacOsPlatformService {
         rollback_snapshot.target_services = target_services.to_vec();
         let result = (|| -> Result<()> {
             for service in target_services {
+                #[cfg(target_os = "macos")]
+                if sysproxy_sc::apply_clash_pac(service, &pac_url).is_ok() {
+                    continue;
+                }
                 // Prefer Auto Proxy URL; clear manual HTTP/HTTPS/SOCKS for this service.
                 run_networksetup(&["-setautoproxyurl", service, &pac_url])?;
                 run_networksetup(&["-setautoproxystate", service, "on"])?;
@@ -1341,6 +1366,63 @@ impl LaunchdService for MacOsPlatformService {
     }
 }
 
+impl MacOsPlatformService {
+    /// Register the main app as a Login Item via `SMAppService::mainAppService`.
+    pub fn enable_login_item(&self) -> Result<ServiceModeStatus> {
+        #[cfg(target_os = "macos")]
+        {
+            sm_app_service::register_login_item().map_err(|err| anyhow::anyhow!(err))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            bail!("Login Item is only available on macOS")
+        }
+    }
+
+    pub fn disable_login_item(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            sm_app_service::unregister_login_item().map_err(|err| anyhow::anyhow!(err))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            bail!("Login Item is only available on macOS")
+        }
+    }
+
+    pub fn login_item_status(&self) -> ServiceModeStatus {
+        #[cfg(target_os = "macos")]
+        {
+            sm_app_service::login_item_status()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            ServiceModeStatus::Unknown
+        }
+    }
+
+    pub fn open_login_items_settings(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            sm_app_service::open_login_items_settings();
+        }
+    }
+
+    /// Set DNS server addresses for a network service via SCPreferences.
+    /// Empty `servers` clears custom DNS (DHCP). Falls back is caller's job.
+    pub fn apply_dns_servers_sc(&self, service: &str, servers: &[String]) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            sysproxy_sc::apply_dns_servers(service, servers)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (service, servers);
+            bail!("DNS via SCPreferences is only available on macOS")
+        }
+    }
+}
+
 impl ServiceModeService for MacOsPlatformService {
     fn service_mode_status(&self) -> ServiceModeStatus {
         #[cfg(target_os = "macos")]
@@ -1467,11 +1549,46 @@ mod sm_app_service {
         unsafe { daemon().unregisterAndReturnError() }
             .map_err(|err| format!("SMAppService unregister failed: {err:?}"))
     }
+
+    fn main_app_login_item() -> Retained<SMAppService> {
+        // SAFETY: `mainAppService` returns the calling app as a Login Item service.
+        unsafe { SMAppService::mainAppService() }
+    }
+
+    pub(super) fn login_item_status() -> ServiceModeStatus {
+        map_status(unsafe { main_app_login_item().status() })
+    }
+
+    pub(super) fn register_login_item() -> Result<ServiceModeStatus, String> {
+        let service = main_app_login_item();
+        unsafe { service.registerAndReturnError() }
+            .map_err(|err| format!("SMAppService mainApp Login Item register failed: {err:?}"))?;
+        Ok(map_status(unsafe { service.status() }))
+    }
+
+    pub(super) fn unregister_login_item() -> Result<(), String> {
+        unsafe { main_app_login_item().unregisterAndReturnError() }
+            .map_err(|err| format!("SMAppService mainApp Login Item unregister failed: {err:?}"))
+    }
+
+    pub(super) fn open_login_items_settings() {
+        unsafe { SMAppService::openSystemSettingsLoginItems() }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sc_preferences_can_list_network_services() {
+        let services = sysproxy_sc::list_network_services().expect("SCPreferences list services");
+        assert!(
+            services.iter().any(|name| !name.is_empty()),
+            "expected at least one SC network service name"
+        );
+    }
 
     #[test]
     fn parses_enabled_networksetup_proxy_state() {

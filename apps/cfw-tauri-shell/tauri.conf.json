@@ -1,11 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Clash for Mac",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.bill.clashformac",
   "build": {
     "frontendDist": "ui",
-    "beforeBuildCommand": "sh -c 'for script in scripts/build_helper_resource.sh ../scripts/build_helper_resource.sh ../../scripts/build_helper_resource.sh ../../../scripts/build_helper_resource.sh; do if [ -x \"$script\" ]; then \"$script\"; exit $?; fi; done; echo \"build_helper_resource.sh not found\" >&2; exit 127'"
+    "beforeBuildCommand": "sh -c 'npm run build && for script in scripts/build_helper_resource.sh ../scripts/build_helper_resource.sh ../../scripts/build_helper_resource.sh ../../../scripts/build_helper_resource.sh; do if [ -x \"$script\" ]; then \"$script\"; exit $?; fi; done; echo \"build_helper_resource.sh not found\" >&2; exit 127'",
+    "beforeDevCommand": "npm run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -34,6 +35,7 @@
     "targets": [
       "app"
     ],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.icns",
       "icons/icon_512.png",
@@ -55,6 +57,12 @@
           "clash"
         ]
       }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQxNjc4ODQ3NDhENTIwREQKUldUZElOVklSNGhuUWM1NnlCMS9qNGtyQm56L3JHSnFwYy9ZRm9iMHpQYzdBeTBqYmU0ZXNsMHUK",
+      "endpoints": [
+        "https://github.com/billlza/cfw-rs/releases/latest/download/latest.json"
+      ]
     }
   }
 }

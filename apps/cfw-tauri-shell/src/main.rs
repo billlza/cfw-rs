@@ -5,7 +5,7 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cfw_controller::{
@@ -19,9 +19,9 @@ use cfw_core::{
     parse_deep_link,
 };
 use cfw_platform::{
-    HelperInstallRequest, HelperService, LaunchAgentSpec, LaunchdDomain, LaunchdService,
-    MacOsPlatformDesign, MacOsPlatformService, NetworkDiagnostics, PlatformTarget, ServiceModeService,
-    ServiceModeStatus, SystemProxyMode, SystemProxyService, SystemProxyState, TunService,
+    HelperInstallRequest, HelperService, LaunchdDomain, LaunchdService, MacOsPlatformDesign,
+    MacOsPlatformService, NetworkDiagnostics, PlatformTarget, ServiceModeService, ServiceModeStatus,
+    SystemProxyMode, SystemProxyService, SystemProxyState, TunService,
 };
 use cfw_profiles::{
     ProfileApplyResult, ProfileImportRequest, ProfileImportResult, ProfileManager, ProfileRecord,
@@ -205,6 +205,7 @@ fn update_settings(
     let mut settings = store.read_or_default().map_err(|err| err.to_string())?;
     mutate(&mut settings)?;
     store.write(&settings).map_err(|err| err.to_string())?;
+    invalidate_controller_client_cache();
     store.snapshot().map_err(|err| err.to_string())
 }
 
@@ -373,6 +374,7 @@ fn read_settings_snapshot() -> Result<SettingsSnapshot, String> {
 fn write_settings_snapshot(settings: PersistedSettings) -> Result<SettingsSnapshot, String> {
     let store = settings_store()?;
     store.write(&settings).map_err(|err| err.to_string())?;
+    invalidate_controller_client_cache();
     store.snapshot().map_err(|err| err.to_string())
 }
 
@@ -382,6 +384,7 @@ fn reset_settings_snapshot() -> Result<SettingsSnapshot, String> {
     store
         .write(&PersistedSettings::default())
         .map_err(|err| err.to_string())?;
+    invalidate_controller_client_cache();
     store.snapshot().map_err(|err| err.to_string())
 }
 
@@ -634,7 +637,7 @@ fn restore_dns_servers_from_settings(settings: &PersistedSettings) -> Option<Str
         .filter(|text| !text.trim().is_empty())
 }
 
-/// Apply DNS via `networksetup`. A lone `Empty` token clears servers (macOS API).
+/// Apply DNS via SCPreferences first; fall back to `networksetup` when SC fails.
 fn apply_restore_dns_servers_inner(servers: &str) -> Result<String, String> {
     let list = servers
         .split(|ch| ch == '\n' || ch == ',' || ch == ' ')
@@ -644,10 +647,10 @@ fn apply_restore_dns_servers_inner(servers: &str) -> Result<String, String> {
     if list.is_empty() {
         return Err("provide at least one DNS server (or 'Empty' to clear)".into());
     }
-    // macOS: `networksetup -setdnsservers <service> Empty` clears custom DNS.
+    // macOS: a lone `Empty` token clears custom DNS (DHCP).
     let clear = list.len() == 1 && list[0].eq_ignore_ascii_case("empty");
-    let dns_args: Vec<String> = if clear {
-        vec!["Empty".into()]
+    let dns_servers: Vec<String> = if clear {
+        Vec::new()
     } else {
         list.iter().map(|item| (*item).to_string()).collect()
     };
@@ -662,22 +665,45 @@ fn apply_restore_dns_servers_inner(servers: &str) -> Result<String, String> {
     if targets.is_empty() {
         return Err("no network services found to update DNS".into());
     }
+
+    let platform = MacOsPlatformService;
     let mut updated = 0usize;
+    let mut used_sc = 0usize;
     for service in &targets {
-        let mut args = vec!["-setdnsservers".to_string(), service.clone()];
-        args.extend(dns_args.iter().cloned());
-        let output = Command::new("/usr/sbin/networksetup")
-            .args(&args)
-            .output()
-            .map_err(|err| err.to_string())?;
-        if output.status.success() {
-            updated += 1;
+        match platform.apply_dns_servers_sc(service, &dns_servers) {
+            Ok(()) => {
+                updated += 1;
+                used_sc += 1;
+                continue;
+            }
+            Err(_) => {
+                let mut args = vec!["-setdnsservers".to_string(), service.clone()];
+                if clear {
+                    args.push("Empty".into());
+                } else {
+                    args.extend(dns_servers.iter().cloned());
+                }
+                let output = Command::new("/usr/sbin/networksetup")
+                    .args(&args)
+                    .output()
+                    .map_err(|err| err.to_string())?;
+                if output.status.success() {
+                    updated += 1;
+                }
+            }
         }
     }
-    Ok(if clear {
-        format!("cleared DNS on {updated}/{} service(s)", targets.len())
+    let via = if used_sc == updated && updated > 0 {
+        "SCPreferences"
+    } else if used_sc > 0 {
+        "SCPreferences+networksetup"
     } else {
-        format!("updated DNS on {updated}/{} service(s)", targets.len())
+        "networksetup"
+    };
+    Ok(if clear {
+        format!("cleared DNS on {updated}/{} service(s) via {via}", targets.len())
+    } else {
+        format!("updated DNS on {updated}/{} service(s) via {via}", targets.len())
     })
 }
 
@@ -909,25 +935,28 @@ fn set_mixin_enabled(enabled: bool) -> Result<SettingsSnapshot, String> {
 fn set_launch_at_login_enabled(enabled: bool) -> Result<SettingsSnapshot, String> {
     update_settings(|settings| {
         let platform = MacOsPlatformService;
+        // Migrate away from the legacy user LaunchAgent if present.
+        let _ = platform.bootout(LAUNCH_AGENT_LABEL, LaunchdDomain::GuiAgent);
+        let _ = platform.uninstall_launch_agent(LAUNCH_AGENT_LABEL);
         if enabled {
-            let program = std::env::current_exe().map_err(|err| err.to_string())?;
-            platform
-                .install_launch_agent(&LaunchAgentSpec {
-                    label: LAUNCH_AGENT_LABEL.into(),
-                    program,
-                    program_arguments: Vec::new(),
-                    run_at_load: true,
-                })
-                .map_err(|err| err.to_string())?;
-            platform
-                .bootstrap(LAUNCH_AGENT_LABEL, LaunchdDomain::GuiAgent)
-                .map_err(|err| err.to_string())?;
+            match platform.enable_login_item().map_err(|err| err.to_string())? {
+                ServiceModeStatus::Enabled => {}
+                ServiceModeStatus::RequiresApproval => {
+                    platform.open_login_items_settings();
+                    return Err(
+                        "Start at Login needs approval in System Settings › General › Login Items"
+                            .into(),
+                    );
+                }
+                other => {
+                    return Err(format!(
+                        "could not enable Login Item (status: {other:?}); a signed app in /Applications is required"
+                    ));
+                }
+            }
         } else {
             platform
-                .bootout(LAUNCH_AGENT_LABEL, LaunchdDomain::GuiAgent)
-                .map_err(|err| err.to_string())?;
-            platform
-                .uninstall_launch_agent(LAUNCH_AGENT_LABEL)
+                .disable_login_item()
                 .map_err(|err| err.to_string())?;
         }
         settings.launch_at_login = enabled;
@@ -1179,6 +1208,19 @@ fn setting_extra_string(settings: &PersistedSettings, keys: &[&str]) -> Option<S
     })
 }
 
+/// Process-wide controller HTTP client cache keyed by endpoint (host/port/secret).
+/// Avoids rebuilding a rustls pool on every invoke / tray refresh.
+fn controller_client_cache() -> &'static Mutex<Option<(ControllerEndpoint, ControllerClient)>> {
+    static CACHE: OnceLock<Mutex<Option<(ControllerEndpoint, ControllerClient)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn invalidate_controller_client_cache() {
+    if let Ok(mut guard) = controller_client_cache().lock() {
+        *guard = None;
+    }
+}
+
 fn controller_client_from_settings() -> Result<ControllerClient, String> {
     let settings = settings_store()?
         .read_or_default()
@@ -1188,7 +1230,17 @@ fn controller_client_from_settings() -> Result<ControllerClient, String> {
         settings.external_controller_port,
         settings.secret,
     );
-    ControllerClient::new(endpoint).map_err(|err| err.to_string())
+    let mut guard = controller_client_cache()
+        .lock()
+        .map_err(|err| err.to_string())?;
+    if let Some((cached_endpoint, client)) = guard.as_ref()
+        && cached_endpoint == &endpoint
+    {
+        return Ok(client.clone());
+    }
+    let client = ControllerClient::new(endpoint.clone()).map_err(|err| err.to_string())?;
+    *guard = Some((endpoint, client.clone()));
+    Ok(client)
 }
 
 #[tauri::command]
@@ -2250,28 +2302,51 @@ async fn dns_query(name: String, record_type: Option<String>) -> Result<serde_js
 
 #[tauri::command]
 fn open_login_items_settings() -> Result<(), String> {
-    let status = Command::new("/usr/bin/open")
-        .arg("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
-        .status()
-        .map_err(|err| err.to_string())?;
-    if status.success() {
-        return Ok(());
-    }
-    let fallback = Command::new("/usr/bin/open")
-        .arg("-b")
-        .arg("com.apple.systempreferences")
-        .status()
-        .map_err(|err| err.to_string())?;
-    if fallback.success() {
-        Ok(())
-    } else {
-        Err(format!("open Login Items failed with status {status}"))
-    }
+    MacOsPlatformService.open_login_items_settings();
+    Ok(())
 }
 
 #[tauri::command]
 fn apply_restore_dns_servers(servers: String) -> Result<String, String> {
     apply_restore_dns_servers_inner(&servers)
+}
+
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|err| err.to_string())?;
+    match updater.check().await.map_err(|err| err.to_string())? {
+        Some(update) => Ok(serde_json::json!({
+            "available": true,
+            "current": env!("CARGO_PKG_VERSION"),
+            "version": update.version,
+            "notes": update.body,
+            "date": update.date.map(|d| d.to_string()),
+        })),
+        None => Ok(serde_json::json!({
+            "available": false,
+            "current": env!("CARGO_PKG_VERSION"),
+        })),
+    }
+}
+
+#[tauri::command]
+async fn install_available_update(app: AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|err| err.to_string())?;
+    let Some(update) = updater.check().await.map_err(|err| err.to_string())? else {
+        return Ok(serde_json::json!({
+            "installed": false,
+            "reason": "no update available",
+            "current": env!("CARGO_PKG_VERSION"),
+        }));
+    };
+    let version = update.version.clone();
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|err| err.to_string())?;
+    app.restart();
 }
 
 #[tauri::command]
@@ -2716,6 +2791,7 @@ fn cleanup_runtime(core: &ManagedCore) -> Vec<String> {
 }
 
 fn emit_page(app: &AppHandle, page: &str) {
+    restore_main_ui_from_tray(app);
     let _ = app.emit("cfw://page", page.to_string());
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -2727,6 +2803,7 @@ fn emit_deep_links(app: &AppHandle, urls: Vec<String>) {
     if urls.is_empty() {
         return;
     }
+    restore_main_ui_from_tray(app);
     let _ = app.emit("cfw://deep-link", urls);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -2735,6 +2812,7 @@ fn emit_deep_links(app: &AppHandle, urls: Vec<String>) {
 }
 
 fn emit_tray_action(app: &AppHandle, action: &str) {
+    restore_main_ui_from_tray(app);
     let _ = app.emit("cfw://tray-action", action.to_string());
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -3098,9 +3176,17 @@ fn apply_silent_start_on_launch(app: &AppHandle) {
     if !silent {
         return;
     }
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    let _ = app.set_dock_visibility(false);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
+}
+
+/// Restore Regular activation + Dock when the user opens the dashboard from the tray.
+fn restore_main_ui_from_tray(app: &AppHandle) {
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    let _ = app.set_dock_visibility(true);
 }
 
 fn main() {
@@ -3108,6 +3194,7 @@ fn main() {
         .manage(ManagedCore::default())
         .manage(LiveStreams::default())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             let urls = argv
                 .into_iter()
@@ -3178,6 +3265,8 @@ fn main() {
             set_proxy_mode,
             set_allow_lan,
             apply_restore_dns_servers,
+            check_for_updates,
+            install_available_update,
             open_login_items_settings,
             dns_query,
             controller_version,

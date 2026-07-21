@@ -8,7 +8,9 @@ TUN truthfulness + product About / update feedback.
 - Switch reflects **live handoff** (`tun.enable` + managed root core), not a stale disk flag
 - Fresh launch defaults to **Off** unless Service Mode actually owns a TUN-capable core
 - Service Mode always spawns **mihomo** for TUN (clash-rs controller-ready ≠ working utun)
-- Handoff waits for **our** managed core on the controller port — never a foreign Clash for Windows listener
+- Handoff readiness uses **controller API + netstat** — unprivileged `lsof` cannot see root listeners and previously false-failed while utun was already up
+- Failed handoff scrub `cache.db` (root-owned) and wait for ports before restarting in-process core
+- Helper `serve` processes an existing control session **immediately** (no 5s first-wait race)
 - System Proxy toggles **never** mutate `tun_mode`; UI re-syncs TUN after proxy changes
 - `write_settings_snapshot` cannot ghost-flip TUN; reconcile emits `cfw://settings-changed`
 

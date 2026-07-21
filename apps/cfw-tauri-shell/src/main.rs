@@ -563,6 +563,9 @@ async fn set_tun_on(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnaps
             let _ = render_runtime_config_from_settings();
             let _ = write_control_session(false);
             let _ = ControlSession::remove();
+            // Give launchd/helper time to tear down the root core before we reclaim ports.
+            let _ = wait_for_ports_free(&ports).await;
+            let _ = scrub_root_runtime_artifacts();
             if stopped_in_process {
                 if let Err(restart_err) = start_managed_core(app, core).await {
                     emit_shell_log(
@@ -626,7 +629,8 @@ async fn set_tun_off(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnap
         }
 
         reap_managed_core_orphans(&[mixed_port, controller_port])?;
-        let _ = wait_for_ports_free(&[controller_port]).await;
+        let _ = wait_for_ports_free(&[controller_port, mixed_port]).await;
+        let _ = scrub_root_runtime_artifacts();
         start_managed_core(app, core).await?;
         Ok(snapshot)
     }
@@ -867,6 +871,16 @@ fn is_managed_core_process(command_line: &str, markers: &[String]) -> bool {
 }
 
 fn pids_listening_on_port(port: u16) -> Result<Vec<u32>, String> {
+    let mut pids = pids_from_lsof(port)?;
+    if pids.is_empty() {
+        // Unprivileged `lsof` often cannot see root listeners (Service Mode
+        // mihomo). Fall back to `netstat -anv` which still reports them.
+        pids = pids_from_netstat(port)?;
+    }
+    Ok(pids)
+}
+
+fn pids_from_lsof(port: u16) -> Result<Vec<u32>, String> {
     let output = Command::new("/usr/sbin/lsof")
         .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
         .output()
@@ -878,6 +892,44 @@ fn pids_listening_on_port(port: u16) -> Result<Vec<u32>, String> {
         .lines()
         .filter_map(|line| line.trim().parse().ok())
         .collect())
+}
+
+/// Parse `netstat -anv -p tcp` LISTEN rows. macOS prints `name:pid` in the
+/// process column even for root listeners that `lsof` hides from the user.
+fn pids_from_netstat(port: u16) -> Result<Vec<u32>, String> {
+    let output = Command::new("/usr/sbin/netstat")
+        .args(["-anv", "-p", "tcp"])
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+    let needle = format!(".{port}");
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if !line.contains("LISTEN") {
+            continue;
+        }
+        // Local address looks like `127.0.0.1.9090` or `*.9090`.
+        let local = line.split_whitespace().nth(3).unwrap_or("");
+        if !(local == format!("*.{port}")
+            || local.ends_with(&needle)
+            || local.contains(&format!("].{port}")))
+        {
+            continue;
+        }
+        // Process column is typically `clash-darwin:12345` near the end.
+        if let Some(pid) = line
+            .split_whitespace()
+            .rev()
+            .find_map(|token| token.rsplit_once(':').and_then(|(_, pid)| pid.parse().ok()))
+        {
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    Ok(pids)
 }
 
 fn process_command_line(pid: u32) -> Option<String> {
@@ -940,29 +992,50 @@ fn write_control_session(want_core: bool) -> Result<(), String> {
     .map_err(|err| err.to_string())
 }
 
-/// Poll until **our** managed core answers on the controller port (never treat a
-/// foreign Clash for Windows / other clash on the same port as success), and the
-/// live config reports `tun.enable` when we asked for TUN.
+/// Poll until the Service Mode root core answers and reports `tun.enable`.
+///
+/// Do **not** gate on unprivileged `lsof`: root mihomo sockets are invisible to
+/// it on macOS, which caused false "helper did not start" failures while TUN was
+/// already up. Prefer TCP + controller API; optionally confirm a managed PID via
+/// netstat when available.
 async fn wait_for_controller_ready() -> Result<(), String> {
-    let port = settings_store()?
+    let settings = settings_store()?
         .read_or_default()
-        .map_err(|err| err.to_string())?
-        .external_controller_port;
-    let deadline = Instant::now() + Duration::from_secs(12);
+        .map_err(|err| err.to_string())?;
+    let port = settings.external_controller_port;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut saw_controller = false;
     loop {
-        if find_managed_core_listener_pid(port).is_none() {
+        // Prefer proving OUR managed binary when netstat/lsof can see it. If the
+        // listener is invisible but the controller answers with tun.enable while
+        // our control session wants the core, accept that — root SMAppService
+        // cores are often invisible to lsof.
+        let managed_pid = find_managed_core_listener_pid(port);
+        let foreign_only = managed_pid.is_none()
+            && controller_port_is_open(port)
+            && !pids_listening_on_port(port).unwrap_or_default().is_empty();
+        if foreign_only {
             if Instant::now() >= deadline {
                 return Err(format!(
-                    "Service Mode helper did not start a managed core on :{port} (see /Library/Logs/com.bill.clashformac.helper.log). Another app may be using the port."
+                    "controller :{port} is occupied by another process (not Clash for Mac). Quit Clash for Windows / other clash cores using this port, then retry TUN."
                 ));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
+
         match controller_client_from_settings()?.configs().await {
             Ok(cfg) => {
+                saw_controller = true;
                 if tun_enable_from_clash_config(&cfg) {
-                    return Ok(());
+                    let session_ok = ControlSession::read()
+                        .ok()
+                        .flatten()
+                        .map(|session| session.want_core)
+                        .unwrap_or(false);
+                    if session_ok || managed_pid.is_some() {
+                        return Ok(());
+                    }
                 }
                 if Instant::now() >= deadline {
                     return Err(
@@ -972,10 +1045,16 @@ async fn wait_for_controller_ready() -> Result<(), String> {
             }
             Err(error) if Instant::now() >= deadline => {
                 return Err(format!(
-                    "core controller not ready (see /Library/Logs/com.bill.clashformac.helper.log): {error}"
+                    "Service Mode helper did not become ready on :{port} (see /Library/Logs/com.bill.clashformac.helper.log): {error}"
                 ));
             }
-            Err(_) => {}
+            Err(_) => {
+                if Instant::now() >= deadline && !saw_controller {
+                    return Err(format!(
+                        "Service Mode helper did not start a managed core on :{port} (see /Library/Logs/com.bill.clashformac.helper.log)."
+                    ));
+                }
+            }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -992,6 +1071,29 @@ fn tun_enable_from_clash_config(cfg: &cfw_controller::ClashConfig) -> bool {
         .unwrap_or(false)
 }
 
+/// Remove root-owned runtime files left by Service Mode mihomo so the
+/// unprivileged in-process core can start again (notably `cache.db`).
+fn scrub_root_runtime_artifacts() -> Result<(), String> {
+    let home = settings_store()?.paths().app_home.clone();
+    for name in ["cache.db", "cache.db-shm", "cache.db-wal"] {
+        let path = home.join(name);
+        if !path.exists() {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) => {
+                // Directory is user-writable; unlink usually works even for root files.
+                return Err(format!(
+                    "could not remove root runtime file {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn tun_runtime_state() -> Result<serde_json::Value, String> {
     let settings = settings_store()?
@@ -1002,12 +1104,12 @@ async fn tun_runtime_state() -> Result<serde_json::Value, String> {
     let want_core = session.as_ref().map(|s| s.want_core).unwrap_or(false);
     let managed_core_pid = find_managed_core_listener_pid(settings.external_controller_port);
     let mut tun_enable = false;
-    if managed_core_pid.is_some() {
+    if want_core || settings.tun_mode || managed_core_pid.is_some() {
         if let Ok(cfg) = controller_client_from_settings()?.configs().await {
             tun_enable = tun_enable_from_clash_config(&cfg);
         }
     }
-    let active = settings.tun_mode && want_core && managed_core_pid.is_some() && tun_enable;
+    let active = settings.tun_mode && want_core && tun_enable;
     Ok(serde_json::json!({
         "tun_mode": settings.tun_mode,
         "service_mode": service_mode,

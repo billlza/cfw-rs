@@ -102,11 +102,9 @@ fn supervise() -> Result<()> {
         .watch(&dir, RecursiveMode::NonRecursive)
         .with_context(|| format!("failed to watch {}", dir.display()))?;
 
+    // Process any pre-existing control session immediately — do not wait up to
+    // SUPERVISE_FALLBACK before the first spawn (app handoff races this delay).
     loop {
-        // Block until FSEvents/kqueue reports a change, or fall back for heartbeat.
-        let _ = rx.recv_timeout(SUPERVISE_FALLBACK);
-        while rx.try_recv().is_ok() {}
-
         let session = match ControlSession::read() {
             Ok(Some(session)) => session,
             // File gone -> the app wants Service Mode off; launchd is stopping us.
@@ -136,36 +134,36 @@ fn supervise() -> Result<()> {
             // (exiting with the file still present would relaunch in a loop).
             stop_child(&mut child);
             running_generation = None;
-            continue;
-        }
-
-        // want_core = true: only ever act on a session that is safe for root.
-        if let Err(error) = session.validate_for_root() {
+        } else if let Err(error) = session.validate_for_root() {
+            // want_core = true: only ever act on a session that is safe for root.
             eprintln!("refusing unsafe control session: {error}");
             stop_child(&mut child);
             running_generation = None;
-            continue;
-        }
-
-        let core_dead = child
-            .as_mut()
-            .map(|process| matches!(process.try_wait(), Ok(Some(_)) | Err(_)))
-            .unwrap_or(true);
-        let generation_changed = running_generation != Some(session.generation);
-        if core_dead || generation_changed {
-            stop_child(&mut child);
-            match spawn_core_for_session(&session) {
-                Ok(process) => {
-                    child = Some(process);
-                    running_generation = Some(session.generation);
-                }
-                Err(error) => {
-                    // Log and keep supervising; never exit non-zero under KeepAlive.
-                    eprintln!("core spawn failed: {error:#}");
-                    running_generation = None;
+        } else {
+            let core_dead = child
+                .as_mut()
+                .map(|process| matches!(process.try_wait(), Ok(Some(_)) | Err(_)))
+                .unwrap_or(true);
+            let generation_changed = running_generation != Some(session.generation);
+            if core_dead || generation_changed {
+                stop_child(&mut child);
+                match spawn_core_for_session(&session) {
+                    Ok(process) => {
+                        child = Some(process);
+                        running_generation = Some(session.generation);
+                    }
+                    Err(error) => {
+                        // Log and keep supervising; never exit non-zero under KeepAlive.
+                        eprintln!("core spawn failed: {error:#}");
+                        running_generation = None;
+                    }
                 }
             }
         }
+
+        // Block until FSEvents/kqueue reports a change, or fall back for heartbeat.
+        let _ = rx.recv_timeout(SUPERVISE_FALLBACK);
+        while rx.try_recv().is_ok() {}
     }
 }
 

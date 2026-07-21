@@ -2341,7 +2341,7 @@ async fn install_available_update(app: AppHandle) -> Result<serde_json::Value, S
             "current": env!("CARGO_PKG_VERSION"),
         }));
     };
-    let version = update.version.clone();
+    let _version = update.version.clone();
     update
         .download_and_install(|_chunk, _total| {}, || {})
         .await

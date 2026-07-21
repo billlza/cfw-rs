@@ -86,14 +86,57 @@ pub fn default_config_mapping(
     {
         insert_yaml(&mut config, "interface-name", interface_name)?;
     }
+    if let Some(bind_address) = settings
+        .extra
+        .get("bind-address")
+        .or_else(|| settings.extra.get("bindAddress"))
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        insert_yaml(&mut config, "bind-address", bind_address)?;
+    }
     if settings.tun_mode {
         let mut tun = serde_yaml::Mapping::new();
         insert_yaml(&mut tun, "enable", true)?;
-        insert_yaml(&mut tun, "stack", "system")?;
-        insert_yaml(&mut tun, "auto-route", true)?;
+        let stack = settings
+            .extra
+            .get("tun-stack")
+            .or_else(|| settings.extra.get("tunStack"))
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or("system");
+        insert_yaml(&mut tun, "stack", stack)?;
+        let auto_route = settings
+            .extra
+            .get("tun-auto-route")
+            .or_else(|| settings.extra.get("tunAutoRoute"))
+            .and_then(serde_yaml::Value::as_bool)
+            .unwrap_or(true);
+        insert_yaml(&mut tun, "auto-route", auto_route)?;
         insert_yaml(&mut tun, "auto-detect-interface", true)?;
-        insert_yaml(&mut tun, "strict-route", false)?;
-        insert_yaml(&mut tun, "dns-hijack", vec!["any:53"])?;
+        let strict_route = settings
+            .extra
+            .get("tun-strict-route")
+            .or_else(|| settings.extra.get("tunStrictRoute"))
+            .and_then(serde_yaml::Value::as_bool)
+            .unwrap_or(false);
+        insert_yaml(&mut tun, "strict-route", strict_route)?;
+        let dns_hijack = settings
+            .extra
+            .get("tun-dns-hijack")
+            .or_else(|| settings.extra.get("tunDnsHijack"))
+            .and_then(serde_yaml::Value::as_str)
+            .map(|value| {
+                value
+                    .split(|ch| ch == '\n' || ch == ',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(|item| item.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|items| !items.is_empty())
+            .unwrap_or_else(|| vec!["any:53".into()]);
+        insert_yaml(&mut tun, "dns-hijack", dns_hijack)?;
         config.insert(
             serde_yaml::Value::String("tun".into()),
             serde_yaml::Value::Mapping(tun),

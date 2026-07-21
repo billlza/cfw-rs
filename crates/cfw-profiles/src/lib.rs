@@ -690,10 +690,15 @@ fn inject_runtime_settings(
     } else {
         mapping.remove(yaml_key("interface-name"));
     }
+    if let Some(bind_address) = setting_string(settings, &["bind-address", "bindAddress"]) {
+        set_yaml_value(mapping, "bind-address", bind_address)?;
+    } else {
+        mapping.remove(yaml_key("bind-address"));
+    }
     if settings.tun_mode {
         mapping.insert(
             serde_yaml::Value::String("tun".into()),
-            mihomo_tun_config()?,
+            mihomo_tun_config(settings)?,
         );
     } else {
         mapping.remove(yaml_key("tun"));
@@ -724,14 +729,29 @@ fn render_profile_with_settings(
     Ok(serde_yaml::to_string(&config)?)
 }
 
-fn mihomo_tun_config() -> Result<serde_yaml::Value, ProfileError> {
+fn mihomo_tun_config(settings: &PersistedSettings) -> Result<serde_yaml::Value, ProfileError> {
     let mut tun = serde_yaml::Mapping::new();
     set_yaml_value(&mut tun, "enable", true)?;
-    set_yaml_value(&mut tun, "stack", "system")?;
-    set_yaml_value(&mut tun, "auto-route", true)?;
+    let stack = setting_string(settings, &["tun-stack", "tunStack"]).unwrap_or_else(|| "system".into());
+    set_yaml_value(&mut tun, "stack", stack)?;
+    let auto_route = setting_bool(settings, &["tun-auto-route", "tunAutoRoute"]).unwrap_or(true);
+    set_yaml_value(&mut tun, "auto-route", auto_route)?;
     set_yaml_value(&mut tun, "auto-detect-interface", true)?;
-    set_yaml_value(&mut tun, "strict-route", false)?;
-    set_yaml_value(&mut tun, "dns-hijack", vec!["any:53"])?;
+    let strict_route =
+        setting_bool(settings, &["tun-strict-route", "tunStrictRoute"]).unwrap_or(false);
+    set_yaml_value(&mut tun, "strict-route", strict_route)?;
+    let dns_hijack = setting_string(settings, &["tun-dns-hijack", "tunDnsHijack"])
+        .map(|value| {
+            value
+                .split(|ch| ch == '\n' || ch == ',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(|item| serde_yaml::Value::String(item.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| vec![serde_yaml::Value::String("any:53".into())]);
+    set_yaml_value(&mut tun, "dns-hijack", dns_hijack)?;
     Ok(serde_yaml::Value::Mapping(tun))
 }
 
@@ -1097,6 +1117,18 @@ fn set_yaml_value<T: Serialize>(
 
 fn yaml_key(key: &str) -> serde_yaml::Value {
     serde_yaml::Value::String(key.into())
+}
+
+fn setting_bool(settings: &PersistedSettings, keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|key| match settings.extra.get(*key) {
+        Some(serde_yaml::Value::Bool(value)) => Some(*value),
+        Some(serde_yaml::Value::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(true),
+            "false" | "0" | "no" | "off" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 fn setting_string(settings: &PersistedSettings, keys: &[&str]) -> Option<String> {

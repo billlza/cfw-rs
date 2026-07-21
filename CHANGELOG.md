@@ -2,15 +2,11 @@
 
 ## Unreleased
 
-- Silent Start hides the main window on launch when enabled; tray still opens the dashboard
-- Profile Proxies/Rules context actions open the YAML editor focused on that section
-- System Proxy: optional PAC mode (`usePacScript` + editor → macOS Auto Proxy URL / `proxy.pac`)
-- Connections: Show Process column from `metadata.processPath`
-- Tray delay indicator also sets the macOS menu-bar title (`Nms`)
-- Primary nav includes Providers and Rules
-- Pinned mihomo core **v1.19.28** (REST `/proxies` no longer merges provider nodes; use `/providers/proxies`)
-- GeoIP metadb updates verify a pinned SHA-256
-- Docs: TUN shipping path is SMAppService root helper (not NetworkExtension)
+- General page CFW action icons: proxy export copy, bind/interfaces, core config preview, DNS query, Script note, TUN settings + restore DNS, Mixin editor, Service Mode manage trio
+- Fix Service Mode / TUN under daemon ownership: hot-reload running core, auto restore DNS on TUN off (`Empty` clears), TUN row On/Off labels, bind↔Allow LAN symmetry, open Razord dashboard
+- Fix glass dialog handlers nested inside GeoIP confirm (Service Mode Install / bind / Mixin / TUN settings were dead)
+- Silent Start; PAC system proxy; Connections process column; tray delay title; Providers/Rules nav
+- Pinned mihomo v1.19.28 + GeoIP metadb SHA-256; SMAppService TUN docs
 
 ## 0.1.0 — 2026-07-20
 

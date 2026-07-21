@@ -13,21 +13,25 @@ Items marked beta-out-of-scope do not block distribution.
 
 ## General
 
-- [x] Layout, mode switcher, System Proxy / TUN / Mixin / Allow LAN / startup toggles
+- [x] Layout, System Proxy / TUN / Mixin / Allow LAN / startup toggles
+- [x] General row action icons (Port terminal/sync, Allow LAN info/interfaces, Core preview/DNS/script, TUN settings/DNS restore, Mixin edit, Service Mode manage)
+- [x] Editable bind-address + network interfaces dialog
+- [x] Runtime config preview + controller version/dashboard URL copy
 - [x] `CoreManager` + MissingBinary / MissingConfig
 - [x] Bundle / provision Apple Silicon mihomo (`clash-darwin`) into managed cores dir
 - [x] Start / stop / supervise core from Rust (in-process; root daemon when TUN)
-- [x] Typed `/configs` client; Allow LAN + IPv6 patches
+- [x] Typed `/configs` client; Allow LAN + IPv6 + bind-address patches
 - [x] `cfw-settings.yaml` + Application Support paths + schema_version
 - [x] System proxy apply + network-service snapshot restore
-- [x] Service Mode via SMAppService + privileged helper
+- [x] Service Mode via SMAppService + privileged helper (Install / Uninstall / Login Items)
 - [x] TUN lifecycle handoff to root daemon (fails loudly if unsigned / unapproved)
 - [x] Reveal home directory action
 - [x] GeoIP database status + click-to-update (`geoip.metadb` / `Country.mmdb`)
 - [x] Honest product version badge (`0.1.0`; CFW 0.20.39 is parity target only)
 - [x] Random mixed-port toggle wired to core start
+- [ ] Mode switcher on General page *(lives on Proxies; CFW also keeps modes there)*
 - [ ] Every original CFW setting with full migration *(partial — extra flattened)*
-- [ ] Proxied terminal actions *(beta out of scope)*
+- [ ] Full proxied Terminal spawn *(beta out of scope — Port copies export commands)*
 
 ## Proxies
 

@@ -122,6 +122,23 @@ impl ControllerClient {
         self.get_json("/configs").await
     }
 
+    pub async fn version(&self) -> Result<ControllerVersion, ControllerError> {
+        self.get_json("/version").await
+    }
+
+    pub async fn dns_query(
+        &self,
+        name: &str,
+        record_type: &str,
+    ) -> Result<serde_json::Value, ControllerError> {
+        let path = format!(
+            "/dns/query?name={}&type={}",
+            urlencoding::encode(name),
+            urlencoding::encode(record_type)
+        );
+        self.get_json(&path).await
+    }
+
     pub async fn patch_configs(&self, patch: ConfigPatch) -> Result<(), ControllerError> {
         self.patch_json("/configs", &patch).await
     }
@@ -239,12 +256,80 @@ impl ControllerClient {
         url: &str,
         timeout_ms: u16,
     ) -> Result<u32, ControllerError> {
-        let path = format!(
-            "/proxies/{}/delay?url={}&timeout={}",
-            urlencoding::encode(proxy),
-            urlencoding::encode(url),
-            timeout_ms
-        );
+        match self
+            .proxy_delay_at(
+                &format!(
+                    "/proxies/{}/delay?url={}&timeout={}",
+                    urlencoding::encode(proxy),
+                    urlencoding::encode(url),
+                    timeout_ms
+                ),
+                timeout_ms,
+            )
+            .await
+        {
+            Ok(delay) => Ok(delay),
+            // mihomo ≥1.19.28 no longer merges provider nodes into /proxies;
+            // CFW falls back to /providers/proxies/{provider}/{name}/healthcheck.
+            Err(ControllerError::Status { status: 404, .. }) => {
+                self.proxy_delay_via_provider(proxy, url, timeout_ms).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn proxy_delay_via_provider(
+        &self,
+        proxy: &str,
+        url: &str,
+        timeout_ms: u16,
+    ) -> Result<u32, ControllerError> {
+        let provider = self
+            .find_provider_name_for_proxy(proxy)
+            .await?
+            .ok_or_else(|| ControllerError::Status {
+                status: 404,
+                body: format!("proxy `{proxy}` not found in /proxies or providers"),
+            })?;
+        self.proxy_delay_at(
+            &format!(
+                "/providers/proxies/{}/{}/healthcheck?url={}&timeout={}",
+                urlencoding::encode(&provider),
+                urlencoding::encode(proxy),
+                urlencoding::encode(url),
+                timeout_ms
+            ),
+            timeout_ms,
+        )
+        .await
+    }
+
+    async fn find_provider_name_for_proxy(
+        &self,
+        proxy: &str,
+    ) -> Result<Option<String>, ControllerError> {
+        let raw: serde_json::Value = self.get_json("/providers/proxies").await?;
+        let Some(providers) = raw.get("providers").and_then(|value| value.as_object()) else {
+            return Ok(None);
+        };
+        for (provider_name, payload) in providers {
+            let Some(list) = payload.get("proxies").and_then(|value| value.as_array()) else {
+                continue;
+            };
+            for item in list {
+                let name = item
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .or_else(|| item.as_str());
+                if name == Some(proxy) {
+                    return Ok(Some(provider_name.clone()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn proxy_delay_at(&self, path: &str, timeout_ms: u16) -> Result<u32, ControllerError> {
         // The controller blocks up to `timeout_ms` while probing the node, so
         // this request must outlive that window. The client-wide 2s timeout
         // would otherwise abort an honest-but-slow probe (timeout_ms > ~2000)
@@ -253,7 +338,7 @@ impl ControllerClient {
         let request_timeout = Duration::from_millis(u64::from(timeout_ms) + 2_000);
         let response = self
             .http
-            .get(self.url(&path)?)
+            .get(self.url(path)?)
             .timeout(request_timeout)
             .send()
             .await?;
@@ -475,10 +560,19 @@ pub struct ConfigPatch {
     pub mode: Option<String>,
     #[serde(rename = "allow-lan", skip_serializing_if = "Option::is_none")]
     pub allow_lan: Option<bool>,
+    #[serde(rename = "bind-address", skip_serializing_if = "Option::is_none")]
+    pub bind_address: Option<String>,
     #[serde(rename = "log-level", skip_serializing_if = "Option::is_none")]
     pub log_level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ipv6: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerVersion {
+    pub version: String,
+    #[serde(default)]
+    pub meta: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

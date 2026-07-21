@@ -9,8 +9,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use cfw_controller::{
-    ConfigPatch, ControllerClient, ControllerEndpoint, ControllerSnapshot, ProviderBatchResult,
-    ProvidersSnapshot, ProxiesSnapshot, ProxyDelayResult, RulesSnapshot, StructuredLogEntry,
+    ConfigPatch, ControllerClient, ControllerEndpoint, ControllerSnapshot, ControllerVersion,
+    ProviderBatchResult, ProvidersSnapshot, ProxiesSnapshot, ProxyDelayResult, RulesSnapshot,
+    StructuredLogEntry,
 };
 use cfw_core::{
     ControlSession, DeepLinkIntent, FeatureSet, PRODUCT_NAME, PersistedSettings, ProductBlueprint,
@@ -487,6 +488,13 @@ async fn set_tun_on(core: &ManagedCore) -> Result<SettingsSnapshot, String> {
 /// control file (launchd then stops the daemon), then restart the in-process
 /// unprivileged core with a tun-free config.
 async fn set_tun_off(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnapshot, String> {
+    // Capture restore-DNS before flipping tun_mode so CFW-style auto-apply works.
+    let restore_dns = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())
+        .ok()
+        .and_then(|settings| restore_dns_servers_from_settings(&settings));
+
     let snapshot = update_settings(|settings| {
         settings.tun_mode = false;
         Ok(())
@@ -499,10 +507,93 @@ async fn set_tun_off(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnap
         .stop_tun()
         .map_err(|err| err.to_string())?;
 
+    if let Some(servers) = restore_dns.as_deref() {
+        match apply_restore_dns_servers_inner(servers) {
+            Ok(message) => emit_shell_log(app, "info", "dns", message),
+            Err(error) => emit_shell_log(
+                app,
+                "warning",
+                "dns",
+                format!("restore DNS after TUN off failed: {error}"),
+            ),
+        }
+    }
+
     // Let the root core release the controller port before respawning ours.
     let _ = wait_for_ports_free(&[snapshot.settings.external_controller_port]).await;
     start_managed_core(app, core).await?;
     Ok(snapshot)
+}
+
+fn restore_dns_servers_from_settings(settings: &PersistedSettings) -> Option<String> {
+    settings
+        .extra
+        .get("restore-dns-servers")
+        .or_else(|| settings.extra.get("restoreDnsServers"))
+        .and_then(|value| match value {
+            serde_yaml::Value::String(text) => Some(text.clone()),
+            serde_yaml::Value::Sequence(items) => {
+                let joined = items
+                    .iter()
+                    .filter_map(serde_yaml::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if joined.is_empty() {
+                    None
+                } else {
+                    Some(joined)
+                }
+            }
+            _ => None,
+        })
+        .filter(|text| !text.trim().is_empty())
+}
+
+/// Apply DNS via `networksetup`. A lone `Empty` token clears servers (macOS API).
+fn apply_restore_dns_servers_inner(servers: &str) -> Result<String, String> {
+    let list = servers
+        .split(|ch| ch == '\n' || ch == ',' || ch == ' ')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>();
+    if list.is_empty() {
+        return Err("provide at least one DNS server (or 'Empty' to clear)".into());
+    }
+    // macOS: `networksetup -setdnsservers <service> Empty` clears custom DNS.
+    let clear = list.len() == 1 && list[0].eq_ignore_ascii_case("empty");
+    let dns_args: Vec<String> = if clear {
+        vec!["Empty".into()]
+    } else {
+        list.iter().map(|item| (*item).to_string()).collect()
+    };
+    let diagnostics = MacOsPlatformService
+        .network_diagnostics()
+        .map_err(|err| err.to_string())?;
+    let targets = if diagnostics.recommended_clash_proxy_services.is_empty() {
+        diagnostics.service_order.clone()
+    } else {
+        diagnostics.recommended_clash_proxy_services.clone()
+    };
+    if targets.is_empty() {
+        return Err("no network services found to update DNS".into());
+    }
+    let mut updated = 0usize;
+    for service in &targets {
+        let mut args = vec!["-setdnsservers".to_string(), service.clone()];
+        args.extend(dns_args.iter().cloned());
+        let output = Command::new("/usr/sbin/networksetup")
+            .args(&args)
+            .output()
+            .map_err(|err| err.to_string())?;
+        if output.status.success() {
+            updated += 1;
+        }
+    }
+    Ok(if clear {
+        format!("cleared DNS on {updated}/{} service(s)", targets.len())
+    } else {
+        format!("updated DNS on {updated}/{} service(s)", targets.len())
+    })
 }
 
 /// True when the privileged root daemon (not the in-process child) owns the core.
@@ -1524,13 +1615,7 @@ async fn refresh_due_profiles(app: &AppHandle) -> Result<(), String> {
 async fn reapply_active_profile_to_running_core(app: &AppHandle) -> Result<(), String> {
     let config_path = render_runtime_config_from_settings()?;
     let core = app.state::<ManagedCore>();
-    if managed_core_is_running(&core)? {
-        controller_client_from_settings()?
-            .reload_config(&config_path.to_string_lossy(), true)
-            .await
-            .map_err(|err| err.to_string())?;
-    }
-    Ok(())
+    reload_running_core_config(&core, &config_path).await
 }
 
 fn now_epoch_secs() -> u64 {
@@ -1804,16 +1889,41 @@ fn managed_core_is_running(core: &State<'_, ManagedCore>) -> Result<bool, String
     }
 }
 
+/// True when either the in-process child or the Service Mode root daemon is expected to own a core.
+fn core_should_be_running(core: &State<'_, ManagedCore>) -> Result<bool, String> {
+    Ok(managed_core_is_running(core)? || service_mode_owns_core().unwrap_or(false))
+}
+
+/// Hot-reload runtime config into whatever owns the core.
+///
+/// Prefer Clash `PUT /configs?force=true` (works for both in-process and root
+/// daemon). If that fails while Service Mode owns the core, bump the control
+/// session generation so the daemon respawns with the on-disk config.
+async fn reload_running_core_config(
+    core: &State<'_, ManagedCore>,
+    config_path: &std::path::Path,
+) -> Result<(), String> {
+    if !core_should_be_running(core)? {
+        return Ok(());
+    }
+    let path = config_path.to_string_lossy().into_owned();
+    if let Ok(client) = controller_client_from_settings() {
+        if client.reload_config(&path, true).await.is_ok() {
+            return Ok(());
+        }
+    }
+    if service_mode_owns_core().unwrap_or(false) {
+        write_control_session(true)?;
+        wait_for_controller_ready().await?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn apply_active_profile(core: State<'_, ManagedCore>) -> Result<ProfileApplyResult, String> {
     let result = apply_active_profile_if_selected()?
         .ok_or_else(|| "no active profile is selected".to_string())?;
-    if managed_core_is_running(&core)? {
-        controller_client_from_settings()?
-            .reload_config(&result.config_path.to_string_lossy(), true)
-            .await
-            .map_err(|err| err.to_string())?;
-    }
+    reload_running_core_config(&core, &result.config_path).await?;
     Ok(result)
 }
 
@@ -1828,6 +1938,107 @@ async fn set_proxy_mode(mode: String) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+
+#[tauri::command]
+async fn set_bind_address(
+    core: State<'_, ManagedCore>,
+    address: String,
+) -> Result<SettingsSnapshot, String> {
+    let trimmed = address.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("bind-address must not be empty".into());
+    }
+    let snapshot = update_settings(|settings| {
+        settings.extra.insert(
+            "bind-address".into(),
+            serde_yaml::Value::String(trimmed.clone()),
+        );
+        settings.extra.remove("bindAddress");
+        // Keep Allow LAN aligned with bind target (CFW-style).
+        if trimmed == "127.0.0.1" {
+            settings.allow_lan = false;
+        } else {
+            settings.allow_lan = true;
+        }
+        Ok(())
+    })?;
+    let config_path = render_runtime_config_from_settings()?;
+    reload_running_core_config(&core, &config_path).await?;
+    if core_should_be_running(&core)?
+        && let Ok(client) = controller_client_from_settings()
+    {
+        let _ = client
+            .patch_configs(ConfigPatch {
+                allow_lan: Some(snapshot.settings.allow_lan),
+                bind_address: Some(trimmed),
+                ..ConfigPatch::default()
+            })
+            .await;
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn read_runtime_config_text() -> Result<String, String> {
+    let store = settings_store()?;
+    let path = store.paths().config_file.clone();
+    if !path.exists() {
+        return Err(format!("runtime config missing: {}", path.display()));
+    }
+    fs::read_to_string(&path).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn controller_version() -> Result<ControllerVersion, String> {
+    controller_client_from_settings()?
+        .version()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn dns_query(name: String, record_type: Option<String>) -> Result<serde_json::Value, String> {
+    let host = name.trim();
+    if host.is_empty() {
+        return Err("DNS query name is required".into());
+    }
+    let kind = record_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("A");
+    controller_client_from_settings()?
+        .dns_query(host, kind)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn open_login_items_settings() -> Result<(), String> {
+    let status = Command::new("/usr/bin/open")
+        .arg("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
+        .status()
+        .map_err(|err| err.to_string())?;
+    if status.success() {
+        return Ok(());
+    }
+    let fallback = Command::new("/usr/bin/open")
+        .arg("-b")
+        .arg("com.apple.systempreferences")
+        .status()
+        .map_err(|err| err.to_string())?;
+    if fallback.success() {
+        Ok(())
+    } else {
+        Err(format!("open Login Items failed with status {status}"))
+    }
+}
+
+#[tauri::command]
+fn apply_restore_dns_servers(servers: String) -> Result<String, String> {
+    apply_restore_dns_servers_inner(&servers)
+}
+
 #[tauri::command]
 async fn set_allow_lan(
     core: State<'_, ManagedCore>,
@@ -1835,18 +2046,46 @@ async fn set_allow_lan(
 ) -> Result<SettingsSnapshot, String> {
     let snapshot = update_settings(|settings| {
         settings.allow_lan = enabled;
+        if enabled {
+            let bind = settings
+                .extra
+                .get("bind-address")
+                .or_else(|| settings.extra.get("bindAddress"))
+                .and_then(serde_yaml::Value::as_str)
+                .unwrap_or("127.0.0.1");
+            if bind == "127.0.0.1" {
+                settings.extra.insert(
+                    "bind-address".into(),
+                    serde_yaml::Value::String("*".into()),
+                );
+                settings.extra.remove("bindAddress");
+            }
+        } else {
+            settings.extra.insert(
+                "bind-address".into(),
+                serde_yaml::Value::String("127.0.0.1".into()),
+            );
+            settings.extra.remove("bindAddress");
+        }
         Ok(())
     })?;
     let config_path = render_runtime_config_from_settings()?;
-    if managed_core_is_running(&core)?
+    reload_running_core_config(&core, &config_path).await?;
+    if core_should_be_running(&core)?
         && let Ok(client) = controller_client_from_settings()
     {
-        let _ = client
-            .reload_config(&config_path.to_string_lossy(), true)
-            .await;
+        let bind = snapshot
+            .settings
+            .extra
+            .get("bind-address")
+            .or_else(|| snapshot.settings.extra.get("bindAddress"))
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or(if enabled { "*" } else { "127.0.0.1" })
+            .to_string();
         let _ = client
             .patch_configs(ConfigPatch {
                 allow_lan: Some(enabled),
+                bind_address: Some(bind),
                 ..ConfigPatch::default()
             })
             .await;
@@ -1861,12 +2100,10 @@ async fn set_ipv6(core: State<'_, ManagedCore>, enabled: bool) -> Result<Setting
         Ok(())
     })?;
     let config_path = render_runtime_config_from_settings()?;
-    if managed_core_is_running(&core)?
+    reload_running_core_config(&core, &config_path).await?;
+    if core_should_be_running(&core)?
         && let Ok(client) = controller_client_from_settings()
     {
-        let _ = client
-            .reload_config(&config_path.to_string_lossy(), true)
-            .await;
         let _ = client
             .patch_configs(ConfigPatch {
                 ipv6: Some(enabled),
@@ -2652,6 +2889,12 @@ fn main() {
             apply_active_profile,
             set_proxy_mode,
             set_allow_lan,
+            apply_restore_dns_servers,
+            open_login_items_settings,
+            dns_query,
+            controller_version,
+            read_runtime_config_text,
+            set_bind_address,
             set_ipv6,
             set_log_level,
             select_proxy,

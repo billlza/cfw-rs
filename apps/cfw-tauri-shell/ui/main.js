@@ -151,13 +151,16 @@ const state = {
     startAtLogin: false,
     breakOnProxyChange: true,
     silentStart: false,
-    hideUnavailable: true,
+    testingDelays: false,
+    hideUnavailable: false,
     enableIpv6: false,
     proxyDelayIndicator: true,
     showProxyFilter: true,
+    showProxiesList: true,
     usePacScript: false,
     showProcess: true,
   },
+  proxyBlinkNode: null,
   traffic: {
     upload: 0,
     download: 0,
@@ -172,6 +175,7 @@ const state = {
   // Live GeoIP DB status from app home (geoip.metadb / Country.mmdb).
   geoipStatus: null,
   geoipUpdating: false,
+  controllerVersion: null,
   connectionStream: {
     at: 0,
     uploadTotal: 0,
@@ -182,7 +186,7 @@ const state = {
   profileInspector: null,
   /** @type {{ id: string, x: number, y: number } | null} */
   profileContextMenu: null,
-  /** @type {{ kind: "copy" | "settings" | "delete" | "reset-settings" | "geoip", id?: string } | null} */
+  /** @type {{ kind: string, id?: string, payload?: any } | null} */
   glassDialog: null,
   proxyGroups: [],
   logs: [],
@@ -271,6 +275,14 @@ const invoke = async (command, args = {}) => {
     if (command === "update_all_rule_providers") return emptyProviderBatch("update-rule");
     if (command === "health_check_all_proxy_providers") return emptyProviderBatch("health-check-proxy");
     if (command === "service_mode_status") return "Unknown";
+    if (command === "controller_version") return { version: "preview", meta: true };
+    if (command === "read_runtime_config_text") return "mixed-port: 7890\n";
+    if (command === "dns_query") return { Status: 0, Answer: [] };
+    if (command === "set_bind_address") return { ...fallbackSettingsSnapshot, persisted: true, settings: { ...fallbackSettingsSnapshot.settings, "bind-address": args.address } };
+    if (command === "open_login_items_settings") return null;
+    if (command === "apply_restore_dns_servers") return "updated DNS on 0/0 service(s)";
+    if (command === "disable_service_mode") return null;
+
     if (command === "enable_service_mode") return "RequiresApproval";
     if (command === "disable_service_mode") return null;
     if (command === "geoip_database_status") {
@@ -394,6 +406,12 @@ function serviceModeLabel(status) {
 
 function serviceModeNeedsAttention(status) {
   return status !== "Enabled";
+}
+
+function tunModeValueLabel(tunEnabled, serviceStatus) {
+  if (tunEnabled) return "On";
+  if (serviceStatus === "Enabled") return "Off";
+  return "Service Mode required";
 }
 
 function formatGeoipLabel(status, updating) {
@@ -562,6 +580,7 @@ function applyControllerSnapshot(snapshot) {
 
   const proxyNodes = new Map((snapshot.proxies?.proxies ?? []).map((node) => [node.name, node]));
   const groups = snapshot.proxies?.groups ?? [];
+  const groupsByName = new Map(groups.map((group) => [group.name, group]));
   if (groups.length) {
     state.proxyGroups = groups.map((group) => ({
       name: group.name,
@@ -569,11 +588,12 @@ function applyControllerSnapshot(snapshot) {
       now: group.now ?? group.options?.[0] ?? "DIRECT",
       options: (group.options ?? []).map((name) => {
         const node = proxyNodes.get(name);
+        const nestedGroup = groupsByName.get(name);
         return {
           name,
-          delay: latestDelay(node?.history ?? group.history),
+          delay: latestDelay(node?.history ?? nestedGroup?.history ?? []),
           dead: false,
-          kind: node?.kind ?? node?.type ?? group.kind ?? "Proxy",
+          kind: node?.kind ?? node?.type ?? nestedGroup?.kind ?? group.kind ?? "Proxy",
           udp: node?.udp ?? null,
         };
       }),
@@ -776,18 +796,71 @@ function renderStatusPill(label, value, tone = "neutral") {
   `;
 }
 
+
+function generalIcon(kind) {
+  const common = 'width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"';
+  switch (kind) {
+    case "terminal":
+      return `<svg ${common}><path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm1 3v2l3 2-3 2v2l5-3.5L5 7zm7 8h6v2h-6v-2z"/></svg>`;
+    case "sync":
+      return `<svg ${common}><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>`;
+    case "sync-off":
+      return `<svg ${common}><path d="M20 12c0-4.42-3.58-8-8-8V1L8 5l1.7 1.7C12.9 6.8 15.2 8.9 16.1 11.5l1.7 1.7c.13-.4.2-.8.2-1.2zM4.27 3 3 4.27l2.05 2.05A7.95 7.95 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-1.3-1.3L19.73 21 21 19.73 4.27 3zM12 18c-3.31 0-6-2.69-6-6 0-1.3.41-2.5 1.11-3.48L14.48 16.9A5.9 5.9 0 0 1 12 18z"/></svg>`;
+    case "info":
+      return `<svg ${common}><path d="M12 2a10 10 0 1 0 .001 20.001A10 10 0 0 0 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>`;
+    case "device-hub":
+      return `<svg ${common}><path d="M17 16h-2v-2h2v2zm-4 0h-2v-2h2v2zm-4 0H7v-2h2v2zm10-6h-2V8h2v2zm-4 0h-2V8h2v2zm-4 0H7V8h2v2zm10-6H5c-1.1 0-2 .9-2 2v14h18V6c0-1.1-.9-2-2-2zm0 14H5V6h14v10z"/></svg>`;
+    case "memory":
+      return `<svg ${common}><path d="M15 9H9v6h6V9zm-2 4h-2v-2h2v2zm8-2V9h-2V7c0-1.1-.9-2-2-2h-2V3h-2v2h-2V3H9v2H7c-1.1 0-2 .9-2 2v2H3v2h2v2H3v2h2v2c0 1.1.9 2 2 2h2v2h2v-2h2v2h2v-2h2c1.1 0 2-.9 2-2v-2h2v-2h-2v-2h2zm-4 6H7V7h10v10z"/></svg>`;
+    case "dns":
+      return `<svg ${common}><path d="M20 13H4c-.55 0-1 .45-1 1v6c0 .55.45 1 1 1h16c.55 0 1-.45 1-1v-6c0-.55-.45-1-1-1zM7 19c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM20 3H4c-.55 0-1 .45-1 1v6c0 .55.45 1 1 1h16c.55 0 1-.45 1-1V4c0-.55-.45-1-1-1zM7 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>`;
+    case "play":
+      return `<svg ${common}><path d="M8 5v14l11-7L8 5z"/></svg>`;
+    case "public":
+      return `<svg ${common}><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>`;
+    case "settings":
+      return `<svg ${common}><path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.2 7.2 0 0 0-1.62-.94l-.36-2.54A.48.48 0 0 0 14 2h-4a.48.48 0 0 0-.48.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.65 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.77 14.52a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.42.48.42h4c.24 0 .44-.18.48-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>`;
+    case "history":
+      return `<svg ${common}><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6a7 7 0 0 1 7-7 7 7 0 0 1 7 7 7 7 0 0 1-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.95 8.95 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>`;
+    default:
+      return "";
+  }
+}
+
+function generalIconButton(action, kind, title, options = {}) {
+  const tone = options.tone ? ` ${options.tone}` : "";
+  const active = options.active ? " active" : "";
+  return `<button type="button" class="general-icon${tone}${active}" data-action="${escapeHtml(action)}" title="${escapeHtml(title)}">${generalIcon(kind)}</button>`;
+}
+
+function bindAddressLabel(persisted) {
+  const bind = persisted["bind-address"] ?? persisted.bindAddress ?? (state.toggles.allowLan ? "*" : "127.0.0.1");
+  return String(bind);
+}
+
+function serviceModeIconTone(status) {
+  if (status === "Enabled") return "ok";
+  if (serviceModeNeedsAttention(status)) return "warn";
+  return "muted";
+}
+
 function renderGeneral() {
-  const profile = activeProfile();
   const persisted = state.settingsSnapshot?.settings ?? fallbackSettingsSnapshot.settings;
   const product = state.payload.product ?? fallbackPayload.product;
   const appVersion = product.version ?? "0.1.0";
   const core = state.coreStatus ?? fallbackCoreStatus;
   const coreRunning = core.state === "Running";
-  const controller = `${persisted.external_controller_host}:${persisted.external_controller_port}`;
+  const controllerHost = persisted.external_controller_host ?? "127.0.0.1";
+  const controllerPort = persisted.external_controller_port ?? 9090;
+  const controller = `${controllerHost}:${controllerPort}`;
+  const coreVersion = state.controllerVersion?.version ?? (coreRunning ? "Connected" : core.state);
   const statusDot = coreRunning ? "cfw-status-dot on" : "cfw-status-dot";
   const logLevel = state.logLevel ?? persisted.logLevel ?? persisted["log-level"] ?? "info";
   const serviceMode = serviceModeLabel(state.serviceModeStatus);
+  const serviceModeReady = state.serviceModeStatus === "Enabled";
   const randomPort = Boolean(persisted.randomMixedPort ?? persisted.random_mixed_port);
+  const bind = bindAddressLabel(persisted);
+  const serviceTone = serviceModeIconTone(state.serviceModeStatus);
   return `
     <div class="cfw-general-view">
       <section class="cfw-header">
@@ -800,20 +873,28 @@ function renderGeneral() {
 
       <section class="cfw-content">
         <div class="cfw-row">
-          <div class="cfw-row-left">Port</div>
+          <div class="cfw-row-left">
+            <span>Port</span>
+            <span class="general-icons">
+              ${generalIconButton("copy-proxy-exports", "terminal", "Copy proxy export commands for Terminal")}
+              ${generalIconButton("toggle-random-mixed-port", randomPort ? "sync" : "sync-off", "random mixed port", { active: randomPort })}
+            </span>
+          </div>
           <div class="cfw-row-right">
-            <label class="port-random" title="Pick a free loopback port when the core starts">
-              <input type="checkbox" data-random-mixed-port ${randomPort ? "checked" : ""} />
-              <span>random ${randomPort ? "on" : "off"}</span>
-            </label>
             <input class="cfw-number" data-mixed-port type="number" min="1" max="65535" value="${persisted.mixed_port}" aria-label="mixed-port" ${randomPort ? "disabled" : ""}>
           </div>
         </div>
 
         <div class="cfw-row">
-          <div class="cfw-row-left">Allow LAN</div>
+          <div class="cfw-row-left">
+            <span>Allow LAN</span>
+            <span class="general-icons">
+              ${generalIconButton("allow-lan-info", "info", "Turn on to listen on all interfaces by default, or else only listen on 127.0.0.1. Change Bind Address to pick an interface.")}
+              ${generalIconButton("show-network-interfaces", "device-hub", "network interfaces")}
+            </span>
+          </div>
           <div class="cfw-row-right">
-            <span class="cfw-link-value">Bind: ${state.toggles.allowLan ? "*" : "127.0.0.1"}</span>
+            <button type="button" class="cfw-text-button" data-action="edit-bind-address" title="Edit bind address">Bind: ${escapeHtml(bind)}</button>
             ${renderInlineSwitch("allowLan", "Allow LAN")}
           </div>
         </div>
@@ -831,18 +912,24 @@ function renderGeneral() {
 
         <div class="cfw-row">
           <div class="cfw-row-left">IPv6</div>
-          <div class="cfw-row-right">
-            ${renderInlineSwitch("enableIpv6", "IPv6")}
-          </div>
+          <div class="cfw-row-right">${renderInlineSwitch("enableIpv6", "IPv6")}</div>
         </div>
 
         <div class="cfw-row">
-          <div class="cfw-row-left">Clash Core</div>
-          <div class="cfw-row-right core-action-zone" data-action="${core.state === "MissingBinary" ? "install-pinned-core" : coreRunning ? "stop-core" : "start-core"}" title="${coreRunning ? "Stop core" : "Install pinned mihomo core"}">
-            <i class="${statusDot}"></i>
-            <span class="cfw-link-value core-state-button">${coreRunning ? "Connected" : escapeHtml(core.state)}</span>
-            ${core.state === "MissingBinary" ? '<span class="cfw-text-button">Install</span>' : ""}
-            <span class="inline-icon play">${coreRunning ? "■" : "▶"}</span>
+          <div class="cfw-row-left">
+            <span>Clash Core</span>
+            <span class="general-icons">
+              ${generalIconButton("preview-runtime-config", "memory", "Preview the final configuration file that was submitted to Clash Core")}
+              ${generalIconButton("dns-query", "dns", "Resolve a host using Clash core")}
+              ${generalIconButton("script-test", "play", "Test script using by Script mode")}
+            </span>
+          </div>
+          <div class="cfw-row-right">
+            <button type="button" class="cfw-text-button core-version-link" data-action="open-controller-dashboard" title="Open controller dashboard">
+              <i class="${statusDot}"></i>
+              <span>${escapeHtml(coreVersion)}${coreRunning ? ` (${escapeHtml(String(controllerPort))})` : ""}</span>
+            </button>
+            <button type="button" class="general-icon" data-action="${core.state === "MissingBinary" ? "install-pinned-core" : coreRunning ? "stop-core" : "start-core"}" title="${coreRunning ? "Stop core" : core.state === "MissingBinary" ? "Install pinned mihomo core" : "Start core"}">${coreRunning ? "■" : "▶"}</button>
           </div>
         </div>
 
@@ -861,7 +948,12 @@ function renderGeneral() {
         </div>
 
         <div class="cfw-row">
-          <div class="cfw-row-left">Service Mode${serviceModeNeedsAttention(state.serviceModeStatus) ? ' <span class="tiny-warn">!</span>' : ""}</div>
+          <div class="cfw-row-left">
+            <span>Service Mode</span>
+            <span class="general-icons">
+              <span class="general-icon ${serviceTone}" title="Service Mode status">${generalIcon("public")}</span>
+            </span>
+          </div>
           <div class="cfw-row-right">
             <span class="cfw-link-value">${serviceMode}</span>
             <button class="cfw-text-button" data-action="manage-service-mode">Manage</button>
@@ -869,15 +961,28 @@ function renderGeneral() {
         </div>
 
         <div class="cfw-row">
-          <div class="cfw-row-left">TUN Mode</div>
+          <div class="cfw-row-left">
+            <span>TUN Mode</span>
+            <span class="general-icons">
+              ${generalIconButton("tun-info", "info", "To enable this mode, please install Service Mode first!")}
+              ${generalIconButton("tun-settings", "settings", "Settings")}
+              ${generalIconButton("tun-reset-dns", "history", "System DNS servers that will be set after TUN Mode is disabled")}
+            </span>
+          </div>
           <div class="cfw-row-right">
-            <span class="cfw-link-value">${state.toggles.tunMode ? serviceMode : "Service Mode required"}</span>
-            ${renderInlineSwitch("tunMode", "TUN Mode")}
+            <span class="cfw-link-value">${tunModeValueLabel(state.toggles.tunMode, state.serviceModeStatus)}</span>
+            ${renderInlineSwitch("tunMode", "TUN Mode", { disabled: !serviceModeReady })}
           </div>
         </div>
 
         <div class="cfw-row">
-          <div class="cfw-row-left">Mixin</div>
+          <div class="cfw-row-left">
+            <span>Mixin</span>
+            <span class="general-icons">
+              ${generalIconButton("mixin-info", "info", "Mixin merges YAML into the generated config before reload. Docs: profile mixin in Settings.")}
+              ${generalIconButton("edit-mixin", "settings", "Edit Mixin content")}
+            </span>
+          </div>
           <div class="cfw-row-right">${renderInlineSwitch("mixin", "Mixin")}</div>
         </div>
 
@@ -897,8 +1002,8 @@ function renderGeneral() {
 
 function delayClass(delay) {
   if (delay === null || delay === undefined) return "pending";
-  if (delay < 0) return "dead";
-  if (delay === 0) return "direct";
+  // Mihomo uses 0 for timeout; negative is our local failure marker.
+  if (delay <= 0) return "dead";
   if (delay < 80) return "fast";
   if (delay < 180) return "mid";
   return "slow";
@@ -907,7 +1012,7 @@ function delayClass(delay) {
 function delayLabel(delay) {
   if (delay === null || delay === undefined) return "Pending";
   if (delay < 0) return "N/A";
-  if (delay === 0) return "DIRECT";
+  if (delay === 0) return "Timeout";
   return `${delay} ms`;
 }
 
@@ -923,26 +1028,35 @@ function isManualProxyGroup(type) {
   return ["selector", "relay"].includes(String(type ?? "").toLowerCase());
 }
 
-/** CFW Proxies toolbar glyphs — monochrome, consistent weight. */
+/** CFW Proxies section toolbar glyphs (Material-style: travel_explore / report / network_check / visibility). */
 function proxyToolIcon(kind) {
-  const common = 'width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+  const common = 'width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"';
   switch (kind) {
-    case "filter":
-      // Globe
-      return `<svg ${common}><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg>`;
-    case "break":
-      // Stop / break connections
-      return `<svg ${common}><path d="M8 3h8l5 5v8l-5 5H8l-5-5V8l5-5z"/><path d="M12 8v5M12 16.5v.5"/></svg>`;
+    case "scroll":
+      // travel_explore — globe + magnifier
+      return `<svg ${common} fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/><circle cx="18.5" cy="18.5" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M20.8 20.8L23 23" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
+    case "report":
+      // report — octagon with !
+      return `<svg ${common} fill="currentColor"><path d="M15.73 3H8.27L3 8.27v7.46L8.27 21h7.46L21 15.73V8.27L15.73 3zM12 17.3c-.72 0-1.3-.58-1.3-1.3s.58-1.3 1.3-1.3 1.3.58 1.3 1.3-.58 1.3-1.3 1.3zm1-4.3h-2V7h2v6z"/></svg>`;
+    case "report-off":
+      return `<svg ${common} fill="currentColor"><path d="M15.73 3H8.27L3 8.27v7.46L8.27 21h7.46L21 15.73V8.27L15.73 3zM12 17.3c-.72 0-1.3-.58-1.3-1.3s.58-1.3 1.3-1.3 1.3.58 1.3 1.3-.58 1.3-1.3 1.3zm1-4.3h-2V7h2v6z" opacity=".38"/></svg>`;
     case "delay":
-      // Latency bars
-      return `<svg ${common}><path d="M2 12a10 10 0 0 1 20 0"/><path d="M5 12a7 7 0 0 1 14 0"/><path d="M8.5 12a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg>`;
+      // network_check — signal arcs + needle
+      return `<svg ${common} fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12a10 10 0 0 1 20 0"/><path d="M5 12a7 7 0 0 1 14 0"/><path d="M8.5 12a3.5 3.5 0 0 1 7 0"/><path d="M12 12V7.5" stroke-width="2"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/></svg>`;
     case "eye":
-      return `<svg ${common}><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
+      return `<svg ${common} fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>`;
     case "eye-off":
-      return `<svg ${common}><path d="M2 12s3.5-7 10-7c2.1 0 3.9.6 5.4 1.4M22 12s-3.5 7-10 7c-2.1 0-3.9-.6-5.4-1.4"/><path d="M9.9 9.9A3 3 0 0 0 12 15a3 3 0 0 0 2.1-.9M4 4l16 16"/></svg>`;
+      return `<svg ${common} fill="currentColor"><path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>`;
     default:
       return "";
   }
+}
+
+function isTimedOutProxy(node) {
+  if (!node) return false;
+  if (node.dead) return true;
+  // Mihomo reports timeout as delay 0; we also use -1 for failed probes.
+  return typeof node.delay === "number" && node.delay <= 0;
 }
 
 function renderProxies() {
@@ -952,7 +1066,7 @@ function renderProxies() {
       ...group,
       options: group.options.filter((node) => {
         const matchesFilter = !filter || group.name.toLowerCase().includes(filter) || node.name.toLowerCase().includes(filter);
-        const shouldHide = state.toggles.hideUnavailable && node.dead && group.now !== node.name;
+        const shouldHide = state.toggles.hideUnavailable && isTimedOutProxy(node) && group.now !== node.name;
         return matchesFilter && !shouldHide;
       }),
     }))
@@ -964,8 +1078,9 @@ function renderProxies() {
     ?? groups[0]
     ?? null;
   const manual = activeGroup ? isManualProxyGroup(activeGroup.type) : false;
-  const hideUnavailable = Boolean(state.toggles.hideUnavailable);
-  const showFilter = state.toggles.showProxyFilter !== false;
+  const hideTimedOut = Boolean(state.toggles.hideUnavailable);
+  const showProxiesList = state.toggles.showProxiesList !== false;
+  const blinkNode = state.proxyBlinkNode;
   return `
     <div class="proxy-layout">
       <div class="mode-switch proxy-mode-header" role="group" aria-label="Proxy mode">
@@ -984,17 +1099,18 @@ function renderProxies() {
               <b>${escapeHtml(activeGroup.now ?? "")}</b>
             </div>
             <div class="cfw-proxy-tools">
-              ${showFilter ? `<input class="proxy-filter" data-proxy-filter placeholder="Filter" value="${escapeHtml(state.proxyFilter)}" aria-label="Filter proxies" />` : ""}
-              <button class="proxy-tool ${showFilter ? "active" : ""}" data-action="toggle-proxy-filter" title="Show Filter">${proxyToolIcon("filter")}</button>
-              <button class="proxy-tool" data-action="break-proxy-connections" title="Break Connections">${proxyToolIcon("break")}</button>
-              <button class="proxy-tool" data-action="delay-test" title="Latency Test">${proxyToolIcon("delay")}</button>
-              <button class="proxy-tool ${hideUnavailable ? "active" : ""}" data-action="toggle-hide-unavailable" title="Hide Unavailable">${proxyToolIcon(hideUnavailable ? "eye-off" : "eye")}</button>
+              <input class="proxy-filter" data-proxy-filter placeholder="Filter" value="${escapeHtml(state.proxyFilter)}" aria-label="Filter proxies" />
+              <button class="proxy-tool" data-action="scroll-to-selected-proxy" title="Scroll to selected proxy">${proxyToolIcon("scroll")}</button>
+              <button class="proxy-tool ${hideTimedOut ? "active" : ""}" data-action="toggle-hide-timed-out" title="Show/Hide timed-out proxies">${proxyToolIcon(hideTimedOut ? "report-off" : "report")}</button>
+              <button class="proxy-tool ${state.toggles.testingDelays ? "active" : ""}" data-action="delay-test" title="Test latency" ${state.toggles.testingDelays ? "disabled" : ""}>${proxyToolIcon("delay")}</button>
+              <button class="proxy-tool ${showProxiesList ? "active" : ""}" data-action="toggle-show-proxies" title="Show/hide proxies">${proxyToolIcon(showProxiesList ? "eye" : "eye-off")}</button>
             </div>
           </div>
           <div class="cfw-proxy-content">
-            <div class="cfw-node-grid">
+            ${showProxiesList ? `
+            <div class="cfw-node-grid" data-proxy-node-grid>
               ${activeGroup.options.map((node) => `
-                <button class="cfw-node-card ${activeGroup.now === node.name ? "selected" : ""} ${manual ? "" : "readonly"}" ${manual ? `data-group="${escapeHtml(activeGroup.name)}" data-node="${escapeHtml(node.name)}"` : "disabled"} title="${manual ? "Select proxy" : "This Clash group type is controlled by the core"}">
+                <button class="cfw-node-card ${activeGroup.now === node.name ? "selected" : ""} ${blinkNode === node.name ? "blink" : ""} ${manual ? "" : "readonly"}" data-proxy-node="${escapeHtml(node.name)}" ${manual ? `data-group="${escapeHtml(activeGroup.name)}" data-node="${escapeHtml(node.name)}"` : "disabled"} title="${manual ? "Select proxy" : "This Clash group type is controlled by the core"}">
                   <i></i>
                   <span>
                     <strong>${nodePrefix(node.name)}${escapeHtml(node.name)}</strong>
@@ -1004,6 +1120,7 @@ function renderProxies() {
                 </button>
               `).join("")}
             </div>
+            ` : `<p class="empty proxy-list-hidden">Proxies hidden — click the eye to show this group’s nodes.</p>`}
             <aside class="cfw-group-rail">
               ${groups.map((group) => `
                 <button class="${group.name === activeGroup.name ? "active" : ""}" data-proxy-group-tab="${escapeHtml(group.name)}" title="${escapeHtml(group.name)}">${escapeHtml(groupRailLabel(group.name))}</button>
@@ -1293,6 +1410,143 @@ function renderGlassOverlays() {
           </div>
         </div>
       `);
+    } else if (dialog.kind === "preview-config") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="Runtime config preview">
+          <h3>Runtime config preview</h3>
+          <pre class="glass-code">${escapeHtml(dialog.payload ?? "")}</pre>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button>
+            <button type="button" class="glass-btn" data-glass-copy-text>Copy</button>
+          </div>
+        </div>
+      `);
+    } else if (dialog.kind === "network-interfaces") {
+      const rows = (dialog.payload ?? []).map((row) => `
+        <tr>
+          <td>${escapeHtml(row.service)}</td>
+          <td>${escapeHtml(row.bsd_device ?? row.bsdDevice ?? "—")}</td>
+          <td>${escapeHtml(row.service_type ?? row.serviceType ?? "—")}</td>
+          <td>${row.is_default_route || row.isDefaultRoute ? "default" : ""}</td>
+        </tr>`).join("");
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="Network interfaces">
+          <h3>Network interfaces</h3>
+          <p class="glass-dialog-copy">Default route: ${escapeHtml(dialog.defaultRoute ?? "unknown")}</p>
+          <div class="glass-table-wrap"><table class="glass-table"><thead><tr><th>Service</th><th>Device</th><th>Type</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="4">No services</td></tr>'}</tbody></table></div>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button></div>
+        </div>
+      `);
+    } else if (dialog.kind === "bind-address") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Bind address">
+          <h3>Bind address</h3>
+          <p class="glass-dialog-copy">Use 127.0.0.1 for localhost only, * for all interfaces, or a specific IP.</p>
+          <label>Address<input data-glass-bind-address value="${escapeHtml(dialog.payload ?? "*")}" /></label>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Cancel</button>
+            <button type="button" class="glass-btn" data-glass-bind-confirm>Save</button>
+          </div>
+        </div>
+      `);
+    } else if (dialog.kind === "dns-query") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="DNS query">
+          <h3>Resolve via Clash core</h3>
+          <label>Name<input data-glass-dns-name value="${escapeHtml(dialog.payload?.name ?? "www.gstatic.com")}" /></label>
+          <label>Type<input data-glass-dns-type value="${escapeHtml(dialog.payload?.type ?? "A")}" /></label>
+          <pre class="glass-code">${escapeHtml(dialog.payload?.result ?? "Enter a name and Query.")}</pre>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button>
+            <button type="button" class="glass-btn" data-glass-dns-confirm>Query</button>
+          </div>
+        </div>
+      `);
+    } else if (dialog.kind === "script-test") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Script test">
+          <h3>Script mode test</h3>
+          <p class="glass-dialog-copy">mihomo does not expose a dedicated Script-eval REST API. Switch mode to Script and use Rules / Connections for live match visibility. Optional: open Rules now.</p>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button>
+            <button type="button" class="glass-btn" data-glass-open-rules>Open Rules</button>
+          </div>
+        </div>
+      `);
+    } else if (dialog.kind === "edit-mixin") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog glass-dialog-wide" role="dialog" aria-label="Edit Mixin">
+          <h3>Edit Mixin content</h3>
+          <textarea class="glass-textarea" data-glass-mixin-yaml rows="16" spellcheck="false">${escapeHtml(dialog.payload ?? "")}</textarea>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Cancel</button>
+            <button type="button" class="glass-btn" data-glass-mixin-confirm>Save</button>
+          </div>
+        </div>
+      `);
+    } else if (dialog.kind === "tun-settings") {
+      const p = dialog.payload ?? {};
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="TUN settings">
+          <h3>TUN settings</h3>
+          <label>Stack
+            <select data-glass-tun-stack>
+              ${["system", "gvisor", "mixed", "lwip"].map((s) => `<option value="${s}" ${p.stack === s ? "selected" : ""}>${s}</option>`).join("")}
+            </select>
+          </label>
+          <label class="glass-check"><input type="checkbox" data-glass-tun-auto-route ${p.autoRoute ? "checked" : ""} /> auto-route</label>
+          <label class="glass-check"><input type="checkbox" data-glass-tun-strict-route ${p.strictRoute ? "checked" : ""} /> strict-route</label>
+          <label>DNS hijack (one per line)<textarea data-glass-tun-dns-hijack rows="4" spellcheck="false">${escapeHtml(p.dnsHijack ?? "any:53")}</textarea></label>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Cancel</button>
+            <button type="button" class="glass-btn" data-glass-tun-settings-confirm>Save</button>
+          </div>
+        </div>
+      `);
+    } else if (dialog.kind === "tun-reset-dns") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Restore DNS">
+          <h3>Restore DNS after TUN off</h3>
+          <p class="glass-dialog-copy">These servers are applied with networksetup when you click Apply (CFW manage_history). Use Empty to clear overrides.</p>
+          <label>DNS servers<textarea data-glass-restore-dns rows="5" spellcheck="false">${escapeHtml(dialog.payload ?? "Empty")}</textarea></label>
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Cancel</button>
+            <button type="button" class="glass-btn ghost" data-glass-restore-dns-save>Save</button>
+            <button type="button" class="glass-btn" data-glass-restore-dns-apply>Apply now</button>
+          </div>
+        </div>
+      `);
+    } else if (dialog.kind === "service-mode-manage") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Service Mode">
+          <h3>Service Mode</h3>
+          <p class="glass-dialog-copy">Status: ${escapeHtml(serviceModeLabel(state.serviceModeStatus))}</p>
+          <div class="glass-dialog-actions column">
+            <button type="button" class="glass-btn" data-glass-service-install>Install / Enable</button>
+            <button type="button" class="glass-btn ghost" data-glass-service-uninstall>Uninstall / Disable</button>
+            <button type="button" class="glass-btn ghost" data-glass-service-login-items>Open Login Items</button>
+            <button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button>
+          </div>
+        </div>
+      `);
+    } else if (dialog.kind === "info") {
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Info">
+          <h3>${escapeHtml(dialog.payload?.title ?? "Info")}</h3>
+          <p class="glass-dialog-copy">${escapeHtml(dialog.payload?.body ?? "")}</p>
+          <div class="glass-dialog-actions"><button type="button" class="glass-btn ghost" data-glass-dismiss>Close</button></div>
+        </div>
+      `);
     }
   }
 
@@ -1444,6 +1698,176 @@ function bindGlassOverlayEvents() {
       } finally {
         state.geoipUpdating = false;
         renderPage();
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-glass-copy-text]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const textValue = state.glassDialog?.payload ?? document.querySelector(".glass-code")?.textContent ?? "";
+      try {
+        await navigator.clipboard.writeText(String(textValue));
+        appendLog("info", "clipboard", "Copied dialog text");
+      } catch (error) {
+        appendLog("warning", "clipboard", error.message ?? String(error));
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-glass-bind-confirm]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const address = document.querySelector("[data-glass-bind-address]")?.value?.trim() ?? "";
+      try {
+        const snapshot = await invoke("set_bind_address", { address });
+        applyPersistedSettings(snapshot);
+        closeGlassOverlays();
+        appendLog("info", "settings", `Bind address set to ${address}`);
+        if (activeProfile().active) await invoke("apply_active_profile");
+      } catch (error) {
+        appendLog("warning", "settings", `Bind address failed: ${error.message ?? String(error)}`);
+      }
+      renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-glass-dns-confirm]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const name = document.querySelector("[data-glass-dns-name]")?.value?.trim() ?? "";
+      const type = document.querySelector("[data-glass-dns-type]")?.value?.trim() || "A";
+      try {
+        const result = await invoke("dns_query", { name, record_type: type, recordType: type });
+        state.glassDialog = { kind: "dns-query", payload: { name, type, result: JSON.stringify(result, null, 2) } };
+        renderGlassOverlays();
+      } catch (error) {
+        state.glassDialog = { kind: "dns-query", payload: { name, type, result: String(error.message ?? error) } };
+        renderGlassOverlays();
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-glass-open-rules]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      closeGlassOverlays();
+      state.activePage = "rules";
+      await loadRulesSnapshot();
+      renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-glass-mixin-confirm]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const yaml = document.querySelector("[data-glass-mixin-yaml]")?.value ?? "";
+      try {
+        const snapshot = await invoke("write_settings_snapshot", {
+          settings: { ...persistedSettingsFromUi(), mixin_yaml: yaml, mixinYaml: yaml },
+        });
+        applyPersistedSettings(snapshot);
+        state.mixinYaml = yaml;
+        closeGlassOverlays();
+        appendLog("info", "settings", "Mixin YAML saved");
+        if (state.toggles.mixin && activeProfile().active) {
+          const applied = await invoke("apply_active_profile");
+          appendLog("info", "settings", `Mixin reapplied (${formatBytes(applied.bytes ?? 0)})`);
+        }
+      } catch (error) {
+        appendLog("warning", "settings", `Mixin save failed: ${error.message ?? String(error)}`);
+      }
+      renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-glass-tun-settings-confirm]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const stack = document.querySelector("[data-glass-tun-stack]")?.value ?? "system";
+      const autoRoute = Boolean(document.querySelector("[data-glass-tun-auto-route]")?.checked);
+      const strictRoute = Boolean(document.querySelector("[data-glass-tun-strict-route]")?.checked);
+      const dnsHijack = document.querySelector("[data-glass-tun-dns-hijack]")?.value ?? "any:53";
+      try {
+        const current = persistedSettingsFromUi();
+        const snapshot = await invoke("write_settings_snapshot", {
+          settings: {
+            ...current,
+            "tun-stack": stack,
+            tunStack: stack,
+            "tun-auto-route": autoRoute,
+            tunAutoRoute: autoRoute,
+            "tun-strict-route": strictRoute,
+            tunStrictRoute: strictRoute,
+            "tun-dns-hijack": dnsHijack,
+            tunDnsHijack: dnsHijack,
+          },
+        });
+        applyPersistedSettings(snapshot);
+        closeGlassOverlays();
+        appendLog("info", "tun", `TUN settings saved (stack=${stack})`);
+        if (state.toggles.tunMode && activeProfile().active) await invoke("apply_active_profile");
+      } catch (error) {
+        appendLog("warning", "tun", `TUN settings failed: ${error.message ?? String(error)}`);
+      }
+      renderPage();
+    });
+  });
+
+  const saveRestoreDns = async (applyNow) => {
+    const servers = document.querySelector("[data-glass-restore-dns]")?.value ?? "Empty";
+    try {
+      const current = persistedSettingsFromUi();
+      const snapshot = await invoke("write_settings_snapshot", {
+        settings: { ...current, "restore-dns-servers": servers, restoreDnsServers: servers },
+      });
+      applyPersistedSettings(snapshot);
+      if (applyNow) {
+        const result = await invoke("apply_restore_dns_servers", { servers });
+        appendLog("info", "dns", result);
+      } else {
+        appendLog("info", "dns", "Restore DNS list saved");
+      }
+      closeGlassOverlays();
+    } catch (error) {
+      appendLog("warning", "dns", error.message ?? String(error));
+    }
+    renderPage();
+  };
+  document.querySelectorAll("[data-glass-restore-dns-save]").forEach((button) => {
+    button.addEventListener("click", () => saveRestoreDns(false));
+  });
+  document.querySelectorAll("[data-glass-restore-dns-apply]").forEach((button) => {
+    button.addEventListener("click", () => saveRestoreDns(true));
+  });
+
+  document.querySelectorAll("[data-glass-service-install]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        const status = await invoke("enable_service_mode");
+        state.serviceModeStatus = status;
+        appendLog("info", "service", `Service Mode: ${serviceModeLabel(status)}`);
+      } catch (error) {
+        appendLog("warning", "service", error.message ?? String(error));
+      }
+      closeGlassOverlays();
+      renderPage();
+    });
+  });
+  document.querySelectorAll("[data-glass-service-uninstall]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await invoke("disable_service_mode");
+        state.serviceModeStatus = await invoke("service_mode_status");
+        appendLog("info", "service", "Service Mode disabled");
+      } catch (error) {
+        appendLog("warning", "service", error.message ?? String(error));
+      }
+      closeGlassOverlays();
+      renderPage();
+    });
+  });
+  document.querySelectorAll("[data-glass-service-login-items]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await invoke("open_login_items_settings");
+        appendLog("info", "service", "Opened Login Items settings");
+      } catch (error) {
+        appendLog("warning", "service", error.message ?? String(error));
       }
     });
   });
@@ -2167,7 +2591,7 @@ function renderSettings() {
     ]],
     ["Mixin", [renderToggle("mixin", "Mixin", "Merge YAML/JS mixin before profile apply."), renderSettingValue("Mixin YAML", "Editor active", "The YAML merge editor below is persisted and applied before config reload.")]],
     ["Proxies", [
-      renderToggle("hideUnavailable", "Hide unavailable proxies", "Keep proxy group list compact."),
+      renderToggle("hideUnavailable", "Hide timed-out proxies", "Hide nodes that failed latency tests (N/A), matching CFW Show/Hide timed-out proxies."),
       renderSettingInput(
         "Delay test URL",
         persisted.delayTestUrl ?? persisted.delay_test_url ?? "http://www.gstatic.com/generate_204",
@@ -2240,7 +2664,7 @@ function renderSettings() {
       ])}
       ${renderNetworkDiagnostics()}
       ${renderSettingsGroup("Experimental", [
-        renderToggle("hideUnavailable", "Hide unavailable proxies", "Keep proxy pages readable when providers degrade."),
+        renderToggle("hideUnavailable", "Hide timed-out proxies", "Hide nodes that failed latency tests (N/A)."),
         renderSettingValue("TUN", platform.tun_strategy ?? "SmAppServiceRootHelper", "Root mihomo via SMAppService helper — not NetworkExtension."),
         renderSettingValue("launchd", platform.launchd_strategy ?? "typed launchd contract", "No product-layer ad-hoc scripts."),
       ])}
@@ -2856,6 +3280,15 @@ async function applyToggle(key, checked, source) {
       applyPersistedSettings(snapshot);
       await loadNetworkDiagnostics();
     } else if (key === "tunMode") {
+      if (checked && state.serviceModeStatus !== "Enabled") {
+        state.toggles[key] = previous;
+        state.glassDialog = {
+          kind: "info",
+          payload: { title: "TUN Mode", body: "To enable this mode, please install Service Mode first!" },
+        };
+        renderGlassOverlays();
+        return;
+      }
       const snapshot = await invoke("set_tun_enabled", { enabled: checked });
       applyPersistedSettings(snapshot);
     } else if (key === "mixin") {
@@ -2894,12 +3327,37 @@ async function handleAction(action) {
   if (action === "open-settings") {
     state.activePage = "settings";
   }
+  if (action === "scroll-to-selected-proxy") {
+    const group = state.proxyGroups.find((item) => item.name === state.activeProxyGroup)
+      ?? state.proxyGroups[0];
+    const selected = group?.now;
+    if (!selected) {
+      appendLog("warning", "proxy", "No selected proxy to scroll to");
+      return;
+    }
+    state.toggles.showProxiesList = true;
+    state.proxyBlinkNode = selected;
+    renderPage();
+    requestAnimationFrame(() => {
+      const card = document.querySelector(`[data-proxy-node="${CSS.escape(selected)}"]`);
+      card?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    setTimeout(() => {
+      if (state.proxyBlinkNode === selected) {
+        state.proxyBlinkNode = null;
+        if (state.activePage === "proxies") renderPage();
+      }
+    }, 1200);
+  }
+  if (action === "toggle-hide-timed-out" || action === "toggle-hide-unavailable") {
+    state.toggles.hideUnavailable = !state.toggles.hideUnavailable;
+  }
+  if (action === "toggle-show-proxies") {
+    state.toggles.showProxiesList = !(state.toggles.showProxiesList !== false);
+  }
   if (action === "toggle-proxy-filter") {
     state.toggles.showProxyFilter = !state.toggles.showProxyFilter;
     if (!state.toggles.showProxyFilter) state.proxyFilter = "";
-  }
-  if (action === "toggle-hide-unavailable") {
-    state.toggles.hideUnavailable = !state.toggles.hideUnavailable;
   }
   if (action === "break-proxy-connections") {
     const count = state.connections.length;
@@ -2934,31 +3392,78 @@ async function handleAction(action) {
     }
   }
   if (action === "delay-test") {
-    if (tauriApi()?.core?.invoke) {
-      const names = [...new Set(state.proxyGroups.flatMap((group) => group.options.map((node) => node.name)))]
-        .filter((name) => !["DIRECT", "REJECT"].includes(name.toUpperCase()));
-      if (!names.length) {
-        appendLog("warning", "proxy", "No proxy nodes available for delay test");
-      } else {
+    if (state.toggles.testingDelays) return;
+    const activeGroup = state.proxyGroups.find((group) => group.name === state.activeProxyGroup)
+      ?? state.proxyGroups.find((group) => isManualProxyGroup(group.type) && group.name.toUpperCase() !== "GLOBAL")
+      ?? state.proxyGroups[0]
+      ?? null;
+    // CFW only latency-tests the current section's `all` list — not every group.
+    const names = [...new Set((activeGroup?.options ?? []).map((node) => node.name))]
+      .filter((name) => !["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"].includes(String(name).toUpperCase()));
+    if (!names.length) {
+      appendLog("warning", "proxy", "No proxy nodes available for delay test");
+    } else if (tauriApi()?.core?.invoke) {
+      state.toggles.testingDelays = true;
+      if (activeGroup) {
+        activeGroup.options.forEach((node) => {
+          if (names.includes(node.name)) {
+            node.delay = null;
+            node.dead = false;
+          }
+        });
+      }
+      renderPage();
+      try {
         const delayUrl = state.settingsSnapshot?.settings?.delayTestUrl
           ?? state.settingsSnapshot?.settings?.delay_test_url
           ?? null;
-        const results = await invoke("test_proxy_delays", { proxies: names, url: delayUrl, timeoutMs: 5000 });
-        const delayByName = new Map((results ?? []).filter((item) => Number.isFinite(item.delay)).map((item) => [item.name, item.delay]));
-        const errorByName = new Map((results ?? []).filter((item) => item.error).map((item) => [item.name, item.error]));
-        state.proxyGroups.forEach((group) => {
-          group.options.forEach((node) => {
-            if (delayByName.has(node.name)) {
-              node.delay = delayByName.get(node.name);
-              node.dead = false;
-            } else if (errorByName.has(node.name)) {
-              node.delay = -1;
-              node.dead = true;
-            }
+        // Probe in chunks so the grid updates while CFW-style testing runs.
+        const delayByName = new Map();
+        const errorByName = new Map();
+        const chunkSize = 8;
+        for (let offset = 0; offset < names.length; offset += chunkSize) {
+          const chunk = names.slice(offset, offset + chunkSize);
+          const results = await invoke("test_proxy_delays", {
+            proxies: chunk,
+            url: delayUrl,
+            timeout_ms: 5000,
+            timeoutMs: 5000,
           });
-        });
-        const failed = (results ?? []).filter((item) => item.error).length;
-        appendLog(failed ? "warning" : "info", "proxy", `Delay Test completed: ${delayByName.size} updated${failed ? `, ${failed} failed` : ""}`);
+          for (const item of results ?? []) {
+            if (Number.isFinite(item.delay) && item.delay > 0) {
+              delayByName.set(item.name, item.delay);
+              errorByName.delete(item.name);
+            } else if (item.delay === 0) {
+              delayByName.set(item.name, 0);
+              errorByName.delete(item.name);
+            } else if (item.error) {
+              errorByName.set(item.name, item.error);
+            }
+          }
+          state.proxyGroups.forEach((group) => {
+            group.options.forEach((node) => {
+              if (delayByName.has(node.name)) {
+                node.delay = delayByName.get(node.name);
+                node.dead = node.delay <= 0;
+              } else if (errorByName.has(node.name)) {
+                node.delay = -1;
+                node.dead = true;
+              }
+            });
+          });
+          renderPage();
+        }
+        const failed = errorByName.size + [...delayByName.values()].filter((delay) => delay <= 0).length;
+        const ok = [...delayByName.values()].filter((delay) => delay > 0).length;
+        appendLog(
+          failed ? "warning" : "info",
+          "proxy",
+          `Delay test (${activeGroup?.name ?? "group"}): ${ok} ok${failed ? `, ${failed} timed out/failed` : ""}`,
+        );
+      } catch (error) {
+        appendLog("warning", "proxy", `Delay test failed: ${error.message ?? String(error)}`);
+      } finally {
+        state.toggles.testingDelays = false;
       }
     } else {
       state.proxyGroups.forEach((group) => {
@@ -3008,6 +3513,156 @@ async function handleAction(action) {
     } catch (error) {
       appendLog("error", "core", error.message ?? String(error));
     }
+  }
+  if (action === "copy-proxy-exports") {
+    const port = state.settingsSnapshot?.settings?.mixed_port ?? 7890;
+    const exports = [
+      `export https_proxy=http://127.0.0.1:${port}`,
+      `export http_proxy=http://127.0.0.1:${port}`,
+      `export all_proxy=socks5://127.0.0.1:${port}`,
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(exports);
+      appendLog("info", "shell", "Copied proxy export commands for Terminal");
+    } catch (error) {
+      appendLog("warning", "clipboard", error.message ?? String(error));
+    }
+  }
+  if (action === "toggle-random-mixed-port") {
+    const current = Boolean(state.settingsSnapshot?.settings?.randomMixedPort ?? state.settingsSnapshot?.settings?.random_mixed_port);
+    try {
+      const snapshot = await invoke("write_settings_snapshot", {
+        settings: { ...persistedSettingsFromUi(), randomMixedPort: !current, random_mixed_port: !current },
+      });
+      applyPersistedSettings(snapshot);
+      appendLog("info", "settings", `Random mixed-port ${!current ? "enabled" : "disabled"}`);
+    } catch (error) {
+      appendLog("warning", "settings", error.message ?? String(error));
+    }
+  }
+  if (action === "allow-lan-info") {
+    state.glassDialog = {
+      kind: "info",
+      payload: {
+        title: "Allow LAN",
+        body: "Turn on to listen on all interfaces by default, or else only listen on 127.0.0.1. You can change the Bind Address on the right to specify a particular interface.",
+      },
+    };
+    renderGlassOverlays();
+    return;
+  }
+  if (action === "show-network-interfaces") {
+    try {
+      const diagnostics = await invoke("network_diagnostics");
+      state.networkDiagnostics = diagnostics;
+      state.glassDialog = {
+        kind: "network-interfaces",
+        payload: diagnostics?.services ?? [],
+        defaultRoute: diagnostics?.default_route_interface ?? diagnostics?.defaultRouteInterface ?? "unknown",
+      };
+      renderGlassOverlays();
+      return;
+    } catch (error) {
+      appendLog("warning", "network", error.message ?? String(error));
+    }
+  }
+  if (action === "edit-bind-address") {
+    const persisted = state.settingsSnapshot?.settings ?? {};
+    state.glassDialog = { kind: "bind-address", payload: bindAddressLabel(persisted) };
+    renderGlassOverlays();
+    return;
+  }
+  if (action === "preview-runtime-config") {
+    try {
+      const body = await invoke("read_runtime_config_text");
+      state.glassDialog = { kind: "preview-config", payload: body };
+      renderGlassOverlays();
+      return;
+    } catch (error) {
+      appendLog("warning", "core", `Config preview failed: ${error.message ?? String(error)}`);
+    }
+  }
+  if (action === "dns-query") {
+    state.glassDialog = { kind: "dns-query", payload: { name: "www.gstatic.com", type: "A", result: "" } };
+    renderGlassOverlays();
+    return;
+  }
+  if (action === "script-test") {
+    state.glassDialog = { kind: "script-test" };
+    renderGlassOverlays();
+    return;
+  }
+  if (action === "open-controller-dashboard") {
+    const settings = state.settingsSnapshot?.settings ?? {};
+    const host = settings.external_controller_host ?? "127.0.0.1";
+    const port = settings.external_controller_port ?? 9090;
+    const secret = settings.secret ? encodeURIComponent(settings.secret) : "";
+    const url = `https://clash.razord.top/#/?host=${encodeURIComponent(host)}&port=${port}${secret ? `&secret=${secret}` : ""}`;
+    try {
+      await invoke("open_external_url", { url });
+      appendLog("info", "core", `Opened controller dashboard (${host}:${port})`);
+    } catch (error) {
+      try {
+        await navigator.clipboard.writeText(url);
+        appendLog("warning", "core", `Open failed; URL copied instead: ${error.message ?? String(error)}`);
+      } catch (clipError) {
+        appendLog("info", "core", url);
+        appendLog("warning", "core", error.message ?? String(error));
+        appendLog("warning", "clipboard", clipError.message ?? String(clipError));
+      }
+    }
+    return;
+  }
+  if (action === "tun-info") {
+    state.glassDialog = {
+      kind: "info",
+      payload: { title: "TUN Mode", body: "To enable this mode, please install Service Mode first!" },
+    };
+    renderGlassOverlays();
+    return;
+  }
+  if (action === "tun-settings") {
+    const settings = state.settingsSnapshot?.settings ?? {};
+    state.glassDialog = {
+      kind: "tun-settings",
+      payload: {
+        stack: settings["tun-stack"] ?? settings.tunStack ?? "system",
+        autoRoute: settings["tun-auto-route"] ?? settings.tunAutoRoute ?? true,
+        strictRoute: settings["tun-strict-route"] ?? settings.tunStrictRoute ?? false,
+        dnsHijack: settings["tun-dns-hijack"] ?? settings.tunDnsHijack ?? "any:53",
+      },
+    };
+    renderGlassOverlays();
+    return;
+  }
+  if (action === "tun-reset-dns") {
+    const settings = state.settingsSnapshot?.settings ?? {};
+    state.glassDialog = {
+      kind: "tun-reset-dns",
+      payload: settings["restore-dns-servers"] ?? settings.restoreDnsServers ?? "Empty",
+    };
+    renderGlassOverlays();
+    return;
+  }
+  if (action === "mixin-info") {
+    state.glassDialog = {
+      kind: "info",
+      payload: {
+        title: "Mixin",
+        body: "When Mixin is enabled, YAML is recursively merged into the generated config.yaml before the core reloads.",
+      },
+    };
+    renderGlassOverlays();
+    return;
+  }
+  if (action === "edit-mixin") {
+    const settings = state.settingsSnapshot?.settings ?? {};
+    state.glassDialog = {
+      kind: "edit-mixin",
+      payload: settings.mixin_yaml ?? settings.mixinYaml ?? state.mixinYaml ?? "",
+    };
+    renderGlassOverlays();
+    return;
   }
   if (action === "open-home-directory") {
     try {
@@ -3266,24 +3921,9 @@ async function handleAction(action) {
     appendLog("info", "settings", "cfw-settings.yaml reloaded");
   }
   if (action === "manage-service-mode") {
-    try {
-      const status = await invoke("enable_service_mode");
-      state.serviceModeStatus = status;
-      if (status === "RequiresApproval") {
-        appendLog(
-          "warning",
-          "service",
-          'Service Mode needs approval: System Settings → General → Login Items & Extensions → enable "Clash for Mac"'
-        );
-      } else if (status === "Enabled") {
-        appendLog("info", "service", "Service Mode enabled");
-      } else {
-        appendLog("warning", "service", `Service Mode status: ${serviceModeLabel(status)}`);
-      }
-    } catch (error) {
-      appendLog("warning", "service", `Service Mode enable failed: ${error.message ?? String(error)}`);
-    }
-    await loadCoreStatus();
+    state.glassDialog = { kind: "service-mode-manage" };
+    renderGlassOverlays();
+    return;
   }
   if (action === "update-geoip-database") {
     if (state.geoipUpdating) return;
@@ -3570,6 +4210,15 @@ async function loadCoreStatus() {
   } catch (error) {
     state.geoipStatus = null;
     appendLog("warning", "geoip", `Unable to read GeoIP database: ${error.message ?? String(error)}`);
+  }
+  if (nextState === "Running") {
+    try {
+      state.controllerVersion = await invoke("controller_version");
+    } catch (_error) {
+      state.controllerVersion = null;
+    }
+  } else {
+    state.controllerVersion = null;
   }
 }
 

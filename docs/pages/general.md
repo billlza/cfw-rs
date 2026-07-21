@@ -1,8 +1,15 @@
 # General
 
-- Status overview card cluster
-- Current mode and quick switcher
-- System proxy toggle
-- TUN toggle
-- Runtime health and crash recovery affordances
+CFW-aligned settings list (not a dashboard card cluster). Each row matches Clash for Windows 0.20.39 macOS General affordances:
 
+- **Port** — copy proxy `export` commands; random mixed-port; editable mixed-port
+- **Allow LAN** — info, network interfaces, editable bind address, toggle
+- **Log Level / IPv6** — level select / toggle
+- **Clash Core** — preview runtime `config.yaml`, DNS query via controller, Script-mode note; version + controller port; start/stop/install
+- **Home Directory / GeoIP Database** — Open Folder; click-to-update GeoIP
+- **Service Mode** — status icon; Manage → Install / Uninstall / Login Items
+- **TUN Mode** — info, TUN settings (stack / auto-route / strict-route / dns-hijack), restore DNS after TUN off
+- **Mixin** — info, edit Mixin YAML, toggle
+- **System Proxy / Start with macOS** — toggles
+
+Sidebar still shows live up/down rates, running time, and Connected status.

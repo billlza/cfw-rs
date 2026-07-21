@@ -1,14 +1,18 @@
 # Clash for Mac — Release Gate
 
-**Goal:** ship a distributable Apple Silicon beta that real users can install without Gatekeeper fights, and that covers CFW 0.20.39's core daily path.
+**Goal:** ship a distributable **Apple Silicon (arm64) only** beta that real users can install without Gatekeeper fights, and that covers CFW 0.20.39's core daily path.
+
+**Hard platform rule:** never support Intel Mac / Universal Binary. Builds and CI must refuse `x86_64-apple-darwin` and lipo.
 
 ## Done when all of these are true
 
 1. **Build**
+   - `./scripts/assert_apple_silicon.sh` passes
    - `cargo test --workspace` passes on `aarch64-apple-darwin`
    - `cargo tauri build` produces `Clash for Mac.app` with:
      - `Contents/MacOS/clash-for-mac`
-     - bundled `resources/cores/clash-darwin`
+     - bundled `resources/cores/clash-rs` (default Rust core)
+     - bundled `resources/cores/clash-darwin` (mihomo fallback)
      - bundled `resources/helpers/cfw-helper`
      - `Contents/Library/LaunchDaemons/com.bill.clashformac.helper.plist` (via `scripts/bundle_service_mode.sh`)
 
@@ -26,16 +30,20 @@
    - Tray + `clash://install-config` deep link work
 
 4. **Ship hygiene**
-   - Version ≥ `0.2.0` with CHANGELOG entry
+   - Version ≥ `0.3.1` with CHANGELOG entry that does **not** claim unfinished work
    - LICENSE present (MIT per Cargo.toml)
-   - CI: test on push/PR; release build documented or automated
+   - CI: test on push/PR; `cfw-perf-gate` records metrics without claiming 「3×」 without baseline
    - `docs/parity-checklist.md` matches reality (no stale unchecked items that are already done)
 
-5. **Explicitly out of scope for this beta (tracked, not blocking)**
-   - Pixel-perfect screenshot parity vs CFW
-   - Proven 3× performance CI gates
-   - SSID policy, Monaco editor, DHCP server, full PAC editor
-   - In-app Sparkle auto-update *(superseded in 0.2.0 by tauri-plugin-updater)*
+5. **Explicit product decisions (closed — do not reopen as “missing features”)**
+   - Pixel-perfect screenshot parity vs CFW *(optional polish)*
+   - Proven 3× performance vs CFW *(metrics recorded; claim forbidden without baseline)*
+   - SSID policy, Monaco editor, DHCP server, full PAC editor *(deferred polish)*
+   - Sparkle *(cancelled — `tauri-plugin-updater`)*
+   - Universal Binary / Intel Mac *(permanently unsupported)*
+   - Network Extension / full App Sandbox *(rejected as production path — helper TUN is official)*
+   - React as product UI *(rejected — Tauri WebKit UI is official; React ≠ stronger than Tauri)*
+   - Default core is **clash-rs**; mihomo is fallback only
 
 
 
@@ -120,7 +128,15 @@ xcrun stapler staple "target/release/bundle/dmg/Clash for Mac_0.1.0_aarch64.dmg"
 - [ ] Update-all cancel mid-flight
 - [ ] Shortcut capture UI / full CFW settings migration
 
-### P3 — explicitly deferred
-- Screenshot parity, 3× CI gates, SSID, Monaco diff, DHCP, Sparkle auto-update, proxied terminal, child-process log tail
+### P3 — explicitly deferred / rejected
+- Screenshot parity, proven 3× CFW gates (without baseline), SSID, Monaco diff, DHCP, proxied terminal, child-process log tail
+- Sparkle auto-update *(rejected — tauri-plugin-updater)*
+- Universal Binary / Intel *(rejected — Apple Silicon only)*
 - MaxMind license-key download path (URL update works; CFW token→tarball path not ported)
+
+### 0.3.1 notes
+- Default core cutover: **clash-rs**; mihomo fallback only
+- Tauri WebKit UI remains product UI (React migration rejected)
+- Helper TUN is production; NE / App Sandbox rejected as production path
+- Do not advertise 「3× CFW」 without same-machine baseline JSON
 

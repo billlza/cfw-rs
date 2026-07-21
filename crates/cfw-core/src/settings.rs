@@ -7,7 +7,7 @@ use std::sync::atomic::{self, AtomicU64};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{DEFAULT_DELAY_TEST_URL, PRODUCT_NAME, RuntimeMode, SettingsSkeleton};
+use crate::{CoreKind, DEFAULT_DELAY_TEST_URL, PRODUCT_NAME, RuntimeMode, SettingsSkeleton};
 
 /// Process-wide counter making each settings temp file name unique.
 static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -118,6 +118,9 @@ pub struct PersistedSettings {
     /// URL used by Proxies delay tests (CFW delay/liveness URL).
     #[serde(default = "default_delay_test_url", rename = "delayTestUrl", alias = "delay_test_url")]
     pub delay_test_url: String,
+    /// Preferred Clash-compatible core. Default is clash-rs; mihomo is fallback.
+    #[serde(default, rename = "coreKind", alias = "core_kind")]
+    pub core_kind: CoreKind,
     pub only_arm64_macos_supported: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_yaml::Value>,
@@ -154,6 +157,7 @@ impl Default for PersistedSettings {
             pac_script: String::new(),
             random_mixed_port: false,
             delay_test_url: default_delay_test_url(),
+            core_kind: CoreKind::default(),
             only_arm64_macos_supported: skeleton.only_arm64_macos_supported,
             extra: BTreeMap::new(),
         }

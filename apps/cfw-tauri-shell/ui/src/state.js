@@ -1,7 +1,7 @@
 export const fallbackPayload = {
   product: {
     name: "Clash for Mac",
-    version: "0.3.0",
+    version: "0.3.1",
     parity_source: "Clash for Windows 0.20.39 macOS arm64 public release artifact",
   },
   pages: [
@@ -94,6 +94,8 @@ export const fallbackSettingsSnapshot = {
     pacScript: "",
     randomMixedPort: false,
     delayTestUrl: "http://www.gstatic.com/generate_204",
+    coreKind: "clash_rs",
+    core_kind: "clash_rs",
     only_arm64_macos_supported: true,
   },
 };
@@ -101,15 +103,16 @@ export const fallbackSettingsSnapshot = {
 export const fallbackCoreStatus = {
   state: "MissingBinary",
   pid: null,
-  message: "Missing ~/Library/Application Support/Clash for Mac/cores/clash-darwin",
+  message: "Missing ~/Library/Application Support/Clash for Mac/cores/clash-rs",
   spec: {
-    binary_path: "~/Library/Application Support/Clash for Mac/cores/clash-darwin",
+    binary_path: "~/Library/Application Support/Clash for Mac/cores/clash-rs",
     config_path: "~/Library/Application Support/Clash for Mac/config.yaml",
     home_dir: "~/Library/Application Support/Clash for Mac",
     log_file: "~/Library/Application Support/Clash for Mac/logs/clash-core.log",
     controller_host: "127.0.0.1",
     controller_port: 9090,
     mixed_port: 7890,
+    core_kind: "clash_rs",
   },
 };
 

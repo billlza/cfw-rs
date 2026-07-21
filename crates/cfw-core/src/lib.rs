@@ -16,7 +16,7 @@ pub use settings::{
 
 pub const PRODUCT_NAME: &str = "Clash for Mac";
 /// Ship version for UI / About (must match `apps/cfw-tauri-shell/tauri.conf.json`).
-pub const PRODUCT_VERSION: &str = "0.3.0";
+pub const PRODUCT_VERSION: &str = "0.3.1";
 pub const DEFAULT_DELAY_TEST_URL: &str = "http://www.gstatic.com/generate_204";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +31,53 @@ pub enum RuntimeMode {
     Rule,
     Direct,
     Script,
+}
+
+/// Which Clash-compatible core binary to prefer.
+///
+/// Default is [`CoreKind::ClashRs`] (Rust). Mihomo remains an automatic fallback
+/// when clash-rs is missing or fails to become controller-ready.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreKind {
+    Mihomo,
+    #[default]
+    ClashRs,
+}
+
+impl CoreKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mihomo => "mihomo",
+            Self::ClashRs => "clash_rs",
+        }
+    }
+
+    pub fn parse_loose(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "mihomo" | "clash-darwin" | "meta" => Some(Self::Mihomo),
+            "clash_rs" | "clash-rs" | "clashrs" | "watfaq" => Some(Self::ClashRs),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod core_kind_tests {
+    use super::CoreKind;
+
+    #[test]
+    fn parses_loose_aliases() {
+        assert_eq!(CoreKind::parse_loose("mihomo"), Some(CoreKind::Mihomo));
+        assert_eq!(CoreKind::parse_loose("clash-rs"), Some(CoreKind::ClashRs));
+        assert_eq!(CoreKind::parse_loose("watfaq"), Some(CoreKind::ClashRs));
+        assert_eq!(CoreKind::parse_loose("nope"), None);
+    }
+
+    #[test]
+    fn default_is_clash_rs() {
+        assert_eq!(CoreKind::default(), CoreKind::ClashRs);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

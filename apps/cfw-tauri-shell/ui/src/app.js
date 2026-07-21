@@ -93,6 +93,14 @@ function persistedSettingsFromUi() {
       || current.delayTestUrl
       || current.delay_test_url
       || "http://www.gstatic.com/generate_204",
+    coreKind: document.querySelector("[data-core-kind]")?.value
+      || current.coreKind
+      || current.core_kind
+      || "clash_rs",
+    core_kind: document.querySelector("[data-core-kind]")?.value
+      || current.coreKind
+      || current.core_kind
+      || "clash_rs",
   };
 }
 
@@ -387,7 +395,7 @@ function serviceModeIconTone(status) {
 function renderGeneral() {
   const persisted = state.settingsSnapshot?.settings ?? fallbackSettingsSnapshot.settings;
   const product = state.payload.product ?? fallbackPayload.product;
-  const appVersion = product.version ?? "0.3.0";
+  const appVersion = product.version ?? "0.3.1";
   const core = state.coreStatus ?? fallbackCoreStatus;
   const coreRunning = core.state === "Running";
   const controllerHost = persisted.external_controller_host ?? "127.0.0.1";
@@ -2181,8 +2189,8 @@ function renderFeedback() {
       <section class="panel hero-panel">
         <div>
           <p class="label">Feedback</p>
-          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.3.0")}</h3>
-          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.3.0")}).</p>
+          <h3>${escapeHtml(product.name)} v${escapeHtml(product.version ?? "0.3.1")}</h3>
+          <p class="muted">Parity target is CFW 0.20.39; this build is the Apple Silicon beta (${escapeHtml(product.version ?? "0.3.1")}).</p>
         </div>
         <span class="badge">ARM64 macOS only</span>
       </section>
@@ -2381,7 +2389,20 @@ function renderSettings() {
         renderSettingValue("mixed-port", String(persisted.mixed_port), "HTTP, HTTPS and SOCKS entry point."),
         renderSettingValue("external-controller", controller, "Local Clash controller endpoint."),
         renderSettingValue("secret", persisted.secret ? "••••••••" : "empty", "Controller secret stored in cfw-settings.yaml."),
+        `
+          <div class="settings-row">
+            <div>
+              <p class="settings-title">Core engine</p>
+              <p class="muted">Default is clash-rs (Rust). Mihomo is automatic fallback. Env: CFW_CORE_KIND.</p>
+            </div>
+            <select data-core-kind class="settings-select">
+              <option value="clash_rs" ${(persisted.coreKind ?? persisted.core_kind ?? "clash_rs") === "clash_rs" ? "selected" : ""}>clash-rs (default, Rust)</option>
+              <option value="mihomo" ${(persisted.coreKind ?? persisted.core_kind) === "mihomo" ? "selected" : ""}>mihomo (fallback)</option>
+            </select>
+          </div>
+        `,
         renderToggle("enableIpv6", "IPv6", "Expose IPv6 option in generated Clash config."),
+        renderSettingAction("Install clash-rs", "Apple Silicon only", `Download pinned clash-rs ${"v0.10.7"} beside mihomo (does not change default).`, "install-pinned-clash-rs", "Install"),
       ])}
       ${renderMixinSettings()}
       ${renderProfileParserSettings()}
@@ -2404,7 +2425,8 @@ function renderSettings() {
       ${renderNetworkDiagnostics()}
       ${renderSettingsGroup("Experimental", [
         renderToggle("hideUnavailable", "Hide timed-out proxies", "Hide nodes that failed latency tests (Timeout)."),
-        renderSettingValue("TUN", platform.tun_strategy ?? "SmAppServiceRootHelper", "Root mihomo via SMAppService helper — not NetworkExtension."),
+        renderSettingValue("TUN", platform.tun_strategy ?? "SmAppServiceRootHelper", "Production TUN path: SMAppService root helper (not Network Extension)."),
+        renderSettingValue("UI shell", "Tauri 2 + WebKit", "Native Tauri shell. React is not the product UI."),
         renderSettingValue("launchd", platform.launchd_strategy ?? "typed launchd contract", "No product-layer ad-hoc scripts."),
       ])}
       <section class="panel settings-index">
@@ -2601,6 +2623,32 @@ function bindPageEvents() {
         appendLog("info", "settings", `Random mixed-port ${event.currentTarget.checked ? "enabled" : "disabled"}`);
       } catch (error) {
         appendLog("error", "settings", `Random mixed-port refused: ${error.message ?? String(error)}`);
+      }
+      renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-core-kind]").forEach((input) => {
+    input.addEventListener("change", async (event) => {
+      const value = event.currentTarget.value || "mihomo";
+      try {
+        const snapshot = await invoke("write_settings_snapshot", {
+          settings: {
+            ...persistedSettingsFromUi(),
+            coreKind: value,
+            core_kind: value,
+          },
+        });
+        applyPersistedSettings(snapshot);
+        appendLog(
+          "info",
+          "core",
+          value === "mihomo"
+            ? "Preferred core set to mihomo (manual override)"
+            : "Preferred core set to clash-rs (default)",
+        );
+      } catch (error) {
+        appendLog("error", "settings", `Core kind refused: ${error.message ?? String(error)}`);
       }
       renderPage();
     });
@@ -3267,6 +3315,19 @@ async function handleAction(action) {
       appendLog("info", "core", `Pinned core installed: ${formatBytes(result.bytes ?? 0)} · ${String(result.sha256 ?? "").slice(0, 12)}`);
     } catch (error) {
       appendLog("error", "core", `Core install failed: ${error.message ?? String(error)}`);
+    }
+  }
+  if (action === "install-pinned-clash-rs") {
+    try {
+      appendLog("info", "core", "Installing pinned clash-rs aarch64 (does not change default core)...");
+      const result = await invoke("install_pinned_clash_rs_core");
+      appendLog(
+        "info",
+        "core",
+        `Pinned clash-rs installed: ${formatBytes(result.bytes ?? 0)} · ${String(result.sha256 ?? "").slice(0, 12)}`,
+      );
+    } catch (error) {
+      appendLog("error", "core", `clash-rs install failed: ${error.message ?? String(error)}`);
     }
   }
   if (action === "stop-core") {

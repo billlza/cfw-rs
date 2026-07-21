@@ -12,9 +12,10 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use cfw_core::{ControlSession, MacOsAppPaths, SettingsStore};
+use cfw_core::{ControlSession, CoreKind, MacOsAppPaths, PersistedSettings, SettingsStore};
 use cfw_runtime::{
-    CORE_LOG_FILE_NAME, CoreManager, CoreProcessSpec, DEFAULT_CORE_BINARY_NAME,
+    CORE_LOG_FILE_NAME, CoreManager, CoreProcessSpec, MIHOMO_CORE_BINARY_NAME, core_binary_name,
+    resolve_core_kind,
 };
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -172,14 +173,26 @@ fn supervise() -> Result<()> {
 /// `$HOME`, which is `/var/root` under launchd) and spawn the core as root.
 fn spawn_core_for_session(session: &ControlSession) -> Result<Child> {
     let paths = MacOsAppPaths::from_app_home(&session.app_home);
+    let settings = SettingsStore::new(paths.clone())
+        .read_or_default()
+        .unwrap_or_else(|_| PersistedSettings::default());
+    let mut kind = resolve_core_kind(&settings);
+    let mut binary_path = paths.cores_dir.join(core_binary_name(kind));
+    if kind == CoreKind::ClashRs && !binary_path.exists() {
+        // Service Mode must stay up; fall back to mihomo without claiming cutover.
+        eprintln!("clash-rs binary missing under Service Mode; falling back to mihomo");
+        kind = CoreKind::Mihomo;
+        binary_path = paths.cores_dir.join(MIHOMO_CORE_BINARY_NAME);
+    }
     let spec = CoreProcessSpec {
-        binary_path: paths.cores_dir.join(DEFAULT_CORE_BINARY_NAME),
+        binary_path,
         config_path: session.config_file.clone(),
         home_dir: paths.app_home.clone(),
         log_file: paths.logs_dir.join(CORE_LOG_FILE_NAME),
         controller_host: "127.0.0.1".into(),
         controller_port: session.controller_port,
         mixed_port: session.mixed_port,
+        core_kind: kind,
     };
     CoreManager::new(spec)
         .spawn()

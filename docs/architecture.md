@@ -18,11 +18,15 @@ The `0.20.39` macOS ARM64 app package establishes the product shape:
 - local Clash core controlled over `127.0.0.1`
 - auth via controller `secret`
 - bundled macOS binaries:
-  - `clash-darwin`
-  - `sysproxy`
-  - `clash-core-service`
+  - `clash-rs` (Watfaq; **default** Rust core)
+  - `clash-darwin` (pinned mihomo; automatic fallback)
+  - `sysproxy` (historical CFW; our path uses SCPreferences)
+  - `clash-core-service` (historical CFW; our path uses SMAppService `cfw-helper`)
 - settings persisted to `cfw-settings.yaml`
 - privileged operations delegated to helper/service logic
+- **platform lock:** `aarch64-apple-darwin` only — never Intel / Universal Binary
+- **UI:** Tauri 2 + WebKit — React is not a product migration target
+- **TUN:** SMAppService helper is production; Network Extension / App Sandbox are not
 
 ## Required 1:1 Feature Buckets
 

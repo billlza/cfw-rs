@@ -14,9 +14,9 @@ use cfw_controller::{
     StructuredLogEntry,
 };
 use cfw_core::{
-    CONTROL_SESSION_DIR, ControlSession, DeepLinkIntent, FeatureSet, PRODUCT_NAME, PersistedSettings,
-    ProductBlueprint, QualityTargets, SettingsSkeleton, SettingsSnapshot, SettingsStore, UiPage,
-    parse_deep_link,
+    CONTROL_SESSION_DIR, ControlSession, CoreKind, DeepLinkIntent, FeatureSet, PRODUCT_NAME,
+    PersistedSettings, ProductBlueprint, QualityTargets, SettingsSkeleton, SettingsSnapshot,
+    SettingsStore, UiPage, parse_deep_link,
 };
 use cfw_platform::{
     HelperInstallRequest, HelperService, LaunchdDomain, LaunchdService, MacOsPlatformDesign,
@@ -28,8 +28,9 @@ use cfw_profiles::{
     ProfileSaveResult, ProfileText,
 };
 use cfw_runtime::{
-    CoreInstallRequest, CoreInstallResult, CoreInstaller, CoreManager, CoreProcessSpec,
-    CoreProcessState, CoreRuntimeError, CoreStatus, DEFAULT_CORE_BINARY_NAME, PINNED_MIHOMO_VERSION,
+    CLASH_RS_CORE_BINARY_NAME, CoreInstallRequest, CoreInstallResult, CoreInstaller, CoreManager,
+    CoreProcessSpec, CoreProcessState, CoreRuntimeError, CoreStatus, DEFAULT_CORE_BINARY_NAME,
+    PINNED_CLASH_RS_VERSION, PINNED_MIHOMO_VERSION, core_binary_name, resolve_core_kind,
 };
 use futures_util::StreamExt;
 use qrcode::QrCode;
@@ -221,17 +222,20 @@ fn core_manager_from_settings() -> Result<CoreManager, String> {
 fn provision_core_binary_from_resources(app: &AppHandle) -> Result<CoreProvisionResult, String> {
     let store = settings_store()?;
     store.ensure_layout().map_err(|err| err.to_string())?;
-    let target_path = store.paths().cores_dir.join(DEFAULT_CORE_BINARY_NAME);
+    let settings = store.read_or_default().map_err(|err| err.to_string())?;
+    let kind = resolve_core_kind(&settings);
+    let binary_name = core_binary_name(kind);
+    let target_path = store.paths().cores_dir.join(binary_name);
     if target_path.exists() {
         return Ok(CoreProvisionResult {
             installed: false,
             source_path: None,
             target_path,
-            message: "Managed Clash core already exists".into(),
+            message: format!("Managed {binary_name} core already exists"),
         });
     }
 
-    let source_path = core_resource_candidates(app)
+    let source_path = core_resource_candidates(app, binary_name)
         .into_iter()
         .find(|path| path.exists() && path.is_file());
     let Some(source_path) = source_path else {
@@ -240,7 +244,7 @@ fn provision_core_binary_from_resources(app: &AppHandle) -> Result<CoreProvision
             source_path: None,
             target_path,
             message: format!(
-                "No bundled ARM64 core found; place {DEFAULT_CORE_BINARY_NAME} in resources/cores before packaging"
+                "No bundled ARM64 {binary_name} found; place it in resources/cores before packaging"
             ),
         });
     };
@@ -259,28 +263,27 @@ fn provision_core_binary_from_resources(app: &AppHandle) -> Result<CoreProvision
         installed: true,
         source_path: Some(source_path),
         target_path,
-        message: "Bundled Clash core installed into managed cores directory".into(),
+        message: format!("Bundled {binary_name} installed into managed cores directory"),
     })
 }
 
-fn core_resource_candidates(app: &AppHandle) -> Vec<PathBuf> {
+fn core_resource_candidates(app: &AppHandle, binary_name: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
-        // Tauri keeps the "resources/" prefix, so the bundled core lands here.
         candidates.push(
             resource_dir
                 .join("resources")
                 .join("cores")
-                .join(DEFAULT_CORE_BINARY_NAME),
+                .join(binary_name),
         );
-        candidates.push(resource_dir.join("cores").join(DEFAULT_CORE_BINARY_NAME));
-        candidates.push(resource_dir.join(DEFAULT_CORE_BINARY_NAME));
+        candidates.push(resource_dir.join("cores").join(binary_name));
+        candidates.push(resource_dir.join(binary_name));
         candidates.push(
             resource_dir
                 .join("cfw-0.20.39-arm64")
-                .join(DEFAULT_CORE_BINARY_NAME),
+                .join(binary_name),
         );
-        collect_core_resource_candidates(&resource_dir, 0, &mut candidates);
+        collect_core_resource_candidates(&resource_dir, binary_name, 0, &mut candidates);
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -288,18 +291,19 @@ fn core_resource_candidates(app: &AppHandle) -> Vec<PathBuf> {
         manifest_dir
             .join("resources")
             .join("cores")
-            .join(DEFAULT_CORE_BINARY_NAME),
+            .join(binary_name),
     );
     candidates.push(
         manifest_dir
             .join("../../reverse/cfw-0.20.39-arm64")
-            .join(DEFAULT_CORE_BINARY_NAME),
+            .join(binary_name),
     );
     candidates
 }
 
 fn collect_core_resource_candidates(
     root: &std::path::Path,
+    binary_name: &str,
     depth: usize,
     candidates: &mut Vec<PathBuf>,
 ) {
@@ -316,11 +320,11 @@ fn collect_core_resource_candidates(
         if path.is_file()
             && path
                 .file_name()
-                .is_some_and(|name| name == DEFAULT_CORE_BINARY_NAME)
+                .is_some_and(|name| name == binary_name)
         {
             candidates.push(path);
         } else if path.is_dir() {
-            collect_core_resource_candidates(&path, depth + 1, candidates);
+            collect_core_resource_candidates(&path, binary_name, depth + 1, candidates);
         }
     }
 }
@@ -344,6 +348,7 @@ async fn install_core_from_url(
         .install_from_url(CoreInstallRequest {
             url,
             sha256: Some(sha256),
+            binary_name: None,
         })
         .await
         .map_err(|err| err.to_string())
@@ -363,6 +368,16 @@ async fn install_pinned_mihomo_core() -> Result<CoreInstallResult, String> {
 #[tauri::command]
 async fn install_latest_mihomo_core() -> Result<CoreInstallResult, String> {
     install_pinned_mihomo_core().await
+}
+
+#[tauri::command]
+async fn install_pinned_clash_rs_core() -> Result<CoreInstallResult, String> {
+    let store = settings_store()?;
+    CoreInstaller::new(store.paths().clone())
+        .map_err(|err| err.to_string())?
+        .install_pinned_clash_rs_arm64()
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -785,13 +800,13 @@ fn applescript_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Terminate managed `clash-darwin` listeners on the given ports (never CFW's core).
+/// Terminate managed core listeners on the given ports (never CFW's core).
 fn reap_managed_core_orphans(ports: &[u16]) -> Result<(), String> {
-    let marker = managed_core_path_marker()?;
+    let markers = managed_core_path_markers()?;
     for &port in ports {
         for pid in pids_listening_on_port(port)? {
             if let Some(cmd) = process_command_line(pid) {
-                if is_managed_clash_darwin(&cmd, &marker) {
+                if is_managed_core_process(&cmd, &markers) {
                     let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
                 }
             }
@@ -800,17 +815,22 @@ fn reap_managed_core_orphans(ports: &[u16]) -> Result<(), String> {
     Ok(())
 }
 
-fn managed_core_path_marker() -> Result<String, String> {
-    let path = settings_store()?
-        .paths()
-        .cores_dir
-        .join(DEFAULT_CORE_BINARY_NAME);
-    Ok(path.to_string_lossy().into_owned())
+fn managed_core_path_markers() -> Result<Vec<String>, String> {
+    let cores = settings_store()?.paths().cores_dir.clone();
+    Ok(vec![
+        cores.join(DEFAULT_CORE_BINARY_NAME).to_string_lossy().into_owned(),
+        cores
+            .join(CLASH_RS_CORE_BINARY_NAME)
+            .to_string_lossy()
+            .into_owned(),
+    ])
 }
 
-fn is_managed_clash_darwin(command_line: &str, marker: &str) -> bool {
-    command_line.contains(marker)
+fn is_managed_core_process(command_line: &str, markers: &[String]) -> bool {
+    markers.iter().any(|marker| command_line.contains(marker))
         || (command_line.contains("Clash for Mac/cores/clash-darwin")
+            && !command_line.contains("Clash for Windows"))
+        || (command_line.contains("Clash for Mac/cores/clash-rs")
             && !command_line.contains("Clash for Windows"))
 }
 
@@ -845,13 +865,13 @@ fn process_command_line(pid: u32) -> Option<String> {
 }
 
 fn find_managed_core_listener_pid(port: u16) -> Option<u32> {
-    let marker = managed_core_path_marker().ok()?;
+    let markers = managed_core_path_markers().ok()?;
     pids_listening_on_port(port)
         .ok()?
         .into_iter()
         .find(|pid| {
             process_command_line(*pid)
-                .map(|cmd| is_managed_clash_darwin(&cmd, &marker))
+                .map(|cmd| is_managed_core_process(&cmd, &markers))
                 .unwrap_or(false)
         })
 }
@@ -2644,7 +2664,7 @@ fn core_status(core: State<'_, ManagedCore>) -> Result<CoreStatus, String> {
         let mut status = manager.status(Some(orphan_pid));
         status.state = CoreProcessState::Running;
         status.message = format!(
-            "Managed clash-darwin still listening (pid {orphan_pid}); use Stop or Start to reclaim"
+            "Managed core still listening (pid {orphan_pid}); use Stop or Start to reclaim"
         );
         return Ok(status);
     }
@@ -2685,6 +2705,7 @@ async fn start_managed_core(app: &AppHandle, core: &ManagedCore) -> Result<CoreS
         settings.external_controller_port,
     ])?;
 
+    let preferred_kind = resolve_core_kind(&settings);
     let initial_manager = core_manager_from_settings()?;
     {
         let mut child = core.child.lock().map_err(|err| err.to_string())?;
@@ -2726,7 +2747,36 @@ async fn start_managed_core(app: &AppHandle, core: &ManagedCore) -> Result<CoreS
         }
     }
 
-    let mut manager = core_manager_from_settings()?;
+    match spawn_and_wait_core(app, core, preferred_kind).await {
+        Ok(status) => Ok(status),
+        Err(error) if preferred_kind == CoreKind::ClashRs => {
+            emit_shell_log(
+                app,
+                "warn",
+                "core",
+                format!(
+                    "clash-rs start failed ({error}); falling back to mihomo"
+                ),
+            );
+            ensure_core_binary_for_kind(app, CoreKind::Mihomo).await?;
+            spawn_and_wait_core(app, core, CoreKind::Mihomo).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn spawn_and_wait_core(
+    app: &AppHandle,
+    core: &ManagedCore,
+    kind: CoreKind,
+) -> Result<CoreStatus, String> {
+    let store = settings_store()?;
+    let settings = store.read_or_default().map_err(|err| err.to_string())?;
+    let mut manager = CoreManager::new(CoreProcessSpec::from_settings_with_kind(
+        store.paths(),
+        &settings,
+        kind,
+    ));
     let mut process = match manager.spawn() {
         Ok(process) => process,
         Err(CoreRuntimeError::PortInUse { purpose, .. }) if purpose == "mixed-port" => {
@@ -2739,7 +2789,12 @@ async fn start_managed_core(app: &AppHandle, core: &ManagedCore) -> Result<CoreS
             if apply_active_profile_if_selected()?.is_none() {
                 let _ = write_default_config_from_settings()?;
             }
-            manager = core_manager_from_settings()?;
+            let settings = store.read_or_default().map_err(|err| err.to_string())?;
+            manager = CoreManager::new(CoreProcessSpec::from_settings_with_kind(
+                store.paths(),
+                &settings,
+                kind,
+            ));
             manager.spawn().map_err(|err| err.to_string())?
         }
         Err(error) => return Err(error.to_string()),
@@ -2752,39 +2807,78 @@ async fn start_managed_core(app: &AppHandle, core: &ManagedCore) -> Result<CoreS
     }
     let mut child = core.child.lock().map_err(|err| err.to_string())?;
     *child = Some(process);
+    emit_shell_log(
+        app,
+        "info",
+        "core",
+        format!("started {} core (pid {pid})", kind.as_str()),
+    );
     Ok(manager.status(Some(pid)))
 }
 
 async fn ensure_core_binary_available(app: &AppHandle) -> Result<(), String> {
+    let settings = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())?;
+    ensure_core_binary_for_kind(app, resolve_core_kind(&settings)).await
+}
+
+async fn ensure_core_binary_for_kind(app: &AppHandle, kind: CoreKind) -> Result<(), String> {
+    let binary_name = core_binary_name(kind);
+    let store = settings_store()?;
+    store.ensure_layout().map_err(|err| err.to_string())?;
+    let target_path = store.paths().cores_dir.join(binary_name);
+    if target_path.exists() {
+        return Ok(());
+    }
+
     let provision = provision_core_binary_from_resources(app)?;
-    if provision.target_path.exists() {
+    if provision.target_path.exists() && provision.target_path.ends_with(binary_name) {
         if provision.installed {
             emit_shell_log(app, "info", "core", provision.message);
         }
         return Ok(());
     }
 
-    // Download fallback: no core was bundled into this build, so fetch the
-    // pinned, checksum-verified mihomo binary into the managed cores directory.
+    // If provision targeted a different kind (settings changed mid-flight), copy again.
+    let source_path = core_resource_candidates(app, binary_name)
+        .into_iter()
+        .find(|path| path.exists() && path.is_file());
+    if let Some(source_path) = source_path {
+        fs::copy(&source_path, &target_path).map_err(|err| err.to_string())?;
+        let mut permissions = fs::metadata(&target_path)
+            .map_err(|err| err.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&target_path, permissions).map_err(|err| err.to_string())?;
+        emit_shell_log(
+            app,
+            "info",
+            "core",
+            format!("Bundled {binary_name} installed into managed cores directory"),
+        );
+        return Ok(());
+    }
+
+    let pinned_label = match kind {
+        CoreKind::Mihomo => format!("mihomo {PINNED_MIHOMO_VERSION}"),
+        CoreKind::ClashRs => format!("clash-rs {PINNED_CLASH_RS_VERSION}"),
+    };
     emit_shell_log(
         app,
         "info",
         "core",
-        format!(
-            "{}; downloading pinned mihomo {PINNED_MIHOMO_VERSION}",
-            provision.message
-        ),
+        format!("No bundled {binary_name}; downloading pinned {pinned_label}"),
     );
-    let store = settings_store()?;
     let installer = CoreInstaller::new(store.paths().clone()).map_err(|err| err.to_string())?;
-    match installer.install_latest_mihomo_arm64().await {
+    match installer.install_pinned_for_kind(kind).await {
         Ok(result) => {
             emit_shell_log(
                 app,
                 "info",
                 "core",
                 format!(
-                    "Downloaded pinned mihomo core ({} bytes) into {}",
+                    "Downloaded pinned {pinned_label} ({} bytes) into {}",
                     result.bytes,
                     result.target_path.display()
                 ),
@@ -2792,7 +2886,7 @@ async fn ensure_core_binary_available(app: &AppHandle) -> Result<(), String> {
             Ok(())
         }
         Err(error) => Err(format!(
-            "no bundled core available and pinned core download failed: {error}"
+            "no bundled {binary_name} available and pinned core download failed: {error}"
         )),
     }
 }
@@ -3317,6 +3411,7 @@ fn main() {
             install_core_from_url,
             install_pinned_mihomo_core,
             install_latest_mihomo_core,
+            install_pinned_clash_rs_core,
             system_proxy_state,
             network_diagnostics,
             read_settings_snapshot,

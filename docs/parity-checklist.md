@@ -1,6 +1,6 @@
 # Clash for Mac Parity Checklist
 
-Honest status vs CFW 0.20.39 for the **0.2.0** gate in [`RELEASE.md`](../RELEASE.md).
+Honest status vs CFW 0.20.39 for the **0.3.1** gate in [`RELEASE.md`](../RELEASE.md).
 Items marked beta-out-of-scope do not block distribution.
 
 ## Current Self-Audit
@@ -8,8 +8,12 @@ Items marked beta-out-of-scope do not block distribution.
 - [x] CFW-style shell: status bar, left nav, traffic/runtime, workspace
 - [x] Non-blocking first paint (controller offline shows empty, not fake rows)
 - [x] No silent platform no-op success for sysproxy / helper / TUN
-- [ ] Screenshot-level visual parity per route *(beta out of scope)*
-- [ ] Proven 3× performance CI gates *(beta out of scope)*
+- [x] Apple Silicon only (Intel / Universal Binary permanently unsupported)
+- [x] Default core: clash-rs (Rust); mihomo automatic fallback
+- [x] Product UI: Tauri 2 + WebKit (`ui/`) — React migration rejected
+- [x] Production TUN: SMAppService helper — NE / App Sandbox rejected as production path
+- [ ] Screenshot-level visual parity per route *(optional polish)*
+- [ ] Proven 3× performance vs CFW on same machine *(metrics only; do not claim)*
 
 ## General
 
@@ -27,7 +31,7 @@ Items marked beta-out-of-scope do not block distribution.
 - [x] TUN lifecycle handoff to root daemon (fails loudly if unsigned / unapproved)
 - [x] Reveal home directory action
 - [x] GeoIP database status + click-to-update (`geoip.metadb` / `Country.mmdb`)
-- [x] Honest product version badge (`0.2.0`; CFW 0.20.39 is parity target only)
+- [x] Honest product version badge (`0.3.1`; CFW 0.20.39 is parity target only)
 - [x] Random mixed-port toggle wired to core start
 - [ ] Mode switcher on General page *(lives on Proxies; CFW also keeps modes there)*
 - [ ] Every original CFW setting with full migration *(partial — extra flattened)*

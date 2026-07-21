@@ -26,6 +26,14 @@
 
 # UI esbuild
 /apps/cfw-tauri-shell/node_modules/
+/apps/cfw-tauri-shell/ui-react/node_modules/
+/apps/cfw-tauri-shell/ui-react/dist/
+
+# Optional clash-rs resource (fetch with scripts/fetch_clash_rs.sh)
+/apps/cfw-tauri-shell/resources/cores/clash-rs
+
+# Perf gate local output
+/target/perf-gate/
 
 # Tauri updater private signing key (public key lives in tauri.conf.json)
 /.tauri/*.key

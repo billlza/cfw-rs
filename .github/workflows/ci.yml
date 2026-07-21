@@ -16,6 +16,8 @@ jobs:
           toolchain: "1.97.1"
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      - name: Assert Apple Silicon
+        run: ./scripts/assert_apple_silicon.sh
       # tauri.conf resources paths must exist; binaries are gitignored (.keep tracked).
       - name: Ensure resource dirs
         run: |
@@ -34,9 +36,44 @@ jobs:
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
-      - name: Fetch pinned core
-        run: ./scripts/fetch_core.sh
+      - name: Assert Apple Silicon
+        run: ./scripts/assert_apple_silicon.sh
+      - name: Fetch pinned cores
+        run: |
+          ./scripts/fetch_clash_rs.sh
+          ./scripts/fetch_core.sh
       - name: Build helper resource
         run: ./scripts/build_helper_resource.sh
       - name: cargo check shell
         run: cargo check -p cfw-tauri-shell
+
+  clashrs-smoke:
+    name: clash-rs controller smoke (arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert Apple Silicon
+        run: ./scripts/assert_apple_silicon.sh
+      - name: Fetch clash-rs + smoke
+        run: |
+          chmod +x scripts/fetch_clash_rs.sh scripts/clash_rs_smoke.sh scripts/assert_apple_silicon.sh
+          ./scripts/clash_rs_smoke.sh
+
+  cfw-perf-gate:
+    name: cfw-perf-gate (arm64 record only)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert Apple Silicon
+        run: ./scripts/assert_apple_silicon.sh
+      - name: Record metrics (no 3x claim)
+        run: |
+          chmod +x scripts/cfw_perf_gate.sh scripts/assert_apple_silicon.sh
+          ./scripts/cfw_perf_gate.sh
+      - name: Upload probe artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfw-perf-gate
+          path: target/perf-gate/
+          if-no-files-found: ignore

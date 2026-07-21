@@ -1,3 +1,4 @@
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Cursor, Read};
 use std::net::TcpListener;
@@ -6,7 +7,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use cfw_core::{MacOsAppPaths, PersistedSettings};
+use cfw_core::{CoreKind, MacOsAppPaths, PersistedSettings};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,10 +21,18 @@ pub use geoip::{
     GeoIpDatabaseStatus, GeoIpUpdateResult, geoip_database_status, update_geoip_database,
 };
 
+/// Default / mihomo managed binary name (historical CFW path).
 pub const DEFAULT_CORE_BINARY_NAME: &str = "clash-darwin";
+pub const MIHOMO_CORE_BINARY_NAME: &str = DEFAULT_CORE_BINARY_NAME;
+/// Optional Rust core (Watfaq clash-rs); **default** engine on Apple Silicon.
+pub const CLASH_RS_CORE_BINARY_NAME: &str = "clash-rs";
 pub const CORE_LOG_FILE_NAME: &str = "clash-core.log";
 const MIHOMO_LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
+const CFW_CORE_KIND_ENV: &str = "CFW_CORE_KIND";
+/// When set to `1`/`true`, clash-rs is started with `--compatibility`
+/// (may trigger GeoIP download on first boot).
+const CFW_CLASH_RS_COMPAT_ENV: &str = "CFW_CLASH_RS_COMPAT";
 
 /// Pinned, known-good mihomo build used as the download fallback when no core
 /// binary is bundled into the app. The checksum is of the *decompressed* Mach-O
@@ -34,6 +43,41 @@ pub const PINNED_MIHOMO_ARM64_URL: &str =
     "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.28/mihomo-darwin-arm64-v1.19.28.gz";
 pub const PINNED_MIHOMO_ARM64_SHA256: &str =
     "55b7286331cb30a54b2564013b02b84a0c280e8b690bd1e5da4b9d4f4ca007ac";
+
+/// Pinned clash-rs aarch64 build (uncompressed Mach-O asset from GitHub Releases).
+pub const PINNED_CLASH_RS_VERSION: &str = "v0.10.7";
+pub const PINNED_CLASH_RS_ARM64_URL: &str =
+    "https://github.com/Watfaq/clash-rs/releases/download/v0.10.7/clash-rs-aarch64-apple-darwin";
+pub const PINNED_CLASH_RS_ARM64_SHA256: &str =
+    "d1be0a2c2bf8ecbb4841a4992b24b6bcb5b5de46214215934ac2eb18cdc9f0c9";
+
+pub fn core_binary_name(kind: CoreKind) -> &'static str {
+    match kind {
+        CoreKind::Mihomo => MIHOMO_CORE_BINARY_NAME,
+        CoreKind::ClashRs => CLASH_RS_CORE_BINARY_NAME,
+    }
+}
+
+/// Resolve preferred core: `CFW_CORE_KIND` env overrides settings.
+pub fn resolve_core_kind(settings: &PersistedSettings) -> CoreKind {
+    if let Ok(value) = env::var(CFW_CORE_KIND_ENV) {
+        if let Some(kind) = CoreKind::parse_loose(&value) {
+            return kind;
+        }
+    }
+    settings.core_kind
+}
+
+fn clash_rs_compat_enabled() -> bool {
+    env::var(CFW_CLASH_RS_COMPAT_ENV)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
 
 #[derive(Debug, Error)]
 pub enum CoreRuntimeError {
@@ -59,6 +103,8 @@ pub enum CoreRuntimeError {
     PortInUse { purpose: String, port: u16 },
     #[error("config generation failed: {0}")]
     Config(String),
+    #[error("Intel / Universal Binary cores are not supported (Apple Silicon only)")]
+    UnsupportedArchitecture,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,18 +116,30 @@ pub struct CoreProcessSpec {
     pub controller_host: String,
     pub controller_port: u16,
     pub mixed_port: u16,
+    #[serde(default)]
+    pub core_kind: CoreKind,
 }
 
 impl CoreProcessSpec {
     pub fn from_settings(paths: &MacOsAppPaths, settings: &PersistedSettings) -> Self {
+        let kind = resolve_core_kind(settings);
+        Self::from_settings_with_kind(paths, settings, kind)
+    }
+
+    pub fn from_settings_with_kind(
+        paths: &MacOsAppPaths,
+        settings: &PersistedSettings,
+        kind: CoreKind,
+    ) -> Self {
         Self {
-            binary_path: paths.cores_dir.join(DEFAULT_CORE_BINARY_NAME),
+            binary_path: paths.cores_dir.join(core_binary_name(kind)),
             config_path: paths.config_file.clone(),
             home_dir: paths.app_home.clone(),
             log_file: paths.logs_dir.join(CORE_LOG_FILE_NAME),
             controller_host: settings.external_controller_host.clone(),
             controller_port: settings.external_controller_port,
             mixed_port: settings.mixed_port,
+            core_kind: kind,
         }
     }
 }
@@ -106,6 +164,9 @@ pub struct CoreStatus {
 pub struct CoreInstallRequest {
     pub url: String,
     pub sha256: Option<String>,
+    /// Target file name under `cores_dir`. Defaults to mihomo's `clash-darwin`.
+    #[serde(default)]
+    pub binary_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,7 +204,7 @@ pub struct CoreInstaller {
 impl CoreInstaller {
     pub fn new(paths: MacOsAppPaths) -> Result<Self, CoreRuntimeError> {
         let http = reqwest::Client::builder()
-            .user_agent("Clash-for-Mac/0.1 core-installer")
+            .user_agent("Clash-for-Mac/0.3 core-installer")
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(90))
             .build()?;
@@ -172,17 +233,11 @@ impl CoreInstaller {
     }
 
     /// Install the pinned, known-good mihomo arm64 build (the download fallback).
-    ///
-    /// This intentionally installs a *pinned* version rather than the newest
-    /// release: an unattended download fallback must be reproducible and
-    /// checksum-verified, and upstream does not publish per-asset checksums we
-    /// could trust for an arbitrary "latest" asset. Use
-    /// [`CoreInstaller::latest_mihomo_arm64_asset`] only to surface that a newer
-    /// release exists, not to install one unattended.
     pub async fn install_pinned_mihomo_arm64(&self) -> Result<CoreInstallResult, CoreRuntimeError> {
         self.install_from_url(CoreInstallRequest {
             url: PINNED_MIHOMO_ARM64_URL.to_string(),
             sha256: Some(PINNED_MIHOMO_ARM64_SHA256.to_string()),
+            binary_name: Some(MIHOMO_CORE_BINARY_NAME.to_string()),
         })
         .await
     }
@@ -190,6 +245,26 @@ impl CoreInstaller {
     /// Deprecated name kept for callers; identical to [`Self::install_pinned_mihomo_arm64`].
     pub async fn install_latest_mihomo_arm64(&self) -> Result<CoreInstallResult, CoreRuntimeError> {
         self.install_pinned_mihomo_arm64().await
+    }
+
+    /// Install pinned clash-rs aarch64 beside mihomo (does not change the default core).
+    pub async fn install_pinned_clash_rs_arm64(&self) -> Result<CoreInstallResult, CoreRuntimeError> {
+        self.install_from_url(CoreInstallRequest {
+            url: PINNED_CLASH_RS_ARM64_URL.to_string(),
+            sha256: Some(PINNED_CLASH_RS_ARM64_SHA256.to_string()),
+            binary_name: Some(CLASH_RS_CORE_BINARY_NAME.to_string()),
+        })
+        .await
+    }
+
+    pub async fn install_pinned_for_kind(
+        &self,
+        kind: CoreKind,
+    ) -> Result<CoreInstallResult, CoreRuntimeError> {
+        match kind {
+            CoreKind::Mihomo => self.install_pinned_mihomo_arm64().await,
+            CoreKind::ClashRs => self.install_pinned_clash_rs_arm64().await,
+        }
     }
 
     pub async fn install_from_url(
@@ -201,6 +276,7 @@ impl CoreInstaller {
         if parsed.scheme() != "https" {
             return Err(CoreRuntimeError::UnsupportedUrl(parsed.scheme().into()));
         }
+        reject_non_arm64_url(&request.url)?;
 
         let bytes = self
             .http
@@ -227,8 +303,14 @@ impl CoreInstaller {
             });
         }
 
+        let binary_name = request
+            .binary_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(DEFAULT_CORE_BINARY_NAME);
+
         fs::create_dir_all(&self.paths.cores_dir)?;
-        let target_path = self.paths.cores_dir.join(DEFAULT_CORE_BINARY_NAME);
+        let target_path = self.paths.cores_dir.join(binary_name);
         let tmp_path = target_path.with_extension("download.tmp");
         fs::write(&tmp_path, &binary)?;
         let mut permissions = fs::metadata(&tmp_path)?.permissions();
@@ -251,10 +333,25 @@ pub struct CoreManager {
     spec: CoreProcessSpec,
 }
 
+fn reject_non_arm64_url(url: &str) -> Result<(), CoreRuntimeError> {
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("amd64")
+        || lower.contains("x86_64")
+        || lower.contains("x86-64")
+        || lower.contains("i686")
+        || lower.contains("universal")
+    {
+        return Err(CoreRuntimeError::UnsupportedArchitecture);
+    }
+    Ok(())
+}
+
 fn is_darwin_arm64_core_asset(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name.contains("darwin")
-        && name.contains("arm64")
+        && (name.contains("arm64") || name.contains("aarch64"))
+        && !name.contains("amd64")
+        && !name.contains("x86_64")
         && !name.contains(".sha")
         && !name.ends_with(".txt")
         && (name.ends_with(".gz") || !name.contains('.'))
@@ -327,7 +424,10 @@ impl CoreManager {
                 state: CoreProcessState::Running,
                 pid: Some(pid),
                 spec: self.spec.clone(),
-                message: format!("Clash core is running with pid {pid}"),
+                message: format!(
+                    "{} core is running with pid {pid}",
+                    self.spec.core_kind.as_str()
+                ),
             };
         }
 
@@ -353,7 +453,7 @@ impl CoreManager {
             state: CoreProcessState::Stopped,
             pid: None,
             spec: self.spec.clone(),
-            message: "Clash core is ready to start".into(),
+            message: format!("{} core is ready to start", self.spec.core_kind.as_str()),
         }
     }
 
@@ -370,11 +470,17 @@ impl CoreManager {
             .open(&self.spec.log_file)?;
         let stderr = stdout.try_clone()?;
 
-        Ok(Command::new(&self.spec.binary_path)
+        let mut command = Command::new(&self.spec.binary_path);
+        command
             .arg("-d")
             .arg(&self.spec.home_dir)
             .arg("-f")
-            .arg(&self.spec.config_path)
+            .arg(&self.spec.config_path);
+        if self.spec.core_kind == CoreKind::ClashRs && clash_rs_compat_enabled() {
+            // Opt-in: can pull GeoIP on first boot and delay controller ready.
+            command.arg("--compatibility");
+        }
+        Ok(command
             .current_dir(&self.spec.home_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
@@ -426,7 +532,18 @@ mod tests {
         let manager = CoreManager::new(spec);
         let status = manager.status(None);
         assert_eq!(status.state, CoreProcessState::MissingBinary);
-        assert!(status.message.contains("clash-darwin"));
+        assert!(status.message.contains("clash-rs"));
+        assert_eq!(status.spec.core_kind, CoreKind::ClashRs);
+    }
+
+    #[test]
+    fn clash_rs_spec_uses_dedicated_binary_name() {
+        let paths = MacOsAppPaths::from_app_home(std::env::temp_dir().join("cfm-runtime-clashrs"));
+        let mut settings = PersistedSettings::default();
+        settings.core_kind = CoreKind::ClashRs;
+        let spec = CoreProcessSpec::from_settings(&paths, &settings);
+        assert_eq!(spec.core_kind, CoreKind::ClashRs);
+        assert!(spec.binary_path.ends_with(CLASH_RS_CORE_BINARY_NAME));
     }
 
     #[test]
@@ -447,6 +564,14 @@ mod tests {
             core_asset_score("mihomo-darwin-arm64-v1.0.gz")
                 > core_asset_score("mihomo-darwin-arm64-go124-v1.0.gz")
         );
+    }
+
+    #[test]
+    fn rejects_intel_download_urls() {
+        assert!(
+            reject_non_arm64_url("https://example.com/clash-rs-x86_64-apple-darwin").is_err()
+        );
+        assert!(reject_non_arm64_url(PINNED_CLASH_RS_ARM64_URL).is_ok());
     }
 
     #[test]

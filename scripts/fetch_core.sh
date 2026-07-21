@@ -8,6 +8,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+./scripts/assert_apple_silicon.sh
 
 VERSION="v1.19.28"
 URL="https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-darwin-arm64-${VERSION}.gz"

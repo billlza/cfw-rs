@@ -3319,6 +3319,13 @@ async function applyToggle(key, checked, source) {
     appendLog("info", source, `${key} changed to ${checked ? "on" : "off"}`);
   } catch (error) {
     state.toggles[key] = previous;
+    if (key === "tunMode") {
+      try {
+        await loadSettingsSnapshot();
+      } catch (_reloadError) {
+        /* keep local previous */
+      }
+    }
     throw error;
   }
 }

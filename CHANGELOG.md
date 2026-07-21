@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix TUN/System Proxy ghost toggles: transactional `tun_mode`, writable control-session dir on Service Mode install, reap orphan managed clash-darwin by port
 - General page CFW action icons: proxy export copy, bind/interfaces, core config preview, DNS query, Script note, TUN settings + restore DNS, Mixin editor, Service Mode manage trio
 - Fix Service Mode / TUN under daemon ownership: hot-reload running core, auto restore DNS on TUN off (`Empty` clears), TUN row On/Off labels, bind↔Allow LAN symmetry, open Razord dashboard
 - Fix glass dialog handlers nested inside GeoIP confirm (Service Mode Install / bind / Mixin / TUN settings were dead)

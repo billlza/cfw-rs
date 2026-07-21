@@ -14,8 +14,9 @@ use cfw_controller::{
     StructuredLogEntry,
 };
 use cfw_core::{
-    ControlSession, DeepLinkIntent, FeatureSet, PRODUCT_NAME, PersistedSettings, ProductBlueprint,
-    QualityTargets, SettingsSkeleton, SettingsSnapshot, SettingsStore, UiPage, parse_deep_link,
+    CONTROL_SESSION_DIR, ControlSession, DeepLinkIntent, FeatureSet, PRODUCT_NAME, PersistedSettings,
+    ProductBlueprint, QualityTargets, SettingsSkeleton, SettingsSnapshot, SettingsStore, UiPage,
+    parse_deep_link,
 };
 use cfw_platform::{
     HelperInstallRequest, HelperService, LaunchAgentSpec, LaunchdDomain, LaunchdService,
@@ -426,9 +427,17 @@ fn service_mode_status() -> ServiceModeStatus {
 
 #[tauri::command]
 fn enable_service_mode() -> Result<ServiceModeStatus, String> {
-    MacOsPlatformService
+    let status = MacOsPlatformService
         .enable_service_mode()
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    // Root daemon PathState watches this dir; create it while the user can approve admin.
+    if matches!(
+        status,
+        ServiceModeStatus::Enabled | ServiceModeStatus::RequiresApproval
+    ) {
+        ensure_control_session_dir_writable()?;
+    }
+    Ok(status)
 }
 
 #[tauri::command]
@@ -445,7 +454,7 @@ async fn set_tun_enabled(
     enabled: bool,
 ) -> Result<SettingsSnapshot, String> {
     if enabled {
-        set_tun_on(&core).await
+        set_tun_on(&app, &core).await
     } else {
         set_tun_off(&app, &core).await
     }
@@ -454,7 +463,15 @@ async fn set_tun_enabled(
 /// TUN ON: hand core ownership to the root daemon. Register/verify Service Mode,
 /// render the tun-enabled config, stop the in-process core to free the ports,
 /// then ask the daemon (via the control file) to run the core as root.
-async fn set_tun_on(core: &ManagedCore) -> Result<SettingsSnapshot, String> {
+///
+/// `tun_mode` is persisted only after the controller is reachable. Failures roll
+/// the flag back so System Proxy toggles cannot ghost-flip the TUN switch.
+async fn set_tun_on(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnapshot, String> {
+    let previous_tun = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())?
+        .tun_mode;
+
     // SMAppService register + status check; bails with an actionable
     // "approve in System Settings" message if approval is still pending.
     MacOsPlatformService
@@ -463,25 +480,68 @@ async fn set_tun_on(core: &ManagedCore) -> Result<SettingsSnapshot, String> {
     MacOsPlatformService
         .start_tun()
         .map_err(|err| err.to_string())?;
+    ensure_control_session_dir_writable()?;
 
-    let snapshot = update_settings(|settings| {
-        settings.tun_mode = true;
-        Ok(())
-    })?;
-    let _ = render_runtime_config_from_settings()?;
+    let ports = {
+        let settings = settings_store()?
+            .read_or_default()
+            .map_err(|err| err.to_string())?;
+        [
+            settings.mixed_port,
+            settings.external_controller_port,
+        ]
+    };
 
-    // Free both ports for the root core: stop the unprivileged in-process core.
-    stop_managed_core(core)?;
-    wait_for_ports_free(&[
-        snapshot.settings.mixed_port,
-        snapshot.settings.external_controller_port,
-    ])
-    .await?;
+    let mut stopped_in_process = false;
+    let outcome = async {
+        // Persist tun_mode=true only long enough to render the tun block; rolled
+        // back below if handoff fails.
+        update_settings(|settings| {
+            settings.tun_mode = true;
+            Ok(())
+        })?;
+        let _ = render_runtime_config_from_settings()?;
 
-    // Hand the core to the daemon and wait for its controller to come up.
-    write_control_session(true)?;
-    wait_for_controller_ready().await?;
-    Ok(snapshot)
+        stop_managed_core(core)?;
+        stopped_in_process = true;
+        reap_managed_core_orphans(&ports)?;
+        wait_for_ports_free(&ports).await?;
+
+        write_control_session(true).map_err(|err| {
+            format!(
+                "{err}. If this is Permission denied, re-run Service Mode → Install so Clash for Mac can create {CONTROL_SESSION_DIR}"
+            )
+        })?;
+        wait_for_controller_ready().await?;
+        settings_store()?
+            .snapshot()
+            .map_err(|err| err.to_string())
+    }
+    .await;
+
+    match outcome {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) => {
+            let _ = update_settings(|settings| {
+                settings.tun_mode = previous_tun;
+                Ok(())
+            });
+            let _ = render_runtime_config_from_settings();
+            let _ = write_control_session(false);
+            let _ = ControlSession::remove();
+            if stopped_in_process {
+                if let Err(restart_err) = start_managed_core(app, core).await {
+                    emit_shell_log(
+                        app,
+                        "warning",
+                        "core",
+                        format!("TUN handoff failed; in-process core restart also failed: {restart_err}"),
+                    );
+                }
+            }
+            Err(error)
+        }
+    }
 }
 
 /// TUN OFF: take core ownership back. Tell the daemon to stop, remove the
@@ -489,40 +549,65 @@ async fn set_tun_on(core: &ManagedCore) -> Result<SettingsSnapshot, String> {
 /// unprivileged core with a tun-free config.
 async fn set_tun_off(app: &AppHandle, core: &ManagedCore) -> Result<SettingsSnapshot, String> {
     // Capture restore-DNS before flipping tun_mode so CFW-style auto-apply works.
-    let restore_dns = settings_store()?
+    let prior = settings_store()?
         .read_or_default()
-        .map_err(|err| err.to_string())
-        .ok()
-        .and_then(|settings| restore_dns_servers_from_settings(&settings));
-
-    let snapshot = update_settings(|settings| {
-        settings.tun_mode = false;
-        Ok(())
-    })?;
-    let _ = render_runtime_config_from_settings()?;
-
-    let _ = write_control_session(false);
-    ControlSession::remove().map_err(|err| err.to_string())?;
-    MacOsPlatformService
-        .stop_tun()
         .map_err(|err| err.to_string())?;
+    let previous_tun = prior.tun_mode;
+    let restore_dns = restore_dns_servers_from_settings(&prior);
+    let controller_port = prior.external_controller_port;
+    let mixed_port = prior.mixed_port;
 
-    if let Some(servers) = restore_dns.as_deref() {
-        match apply_restore_dns_servers_inner(servers) {
-            Ok(message) => emit_shell_log(app, "info", "dns", message),
-            Err(error) => emit_shell_log(
+    let outcome = async {
+        let snapshot = update_settings(|settings| {
+            settings.tun_mode = false;
+            Ok(())
+        })?;
+        let _ = render_runtime_config_from_settings()?;
+
+        if let Err(error) = write_control_session(false) {
+            // Directory may be missing when TUN never fully came up; still try remove.
+            emit_shell_log(
                 app,
                 "warning",
-                "dns",
-                format!("restore DNS after TUN off failed: {error}"),
-            ),
+                "core",
+                format!("control session want_core=false write: {error}"),
+            );
+        }
+        ControlSession::remove().map_err(|err| err.to_string())?;
+        MacOsPlatformService
+            .stop_tun()
+            .map_err(|err| err.to_string())?;
+
+        if let Some(servers) = restore_dns.as_deref() {
+            match apply_restore_dns_servers_inner(servers) {
+                Ok(message) => emit_shell_log(app, "info", "dns", message),
+                Err(error) => emit_shell_log(
+                    app,
+                    "warning",
+                    "dns",
+                    format!("restore DNS after TUN off failed: {error}"),
+                ),
+            }
+        }
+
+        reap_managed_core_orphans(&[mixed_port, controller_port])?;
+        let _ = wait_for_ports_free(&[controller_port]).await;
+        start_managed_core(app, core).await?;
+        Ok(snapshot)
+    }
+    .await;
+
+    match outcome {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) => {
+            // Keep disk aligned with the last successful runtime intent when off fails mid-way.
+            let _ = update_settings(|settings| {
+                settings.tun_mode = previous_tun;
+                Ok(())
+            });
+            Err(error)
         }
     }
-
-    // Let the root core release the controller port before respawning ours.
-    let _ = wait_for_ports_free(&[snapshot.settings.external_controller_port]).await;
-    start_managed_core(app, core).await?;
-    Ok(snapshot)
 }
 
 fn restore_dns_servers_from_settings(settings: &PersistedSettings) -> Option<String> {
@@ -604,9 +689,159 @@ fn service_mode_owns_core() -> Result<bool, String> {
     Ok(settings.tun_mode && MacOsPlatformService.service_mode_status() == ServiceModeStatus::Enabled)
 }
 
+/// Ensure `/Library/Application Support/com.bill.clashformac` exists and is
+/// writable by the current user (SMAppService PathState + app control file).
+fn ensure_control_session_dir_writable() -> Result<(), String> {
+    let dir = ControlSession::dir();
+    if control_session_dir_is_writable(&dir) {
+        return Ok(());
+    }
+
+    let user = env::var("USER").unwrap_or_else(|_| whoami_user());
+    let dir_display = dir.display().to_string();
+    let quoted_dir = shell_single_quote(&dir_display);
+    let quoted_user = shell_single_quote(&user);
+    let shell = format!(
+        "mkdir -p {quoted_dir} && chown {quoted_user}:staff {quoted_dir} && chmod 775 {quoted_dir}"
+    );
+    let status = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(format!(
+            "do shell script {shell_literal} with administrator privileges",
+            shell_literal = applescript_string(&shell)
+        ))
+        .status()
+        .map_err(|err| format!("failed to request admin to create control session dir: {err}"))?;
+    if !status.success() {
+        return Err(format!(
+            "could not create writable control session dir at {dir_display} (admin prompt cancelled or failed). TUN/Service Mode needs this directory."
+        ));
+    }
+    if control_session_dir_is_writable(&dir) {
+        Ok(())
+    } else {
+        Err(format!(
+            "control session dir {dir_display} still not writable after admin setup"
+        ))
+    }
+}
+
+fn control_session_dir_is_writable(dir: &std::path::Path) -> bool {
+    if !dir.is_dir() && fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".write-probe.{}", std::process::id()));
+    match fs::write(&probe, b"ok") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn whoami_user() -> String {
+    Command::new("/usr/bin/id")
+        .args(["-un"])
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn applescript_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Terminate managed `clash-darwin` listeners on the given ports (never CFW's core).
+fn reap_managed_core_orphans(ports: &[u16]) -> Result<(), String> {
+    let marker = managed_core_path_marker()?;
+    for &port in ports {
+        for pid in pids_listening_on_port(port)? {
+            if let Some(cmd) = process_command_line(pid) {
+                if is_managed_clash_darwin(&cmd, &marker) {
+                    let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn managed_core_path_marker() -> Result<String, String> {
+    let path = settings_store()?
+        .paths()
+        .cores_dir
+        .join(DEFAULT_CORE_BINARY_NAME);
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn is_managed_clash_darwin(command_line: &str, marker: &str) -> bool {
+    command_line.contains(marker)
+        || (command_line.contains("Clash for Mac/cores/clash-darwin")
+            && !command_line.contains("Clash for Windows"))
+}
+
+fn pids_listening_on_port(port: u16) -> Result<Vec<u32>, String> {
+    let output = Command::new("/usr/sbin/lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect())
+}
+
+fn process_command_line(pid: u32) -> Option<String> {
+    let output = Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn find_managed_core_listener_pid(port: u16) -> Option<u32> {
+    let marker = managed_core_path_marker().ok()?;
+    pids_listening_on_port(port)
+        .ok()?
+        .into_iter()
+        .find(|pid| {
+            process_command_line(*pid)
+                .map(|cmd| is_managed_clash_darwin(&cmd, &marker))
+                .unwrap_or(false)
+        })
+}
+
+fn controller_port_is_open(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(150),
+    )
+    .is_ok()
+}
+
 /// Write the app->daemon control file from current settings, bumping the
 /// generation so the daemon's supervise loop reloads.
 fn write_control_session(want_core: bool) -> Result<(), String> {
+    ensure_control_session_dir_writable()?;
     let snapshot = settings_store()?.snapshot().map_err(|err| err.to_string())?;
     let generation = ControlSession::read()
         .ok()
@@ -2206,7 +2441,35 @@ fn core_status(core: State<'_, ManagedCore>) -> Result<CoreStatus, String> {
         },
         None => None,
     };
-    Ok(manager.status(pid))
+    if pid.is_some() {
+        return Ok(manager.status(pid));
+    }
+
+    let settings = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())?;
+    let controller_port = settings.external_controller_port;
+    let mixed_port = settings.mixed_port;
+
+    if service_mode_owns_core().unwrap_or(false) && controller_port_is_open(controller_port) {
+        let mut status = manager.status(None);
+        status.state = CoreProcessState::Running;
+        status.message = "Clash core running under Service Mode (root daemon)".into();
+        return Ok(status);
+    }
+
+    if let Some(orphan_pid) = find_managed_core_listener_pid(controller_port)
+        .or_else(|| find_managed_core_listener_pid(mixed_port))
+    {
+        let mut status = manager.status(Some(orphan_pid));
+        status.state = CoreProcessState::Running;
+        status.message = format!(
+            "Managed clash-darwin still listening (pid {orphan_pid}); use Stop or Start to reclaim"
+        );
+        return Ok(status);
+    }
+
+    Ok(manager.status(None))
 }
 
 #[tauri::command]
@@ -2233,6 +2496,14 @@ async fn start_managed_core(app: &AppHandle, core: &ManagedCore) -> Result<CoreS
             message: "Clash core running under Service Mode (root daemon)".into(),
         });
     }
+
+    let settings = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())?;
+    reap_managed_core_orphans(&[
+        settings.mixed_port,
+        settings.external_controller_port,
+    ])?;
 
     let initial_manager = core_manager_from_settings()?;
     {
@@ -2373,6 +2644,15 @@ fn next_available_loopback_port(start: u16) -> Option<u16> {
 
 #[tauri::command]
 fn stop_core(core: State<'_, ManagedCore>) -> Result<CoreStatus, String> {
+    if service_mode_owns_core().unwrap_or(false) {
+        let _ = write_control_session(false);
+        let _ = ControlSession::remove();
+        let _ = update_settings(|settings| {
+            settings.tun_mode = false;
+            Ok(())
+        });
+        let _ = render_runtime_config_from_settings();
+    }
     let manager = core_manager_from_settings()?;
     stop_managed_core(&core)?;
     Ok(manager.status(None))
@@ -2384,6 +2664,14 @@ fn stop_managed_core(core: &ManagedCore) -> Result<(), String> {
         process.kill().map_err(|err| err.to_string())?;
         process.wait().map_err(|err| err.to_string())?;
     }
+    drop(child);
+    let settings = settings_store()?
+        .read_or_default()
+        .map_err(|err| err.to_string())?;
+    reap_managed_core_orphans(&[
+        settings.mixed_port,
+        settings.external_controller_port,
+    ])?;
     Ok(())
 }
 

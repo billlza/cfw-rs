@@ -29,6 +29,7 @@ PLIST_SRC="apps/cfw-tauri-shell/macos/com.bill.clashformac.helper.plist"
 # so resources/helpers and resources/cores keep their "resources/" segment.
 HELPER_REL="Contents/Resources/resources/helpers/cfw-helper"
 CORE_REL="Contents/Resources/resources/cores/clash-darwin"
+CLASH_RS_REL="Contents/Resources/resources/cores/clash-rs"
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   echo "==> cargo tauri build (release)"
@@ -99,6 +100,7 @@ if [[ "${CODESIGN_TIMESTAMP:-1}" == "0" ]]; then
 fi
 
 sign_runtime "$CORE_REL"
+sign_runtime "$CLASH_RS_REL"
 sign_runtime "$HELPER_REL"
 
 echo "==> sign app bundle (outermost)"

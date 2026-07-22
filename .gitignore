@@ -7,11 +7,9 @@
 # macOS junk
 .DS_Store
 
-# Large, reproducibly-downloadable artifacts. The mihomo core is pinned by
-# version+SHA-256 in cfw-runtime; re-fetch with scripts/fetch_core.sh. The helper
-# resource is produced by scripts/build_helper_resource.sh at build time.
-/apps/cfw-tauri-shell/resources/cores/clash-darwin
-/apps/cfw-tauri-shell/resources/helpers/cfw-helper
+# Python bytecode is never source or release evidence
+__pycache__/
+*.py[cod]
 
 # Playwright cache
 /.playwright-cli
@@ -26,11 +24,15 @@
 
 # UI esbuild
 /apps/cfw-tauri-shell/node_modules/
-/apps/cfw-tauri-shell/ui-react/node_modules/
-/apps/cfw-tauri-shell/ui-react/dist/
+/apps/cfw-tauri-shell/ui/dist/
+# The parallel React prototype is retired. Keep any local remnants out of the
+# source graph and release SBOM without deleting user-owned untracked files.
+/apps/cfw-tauri-shell/ui-react/
 
-# Optional clash-rs resource (fetch with scripts/fetch_clash_rs.sh)
-/apps/cfw-tauri-shell/resources/cores/clash-rs
+# Retired local network binaries are never packaged. Keep accidental rebuilds
+# out of source control while the one-way migration removes installed copies.
+/apps/cfw-tauri-shell/resources/cores/*
+/apps/cfw-tauri-shell/resources/helpers/*
 
 # Perf gate local output
 /target/perf-gate/

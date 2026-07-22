@@ -1,15 +1,29 @@
-# General
+# General page
 
-CFW-aligned settings list (not a dashboard card cluster). Each row matches Clash for Windows 0.20.39 macOS General affordances:
+The General page presents one authoritative engine state and two mutually
+exclusive controls: System Proxy and Tunnel. A requested mode is not displayed
+as Active until observed runtime owner, generation, config digest, readiness,
+and the relevant macOS status all match.
 
-- **Port** — copy proxy `export` commands; random mixed-port; editable mixed-port
-- **Allow LAN** — info, network interfaces, editable bind address, toggle
-- **Log Level / IPv6** — level select / toggle
-- **Clash Core** — preview runtime `config.yaml`, DNS query via controller, Script-mode note; version + controller port; start/stop/install
-- **Home Directory / GeoIP Database** — Open Folder; click-to-update GeoIP
-- **Service Mode** — status icon; Manage → Install / Uninstall / Login Items. Install also creates a writable `/Library/Application Support/com.bill.clashformac` control-session directory (admin prompt once) so TUN can hand the core to the root helper.
-- **TUN Mode** — info, TUN settings (stack / auto-route / strict-route / dns-hijack), restore DNS after TUN off. Can stay on together with System Proxy. Failed TUN enable rolls `tun_mode` back on disk so other toggles cannot ghost-flip the switch.
-- **Mixin** — info, edit Mixin YAML, toggle
-- **System Proxy / Start with macOS** — toggles
+The legacy Service Mode row is a temporary cleanup-only migration affordance.
+It can unregister the retired helper and report an exact cleanup failure; it
+cannot install, approve, or start the old root data plane.
 
-Sidebar still shows live up/down rates, running time, and Connected status.
+Application launch never activates this cleanup path. While the migration is
+`awaiting_confirmation`, the existing VPN remains unchanged and the Profiles
+page stages the replacement in a directory that legacy cleanup never targets.
+The cutover button is enabled only after a replacement profile is selected and
+the signed native replacement reports preflight readiness. The server requires
+the same explicit confirmation and preflight again before invoking retirement;
+renderer state alone cannot authorize a destructive cutover.
+
+Legacy System Proxy and DNS cleanup may require explicit review. The migration
+does not assume that a historical snapshot still owns the current macOS
+setting, and it does not overwrite a later user or administrator change. New
+network modes remain blocked until the UI reports the required proxy/DNS action
+as resolved.
+
+Network-path changes mark observations stale and trigger coordinator recovery.
+They are not treated as UI-only refresh events. Loading, approval, failure,
+awaiting confirmation, cleaning, manual cleanup required, and Off remain
+distinct user-visible states.

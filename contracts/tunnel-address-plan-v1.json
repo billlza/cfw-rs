@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "ipv4Address": "198.18.64.1",
+  "ipv4PrefixLength": 30,
+  "ipv4DnsPeer": "198.18.64.2",
+  "ipv6Address": "2001:2:0:64::1",
+  "ipv6PrefixLength": 126,
+  "ipv6DnsPeer": "2001:2:0:64::2"
+}

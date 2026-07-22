@@ -12,3 +12,8 @@ The contents here are kept strictly separate from the rebuild source tree:
 
 These files are reference material for parity work, not product source.
 
+The upstream package declares the extracted application material as MIT and
+identifies its author as Fndroid. See
+[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) and
+[`LICENSE.MIT`](./LICENSE.MIT). No unavailable copyright year or holder has
+been inferred.

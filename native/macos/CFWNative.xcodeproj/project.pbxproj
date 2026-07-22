@@ -1,0 +1,3660 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		000D835A918C90FE76F3BBD6 /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		0273EE7E521A21E917BC4402 /* libCFWPacketTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E899BAFDF20794FBCC622B32 /* libCFWPacketTransport.a */; };
+		04D4D3969671B1818D4436A0 /* NativeBridgeCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6551CC605AD961958CB22F5D /* NativeBridgeCodec.swift */; };
+		08798F02189C6883F3A79BE1 /* LibboxRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EC9560714B4C1B12BCF8054 /* LibboxRuntime.swift */; };
+		099E174273E9D80E0ED91D4C /* libCFWAppleNetwork.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E7023E036C07D36995D0CFA7 /* libCFWAppleNetwork.a */; };
+		09B2D995F8F6F5D8C4E59E1C /* NativeEngineRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 979C7849A2B06E17A7103C64 /* NativeEngineRequest.swift */; };
+		0A72E11A3084C2418AF5C981 /* libCFWAppleNetwork.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E7023E036C07D36995D0CFA7 /* libCFWAppleNetwork.a */; };
+		0B605AA7D190E9EAEC644CE2 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		0BE2A57906A6F8B63BF96C43 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 374828D0449C73C8F8420F62 /* Network.framework */; };
+		0C0217CE41F6C8FEC81AD19C /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */; };
+		0F7A8914DA83F0FF23B82662 /* TunnelStartPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8417065D3B67D2B50263CD01 /* TunnelStartPayloadTests.swift */; };
+		1095FFA840D61812DF74CAB3 /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
+		1115E891D5C7316DD5DB577B /* libCFWCredentialVault.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */; };
+		11F76D79F69C374799833893 /* TunnelStartPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60B3C108BAE14F4FAD80B612 /* TunnelStartPayload.swift */; };
+		126C760C0E500850FE6FD654 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
+		165FA2450722590862E4454B /* NativeCredentialProvisioning.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9D32E275B38C221430B4CE0 /* NativeCredentialProvisioning.swift */; };
+		1682CE7F97A6CC6120A6E76C /* SourceBuiltLibboxServiceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D320F573306DC97645B252C1 /* SourceBuiltLibboxServiceRuntime.swift */; };
+		1861B1E4F77F744A97B6F939 /* ProxyAgentExecutable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66C5581D4DCE8B78FB58CFF6 /* ProxyAgentExecutable.swift */; };
+		18A1430DCBE1CDE42C0D9FBA /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
+		19270D865AAE41AEFD34E9BF /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
+		1B40606EA3B7A0D0F84EA7B9 /* libCFWLibboxObjC.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */; };
+		1B584F22345C368A11E4A70C /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		1C4FC296D3D9E0DCF74963F9 /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */; };
+		1C6F96E208D25447B809914D /* NativeBridgeABI.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE28F39D69E303AB9E76F5AF /* NativeBridgeABI.swift */; };
+		1E6E7AC1FB1DB90874772E7D /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 374828D0449C73C8F8420F62 /* Network.framework */; };
+		214369C049B83F2014388F47 /* libCFWPacketTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E899BAFDF20794FBCC622B32 /* libCFWPacketTransport.a */; };
+		264A06450650FF1BD2B0577B /* CFWLibboxObjC.m in Sources */ = {isa = PBXBuildFile; fileRef = A499F5929B081DA13698546D /* CFWLibboxObjC.m */; };
+		290F5647E4CA6DAE86780DF3 /* SystemExtensions.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D3BB877A7812177051275480 /* SystemExtensions.framework */; };
+		2A89401485BC97A4B891807A /* ConfigurationAcceptanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C23E8D5D284F70D5D716D59 /* ConfigurationAcceptanceStore.swift */; };
+		2B29088075A3B1599490065D /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
+		2BF9FA6651D39E9CF41BB152 /* libCFWPacketTunnel.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2047E844D12435EE7D3CFE4C /* libCFWPacketTunnel.a */; };
+		2C5101DC2BAE5B7D2008D1D6 /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
+		2D8F05E47B8260818C7767B2 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
+		2EA04AE28BCEA321B02396EB /* libCFWLibboxObjC.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */; };
+		2FF1FD83F995C36DA4B9F958 /* SecureAppGroupFileSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 128D75EF9EC431457D0C0BEF /* SecureAppGroupFileSystem.swift */; };
+		31892327BE3A489CF3944978 /* HostBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAB9983F5D70393D8DB8FEE9 /* HostBridge.swift */; };
+		319889940229F25DF0E96648 /* ProxyAgentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5641D870A50F668D27BBD945 /* ProxyAgentService.swift */; };
+		31E01C0E66F5F67E1CF2A0BF /* CrossProcessEngineLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16DC14DF6A62549232F309EA /* CrossProcessEngineLease.swift */; };
+		3299E762ADC5BCC4471B86EA /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		3461914FFEFE386E960FBD31 /* libCFWPacketTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E899BAFDF20794FBCC622B32 /* libCFWPacketTransport.a */; };
+		3796E38A97708D5E96C07E9F /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		3822512B28673641BA3D56A1 /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
+		3ABE1A74FC82C0D0760FF28A /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */; };
+		3B7425C22F4F18266F4157F1 /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
+		3C784AA2A35FF6F8322E1891 /* CFWLibboxObjC.h in CopyFiles */ = {isa = PBXBuildFile; fileRef = 298B080814FE88D1912CE2F0 /* CFWLibboxObjC.h */; };
+		3DA4D7FD9ABC519FC7F404CC /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		3F77ADFB30143BA32EE2520D /* CredentialVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2701A3BD1D4D847DF0FA6AD /* CredentialVault.swift */; };
+		3FA67DD8B257FC688AEC30AA /* IPPacket.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34CF9D4C6428C4F7637376BC /* IPPacket.swift */; };
+		424EC4E4F9AD9B5D36AE0504 /* AuthenticatedJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = A37AC022C76CAD0A7365562B /* AuthenticatedJournal.swift */; };
+		4323BE294D6A766FE3FCC395 /* PacketQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25FC3CE99C5C521F6CB43C2B /* PacketQueueTests.swift */; };
+		46DF4EF2E36E94B0AC042B3C /* SensitiveDataBufferTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DF1E90C407C1EE1B28FD463 /* SensitiveDataBufferTests.swift */; };
+		47D8833530B85167D3AA4421 /* NativeBridgeCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24B2949D961A95CDC43CD78D /* NativeBridgeCoordinator.swift */; };
+		4C9D42835844FAEADAC1EDBF /* EngineProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82685BB8910588272D53CC8C /* EngineProtocol.swift */; };
+		4D61E0AE157DA13CD6CF7599 /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		4E62E118E3CD0A571B5AE8C3 /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		5198D29D3A8974A2DC226428 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		527D00F15E863BCF363DE5B9 /* CredentialVaultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62F4C3519285AD3E4A9D9EF7 /* CredentialVaultTests.swift */; };
+		5310A3BE70CA7D5FF085F3FB /* NativeBridgeResponse.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2D915EA460231BB72C07BED /* NativeBridgeResponse.swift */; };
+		551F2FFD16E74E3614B52761 /* libCFWCredentialVault.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */; };
+		5921F3E3EE9CEE9BC138A048 /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
+		5BB2BA84D0F48D19EC31F26B /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
+		5DC7BD432FEC00E9C1FAF90A /* ProxySessionLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E89F74FCF4C2F074B0C73F2 /* ProxySessionLifecycleTests.swift */; };
+		5E40D372E12C361B1A1CB29B /* SystemProxyPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1442797CFC4C5CB46B7B044C /* SystemProxyPreferences.swift */; };
+		5E69E4D4F0024D3C03A5E7AA /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 374828D0449C73C8F8420F62 /* Network.framework */; };
+		63D8F608CA339E93E46E8737 /* libCFWLibboxObjC.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */; };
+		63D9339341420D1C1F18AF6F /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		6579548B9BDF9390A864DCA4 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
+		6668EED592BA0A9E4DF59237 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
+		690B18CE9BC4CB99E421C0FC /* PacketPump.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C1C7294DC7B1EC48166FB01 /* PacketPump.swift */; };
+		6B5D60CD63EBAD7831FB82BE /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		6B7672458B4FB9FEE56A5892 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		6BCC3006DF57517C283F6432 /* SandboxAcceptanceStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 648FFFF2B9583C604BA9C27D /* SandboxAcceptanceStoreTests.swift */; };
+		6CC5023128986B873595D570 /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		6D84EAF8E3A7C844363D2691 /* SystemProxyPreferencesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A6CEC2D04B4AFAA3A8C03B8 /* SystemProxyPreferencesTests.swift */; };
+		6EB136519B0078FDFCE52A0B /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		709FF5205A369849740CFF1B /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2A0E3A08746263766406F990 /* SystemConfiguration.framework */; };
+		72CD7982ED549C6165DFA57A /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		7372C976420D0AAAA52D361F /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */; };
+		76A13D65E85437384153A58C /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		76D8A0ACC47B4F6F444A3B96 /* CutoverPreflightProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2F4658B4AD92ECE5D6CC765 /* CutoverPreflightProtocol.swift */; };
+		76EC298BA1C9D20A3E8BC51F /* libCFWLibboxObjC.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */; };
+		780FCAA8E5686E46112B0C76 /* ProxySessionLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D6C8F26D378EB06A88158DE /* ProxySessionLifecycle.swift */; };
+		787D2420BEB4327FECB129E7 /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		7C372DB30E51C336FC46B33F /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
+		7D2FFA00D27C51C9B77525AC /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC1C346771288A99F87CD85 /* main.swift */; };
+		806D9DCC408819CF8DD2C3E2 /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
+		8079361014FD63FAFA52B9B5 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		81FC73EDEA5785B2D0FF674A /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2A0E3A08746263766406F990 /* SystemConfiguration.framework */; };
+		8214160B798542AEBBFF48CF /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		826700227EC483E4CDACC615 /* CrossProcessEngineLeaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54333B2DCDEE75257A96F889 /* CrossProcessEngineLeaseTests.swift */; };
+		82D7622ADD91331C5583251A /* ContinuationGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EA2D1DF586BD9D4FC56269F /* ContinuationGateTests.swift */; };
+		859336FDC2BE207B7771E9E8 /* EngineProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D169D69CE3BF020154B89CCC /* EngineProtocolTests.swift */; };
+		861CC5923107A1C3E394F8B0 /* SensitiveDataBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA94A600EF7112AD91C6D809 /* SensitiveDataBuffer.swift */; };
+		89C473F32B84F2479C626CBF /* LibboxRuntimeDirectoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FBA3DF467FC9550C79C4CB2 /* LibboxRuntimeDirectoryTests.swift */; };
+		8A7D89A4C08C1C3B342754BE /* XPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD25E1DB9E3CE6218710F318 /* XPCProtocol.swift */; };
+		8BEC0E565ADC2DDB40473F03 /* libCFWCredentialVault.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */; };
+		8C8259C6DD9A3118958C7480 /* libCFWPacketTunnel.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2047E844D12435EE7D3CFE4C /* libCFWPacketTunnel.a */; };
+		8CA34BA1CB9E39ED22D1201C /* ProxyOwnershipJournalStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B71BA8FC172A948930EE09 /* ProxyOwnershipJournalStoreTests.swift */; };
+		930613C9BEEDDD2FFC874965 /* NativeBridgeProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 537C67153E58D0DDE5BC19A0 /* NativeBridgeProtocolTests.swift */; };
+		9ADAB57C708AEE3C41675872 /* NativeBridgeCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D9AB858A84F1720EDC114E /* NativeBridgeCommand.swift */; };
+		9BE41D30004EBECCB1AE8FC5 /* PacketEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDDB12B6A87D751CA43891BE /* PacketEngine.swift */; };
+		A207E8B7785CFD846EB8AC9F /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		A6D200B683B5DEBDF3564B6C /* LibboxConfigurationChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF56679A8B961C61681A71BE /* LibboxConfigurationChecker.swift */; };
+		A87B67C7E3F7C194ACA15FB0 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		A8C414AA189F87A5579F29E9 /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
+		A8F26FB93D43E119C0BE959E /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		A9BA08A4674699FE9096AFF6 /* NativeCredentialOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A237C7BA5EE6EC8197286026 /* NativeCredentialOperations.swift */; };
+		AA969CD59D11611B68B3296D /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
+		AC092B960EA5E1929DC2446D /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
+		ACECCA1F0B2C56B6F2297859 /* CFWNativeBridge.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 2B8A11FF762CF83D34CECA5D /* CFWNativeBridge.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		AE66718ECB24BFB1C3CDC6C4 /* CodeIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27AE266237E0D2CBF3F958CC /* CodeIdentityTests.swift */; };
+		B037CF6F74D0F19136364ACD /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
+		B7A66DBFE129AE59041EBAB8 /* libCFWLibboxObjC.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */; };
+		BA3C7F29FCA101E92BB1225A /* BoundedPacketQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC7347BB0CC09FA8FD40FF0 /* BoundedPacketQueue.swift */; };
+		BDC14BB7C2FAC8C7450A8693 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A8823AD70E7698BBEC5D4EFC /* NetworkExtension.framework */; };
+		C03936D210F6FF968A349F09 /* CutoverPreflightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F31C7A64D276147B0B903D0D /* CutoverPreflightTests.swift */; };
+		C7A0E5AFC9C734BC7CC82289 /* ProviderLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C133F0773520864076543B11 /* ProviderLifecycleTests.swift */; };
+		C879D04BB3E96898FED1A675 /* libCFWCredentialVault.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */; };
+		C8DD3FFE5408A45409D041C0 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 374828D0449C73C8F8420F62 /* Network.framework */; };
+		CCA1612F83B16CEBB6A61BE7 /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
+		CCECC01DD34E2AAE4FB94428 /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		CD0610E632D83D1B3AC34385 /* libCFWLibboxRuntime.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */; };
+		CF8D7B40E6DB1DFC301191F2 /* libCFWProxyAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D1173992869652522AD0288 /* libCFWProxyAgentCore.a */; };
+		D00E9C42E457BEC0114F41E1 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18B43654E000715C99413186 /* libresolv.tbd */; };
+		D06BA5B8CDED7A536F16A41E /* ProxyEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAB752DDC87AB652A7909F45 /* ProxyEngine.swift */; };
+		D4E2FABD54C21D032BFC905D /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		D51CDD9B50E2759901312C83 /* ProxyOwnershipJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7992F66A36F455FF02A57EDB /* ProxyOwnershipJournal.swift */; };
+		D6EB900D516790C71871D3B6 /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 795C8BFA79F454B8B2481E02 /* ServiceManagement.framework */; };
+		D84ECF85B6C66520E54685E2 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = C995B5D3DAB440A295071ED4 /* main.swift */; };
+		D85022AC17A6A99C5D66E5F3 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		D93B91A180CD2E89E6309AA5 /* libCFWAppleNetwork.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E7023E036C07D36995D0CFA7 /* libCFWAppleNetwork.a */; };
+		DA5E5259BF2BA27D1B65CB64 /* CodeIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A965BF014FA4185DA6B7F5D2 /* CodeIdentity.swift */; };
+		DB2130049F10F780BFDE2510 /* NetworkSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EDC3E7FF288ADF389D53B04 /* NetworkSettingsTests.swift */; };
+		DC09FC72F033FE9559CB7252 /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */; };
+		DC3938A477DD02B566A73906 /* CredentialMaterialTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBFB02DD63385B5E78B4C72 /* CredentialMaterialTests.swift */; };
+		DE1B7AA6D8912D6D61931B96 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		E16EAB4D2627359BF47AAC3D /* NativeCredentialGarbageCollection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2BE7D73795FBD8CE7887272 /* NativeCredentialGarbageCollection.swift */; };
+		E1D1F3852AE4A8CC3DA84E26 /* CodeIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08BE33F94DC44BB352596B1A /* CodeIdentity.swift */; };
+		E1FEB1EB30DCC6826ABA4CA4 /* SandboxConfigurationAcceptanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03314AEFA2B438B786B82D20 /* SandboxConfigurationAcceptanceStore.swift */; };
+		E24A50C51AC923434CF9AEA5 /* libCFWProxyAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D1173992869652522AD0288 /* libCFWProxyAgentCore.a */; };
+		E2AA26F528E215A1039A6082 /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		E411BADABEAC87C93B41D6BD /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
+		E491C3D253D95E05171DB781 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2A0E3A08746263766406F990 /* SystemConfiguration.framework */; };
+		E6484999BF9D9FFCDDC5717C /* libCFWCredentialVault.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */; };
+		E9BE53E4F1D1CFB14B1EA8FB /* PacketPumpTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0115E4A2395D1D3CD38C05A /* PacketPumpTests.swift */; };
+		EA49BE8C632A2E9A439BD5DE /* CFWNativeBridge.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2B8A11FF762CF83D34CECA5D /* CFWNativeBridge.framework */; };
+		EC8E3E6549674D0D6DC6CBE2 /* NativeBridgeCoordinatorSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C19605072174559F5EF08AE /* NativeBridgeCoordinatorSupport.swift */; };
+		ED0B83A12938FA6B89E95057 /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 795C8BFA79F454B8B2481E02 /* ServiceManagement.framework */; };
+		F0D07C2767F9B045D4F009B8 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		F0E9A05FCDAE5987205212C3 /* NativeEngineOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 452632C2C9A18D7B70323830 /* NativeEngineOperations.swift */; };
+		F1112DC4F53309F571D8EB41 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */; };
+		F1710071DAB1665267179D4A /* PacketTunnelSessionLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDEE2567B544BCF93C1CE3EB /* PacketTunnelSessionLifecycle.swift */; };
+		F1CCCA6A4C5DF9BE9004EB8A /* TunnelAddressPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59C52B85A64A7895C88E91CD /* TunnelAddressPlan.swift */; };
+		F2C247BBF6E09E5A31EA663E /* ProxyAgentHostClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 565BFA9F05D311A350FAD7E1 /* ProxyAgentHostClient.swift */; };
+		F6B5D799D2BA819920FFC0B4 /* CredentialMaterial.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D069304736A571212FCD7C /* CredentialMaterial.swift */; };
+		F7B9A0935EE06647D5BDDD34 /* CredentialVaultStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A54CA6F896ECF92A1AF25A8C /* CredentialVaultStorage.swift */; };
+		F8FEF7D4BF2CDEE11149470E /* CFWNativeBridge.h in Headers */ = {isa = PBXBuildFile; fileRef = A599F022076399B5B2D7CFDC /* CFWNativeBridge.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		FA01AAC837E291166601C01F /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
+		FBFD168627E6B687B0CF32D1 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C72C5ECB90D52B622ED1FD9E /* PacketTunnelProvider.swift */; };
+		FE0030F07C4F8304C6BD1506 /* ConfigurationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1115B6C06001CB30128567C /* ConfigurationStore.swift */; };
+		FE20D5CDDDA46493E3D8190F /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+		FFC4CBAC60356C178708B897 /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */; };
+		FFD4858DD6062F98A7D66C7A /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C728A426AD56CF0A261E2E63 /* Security.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		003ADA35D545CD6DCEA01E73 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		0214CDA3BFAF88B827ABE2C4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		06D395EB4B1BDA25C29A6824 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2A7AC1C8CCAD5FB9FF213505;
+			remoteInfo = CFWLibboxRuntime;
+		};
+		0B42EA30BDC64D215D1D1754 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		10C35E10D17114FD0050F3D4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 43C006A024C35D0CE4102168;
+			remoteInfo = CFWPacketTunnel;
+		};
+		142F82561A18C700F296EF6F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B555CC9232527715E5919EC1;
+			remoteInfo = CFWCredentialVault;
+		};
+		19382F686107D07E3527826C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0346508F3289A1A0DB1073FC;
+			remoteInfo = CFWPacketTransport;
+		};
+		22ED6D805717F89A75702FEF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2A7AC1C8CCAD5FB9FF213505;
+			remoteInfo = CFWLibboxRuntime;
+		};
+		22FE69D28C4386DFB9D61526 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		232BEF69224BE643A11A88E6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		259D759C16A5D5E4FF633A8D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		26C8017EAE64FC8B87075562 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 17B3C9D2B13016E208E240AC;
+			remoteInfo = CFWLibboxObjC;
+		};
+		2FE5FD522CEFB0495E849D8F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 17B3C9D2B13016E208E240AC;
+			remoteInfo = CFWLibboxObjC;
+		};
+		33F1D96C339980B80918823A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		387BD041E052A3003353DE3B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		4493C4EACDDE8A90116BCE2C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8302E0307354170385398A04;
+			remoteInfo = CFWProxyAgentCore;
+		};
+		47B282158CCF7BCED18FBE8E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 17B3C9D2B13016E208E240AC;
+			remoteInfo = CFWLibboxObjC;
+		};
+		51B40F9F5BF0C7E2C962D2F4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		527FC50C9A29F1F6D478C45D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		5B59983F7CC21F9C1D5F2191 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		5B5CD2FE259318EEED0F4CA5 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C3B723FE9D758E59C6AF4FA7;
+			remoteInfo = CFWAppleNetwork;
+		};
+		6C4F5E770A9C849A9645A906 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0346508F3289A1A0DB1073FC;
+			remoteInfo = CFWPacketTransport;
+		};
+		783FBE48072C684FD5B7041B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 510501B24DAA484506E7AFF0;
+			remoteInfo = CFWNativeBridge;
+		};
+		78587AB03ADD3DB469AF5230 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2A7AC1C8CCAD5FB9FF213505;
+			remoteInfo = CFWLibboxRuntime;
+		};
+		7E8DE5D1FE0BBDAC35311498 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 43C006A024C35D0CE4102168;
+			remoteInfo = CFWPacketTunnel;
+		};
+		80E5CEDFEF78F7D37E6E11C5 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2A7AC1C8CCAD5FB9FF213505;
+			remoteInfo = CFWLibboxRuntime;
+		};
+		8250992C71788788DD1440E4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B555CC9232527715E5919EC1;
+			remoteInfo = CFWCredentialVault;
+		};
+		8527C12BDBD1FE2AAD22E9D8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 17B3C9D2B13016E208E240AC;
+			remoteInfo = CFWLibboxObjC;
+		};
+		872D003368472037BAFAEA57 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 17B3C9D2B13016E208E240AC;
+			remoteInfo = CFWLibboxObjC;
+		};
+		8CB9F1F3D814024D39EA750A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		91EDB647B46AC2F12E24FB89 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		921FD46A1BEBCE2218FE7804 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		99BCF952625FF0879F023247 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 17B3C9D2B13016E208E240AC;
+			remoteInfo = CFWLibboxObjC;
+		};
+		9C622D688AC1D879C01CAB22 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		9FBBA5724029F534A8B29ED1 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		A10012E89490CF774A22D317 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		AB9466D1C9AB52E41EEEB82D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 17B3C9D2B13016E208E240AC;
+			remoteInfo = CFWLibboxObjC;
+		};
+		AF06623EC50C1B5BACFEF0F3 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		B047F86C8F98B2D38A6ACA34 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		B2D02E17038F743A09B0CCC2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2A7AC1C8CCAD5FB9FF213505;
+			remoteInfo = CFWLibboxRuntime;
+		};
+		B3847A404617C2B56AC4150D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		B941EF61E9A42F1860EDC556 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		BC0C85E66E8B7DDE027F4DB0 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B555CC9232527715E5919EC1;
+			remoteInfo = CFWCredentialVault;
+		};
+		C03215A73A6B7EA9C9C743AC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B555CC9232527715E5919EC1;
+			remoteInfo = CFWCredentialVault;
+		};
+		C5C54C8D2F81302BF98B1CB5 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2A7AC1C8CCAD5FB9FF213505;
+			remoteInfo = CFWLibboxRuntime;
+		};
+		C628145C9FA173E07E6D8044 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		CBACD6C8E40D79BDC9CF0997 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8302E0307354170385398A04;
+			remoteInfo = CFWProxyAgentCore;
+		};
+		D003B262117EFB2ABC0B6967 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0346508F3289A1A0DB1073FC;
+			remoteInfo = CFWPacketTransport;
+		};
+		D0B2F202921136A573D90D9A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0346508F3289A1A0DB1073FC;
+			remoteInfo = CFWPacketTransport;
+		};
+		D4871EA743D38141E71612EB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C3B723FE9D758E59C6AF4FA7;
+			remoteInfo = CFWAppleNetwork;
+		};
+		D856614FB97F827C7CADCD0C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		DBC91E96C44DC272CAF1A37D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 17B3C9D2B13016E208E240AC;
+			remoteInfo = CFWLibboxObjC;
+		};
+		DCDD021223B73A6CC1150C0B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		DD1E8E0E2C6F05A616C0C5A9 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C3B723FE9D758E59C6AF4FA7;
+			remoteInfo = CFWAppleNetwork;
+		};
+		DDC5CE93A86BB32CA1DED2FC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B555CC9232527715E5919EC1;
+			remoteInfo = CFWCredentialVault;
+		};
+		E1FE931555AC8C75F2E21FFB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		E4384FBB1ED863E427C830CD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		EABE12A0D0C32BC1DEEDED97 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		EE24690CABF48B69EF2650BD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5C03E560390FC4F9FF380958;
+			remoteInfo = CFWCredentialTransport;
+		};
+		F20C6C0940B542682936B217 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B555CC9232527715E5919EC1;
+			remoteInfo = CFWCredentialVault;
+		};
+		F922535DED7754A481807B06 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F914C3519EBBAD9FF1EBB651;
+			remoteInfo = CFWSharedProtocol;
+		};
+		FE8BF946BA31666C561F218E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AE4506420C933981AFA41BB7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2A7AC1C8CCAD5FB9FF213505;
+			remoteInfo = CFWLibboxRuntime;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		AF96931877E1108316FAD46E /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "include/$(PRODUCT_NAME)";
+			dstSubfolderSpec = 16;
+			files = (
+				3C784AA2A35FF6F8322E1891 /* CFWLibboxObjC.h in CopyFiles */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D6249B314F1C66837F0CEABC /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				ACECCA1F0B2C56B6F2297859 /* CFWNativeBridge.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWCredentialVault.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		03314AEFA2B438B786B82D20 /* SandboxConfigurationAcceptanceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SandboxConfigurationAcceptanceStore.swift; sourceTree = "<group>"; };
+		08BE33F94DC44BB352596B1A /* CodeIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeIdentity.swift; sourceTree = "<group>"; };
+		0BC7347BB0CC09FA8FD40FF0 /* BoundedPacketQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedPacketQueue.swift; sourceTree = "<group>"; };
+		0EA2D1DF586BD9D4FC56269F /* ContinuationGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinuationGateTests.swift; sourceTree = "<group>"; };
+		0EBFB02DD63385B5E78B4C72 /* CredentialMaterialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialMaterialTests.swift; sourceTree = "<group>"; };
+		0EC9560714B4C1B12BCF8054 /* LibboxRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxRuntime.swift; sourceTree = "<group>"; };
+		11CD9A1E84DC634DD581C9CA /* CFWProxyAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CFWProxyAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		128D75EF9EC431457D0C0BEF /* SecureAppGroupFileSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureAppGroupFileSystem.swift; sourceTree = "<group>"; };
+		1442797CFC4C5CB46B7B044C /* SystemProxyPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyPreferences.swift; sourceTree = "<group>"; };
+		16DC14DF6A62549232F309EA /* CrossProcessEngineLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossProcessEngineLease.swift; sourceTree = "<group>"; };
+		17FA1E1563C845593EEBB0B9 /* CFWSharedProtocolTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWSharedProtocolTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		18B43654E000715C99413186 /* libresolv.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = SDKROOT; };
+		1A7AFC93657C6ACF16CFF3EA /* CFWNativeBridgeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWNativeBridgeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1D1173992869652522AD0288 /* libCFWProxyAgentCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWProxyAgentCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		2047E844D12435EE7D3CFE4C /* libCFWPacketTunnel.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWPacketTunnel.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		24B2949D961A95CDC43CD78D /* NativeBridgeCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeCoordinator.swift; sourceTree = "<group>"; };
+		25FC3CE99C5C521F6CB43C2B /* PacketQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketQueueTests.swift; sourceTree = "<group>"; };
+		27AE266237E0D2CBF3F958CC /* CodeIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeIdentityTests.swift; sourceTree = "<group>"; };
+		298B080814FE88D1912CE2F0 /* CFWLibboxObjC.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CFWLibboxObjC.h; sourceTree = "<group>"; };
+		2A0E3A08746263766406F990 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
+		2B8A11FF762CF83D34CECA5D /* CFWNativeBridge.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = CFWNativeBridge.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		2FBA3DF467FC9550C79C4CB2 /* LibboxRuntimeDirectoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxRuntimeDirectoryTests.swift; sourceTree = "<group>"; };
+		31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libbox.xcframework; path = "../../target/native-dependencies/Libbox.xcframework"; sourceTree = "<group>"; };
+		328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWCredentialTransport.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		34CF9D4C6428C4F7637376BC /* IPPacket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPPacket.swift; sourceTree = "<group>"; };
+		374828D0449C73C8F8420F62 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		39B71BA8FC172A948930EE09 /* ProxyOwnershipJournalStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyOwnershipJournalStoreTests.swift; sourceTree = "<group>"; };
+		3B5FD4412DCF31DB2A79AC71 /* CFWPacketTunnelExtension.systemextension */ = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = CFWPacketTunnelExtension.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
+		40C31EAF47A4BE397A32F597 /* CFWLibboxRuntimeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWLibboxRuntimeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		452632C2C9A18D7B70323830 /* NativeEngineOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEngineOperations.swift; sourceTree = "<group>"; };
+		4A6CEC2D04B4AFAA3A8C03B8 /* SystemProxyPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyPreferencesTests.swift; sourceTree = "<group>"; };
+		4C1C7294DC7B1EC48166FB01 /* PacketPump.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketPump.swift; sourceTree = "<group>"; };
+		537C67153E58D0DDE5BC19A0 /* NativeBridgeProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeProtocolTests.swift; sourceTree = "<group>"; };
+		54333B2DCDEE75257A96F889 /* CrossProcessEngineLeaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossProcessEngineLeaseTests.swift; sourceTree = "<group>"; };
+		5641D870A50F668D27BBD945 /* ProxyAgentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyAgentService.swift; sourceTree = "<group>"; };
+		565BFA9F05D311A350FAD7E1 /* ProxyAgentHostClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyAgentHostClient.swift; sourceTree = "<group>"; };
+		59C52B85A64A7895C88E91CD /* TunnelAddressPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelAddressPlan.swift; sourceTree = "<group>"; };
+		6080157815B16AD69A1E5D18 /* CFWAppleNetworkTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWAppleNetworkTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		60B3C108BAE14F4FAD80B612 /* TunnelStartPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelStartPayload.swift; sourceTree = "<group>"; };
+		62F4C3519285AD3E4A9D9EF7 /* CredentialVaultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialVaultTests.swift; sourceTree = "<group>"; };
+		648FFFF2B9583C604BA9C27D /* SandboxAcceptanceStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SandboxAcceptanceStoreTests.swift; sourceTree = "<group>"; };
+		6551CC605AD961958CB22F5D /* NativeBridgeCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeCodec.swift; sourceTree = "<group>"; };
+		66C5581D4DCE8B78FB58CFF6 /* ProxyAgentExecutable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyAgentExecutable.swift; sourceTree = "<group>"; };
+		66D069304736A571212FCD7C /* CredentialMaterial.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialMaterial.swift; sourceTree = "<group>"; };
+		66D9AB858A84F1720EDC114E /* NativeBridgeCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeCommand.swift; sourceTree = "<group>"; };
+		6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CryptoKit.framework; path = System/Library/Frameworks/CryptoKit.framework; sourceTree = SDKROOT; };
+		6934B0642FFA67B5D3B7C228 /* CFWCredentialVaultTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWCredentialVaultTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		6BC145D8BDF15D5E10BB14A5 /* CFWCredentialTransportTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWCredentialTransportTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		6C23E8D5D284F70D5D716D59 /* ConfigurationAcceptanceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationAcceptanceStore.swift; sourceTree = "<group>"; };
+		6D6C8F26D378EB06A88158DE /* ProxySessionLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxySessionLifecycle.swift; sourceTree = "<group>"; };
+		6E89F74FCF4C2F074B0C73F2 /* ProxySessionLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxySessionLifecycleTests.swift; sourceTree = "<group>"; };
+		795C8BFA79F454B8B2481E02 /* ServiceManagement.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ServiceManagement.framework; path = System/Library/Frameworks/ServiceManagement.framework; sourceTree = SDKROOT; };
+		7992F66A36F455FF02A57EDB /* ProxyOwnershipJournal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyOwnershipJournal.swift; sourceTree = "<group>"; };
+		7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWLibboxRuntime.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		7C19605072174559F5EF08AE /* NativeBridgeCoordinatorSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeCoordinatorSupport.swift; sourceTree = "<group>"; };
+		82685BB8910588272D53CC8C /* EngineProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineProtocol.swift; sourceTree = "<group>"; };
+		8417065D3B67D2B50263CD01 /* TunnelStartPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelStartPayloadTests.swift; sourceTree = "<group>"; };
+		8DF1E90C407C1EE1B28FD463 /* SensitiveDataBufferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensitiveDataBufferTests.swift; sourceTree = "<group>"; };
+		979C7849A2B06E17A7103C64 /* NativeEngineRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEngineRequest.swift; sourceTree = "<group>"; };
+		9EDC3E7FF288ADF389D53B04 /* NetworkSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkSettingsTests.swift; sourceTree = "<group>"; };
+		A237C7BA5EE6EC8197286026 /* NativeCredentialOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCredentialOperations.swift; sourceTree = "<group>"; };
+		A37AC022C76CAD0A7365562B /* AuthenticatedJournal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticatedJournal.swift; sourceTree = "<group>"; };
+		A499F5929B081DA13698546D /* CFWLibboxObjC.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CFWLibboxObjC.m; sourceTree = "<group>"; };
+		A54CA6F896ECF92A1AF25A8C /* CredentialVaultStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialVaultStorage.swift; sourceTree = "<group>"; };
+		A599F022076399B5B2D7CFDC /* CFWNativeBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CFWNativeBridge.h; sourceTree = "<group>"; };
+		A8823AD70E7698BBEC5D4EFC /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
+		A965BF014FA4185DA6B7F5D2 /* CodeIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeIdentity.swift; sourceTree = "<group>"; };
+		AA50CB94E27FC84F72D7D53D /* CFWPacketTransportTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWPacketTransportTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AAB9983F5D70393D8DB8FEE9 /* HostBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostBridge.swift; sourceTree = "<group>"; };
+		B2D915EA460231BB72C07BED /* NativeBridgeResponse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeResponse.swift; sourceTree = "<group>"; };
+		BEBA3B9D2E141CE28AB40EA3 /* CFWPacketTunnelTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWPacketTunnelTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C133F0773520864076543B11 /* ProviderLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderLifecycleTests.swift; sourceTree = "<group>"; };
+		C728A426AD56CF0A261E2E63 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		C72C5ECB90D52B622ED1FD9E /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		C995B5D3DAB440A295071ED4 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		CAB752DDC87AB652A7909F45 /* ProxyEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyEngine.swift; sourceTree = "<group>"; };
+		CD25E1DB9E3CE6218710F318 /* XPCProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XPCProtocol.swift; sourceTree = "<group>"; };
+		CDDB12B6A87D751CA43891BE /* PacketEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketEngine.swift; sourceTree = "<group>"; };
+		CDEE2567B544BCF93C1CE3EB /* PacketTunnelSessionLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelSessionLifecycle.swift; sourceTree = "<group>"; };
+		CE28F39D69E303AB9E76F5AF /* NativeBridgeABI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeABI.swift; sourceTree = "<group>"; };
+		CF56679A8B961C61681A71BE /* LibboxConfigurationChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibboxConfigurationChecker.swift; sourceTree = "<group>"; };
+		D169D69CE3BF020154B89CCC /* EngineProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineProtocolTests.swift; sourceTree = "<group>"; };
+		D2BE7D73795FBD8CE7887272 /* NativeCredentialGarbageCollection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCredentialGarbageCollection.swift; sourceTree = "<group>"; };
+		D2F4658B4AD92ECE5D6CC765 /* CutoverPreflightProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CutoverPreflightProtocol.swift; sourceTree = "<group>"; };
+		D320F573306DC97645B252C1 /* SourceBuiltLibboxServiceRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceBuiltLibboxServiceRuntime.swift; sourceTree = "<group>"; };
+		D3BB877A7812177051275480 /* SystemExtensions.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemExtensions.framework; path = System/Library/Frameworks/SystemExtensions.framework; sourceTree = SDKROOT; };
+		DA94A600EF7112AD91C6D809 /* SensitiveDataBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensitiveDataBuffer.swift; sourceTree = "<group>"; };
+		E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
+		E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWSharedProtocol.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		E2701A3BD1D4D847DF0FA6AD /* CredentialVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialVault.swift; sourceTree = "<group>"; };
+		E7023E036C07D36995D0CFA7 /* libCFWAppleNetwork.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWAppleNetwork.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		E899BAFDF20794FBCC622B32 /* libCFWPacketTransport.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWPacketTransport.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		F0115E4A2395D1D3CD38C05A /* PacketPumpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketPumpTests.swift; sourceTree = "<group>"; };
+		F1115B6C06001CB30128567C /* ConfigurationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationStore.swift; sourceTree = "<group>"; };
+		F256A00E92DC8BD6719E097A /* CFWProxyAgentTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CFWProxyAgentTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F31C7A64D276147B0B903D0D /* CutoverPreflightTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CutoverPreflightTests.swift; sourceTree = "<group>"; };
+		F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWLibboxObjC.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		F9D32E275B38C221430B4CE0 /* NativeCredentialProvisioning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCredentialProvisioning.swift; sourceTree = "<group>"; };
+		FFC1C346771288A99F87CD85 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		112B71FF58160963743CA9AD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2BF9FA6651D39E9CF41BB152 /* libCFWPacketTunnel.a in Frameworks */,
+				CCECC01DD34E2AAE4FB94428 /* libCFWSharedProtocol.a in Frameworks */,
+				3B7425C22F4F18266F4157F1 /* libCFWCredentialTransport.a in Frameworks */,
+				3461914FFEFE386E960FBD31 /* libCFWPacketTransport.a in Frameworks */,
+				AC092B960EA5E1929DC2446D /* libCFWLibboxRuntime.a in Frameworks */,
+				2EA04AE28BCEA321B02396EB /* libCFWLibboxObjC.a in Frameworks */,
+				B037CF6F74D0F19136364ACD /* Libbox.xcframework in Frameworks */,
+				F1112DC4F53309F571D8EB41 /* AppIntents.framework in Frameworks */,
+				DC09FC72F033FE9559CB7252 /* CryptoKit.framework in Frameworks */,
+				5E69E4D4F0024D3C03A5E7AA /* Network.framework in Frameworks */,
+				6B7672458B4FB9FEE56A5892 /* Security.framework in Frameworks */,
+				2D8F05E47B8260818C7767B2 /* libresolv.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		21F6B99EC375060486DD03F5 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3ABE1A74FC82C0D0760FF28A /* CryptoKit.framework in Frameworks */,
+				A207E8B7785CFD846EB8AC9F /* Security.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2DABDA998CD33E26C6D8D0D2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8C8259C6DD9A3118958C7480 /* libCFWPacketTunnel.a in Frameworks */,
+				1B584F22345C368A11E4A70C /* libCFWSharedProtocol.a in Frameworks */,
+				FA01AAC837E291166601C01F /* libCFWCredentialTransport.a in Frameworks */,
+				0273EE7E521A21E917BC4402 /* libCFWPacketTransport.a in Frameworks */,
+				806D9DCC408819CF8DD2C3E2 /* libCFWLibboxRuntime.a in Frameworks */,
+				1B40606EA3B7A0D0F84EA7B9 /* libCFWLibboxObjC.a in Frameworks */,
+				2C5101DC2BAE5B7D2008D1D6 /* Libbox.xcframework in Frameworks */,
+				3796E38A97708D5E96C07E9F /* AppIntents.framework in Frameworks */,
+				6579548B9BDF9390A864DCA4 /* libresolv.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		365A4AC5AF98C7236CE5DF11 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				099E174273E9D80E0ED91D4C /* libCFWAppleNetwork.a in Frameworks */,
+				3822512B28673641BA3D56A1 /* libCFWCredentialTransport.a in Frameworks */,
+				8BEC0E565ADC2DDB40473F03 /* libCFWCredentialVault.a in Frameworks */,
+				4D61E0AE157DA13CD6CF7599 /* libCFWSharedProtocol.a in Frameworks */,
+				BDC14BB7C2FAC8C7450A8693 /* NetworkExtension.framework in Frameworks */,
+				72CD7982ED549C6165DFA57A /* Security.framework in Frameworks */,
+				D6EB900D516790C71871D3B6 /* ServiceManagement.framework in Frameworks */,
+				290F5647E4CA6DAE86780DF3 /* SystemExtensions.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4A938850AB24B20051DD60FF /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EA49BE8C632A2E9A439BD5DE /* CFWNativeBridge.framework in Frameworks */,
+				0A72E11A3084C2418AF5C981 /* libCFWAppleNetwork.a in Frameworks */,
+				19270D865AAE41AEFD34E9BF /* libCFWCredentialTransport.a in Frameworks */,
+				1115E891D5C7316DD5DB577B /* libCFWCredentialVault.a in Frameworks */,
+				E2AA26F528E215A1039A6082 /* libCFWSharedProtocol.a in Frameworks */,
+				A8F26FB93D43E119C0BE959E /* AppIntents.framework in Frameworks */,
+				6B5D60CD63EBAD7831FB82BE /* Security.framework in Frameworks */,
+				ED0B83A12938FA6B89E95057 /* ServiceManagement.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4AC9130B12E44301A3C01D43 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E411BADABEAC87C93B41D6BD /* libCFWSharedProtocol.a in Frameworks */,
+				8079361014FD63FAFA52B9B5 /* AppIntents.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6DE2A49E63A1C09F9CC52A96 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5BB2BA84D0F48D19EC31F26B /* libCFWCredentialTransport.a in Frameworks */,
+				000D835A918C90FE76F3BBD6 /* libCFWSharedProtocol.a in Frameworks */,
+				76A13D65E85437384153A58C /* AppIntents.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7ADF855493F5F5070AD9EF49 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CF8D7B40E6DB1DFC301191F2 /* libCFWProxyAgentCore.a in Frameworks */,
+				D4E2FABD54C21D032BFC905D /* libCFWSharedProtocol.a in Frameworks */,
+				18A1430DCBE1CDE42C0D9FBA /* libCFWCredentialTransport.a in Frameworks */,
+				551F2FFD16E74E3614B52761 /* libCFWCredentialVault.a in Frameworks */,
+				1095FFA840D61812DF74CAB3 /* libCFWLibboxRuntime.a in Frameworks */,
+				63D8F608CA339E93E46E8737 /* libCFWLibboxObjC.a in Frameworks */,
+				FFC4CBAC60356C178708B897 /* Libbox.xcframework in Frameworks */,
+				63D9339341420D1C1F18AF6F /* AppIntents.framework in Frameworks */,
+				6668EED592BA0A9E4DF59237 /* libresolv.tbd in Frameworks */,
+				7372C976420D0AAAA52D361F /* CryptoKit.framework in Frameworks */,
+				FE20D5CDDDA46493E3D8190F /* Security.framework in Frameworks */,
+				81FC73EDEA5785B2D0FF674A /* SystemConfiguration.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8C7BFBA12010FDE8EC2D385F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				214369C049B83F2014388F47 /* libCFWPacketTransport.a in Frameworks */,
+				A87B67C7E3F7C194ACA15FB0 /* AppIntents.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8F01970C5EE0D3B08F9C92E3 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E24A50C51AC923434CF9AEA5 /* libCFWProxyAgentCore.a in Frameworks */,
+				6CC5023128986B873595D570 /* libCFWSharedProtocol.a in Frameworks */,
+				A8C414AA189F87A5579F29E9 /* libCFWCredentialTransport.a in Frameworks */,
+				C879D04BB3E96898FED1A675 /* libCFWCredentialVault.a in Frameworks */,
+				CCA1612F83B16CEBB6A61BE7 /* libCFWLibboxRuntime.a in Frameworks */,
+				76EC298BA1C9D20A3E8BC51F /* libCFWLibboxObjC.a in Frameworks */,
+				AA969CD59D11611B68B3296D /* Libbox.xcframework in Frameworks */,
+				6EB136519B0078FDFCE52A0B /* AppIntents.framework in Frameworks */,
+				0C0217CE41F6C8FEC81AD19C /* CryptoKit.framework in Frameworks */,
+				0BE2A57906A6F8B63BF96C43 /* Network.framework in Frameworks */,
+				3299E762ADC5BCC4471B86EA /* Security.framework in Frameworks */,
+				E491C3D253D95E05171DB781 /* SystemConfiguration.framework in Frameworks */,
+				126C760C0E500850FE6FD654 /* libresolv.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9430F1B2B89AF45179AEC7C3 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D00E9C42E457BEC0114F41E1 /* libresolv.tbd in Frameworks */,
+				C8DD3FFE5408A45409D041C0 /* Network.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C06EE52183698327ABF02F85 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D85022AC17A6A99C5D66E5F3 /* Security.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D16DE59DBC9A77664433386E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1C4FC296D3D9E0DCF74963F9 /* CryptoKit.framework in Frameworks */,
+				0B605AA7D190E9EAEC644CE2 /* Security.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D346308ACC720B9E76AF2D07 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D93B91A180CD2E89E6309AA5 /* libCFWAppleNetwork.a in Frameworks */,
+				4E62E118E3CD0A571B5AE8C3 /* libCFWSharedProtocol.a in Frameworks */,
+				F0D07C2767F9B045D4F009B8 /* AppIntents.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E84AABF2AF5EB17C95C427BF /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FFD4858DD6062F98A7D66C7A /* Security.framework in Frameworks */,
+				709FF5205A369849740CFF1B /* SystemConfiguration.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F83AB592D235E406F469FBCA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5921F3E3EE9CEE9BC138A048 /* libCFWCredentialTransport.a in Frameworks */,
+				E6484999BF9D9FFCDDC5717C /* libCFWCredentialVault.a in Frameworks */,
+				787D2420BEB4327FECB129E7 /* libCFWSharedProtocol.a in Frameworks */,
+				5198D29D3A8974A2DC226428 /* AppIntents.framework in Frameworks */,
+				DE1B7AA6D8912D6D61931B96 /* Security.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FABF279C5B4B0577163EF296 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CD0610E632D83D1B3AC34385 /* libCFWLibboxRuntime.a in Frameworks */,
+				3DA4D7FD9ABC519FC7F404CC /* libCFWSharedProtocol.a in Frameworks */,
+				B7A66DBFE129AE59041EBAB8 /* libCFWLibboxObjC.a in Frameworks */,
+				2B29088075A3B1599490065D /* Libbox.xcframework in Frameworks */,
+				8214160B798542AEBBFF48CF /* AppIntents.framework in Frameworks */,
+				1E6E7AC1FB1DB90874772E7D /* Network.framework in Frameworks */,
+				7C372DB30E51C336FC46B33F /* libresolv.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0896AB4DBB7453BFCDE3B2F4 /* SystemExtension */ = {
+			isa = PBXGroup;
+			children = (
+				C995B5D3DAB440A295071ED4 /* main.swift */,
+			);
+			path = SystemExtension;
+			sourceTree = "<group>";
+		};
+		31A97A323C911DF313125099 /* CFWPacketTransport */ = {
+			isa = PBXGroup;
+			children = (
+				0BC7347BB0CC09FA8FD40FF0 /* BoundedPacketQueue.swift */,
+				34CF9D4C6428C4F7637376BC /* IPPacket.swift */,
+				4C1C7294DC7B1EC48166FB01 /* PacketPump.swift */,
+			);
+			path = CFWPacketTransport;
+			sourceTree = "<group>";
+		};
+		3893B172E8C613DF487A7DBE /* CFWSharedProtocolTests */ = {
+			isa = PBXGroup;
+			children = (
+				54333B2DCDEE75257A96F889 /* CrossProcessEngineLeaseTests.swift */,
+				D169D69CE3BF020154B89CCC /* EngineProtocolTests.swift */,
+				648FFFF2B9583C604BA9C27D /* SandboxAcceptanceStoreTests.swift */,
+				8417065D3B67D2B50263CD01 /* TunnelStartPayloadTests.swift */,
+			);
+			path = CFWSharedProtocolTests;
+			sourceTree = "<group>";
+		};
+		3E2BA1D0B2A5E04CDDD0061F /* CFWCredentialTransportTests */ = {
+			isa = PBXGroup;
+			children = (
+				0EBFB02DD63385B5E78B4C72 /* CredentialMaterialTests.swift */,
+				8DF1E90C407C1EE1B28FD463 /* SensitiveDataBufferTests.swift */,
+			);
+			path = CFWCredentialTransportTests;
+			sourceTree = "<group>";
+		};
+		43B302F31C6F3AF11DC2AD53 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				F7DA3D10AC3D4E74C5497688 /* CFWAppleNetworkTests */,
+				3E2BA1D0B2A5E04CDDD0061F /* CFWCredentialTransportTests */,
+				E7543D61A11EA4C503DEED43 /* CFWCredentialVaultTests */,
+				A07C5388295C41E483CC7FC7 /* CFWLibboxRuntimeTests */,
+				F850933C1EDC48DF285636F1 /* CFWNativeBridgeTests */,
+				9526BE03BE7129CCECFBE0FF /* CFWPacketTransportTests */,
+				6DA73F5DE2F5CFB953888156 /* CFWPacketTunnelTests */,
+				5FB37E11673A6B6E65059BF3 /* CFWProxyAgentTests */,
+				3893B172E8C613DF487A7DBE /* CFWSharedProtocolTests */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		4701CAD90B28B2EA5C48DEE4 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				6080157815B16AD69A1E5D18 /* CFWAppleNetworkTests.xctest */,
+				6BC145D8BDF15D5E10BB14A5 /* CFWCredentialTransportTests.xctest */,
+				6934B0642FFA67B5D3B7C228 /* CFWCredentialVaultTests.xctest */,
+				40C31EAF47A4BE397A32F597 /* CFWLibboxRuntimeTests.xctest */,
+				2B8A11FF762CF83D34CECA5D /* CFWNativeBridge.framework */,
+				1A7AFC93657C6ACF16CFF3EA /* CFWNativeBridgeTests.xctest */,
+				AA50CB94E27FC84F72D7D53D /* CFWPacketTransportTests.xctest */,
+				3B5FD4412DCF31DB2A79AC71 /* CFWPacketTunnelExtension.systemextension */,
+				BEBA3B9D2E141CE28AB40EA3 /* CFWPacketTunnelTests.xctest */,
+				11CD9A1E84DC634DD581C9CA /* CFWProxyAgent.app */,
+				F256A00E92DC8BD6719E097A /* CFWProxyAgentTests.xctest */,
+				17FA1E1563C845593EEBB0B9 /* CFWSharedProtocolTests.xctest */,
+				E7023E036C07D36995D0CFA7 /* libCFWAppleNetwork.a */,
+				328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */,
+				02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */,
+				F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */,
+				7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */,
+				E899BAFDF20794FBCC622B32 /* libCFWPacketTransport.a */,
+				2047E844D12435EE7D3CFE4C /* libCFWPacketTunnel.a */,
+				1D1173992869652522AD0288 /* libCFWProxyAgentCore.a */,
+				E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		4F7D7B27C313D17989B7B795 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				E0F7DC00BE7A72BFDC5592DA /* AppIntents.framework */,
+				6833E1FDAD1F7246FAB83752 /* CryptoKit.framework */,
+				31F81BAA1D9892DEE6C6C167 /* Libbox.xcframework */,
+				18B43654E000715C99413186 /* libresolv.tbd */,
+				374828D0449C73C8F8420F62 /* Network.framework */,
+				A8823AD70E7698BBEC5D4EFC /* NetworkExtension.framework */,
+				C728A426AD56CF0A261E2E63 /* Security.framework */,
+				795C8BFA79F454B8B2481E02 /* ServiceManagement.framework */,
+				2A0E3A08746263766406F990 /* SystemConfiguration.framework */,
+				D3BB877A7812177051275480 /* SystemExtensions.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		5FB37E11673A6B6E65059BF3 /* CFWProxyAgentTests */ = {
+			isa = PBXGroup;
+			children = (
+				27AE266237E0D2CBF3F958CC /* CodeIdentityTests.swift */,
+				39B71BA8FC172A948930EE09 /* ProxyOwnershipJournalStoreTests.swift */,
+				6E89F74FCF4C2F074B0C73F2 /* ProxySessionLifecycleTests.swift */,
+				4A6CEC2D04B4AFAA3A8C03B8 /* SystemProxyPreferencesTests.swift */,
+			);
+			path = CFWProxyAgentTests;
+			sourceTree = "<group>";
+		};
+		6A6E6C90701DE22A6F523D90 /* CFWLibboxObjC */ = {
+			isa = PBXGroup;
+			children = (
+				A499F5929B081DA13698546D /* CFWLibboxObjC.m */,
+				EFBDA6D17DA3FFD3DC695AB0 /* include */,
+			);
+			path = CFWLibboxObjC;
+			sourceTree = "<group>";
+		};
+		6DA73F5DE2F5CFB953888156 /* CFWPacketTunnelTests */ = {
+			isa = PBXGroup;
+			children = (
+				9EDC3E7FF288ADF389D53B04 /* NetworkSettingsTests.swift */,
+				C133F0773520864076543B11 /* ProviderLifecycleTests.swift */,
+			);
+			path = CFWPacketTunnelTests;
+			sourceTree = "<group>";
+		};
+		7D15B089889BDC165252B394 /* CFWProxyAgentMain */ = {
+			isa = PBXGroup;
+			children = (
+				FFC1C346771288A99F87CD85 /* main.swift */,
+			);
+			path = CFWProxyAgentMain;
+			sourceTree = "<group>";
+		};
+		918E3F6AC1F40DC16D1790EC /* CFWSharedProtocol */ = {
+			isa = PBXGroup;
+			children = (
+				A37AC022C76CAD0A7365562B /* AuthenticatedJournal.swift */,
+				A965BF014FA4185DA6B7F5D2 /* CodeIdentity.swift */,
+				6C23E8D5D284F70D5D716D59 /* ConfigurationAcceptanceStore.swift */,
+				F1115B6C06001CB30128567C /* ConfigurationStore.swift */,
+				16DC14DF6A62549232F309EA /* CrossProcessEngineLease.swift */,
+				D2F4658B4AD92ECE5D6CC765 /* CutoverPreflightProtocol.swift */,
+				82685BB8910588272D53CC8C /* EngineProtocol.swift */,
+				6551CC605AD961958CB22F5D /* NativeBridgeCodec.swift */,
+				66D9AB858A84F1720EDC114E /* NativeBridgeCommand.swift */,
+				B2D915EA460231BB72C07BED /* NativeBridgeResponse.swift */,
+				D2BE7D73795FBD8CE7887272 /* NativeCredentialGarbageCollection.swift */,
+				F9D32E275B38C221430B4CE0 /* NativeCredentialProvisioning.swift */,
+				979C7849A2B06E17A7103C64 /* NativeEngineRequest.swift */,
+				03314AEFA2B438B786B82D20 /* SandboxConfigurationAcceptanceStore.swift */,
+				128D75EF9EC431457D0C0BEF /* SecureAppGroupFileSystem.swift */,
+				60B3C108BAE14F4FAD80B612 /* TunnelStartPayload.swift */,
+				CD25E1DB9E3CE6218710F318 /* XPCProtocol.swift */,
+			);
+			path = CFWSharedProtocol;
+			sourceTree = "<group>";
+		};
+		9526BE03BE7129CCECFBE0FF /* CFWPacketTransportTests */ = {
+			isa = PBXGroup;
+			children = (
+				F0115E4A2395D1D3CD38C05A /* PacketPumpTests.swift */,
+				25FC3CE99C5C521F6CB43C2B /* PacketQueueTests.swift */,
+			);
+			path = CFWPacketTransportTests;
+			sourceTree = "<group>";
+		};
+		986208BA9FCBBE7910EEE75E /* CFWCredentialVault */ = {
+			isa = PBXGroup;
+			children = (
+				E2701A3BD1D4D847DF0FA6AD /* CredentialVault.swift */,
+				A54CA6F896ECF92A1AF25A8C /* CredentialVaultStorage.swift */,
+			);
+			path = CFWCredentialVault;
+			sourceTree = "<group>";
+		};
+		9A2B9A05E19412C22EBEF8D7 /* CFWCredentialTransport */ = {
+			isa = PBXGroup;
+			children = (
+				66D069304736A571212FCD7C /* CredentialMaterial.swift */,
+				DA94A600EF7112AD91C6D809 /* SensitiveDataBuffer.swift */,
+			);
+			path = CFWCredentialTransport;
+			sourceTree = "<group>";
+		};
+		9F1E020803DB337CD6F20868 /* CFWPacketTunnel */ = {
+			isa = PBXGroup;
+			children = (
+				CDDB12B6A87D751CA43891BE /* PacketEngine.swift */,
+				C72C5ECB90D52B622ED1FD9E /* PacketTunnelProvider.swift */,
+				CDEE2567B544BCF93C1CE3EB /* PacketTunnelSessionLifecycle.swift */,
+				59C52B85A64A7895C88E91CD /* TunnelAddressPlan.swift */,
+			);
+			path = CFWPacketTunnel;
+			sourceTree = "<group>";
+		};
+		A07C5388295C41E483CC7FC7 /* CFWLibboxRuntimeTests */ = {
+			isa = PBXGroup;
+			children = (
+				2FBA3DF467FC9550C79C4CB2 /* LibboxRuntimeDirectoryTests.swift */,
+			);
+			path = CFWLibboxRuntimeTests;
+			sourceTree = "<group>";
+		};
+		A181C5AC9F88D0206FD07B9C /* Headers */ = {
+			isa = PBXGroup;
+			children = (
+				A599F022076399B5B2D7CFDC /* CFWNativeBridge.h */,
+			);
+			path = Headers;
+			sourceTree = "<group>";
+		};
+		A497339C9DA4528DD4138A70 = {
+			isa = PBXGroup;
+			children = (
+				A181C5AC9F88D0206FD07B9C /* Headers */,
+				AD726A1824AA0BE775B7B068 /* Sources */,
+				0896AB4DBB7453BFCDE3B2F4 /* SystemExtension */,
+				43B302F31C6F3AF11DC2AD53 /* Tests */,
+				4F7D7B27C313D17989B7B795 /* Frameworks */,
+				4701CAD90B28B2EA5C48DEE4 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		AD726A1824AA0BE775B7B068 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				EB1BCD873CE308BB951C853E /* CFWAppleNetwork */,
+				9A2B9A05E19412C22EBEF8D7 /* CFWCredentialTransport */,
+				986208BA9FCBBE7910EEE75E /* CFWCredentialVault */,
+				6A6E6C90701DE22A6F523D90 /* CFWLibboxObjC */,
+				EC09B6F139ABBF87780A323B /* CFWLibboxRuntime */,
+				DE50894D73C44D9AA2EE22DD /* CFWNativeBridge */,
+				31A97A323C911DF313125099 /* CFWPacketTransport */,
+				9F1E020803DB337CD6F20868 /* CFWPacketTunnel */,
+				F23795111539D04AE5CFFECA /* CFWProxyAgent */,
+				7D15B089889BDC165252B394 /* CFWProxyAgentMain */,
+				918E3F6AC1F40DC16D1790EC /* CFWSharedProtocol */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		DE50894D73C44D9AA2EE22DD /* CFWNativeBridge */ = {
+			isa = PBXGroup;
+			children = (
+				CE28F39D69E303AB9E76F5AF /* NativeBridgeABI.swift */,
+				24B2949D961A95CDC43CD78D /* NativeBridgeCoordinator.swift */,
+				7C19605072174559F5EF08AE /* NativeBridgeCoordinatorSupport.swift */,
+				A237C7BA5EE6EC8197286026 /* NativeCredentialOperations.swift */,
+				452632C2C9A18D7B70323830 /* NativeEngineOperations.swift */,
+			);
+			path = CFWNativeBridge;
+			sourceTree = "<group>";
+		};
+		E7543D61A11EA4C503DEED43 /* CFWCredentialVaultTests */ = {
+			isa = PBXGroup;
+			children = (
+				62F4C3519285AD3E4A9D9EF7 /* CredentialVaultTests.swift */,
+			);
+			path = CFWCredentialVaultTests;
+			sourceTree = "<group>";
+		};
+		EB1BCD873CE308BB951C853E /* CFWAppleNetwork */ = {
+			isa = PBXGroup;
+			children = (
+				AAB9983F5D70393D8DB8FEE9 /* HostBridge.swift */,
+				565BFA9F05D311A350FAD7E1 /* ProxyAgentHostClient.swift */,
+			);
+			path = CFWAppleNetwork;
+			sourceTree = "<group>";
+		};
+		EC09B6F139ABBF87780A323B /* CFWLibboxRuntime */ = {
+			isa = PBXGroup;
+			children = (
+				CF56679A8B961C61681A71BE /* LibboxConfigurationChecker.swift */,
+				0EC9560714B4C1B12BCF8054 /* LibboxRuntime.swift */,
+				D320F573306DC97645B252C1 /* SourceBuiltLibboxServiceRuntime.swift */,
+			);
+			path = CFWLibboxRuntime;
+			sourceTree = "<group>";
+		};
+		EFBDA6D17DA3FFD3DC695AB0 /* include */ = {
+			isa = PBXGroup;
+			children = (
+				298B080814FE88D1912CE2F0 /* CFWLibboxObjC.h */,
+			);
+			path = include;
+			sourceTree = "<group>";
+		};
+		F23795111539D04AE5CFFECA /* CFWProxyAgent */ = {
+			isa = PBXGroup;
+			children = (
+				08BE33F94DC44BB352596B1A /* CodeIdentity.swift */,
+				66C5581D4DCE8B78FB58CFF6 /* ProxyAgentExecutable.swift */,
+				5641D870A50F668D27BBD945 /* ProxyAgentService.swift */,
+				CAB752DDC87AB652A7909F45 /* ProxyEngine.swift */,
+				7992F66A36F455FF02A57EDB /* ProxyOwnershipJournal.swift */,
+				6D6C8F26D378EB06A88158DE /* ProxySessionLifecycle.swift */,
+				1442797CFC4C5CB46B7B044C /* SystemProxyPreferences.swift */,
+			);
+			path = CFWProxyAgent;
+			sourceTree = "<group>";
+		};
+		F7DA3D10AC3D4E74C5497688 /* CFWAppleNetworkTests */ = {
+			isa = PBXGroup;
+			children = (
+				0EA2D1DF586BD9D4FC56269F /* ContinuationGateTests.swift */,
+			);
+			path = CFWAppleNetworkTests;
+			sourceTree = "<group>";
+		};
+		F850933C1EDC48DF285636F1 /* CFWNativeBridgeTests */ = {
+			isa = PBXGroup;
+			children = (
+				F31C7A64D276147B0B903D0D /* CutoverPreflightTests.swift */,
+				537C67153E58D0DDE5BC19A0 /* NativeBridgeProtocolTests.swift */,
+			);
+			path = CFWNativeBridgeTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		F3B2BFD250AFE2D15D7E3963 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F8FEF7D4BF2CDEE11149470E /* CFWNativeBridge.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		0346508F3289A1A0DB1073FC /* CFWPacketTransport */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 04968ACDBCA7F12FD8A39080 /* Build configuration list for PBXNativeTarget "CFWPacketTransport" */;
+			buildPhases = (
+				132084241980D15696373D09 /* Sources */,
+				700A9FE524D6BD106BC5DA23 /* Copy Swift Objective-C Interface Header */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FDF6CE13F0CA8CBAB6F978C1 /* PBXTargetDependency */,
+			);
+			name = CFWPacketTransport;
+			packageProductDependencies = (
+			);
+			productName = CFWPacketTransport;
+			productReference = E899BAFDF20794FBCC622B32 /* libCFWPacketTransport.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		11273537150134172EEE84CE /* CFWPacketTunnelTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 68983CEB4E5497230A631765 /* Build configuration list for PBXNativeTarget "CFWPacketTunnelTests" */;
+			buildPhases = (
+				B10B4E0BE9426FB11252E0C2 /* Sources */,
+				112B71FF58160963743CA9AD /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				635F60405463996CEB74FA35 /* PBXTargetDependency */,
+				0C5F1AF0230ECD658CF80E43 /* PBXTargetDependency */,
+				1469A575329A3B9211107252 /* PBXTargetDependency */,
+				20D40347393034CFB39EA5D6 /* PBXTargetDependency */,
+				1ABE6D804CF5C0B0195EEA41 /* PBXTargetDependency */,
+				A03B694779C3E1465CB13DEA /* PBXTargetDependency */,
+			);
+			name = CFWPacketTunnelTests;
+			packageProductDependencies = (
+			);
+			productName = CFWPacketTunnelTests;
+			productReference = BEBA3B9D2E141CE28AB40EA3 /* CFWPacketTunnelTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		17B3C9D2B13016E208E240AC /* CFWLibboxObjC */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 53B0473717FF1A6F74AC376E /* Build configuration list for PBXNativeTarget "CFWLibboxObjC" */;
+			buildPhases = (
+				AF96931877E1108316FAD46E /* CopyFiles */,
+				914248837955BD79DF7DB19B /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CFWLibboxObjC;
+			packageProductDependencies = (
+			);
+			productName = CFWLibboxObjC;
+			productReference = F4CD5E1FF39376D7C0285148 /* libCFWLibboxObjC.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		2A7AC1C8CCAD5FB9FF213505 /* CFWLibboxRuntime */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F53F816EE6DE8A2B0809887E /* Build configuration list for PBXNativeTarget "CFWLibboxRuntime" */;
+			buildPhases = (
+				54CCA6BCA7159DF148745DAA /* Sources */,
+				52A28EE5BFF5482456797197 /* Copy Swift Objective-C Interface Header */,
+				9430F1B2B89AF45179AEC7C3 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E93CC69B13333BC911A683E2 /* PBXTargetDependency */,
+				A1EDC5ADFAAA2A1AB37670F9 /* PBXTargetDependency */,
+			);
+			name = CFWLibboxRuntime;
+			packageProductDependencies = (
+			);
+			productName = CFWLibboxRuntime;
+			productReference = 7AEC5CA60C55F16137EEAAF0 /* libCFWLibboxRuntime.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		43C006A024C35D0CE4102168 /* CFWPacketTunnel */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6CA87DEAFD4FD7D03E121070 /* Build configuration list for PBXNativeTarget "CFWPacketTunnel" */;
+			buildPhases = (
+				68DC497DEAAA14A34B622B2A /* Sources */,
+				898B28974C4B84B5371C2A69 /* Copy Swift Objective-C Interface Header */,
+				21F6B99EC375060486DD03F5 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				7062EF209FB15D3F2B256E80 /* PBXTargetDependency */,
+				E05D107C5860CD1C46A0AB43 /* PBXTargetDependency */,
+				E84C3DCF851DFA11868437DE /* PBXTargetDependency */,
+				B657E77C5D5DEC2024F8D269 /* PBXTargetDependency */,
+				810E5F0AC098DBF75A5F7FFF /* PBXTargetDependency */,
+			);
+			name = CFWPacketTunnel;
+			packageProductDependencies = (
+			);
+			productName = CFWPacketTunnel;
+			productReference = 2047E844D12435EE7D3CFE4C /* libCFWPacketTunnel.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		4E9CDD099215E2D754E5B71E /* CFWCredentialTransportTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BAE470B301AD228345C2F4B3 /* Build configuration list for PBXNativeTarget "CFWCredentialTransportTests" */;
+			buildPhases = (
+				840E8476635DA983F8D9C510 /* Sources */,
+				6DE2A49E63A1C09F9CC52A96 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				536CACE12583A81CA0EBFA68 /* PBXTargetDependency */,
+				71D43DD35DDC1BB929F696D6 /* PBXTargetDependency */,
+			);
+			name = CFWCredentialTransportTests;
+			packageProductDependencies = (
+			);
+			productName = CFWCredentialTransportTests;
+			productReference = 6BC145D8BDF15D5E10BB14A5 /* CFWCredentialTransportTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		510501B24DAA484506E7AFF0 /* CFWNativeBridge */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1FFB13FB3ED12E19AD7F24CC /* Build configuration list for PBXNativeTarget "CFWNativeBridge" */;
+			buildPhases = (
+				F3B2BFD250AFE2D15D7E3963 /* Headers */,
+				6C69E64B362F277A09CB9F3B /* Sources */,
+				365A4AC5AF98C7236CE5DF11 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C2DA952F76E99F8DFDAA3671 /* PBXTargetDependency */,
+				BEF7908148CC0CDC98B7BFDE /* PBXTargetDependency */,
+				727A4CE9D2C7480AF1E176D4 /* PBXTargetDependency */,
+				889CEA12D586A9C3EBD40C13 /* PBXTargetDependency */,
+			);
+			name = CFWNativeBridge;
+			packageProductDependencies = (
+			);
+			productName = CFWNativeBridge;
+			productReference = 2B8A11FF762CF83D34CECA5D /* CFWNativeBridge.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		566E95485C3EF974358701C7 /* CFWCredentialVaultTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0C5AEA588CC02F06642CECAF /* Build configuration list for PBXNativeTarget "CFWCredentialVaultTests" */;
+			buildPhases = (
+				C7FB0CF307A59983B5C87891 /* Sources */,
+				F83AB592D235E406F469FBCA /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				944C07B5C7E623F635AEAA04 /* PBXTargetDependency */,
+				20A83754568D97C8B0DCBD04 /* PBXTargetDependency */,
+				D66F842EEB4BA09C6480AB70 /* PBXTargetDependency */,
+			);
+			name = CFWCredentialVaultTests;
+			packageProductDependencies = (
+			);
+			productName = CFWCredentialVaultTests;
+			productReference = 6934B0642FFA67B5D3B7C228 /* CFWCredentialVaultTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		59B9D0EAE889D70C4334D08B /* CFWPacketTunnelExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 360F2CCFD37F8894D1D37F10 /* Build configuration list for PBXNativeTarget "CFWPacketTunnelExtension" */;
+			buildPhases = (
+				7B414472DB0FF60E5685521B /* Sources */,
+				2DABDA998CD33E26C6D8D0D2 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				129903ABD6688A2B4D7894D4 /* PBXTargetDependency */,
+				E97350FC1228EE185EAF116E /* PBXTargetDependency */,
+				B6AE045C57C43BDC419F8492 /* PBXTargetDependency */,
+				A1EB521FB612672ECCC1214F /* PBXTargetDependency */,
+				DD3BC1AF1541EC57FC849400 /* PBXTargetDependency */,
+				B1625E65563A310B808A8FD2 /* PBXTargetDependency */,
+			);
+			name = CFWPacketTunnelExtension;
+			packageProductDependencies = (
+			);
+			productName = CFWPacketTunnelExtension;
+			productReference = 3B5FD4412DCF31DB2A79AC71 /* CFWPacketTunnelExtension.systemextension */;
+			productType = "com.apple.product-type.system-extension";
+		};
+		5A779EA1E34B8B72AC357B3D /* CFWSharedProtocolTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2E2F4D50526146C05D342AB9 /* Build configuration list for PBXNativeTarget "CFWSharedProtocolTests" */;
+			buildPhases = (
+				AEE8C79C7A2F310E0808FCB9 /* Sources */,
+				4AC9130B12E44301A3C01D43 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3B931846312853E8AFB73E04 /* PBXTargetDependency */,
+			);
+			name = CFWSharedProtocolTests;
+			packageProductDependencies = (
+			);
+			productName = CFWSharedProtocolTests;
+			productReference = 17FA1E1563C845593EEBB0B9 /* CFWSharedProtocolTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		5C03E560390FC4F9FF380958 /* CFWCredentialTransport */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BBB0FC3E9CDB79046993A7CF /* Build configuration list for PBXNativeTarget "CFWCredentialTransport" */;
+			buildPhases = (
+				2B78A60DC7812F465DEECA5F /* Sources */,
+				830247A3E81B2F24728CB73C /* Copy Swift Objective-C Interface Header */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				148002E6AE485E9153B94E99 /* PBXTargetDependency */,
+			);
+			name = CFWCredentialTransport;
+			packageProductDependencies = (
+			);
+			productName = CFWCredentialTransport;
+			productReference = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		6E7030F0BD99ED41D74E2C4A /* CFWProxyAgentTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 06258427007CC539D2B3E1E2 /* Build configuration list for PBXNativeTarget "CFWProxyAgentTests" */;
+			buildPhases = (
+				02702A721A1DE340713C71E0 /* Sources */,
+				8F01970C5EE0D3B08F9C92E3 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				7EDBE8796FE31D0658FDD610 /* PBXTargetDependency */,
+				BAB990B2EA221FFCA05A9597 /* PBXTargetDependency */,
+				220FFC29CAD4DC0ED28369FE /* PBXTargetDependency */,
+				124BC6291C6AB71706A0CB26 /* PBXTargetDependency */,
+				9FF5C04800B1F883E9711F31 /* PBXTargetDependency */,
+				018B8E264D12D7489FDBCCBC /* PBXTargetDependency */,
+			);
+			name = CFWProxyAgentTests;
+			packageProductDependencies = (
+			);
+			productName = CFWProxyAgentTests;
+			productReference = F256A00E92DC8BD6719E097A /* CFWProxyAgentTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		7C1F0482F320C38842F20241 /* CFWProxyAgent */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9A92BF970CB6ACF6D5313731 /* Build configuration list for PBXNativeTarget "CFWProxyAgent" */;
+			buildPhases = (
+				0432ABFEB236DACF4AAC38EE /* Sources */,
+				7ADF855493F5F5070AD9EF49 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				46AB7B2FB6C848ACA62A4B43 /* PBXTargetDependency */,
+				F45B0DB11E0515983C38903E /* PBXTargetDependency */,
+				8AE8ADF8C74FAA8287F0AF87 /* PBXTargetDependency */,
+				4BDE843EC3356413C022F521 /* PBXTargetDependency */,
+				3111A9CB642C8052AA85F76F /* PBXTargetDependency */,
+				D05BC8AB0DC4D86D707B92A0 /* PBXTargetDependency */,
+			);
+			name = CFWProxyAgent;
+			packageProductDependencies = (
+			);
+			productName = CFWProxyAgent;
+			productReference = 11CD9A1E84DC634DD581C9CA /* CFWProxyAgent.app */;
+			productType = "com.apple.product-type.application";
+		};
+		8302E0307354170385398A04 /* CFWProxyAgentCore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D2E3A16FE2A85E7713A59CB7 /* Build configuration list for PBXNativeTarget "CFWProxyAgentCore" */;
+			buildPhases = (
+				9E10B4D20F80164161B6C380 /* Sources */,
+				4A8F8C981E99069E033A1F2F /* Copy Swift Objective-C Interface Header */,
+				E84AABF2AF5EB17C95C427BF /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9A2FD8A2E51FB3784558E3A9 /* PBXTargetDependency */,
+				6126427F0CC1D0AA7ACFA1DD /* PBXTargetDependency */,
+				82CEB23A9B79BEB1695E42F7 /* PBXTargetDependency */,
+				353C61761BF9C7BF20BA765C /* PBXTargetDependency */,
+				62CB3FCE4039F4A2EF2D7C09 /* PBXTargetDependency */,
+			);
+			name = CFWProxyAgentCore;
+			packageProductDependencies = (
+			);
+			productName = CFWProxyAgentCore;
+			productReference = 1D1173992869652522AD0288 /* libCFWProxyAgentCore.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		A535AA7EE324ABB116911FEC /* CFWLibboxRuntimeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8665A93F50C9CBCF8C8FC8FB /* Build configuration list for PBXNativeTarget "CFWLibboxRuntimeTests" */;
+			buildPhases = (
+				44A03DA9019B8E61A703F13B /* Sources */,
+				FABF279C5B4B0577163EF296 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0CB53A7495005A37C6ED790B /* PBXTargetDependency */,
+				321BE1EE2D0B5EBDA451953E /* PBXTargetDependency */,
+				A164E0AF7E7549D12DD18B94 /* PBXTargetDependency */,
+			);
+			name = CFWLibboxRuntimeTests;
+			packageProductDependencies = (
+			);
+			productName = CFWLibboxRuntimeTests;
+			productReference = 40C31EAF47A4BE397A32F597 /* CFWLibboxRuntimeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		B555CC9232527715E5919EC1 /* CFWCredentialVault */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B0C18AEA933CE1C021A7F06E /* Build configuration list for PBXNativeTarget "CFWCredentialVault" */;
+			buildPhases = (
+				4412F23D28745CAE6146CD45 /* Sources */,
+				573614B3B64BA75C1497EDED /* Copy Swift Objective-C Interface Header */,
+				C06EE52183698327ABF02F85 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				4C28B9E9A4C8A7662C828D0D /* PBXTargetDependency */,
+				A27F9D1C504E8D7A3F279B9C /* PBXTargetDependency */,
+			);
+			name = CFWCredentialVault;
+			packageProductDependencies = (
+			);
+			productName = CFWCredentialVault;
+			productReference = 02A5FEEB309B0F35426952B8 /* libCFWCredentialVault.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		C3B723FE9D758E59C6AF4FA7 /* CFWAppleNetwork */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 78308F3DB888A38870DE2E54 /* Build configuration list for PBXNativeTarget "CFWAppleNetwork" */;
+			buildPhases = (
+				65FB9AB0B1A36F010FE7BAC4 /* Sources */,
+				A41BE1649F19BD8054C71144 /* Copy Swift Objective-C Interface Header */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				8F3F28DAE707D07E08719E91 /* PBXTargetDependency */,
+			);
+			name = CFWAppleNetwork;
+			packageProductDependencies = (
+			);
+			productName = CFWAppleNetwork;
+			productReference = E7023E036C07D36995D0CFA7 /* libCFWAppleNetwork.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		C458AD52790F8A17489F8FFA /* CFWAppleNetworkTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F9BE2F95DAFAE5563ABF293F /* Build configuration list for PBXNativeTarget "CFWAppleNetworkTests" */;
+			buildPhases = (
+				7C6DCC82B9810A517133BC10 /* Sources */,
+				D346308ACC720B9E76AF2D07 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5AC44F942A9BE7C0CEBD38C1 /* PBXTargetDependency */,
+				14DE88DC3BDFFFAE4F4A9E73 /* PBXTargetDependency */,
+			);
+			name = CFWAppleNetworkTests;
+			packageProductDependencies = (
+			);
+			productName = CFWAppleNetworkTests;
+			productReference = 6080157815B16AD69A1E5D18 /* CFWAppleNetworkTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		D4514DEE0E08956ADF696F05 /* CFWNativeBridgeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FCF8084BCB437E41784CA590 /* Build configuration list for PBXNativeTarget "CFWNativeBridgeTests" */;
+			buildPhases = (
+				8B3C381FE4BBA0316113751A /* Sources */,
+				4A938850AB24B20051DD60FF /* Frameworks */,
+				D6249B314F1C66837F0CEABC /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3A612EC93780A09E628B1D2B /* PBXTargetDependency */,
+				608A81CC11122A14C86CDF0C /* PBXTargetDependency */,
+				0A7B74B72B8B36F50098CE94 /* PBXTargetDependency */,
+				FB71023BC8F54F952623EC3F /* PBXTargetDependency */,
+				73B8B0DF53B77192FA8032C4 /* PBXTargetDependency */,
+			);
+			name = CFWNativeBridgeTests;
+			packageProductDependencies = (
+			);
+			productName = CFWNativeBridgeTests;
+			productReference = 1A7AFC93657C6ACF16CFF3EA /* CFWNativeBridgeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		EC45BA3E0D2D223B435F86F6 /* CFWPacketTransportTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E1E88CE43295660FB54270FC /* Build configuration list for PBXNativeTarget "CFWPacketTransportTests" */;
+			buildPhases = (
+				0B96726AA7A8E9F567BB4FF9 /* Sources */,
+				8C7BFBA12010FDE8EC2D385F /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AE8B73EAE842C43515ACCCD2 /* PBXTargetDependency */,
+			);
+			name = CFWPacketTransportTests;
+			packageProductDependencies = (
+			);
+			productName = CFWPacketTransportTests;
+			productReference = AA50CB94E27FC84F72D7D53D /* CFWPacketTransportTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9C0EC45967BC1C9D4C08C0AD /* Build configuration list for PBXNativeTarget "CFWSharedProtocol" */;
+			buildPhases = (
+				DF6CAC41C3A0AA7D89BA7DB1 /* Sources */,
+				0333134EC1CDE152540C3E45 /* Copy Swift Objective-C Interface Header */,
+				D16DE59DBC9A77664433386E /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CFWSharedProtocol;
+			packageProductDependencies = (
+			);
+			productName = CFWSharedProtocol;
+			productReference = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AE4506420C933981AFA41BB7 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					59B9D0EAE889D70C4334D08B = {
+						ProvisioningStyle = Manual;
+					};
+					7C1F0482F320C38842F20241 = {
+						ProvisioningStyle = Manual;
+					};
+				};
+			};
+			buildConfigurationList = E04BADAC1C8A40F1F1D5F1C9 /* Build configuration list for PBXProject "CFWNative" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = A497339C9DA4528DD4138A70;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4701CAD90B28B2EA5C48DEE4 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C3B723FE9D758E59C6AF4FA7 /* CFWAppleNetwork */,
+				C458AD52790F8A17489F8FFA /* CFWAppleNetworkTests */,
+				5C03E560390FC4F9FF380958 /* CFWCredentialTransport */,
+				4E9CDD099215E2D754E5B71E /* CFWCredentialTransportTests */,
+				B555CC9232527715E5919EC1 /* CFWCredentialVault */,
+				566E95485C3EF974358701C7 /* CFWCredentialVaultTests */,
+				17B3C9D2B13016E208E240AC /* CFWLibboxObjC */,
+				2A7AC1C8CCAD5FB9FF213505 /* CFWLibboxRuntime */,
+				A535AA7EE324ABB116911FEC /* CFWLibboxRuntimeTests */,
+				510501B24DAA484506E7AFF0 /* CFWNativeBridge */,
+				D4514DEE0E08956ADF696F05 /* CFWNativeBridgeTests */,
+				0346508F3289A1A0DB1073FC /* CFWPacketTransport */,
+				EC45BA3E0D2D223B435F86F6 /* CFWPacketTransportTests */,
+				43C006A024C35D0CE4102168 /* CFWPacketTunnel */,
+				59B9D0EAE889D70C4334D08B /* CFWPacketTunnelExtension */,
+				11273537150134172EEE84CE /* CFWPacketTunnelTests */,
+				7C1F0482F320C38842F20241 /* CFWProxyAgent */,
+				8302E0307354170385398A04 /* CFWProxyAgentCore */,
+				6E7030F0BD99ED41D74E2C4A /* CFWProxyAgentTests */,
+				F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */,
+				5A779EA1E34B8B72AC357B3D /* CFWSharedProtocolTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		0333134EC1CDE152540C3E45 /* Copy Swift Objective-C Interface Header */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			name = "Copy Swift Objective-C Interface Header";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+		4A8F8C981E99069E033A1F2F /* Copy Swift Objective-C Interface Header */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			name = "Copy Swift Objective-C Interface Header";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+		52A28EE5BFF5482456797197 /* Copy Swift Objective-C Interface Header */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			name = "Copy Swift Objective-C Interface Header";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+		573614B3B64BA75C1497EDED /* Copy Swift Objective-C Interface Header */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			name = "Copy Swift Objective-C Interface Header";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+		700A9FE524D6BD106BC5DA23 /* Copy Swift Objective-C Interface Header */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			name = "Copy Swift Objective-C Interface Header";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+		830247A3E81B2F24728CB73C /* Copy Swift Objective-C Interface Header */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			name = "Copy Swift Objective-C Interface Header";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+		898B28974C4B84B5371C2A69 /* Copy Swift Objective-C Interface Header */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			name = "Copy Swift Objective-C Interface Header";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+		A41BE1649F19BD8054C71144 /* Copy Swift Objective-C Interface Header */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			name = "Copy Swift Objective-C Interface Header";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		02702A721A1DE340713C71E0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AE66718ECB24BFB1C3CDC6C4 /* CodeIdentityTests.swift in Sources */,
+				8CA34BA1CB9E39ED22D1201C /* ProxyOwnershipJournalStoreTests.swift in Sources */,
+				5DC7BD432FEC00E9C1FAF90A /* ProxySessionLifecycleTests.swift in Sources */,
+				6D84EAF8E3A7C844363D2691 /* SystemProxyPreferencesTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0432ABFEB236DACF4AAC38EE /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7D2FFA00D27C51C9B77525AC /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0B96726AA7A8E9F567BB4FF9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E9BE53E4F1D1CFB14B1EA8FB /* PacketPumpTests.swift in Sources */,
+				4323BE294D6A766FE3FCC395 /* PacketQueueTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		132084241980D15696373D09 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BA3C7F29FCA101E92BB1225A /* BoundedPacketQueue.swift in Sources */,
+				3FA67DD8B257FC688AEC30AA /* IPPacket.swift in Sources */,
+				690B18CE9BC4CB99E421C0FC /* PacketPump.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2B78A60DC7812F465DEECA5F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F6B5D799D2BA819920FFC0B4 /* CredentialMaterial.swift in Sources */,
+				861CC5923107A1C3E394F8B0 /* SensitiveDataBuffer.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4412F23D28745CAE6146CD45 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3F77ADFB30143BA32EE2520D /* CredentialVault.swift in Sources */,
+				F7B9A0935EE06647D5BDDD34 /* CredentialVaultStorage.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		44A03DA9019B8E61A703F13B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				89C473F32B84F2479C626CBF /* LibboxRuntimeDirectoryTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		54CCA6BCA7159DF148745DAA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A6D200B683B5DEBDF3564B6C /* LibboxConfigurationChecker.swift in Sources */,
+				08798F02189C6883F3A79BE1 /* LibboxRuntime.swift in Sources */,
+				1682CE7F97A6CC6120A6E76C /* SourceBuiltLibboxServiceRuntime.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		65FB9AB0B1A36F010FE7BAC4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				31892327BE3A489CF3944978 /* HostBridge.swift in Sources */,
+				F2C247BBF6E09E5A31EA663E /* ProxyAgentHostClient.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		68DC497DEAAA14A34B622B2A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9BE41D30004EBECCB1AE8FC5 /* PacketEngine.swift in Sources */,
+				FBFD168627E6B687B0CF32D1 /* PacketTunnelProvider.swift in Sources */,
+				F1710071DAB1665267179D4A /* PacketTunnelSessionLifecycle.swift in Sources */,
+				F1CCCA6A4C5DF9BE9004EB8A /* TunnelAddressPlan.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6C69E64B362F277A09CB9F3B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1C6F96E208D25447B809914D /* NativeBridgeABI.swift in Sources */,
+				47D8833530B85167D3AA4421 /* NativeBridgeCoordinator.swift in Sources */,
+				EC8E3E6549674D0D6DC6CBE2 /* NativeBridgeCoordinatorSupport.swift in Sources */,
+				A9BA08A4674699FE9096AFF6 /* NativeCredentialOperations.swift in Sources */,
+				F0E9A05FCDAE5987205212C3 /* NativeEngineOperations.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7B414472DB0FF60E5685521B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D84ECF85B6C66520E54685E2 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7C6DCC82B9810A517133BC10 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				82D7622ADD91331C5583251A /* ContinuationGateTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		840E8476635DA983F8D9C510 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DC3938A477DD02B566A73906 /* CredentialMaterialTests.swift in Sources */,
+				46DF4EF2E36E94B0AC042B3C /* SensitiveDataBufferTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8B3C381FE4BBA0316113751A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C03936D210F6FF968A349F09 /* CutoverPreflightTests.swift in Sources */,
+				930613C9BEEDDD2FFC874965 /* NativeBridgeProtocolTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		914248837955BD79DF7DB19B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				264A06450650FF1BD2B0577B /* CFWLibboxObjC.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9E10B4D20F80164161B6C380 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E1D1F3852AE4A8CC3DA84E26 /* CodeIdentity.swift in Sources */,
+				1861B1E4F77F744A97B6F939 /* ProxyAgentExecutable.swift in Sources */,
+				319889940229F25DF0E96648 /* ProxyAgentService.swift in Sources */,
+				D06BA5B8CDED7A536F16A41E /* ProxyEngine.swift in Sources */,
+				D51CDD9B50E2759901312C83 /* ProxyOwnershipJournal.swift in Sources */,
+				780FCAA8E5686E46112B0C76 /* ProxySessionLifecycle.swift in Sources */,
+				5E40D372E12C361B1A1CB29B /* SystemProxyPreferences.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AEE8C79C7A2F310E0808FCB9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				826700227EC483E4CDACC615 /* CrossProcessEngineLeaseTests.swift in Sources */,
+				859336FDC2BE207B7771E9E8 /* EngineProtocolTests.swift in Sources */,
+				6BCC3006DF57517C283F6432 /* SandboxAcceptanceStoreTests.swift in Sources */,
+				0F7A8914DA83F0FF23B82662 /* TunnelStartPayloadTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B10B4E0BE9426FB11252E0C2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DB2130049F10F780BFDE2510 /* NetworkSettingsTests.swift in Sources */,
+				C7A0E5AFC9C734BC7CC82289 /* ProviderLifecycleTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C7FB0CF307A59983B5C87891 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				527D00F15E863BCF363DE5B9 /* CredentialVaultTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DF6CAC41C3A0AA7D89BA7DB1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				424EC4E4F9AD9B5D36AE0504 /* AuthenticatedJournal.swift in Sources */,
+				DA5E5259BF2BA27D1B65CB64 /* CodeIdentity.swift in Sources */,
+				2A89401485BC97A4B891807A /* ConfigurationAcceptanceStore.swift in Sources */,
+				FE0030F07C4F8304C6BD1506 /* ConfigurationStore.swift in Sources */,
+				31E01C0E66F5F67E1CF2A0BF /* CrossProcessEngineLease.swift in Sources */,
+				76D8A0ACC47B4F6F444A3B96 /* CutoverPreflightProtocol.swift in Sources */,
+				4C9D42835844FAEADAC1EDBF /* EngineProtocol.swift in Sources */,
+				04D4D3969671B1818D4436A0 /* NativeBridgeCodec.swift in Sources */,
+				9ADAB57C708AEE3C41675872 /* NativeBridgeCommand.swift in Sources */,
+				5310A3BE70CA7D5FF085F3FB /* NativeBridgeResponse.swift in Sources */,
+				E16EAB4D2627359BF47AAC3D /* NativeCredentialGarbageCollection.swift in Sources */,
+				165FA2450722590862E4454B /* NativeCredentialProvisioning.swift in Sources */,
+				09B2D995F8F6F5D8C4E59E1C /* NativeEngineRequest.swift in Sources */,
+				E1FEB1EB30DCC6826ABA4CA4 /* SandboxConfigurationAcceptanceStore.swift in Sources */,
+				2FF1FD83F995C36DA4B9F958 /* SecureAppGroupFileSystem.swift in Sources */,
+				11F76D79F69C374799833893 /* TunnelStartPayload.swift in Sources */,
+				8A7D89A4C08C1C3B342754BE /* XPCProtocol.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		018B8E264D12D7489FDBCCBC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 17B3C9D2B13016E208E240AC /* CFWLibboxObjC */;
+			targetProxy = 47B282158CCF7BCED18FBE8E /* PBXContainerItemProxy */;
+		};
+		0A7B74B72B8B36F50098CE94 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = E4384FBB1ED863E427C830CD /* PBXContainerItemProxy */;
+		};
+		0C5F1AF0230ECD658CF80E43 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = 232BEF69224BE643A11A88E6 /* PBXContainerItemProxy */;
+		};
+		0CB53A7495005A37C6ED790B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2A7AC1C8CCAD5FB9FF213505 /* CFWLibboxRuntime */;
+			targetProxy = 22ED6D805717F89A75702FEF /* PBXContainerItemProxy */;
+		};
+		124BC6291C6AB71706A0CB26 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B555CC9232527715E5919EC1 /* CFWCredentialVault */;
+			targetProxy = F20C6C0940B542682936B217 /* PBXContainerItemProxy */;
+		};
+		129903ABD6688A2B4D7894D4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 43C006A024C35D0CE4102168 /* CFWPacketTunnel */;
+			targetProxy = 10C35E10D17114FD0050F3D4 /* PBXContainerItemProxy */;
+		};
+		1469A575329A3B9211107252 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = D856614FB97F827C7CADCD0C /* PBXContainerItemProxy */;
+		};
+		148002E6AE485E9153B94E99 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = 921FD46A1BEBCE2218FE7804 /* PBXContainerItemProxy */;
+		};
+		14DE88DC3BDFFFAE4F4A9E73 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = 527FC50C9A29F1F6D478C45D /* PBXContainerItemProxy */;
+		};
+		1ABE6D804CF5C0B0195EEA41 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2A7AC1C8CCAD5FB9FF213505 /* CFWLibboxRuntime */;
+			targetProxy = C5C54C8D2F81302BF98B1CB5 /* PBXContainerItemProxy */;
+		};
+		20A83754568D97C8B0DCBD04 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B555CC9232527715E5919EC1 /* CFWCredentialVault */;
+			targetProxy = 8250992C71788788DD1440E4 /* PBXContainerItemProxy */;
+		};
+		20D40347393034CFB39EA5D6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0346508F3289A1A0DB1073FC /* CFWPacketTransport */;
+			targetProxy = 6C4F5E770A9C849A9645A906 /* PBXContainerItemProxy */;
+		};
+		220FFC29CAD4DC0ED28369FE /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = 22FE69D28C4386DFB9D61526 /* PBXContainerItemProxy */;
+		};
+		3111A9CB642C8052AA85F76F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2A7AC1C8CCAD5FB9FF213505 /* CFWLibboxRuntime */;
+			targetProxy = 78587AB03ADD3DB469AF5230 /* PBXContainerItemProxy */;
+		};
+		321BE1EE2D0B5EBDA451953E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = EABE12A0D0C32BC1DEEDED97 /* PBXContainerItemProxy */;
+		};
+		353C61761BF9C7BF20BA765C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2A7AC1C8CCAD5FB9FF213505 /* CFWLibboxRuntime */;
+			targetProxy = 06D395EB4B1BDA25C29A6824 /* PBXContainerItemProxy */;
+		};
+		3A612EC93780A09E628B1D2B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 510501B24DAA484506E7AFF0 /* CFWNativeBridge */;
+			targetProxy = 783FBE48072C684FD5B7041B /* PBXContainerItemProxy */;
+		};
+		3B931846312853E8AFB73E04 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = 0214CDA3BFAF88B827ABE2C4 /* PBXContainerItemProxy */;
+		};
+		46AB7B2FB6C848ACA62A4B43 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8302E0307354170385398A04 /* CFWProxyAgentCore */;
+			targetProxy = 4493C4EACDDE8A90116BCE2C /* PBXContainerItemProxy */;
+		};
+		4BDE843EC3356413C022F521 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B555CC9232527715E5919EC1 /* CFWCredentialVault */;
+			targetProxy = 142F82561A18C700F296EF6F /* PBXContainerItemProxy */;
+		};
+		4C28B9E9A4C8A7662C828D0D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = 5B59983F7CC21F9C1D5F2191 /* PBXContainerItemProxy */;
+		};
+		536CACE12583A81CA0EBFA68 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = 003ADA35D545CD6DCEA01E73 /* PBXContainerItemProxy */;
+		};
+		5AC44F942A9BE7C0CEBD38C1 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C3B723FE9D758E59C6AF4FA7 /* CFWAppleNetwork */;
+			targetProxy = DD1E8E0E2C6F05A616C0C5A9 /* PBXContainerItemProxy */;
+		};
+		608A81CC11122A14C86CDF0C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C3B723FE9D758E59C6AF4FA7 /* CFWAppleNetwork */;
+			targetProxy = D4871EA743D38141E71612EB /* PBXContainerItemProxy */;
+		};
+		6126427F0CC1D0AA7ACFA1DD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = 91EDB647B46AC2F12E24FB89 /* PBXContainerItemProxy */;
+		};
+		62CB3FCE4039F4A2EF2D7C09 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 17B3C9D2B13016E208E240AC /* CFWLibboxObjC */;
+			targetProxy = 26C8017EAE64FC8B87075562 /* PBXContainerItemProxy */;
+		};
+		635F60405463996CEB74FA35 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 43C006A024C35D0CE4102168 /* CFWPacketTunnel */;
+			targetProxy = 7E8DE5D1FE0BBDAC35311498 /* PBXContainerItemProxy */;
+		};
+		7062EF209FB15D3F2B256E80 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = DCDD021223B73A6CC1150C0B /* PBXContainerItemProxy */;
+		};
+		71D43DD35DDC1BB929F696D6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = A10012E89490CF774A22D317 /* PBXContainerItemProxy */;
+		};
+		727A4CE9D2C7480AF1E176D4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B555CC9232527715E5919EC1 /* CFWCredentialVault */;
+			targetProxy = DDC5CE93A86BB32CA1DED2FC /* PBXContainerItemProxy */;
+		};
+		73B8B0DF53B77192FA8032C4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = 51B40F9F5BF0C7E2C962D2F4 /* PBXContainerItemProxy */;
+		};
+		7EDBE8796FE31D0658FDD610 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8302E0307354170385398A04 /* CFWProxyAgentCore */;
+			targetProxy = CBACD6C8E40D79BDC9CF0997 /* PBXContainerItemProxy */;
+		};
+		810E5F0AC098DBF75A5F7FFF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 17B3C9D2B13016E208E240AC /* CFWLibboxObjC */;
+			targetProxy = DBC91E96C44DC272CAF1A37D /* PBXContainerItemProxy */;
+		};
+		82CEB23A9B79BEB1695E42F7 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B555CC9232527715E5919EC1 /* CFWCredentialVault */;
+			targetProxy = BC0C85E66E8B7DDE027F4DB0 /* PBXContainerItemProxy */;
+		};
+		889CEA12D586A9C3EBD40C13 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = C628145C9FA173E07E6D8044 /* PBXContainerItemProxy */;
+		};
+		8AE8ADF8C74FAA8287F0AF87 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = AF06623EC50C1B5BACFEF0F3 /* PBXContainerItemProxy */;
+		};
+		8F3F28DAE707D07E08719E91 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = B941EF61E9A42F1860EDC556 /* PBXContainerItemProxy */;
+		};
+		944C07B5C7E623F635AEAA04 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = 9C622D688AC1D879C01CAB22 /* PBXContainerItemProxy */;
+		};
+		9A2FD8A2E51FB3784558E3A9 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = 8CB9F1F3D814024D39EA750A /* PBXContainerItemProxy */;
+		};
+		9FF5C04800B1F883E9711F31 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2A7AC1C8CCAD5FB9FF213505 /* CFWLibboxRuntime */;
+			targetProxy = 80E5CEDFEF78F7D37E6E11C5 /* PBXContainerItemProxy */;
+		};
+		A03B694779C3E1465CB13DEA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 17B3C9D2B13016E208E240AC /* CFWLibboxObjC */;
+			targetProxy = 872D003368472037BAFAEA57 /* PBXContainerItemProxy */;
+		};
+		A164E0AF7E7549D12DD18B94 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 17B3C9D2B13016E208E240AC /* CFWLibboxObjC */;
+			targetProxy = 8527C12BDBD1FE2AAD22E9D8 /* PBXContainerItemProxy */;
+		};
+		A1EB521FB612672ECCC1214F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0346508F3289A1A0DB1073FC /* CFWPacketTransport */;
+			targetProxy = D003B262117EFB2ABC0B6967 /* PBXContainerItemProxy */;
+		};
+		A1EDC5ADFAAA2A1AB37670F9 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 17B3C9D2B13016E208E240AC /* CFWLibboxObjC */;
+			targetProxy = AB9466D1C9AB52E41EEEB82D /* PBXContainerItemProxy */;
+		};
+		A27F9D1C504E8D7A3F279B9C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = 33F1D96C339980B80918823A /* PBXContainerItemProxy */;
+		};
+		AE8B73EAE842C43515ACCCD2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0346508F3289A1A0DB1073FC /* CFWPacketTransport */;
+			targetProxy = 19382F686107D07E3527826C /* PBXContainerItemProxy */;
+		};
+		B1625E65563A310B808A8FD2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 17B3C9D2B13016E208E240AC /* CFWLibboxObjC */;
+			targetProxy = 99BCF952625FF0879F023247 /* PBXContainerItemProxy */;
+		};
+		B657E77C5D5DEC2024F8D269 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2A7AC1C8CCAD5FB9FF213505 /* CFWLibboxRuntime */;
+			targetProxy = FE8BF946BA31666C561F218E /* PBXContainerItemProxy */;
+		};
+		B6AE045C57C43BDC419F8492 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = 259D759C16A5D5E4FF633A8D /* PBXContainerItemProxy */;
+		};
+		BAB990B2EA221FFCA05A9597 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = 387BD041E052A3003353DE3B /* PBXContainerItemProxy */;
+		};
+		BEF7908148CC0CDC98B7BFDE /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = 9FBBA5724029F534A8B29ED1 /* PBXContainerItemProxy */;
+		};
+		C2DA952F76E99F8DFDAA3671 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C3B723FE9D758E59C6AF4FA7 /* CFWAppleNetwork */;
+			targetProxy = 5B5CD2FE259318EEED0F4CA5 /* PBXContainerItemProxy */;
+		};
+		D05BC8AB0DC4D86D707B92A0 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 17B3C9D2B13016E208E240AC /* CFWLibboxObjC */;
+			targetProxy = 2FE5FD522CEFB0495E849D8F /* PBXContainerItemProxy */;
+		};
+		D66F842EEB4BA09C6480AB70 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = 0B42EA30BDC64D215D1D1754 /* PBXContainerItemProxy */;
+		};
+		DD3BC1AF1541EC57FC849400 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2A7AC1C8CCAD5FB9FF213505 /* CFWLibboxRuntime */;
+			targetProxy = B2D02E17038F743A09B0CCC2 /* PBXContainerItemProxy */;
+		};
+		E05D107C5860CD1C46A0AB43 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5C03E560390FC4F9FF380958 /* CFWCredentialTransport */;
+			targetProxy = EE24690CABF48B69EF2650BD /* PBXContainerItemProxy */;
+		};
+		E84C3DCF851DFA11868437DE /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0346508F3289A1A0DB1073FC /* CFWPacketTransport */;
+			targetProxy = D0B2F202921136A573D90D9A /* PBXContainerItemProxy */;
+		};
+		E93CC69B13333BC911A683E2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = F922535DED7754A481807B06 /* PBXContainerItemProxy */;
+		};
+		E97350FC1228EE185EAF116E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = E1FE931555AC8C75F2E21FFB /* PBXContainerItemProxy */;
+		};
+		F45B0DB11E0515983C38903E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = B047F86C8F98B2D38A6ACA34 /* PBXContainerItemProxy */;
+		};
+		FB71023BC8F54F952623EC3F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B555CC9232527715E5919EC1 /* CFWCredentialVault */;
+			targetProxy = C03215A73A6B7EA9C9C743AC /* PBXContainerItemProxy */;
+		};
+		FDF6CE13F0CA8CBAB6F978C1 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F914C3519EBBAD9FF1EBB651 /* CFWSharedProtocol */;
+			targetProxy = B3847A404617C2B56AC4150D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		06CF8E40FD1AE0E19B7D4D37 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWCredentialTransportTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		0780B739745F859B9BCB3524 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWCredentialVault;
+				PRODUCT_MODULE_NAME = CFWCredentialVault;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		0E60C0C5CD56EA4A2E0DD42A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWCredentialVault;
+				PRODUCT_MODULE_NAME = CFWCredentialVault;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		16FE10ABBC0AA2DDB830971A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWAppleNetworkTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		1B2295FEE3BB9BE3FC413D0B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEFINES_MODULE = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWLibboxObjC;
+				PRODUCT_MODULE_NAME = CFWLibboxObjC;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		1CBB78456AAAF2FA2D25F0EA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Config/PacketTunnel.entitlements;
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				INFOPLIST_FILE = "Config/PacketTunnel-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.bill.clashformac.packet-tunnel";
+				PRODUCT_MODULE_NAME = CFWPacketTunnelExtension;
+				PRODUCT_NAME = CFWPacketTunnel;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		1D0518F3F7528D993373D215 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWLibboxRuntimeTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		1DD0764B799947932017F646 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWPacketTransport;
+				PRODUCT_MODULE_NAME = CFWPacketTransport;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		2AC33D6240D76BEE3A3F6469 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWPacketTransport;
+				PRODUCT_MODULE_NAME = CFWPacketTransport;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		2D84316FB97D2BC98CAC81A1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWPacketTunnel;
+				PRODUCT_MODULE_NAME = CFWPacketTunnel;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		2E78B259B4C03920BA114A88 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWAppleNetwork;
+				PRODUCT_MODULE_NAME = CFWAppleNetwork;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		39EEB28A353062C787B70A63 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWLibboxRuntime;
+				PRODUCT_MODULE_NAME = CFWLibboxRuntime;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		4392344FA5B7B97DE45DD812 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				CFW_BUILD_NUMBER = 40000;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = "$(CFW_BUILD_NUMBER)";
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.4.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = NO;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		50A2E85AF7BBE7C65B42AF69 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = "$(CFW_BUILD_NUMBER)";
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.bill.clashformac.native-bridge";
+				PRODUCT_MODULE_NAME = CFWNativeBridge;
+				PRODUCT_NAME = CFWNativeBridge;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Debug;
+		};
+		546320088193EC921D12708A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWSharedProtocol;
+				PRODUCT_MODULE_NAME = CFWSharedProtocol;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		56C6C57073A4D5AC094685E7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWSharedProtocol;
+				PRODUCT_MODULE_NAME = CFWSharedProtocol;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		633D3382CA9FD58E69F23EF1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				CFW_BUILD_NUMBER = 40000;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = "$(CFW_BUILD_NUMBER)";
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.4.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = NO;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		6A812BC98BC2B2748A29272D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEFINES_MODULE = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWLibboxObjC;
+				PRODUCT_MODULE_NAME = CFWLibboxObjC;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		6F82CCEC2E26E6645D9C9246 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWPacketTransportTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		7177DF40A6FDA66E5D519F10 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWCredentialTransportTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		89CFF93627EEEADD9F7E3549 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWPacketTunnelTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		9198A67CF308AA2EFDB4D8C4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWLibboxRuntimeTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		9B0EF0619365FCF38AD07A88 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWCredentialTransport;
+				PRODUCT_MODULE_NAME = CFWCredentialTransport;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		9B78E29BD4D46BE3C4E8639F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWCredentialTransport;
+				PRODUCT_MODULE_NAME = CFWCredentialTransport;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		A28F210F285AA905ED314107 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWSharedProtocolTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		A412F38A62523953DCE93113 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = "$(CFW_BUILD_NUMBER)";
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.bill.clashformac.native-bridge";
+				PRODUCT_MODULE_NAME = CFWNativeBridge;
+				PRODUCT_NAME = CFWNativeBridge;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
+		};
+		A88524B722CD8EABD0B5A24B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWSharedProtocolTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		ACFC66F601CEDFE290BCC58F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWPacketTunnel;
+				PRODUCT_MODULE_NAME = CFWPacketTunnel;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		B0F9A13780B57C09C395B528 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWAppleNetworkTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		BEF4765D488DF47942352E32 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWPacketTunnelTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		BF8B03C718CF64A1C1A60B16 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWProxyAgentTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		C1CF8CC65E6DD916BFE15711 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Config/ProxyAgent.entitlements;
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				INFOPLIST_FILE = "Config/ProxyAgent-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.bill.clashformac.proxy-agent";
+				PRODUCT_MODULE_NAME = CFWProxyAgent;
+				PRODUCT_NAME = CFWProxyAgent;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		C8DF68DAFB17D397242D90E5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Config/PacketTunnel.entitlements;
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				INFOPLIST_FILE = "Config/PacketTunnel-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.bill.clashformac.packet-tunnel";
+				PRODUCT_MODULE_NAME = CFWPacketTunnelExtension;
+				PRODUCT_NAME = CFWPacketTunnel;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		D0C822D8CA36676DD3434AF7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWNativeBridgeTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		DB3C7BC12C261FB7A039D498 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWCredentialVaultTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		E43A87A12FE2C747783AA6EC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWNativeBridgeTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		E988BCF8236C74BD4DDB4248 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWProxyAgentCore;
+				PRODUCT_MODULE_NAME = CFWProxyAgentCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		EB37707D0E5A5D46955C4F0C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWProxyAgentCore;
+				PRODUCT_MODULE_NAME = CFWProxyAgentCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		EBCD625C077D18FF51BA45C3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWCredentialVaultTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		EFAAC11AB022469549811D6B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWLibboxRuntime;
+				PRODUCT_MODULE_NAME = CFWLibboxRuntime;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		F11ED91B732AED64C41E14A5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWProxyAgentTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		F2005976556D1EDE3DA4EA91 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWAppleNetwork;
+				PRODUCT_MODULE_NAME = CFWAppleNetwork;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		F49F3D469B56686A53C76A9D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Config/ProxyAgent.entitlements;
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../target/native-dependencies\"",
+				);
+				INFOPLIST_FILE = "Config/ProxyAgent-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.bill.clashformac.proxy-agent";
+				PRODUCT_MODULE_NAME = CFWProxyAgent;
+				PRODUCT_NAME = CFWProxyAgent;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		FD7DE5918D663913A162CAD5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.bill.clashformac.CFWPacketTransportTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		04968ACDBCA7F12FD8A39080 /* Build configuration list for PBXNativeTarget "CFWPacketTransport" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1DD0764B799947932017F646 /* Debug */,
+				2AC33D6240D76BEE3A3F6469 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		06258427007CC539D2B3E1E2 /* Build configuration list for PBXNativeTarget "CFWProxyAgentTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BF8B03C718CF64A1C1A60B16 /* Debug */,
+				F11ED91B732AED64C41E14A5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		0C5AEA588CC02F06642CECAF /* Build configuration list for PBXNativeTarget "CFWCredentialVaultTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EBCD625C077D18FF51BA45C3 /* Debug */,
+				DB3C7BC12C261FB7A039D498 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		1FFB13FB3ED12E19AD7F24CC /* Build configuration list for PBXNativeTarget "CFWNativeBridge" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				50A2E85AF7BBE7C65B42AF69 /* Debug */,
+				A412F38A62523953DCE93113 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		2E2F4D50526146C05D342AB9 /* Build configuration list for PBXNativeTarget "CFWSharedProtocolTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A28F210F285AA905ED314107 /* Debug */,
+				A88524B722CD8EABD0B5A24B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		360F2CCFD37F8894D1D37F10 /* Build configuration list for PBXNativeTarget "CFWPacketTunnelExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C8DF68DAFB17D397242D90E5 /* Debug */,
+				1CBB78456AAAF2FA2D25F0EA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		53B0473717FF1A6F74AC376E /* Build configuration list for PBXNativeTarget "CFWLibboxObjC" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1B2295FEE3BB9BE3FC413D0B /* Debug */,
+				6A812BC98BC2B2748A29272D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		68983CEB4E5497230A631765 /* Build configuration list for PBXNativeTarget "CFWPacketTunnelTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BEF4765D488DF47942352E32 /* Debug */,
+				89CFF93627EEEADD9F7E3549 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6CA87DEAFD4FD7D03E121070 /* Build configuration list for PBXNativeTarget "CFWPacketTunnel" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2D84316FB97D2BC98CAC81A1 /* Debug */,
+				ACFC66F601CEDFE290BCC58F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		78308F3DB888A38870DE2E54 /* Build configuration list for PBXNativeTarget "CFWAppleNetwork" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F2005976556D1EDE3DA4EA91 /* Debug */,
+				2E78B259B4C03920BA114A88 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8665A93F50C9CBCF8C8FC8FB /* Build configuration list for PBXNativeTarget "CFWLibboxRuntimeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9198A67CF308AA2EFDB4D8C4 /* Debug */,
+				1D0518F3F7528D993373D215 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9A92BF970CB6ACF6D5313731 /* Build configuration list for PBXNativeTarget "CFWProxyAgent" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C1CF8CC65E6DD916BFE15711 /* Debug */,
+				F49F3D469B56686A53C76A9D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9C0EC45967BC1C9D4C08C0AD /* Build configuration list for PBXNativeTarget "CFWSharedProtocol" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				546320088193EC921D12708A /* Debug */,
+				56C6C57073A4D5AC094685E7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B0C18AEA933CE1C021A7F06E /* Build configuration list for PBXNativeTarget "CFWCredentialVault" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0E60C0C5CD56EA4A2E0DD42A /* Debug */,
+				0780B739745F859B9BCB3524 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		BAE470B301AD228345C2F4B3 /* Build configuration list for PBXNativeTarget "CFWCredentialTransportTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7177DF40A6FDA66E5D519F10 /* Debug */,
+				06CF8E40FD1AE0E19B7D4D37 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		BBB0FC3E9CDB79046993A7CF /* Build configuration list for PBXNativeTarget "CFWCredentialTransport" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9B0EF0619365FCF38AD07A88 /* Debug */,
+				9B78E29BD4D46BE3C4E8639F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D2E3A16FE2A85E7713A59CB7 /* Build configuration list for PBXNativeTarget "CFWProxyAgentCore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E988BCF8236C74BD4DDB4248 /* Debug */,
+				EB37707D0E5A5D46955C4F0C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E04BADAC1C8A40F1F1D5F1C9 /* Build configuration list for PBXProject "CFWNative" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4392344FA5B7B97DE45DD812 /* Debug */,
+				633D3382CA9FD58E69F23EF1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E1E88CE43295660FB54270FC /* Build configuration list for PBXNativeTarget "CFWPacketTransportTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6F82CCEC2E26E6645D9C9246 /* Debug */,
+				FD7DE5918D663913A162CAD5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F53F816EE6DE8A2B0809887E /* Build configuration list for PBXNativeTarget "CFWLibboxRuntime" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				39EEB28A353062C787B70A63 /* Debug */,
+				EFAAC11AB022469549811D6B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F9BE2F95DAFAE5563ABF293F /* Build configuration list for PBXNativeTarget "CFWAppleNetworkTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B0F9A13780B57C09C395B528 /* Debug */,
+				16FE10ABBC0AA2DDB830971A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FCF8084BCB437E41784CA590 /* Build configuration list for PBXNativeTarget "CFWNativeBridgeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E43A87A12FE2C747783AA6EC /* Debug */,
+				D0C822D8CA36676DD3434AF7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = AE4506420C933981AFA41BB7 /* Project object */;
+}

@@ -1,0 +1,319 @@
+use serde_json::Value;
+
+use crate::{ConfigError, CredentialSecret, MAX_PROFILE_NODES, ValidatedSingBoxProfile};
+
+const SS_ID: &str = "11111111-1111-4111-8111-111111111111";
+const VMESS_ID: &str = "22222222-2222-4222-8222-222222222222";
+const VLESS_ID: &str = "33333333-3333-4333-8333-333333333333";
+const TROJAN_ID: &str = "44444444-4444-4444-8444-444444444444";
+const HYSTERIA_ID: &str = "55555555-5555-4555-8555-555555555555";
+const HYSTERIA_OBFS_ID: &str = "66666666-6666-4666-8666-666666666666";
+
+#[test]
+fn canonical_digest_does_not_depend_on_object_order() {
+    let first = ValidatedSingBoxProfile::parse(
+        r#"{"route":{"final":"proxy"},"outbounds":[{"tag":"proxy","type":"direct"}]}"#,
+    )
+    .expect("first profile");
+    let second = ValidatedSingBoxProfile::parse(
+        r#"{"outbounds":[{"type":"direct","tag":"proxy"}],"route":{"final":"proxy"}}"#,
+    )
+    .expect("second profile");
+    assert_eq!(first.digest(), second.digest());
+    assert_eq!(first.as_json(), second.as_json());
+}
+
+#[test]
+fn application_owned_inbounds_are_rejected() {
+    let error = ValidatedSingBoxProfile::parse(r#"{"inbounds":[]}"#)
+        .expect_err("profile must not control listeners");
+    assert_eq!(
+        error,
+        ConfigError::UnsupportedTopLevelKey("inbounds".into())
+    );
+}
+
+#[test]
+fn process_matching_is_rejected_at_any_depth() {
+    let error =
+        ValidatedSingBoxProfile::parse(r#"{"route":{"rules":[{"process_name":["Safari"]}]}}"#)
+            .expect_err("process matching is unavailable in the unprivileged design");
+    assert!(matches!(
+        error,
+        ConfigError::ForbiddenKey { key, .. } if key == "process_name"
+    ));
+}
+
+#[test]
+fn executable_and_file_path_options_are_rejected_at_any_depth() {
+    for key in [
+        "command",
+        "script",
+        "executable",
+        "certificate_path",
+        "download_url",
+    ] {
+        let input = format!(r#"{{"outbounds":[{{"type":"direct","{key}":"/tmp/x"}}]}}"#);
+        let error = ValidatedSingBoxProfile::parse(&input)
+            .expect_err("executable and file path options must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::ForbiddenKey { key: rejected, .. } if rejected == key
+        ));
+    }
+}
+
+#[test]
+fn engine_managed_remote_resources_are_rejected() {
+    let remote_rule_set = ValidatedSingBoxProfile::parse(
+        r#"{"route":{"rule_set":[{"type":"remote","tag":"blocked","url":"http://169.254.169.254/latest"}]}}"#,
+    )
+    .expect_err("the engine must not fetch remote rule sets");
+    assert!(matches!(
+        remote_rule_set,
+        ConfigError::RemoteResource { path } if path == "$.route.rule_set[0]"
+    ));
+
+    let health_check = ValidatedSingBoxProfile::parse(
+        r#"{"outbounds":[{"type":"urltest","tag":"automatic","url":"https://example.com"}]}"#,
+    )
+    .expect_err("profiles must not schedule URL-based probes");
+    assert!(matches!(
+        health_check,
+        ConfigError::ForbiddenKey { key, .. } if key == "url"
+    ));
+}
+
+#[test]
+fn credentials_are_rejected_until_keychain_projection_exists() {
+    for key in ["password", "private_key", "token", "uuid", "auth_key"] {
+        let input = format!(r#"{{"outbounds":[{{"type":"direct","{key}":"sensitive"}}]}}"#);
+        let error = ValidatedSingBoxProfile::parse(&input)
+            .expect_err("credentials must never be persisted in profile JSON");
+        assert!(matches!(
+            error,
+            ConfigError::CredentialRequiresKeychain { key: rejected, .. } if rejected == key
+        ));
+    }
+}
+
+#[test]
+fn typed_remote_outbounds_persist_only_canonical_credential_references() {
+    let input = format!(
+        r#"{{
+          "outbounds": [
+            {{"type":"shadowsocks","tag":"ss","server":"ss.example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{SS_ID}","kind":"shadowsocks_password"}}}},
+            {{"type":"vmess","tag":"vmess","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"security":"auto","tls":{{"enabled":true,"server_name":"vmess.example.com","utls":{{"enabled":true,"fingerprint":"chrome"}}}},"transport":{{"type":"ws","path":"/ws","headers":{{"Host":"vmess.example.com"}}}}}},
+            {{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"flow":"xtls-rprx-vision","tls":{{"enabled":true,"server_name":"www.example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}}}}}},
+            {{"type":"trojan","tag":"trojan","server":"trojan.example.com","server_port":443,"credential_ref":{{"id":"{TROJAN_ID}","kind":"trojan_password"}},"tls":{{"enabled":true,"server_name":"trojan.example.com"}},"transport":{{"type":"grpc","service_name":"tunnel"}}}},
+            {{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}},"up_mbps":100,"down_mbps":200,"obfs":{{"type":"salamander","credential_ref":{{"id":"{HYSTERIA_OBFS_ID}","kind":"hysteria2_obfs_password"}}}}}}
+          ],
+          "route": {{"final":"ss"}}
+        }}"#
+    );
+    let profile = ValidatedSingBoxProfile::parse(&input).expect("typed remote profile");
+    let value: Value = serde_json::from_str(profile.as_json()).expect("canonical profile JSON");
+    assert_eq!(value["route"]["final"], "ss");
+    assert_eq!(value["outbounds"][0]["credential_ref"]["id"], SS_ID);
+    assert!(!contains_key(&value, "password"));
+    assert!(!contains_key(&value, "uuid"));
+}
+
+#[test]
+fn cross_layer_typed_profile_fixture_uses_the_native_safe_field_shape() {
+    let profile =
+        ValidatedSingBoxProfile::parse(include_str!("../../../../contracts/typed-profile-v1.json"))
+            .expect("shared typed profile fixture");
+    let canonical: serde_json::Value =
+        serde_json::from_str(profile.as_json()).expect("canonical fixture");
+    assert_eq!(canonical["outbounds"][0]["transport"]["type"], "ws");
+    assert_eq!(
+        canonical["outbounds"][0]["transport"]["headers"]["Host"],
+        "vmess.example.com"
+    );
+    assert_eq!(canonical["outbounds"][0]["tls"]["utls"]["enabled"], true);
+    assert_eq!(canonical["outbounds"][1]["tls"]["reality"]["enabled"], true);
+}
+
+#[test]
+fn typed_profiles_reject_unknown_fields_and_wrong_credential_kinds() {
+    let unknown = format!(
+        r#"{{"outbounds":[{{"type":"shadowsocks","tag":"proxy","server":"example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{SS_ID}","kind":"shadowsocks_password"}},"plugin":"unsafe"}}]}}"#
+    );
+    assert!(ValidatedSingBoxProfile::parse(&unknown).is_err());
+
+    let wrong_kind = format!(
+        r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"trojan_password"}}}}]}}"#
+    );
+    assert!(matches!(
+        ValidatedSingBoxProfile::parse(&wrong_kind),
+        Err(ConfigError::CredentialKindMismatch { .. })
+    ));
+
+    let noncanonical_id = r#"{"outbounds":[{"type":"vmess","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{"id":"22222222222242228222222222222222","kind":"vmess_uuid"}}]}"#;
+    assert!(ValidatedSingBoxProfile::parse(noncanonical_id).is_err());
+}
+
+#[test]
+fn reality_requires_enabled_canonical_x25519_public_material() {
+    let fixture = include_str!("../../../../contracts/typed-profile-v1.json");
+    for invalid in [
+        fixture.replacen(
+            "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+            "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS*",
+            1,
+        ),
+        fixture.replacen("0123456789abcdef", "0123456789ABCDEF", 1),
+        fixture.replacen(
+            "\"reality\": {\n          \"enabled\": true",
+            "\"reality\": {\n          \"enabled\": false",
+            1,
+        ),
+    ] {
+        assert!(ValidatedSingBoxProfile::parse(&invalid).is_err());
+    }
+}
+
+#[test]
+fn one_credential_id_cannot_cross_protocol_kinds() {
+    let input = format!(
+        r#"{{"outbounds":[
+          {{"type":"shadowsocks","tag":"ss","server":"one.example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{SS_ID}","kind":"shadowsocks_password"}}}},
+          {{"type":"trojan","tag":"trojan","server":"two.example.com","server_port":443,"credential_ref":{{"id":"{SS_ID}","kind":"trojan_password"}},"tls":{{"enabled":true,"server_name":"two.example.com"}}}}
+        ]}}"#
+    );
+    assert!(matches!(
+        ValidatedSingBoxProfile::parse(&input),
+        Err(ConfigError::ConflictingCredentialReference { id }) if id == SS_ID
+    ));
+}
+
+#[test]
+fn borrowed_secret_debug_is_redacted_and_not_serializable() {
+    let secret = CredentialSecret::new("never-log-this-secret").expect("bounded secret");
+    assert_eq!(format!("{secret:?}"), "CredentialSecret([REDACTED])");
+    assert_eq!(secret.expose_to_vault(), "never-log-this-secret");
+}
+
+#[test]
+fn untyped_network_and_credential_bearing_features_fail_closed() {
+    for input in [
+        r#"{"dns":{"servers":[{"address":"https://169.254.169.254"}]},"outbounds":[{"type":"direct","tag":"direct"}]}"#,
+        r#"{"outbounds":[{"type":"hysteria","tag":"proxy","auth_str":"secret"}]}"#,
+        r#"{"outbounds":[{"type":"direct","tag":"direct","tls":{"client_key":"secret"}}]}"#,
+        r#"{"outbounds":[{"type":"direct","tag":"direct","headers":{"Authorization":"secret"}}]}"#,
+    ] {
+        assert!(ValidatedSingBoxProfile::parse(input).is_err());
+    }
+}
+
+#[test]
+fn typed_remote_endpoints_reject_non_routable_and_tunnel_reserved_literals() {
+    for server in [
+        "0.0.0.0",
+        "127.0.0.1",
+        "169.254.169.254",
+        "198.18.0.2",
+        "198.18.64.2",
+        "203.0.113.10",
+        "::1",
+        "fe80::1",
+        "2001:db8::2",
+        "2001:2:0:64::2",
+    ] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"shadowsocks","tag":"proxy","server":"{server}","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{SS_ID}","kind":"shadowsocks_password"}}}}]}}"#
+        );
+        assert!(ValidatedSingBoxProfile::parse(&input).is_err(), "{server}");
+    }
+}
+
+#[test]
+fn excessively_wide_profiles_are_rejected_before_projection() {
+    let outbounds = std::iter::repeat_n("null", MAX_PROFILE_NODES)
+        .collect::<Vec<_>>()
+        .join(",");
+    let input = format!(r#"{{"outbounds":[{outbounds}]}}"#);
+    let error = ValidatedSingBoxProfile::parse(&input)
+        .expect_err("node count must remain bounded independently of byte size");
+    assert_eq!(
+        error,
+        ConfigError::TooComplex {
+            maximum: MAX_PROFILE_NODES
+        }
+    );
+}
+
+#[test]
+fn remote_outbound_admission_distinguishes_real_replacements_from_local_only_profiles() {
+    let direct = ValidatedSingBoxProfile::direct();
+    assert!(!direct.routes_through_remote());
+
+    let remote = ValidatedSingBoxProfile::parse(
+        r#"{
+          "outbounds": [
+            {
+              "type": "shadowsocks",
+              "tag": "remote",
+              "server": "example.com",
+              "server_port": 443,
+              "method": "aes-128-gcm",
+              "credential_ref": {
+                "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "kind": "shadowsocks_password"
+              }
+            }
+          ]
+        }"#,
+    )
+    .expect("remote profile");
+    assert!(remote.routes_through_remote());
+
+    let unused_remote = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{
+              "outbounds": [
+                {{"type":"direct","tag":"direct"}},
+                {{
+                  "type":"shadowsocks",
+                  "tag":"unused-remote",
+                  "server":"example.com",
+                  "server_port":443,
+                  "method":"aes-128-gcm",
+                  "credential_ref":{{"id":"{SS_ID}","kind":"shadowsocks_password"}}
+                }}
+              ],
+              "route":{{"final":"direct"}}
+            }}"#
+    ))
+    .expect("unused remote profile remains valid for local testing");
+    assert!(!unused_remote.routes_through_remote());
+
+    let implicit_first_direct = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{
+              "outbounds": [
+                {{"type":"direct","tag":"direct"}},
+                {{
+                  "type":"shadowsocks",
+                  "tag":"unused-remote",
+                  "server":"example.com",
+                  "server_port":443,
+                  "method":"aes-128-gcm",
+                  "credential_ref":{{"id":"{SS_ID}","kind":"shadowsocks_password"}}
+                }}
+              ]
+            }}"#
+    ))
+    .expect("implicit direct final profile");
+    assert!(!implicit_first_direct.routes_through_remote());
+}
+
+fn contains_key(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.contains_key(expected)
+                || object.values().any(|value| contains_key(value, expected))
+        }
+        Value::Array(values) => values.iter().any(|value| contains_key(value, expected)),
+        _ => false,
+    }
+}

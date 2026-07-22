@@ -1,0 +1,484 @@
+name: CFWNative
+
+options:
+  bundleIdPrefix: com.bill.clashformac
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "15.0"
+
+settings:
+  base:
+    ARCHS: arm64
+    CFW_BUILD_NUMBER: 40000
+    CURRENT_PROJECT_VERSION: $(CFW_BUILD_NUMBER)
+    DEAD_CODE_STRIPPING: true
+    ENABLE_HARDENED_RUNTIME: true
+    ENABLE_USER_SCRIPT_SANDBOXING: true
+    GCC_TREAT_WARNINGS_AS_ERRORS: true
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    MARKETING_VERSION: 0.4.0
+    ONLY_ACTIVE_ARCH: false
+    SUPPORTS_MACCATALYST: false
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: true
+    SWIFT_VERSION: "6.0"
+
+targets:
+  CFWSharedProtocol:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/CFWSharedProtocol
+    dependencies:
+      - sdk: CryptoKit.framework
+      - sdk: Security.framework
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        PRODUCT_MODULE_NAME: CFWSharedProtocol
+
+  CFWPacketTransport:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/CFWPacketTransport
+    dependencies:
+      - target: CFWSharedProtocol
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        PRODUCT_MODULE_NAME: CFWPacketTransport
+
+  CFWAppleNetwork:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/CFWAppleNetwork
+    dependencies:
+      - target: CFWSharedProtocol
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        PRODUCT_MODULE_NAME: CFWAppleNetwork
+
+  CFWNativeBridge:
+    type: framework
+    platform: macOS
+    sources:
+      - Sources/CFWNativeBridge
+      - path: Headers
+        headerVisibility: public
+    dependencies:
+      - target: CFWAppleNetwork
+        link: true
+      - target: CFWCredentialTransport
+        link: true
+      - target: CFWCredentialVault
+        link: true
+      - target: CFWSharedProtocol
+        link: true
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+      - sdk: ServiceManagement.framework
+      - sdk: SystemExtensions.framework
+    settings:
+      base:
+        DEFINES_MODULE: true
+        CURRENT_PROJECT_VERSION: $(CFW_BUILD_NUMBER)
+        PRODUCT_BUNDLE_IDENTIFIER: com.bill.clashformac.native-bridge
+        PRODUCT_MODULE_NAME: CFWNativeBridge
+        PRODUCT_NAME: CFWNativeBridge
+        SKIP_INSTALL: true
+
+  CFWCredentialTransport:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/CFWCredentialTransport
+    dependencies:
+      - target: CFWSharedProtocol
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        PRODUCT_MODULE_NAME: CFWCredentialTransport
+
+  CFWCredentialVault:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/CFWCredentialVault
+    dependencies:
+      - target: CFWCredentialTransport
+      - target: CFWSharedProtocol
+      - sdk: Security.framework
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        PRODUCT_MODULE_NAME: CFWCredentialVault
+
+  CFWLibboxRuntime:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/CFWLibboxRuntime
+    dependencies:
+      - target: CFWSharedProtocol
+      - target: CFWLibboxObjC
+      - framework: ../../target/native-dependencies/Libbox.xcframework
+        embed: false
+      - sdk: libresolv.tbd
+      - sdk: Network.framework
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        PRODUCT_MODULE_NAME: CFWLibboxRuntime
+
+  CFWLibboxObjC:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: Sources/CFWLibboxObjC
+        excludes:
+          - include
+      - path: Sources/CFWLibboxObjC/include
+        headerVisibility: public
+    dependencies:
+      - framework: ../../target/native-dependencies/Libbox.xcframework
+        embed: false
+    settings:
+      base:
+        CLANG_ENABLE_MODULES: true
+        CLANG_WARN_DOCUMENTATION_COMMENTS: true
+        DEFINES_MODULE: true
+        PRODUCT_MODULE_NAME: CFWLibboxObjC
+
+  CFWPacketTunnel:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/CFWPacketTunnel
+    dependencies:
+      - target: CFWSharedProtocol
+      - target: CFWCredentialTransport
+      - target: CFWPacketTransport
+      - target: CFWLibboxRuntime
+      - target: CFWLibboxObjC
+      - sdk: CryptoKit.framework
+      - sdk: Security.framework
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        PRODUCT_MODULE_NAME: CFWPacketTunnel
+
+  CFWPacketTunnelExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - SystemExtension
+    dependencies:
+      - target: CFWPacketTunnel
+      - target: CFWSharedProtocol
+      - target: CFWCredentialTransport
+      - target: CFWPacketTransport
+      - target: CFWLibboxRuntime
+      - target: CFWLibboxObjC
+      - framework: ../../target/native-dependencies/Libbox.xcframework
+        embed: false
+      - sdk: AppIntents.framework
+      - sdk: libresolv.tbd
+    entitlements:
+      path: Config/PacketTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension:
+          - packet-tunnel-provider-systemextension
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+    info:
+      path: Config/PacketTunnel-Info.plist
+      properties:
+        CFBundleDisplayName: Clash for Mac Packet Tunnel
+        CFBundlePackageType: SYSX
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NetworkExtension:
+          NEMachServiceName: $(TeamIdentifierPrefix)com.bill.clashformac.packet-tunnel
+          NEProviderClasses:
+            com.apple.networkextension.packet-tunnel: CFWPacketTunnel.PacketTunnelProvider
+        NSSystemExtensionUsageDescription: >-
+          Clash for Mac uses a packet tunnel system extension to route traffic
+          through the selected network profile.
+    settings:
+      base:
+        CODE_SIGN_STYLE: Manual
+        PRODUCT_BUNDLE_IDENTIFIER: com.bill.clashformac.packet-tunnel
+        PRODUCT_MODULE_NAME: CFWPacketTunnelExtension
+        PRODUCT_NAME: CFWPacketTunnel
+        SKIP_INSTALL: true
+
+  CFWProxyAgentCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/CFWProxyAgent
+    dependencies:
+      - target: CFWSharedProtocol
+      - target: CFWCredentialTransport
+      - target: CFWCredentialVault
+      - target: CFWLibboxRuntime
+      - target: CFWLibboxObjC
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        PRODUCT_MODULE_NAME: CFWProxyAgentCore
+
+  CFWProxyAgent:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/CFWProxyAgentMain
+    dependencies:
+      - target: CFWProxyAgentCore
+      - target: CFWSharedProtocol
+      - target: CFWCredentialTransport
+      - target: CFWCredentialVault
+      - target: CFWLibboxRuntime
+      - target: CFWLibboxObjC
+      - framework: ../../target/native-dependencies/Libbox.xcframework
+        embed: false
+      - sdk: AppIntents.framework
+      - sdk: libresolv.tbd
+      - sdk: CryptoKit.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    entitlements:
+      path: Config/ProxyAgent.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - $(TeamIdentifierPrefix)group.com.bill.clashformac
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.bill.clashformac.proxy-agent
+          - $(AppIdentifierPrefix)com.bill.clashformac.credentials
+    info:
+      path: Config/ProxyAgent-Info.plist
+      properties:
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFWAppGroupIdentifier: $(TeamIdentifierPrefix)group.com.bill.clashformac
+        CFWExpectedHostBundleIdentifier: com.bill.clashformac
+        CFWExpectedTeamIdentifier: $(DEVELOPMENT_TEAM)
+        CFWProxyJournalKeychainAccessGroup: >-
+          $(AppIdentifierPrefix)com.bill.clashformac.proxy-agent
+        CFWCredentialKeychainAccessGroup: >-
+          $(AppIdentifierPrefix)com.bill.clashformac.credentials
+        CFWProxyAgentMachServiceName: com.bill.clashformac.proxy-agent
+        LSBackgroundOnly: true
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSMultipleInstancesProhibited: true
+    settings:
+      base:
+        CODE_SIGN_STYLE: Manual
+        PRODUCT_BUNDLE_IDENTIFIER: com.bill.clashformac.proxy-agent
+        PRODUCT_MODULE_NAME: CFWProxyAgent
+        PRODUCT_NAME: CFWProxyAgent
+        SKIP_INSTALL: true
+
+  CFWSharedProtocolTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/CFWSharedProtocolTests
+    dependencies:
+      - target: CFWSharedProtocol
+      - sdk: AppIntents.framework
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: false
+
+  CFWPacketTransportTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/CFWPacketTransportTests
+    dependencies:
+      - target: CFWPacketTransport
+      - sdk: AppIntents.framework
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: false
+
+  CFWPacketTunnelTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/CFWPacketTunnelTests
+    dependencies:
+      - target: CFWPacketTunnel
+      - target: CFWSharedProtocol
+      - target: CFWCredentialTransport
+      - target: CFWPacketTransport
+      - target: CFWLibboxRuntime
+      - target: CFWLibboxObjC
+      - framework: ../../target/native-dependencies/Libbox.xcframework
+        embed: false
+      - sdk: AppIntents.framework
+      - sdk: CryptoKit.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - sdk: libresolv.tbd
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: false
+
+  CFWLibboxRuntimeTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/CFWLibboxRuntimeTests
+    dependencies:
+      - target: CFWLibboxRuntime
+      - target: CFWSharedProtocol
+      - target: CFWLibboxObjC
+      - framework: ../../target/native-dependencies/Libbox.xcframework
+        embed: false
+      - sdk: AppIntents.framework
+      - sdk: Network.framework
+      - sdk: libresolv.tbd
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: false
+
+  CFWAppleNetworkTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/CFWAppleNetworkTests
+    dependencies:
+      - target: CFWAppleNetwork
+      - target: CFWSharedProtocol
+      - sdk: AppIntents.framework
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: false
+
+  CFWNativeBridgeTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/CFWNativeBridgeTests
+    dependencies:
+      - target: CFWNativeBridge
+      - target: CFWAppleNetwork
+      - target: CFWCredentialTransport
+      - target: CFWCredentialVault
+      - target: CFWSharedProtocol
+      - sdk: AppIntents.framework
+      - sdk: Security.framework
+      - sdk: ServiceManagement.framework
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: false
+
+  CFWCredentialTransportTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/CFWCredentialTransportTests
+    dependencies:
+      - target: CFWCredentialTransport
+      - target: CFWSharedProtocol
+      - sdk: AppIntents.framework
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: false
+
+  CFWCredentialVaultTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/CFWCredentialVaultTests
+    dependencies:
+      - target: CFWCredentialTransport
+      - target: CFWCredentialVault
+      - target: CFWSharedProtocol
+      - sdk: AppIntents.framework
+      - sdk: Security.framework
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: false
+
+  CFWProxyAgentTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/CFWProxyAgentTests
+    dependencies:
+      - target: CFWProxyAgentCore
+      - target: CFWSharedProtocol
+      - target: CFWCredentialTransport
+      - target: CFWCredentialVault
+      - target: CFWLibboxRuntime
+      - target: CFWLibboxObjC
+      - framework: ../../target/native-dependencies/Libbox.xcframework
+        embed: false
+      - sdk: AppIntents.framework
+      - sdk: CryptoKit.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: libresolv.tbd
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: false
+
+schemes:
+  CFWNativeTests:
+    build:
+      targets:
+        CFWSharedProtocol: all
+        CFWPacketTransport: all
+        CFWAppleNetwork: all
+        CFWNativeBridge: all
+        CFWCredentialTransport: all
+        CFWCredentialVault: all
+        CFWLibboxRuntime: all
+        CFWLibboxObjC: all
+        CFWSharedProtocolTests: [test]
+        CFWPacketTransportTests: [test]
+        CFWPacketTunnelTests: [test]
+        CFWAppleNetworkTests: [test]
+        CFWNativeBridgeTests: [test]
+        CFWCredentialTransportTests: [test]
+        CFWCredentialVaultTests: [test]
+        CFWLibboxRuntimeTests: [test]
+        CFWProxyAgentTests: [test]
+    test:
+      targets:
+        - CFWSharedProtocolTests
+        - CFWPacketTransportTests
+        - CFWPacketTunnelTests
+        - CFWAppleNetworkTests
+        - CFWNativeBridgeTests
+        - CFWCredentialTransportTests
+        - CFWCredentialVaultTests
+        - CFWLibboxRuntimeTests
+        - CFWProxyAgentTests
+
+  CFWPacketTunnelExtension:
+    build:
+      targets:
+        CFWPacketTunnelExtension: all
+
+  CFWProxyAgent:
+    build:
+      targets:
+        CFWProxyAgent: all
+
+  CFWNativeBridge:
+    build:
+      targets:
+        CFWNativeBridge: all

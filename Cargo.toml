@@ -1,27 +1,35 @@
 [workspace]
 members = [
   "apps/cfw-tauri-shell",
-  "apps/cfw-cli",
   "crates/cfw-core",
-  "crates/cfw-controller",
+  "crates/cfw-engine-api",
+  "crates/cfw-singbox-config",
+  "crates/cfw-application",
+  "crates/cfw-apple-network",
   "crates/cfw-profiles",
-  "crates/cfw-runtime",
   "crates/cfw-platform",
-  "crates/cfw-helper",
-  "crates/serde_yaml",
+  "crates/cfw-legacy-tombstone",
+  "crates/cfw-release-verifier",
+  "crates/urlpattern-maintained-adapter",
 ]
 resolver = "2"
 
+[patch.crates-io]
+# tauri-utils 2.9.3 still requires urlpattern 0.3. This narrow adapter keeps
+# that API requirement while delegating to the maintained 0.6 implementation.
+# Remove it when the pinned Tauri line consumes urlpattern >=0.6 directly.
+urlpattern = { path = "crates/urlpattern-maintained-adapter" }
+
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 authors = ["bill"]
 rust-version = "1.97"
 
 # Release profile tuned for aarch64-apple-darwin: maximum optimization, whole-
 # program LTO and a single codegen unit for the best runtime performance, with
-# symbols stripped to keep the shipped bundle small. panic=unwind is kept so
-# tokio/reqwest behave as upstream expects.
+# symbols stripped to keep the shipped bundle small. panic=unwind is kept for
+# structured cleanup across the asynchronous application boundary.
 [profile.release]
 opt-level = 3
 lto = true
@@ -30,18 +38,21 @@ strip = true
 
 [workspace.dependencies]
 anyhow = "1.0"
-flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
-futures-util = "0.3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-noyalib = { version = "0.0.15", features = ["compat-serde-yaml"] }
-serde_yaml = { path = "crates/serde_yaml" }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-qrcode = "0.14"
+base64 = "0.22.1"
+futures-util = "0.3.33"
+flate2 = "1.1.9"
+libc = "0.2.189"
+minisign-verify = "0.2.5"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
+rustls = { version = "0.23.42", default-features = false, features = ["ring", "std"] }
+plist = "1.10.0"
+semver = "1.0.28"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 sha2 = "0.11"
-thiserror = "2.0"
-tokio = { version = "1", features = ["time"] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
-tracing = "0.1"
-url = "2.5"
-urlencoding = "2.1"
+thiserror = "2.0.19"
+tempfile = "3.27.0"
+tar = "0.4.46"
+tokio = { version = "1.53.1", features = ["macros", "sync", "time"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+zeroize = "1.9.0"

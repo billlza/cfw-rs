@@ -1,0 +1,412 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme
+   LastUpgradeVersion = "1430"
+   version = "1.7">
+   <BuildAction
+      parallelizeBuildables = "YES"
+      buildImplicitDependencies = "YES"
+      runPostActionsOnFailure = "NO">
+      <BuildActionEntries>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C3B723FE9D758E59C6AF4FA7"
+               BuildableName = "libCFWAppleNetwork.a"
+               BlueprintName = "CFWAppleNetwork"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C458AD52790F8A17489F8FFA"
+               BuildableName = "CFWAppleNetworkTests.xctest"
+               BlueprintName = "CFWAppleNetworkTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "5C03E560390FC4F9FF380958"
+               BuildableName = "libCFWCredentialTransport.a"
+               BlueprintName = "CFWCredentialTransport"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "4E9CDD099215E2D754E5B71E"
+               BuildableName = "CFWCredentialTransportTests.xctest"
+               BlueprintName = "CFWCredentialTransportTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "B555CC9232527715E5919EC1"
+               BuildableName = "libCFWCredentialVault.a"
+               BlueprintName = "CFWCredentialVault"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "566E95485C3EF974358701C7"
+               BuildableName = "CFWCredentialVaultTests.xctest"
+               BlueprintName = "CFWCredentialVaultTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "17B3C9D2B13016E208E240AC"
+               BuildableName = "libCFWLibboxObjC.a"
+               BlueprintName = "CFWLibboxObjC"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "2A7AC1C8CCAD5FB9FF213505"
+               BuildableName = "libCFWLibboxRuntime.a"
+               BlueprintName = "CFWLibboxRuntime"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A535AA7EE324ABB116911FEC"
+               BuildableName = "CFWLibboxRuntimeTests.xctest"
+               BlueprintName = "CFWLibboxRuntimeTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "510501B24DAA484506E7AFF0"
+               BuildableName = "CFWNativeBridge.framework"
+               BlueprintName = "CFWNativeBridge"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "D4514DEE0E08956ADF696F05"
+               BuildableName = "CFWNativeBridgeTests.xctest"
+               BlueprintName = "CFWNativeBridgeTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "0346508F3289A1A0DB1073FC"
+               BuildableName = "libCFWPacketTransport.a"
+               BlueprintName = "CFWPacketTransport"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "EC45BA3E0D2D223B435F86F6"
+               BuildableName = "CFWPacketTransportTests.xctest"
+               BlueprintName = "CFWPacketTransportTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "11273537150134172EEE84CE"
+               BuildableName = "CFWPacketTunnelTests.xctest"
+               BlueprintName = "CFWPacketTunnelTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "6E7030F0BD99ED41D74E2C4A"
+               BuildableName = "CFWProxyAgentTests.xctest"
+               BlueprintName = "CFWProxyAgentTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "F914C3519EBBAD9FF1EBB651"
+               BuildableName = "libCFWSharedProtocol.a"
+               BlueprintName = "CFWSharedProtocol"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "5A779EA1E34B8B72AC357B3D"
+               BuildableName = "CFWSharedProtocolTests.xctest"
+               BlueprintName = "CFWSharedProtocolTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+      </BuildActionEntries>
+   </BuildAction>
+   <TestAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      onlyGenerateCoverageForSpecifiedTargets = "NO">
+      <MacroExpansion>
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "C3B723FE9D758E59C6AF4FA7"
+            BuildableName = "libCFWAppleNetwork.a"
+            BlueprintName = "CFWAppleNetwork"
+            ReferencedContainer = "container:CFWNative.xcodeproj">
+         </BuildableReference>
+      </MacroExpansion>
+      <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "5A779EA1E34B8B72AC357B3D"
+               BuildableName = "CFWSharedProtocolTests.xctest"
+               BlueprintName = "CFWSharedProtocolTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "EC45BA3E0D2D223B435F86F6"
+               BuildableName = "CFWPacketTransportTests.xctest"
+               BlueprintName = "CFWPacketTransportTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "11273537150134172EEE84CE"
+               BuildableName = "CFWPacketTunnelTests.xctest"
+               BlueprintName = "CFWPacketTunnelTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C458AD52790F8A17489F8FFA"
+               BuildableName = "CFWAppleNetworkTests.xctest"
+               BlueprintName = "CFWAppleNetworkTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "D4514DEE0E08956ADF696F05"
+               BuildableName = "CFWNativeBridgeTests.xctest"
+               BlueprintName = "CFWNativeBridgeTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "4E9CDD099215E2D754E5B71E"
+               BuildableName = "CFWCredentialTransportTests.xctest"
+               BlueprintName = "CFWCredentialTransportTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "566E95485C3EF974358701C7"
+               BuildableName = "CFWCredentialVaultTests.xctest"
+               BlueprintName = "CFWCredentialVaultTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A535AA7EE324ABB116911FEC"
+               BuildableName = "CFWLibboxRuntimeTests.xctest"
+               BlueprintName = "CFWLibboxRuntimeTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "6E7030F0BD99ED41D74E2C4A"
+               BuildableName = "CFWProxyAgentTests.xctest"
+               BlueprintName = "CFWProxyAgentTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+      </Testables>
+      <CommandLineArguments>
+      </CommandLineArguments>
+   </TestAction>
+   <LaunchAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      launchStyle = "0"
+      useCustomWorkingDirectory = "NO"
+      ignoresPersistentStateOnLaunch = "NO"
+      debugDocumentVersioning = "YES"
+      debugServiceExtension = "internal"
+      allowLocationSimulation = "YES">
+      <MacroExpansion>
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "C3B723FE9D758E59C6AF4FA7"
+            BuildableName = "libCFWAppleNetwork.a"
+            BlueprintName = "CFWAppleNetwork"
+            ReferencedContainer = "container:CFWNative.xcodeproj">
+         </BuildableReference>
+      </MacroExpansion>
+   </LaunchAction>
+   <ProfileAction
+      buildConfiguration = "Release"
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      savedToolIdentifier = ""
+      useCustomWorkingDirectory = "NO"
+      debugDocumentVersioning = "YES">
+      <MacroExpansion>
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "C3B723FE9D758E59C6AF4FA7"
+            BuildableName = "libCFWAppleNetwork.a"
+            BlueprintName = "CFWAppleNetwork"
+            ReferencedContainer = "container:CFWNative.xcodeproj">
+         </BuildableReference>
+      </MacroExpansion>
+   </ProfileAction>
+   <AnalyzeAction
+      buildConfiguration = "Debug">
+   </AnalyzeAction>
+   <ArchiveAction
+      buildConfiguration = "Release"
+      revealArchiveInOrganizer = "YES">
+   </ArchiveAction>
+</Scheme>

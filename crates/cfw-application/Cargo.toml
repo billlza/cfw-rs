@@ -1,0 +1,15 @@
+[package]
+name = "cfw-application"
+version = "0.4.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+cfw-engine-api = { path = "../cfw-engine-api" }
+cfw-singbox-config = { path = "../cfw-singbox-config" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }

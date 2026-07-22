@@ -1,15 +1,15 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Clash for Mac",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "identifier": "com.bill.clashformac",
   "build": {
-    "frontendDist": "ui",
-    "beforeBuildCommand": "sh -c 'npm run build && for script in scripts/build_helper_resource.sh ../scripts/build_helper_resource.sh ../../scripts/build_helper_resource.sh ../../../scripts/build_helper_resource.sh; do if [ -x \"$script\" ]; then \"$script\"; exit $?; fi; done; echo \"build_helper_resource.sh not found\" >&2; exit 127'",
-    "beforeDevCommand": "npm run build"
+    "frontendDist": "ui/dist",
+    "beforeBuildCommand": "../../scripts/build_ui_with_pinned_node.sh",
+    "beforeDevCommand": "../../scripts/build_ui_with_pinned_node.sh"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "label": "main",
@@ -25,6 +25,7 @@
       }
     ],
     "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'",
       "capabilities": [
         "main-capability"
       ]
@@ -35,30 +36,27 @@
     "targets": [
       "app"
     ],
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "icon": [
       "icons/icon.icns",
       "icons/icon_512.png",
       "icons/logo_64.png"
     ],
     "macOS": {
-      "minimumSystemVersion": "13.0",
-      "entitlements": "macos/entitlements.plist"
-    },
-    "resources": [
-      "resources/helpers",
-      "resources/cores",
-      "resources/benchmarks"
-    ]
-  },
-  "plugins": {
-    "deep-link": {
-      "desktop": {
-        "schemes": [
-          "clash"
-        ]
+      "minimumSystemVersion": "15.0",
+      "entitlements": "macos/entitlements.plist",
+      "files": {
+        "Frameworks/CFWNativeBridge.framework": "../../target/native-products/CFWNativeBridge.framework",
+        "Library/HelperTools/cfw-helper-tombstone": "../../target/native-products/CFWLegacyTombstone/cfw-helper-tombstone",
+        "Library/LaunchDaemons/com.bill.clashformac.helper.plist": "macos/legacy-tombstone/com.bill.clashformac.helper.plist",
+        "Library/LaunchAgents/com.bill.clashformac.proxy-agent.plist": "../../native/macos/Config/com.bill.clashformac.proxy-agent.plist",
+        "Library/LoginItems/CFWProxyAgent.app": "../../target/native-products/CFWProxyAgent.app",
+        "Library/SystemExtensions/CFWPacketTunnel.systemextension": "../../target/native-products/CFWPacketTunnel.systemextension"
       }
     },
+    "resources": []
+  },
+  "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQxNjc4ODQ3NDhENTIwREQKUldUZElOVklSNGhuUWM1NnlCMS9qNGtyQm56L3JHSnFwYy9ZRm9iMHpQYzdBeTBqYmU0ZXNsMHUK",
       "endpoints": [

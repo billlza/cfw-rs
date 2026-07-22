@@ -1,0 +1,57 @@
+{
+  "outbounds": [
+    {
+      "type": "vmess",
+      "tag": "vmess-ws",
+      "server": "vmess.example.com",
+      "server_port": 443,
+      "credential_ref": {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "kind": "vmess_uuid"
+      },
+      "security": "auto",
+      "tls": {
+        "enabled": true,
+        "server_name": "vmess.example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/transport",
+        "headers": {
+          "Host": "vmess.example.com"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "vless-reality",
+      "server": "vless.example.com",
+      "server_port": 443,
+      "credential_ref": {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "kind": "vless_uuid"
+      },
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+          "short_id": "0123456789abcdef"
+        }
+      }
+    }
+  ],
+  "route": {
+    "final": "vless-reality"
+  }
+}

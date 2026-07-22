@@ -5,80 +5,195 @@ on:
     branches: [main, master]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  MACOSX_DEPLOYMENT_TARGET: "15.0"
+
 jobs:
-  test:
-    name: cargo test (macOS arm64)
-    runs-on: macos-14
+  rust-and-ui:
+    name: Rust, UI, and script quality gates
+    runs-on: macos-26
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: "1.97.1"
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-      - name: Assert Apple Silicon
-        run: ./scripts/assert_apple_silicon.sh
-      # tauri.conf resources paths must exist; binaries are gitignored (.keep tracked).
-      - name: Ensure resource dirs
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24.18.0"
+          cache: npm
+          cache-dependency-path: apps/cfw-tauri-shell/package-lock.json
+      - name: Assert pinned Apple toolchain
         run: |
-          test -d apps/cfw-tauri-shell/resources/cores
-          test -d apps/cfw-tauri-shell/resources/helpers
-      - name: Test workspace
-        run: cargo test --workspace
+          ./scripts/assert_apple_silicon.sh
+          test "$(xcodebuild -version)" = $'Xcode 26.6\nBuild version 17F113'
+      - name: Verify build-script boundary
+        run: ./scripts/verify_build_boundaries.sh
+      - name: Verify 0.4.0 version contract
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_version_contract.py
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Verify locked Rust dependency graph
+        run: cargo metadata --locked --filter-platform aarch64-apple-darwin --format-version 1 >/dev/null
+      - name: Lint Rust workspace
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Test Rust workspace
+        run: cargo test --locked --workspace --all-targets
+      - name: Install UI dependencies
+        working-directory: apps/cfw-tauri-shell
+        run: npm ci
+      - name: Test UI
+        working-directory: apps/cfw-tauri-shell
+        run: npm test
+      - name: Build UI
+        working-directory: apps/cfw-tauri-shell
+        run: npm run build
+      - name: Audit UI dependencies
+        working-directory: apps/cfw-tauri-shell
+        run: npm audit --audit-level=high
+      - name: Test release tooling
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover \
+            -s scripts/tests \
+            -p 'test_*.py'
+          while IFS= read -r test_script; do
+            bash "$test_script"
+          done < <(find scripts/tests -type f -name '*_test.sh' | sort)
+      - name: Validate shell scripts
+        run: |
+          while IFS= read -r script; do
+            bash -n "$script"
+            zsh -n "$script"
+          done < <(find scripts -type f -name '*.sh' | sort)
+      - name: Lint shell scripts with pinned ShellCheck
+        run: |
+          source scripts/dependency_pins.env
+          archive="$RUNNER_TEMP/shellcheck-v$SHELLCHECK_VERSION.darwin.aarch64.tar.gz"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "https://github.com/koalaman/shellcheck/releases/download/v$SHELLCHECK_VERSION/shellcheck-v$SHELLCHECK_VERSION.darwin.aarch64.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$SHELLCHECK_DARWIN_ARM64_SHA256" "$archive" | shasum -a 256 --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/shellcheck-v$SHELLCHECK_VERSION/shellcheck" -x scripts/*.sh scripts/tests/*.sh
 
-  # Full tauri bundle needs secrets + signing; keep compile check light here.
-  check-shell:
-    name: check tauri shell
-    runs-on: macos-14
+  supply-chain:
+    name: macOS Rust supply-chain policy
+    runs-on: macos-26
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
-      - name: Assert Apple Silicon
-        run: ./scripts/assert_apple_silicon.sh
-      - name: Fetch pinned cores
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: Install pinned policy tools
         run: |
-          ./scripts/fetch_clash_rs.sh
-          ./scripts/fetch_core.sh
-      - name: Build helper resource
-        run: ./scripts/build_helper_resource.sh
-      - name: cargo check shell
-        run: cargo check -p cfw-tauri-shell
+          source scripts/dependency_pins.env
+          cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+          cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+      - name: Audit exact shipped Rust target graph
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/audit_rust_target.py
+      - name: Enforce dependency, source, and license policy
+        run: cargo deny --locked --target aarch64-apple-darwin check
 
-  clashrs-smoke:
-    name: clash-rs controller smoke (arm64)
-    runs-on: macos-14
+  native-and-package:
+    name: libbox, Network Extension, and app skeleton gates
+    runs-on: macos-26
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-      - name: Assert Apple Silicon
-        run: ./scripts/assert_apple_silicon.sh
-      - name: Fetch clash-rs + smoke
-        run: |
-          chmod +x scripts/fetch_clash_rs.sh scripts/clash_rs_smoke.sh scripts/assert_apple_silicon.sh scripts/fetch_core.sh scripts/kernel_compare.py
-          ./scripts/clash_rs_smoke.sh
-      - name: Measured kernel compare
-        run: |
-          ./scripts/fetch_core.sh
-          python3 scripts/kernel_compare.py
-          test -f apps/cfw-tauri-shell/resources/benchmarks/kernel-compare-latest.json
-
-  cfw-perf-gate:
-    name: cfw-perf-gate (arm64 record only)
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - name: Assert Apple Silicon
-        run: ./scripts/assert_apple_silicon.sh
-      - name: Record metrics (no 3x claim)
-        run: |
-          chmod +x scripts/cfw_perf_gate.sh scripts/assert_apple_silicon.sh
-          ./scripts/cfw_perf_gate.sh
-      - name: Upload probe artifact
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          name: cfw-perf-gate
-          path: target/perf-gate/
-          if-no-files-found: ignore
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: Assert pinned Apple toolchain
+        run: |
+          ./scripts/assert_apple_silicon.sh
+          test "$(xcodebuild -version)" = $'Xcode 26.6\nBuild version 17F113'
+          test "$(swift --version | sed -n '1p')" != ""
+      - name: Bootstrap verified release tools
+        run: ./scripts/bootstrap_release_toolchain.sh
+      - name: Verify generated Xcode project
+        run: ./scripts/verify_xcode_project.sh
+      - name: Materialize pinned libbox source
+        run: |
+          source scripts/dependency_pins.env
+          upstream="$RUNNER_TEMP/sing-box-upstream"
+          patched="$RUNNER_TEMP/sing-box-patched"
+          mkdir -p "$upstream"
+          git -C "$upstream" init
+          git -C "$upstream" remote add origin https://github.com/SagerNet/sing-box.git
+          git -C "$upstream" fetch --depth=1 origin "$SING_BOX_COMMIT"
+          git -C "$upstream" checkout --detach FETCH_HEAD
+          test "$(git -C "$upstream" rev-parse HEAD)" = "$SING_BOX_COMMIT"
+          SING_BOX_SOURCE="$upstream" \
+          LIBBOX_PATCHED_SOURCE_OUTPUT="$patched" \
+            ./scripts/materialize_libbox_source.sh
+          echo "SING_BOX_SOURCE=$patched" >>"$GITHUB_ENV"
+      - name: Prepare and verify Go module graph
+        run: |
+          SING_BOX_SOURCE="$SING_BOX_SOURCE" ./scripts/prepare_libbox_modules.sh
+          source scripts/dependency_pins.env
+          source scripts/go_release_environment.sh
+          toolchain_root="$PWD/target/toolchains"
+          go_bin="$toolchain_root/go-$GO_VERSION/bin/go"
+          export GOPATH="$toolchain_root/go-workspace"
+          export GOMODCACHE="$GOPATH/pkg/mod"
+          export GOCACHE="$toolchain_root/go-build-cache"
+          configure_offline_go_environment
+          (
+            cd "$SING_BOX_SOURCE"
+            "$go_bin" mod verify
+            "$go_bin" test -count=1 -race -ldflags=-checklinkname=0 \
+              -tags "$LIBBOX_BUILD_TAGS" ./dns ./option
+            "$go_bin" test -count=1 -ldflags=-checklinkname=0 \
+              -tags "$LIBBOX_BUILD_TAGS" \
+              ./dns ./option ./common/dialer ./daemon ./experimental/libbox
+            "$go_bin" test -run '^$' -ldflags=-checklinkname=0 \
+              -tags "$LIBBOX_BUILD_TAGS" ./common/dialer ./route
+            "$go_bin" vet -tags "$LIBBOX_BUILD_TAGS" \
+              ./dns ./option ./common/dialer ./daemon ./experimental/libbox
+          )
+      - name: Scan linked libbox graph
+        run: SING_BOX_SOURCE="$SING_BOX_SOURCE" ./scripts/scan_libbox_vulnerabilities.sh
+      - name: Build source-bound libbox
+        run: SING_BOX_SOURCE="$SING_BOX_SOURCE" ./scripts/build_libbox.sh
+      - name: Check Swift formatting
+        run: swift format lint --recursive --strict native/macos/Sources native/macos/SystemExtension native/macos/Tests
+      - name: Test Swift package
+        run: swift test --package-path native/macos
+      - name: Test Xcode targets
+        run: >-
+          xcodebuild test
+          -project native/macos/CFWNative.xcodeproj
+          -scheme CFWNativeTests
+          -destination 'platform=macOS,arch=arm64'
+          CODE_SIGNING_ALLOWED=NO
+      - name: Analyze Xcode targets
+        run: |
+          for scheme in CFWNativeTests CFWPacketTunnelExtension CFWProxyAgent CFWNativeBridge; do
+            xcodebuild analyze \
+              -project native/macos/CFWNative.xcodeproj \
+              -scheme "$scheme" \
+              -destination 'platform=macOS,arch=arm64' \
+              CODE_SIGNING_ALLOWED=NO
+          done
+      - name: Install UI dependencies with pinned Node
+        run: target/toolchains/node-24.18.0/bin/npm --prefix apps/cfw-tauri-shell ci
+      - name: Install pinned Tauri CLI
+        run: |
+          source scripts/dependency_pins.env
+          cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Build and verify unsigned application skeleton
+        run: ./scripts/build_unsigned_candidate.sh

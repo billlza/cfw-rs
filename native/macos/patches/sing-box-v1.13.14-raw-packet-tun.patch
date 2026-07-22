@@ -1,0 +1,781 @@
+diff --git a/daemon/started_service.go b/daemon/started_service.go
+index 3af0ea5a..4ff8e381 100644
+--- a/daemon/started_service.go
++++ b/daemon/started_service.go
+@@ -177,8 +177,12 @@ func (s *StartedService) StartOrReloadService(profileContent string, options *Ov
+ 	if oldInstance != nil {
+ 		s.updateStatus(ServiceStatus_STOPPING)
+ 		s.serviceAccess.Unlock()
+-		_ = oldInstance.Close()
++		closeErr := oldInstance.Close()
+ 		s.serviceAccess.Lock()
++		s.instance = nil
++		if closeErr != nil {
++			return s.updateStatusError(E.Cause(closeErr, "close previous service"))
++		}
+ 	}
+ 	s.updateStatus(ServiceStatus_STARTING)
+ 	s.resetLogs()
+@@ -200,6 +204,13 @@ func (s *StartedService) StartOrReloadService(profileContent string, options *Ov
+ 		return nil
+ 	}
+ 	if err != nil {
++		s.instance = nil
++		s.serviceAccess.Unlock()
++		closeErr := instance.Close()
++		s.serviceAccess.Lock()
++		if closeErr != nil {
++			err = E.Errors(err, E.Cause(closeErr, "close failed service"))
++		}
+ 		return s.updateStatusError(err)
+ 	}
+ 	s.startedAt = time.Now()
+@@ -217,10 +228,16 @@ func (s *StartedService) Close() {
+ 	s.connectionEventSubscriber.Close()
+ }
+ 
++func (s *StartedService) RuntimeStatus() (ServiceStatus_Type, string) {
++	s.serviceAccess.RLock()
++	defer s.serviceAccess.RUnlock()
++	return s.serviceStatus.Status, s.serviceStatus.ErrorMessage
++}
++
+ func (s *StartedService) CloseService() error {
+ 	s.serviceAccess.Lock()
+ 	switch s.serviceStatus.Status {
+-	case ServiceStatus_STARTING, ServiceStatus_STARTED:
++	case ServiceStatus_STARTING, ServiceStatus_STARTED, ServiceStatus_FATAL:
+ 	default:
+ 		s.serviceAccess.Unlock()
+ 		return os.ErrInvalid
+diff --git a/daemon/started_service_test.go b/daemon/started_service_test.go
+new file mode 100644
+index 00000000..7afdf7a9
+--- /dev/null
++++ b/daemon/started_service_test.go
+@@ -0,0 +1,31 @@
++package daemon
++
++import (
++	"context"
++	"errors"
++	"testing"
++)
++
++func TestStartedServiceRuntimeStatusAndFatalCleanup(t *testing.T) {
++	service := NewStartedService(ServiceOptions{Context: context.Background()})
++	defer service.Close()
++
++	status, message := service.RuntimeStatus()
++	if status != ServiceStatus_IDLE || message != "" {
++		t.Fatalf("unexpected initial status: %v %q", status, message)
++	}
++
++	service.SetError(errors.New("test failure"))
++	status, message = service.RuntimeStatus()
++	if status != ServiceStatus_FATAL || message != "test failure" {
++		t.Fatalf("unexpected fatal status: %v %q", status, message)
++	}
++
++	if err := service.CloseService(); err != nil {
++		t.Fatalf("clean fatal service: %v", err)
++	}
++	status, message = service.RuntimeStatus()
++	if status != ServiceStatus_IDLE || message != "" {
++		t.Fatalf("unexpected cleaned status: %v %q", status, message)
++	}
++}
+diff --git a/experimental/libbox/command_server.go b/experimental/libbox/command_server.go
+index 7eca1194..1ecf9a1f 100644
+--- a/experimental/libbox/command_server.go
++++ b/experimental/libbox/command_server.go
+@@ -169,6 +169,27 @@ type OverrideOptions struct {
+ 	ExcludePackage StringIterator
+ }
+ 
++const (
++	RuntimeStateIdle int32 = iota
++	RuntimeStateStarting
++	RuntimeStateStarted
++	RuntimeStateStopping
++	RuntimeStateFatal
++)
++
++type RuntimeStatus struct {
++	State        int32
++	ErrorMessage string
++}
++
++func (s *CommandServer) RuntimeStatus() *RuntimeStatus {
++	status, message := s.StartedService.RuntimeStatus()
++	return &RuntimeStatus{
++		State:        int32(status),
++		ErrorMessage: message,
++	}
++}
++
+ func (s *CommandServer) StartOrReloadService(configContent string, options *OverrideOptions) error {
+ 	return s.StartedService.StartOrReloadService(configContent, &daemon.OverrideOptions{
+ 		AutoRedirect:   options.AutoRedirect,
+diff --git a/experimental/libbox/command_types.go b/experimental/libbox/command_types.go
+index b811aaf4..85cc3f94 100644
+--- a/experimental/libbox/command_types.go
++++ b/experimental/libbox/command_types.go
+@@ -103,7 +103,11 @@ type Connections struct {
+ 	filterApplied bool
+ }
+ 
+-func NewConnections() *Connections {
++// CreateConnections intentionally avoids the gomobile "NewType" constructor
++// convention. That convention generates a nullable Objective-C -init which
++// conflicts with NSObject's nonnull initializer and makes every strict Swift
++// import emit a nullability warning.
++func CreateConnections() *Connections {
+ 	return &Connections{
+ 		connectionMap: make(map[string]*Connection),
+ 	}
+diff --git a/experimental/libbox/platform.go b/experimental/libbox/platform.go
+index b82121b7..3eb6e058 100644
+--- a/experimental/libbox/platform.go
++++ b/experimental/libbox/platform.go
+@@ -6,6 +6,10 @@ type PlatformInterface interface {
+ 	LocalDNSTransport() LocalDNSTransport
+ 	UsePlatformAutoDetectInterfaceControl() bool
+ 	AutoDetectInterfaceControl(fd int32) error
++	UseRawPacketTun() bool
++	// OpenRawPacketTun returns a connected AF_UNIX/SOCK_DGRAM descriptor.
++	// A successful return transfers descriptor ownership to libbox.
++	OpenRawPacketTun(options TunOptions) (int32, error)
+ 	OpenTun(options TunOptions) (int32, error)
+ 	UseProcFS() bool
+ 	FindConnectionOwner(ipProtocol int32, sourceAddress string, sourcePort int32, destinationAddress string, destinationPort int32) (*ConnectionOwner, error)
+diff --git a/experimental/libbox/raw_packet_tun.go b/experimental/libbox/raw_packet_tun.go
+new file mode 100644
+index 00000000..76e7e7e8
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun.go
+@@ -0,0 +1,14 @@
++package libbox
++
++import "errors"
++
++const rawPacketTunName = "cfw-packet-flow"
++
++var (
++	errRawPacketTunUnsupported          = errors.New("raw packet tun is unsupported on this platform")
++	errRawPacketTunInvalidDescriptor    = errors.New("raw packet tun descriptor is invalid")
++	errRawPacketTunInvalidConfiguration = errors.New("raw packet tun configuration is invalid")
++	errRawPacketTunConfigurationChanged = errors.New("raw packet tun configuration changed")
++	errRawPacketTunInvalidPacket        = errors.New("raw packet tun packet is invalid")
++	errRawPacketTunPacketTruncated      = errors.New("raw packet tun packet was truncated")
++)
+diff --git a/experimental/libbox/raw_packet_tun_darwin.go b/experimental/libbox/raw_packet_tun_darwin.go
+new file mode 100644
+index 00000000..cd899a61
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun_darwin.go
+@@ -0,0 +1,242 @@
++//go:build darwin
++
++package libbox
++
++import (
++	"encoding/binary"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"reflect"
++	"slices"
++	"sync"
++
++	tun "github.com/sagernet/sing-tun"
++	"golang.org/x/sys/unix"
++)
++
++const (
++	rawPacketTunMinimumMTU = 1280
++	rawPacketTunMaximumMTU = 1500
++	rawPacketTunHeaderSize = 4
++)
++
++type rawPacketTun struct {
++	connection    *net.UnixConn
++	mtu           int
++	configuration tun.Options
++	closeOnce     sync.Once
++	closeErr      error
++}
++
++var _ tun.Tun = (*rawPacketTun)(nil)
++
++// newRawPacketTun takes ownership of fd on every path. The descriptor must be
++// one end of a connected AF_UNIX/SOCK_DGRAM socketpair carrying exactly one
++// headerless IP packet per datagram.
++func newRawPacketTun(fd int32, options *tun.Options) (tun.Tun, error) {
++	if fd < 0 {
++		return nil, fmt.Errorf("%w: negative file descriptor", errRawPacketTunInvalidDescriptor)
++	}
++	closeFD := true
++	defer func() {
++		if closeFD {
++			_ = unix.Close(int(fd))
++		}
++	}()
++
++	socketType, err := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_TYPE)
++	if err != nil {
++		return nil, fmt.Errorf("%w: query socket type: %v", errRawPacketTunInvalidDescriptor, err)
++	}
++	if socketType != unix.SOCK_DGRAM {
++		return nil, fmt.Errorf("%w: expected SOCK_DGRAM", errRawPacketTunInvalidDescriptor)
++	}
++	if _, ok := mustSockaddrUnix(unix.Getsockname(int(fd))); !ok {
++		return nil, fmt.Errorf("%w: expected AF_UNIX socket", errRawPacketTunInvalidDescriptor)
++	}
++	if _, ok := mustSockaddrUnix(unix.Getpeername(int(fd))); !ok {
++		return nil, fmt.Errorf("%w: expected connected AF_UNIX socket", errRawPacketTunInvalidDescriptor)
++	}
++	if options == nil {
++		return nil, fmt.Errorf("%w: missing options", errRawPacketTunInvalidConfiguration)
++	}
++	if options.MTU < rawPacketTunMinimumMTU || options.MTU > rawPacketTunMaximumMTU {
++		return nil, fmt.Errorf("%w: MTU %d is outside %d...%d", errRawPacketTunInvalidConfiguration, options.MTU, rawPacketTunMinimumMTU, rawPacketTunMaximumMTU)
++	}
++	if options.AutoRoute {
++		return nil, fmt.Errorf("%w: auto_route must be disabled", errRawPacketTunInvalidConfiguration)
++	}
++	if options.GSO {
++		return nil, fmt.Errorf("%w: GSO is unsupported", errRawPacketTunInvalidConfiguration)
++	}
++
++	file := os.NewFile(uintptr(fd), rawPacketTunName)
++	if file == nil {
++		return nil, fmt.Errorf("%w: adopt file descriptor", errRawPacketTunInvalidDescriptor)
++	}
++	connection, err := net.FileConn(file)
++	fileCloseErr := file.Close()
++	closeFD = false
++	if err != nil {
++		if fileCloseErr != nil {
++			return nil, fmt.Errorf("%w: adopt datagram socket: %v; close transferred descriptor: %v", errRawPacketTunInvalidDescriptor, err, fileCloseErr)
++		}
++		return nil, fmt.Errorf("%w: adopt datagram socket: %v", errRawPacketTunInvalidDescriptor, err)
++	}
++	if fileCloseErr != nil {
++		_ = connection.Close()
++		return nil, fmt.Errorf("%w: close transferred descriptor: %v", errRawPacketTunInvalidDescriptor, fileCloseErr)
++	}
++	unixConnection, ok := connection.(*net.UnixConn)
++	if !ok {
++		_ = connection.Close()
++		return nil, fmt.Errorf("%w: descriptor did not produce UnixConn", errRawPacketTunInvalidDescriptor)
++	}
++
++	options.Name = rawPacketTunName
++	options.FileDescriptor = 0
++	options.EXP_ExternalConfiguration = true
++	options.EXP_MultiPendingPackets = false
++	options.EXP_SendMsgX = false
++	return &rawPacketTun{
++		connection:    unixConnection,
++		mtu:           int(options.MTU),
++		configuration: cloneRawPacketTunOptions(*options),
++	}, nil
++}
++
++func cloneRawPacketTunOptions(options tun.Options) tun.Options {
++	options.Inet4Address = slices.Clone(options.Inet4Address)
++	options.Inet6Address = slices.Clone(options.Inet6Address)
++	options.DNSServers = slices.Clone(options.DNSServers)
++	options.Inet4LoopbackAddress = slices.Clone(options.Inet4LoopbackAddress)
++	options.Inet6LoopbackAddress = slices.Clone(options.Inet6LoopbackAddress)
++	options.Inet4RouteAddress = slices.Clone(options.Inet4RouteAddress)
++	options.Inet6RouteAddress = slices.Clone(options.Inet6RouteAddress)
++	options.Inet4RouteExcludeAddress = slices.Clone(options.Inet4RouteExcludeAddress)
++	options.Inet6RouteExcludeAddress = slices.Clone(options.Inet6RouteExcludeAddress)
++	options.IncludeInterface = slices.Clone(options.IncludeInterface)
++	options.ExcludeInterface = slices.Clone(options.ExcludeInterface)
++	options.IncludeUID = slices.Clone(options.IncludeUID)
++	options.ExcludeUID = slices.Clone(options.ExcludeUID)
++	options.IncludeAndroidUser = slices.Clone(options.IncludeAndroidUser)
++	options.IncludePackage = slices.Clone(options.IncludePackage)
++	options.ExcludePackage = slices.Clone(options.ExcludePackage)
++	// Runtime collaborators do not describe the externally managed Network
++	// Extension settings and must not participate in configuration equality.
++	options.InterfaceFinder = nil
++	options.InterfaceMonitor = nil
++	options.Logger = nil
++	return options
++}
++
++func mustSockaddrUnix(address unix.Sockaddr, err error) (*unix.SockaddrUnix, bool) {
++	if err != nil {
++		return nil, false
++	}
++	unixAddress, ok := address.(*unix.SockaddrUnix)
++	return unixAddress, ok
++}
++
++func (t *rawPacketTun) Name() (string, error) {
++	return rawPacketTunName, nil
++}
++
++func (t *rawPacketTun) Start() error {
++	return nil
++}
++
++func (t *rawPacketTun) Close() error {
++	t.closeOnce.Do(func() {
++		t.closeErr = t.connection.Close()
++	})
++	return t.closeErr
++}
++
++func (t *rawPacketTun) Read(buffer []byte) (int, error) {
++	required := t.mtu + rawPacketTunHeaderSize
++	if len(buffer) < required {
++		return 0, fmt.Errorf("%w: read buffer is %d, need %d", errRawPacketTunInvalidConfiguration, len(buffer), required)
++	}
++	packetLength, _, flags, _, err := t.connection.ReadMsgUnix(buffer[rawPacketTunHeaderSize:required], nil)
++	if err != nil {
++		return 0, err
++	}
++	if flags&unix.MSG_TRUNC != 0 {
++		return 0, errRawPacketTunPacketTruncated
++	}
++	if packetLength == 0 {
++		return 0, io.ErrUnexpectedEOF
++	}
++	addressFamily, err := validateRawIPPacket(buffer[rawPacketTunHeaderSize : rawPacketTunHeaderSize+packetLength])
++	if err != nil {
++		return 0, err
++	}
++	binary.BigEndian.PutUint32(buffer[:rawPacketTunHeaderSize], uint32(addressFamily))
++	return rawPacketTunHeaderSize + packetLength, nil
++}
++
++func (t *rawPacketTun) Write(packetWithHeader []byte) (int, error) {
++	if len(packetWithHeader) < rawPacketTunHeaderSize {
++		return 0, fmt.Errorf("%w: missing Darwin address-family header", errRawPacketTunInvalidPacket)
++	}
++	packet := packetWithHeader[rawPacketTunHeaderSize:]
++	if len(packet) > t.mtu {
++		return 0, fmt.Errorf("%w: packet is %d bytes, MTU is %d", errRawPacketTunInvalidPacket, len(packet), t.mtu)
++	}
++	addressFamily, err := validateRawIPPacket(packet)
++	if err != nil {
++		return 0, err
++	}
++	providedFamily := binary.BigEndian.Uint32(packetWithHeader[:rawPacketTunHeaderSize])
++	if providedFamily != uint32(addressFamily) {
++		return 0, fmt.Errorf("%w: address family %d does not match IP version", errRawPacketTunInvalidPacket, providedFamily)
++	}
++	written, err := t.connection.Write(packet)
++	if err != nil {
++		return 0, err
++	}
++	if written != len(packet) {
++		return 0, io.ErrShortWrite
++	}
++	return len(packetWithHeader), nil
++}
++
++func (t *rawPacketTun) UpdateRouteOptions(options tun.Options) error {
++	if !reflect.DeepEqual(t.configuration, cloneRawPacketTunOptions(options)) {
++		return errRawPacketTunConfigurationChanged
++	}
++	return nil
++}
++
++func validateRawIPPacket(packet []byte) (int, error) {
++	if len(packet) == 0 {
++		return 0, fmt.Errorf("%w: empty packet", errRawPacketTunInvalidPacket)
++	}
++	switch packet[0] >> 4 {
++	case 4:
++		if len(packet) < 20 {
++			return 0, fmt.Errorf("%w: truncated IPv4 header", errRawPacketTunInvalidPacket)
++		}
++		headerLength := int(packet[0]&0x0f) * 4
++		if headerLength < 20 || headerLength > len(packet) {
++			return 0, fmt.Errorf("%w: invalid IPv4 header length", errRawPacketTunInvalidPacket)
++		}
++		if int(binary.BigEndian.Uint16(packet[2:4])) != len(packet) {
++			return 0, fmt.Errorf("%w: IPv4 total length mismatch", errRawPacketTunInvalidPacket)
++		}
++		return unix.AF_INET, nil
++	case 6:
++		if len(packet) < 40 {
++			return 0, fmt.Errorf("%w: truncated IPv6 header", errRawPacketTunInvalidPacket)
++		}
++		if 40+int(binary.BigEndian.Uint16(packet[4:6])) != len(packet) {
++			return 0, fmt.Errorf("%w: IPv6 payload length mismatch", errRawPacketTunInvalidPacket)
++		}
++		return unix.AF_INET6, nil
++	default:
++		return 0, fmt.Errorf("%w: unsupported IP version", errRawPacketTunInvalidPacket)
++	}
++}
+diff --git a/experimental/libbox/raw_packet_tun_darwin_test.go b/experimental/libbox/raw_packet_tun_darwin_test.go
+new file mode 100644
+index 00000000..cf0fa9a2
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun_darwin_test.go
+@@ -0,0 +1,271 @@
++//go:build darwin
++
++package libbox
++
++import (
++	"encoding/binary"
++	"errors"
++	"net/netip"
++	"slices"
++	"testing"
++	"time"
++
++	tun "github.com/sagernet/sing-tun"
++	"golang.org/x/sys/unix"
++)
++
++func TestRawPacketTunReadAddsDarwinAddressFamilyHeader(t *testing.T) {
++	tests := []struct {
++		name          string
++		packet        []byte
++		addressFamily int
++	}{
++		{"IPv4", testIPv4Packet(32), unix.AF_INET},
++		{"IPv6", testIPv6Packet(48), unix.AF_INET6},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			rawTun, peer, _ := newTestRawPacketTun(t, rawPacketTunMinimumMTU)
++			if err := unix.Send(peer, test.packet, 0); err != nil {
++				t.Fatal(err)
++			}
++			buffer := make([]byte, rawPacketTunMinimumMTU+rawPacketTunHeaderSize)
++			n, err := rawTun.Read(buffer)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if n != len(test.packet)+rawPacketTunHeaderSize {
++				t.Fatalf("unexpected framed packet length: %d", n)
++			}
++			if family := int(binary.BigEndian.Uint32(buffer[:rawPacketTunHeaderSize])); family != test.addressFamily {
++				t.Fatalf("unexpected address family: %d", family)
++			}
++			if !slices.Equal(buffer[rawPacketTunHeaderSize:n], test.packet) {
++				t.Fatal("raw packet payload changed")
++			}
++		})
++	}
++}
++
++func TestRawPacketTunWriteRemovesAndValidatesDarwinHeader(t *testing.T) {
++	rawTun, peer, _ := newTestRawPacketTun(t, rawPacketTunMinimumMTU)
++	packet := testIPv6Packet(64)
++	framed := frameTestPacket(packet, unix.AF_INET6)
++	written, err := rawTun.Write(framed)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if written != len(framed) {
++		t.Fatalf("unexpected write length: %d", written)
++	}
++	received := make([]byte, rawPacketTunMinimumMTU)
++	n, err := unix.Read(peer, received)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !slices.Equal(received[:n], packet) {
++		t.Fatal("Darwin header leaked into raw packet datagram")
++	}
++
++	if _, err = rawTun.Write(frameTestPacket(testIPv4Packet(32), unix.AF_INET6)); !errors.Is(err, errRawPacketTunInvalidPacket) {
++		t.Fatalf("expected address-family validation error, got %v", err)
++	}
++	malformedHeader := append([]byte{1, 0, 0, unix.AF_INET}, testIPv4Packet(32)...)
++	if _, err = rawTun.Write(malformedHeader); !errors.Is(err, errRawPacketTunInvalidPacket) {
++		t.Fatalf("expected malformed address-family header error, got %v", err)
++	}
++}
++
++func TestRawPacketTunAcceptsExactMaximumMTUDatagramAndRejectsMaximumPlusOne(t *testing.T) {
++	rawTun, peer, _ := newTestRawPacketTun(t, rawPacketTunMaximumMTU)
++	packet := testIPv4Packet(rawPacketTunMaximumMTU)
++	if err := unix.Send(peer, packet, 0); err != nil {
++		t.Fatalf("send exact maximum datagram: %v", err)
++	}
++	buffer := make([]byte, rawPacketTunMaximumMTU+rawPacketTunHeaderSize)
++	n, err := rawTun.Read(buffer)
++	if err != nil {
++		t.Fatalf("read exact maximum datagram: %v", err)
++	}
++	if n != rawPacketTunMaximumMTU+rawPacketTunHeaderSize {
++		t.Fatalf("unexpected exact maximum framed length: %d", n)
++	}
++
++	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Close(pair[0])
++	_, err = newRawPacketTun(
++		int32(pair[1]),
++		testRawPacketTunOptions(rawPacketTunMaximumMTU+1),
++	)
++	if !errors.Is(err, errRawPacketTunInvalidConfiguration) {
++		t.Fatalf("expected maximum plus one MTU rejection, got %v", err)
++	}
++	if err := unix.Close(pair[1]); !errors.Is(err, unix.EBADF) {
++		t.Fatalf("rejected maximum plus one descriptor was not closed: %v", err)
++	}
++}
++
++func TestRawPacketTunRejectsTruncationOversizeAndMalformedPackets(t *testing.T) {
++	rawTun, peer, _ := newTestRawPacketTun(t, rawPacketTunMinimumMTU)
++	oversize := testIPv4Packet(rawPacketTunMinimumMTU + 1)
++	if err := unix.Send(peer, oversize, 0); err != nil {
++		t.Fatal(err)
++	}
++	buffer := make([]byte, rawPacketTunMinimumMTU+rawPacketTunHeaderSize)
++	if _, err := rawTun.Read(buffer); !errors.Is(err, errRawPacketTunPacketTruncated) {
++		t.Fatalf("expected truncation error, got %v", err)
++	}
++
++	if _, err := rawTun.Write(frameTestPacket(oversize, unix.AF_INET)); !errors.Is(err, errRawPacketTunInvalidPacket) {
++		t.Fatalf("expected outbound MTU error, got %v", err)
++	}
++	if err := unix.Send(peer, []byte{0x70, 0, 0, 0}, 0); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := rawTun.Read(buffer); !errors.Is(err, errRawPacketTunInvalidPacket) {
++		t.Fatalf("expected IP validation error, got %v", err)
++	}
++	if _, err := rawTun.Read(make([]byte, rawPacketTunMinimumMTU)); !errors.Is(err, errRawPacketTunInvalidConfiguration) {
++		t.Fatalf("expected bounded read-buffer error, got %v", err)
++	}
++}
++
++func TestRawPacketTunCloseUnblocksReadAndIsIdempotent(t *testing.T) {
++	rawTun, _, _ := newTestRawPacketTun(t, rawPacketTunMinimumMTU)
++	readStarted := make(chan struct{})
++	readFinished := make(chan error, 1)
++	go func() {
++		close(readStarted)
++		_, err := rawTun.Read(make([]byte, rawPacketTunMinimumMTU+rawPacketTunHeaderSize))
++		readFinished <- err
++	}()
++	<-readStarted
++	if err := rawTun.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := rawTun.Close(); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case err := <-readFinished:
++		if err == nil {
++			t.Fatal("blocked read returned success after close")
++		}
++	case <-time.After(time.Second):
++		t.Fatal("close did not unblock packet read")
++	}
++}
++
++func TestRawPacketTunOwnsDescriptorAndUsesExternalConfiguration(t *testing.T) {
++	rawTun, peer, options := newTestRawPacketTun(t, rawPacketTunMinimumMTU)
++	name, err := rawTun.Name()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if name != rawPacketTunName || options.Name != rawPacketTunName {
++		t.Fatalf("unexpected logical name: %q / %q", name, options.Name)
++	}
++	if !options.EXP_ExternalConfiguration || options.EXP_MultiPendingPackets || options.EXP_SendMsgX {
++		t.Fatal("raw transport did not enforce external configuration")
++	}
++
++	unchanged := *options
++	unchanged.Inet4Address = slices.Clone(options.Inet4Address)
++	unchanged.Inet6Address = slices.Clone(options.Inet6Address)
++	if err := rawTun.UpdateRouteOptions(unchanged); err != nil {
++		t.Fatalf("unchanged options were rejected: %v", err)
++	}
++	changedMTU := unchanged
++	changedMTU.MTU++
++	if err := rawTun.UpdateRouteOptions(changedMTU); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected MTU change rejection, got %v", err)
++	}
++	changedAddress := unchanged
++	changedAddress.Inet4Address = []netip.Prefix{netip.MustParsePrefix("198.18.64.5/30")}
++	if err := rawTun.UpdateRouteOptions(changedAddress); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected address change rejection, got %v", err)
++	}
++	changedRoute := unchanged
++	changedRoute.Inet4RouteAddress = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}
++	if err := rawTun.UpdateRouteOptions(changedRoute); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected route change rejection, got %v", err)
++	}
++	changedDNS := unchanged
++	changedDNS.DNSServers = []netip.Addr{netip.MustParseAddr("2001:2:0:65::2")}
++	if err := rawTun.UpdateRouteOptions(changedDNS); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected DNS change rejection, got %v", err)
++	}
++	changedInterface := unchanged
++	changedInterface.IncludeInterface = []string{"en0"}
++	if err := rawTun.UpdateRouteOptions(changedInterface); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected interface change rejection, got %v", err)
++	}
++	changedExternalConfiguration := unchanged
++	changedExternalConfiguration.EXP_ExternalConfiguration = false
++	if err := rawTun.UpdateRouteOptions(changedExternalConfiguration); !errors.Is(err, errRawPacketTunConfigurationChanged) {
++		t.Fatalf("expected external configuration change rejection, got %v", err)
++	}
++
++	packet := testIPv4Packet(32)
++	if err := unix.Send(peer, packet, 0); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := rawTun.Read(make([]byte, rawPacketTunMinimumMTU+rawPacketTunHeaderSize)); err != nil {
++		t.Fatalf("adopted connection is not usable: %v", err)
++	}
++}
++
++func TestRawPacketTunRejectsAndClosesInvalidDescriptors(t *testing.T) {
++	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Close(pair[0])
++	options := testRawPacketTunOptions(rawPacketTunMinimumMTU)
++	if _, err := newRawPacketTun(int32(pair[1]), options); !errors.Is(err, errRawPacketTunInvalidDescriptor) {
++		t.Fatalf("expected descriptor validation error, got %v", err)
++	}
++	if err := unix.Close(pair[1]); !errors.Is(err, unix.EBADF) {
++		t.Fatalf("failed constructor retained descriptor ownership: %v", err)
++	}
++
++	datagram, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := newRawPacketTun(int32(datagram), testRawPacketTunOptions(rawPacketTunMinimumMTU)); !errors.Is(err, errRawPacketTunInvalidDescriptor) {
++		t.Fatalf("expected connected-socket validation error, got %v", err)
++	}
++	if err := unix.Close(datagram); !errors.Is(err, unix.EBADF) {
++		t.Fatalf("unconnected descriptor was not closed: %v", err)
++	}
++}
++
++func newTestRawPacketTun(t *testing.T, mtu int) (*rawPacketTun, int, *tun.Options) {
++	t.Helper()
++	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	options := testRawPacketTunOptions(mtu)
++	created, err := newRawPacketTun(int32(pair[1]), options)
++	if err != nil {
++		unix.Close(pair[0])
++		t.Fatal(err)
++	}
++	if err := unix.Close(pair[1]); !errors.Is(err, unix.EBADF) {
++		created.Close()
++		unix.Close(pair[0])
++		t.Fatalf("transferred descriptor was not closed: %v", err)
++	}
++	rawTun := created.(*rawPacketTun)
++	t.Cleanup(func() {
++		_ = rawTun.Close()
++		_ = unix.Close(pair[0])
++	})
++	return rawTun, pair[0], options
++}
++
++func testRawPacketTunOptions(mtu int) *tun.Options {
++	return &tun.Options{
++		MTU:          uint32(mtu),
++		Inet4Address: []netip.Prefix{netip.MustParsePrefix("198.18.64.1/30")},
++		Inet6Address: []netip.Prefix{netip.MustParsePrefix("2001:2:0:64::1/126")},
++	}
++}
++
++func frameTestPacket(packet []byte, addressFamily int) []byte {
++	framed := make([]byte, rawPacketTunHeaderSize+len(packet))
++	binary.BigEndian.PutUint32(framed[:rawPacketTunHeaderSize], uint32(addressFamily))
++	copy(framed[rawPacketTunHeaderSize:], packet)
++	return framed
++}
++
++func testIPv4Packet(length int) []byte {
++	packet := make([]byte, length)
++	packet[0] = 0x45
++	binary.BigEndian.PutUint16(packet[2:4], uint16(length))
++	packet[8] = 64
++	packet[9] = unix.IPPROTO_UDP
++	return packet
++}
++
++func testIPv6Packet(length int) []byte {
++	packet := make([]byte, length)
++	packet[0] = 0x60
++	binary.BigEndian.PutUint16(packet[4:6], uint16(length-40))
++	packet[6] = unix.IPPROTO_UDP
++	packet[7] = 64
++	return packet
++}
+diff --git a/experimental/libbox/raw_packet_tun_other.go b/experimental/libbox/raw_packet_tun_other.go
+new file mode 100644
+index 00000000..7acd788c
+--- /dev/null
++++ b/experimental/libbox/raw_packet_tun_other.go
+@@ -0,0 +1,19 @@
++//go:build !darwin
++
++package libbox
++
++import (
++	"fmt"
++	"os"
++
++	tun "github.com/sagernet/sing-tun"
++)
++
++func newRawPacketTun(fd int32, _ *tun.Options) (tun.Tun, error) {
++	if fd >= 0 {
++		if file := os.NewFile(uintptr(fd), rawPacketTunName); file != nil {
++			_ = file.Close()
++		}
++	}
++	return nil, fmt.Errorf("%w", errRawPacketTunUnsupported)
++}
+diff --git a/experimental/libbox/service.go b/experimental/libbox/service.go
+index 37fd56c9..2b08aec4 100644
+--- a/experimental/libbox/service.go
++++ b/experimental/libbox/service.go
+@@ -64,7 +64,22 @@ func (w *platformInterfaceWrapper) OpenInterface(options *tun.Options, platformO
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	tunFd, err := w.iif.OpenTun(&tunOptions{options, routeRanges, platformOptions})
++	platformTunOptions := &tunOptions{options, routeRanges, platformOptions}
++	if w.iif.UseRawPacketTun() {
++		tunFd, err := w.iif.OpenRawPacketTun(platformTunOptions)
++		if err != nil {
++			return nil, err
++		}
++		rawTun, err := newRawPacketTun(tunFd, options)
++		if err != nil {
++			return nil, E.Cause(err, "create raw packet tun")
++		}
++		options.InterfaceMonitor.RegisterMyInterface(options.Name)
++		w.myTunName = options.Name
++		w.myTunAddress = myTunAddress(options)
++		return rawTun, nil
++	}
++	tunFd, err := w.iif.OpenTun(platformTunOptions)
+ 	if err != nil {
+ 		return nil, err
+ 	}

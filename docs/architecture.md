@@ -1,107 +1,159 @@
-# Architecture Baseline
+# macOS 15+ architecture
 
-## Goal
+## Product boundary
 
-Rebuild the final Apple Silicon macOS flavor of Clash for Windows with:
+The product supports Apple Silicon and macOS 15 or newer. It has two mutually
+exclusive network modes:
 
-- equivalent UI structure
-- equivalent feature surface
-- better internal boundaries
-- no Intel macOS support
+- System Proxy: a signed, non-root user ProxyAgent owns one libbox mixed
+  inbound and applies SystemConfiguration preferences transactionally.
+- Tunnel: a Packet Tunnel System Extension owns one libbox instance and uses
+  public Network Extension packet-flow methods.
 
-## Reverse-Engineered Baseline
+Every Proxy-to-Tunnel or Tunnel-to-Proxy change passes through Off. The old root
+helper and external Clash-compatible core are retired and never act as a
+fallback.
 
-The `0.20.39` macOS ARM64 app package establishes the product shape:
+## Dependency direction
 
-- Electron shell with tray and frameless dashboard window
-- renderer-driven configuration UI
-- local Clash core controlled over `127.0.0.1`
-- auth via controller `secret`
-- bundled macOS binaries:
-  - `clash-rs` (Watfaq; **default** Rust core)
-  - `clash-darwin` (pinned mihomo; automatic fallback)
-  - `sysproxy` (historical CFW; our path uses SCPreferences)
-  - `clash-core-service` (historical CFW; our path uses SMAppService `cfw-helper`)
-- settings persisted to `cfw-settings.yaml`
-- privileged operations delegated to helper/service logic
-- **platform lock:** `aarch64-apple-darwin` only — never Intel / Universal Binary
-- **UI:** Tauri 2 + WebKit — React is not a product migration target
-- **TUN:** SMAppService helper is production; Network Extension / App Sandbox are not
+```text
+Tauri commands/UI
+  -> cfw-application
+     -> cfw-engine-api
+     -> cfw-singbox-config
+     -> cfw-apple-network
+        -> narrow signed Swift Host Bridge
+           -> NETunnelProviderManager / authenticated ProxyAgent XPC
+```
 
-## Required 1:1 Feature Buckets
+`cfw-singbox-config` has no Apple dependency. `cfw-engine-api` owns stable
+product and wire types. `cfw-application` owns serialized use cases and state
+transitions. `cfw-apple-network` adapts native failures into domain errors.
+Swift owns Apple framework integration but not a second product state machine.
 
-These should be treated as compatibility scope, not optional polish:
+## Engine state
 
-1. Dashboard navigation structure
-2. Tray menu structure and mode toggles
-3. Profile import/update lifecycle
-4. Proxy group selection and persistence
-5. Mixed port / external controller / secret flow
-6. System proxy enable/disable
-7. TUN mode lifecycle
-8. Connections and logs views
-9. `clash://` protocol handling
-10. Auto-launch and window restore behavior
+The state set is:
 
-## Deliberate Departures
+```text
+Off
+ProxyStarting -> ProxyActive -> ProxyStopping -> Off
+TunnelInstalling -> AwaitingApproval -> TunnelStarting
+  -> TunnelActive -> TunnelStopping -> Off
+Failed
+```
 
-These are intentional improvements, not regressions:
+One bounded coordinator actor processes commands. Caller cancellation does not
+cancel a transition already accepted by the actor. Backend errors are typed and
+observable; a failed start becomes Failed and never tries another engine.
 
-1. Apple Silicon only
-   - target `aarch64-apple-darwin`
-   - do not carry Intel code paths, Rosetta assumptions, or dual-arch packaging
-2. Stronger process boundaries
-   - UI shell must not directly own privileged behavior
-   - helper operations should be expressed as explicit commands/contracts
-3. Cleaner platform abstraction
-   - macOS-specific service and proxy code should not leak across the domain
-4. Safer configuration and state model
-   - typed settings/state instead of renderer-spread implicit behavior
+The actual Agent or System Extension process must hold one globally arbitrated
+engine lease for the full libbox lifetime. A user App Group file cannot provide
+that arbitration for a system extension: the system extension runs as root and
+resolves the same App Group identifier into a different container. The current
+prototype therefore blocks Tunnel startup until a signed, identity-checked XPC
+state transport and global lease service replace that false-sharing design.
+Intent and observed-state journals remain single-writer, versioned, and
+protected by installation ID, configuration epoch, generation, length, and
+SHA-256 digest.
 
-## Recommended Technical Direction
+## Configuration and credentials
 
-### Shell
+One `ValidatedSingBoxProfile` plus `EngineSettings` deterministically produces
+separate Proxy and Tunnel projections. Business configuration is not copied
+into two independent models.
 
-Use a Rust-first desktop shell, with Tauri 2 as the most practical path to
-pixel-accurate reconstruction of the existing information architecture on macOS.
+The validator accepts a deliberately closed local JSON schema: one to 128
+uniquely tagged `direct`, `block`, Shadowsocks, VMess, VLESS/Reality, Trojan,
+or Hysteria2 outbounds and, optionally, `route.final` naming a declared tag.
+Protocol fields, TLS, transports, endpoint syntax, limits, and credential kind
+are typed and unknown fields fail closed. User-managed DNS/services,
+subscriptions and remote resources, scripts, executable paths, and raw secret
+values remain forbidden. This is not full sing-box compatibility.
 
-Reason:
+Profile files store only canonical `credential_ref` objects. Deterministic
+projection removes those references from libbox JSON, leaves an empty string
+at each exact secret target, and emits a separate closed credential-slot list.
+The configuration identity covers the secret-free template and slot
+references, never secret-derived bytes. References are immutable: provisioning
+an existing UUID is allowed only for the same kind and byte-identical secret;
+rotation creates a new UUID and updates the profile. The UI queries presence
+and submits only the missing subset, while the native transaction also receives
+the profile's full reference set and rejects every missing, extra, duplicate,
+kind-mismatched, or conflicting entry atomically. Owned secret buffers are
+zeroized at the renderer-command and native bridge boundaries. Installed-
+signature and entitlement proof remain release gates; no empty placeholder may
+reach a running libbox instance.
 
-- The original product is visually web-shaped
-- Recreating the same layout and interaction model is lower risk in a WebKit
-  shell than in a pure native widget tree
-- Tauri on macOS uses the system `WKWebView`, which aligns well with an
-  Apple-Silicon-only strategy
+Deleting a profile or rotating a UUID does not leave permanent Keychain
+orphans. Garbage collection is an explicit two-phase operation. Its preview is
+bound to a canonical digest of every selected and staged profile, a sorted live
+reference set, and the vault revision. Commit requires the replacement engine
+to be exactly Off, holds both the application maintenance lease and the
+repository's cross-process lock, re-reads the same snapshot, and performs one
+Keychain compare-and-swap. Shared references stay live; expiry, concurrent
+provisioning, repository mutation, corruption, or confirmation drift deletes
+nothing.
 
-### Core
+The user App Group stores only bounded, versioned, non-sensitive ProxyAgent
+configuration and journal data. It is not a host-to-system-extension transport.
+The Packet Tunnel system extension must receive configuration through its
+authenticated global XPC boundary and keep provider-owned non-secret replay
+state in a root/global-context store. User credentials remain in the dedicated
+Host/ProxyAgent Keychain access group. A Tunnel secret is read by the
+authenticated Host, transferred through XPC only in memory, and injected by
+the global authority immediately before libbox start. The System Extension
+does not claim direct access to the user's Data Protection Keychain, and secret
+bytes never enter App Group or journal storage.
 
-Model the application around explicit services:
+Engine DNS has two non-interchangeable roles in both modes. Bounded numeric UDP
+bootstrap transports dial directly and are referenced only by domain-named
+proxy server outbounds. All ordinary engine queries use certificate-verified
+DoH transports whose `detour` is the selected profile outbound, and route-level
+destination resolution uses the same authenticated role. Tunnel additionally
+hijacks packet-flow port 53 into this path. No resolution cycle exists: each
+DoH endpoint is numeric, while a domain-named selected outbound explicitly
+resolves only its own endpoint through the bootstrap pair. The pinned source
+patch represents both resolver roles as strict primary/fallback pairs and
+permits one bounded fallback after a rejected response or transport error. It
+never falls back after cancellation and never attempts either server more than
+once. Building that exact patch into libbox and proving both paths by physical
+packet capture remain release gates; unpatched sing-box 1.13 does not provide
+these semantics.
 
-- `CoreManager`
-- `ProfileManager`
-- `ProxyStateStore`
-- `SettingsStore`
-- `ControllerClient`
-- `PlatformService`
+Engine generation lineage is a canonical, bounded document in the host app's
+own Data Protection Keychain access group. Its revision label is the SHA-256 of
+the document and Keychain updates compare against the prior label, preserving
+compare-and-swap semantics across processes. The Application Support copy is
+only a repairable cache and serialization aid: deletion, rollback, or tampering
+cannot select an older installation identity, epoch, or generation.
 
-### Privileged Operations
+Native requests accept only fixed relative slots. Absolute paths, executable
+paths, scripts, arbitrary environment variables, and user-selected commands
+are not part of the contract.
 
-Treat helper install and TUN/proxy mutations as a separate subsystem:
+## Native security boundary
 
-- UI requests action
-- shell validates state and emits a typed command
-- platform layer executes via helper boundary
-- helper returns typed result/error
+The ProxyAgent validates the connecting user and exact signed code identity,
+including Team ID and allowed bundle identifier, before exporting a typed and
+bounded XPC interface. The System Extension is sandboxed and uses exact App
+Group and Network Extension entitlements, but treats its App Group container as
+root-owned provider-local state. Its global XPC listener must authenticate the
+Team ID, bundle identity, audit token, active console user, and multi-user lease
+ownership before accepting configuration or mode requests.
 
-Do not hide privilege boundaries inside ad-hoc shell commands.
+The Packet Tunnel adapter uses bounded nonblocking socketpairs and public
+`NEPacketTunnelFlow` reads/writes. It validates packet/protocol count,
+packet lengths, batches, cancellation, close, and backpressure. Accessing
+private packet-flow file descriptors through KVC is forbidden.
 
-## First Delivery Slices
+## Activation truth
 
-1. Read/write settings and restore dashboard state
-2. Launch bundled Clash core and speak controller API
-3. Rebuild tray/menu and mode switching
-4. Rebuild profiles and proxies screens
-5. Rebuild system proxy flow
-6. Rebuild helper + launchd flow
-7. Rebuild TUN mode flow
+System Proxy is active only after the mixed listener is ready and the intended
+SystemConfiguration values have been applied. Stop restores only fields that
+still equal this product's applied values, so user or administrator changes are
+not overwritten.
 
+Tunnel is active only when `NEVPNStatus.connected`, the provider reports ready,
+and its generation and configuration digest match current intent. Interface
+existence or a saved preference alone is never treated as success.

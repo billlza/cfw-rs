@@ -2,11 +2,26 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Hardened-runtime entitlements for Developer ID + notarization.
-         Outbound network / localhost controller only — no JIT, no unsigned memory. -->
-    <key>com.apple.security.network.client</key>
+    <!-- Host entitlements for the Developer ID System Extension distribution
+         path. Signing and provisioning must authorize every entitlement. -->
+    <key>com.apple.developer.system-extension.install</key>
     <true/>
-    <key>com.apple.security.network.server</key>
-    <true/>
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider-systemextension</string>
+    </array>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <!-- Tauri signs this plist directly, outside Xcode build-setting
+             expansion, so the Developer ID Team ID must be concrete. -->
+        <string>YKUPL7Z869.group.com.bill.clashformac</string>
+    </array>
+    <!-- Host-only Data Protection Keychain boundary for canonical engine
+         generation lineage. It is not shared with either provider. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>YKUPL7Z869.com.bill.clashformac</string>
+        <string>YKUPL7Z869.com.bill.clashformac.credentials</string>
+    </array>
 </dict>
 </plist>

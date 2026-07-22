@@ -1,10 +1,22 @@
 {
   "name": "cfw-tauri-shell-ui",
   "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
+  },
   "scripts": {
-    "build": "esbuild ui/src/main.js --bundle --minify --target=safari16 --outfile=ui/main.js"
+    "build": "node ../../scripts/build_ui.mjs",
+    "test": "node --test ui/tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
+    "esbuild": "0.28.1"
   }
 }

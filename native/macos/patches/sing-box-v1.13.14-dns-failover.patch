@@ -1,0 +1,1189 @@
+diff --git a/adapter/dns.go b/adapter/dns.go
+index 23fbc9de..fbb417eb 100644
+--- a/adapter/dns.go
++++ b/adapter/dns.go
+@@ -31,12 +31,13 @@ type DNSClient interface {
+ }
+ 
+ type DNSQueryOptions struct {
+-	Transport      DNSTransport
+-	Strategy       C.DomainStrategy
+-	LookupStrategy C.DomainStrategy
+-	DisableCache   bool
+-	RewriteTTL     *uint32
+-	ClientSubnet   netip.Prefix
++	Transport         DNSTransport
++	FallbackTransport DNSTransport
++	Strategy          C.DomainStrategy
++	LookupStrategy    C.DomainStrategy
++	DisableCache      bool
++	RewriteTTL        *uint32
++	ClientSubnet      netip.Prefix
+ }
+ 
+ func DNSQueryOptionsFrom(ctx context.Context, options *option.DomainResolveOptions) (*DNSQueryOptions, error) {
+@@ -48,12 +49,20 @@ func DNSQueryOptionsFrom(ctx context.Context, options *option.DomainResolveOptio
+ 	if !loaded {
+ 		return nil, E.New("domain resolver not found: " + options.Server)
+ 	}
++	var fallbackTransport DNSTransport
++	if options.FallbackServer != "" {
++		fallbackTransport, loaded = transportManager.Transport(options.FallbackServer)
++		if !loaded {
++			return nil, E.New("domain resolver fallback not found: " + options.FallbackServer)
++		}
++	}
+ 	return &DNSQueryOptions{
+-		Transport:    transport,
+-		Strategy:     C.DomainStrategy(options.Strategy),
+-		DisableCache: options.DisableCache,
+-		RewriteTTL:   options.RewriteTTL,
+-		ClientSubnet: options.ClientSubnet.Build(netip.Prefix{}),
++		Transport:         transport,
++		FallbackTransport: fallbackTransport,
++		Strategy:          C.DomainStrategy(options.Strategy),
++		DisableCache:      options.DisableCache,
++		RewriteTTL:        options.RewriteTTL,
++		ClientSubnet:      options.ClientSubnet.Build(netip.Prefix{}),
+ 	}, nil
+ }
+ 
+diff --git a/adapter/network.go b/adapter/network.go
+index 14fe46c8..da679fe0 100644
+--- a/adapter/network.go
++++ b/adapter/network.go
+@@ -35,14 +35,15 @@ type NetworkManager interface {
+ }
+ 
+ type NetworkOptions struct {
+-	BindInterface        string
+-	RoutingMark          uint32
+-	DomainResolver       string
+-	DomainResolveOptions DNSQueryOptions
+-	NetworkStrategy      *C.NetworkStrategy
+-	NetworkType          []C.InterfaceType
+-	FallbackNetworkType  []C.InterfaceType
+-	FallbackDelay        time.Duration
++	BindInterface          string
++	RoutingMark            uint32
++	DomainResolver         string
++	DomainResolverFallback string
++	DomainResolveOptions   DNSQueryOptions
++	NetworkStrategy        *C.NetworkStrategy
++	NetworkType            []C.InterfaceType
++	FallbackNetworkType    []C.InterfaceType
++	FallbackDelay          time.Duration
+ }
+ 
+ type InterfaceUpdateListener interface {
+diff --git a/common/dialer/dialer.go b/common/dialer/dialer.go
+index 2ba559f9..3c0677cf 100644
+--- a/common/dialer/dialer.go
++++ b/common/dialer/dialer.go
+@@ -63,17 +63,27 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+ 		}
+ 		var (
+ 			server               string
++			fallbackServer       string
+ 			dnsQueryOptions      adapter.DNSQueryOptions
+ 			resolveFallbackDelay time.Duration
+ 		)
+ 		if dialOptions.DomainResolver != nil && dialOptions.DomainResolver.Server != "" {
+-			var transport adapter.DNSTransport
++			var (
++				transport         adapter.DNSTransport
++				fallbackTransport adapter.DNSTransport
++			)
+ 			if !options.DirectResolver {
+ 				var loaded bool
+ 				transport, loaded = dnsTransport.Transport(dialOptions.DomainResolver.Server)
+ 				if !loaded {
+ 					return nil, E.New("domain resolver not found: " + dialOptions.DomainResolver.Server)
+ 				}
++				if dialOptions.DomainResolver.FallbackServer != "" {
++					fallbackTransport, loaded = dnsTransport.Transport(dialOptions.DomainResolver.FallbackServer)
++					if !loaded {
++						return nil, E.New("domain resolver fallback not found: " + dialOptions.DomainResolver.FallbackServer)
++					}
++				}
+ 			}
+ 			var strategy C.DomainStrategy
+ 			if dialOptions.DomainResolver.Strategy != option.DomainStrategy(C.DomainStrategyAsIS) {
+@@ -86,12 +96,14 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+ 				deprecated.Report(options.Context, deprecated.OptionLegacyDomainStrategyOptions)
+ 			}
+ 			server = dialOptions.DomainResolver.Server
++			fallbackServer = dialOptions.DomainResolver.FallbackServer
+ 			dnsQueryOptions = adapter.DNSQueryOptions{
+-				Transport:    transport,
+-				Strategy:     strategy,
+-				DisableCache: dialOptions.DomainResolver.DisableCache,
+-				RewriteTTL:   dialOptions.DomainResolver.RewriteTTL,
+-				ClientSubnet: dialOptions.DomainResolver.ClientSubnet.Build(netip.Prefix{}),
++				Transport:         transport,
++				FallbackTransport: fallbackTransport,
++				Strategy:          strategy,
++				DisableCache:      dialOptions.DomainResolver.DisableCache,
++				RewriteTTL:        dialOptions.DomainResolver.RewriteTTL,
++				ClientSubnet:      dialOptions.DomainResolver.ClientSubnet.Build(netip.Prefix{}),
+ 			}
+ 			resolveFallbackDelay = time.Duration(dialOptions.FallbackDelay)
+ 		} else if options.DirectResolver {
+@@ -104,6 +116,13 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+ 					return nil, E.New("default domain resolver not found: " + defaultOptions.DomainResolver)
+ 				}
+ 				dnsQueryOptions.Transport = transport
++				if defaultOptions.DomainResolverFallback != "" {
++					fallbackTransport, loaded := dnsTransport.Transport(defaultOptions.DomainResolverFallback)
++					if !loaded {
++						return nil, E.New("default domain resolver fallback not found: " + defaultOptions.DomainResolverFallback)
++					}
++					dnsQueryOptions.FallbackTransport = fallbackTransport
++				}
+ 				resolveFallbackDelay = time.Duration(dialOptions.FallbackDelay)
+ 			} else {
+ 				transports := dnsTransport.Transports()
+@@ -128,6 +147,7 @@ func NewWithOptions(options Options) (N.Dialer, error) {
+ 			dialer,
+ 			dialOptions.Detour == "" && !dialOptions.TCPFastOpen,
+ 			server,
++			fallbackServer,
+ 			dnsQueryOptions,
+ 			resolveFallbackDelay,
+ 		)
+diff --git a/common/dialer/resolve.go b/common/dialer/resolve.go
+index 21fe38d5..9c13cbd5 100644
+--- a/common/dialer/resolve.go
++++ b/common/dialer/resolve.go
+@@ -32,40 +32,43 @@ type ParallelInterfaceResolveDialer interface {
+ }
+ 
+ type resolveDialer struct {
+-	transport     adapter.DNSTransportManager
+-	router        adapter.DNSRouter
+-	dialer        N.Dialer
+-	parallel      bool
+-	server        string
+-	initOnce      sync.Once
+-	initErr       error
+-	queryOptions  adapter.DNSQueryOptions
+-	fallbackDelay time.Duration
++	transport      adapter.DNSTransportManager
++	router         adapter.DNSRouter
++	dialer         N.Dialer
++	parallel       bool
++	server         string
++	fallbackServer string
++	initOnce       sync.Once
++	initErr        error
++	queryOptions   adapter.DNSQueryOptions
++	fallbackDelay  time.Duration
+ }
+ 
+-func NewResolveDialer(ctx context.Context, dialer N.Dialer, parallel bool, server string, queryOptions adapter.DNSQueryOptions, fallbackDelay time.Duration) ResolveDialer {
++func NewResolveDialer(ctx context.Context, dialer N.Dialer, parallel bool, server string, fallbackServer string, queryOptions adapter.DNSQueryOptions, fallbackDelay time.Duration) ResolveDialer {
+ 	if parallelDialer, isParallel := dialer.(ParallelInterfaceDialer); isParallel {
+ 		return &resolveParallelNetworkDialer{
+ 			resolveDialer{
+-				transport:     service.FromContext[adapter.DNSTransportManager](ctx),
+-				router:        service.FromContext[adapter.DNSRouter](ctx),
+-				dialer:        dialer,
+-				parallel:      parallel,
+-				server:        server,
+-				queryOptions:  queryOptions,
+-				fallbackDelay: fallbackDelay,
++				transport:      service.FromContext[adapter.DNSTransportManager](ctx),
++				router:         service.FromContext[adapter.DNSRouter](ctx),
++				dialer:         dialer,
++				parallel:       parallel,
++				server:         server,
++				fallbackServer: fallbackServer,
++				queryOptions:   queryOptions,
++				fallbackDelay:  fallbackDelay,
+ 			},
+ 			parallelDialer,
+ 		}
+ 	}
+ 	return &resolveDialer{
+-		transport:     service.FromContext[adapter.DNSTransportManager](ctx),
+-		router:        service.FromContext[adapter.DNSRouter](ctx),
+-		dialer:        dialer,
+-		parallel:      parallel,
+-		server:        server,
+-		queryOptions:  queryOptions,
+-		fallbackDelay: fallbackDelay,
++		transport:      service.FromContext[adapter.DNSTransportManager](ctx),
++		router:         service.FromContext[adapter.DNSRouter](ctx),
++		dialer:         dialer,
++		parallel:       parallel,
++		server:         server,
++		fallbackServer: fallbackServer,
++		queryOptions:   queryOptions,
++		fallbackDelay:  fallbackDelay,
+ 	}
+ }
+ 
+@@ -89,6 +92,15 @@ func (d *resolveDialer) initServer() {
+ 		return
+ 	}
+ 	d.queryOptions.Transport = transport
++	if d.fallbackServer == "" {
++		return
++	}
++	fallbackTransport, loaded := d.transport.Transport(d.fallbackServer)
++	if !loaded {
++		d.initErr = E.New("domain resolver fallback not found: " + d.fallbackServer)
++		return
++	}
++	d.queryOptions.FallbackTransport = fallbackTransport
+ }
+ 
+ func (d *resolveDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+diff --git a/dns/router.go b/dns/router.go
+index 4f18959b..1e205157 100644
+--- a/dns/router.go
++++ b/dns/router.go
+@@ -207,6 +207,8 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int,
+ 	return transport, nil, -1
+ }
+ 
++const maxDNSAttempts = 2
++
+ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions) (*mDNS.Msg, error) {
+ 	if len(message.Question) != 1 {
+ 		r.logger.WarnContext(ctx, "bad question size: ", len(message.Question))
+@@ -222,9 +224,11 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+ 	}
+ 	r.logger.DebugContext(ctx, "exchange ", FormatQuestion(message.Question[0].String()))
+ 	var (
+-		response  *mDNS.Msg
+-		transport adapter.DNSTransport
+-		err       error
++		response      *mDNS.Msg
++		transport     adapter.DNSTransport
++		attemptErrors [maxDNSAttempts]error
++		attemptCount  int
++		err           error
+ 	)
+ 	var metadata *adapter.InboundContext
+ 	ctx, metadata = adapter.ExtendContext(ctx)
+@@ -251,6 +255,24 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+ 			options.Strategy = r.defaultDomainStrategy
+ 		}
+ 		response, err = r.client.Exchange(ctx, transport, message, options, nil)
++		if shouldUseExplicitDNSFallback(ctx, options.FallbackTransport, err) {
++			primaryError := dnsAttemptError(transport, err)
++			transport = options.FallbackTransport
++			options.Transport = transport
++			options.FallbackTransport = nil
++			if legacyTransport, isLegacy := transport.(adapter.LegacyDNSTransport); isLegacy {
++				if options.Strategy == C.DomainStrategyAsIS {
++					options.Strategy = legacyTransport.LegacyStrategy()
++				}
++				if !options.ClientSubnet.IsValid() {
++					options.ClientSubnet = legacyTransport.LegacyClientSubnet()
++				}
++			}
++			response, err = r.client.Exchange(ctx, transport, message, options, nil)
++			if err != nil {
++				err = E.Errors(primaryError, dnsAttemptError(transport, err))
++			}
++		}
+ 	} else {
+ 		var (
+ 			rule      adapter.DNSRule
+@@ -286,13 +308,11 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+ 				dnsOptions.Strategy = r.defaultDomainStrategy
+ 			}
+ 			response, err = r.client.Exchange(dnsCtx, transport, message, dnsOptions, responseCheck)
+-			var rejected bool
++			attemptCount++
+ 			if err != nil {
+ 				if errors.Is(err, ErrResponseRejectedCached) {
+-					rejected = true
+ 					r.logger.DebugContext(ctx, E.Cause(err, "response rejected for ", FormatQuestion(message.Question[0].String())), " (cached)")
+ 				} else if errors.Is(err, ErrResponseRejected) {
+-					rejected = true
+ 					r.logger.DebugContext(ctx, E.Cause(err, "response rejected for ", FormatQuestion(message.Question[0].String())))
+ 				} else if len(message.Question) > 0 {
+ 					r.logger.ErrorContext(ctx, E.Cause(err, "exchange failed for ", FormatQuestion(message.Question[0].String())))
+@@ -300,13 +320,18 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+ 					r.logger.ErrorContext(ctx, E.Cause(err, "exchange failed for <empty query>"))
+ 				}
+ 			}
+-			if responseCheck != nil && rejected {
++			if shouldContinueDNSRule(ctx, responseCheck != nil, err, attemptCount) {
++				attemptErrors[attemptCount-1] = dnsAttemptError(transport, err)
+ 				continue
+ 			}
+ 			break
+ 		}
+ 	}
+ 	if err != nil {
++		if attemptCount > 1 {
++			attemptErrors[attemptCount-1] = dnsAttemptError(transport, err)
++			err = E.Errors(attemptErrors[:attemptCount]...)
++		}
+ 		return nil, err
+ 	}
+ 	if r.dnsReverseMapping != nil && len(message.Question) > 0 && response != nil && len(response.Answer) > 0 {
+@@ -327,6 +352,9 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) ([]netip.Addr, error) {
+ 	var (
+ 		responseAddrs []netip.Addr
++		transport     adapter.DNSTransport
++		attemptErrors [maxDNSAttempts]error
++		attemptCount  int
+ 		err           error
+ 	)
+ 	printResult := func() {
+@@ -351,7 +379,7 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+ 	metadata.Destination = M.Socksaddr{}
+ 	metadata.Domain = FqdnToDomain(domain)
+ 	if options.Transport != nil {
+-		transport := options.Transport
++		transport = options.Transport
+ 		if legacyTransport, isLegacy := transport.(adapter.LegacyDNSTransport); isLegacy {
+ 			if options.Strategy == C.DomainStrategyAsIS {
+ 				options.Strategy = legacyTransport.LegacyStrategy()
+@@ -364,9 +392,26 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+ 			options.Strategy = r.defaultDomainStrategy
+ 		}
+ 		responseAddrs, err = r.client.Lookup(ctx, transport, domain, options, nil)
++		if shouldUseExplicitDNSFallback(ctx, options.FallbackTransport, err) {
++			primaryError := dnsAttemptError(transport, err)
++			transport = options.FallbackTransport
++			options.Transport = transport
++			options.FallbackTransport = nil
++			if legacyTransport, isLegacy := transport.(adapter.LegacyDNSTransport); isLegacy {
++				if options.Strategy == C.DomainStrategyAsIS {
++					options.Strategy = legacyTransport.LegacyStrategy()
++				}
++				if !options.ClientSubnet.IsValid() {
++					options.ClientSubnet = legacyTransport.LegacyClientSubnet()
++				}
++			}
++			responseAddrs, err = r.client.Lookup(ctx, transport, domain, options, nil)
++			if err != nil {
++				err = E.Errors(primaryError, dnsAttemptError(transport, err))
++			}
++		}
+ 	} else {
+ 		var (
+-			transport adapter.DNSTransport
+ 			rule      adapter.DNSRule
+ 			ruleIndex int
+ 		)
+@@ -402,12 +447,18 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
+ 				dnsOptions.Strategy = r.defaultDomainStrategy
+ 			}
+ 			responseAddrs, err = r.client.Lookup(dnsCtx, transport, domain, dnsOptions, responseCheck)
+-			if responseCheck == nil || err == nil {
++			attemptCount++
++			if !shouldContinueDNSRule(ctx, responseCheck != nil, err, attemptCount) {
+ 				break
+ 			}
++			attemptErrors[attemptCount-1] = dnsAttemptError(transport, err)
+ 			printResult()
+ 		}
+ 	}
++	if err != nil && attemptCount > 1 {
++		attemptErrors[attemptCount-1] = dnsAttemptError(transport, err)
++		err = E.Errors(attemptErrors[:attemptCount]...)
++	}
+ response:
+ 	printResult()
+ 	if len(responseAddrs) > 0 {
+@@ -416,6 +467,21 @@ response:
+ 	return responseAddrs, err
+ }
+ 
++func shouldContinueDNSRule(ctx context.Context, hasResponseCheck bool, err error, attemptCount int) bool {
++	return hasResponseCheck && err != nil && attemptCount < maxDNSAttempts && ctx.Err() == nil
++}
++
++func shouldUseExplicitDNSFallback(ctx context.Context, fallback adapter.DNSTransport, err error) bool {
++	return fallback != nil && err != nil && ctx.Err() == nil
++}
++
++func dnsAttemptError(transport adapter.DNSTransport, err error) error {
++	if transport == nil {
++		return E.Cause(err, "DNS transport unavailable")
++	}
++	return E.Cause(err, "DNS server ", transport.Tag())
++}
++
+ func isAddressQuery(message *mDNS.Msg) bool {
+ 	for _, question := range message.Question {
+ 		if question.Qtype == mDNS.TypeA || question.Qtype == mDNS.TypeAAAA || question.Qtype == mDNS.TypeHTTPS {
+diff --git a/dns/router_retry_test.go b/dns/router_retry_test.go
+new file mode 100644
+index 00000000..5c09f075
+--- /dev/null
++++ b/dns/router_retry_test.go
+@@ -0,0 +1,618 @@
++package dns
++
++import (
++	"context"
++	"errors"
++	"net/netip"
++	"slices"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	R "github.com/sagernet/sing-box/route/rule"
++	"github.com/sagernet/sing/common/logger"
++
++	mDNS "github.com/miekg/dns"
++)
++
++func TestExchangeDNSRuleFallback(t *testing.T) {
++	t.Run("transport error reaches secondary", func(t *testing.T) {
++		primaryError := errors.New("primary unavailable")
++		client := newFallbackDNSClient()
++		client.exchangeErrors["primary"] = primaryError
++		router := newFallbackRouter(client)
++
++		response, err := router.Exchange(context.Background(), testDNSQuestion(mDNS.TypeA), adapter.DNSQueryOptions{})
++		if err != nil {
++			t.Fatalf("exchange failed: %v", err)
++		}
++		if response == nil || client.exchangeCalls["primary"] != 1 || client.exchangeCalls["secondary"] != 1 {
++			t.Fatalf("unexpected fallback calls: %#v", client.exchangeCalls)
++		}
++	})
++
++	t.Run("accepted response does not reach secondary", func(t *testing.T) {
++		client := newFallbackDNSClient()
++		router := newFallbackRouter(client)
++
++		_, err := router.Exchange(context.Background(), testDNSQuestion(mDNS.TypeA), adapter.DNSQueryOptions{})
++		if err != nil {
++			t.Fatalf("exchange failed: %v", err)
++		}
++		if client.exchangeCalls["primary"] != 1 || client.exchangeCalls["secondary"] != 0 {
++			t.Fatalf("unexpected success calls: %#v", client.exchangeCalls)
++		}
++	})
++
++	t.Run("rejected response reaches secondary", func(t *testing.T) {
++		client := newFallbackDNSClient()
++		client.exchangeErrors["primary"] = ErrResponseRejected
++		router := newFallbackRouter(client)
++
++		_, err := router.Exchange(context.Background(), testDNSQuestion(mDNS.TypeA), adapter.DNSQueryOptions{})
++		if err != nil {
++			t.Fatalf("exchange failed: %v", err)
++		}
++		if client.exchangeCalls["primary"] != 1 || client.exchangeCalls["secondary"] != 1 {
++			t.Fatalf("unexpected rejection calls: %#v", client.exchangeCalls)
++		}
++	})
++
++	t.Run("caller cancellation stops fallback", func(t *testing.T) {
++		primaryError := errors.New("primary unavailable")
++		client := newFallbackDNSClient()
++		client.exchangeErrors["primary"] = primaryError
++		router := newFallbackRouter(client)
++		ctx, cancel := context.WithCancel(context.Background())
++		cancel()
++
++		_, err := router.Exchange(ctx, testDNSQuestion(mDNS.TypeA), adapter.DNSQueryOptions{})
++		if !errors.Is(err, primaryError) {
++			t.Fatalf("expected primary error, got %v", err)
++		}
++		if client.exchangeCalls["secondary"] != 0 {
++			t.Fatalf("cancelled exchange reached secondary: %#v", client.exchangeCalls)
++		}
++	})
++
++	t.Run("expired deadline stops fallback", func(t *testing.T) {
++		primaryError := errors.New("primary unavailable")
++		client := newFallbackDNSClient()
++		client.exchangeErrors["primary"] = primaryError
++		router := newFallbackRouter(client)
++		ctx, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
++		defer cancel()
++
++		_, err := router.Exchange(ctx, testDNSQuestion(mDNS.TypeA), adapter.DNSQueryOptions{})
++		if !errors.Is(err, primaryError) || client.exchangeCalls["secondary"] != 0 {
++			t.Fatalf("expired exchange unexpectedly fell back: err=%v calls=%#v", err, client.exchangeCalls)
++		}
++	})
++
++	t.Run("two failures are bounded and retained", func(t *testing.T) {
++		primaryError := errors.New("primary unavailable")
++		secondaryError := errors.New("secondary unavailable")
++		client := newFallbackDNSClient()
++		client.exchangeErrors["primary"] = primaryError
++		client.exchangeErrors["secondary"] = secondaryError
++		router := newFallbackRouter(client)
++
++		_, err := router.Exchange(context.Background(), testDNSQuestion(mDNS.TypeA), adapter.DNSQueryOptions{})
++		if !errors.Is(err, primaryError) || !errors.Is(err, secondaryError) {
++			t.Fatalf("expected both attempt errors, got %v", err)
++		}
++		if client.exchangeCalls["primary"] != 1 || client.exchangeCalls["secondary"] != 1 {
++			t.Fatalf("fallback was not bounded: %#v", client.exchangeCalls)
++		}
++	})
++
++	t.Run("non address query uses authenticated final directly", func(t *testing.T) {
++		client := newFallbackDNSClient()
++		router := newFallbackRouter(client)
++
++		_, err := router.Exchange(context.Background(), testDNSQuestion(mDNS.TypeTXT), adapter.DNSQueryOptions{})
++		if err != nil {
++			t.Fatalf("exchange failed: %v", err)
++		}
++		if client.exchangeCalls["primary"] != 0 || client.exchangeCalls["secondary"] != 1 {
++			t.Fatalf("non-address query used the wrong server: %#v", client.exchangeCalls)
++		}
++	})
++}
++
++func TestLookupDNSRuleFallback(t *testing.T) {
++	t.Run("transport error reaches secondary", func(t *testing.T) {
++		primaryError := errors.New("primary unavailable")
++		client := newFallbackDNSClient()
++		client.lookupErrors["primary"] = primaryError
++		router := newFallbackRouter(client)
++
++		addresses, err := router.Lookup(context.Background(), "example.test", adapter.DNSQueryOptions{})
++		if err != nil {
++			t.Fatalf("lookup failed: %v", err)
++		}
++		if len(addresses) != 1 || addresses[0] != netip.MustParseAddr("192.0.2.1") {
++			t.Fatalf("unexpected addresses: %v", addresses)
++		}
++		if client.lookupCalls["primary"] != 1 || client.lookupCalls["secondary"] != 1 {
++			t.Fatalf("unexpected fallback calls: %#v", client.lookupCalls)
++		}
++	})
++
++	t.Run("accepted result does not reach secondary", func(t *testing.T) {
++		client := newFallbackDNSClient()
++		router := newFallbackRouter(client)
++
++		_, err := router.Lookup(context.Background(), "example.test", adapter.DNSQueryOptions{})
++		if err != nil {
++			t.Fatalf("lookup failed: %v", err)
++		}
++		if client.lookupCalls["primary"] != 1 || client.lookupCalls["secondary"] != 0 {
++			t.Fatalf("unexpected success calls: %#v", client.lookupCalls)
++		}
++	})
++
++	t.Run("rejected result reaches secondary", func(t *testing.T) {
++		client := newFallbackDNSClient()
++		client.lookupErrors["primary"] = ErrResponseRejected
++		router := newFallbackRouter(client)
++
++		_, err := router.Lookup(context.Background(), "example.test", adapter.DNSQueryOptions{})
++		if err != nil {
++			t.Fatalf("lookup failed: %v", err)
++		}
++		if client.lookupCalls["primary"] != 1 || client.lookupCalls["secondary"] != 1 {
++			t.Fatalf("unexpected rejection calls: %#v", client.lookupCalls)
++		}
++	})
++
++	t.Run("caller cancellation stops fallback", func(t *testing.T) {
++		primaryError := errors.New("primary unavailable")
++		client := newFallbackDNSClient()
++		client.lookupErrors["primary"] = primaryError
++		router := newFallbackRouter(client)
++		ctx, cancel := context.WithCancel(context.Background())
++		cancel()
++
++		_, err := router.Lookup(ctx, "example.test", adapter.DNSQueryOptions{})
++		if !errors.Is(err, primaryError) {
++			t.Fatalf("expected primary error, got %v", err)
++		}
++		if client.lookupCalls["secondary"] != 0 {
++			t.Fatalf("cancelled lookup reached secondary: %#v", client.lookupCalls)
++		}
++	})
++
++	t.Run("expired deadline stops fallback", func(t *testing.T) {
++		primaryError := errors.New("primary unavailable")
++		client := newFallbackDNSClient()
++		client.lookupErrors["primary"] = primaryError
++		router := newFallbackRouter(client)
++		ctx, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
++		defer cancel()
++
++		_, err := router.Lookup(ctx, "example.test", adapter.DNSQueryOptions{})
++		if !errors.Is(err, primaryError) || client.lookupCalls["secondary"] != 0 {
++			t.Fatalf("expired lookup unexpectedly fell back: err=%v calls=%#v", err, client.lookupCalls)
++		}
++	})
++
++	t.Run("two failures are bounded and retained", func(t *testing.T) {
++		primaryError := errors.New("primary unavailable")
++		secondaryError := errors.New("secondary unavailable")
++		client := newFallbackDNSClient()
++		client.lookupErrors["primary"] = primaryError
++		client.lookupErrors["secondary"] = secondaryError
++		router := newFallbackRouter(client)
++
++		_, err := router.Lookup(context.Background(), "example.test", adapter.DNSQueryOptions{})
++		if !errors.Is(err, primaryError) || !errors.Is(err, secondaryError) {
++			t.Fatalf("expected both attempt errors, got %v", err)
++		}
++		if client.lookupCalls["primary"] != 1 || client.lookupCalls["secondary"] != 1 {
++			t.Fatalf("fallback was not bounded: %#v", client.lookupCalls)
++		}
++	})
++}
++
++func TestExplicitDNSFallbackIsBounded(t *testing.T) {
++	primaryError := errors.New("primary unavailable")
++	secondaryError := errors.New("secondary unavailable")
++
++	t.Run("exchange uses secondary and retains both failures", func(t *testing.T) {
++		client := newFallbackDNSClient()
++		client.exchangeErrors["primary"] = primaryError
++		router, primary, secondary := newExplicitFallbackRouter(client)
++		options := adapter.DNSQueryOptions{
++			Transport:         primary,
++			FallbackTransport: secondary,
++		}
++
++		_, err := router.Exchange(context.Background(), testDNSQuestion(mDNS.TypeA), options)
++		if err != nil {
++			t.Fatalf("explicit fallback failed: %v", err)
++		}
++		if client.exchangeCalls["primary"] != 1 || client.exchangeCalls["secondary"] != 1 {
++			t.Fatalf("explicit fallback was not bounded: %#v", client.exchangeCalls)
++		}
++
++		client = newFallbackDNSClient()
++		client.exchangeErrors["primary"] = primaryError
++		client.exchangeErrors["secondary"] = secondaryError
++		router, primary, secondary = newExplicitFallbackRouter(client)
++		options.Transport = primary
++		options.FallbackTransport = secondary
++		_, err = router.Exchange(context.Background(), testDNSQuestion(mDNS.TypeA), options)
++		if !errors.Is(err, primaryError) || !errors.Is(err, secondaryError) {
++			t.Fatalf("expected both explicit attempt errors, got %v", err)
++		}
++
++		client = newFallbackDNSClient()
++		client.exchangeErrors["primary"] = primaryError
++		router, primary, secondary = newExplicitFallbackRouter(client)
++		options.Transport = primary
++		options.FallbackTransport = secondary
++		ctx, cancel := context.WithCancel(context.Background())
++		cancel()
++		_, err = router.Exchange(ctx, testDNSQuestion(mDNS.TypeA), options)
++		if !errors.Is(err, primaryError) || client.exchangeCalls["secondary"] != 0 {
++			t.Fatalf("cancelled explicit exchange unexpectedly fell back: err=%v calls=%#v", err, client.exchangeCalls)
++		}
++
++		client = newFallbackDNSClient()
++		client.exchangeErrors["primary"] = primaryError
++		router, primary, secondary = newExplicitFallbackRouter(client)
++		options.Transport = primary
++		options.FallbackTransport = secondary
++		ctx, cancel = context.WithCancel(context.Background())
++		client.exchangeHooks["primary"] = cancel
++		_, err = router.Exchange(ctx, testDNSQuestion(mDNS.TypeA), options)
++		if !errors.Is(err, primaryError) || client.exchangeCalls["secondary"] != 0 {
++			t.Fatalf("exchange cancelled by the primary attempt unexpectedly fell back: err=%v calls=%#v", err, client.exchangeCalls)
++		}
++
++		client = newFallbackDNSClient()
++		client.exchangeErrors["primary"] = primaryError
++		router, primary, secondary = newExplicitFallbackRouter(client)
++		options.Transport = primary
++		options.FallbackTransport = secondary
++		ctx, cancel = context.WithDeadline(context.Background(), time.Unix(0, 0))
++		defer cancel()
++		_, err = router.Exchange(ctx, testDNSQuestion(mDNS.TypeA), options)
++		if !errors.Is(err, primaryError) || client.exchangeCalls["secondary"] != 0 {
++			t.Fatalf("expired explicit exchange unexpectedly fell back: err=%v calls=%#v", err, client.exchangeCalls)
++		}
++	})
++
++	t.Run("lookup uses secondary and cancellation stops fallback", func(t *testing.T) {
++		client := newFallbackDNSClient()
++		client.lookupErrors["primary"] = primaryError
++		router, primary, secondary := newExplicitFallbackRouter(client)
++		options := adapter.DNSQueryOptions{
++			Transport:         primary,
++			FallbackTransport: secondary,
++		}
++
++		_, err := router.Lookup(context.Background(), "example.test", options)
++		if err != nil {
++			t.Fatalf("explicit lookup fallback failed: %v", err)
++		}
++		if client.lookupCalls["primary"] != 1 || client.lookupCalls["secondary"] != 1 {
++			t.Fatalf("explicit lookup fallback was not bounded: %#v", client.lookupCalls)
++		}
++
++		client = newFallbackDNSClient()
++		client.lookupErrors["primary"] = primaryError
++		router, primary, secondary = newExplicitFallbackRouter(client)
++		options.Transport = primary
++		options.FallbackTransport = secondary
++		ctx, cancel := context.WithCancel(context.Background())
++		cancel()
++		_, err = router.Lookup(ctx, "example.test", options)
++		if !errors.Is(err, primaryError) || client.lookupCalls["secondary"] != 0 {
++			t.Fatalf("cancelled lookup unexpectedly fell back: err=%v calls=%#v", err, client.lookupCalls)
++		}
++
++		client = newFallbackDNSClient()
++		client.lookupErrors["primary"] = primaryError
++		router, primary, secondary = newExplicitFallbackRouter(client)
++		options.Transport = primary
++		options.FallbackTransport = secondary
++		ctx, cancel = context.WithCancel(context.Background())
++		client.lookupHooks["primary"] = cancel
++		_, err = router.Lookup(ctx, "example.test", options)
++		if !errors.Is(err, primaryError) || client.lookupCalls["secondary"] != 0 {
++			t.Fatalf("lookup cancelled by the primary attempt unexpectedly fell back: err=%v calls=%#v", err, client.lookupCalls)
++		}
++
++		client = newFallbackDNSClient()
++		client.lookupErrors["primary"] = primaryError
++		router, primary, secondary = newExplicitFallbackRouter(client)
++		options.Transport = primary
++		options.FallbackTransport = secondary
++		ctx, cancel = context.WithDeadline(context.Background(), time.Unix(0, 0))
++		defer cancel()
++		_, err = router.Lookup(ctx, "example.test", options)
++		if !errors.Is(err, primaryError) || client.lookupCalls["secondary"] != 0 {
++			t.Fatalf("expired explicit lookup unexpectedly fell back: err=%v calls=%#v", err, client.lookupCalls)
++		}
++	})
++}
++
++func TestDNSRuleFallbackHasAGlobalTwoAttemptBudget(t *testing.T) {
++	primaryError := errors.New("primary unavailable")
++	secondaryError := errors.New("secondary unavailable")
++	thirdError := errors.New("third server unavailable")
++
++	t.Run("exchange", func(t *testing.T) {
++		client := newFallbackDNSClient()
++		client.exchangeErrorSequences["primary"] = []error{primaryError, secondaryError, thirdError}
++		router := newFallbackRouter(client)
++		router.rules = []adapter.DNSRule{new(fallbackDNSRule), new(fallbackDNSRule), new(fallbackDNSRule)}
++
++		_, err := router.Exchange(context.Background(), testDNSQuestion(mDNS.TypeA), adapter.DNSQueryOptions{})
++		if !errors.Is(err, primaryError) || !errors.Is(err, secondaryError) || errors.Is(err, thirdError) {
++			t.Fatalf("expected exactly the first two retained errors, got %v", err)
++		}
++		if client.exchangeCalls["primary"] != maxDNSAttempts || client.exchangeCalls["secondary"] != 0 {
++			t.Fatalf("three eligible rules exceeded the global budget: %#v", client.exchangeCalls)
++		}
++	})
++
++	t.Run("lookup", func(t *testing.T) {
++		client := newFallbackDNSClient()
++		client.lookupErrorSequences["primary"] = []error{primaryError, secondaryError, thirdError}
++		router := newFallbackRouter(client)
++		router.rules = []adapter.DNSRule{new(fallbackDNSRule), new(fallbackDNSRule), new(fallbackDNSRule)}
++
++		_, err := router.Lookup(context.Background(), "example.test", adapter.DNSQueryOptions{})
++		if !errors.Is(err, primaryError) || !errors.Is(err, secondaryError) || errors.Is(err, thirdError) {
++			t.Fatalf("expected exactly the first two retained errors, got %v", err)
++		}
++		if client.lookupCalls["primary"] != maxDNSAttempts || client.lookupCalls["secondary"] != 0 {
++			t.Fatalf("three eligible rules exceeded the global budget: %#v", client.lookupCalls)
++		}
++	})
++}
++
++func TestDNSFallbackDependenciesAreOrderedAndValidated(t *testing.T) {
++	domainResolver := &option.DomainResolveOptions{Server: "primary", FallbackServer: "secondary"}
++	transportAdapter := NewTransportAdapterWithRemoteOptions("https", "dependent", option.RemoteDNSServerOptions{
++		RawLocalDNSServerOptions: option.RawLocalDNSServerOptions{
++			DialerOptions: option.DialerOptions{DomainResolver: domainResolver},
++		},
++	})
++	if !slices.Equal(transportAdapter.Dependencies(), []string{"primary", "secondary"}) {
++		t.Fatalf("fallback resolver was omitted from dependencies: %v", transportAdapter.Dependencies())
++	}
++
++	t.Run("dependencies start first", func(t *testing.T) {
++		var startOrder []string
++		primary := &fallbackDNSTransport{tag: "primary", startOrder: &startOrder}
++		secondary := &fallbackDNSTransport{tag: "secondary", startOrder: &startOrder}
++		dependent := &fallbackDNSTransport{
++			tag:          "dependent",
++			dependencies: []string{"primary", "secondary"},
++			startOrder:   &startOrder,
++		}
++		manager := NewTransportManager(logger.NOP(), nil, nil, "")
++		manager.transportByTag = map[string]adapter.DNSTransport{
++			"primary": primary, "secondary": secondary, "dependent": dependent,
++		}
++		if err := manager.startTransports([]adapter.DNSTransport{dependent, secondary, primary}); err != nil {
++			t.Fatalf("start transports: %v", err)
++		}
++		dependentIndex := slices.Index(startOrder, "dependent")
++		if dependentIndex < 0 || slices.Index(startOrder, "primary") >= dependentIndex || slices.Index(startOrder, "secondary") >= dependentIndex {
++			t.Fatalf("dependent started before both resolvers: %v", startOrder)
++		}
++	})
++
++	t.Run("missing dependency fails", func(t *testing.T) {
++		dependent := &fallbackDNSTransport{tag: "dependent", dependencies: []string{"missing"}}
++		manager := NewTransportManager(logger.NOP(), nil, nil, "")
++		manager.transportByTag["dependent"] = dependent
++		err := manager.startTransports([]adapter.DNSTransport{dependent})
++		if err == nil || !strings.Contains(err.Error(), "dependency[missing] not found") {
++			t.Fatalf("missing fallback dependency was not rejected: %v", err)
++		}
++	})
++
++	t.Run("dependency cycle fails", func(t *testing.T) {
++		primary := &fallbackDNSTransport{tag: "primary", dependencies: []string{"secondary"}}
++		secondary := &fallbackDNSTransport{tag: "secondary", dependencies: []string{"primary"}}
++		manager := NewTransportManager(logger.NOP(), nil, nil, "")
++		manager.transportByTag = map[string]adapter.DNSTransport{
++			"primary": primary, "secondary": secondary,
++		}
++		err := manager.startTransports([]adapter.DNSTransport{primary, secondary})
++		if err == nil || !strings.Contains(err.Error(), "circular server dependency") {
++			t.Fatalf("fallback dependency cycle was not rejected: %v", err)
++		}
++	})
++}
++
++func TestShouldContinueDNSRule(t *testing.T) {
++	t.Parallel()
++
++	transportError := errors.New("transport unavailable")
++	if !shouldContinueDNSRule(context.Background(), true, transportError, 1) {
++		t.Fatal("an eligible rule must fall through after a transport error")
++	}
++	if shouldContinueDNSRule(context.Background(), false, transportError, 1) {
++		t.Fatal("a rule without response fallback must retain its transport error")
++	}
++	if shouldContinueDNSRule(context.Background(), true, nil, 1) {
++		t.Fatal("a successful exchange must never fall through")
++	}
++	if shouldContinueDNSRule(context.Background(), true, transportError, maxDNSAttempts) {
++		t.Fatal("the global attempt budget must stop a third transport attempt")
++	}
++
++	cancelled, cancel := context.WithCancel(context.Background())
++	cancel()
++	if shouldContinueDNSRule(cancelled, true, transportError, 1) {
++		t.Fatal("caller cancellation must stop fallback immediately")
++	}
++	deadline, cancelDeadline := context.WithDeadline(context.Background(), time.Unix(0, 0))
++	defer cancelDeadline()
++	if shouldContinueDNSRule(deadline, true, transportError, 1) {
++		t.Fatal("caller deadline must stop fallback immediately")
++	}
++}
++
++type fallbackDNSRule struct{}
++
++func (*fallbackDNSRule) Start() error                                   { return nil }
++func (*fallbackDNSRule) Close() error                                   { return nil }
++func (*fallbackDNSRule) Type() string                                   { return C.RuleTypeDefault }
++func (*fallbackDNSRule) String() string                                 { return "test fallback" }
++func (*fallbackDNSRule) Match(*adapter.InboundContext) bool             { return true }
++func (*fallbackDNSRule) WithAddressLimit() bool                         { return true }
++func (*fallbackDNSRule) MatchAddressLimit(*adapter.InboundContext) bool { return true }
++func (*fallbackDNSRule) Action() adapter.RuleAction {
++	return &R.RuleActionDNSRoute{Server: "primary"}
++}
++
++type fallbackDNSTransport struct {
++	tag          string
++	dependencies []string
++	startOrder   *[]string
++}
++
++func (t *fallbackDNSTransport) Start(adapter.StartStage) error {
++	if t.startOrder != nil {
++		*t.startOrder = append(*t.startOrder, t.tag)
++	}
++	return nil
++}
++func (*fallbackDNSTransport) Close() error             { return nil }
++func (*fallbackDNSTransport) Type() string             { return "https" }
++func (t *fallbackDNSTransport) Tag() string            { return t.tag }
++func (t *fallbackDNSTransport) Dependencies() []string { return t.dependencies }
++func (*fallbackDNSTransport) Reset()                   {}
++func (*fallbackDNSTransport) Exchange(context.Context, *mDNS.Msg) (*mDNS.Msg, error) {
++	return nil, errors.New("direct transport exchange is not used by this test")
++}
++
++type fallbackTransportManager struct {
++	primary   adapter.DNSTransport
++	secondary adapter.DNSTransport
++}
++
++func (*fallbackTransportManager) Start(adapter.StartStage) error { return nil }
++func (*fallbackTransportManager) Close() error                   { return nil }
++func (m *fallbackTransportManager) Transports() []adapter.DNSTransport {
++	return []adapter.DNSTransport{m.primary, m.secondary}
++}
++func (m *fallbackTransportManager) Transport(tag string) (adapter.DNSTransport, bool) {
++	if tag == m.primary.Tag() {
++		return m.primary, true
++	}
++	if tag == m.secondary.Tag() {
++		return m.secondary, true
++	}
++	return nil, false
++}
++func (m *fallbackTransportManager) Default() adapter.DNSTransport { return m.secondary }
++func (*fallbackTransportManager) FakeIP() adapter.FakeIPTransport { return nil }
++func (*fallbackTransportManager) Remove(string) error             { return nil }
++func (*fallbackTransportManager) Create(context.Context, log.ContextLogger, string, string, any) error {
++	return errors.New("transport creation is not used by this test")
++}
++
++type fallbackDNSClient struct {
++	exchangeErrors         map[string]error
++	lookupErrors           map[string]error
++	exchangeErrorSequences map[string][]error
++	lookupErrorSequences   map[string][]error
++	exchangeCalls          map[string]int
++	lookupCalls            map[string]int
++	exchangeHooks          map[string]func()
++	lookupHooks            map[string]func()
++}
++
++func newFallbackDNSClient() *fallbackDNSClient {
++	return &fallbackDNSClient{
++		exchangeErrors:         make(map[string]error),
++		lookupErrors:           make(map[string]error),
++		exchangeErrorSequences: make(map[string][]error),
++		lookupErrorSequences:   make(map[string][]error),
++		exchangeCalls:          make(map[string]int),
++		lookupCalls:            make(map[string]int),
++		exchangeHooks:          make(map[string]func()),
++		lookupHooks:            make(map[string]func()),
++	}
++}
++
++func (*fallbackDNSClient) Start()      {}
++func (*fallbackDNSClient) ClearCache() {}
++func (c *fallbackDNSClient) Exchange(_ context.Context, transport adapter.DNSTransport, message *mDNS.Msg, _ adapter.DNSQueryOptions, _ func([]netip.Addr) bool) (*mDNS.Msg, error) {
++	tag := transport.Tag()
++	c.exchangeCalls[tag]++
++	if hook := c.exchangeHooks[transport.Tag()]; hook != nil {
++		hook()
++	}
++	if sequence := c.exchangeErrorSequences[tag]; c.exchangeCalls[tag] <= len(sequence) {
++		if err := sequence[c.exchangeCalls[tag]-1]; err != nil {
++			return nil, err
++		}
++	}
++	if err := c.exchangeErrors[transport.Tag()]; err != nil {
++		return nil, err
++	}
++	response := new(mDNS.Msg)
++	response.SetReply(message)
++	return response, nil
++}
++func (c *fallbackDNSClient) Lookup(_ context.Context, transport adapter.DNSTransport, _ string, _ adapter.DNSQueryOptions, _ func([]netip.Addr) bool) ([]netip.Addr, error) {
++	tag := transport.Tag()
++	c.lookupCalls[tag]++
++	if hook := c.lookupHooks[transport.Tag()]; hook != nil {
++		hook()
++	}
++	if sequence := c.lookupErrorSequences[tag]; c.lookupCalls[tag] <= len(sequence) {
++		if err := sequence[c.lookupCalls[tag]-1]; err != nil {
++			return nil, err
++		}
++	}
++	if err := c.lookupErrors[transport.Tag()]; err != nil {
++		return nil, err
++	}
++	return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
++}
++
++func newFallbackRouter(client *fallbackDNSClient) *Router {
++	primary := &fallbackDNSTransport{tag: "primary"}
++	secondary := &fallbackDNSTransport{tag: "secondary"}
++	return &Router{
++		logger: logger.NOP(),
++		transport: &fallbackTransportManager{
++			primary:   primary,
++			secondary: secondary,
++		},
++		client: client,
++		rules:  []adapter.DNSRule{new(fallbackDNSRule)},
++	}
++}
++
++func newExplicitFallbackRouter(client *fallbackDNSClient) (*Router, adapter.DNSTransport, adapter.DNSTransport) {
++	primary := &fallbackDNSTransport{tag: "primary"}
++	secondary := &fallbackDNSTransport{tag: "secondary"}
++	manager := &fallbackTransportManager{primary: primary, secondary: secondary}
++	return &Router{
++		logger:    logger.NOP(),
++		transport: manager,
++		client:    client,
++	}, primary, secondary
++}
++
++func testDNSQuestion(questionType uint16) *mDNS.Msg {
++	message := new(mDNS.Msg)
++	message.SetQuestion("example.test.", questionType)
++	return message
++}
+diff --git a/dns/transport_adapter.go b/dns/transport_adapter.go
+index 47345709..7f83d0da 100644
+--- a/dns/transport_adapter.go
++++ b/dns/transport_adapter.go
+@@ -30,6 +30,9 @@ func NewTransportAdapterWithLocalOptions(transportType string, transportTag stri
+ 	var dependencies []string
+ 	if localOptions.DomainResolver != nil && localOptions.DomainResolver.Server != "" {
+ 		dependencies = append(dependencies, localOptions.DomainResolver.Server)
++		if localOptions.DomainResolver.FallbackServer != "" {
++			dependencies = append(dependencies, localOptions.DomainResolver.FallbackServer)
++		}
+ 	}
+ 	return TransportAdapter{
+ 		transportType: transportType,
+@@ -44,6 +47,9 @@ func NewTransportAdapterWithRemoteOptions(transportType string, transportTag str
+ 	var dependencies []string
+ 	if remoteOptions.DomainResolver != nil && remoteOptions.DomainResolver.Server != "" {
+ 		dependencies = append(dependencies, remoteOptions.DomainResolver.Server)
++		if remoteOptions.DomainResolver.FallbackServer != "" {
++			dependencies = append(dependencies, remoteOptions.DomainResolver.FallbackServer)
++		}
+ 	}
+ 	if remoteOptions.LegacyAddressResolver != "" {
+ 		dependencies = append(dependencies, remoteOptions.LegacyAddressResolver)
+diff --git a/option/domain_resolver_fallback_test.go b/option/domain_resolver_fallback_test.go
+new file mode 100644
+index 00000000..64627255
+--- /dev/null
++++ b/option/domain_resolver_fallback_test.go
+@@ -0,0 +1,36 @@
++package option
++
++import (
++	"encoding/json"
++	"testing"
++)
++
++func TestDomainResolveOptionsFallbackJSON(t *testing.T) {
++	t.Parallel()
++
++	var options DomainResolveOptions
++	err := json.Unmarshal([]byte(`{"server":"primary","fallback_server":"secondary"}`), &options)
++	if err != nil {
++		t.Fatalf("decode fallback resolver: %v", err)
++	}
++	if options.Server != "primary" || options.FallbackServer != "secondary" {
++		t.Fatalf("unexpected resolver options: %#v", options)
++	}
++	encoded, err := json.Marshal(options)
++	if err != nil {
++		t.Fatalf("encode fallback resolver: %v", err)
++	}
++	if string(encoded) != `{"server":"primary","fallback_server":"secondary"}` {
++		t.Fatalf("unexpected fallback JSON: %s", encoded)
++	}
++
++	err = json.Unmarshal([]byte(`{"server":"same","fallback_server":"same"}`), &options)
++	if err == nil {
++		t.Fatal("duplicate primary and fallback resolver must be rejected")
++	}
++
++	err = json.Unmarshal([]byte(`"primary"`), &options)
++	if err != nil || options.Server != "primary" || options.FallbackServer != "" {
++		t.Fatalf("legacy single resolver changed: options=%#v err=%v", options, err)
++	}
++}
+diff --git a/option/outbound.go b/option/outbound.go
+index 6676a3e9..3064f24c 100644
+--- a/option/outbound.go
++++ b/option/outbound.go
+@@ -93,11 +93,12 @@ type DialerOptions struct {
+ }
+ 
+ type _DomainResolveOptions struct {
+-	Server       string                `json:"server"`
+-	Strategy     DomainStrategy        `json:"strategy,omitempty"`
+-	DisableCache bool                  `json:"disable_cache,omitempty"`
+-	RewriteTTL   *uint32               `json:"rewrite_ttl,omitempty"`
+-	ClientSubnet *badoption.Prefixable `json:"client_subnet,omitempty"`
++	Server         string                `json:"server"`
++	FallbackServer string                `json:"fallback_server,omitempty"`
++	Strategy       DomainStrategy        `json:"strategy,omitempty"`
++	DisableCache   bool                  `json:"disable_cache,omitempty"`
++	RewriteTTL     *uint32               `json:"rewrite_ttl,omitempty"`
++	ClientSubnet   *badoption.Prefixable `json:"client_subnet,omitempty"`
+ }
+ 
+ type DomainResolveOptions _DomainResolveOptions
+@@ -105,7 +106,8 @@ type DomainResolveOptions _DomainResolveOptions
+ func (o DomainResolveOptions) MarshalJSON() ([]byte, error) {
+ 	if o.Server == "" {
+ 		return []byte("{}"), nil
+-	} else if o.Strategy == DomainStrategy(C.DomainStrategyAsIS) &&
++	} else if o.FallbackServer == "" &&
++		o.Strategy == DomainStrategy(C.DomainStrategyAsIS) &&
+ 		!o.DisableCache &&
+ 		o.RewriteTTL == nil &&
+ 		o.ClientSubnet == nil {
+@@ -116,6 +118,7 @@ func (o DomainResolveOptions) MarshalJSON() ([]byte, error) {
+ }
+ 
+ func (o *DomainResolveOptions) UnmarshalJSON(bytes []byte) error {
++	*o = DomainResolveOptions{}
+ 	var stringValue string
+ 	err := json.Unmarshal(bytes, &stringValue)
+ 	if err == nil {
+@@ -129,6 +132,9 @@ func (o *DomainResolveOptions) UnmarshalJSON(bytes []byte) error {
+ 	if o.Server == "" {
+ 		return E.New("empty domain_resolver.server")
+ 	}
++	if o.FallbackServer == o.Server {
++		return E.New("domain_resolver.fallback_server must differ from server")
++	}
+ 	return nil
+ }
+ 
+diff --git a/protocol/tailscale/dns_transport.go b/protocol/tailscale/dns_transport.go
+index 4195235c..7f930f69 100644
+--- a/protocol/tailscale/dns_transport.go
++++ b/protocol/tailscale/dns_transport.go
+@@ -169,7 +169,7 @@ func (t *DNSTransport) createResolver(directDialer func() N.Dialer, resolver *dn
+ 	}
+ 	if len(resolver.BootstrapResolution) > 0 {
+ 		bootstrapTransport := transport.NewUDPRaw(t.logger, t.TransportAdapter, myDialer, M.SocksaddrFrom(resolver.BootstrapResolution[0], 53))
+-		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", adapter.DNSQueryOptions{Transport: bootstrapTransport}, 0)
++		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", "", adapter.DNSQueryOptions{Transport: bootstrapTransport}, 0)
+ 	}
+ 	if serverAddr := M.ParseSocksaddr(resolver.Addr); serverAddr.IsValid() {
+ 		if serverAddr.Port == 0 {
+diff --git a/route/network.go b/route/network.go
+index 03e94879..408f30e6 100644
+--- a/route/network.go
++++ b/route/network.go
+@@ -74,9 +74,10 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options
+ 		interfaceFinder:     control.NewDefaultInterfaceFinder(),
+ 		autoDetectInterface: options.AutoDetectInterface,
+ 		defaultOptions: adapter.NetworkOptions{
+-			BindInterface:  options.DefaultInterface,
+-			RoutingMark:    uint32(options.DefaultMark),
+-			DomainResolver: defaultDomainResolver.Server,
++			BindInterface:          options.DefaultInterface,
++			RoutingMark:            uint32(options.DefaultMark),
++			DomainResolver:         defaultDomainResolver.Server,
++			DomainResolverFallback: defaultDomainResolver.FallbackServer,
+ 			DomainResolveOptions: adapter.DNSQueryOptions{
+ 				Strategy:     C.DomainStrategy(defaultDomainResolver.Strategy),
+ 				DisableCache: defaultDomainResolver.DisableCache,

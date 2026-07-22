@@ -1,0 +1,543 @@
+use std::collections::BTreeSet;
+use std::fs::File;
+use std::path::PathBuf;
+
+use cfw_singbox_config::{CredentialRef, ValidatedSingBoxProfile, sha256_hex};
+use serde::Serialize;
+use uuid::Uuid;
+
+use crate::envelope::{
+    decode, encode, normalize_name, profile_file_name, profile_id_from_file_name,
+    validate_profile_id,
+};
+use crate::selection::{ProfileSelection, decode as decode_selection, encode as encode_selection};
+use crate::storage::RepositoryDirectory;
+use crate::storage::ensure_entry_capacity;
+use crate::{
+    MAX_REPOSITORY_BYTES, MAX_REPOSITORY_CREDENTIAL_REFERENCES, ProfileError, SELECTION_FILE_NAME,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProfileImportResult {
+    pub id: String,
+    pub name: String,
+    pub bytes: usize,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProfileRecord {
+    pub id: String,
+    pub name: String,
+    pub bytes: usize,
+    pub digest: String,
+    pub created_epoch_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredProfile {
+    pub record: ProfileRecord,
+    pub profile: ValidatedSingBoxProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProfileRepositorySnapshot {
+    pub profiles: Vec<ProfileRecord>,
+    pub selected_profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProfileCredentialSnapshot {
+    pub snapshot_digest: String,
+    pub live_references: Vec<CredentialRef>,
+    pub selected_profile_id: Option<String>,
+    pub profile_count: usize,
+}
+
+/// Holds the repository's cross-process exclusive lock for a credential GC
+/// commit. The native vault transaction must finish before this value drops,
+/// otherwise a newly imported profile could race the live-reference check.
+pub struct LockedProfileCredentialSnapshot {
+    snapshot: ProfileCredentialSnapshot,
+    _directory: RepositoryDirectory,
+}
+
+/// Selected profile plus the repository's cross-process exclusive lock. This
+/// guard closes the gap between destructive legacy retirement validation and
+/// starting the exact profile that was validated.
+pub struct LockedSelectedProfile {
+    stored: StoredProfile,
+    _directory: RepositoryDirectory,
+}
+
+impl LockedSelectedProfile {
+    pub fn stored(&self) -> &StoredProfile {
+        &self.stored
+    }
+}
+
+impl LockedProfileCredentialSnapshot {
+    pub fn snapshot(&self) -> &ProfileCredentialSnapshot {
+        &self.snapshot
+    }
+}
+
+struct RepositorySnapshot {
+    records: Vec<ProfileRecord>,
+    stored_bytes: u64,
+    selection: Option<ProfileSelection>,
+    live_references: BTreeSet<CredentialRef>,
+}
+
+struct RepositoryProfiles {
+    records: Vec<ProfileRecord>,
+    stored_bytes: u64,
+    has_selection: bool,
+    live_references: BTreeSet<CredentialRef>,
+}
+
+#[derive(Serialize)]
+struct CredentialSnapshotIdentity<'a> {
+    schema_version: u16,
+    profiles: Vec<CredentialSnapshotProfile<'a>>,
+    selected_profile_id: Option<&'a str>,
+    live_references: &'a [CredentialRef],
+}
+
+#[derive(Serialize)]
+struct CredentialSnapshotProfile<'a> {
+    id: &'a str,
+    digest: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileRepository {
+    profiles_dir: PathBuf,
+}
+
+impl ProfileRepository {
+    pub fn new(profiles_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            profiles_dir: profiles_dir.into(),
+        }
+    }
+
+    pub fn import(
+        &self,
+        name: Option<&str>,
+        profile: &ValidatedSingBoxProfile,
+    ) -> Result<ProfileImportResult, ProfileError> {
+        let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+        // Do not add new state alongside a corrupt, legacy, or interrupted
+        // entry. The one-way migration API is the only path that clears those.
+        let existing = self.read_all(&directory)?;
+        let mut prospective_references = existing.live_references.clone();
+        prospective_references.extend(profile.credential_references());
+        ensure_credential_reference_capacity(prospective_references.len())?;
+        // A successful read proves the repository contains at most the
+        // documented limit. Import must still reject the next write when it
+        // is already full; otherwise the 4,097th entry would be committed and
+        // only discovered by a later operation.
+        ensure_entry_capacity(existing.records.len())?;
+        let id = Uuid::new_v4().hyphenated().to_string();
+        let name = normalize_name(name.unwrap_or("Local profile"))?;
+        let bytes = encode(&id, &name, profile)?;
+        ensure_repository_bytes(existing.stored_bytes, bytes.len())?;
+        directory.write_new_atomic(&profile_file_name(&id), &bytes)?;
+        Ok(ProfileImportResult {
+            id,
+            name,
+            bytes: profile.as_json().len(),
+            digest: profile.digest().to_string(),
+        })
+    }
+
+    pub fn list(&self) -> Result<Vec<ProfileRecord>, ProfileError> {
+        self.snapshot().map(|snapshot| snapshot.profiles)
+    }
+
+    pub fn snapshot(&self) -> Result<ProfileRepositorySnapshot, ProfileError> {
+        let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
+            return Ok(ProfileRepositorySnapshot {
+                profiles: Vec::new(),
+                selected_profile_id: None,
+            });
+        };
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+        self.read_all(&directory)
+            .map(|snapshot| ProfileRepositorySnapshot {
+                profiles: snapshot.records,
+                selected_profile_id: snapshot
+                    .selection
+                    .map(|selection| selection.profile_id().to_owned()),
+            })
+    }
+
+    /// Returns one lock-consistent, secret-free identity for credential vault
+    /// garbage collection. Every managed profile contributes its immutable
+    /// references, including selected and newly imported unselected profiles.
+    pub fn credential_snapshot(&self) -> Result<ProfileCredentialSnapshot, ProfileError> {
+        let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
+            return build_credential_snapshot(&[], None, BTreeSet::new());
+        };
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+        let snapshot = self.read_all(&directory)?;
+        build_credential_snapshot(
+            &snapshot.records,
+            snapshot.selection.as_ref(),
+            snapshot.live_references,
+        )
+    }
+
+    pub fn lock_credential_snapshot(
+        &self,
+    ) -> Result<LockedProfileCredentialSnapshot, ProfileError> {
+        let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+        let snapshot = self.read_all(&directory)?;
+        let snapshot = build_credential_snapshot(
+            &snapshot.records,
+            snapshot.selection.as_ref(),
+            snapshot.live_references,
+        )?;
+        Ok(LockedProfileCredentialSnapshot {
+            snapshot,
+            _directory: directory,
+        })
+    }
+
+    fn read_all(
+        &self,
+        directory: &RepositoryDirectory,
+    ) -> Result<RepositorySnapshot, ProfileError> {
+        let profiles = self.read_profiles(directory)?;
+        let mut stored_bytes = profiles.stored_bytes;
+        let selection = if profiles.has_selection {
+            let file = directory.open_selection_file()?;
+            stored_bytes = stored_bytes
+                .checked_add(file.metadata()?.len())
+                .ok_or(ProfileError::RepositoryTooLarge { actual: u64::MAX })?;
+            if stored_bytes > MAX_REPOSITORY_BYTES {
+                return Err(ProfileError::RepositoryTooLarge {
+                    actual: stored_bytes,
+                });
+            }
+            Some(decode_selection(file)?)
+        } else {
+            None
+        };
+
+        if let Some(selection) = &selection {
+            let record = profiles
+                .records
+                .iter()
+                .find(|record| record.id == selection.profile_id())
+                .ok_or_else(|| {
+                    ProfileError::SelectedProfileMissing(selection.profile_id().to_owned())
+                })?;
+            if record.digest != selection.profile_digest() {
+                return Err(ProfileError::SelectedProfileDigestMismatch {
+                    id: selection.profile_id().to_owned(),
+                    expected: selection.profile_digest().to_owned(),
+                    actual: record.digest.clone(),
+                });
+            }
+        }
+
+        Ok(RepositorySnapshot {
+            records: profiles.records,
+            stored_bytes,
+            selection,
+            live_references: profiles.live_references,
+        })
+    }
+
+    fn read_profiles(
+        &self,
+        directory: &RepositoryDirectory,
+    ) -> Result<RepositoryProfiles, ProfileError> {
+        let mut ids = Vec::new();
+        let mut has_selection = false;
+        for file_name in directory.entry_names()? {
+            let file_name = file_name
+                .to_str()
+                .ok_or_else(|| ProfileError::UnexpectedEntry("non-UTF-8 filename".into()))?;
+            if file_name == SELECTION_FILE_NAME {
+                has_selection = true;
+            } else {
+                ids.push(profile_id_from_file_name(file_name)?.to_string());
+            }
+        }
+        ids.sort_unstable();
+
+        let mut records = Vec::with_capacity(ids.len());
+        let mut live_references = BTreeSet::new();
+        let mut stored_bytes = 0_u64;
+        for id in ids {
+            let file = directory.open_profile_file(&id)?;
+            let file_length = file.metadata()?.len();
+            stored_bytes = stored_bytes
+                .checked_add(file_length)
+                .ok_or(ProfileError::RepositoryTooLarge { actual: u64::MAX })?;
+            if stored_bytes > MAX_REPOSITORY_BYTES {
+                return Err(ProfileError::RepositoryTooLarge {
+                    actual: stored_bytes,
+                });
+            }
+            let stored = self.decode(&id, file)?;
+            live_references.extend(stored.profile.credential_references());
+            ensure_credential_reference_capacity(live_references.len())?;
+            records.push(stored.record);
+        }
+        records.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(RepositoryProfiles {
+            records,
+            stored_bytes,
+            has_selection,
+            live_references,
+        })
+    }
+
+    pub fn load(&self, id: &str) -> Result<Option<StoredProfile>, ProfileError> {
+        let id = validate_profile_id(id)?;
+        let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
+            return Ok(None);
+        };
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+        match directory.open_profile_file(id) {
+            Ok(file) => self.decode(id, file).map(Some),
+            Err(ProfileError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn load_selected(&self) -> Result<Option<StoredProfile>, ProfileError> {
+        let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
+            return Ok(None);
+        };
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+        let snapshot = self.read_all(&directory)?;
+        let Some(selection) = snapshot.selection else {
+            return Ok(None);
+        };
+        let file = directory.open_profile_file(selection.profile_id())?;
+        self.decode(selection.profile_id(), file).map(Some)
+    }
+
+    pub fn require_selected(&self) -> Result<StoredProfile, ProfileError> {
+        self.load_selected()?.ok_or(ProfileError::NoSelectedProfile)
+    }
+
+    pub fn lock_selected(&self) -> Result<LockedSelectedProfile, ProfileError> {
+        let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+        let snapshot = self.read_all(&directory)?;
+        let selection = snapshot.selection.ok_or(ProfileError::NoSelectedProfile)?;
+        let file = directory.open_profile_file(selection.profile_id())?;
+        let stored = self.decode(selection.profile_id(), file)?;
+        Ok(LockedSelectedProfile {
+            stored,
+            _directory: directory,
+        })
+    }
+
+    pub fn select(&self, id: &str) -> Result<ProfileRecord, ProfileError> {
+        let id = validate_profile_id(id)?;
+        let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
+            return Err(ProfileError::SelectedProfileMissing(id.to_owned()));
+        };
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+
+        // Selecting a known-good profile is also the explicit recovery path
+        // for malformed or stale selection metadata. Profile envelopes remain
+        // fully validated before the replacement is committed.
+        let profiles = self.read_profiles(&directory)?;
+        let record = profiles
+            .records
+            .iter()
+            .find(|record| record.id == id)
+            .cloned()
+            .ok_or_else(|| ProfileError::SelectedProfileMissing(id.to_owned()))?;
+        let selection = ProfileSelection::new(&record.id, &record.digest)?;
+        let bytes = encode_selection(&selection)?;
+        ensure_repository_bytes(profiles.stored_bytes, bytes.len())?;
+        directory.write_replace_atomic(SELECTION_FILE_NAME, &bytes)?;
+        Ok(record)
+    }
+
+    pub fn delete(&self, id: &str) -> Result<bool, ProfileError> {
+        let id = validate_profile_id(id)?;
+        let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
+            return Ok(false);
+        };
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+        let snapshot = self.read_all(&directory)?;
+        if snapshot
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.profile_id() == id)
+        {
+            return Err(ProfileError::SelectedProfileDeletion(id.to_owned()));
+        }
+        let file = match directory.open_profile_file(id) {
+            Ok(file) => file,
+            Err(ProfileError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        self.decode(id, file)?;
+        directory.unlink(&profile_file_name(id))?;
+        directory.sync_committed(&profile_file_name(id))?;
+        Ok(true)
+    }
+
+    /// Permanently removes the contents of the application-managed profiles
+    /// directory without reading, converting, backing up, or following them.
+    ///
+    /// This one-way migration API intentionally refuses to traverse real
+    /// subdirectories. Symlinks are unlinked as directory entries, so their
+    /// external targets are never touched.
+    pub fn clear_managed_profiles(&self) -> Result<usize, ProfileError> {
+        let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
+            return Ok(0);
+        };
+        directory.lock_exclusive()?;
+        let entries = directory.entry_names()?;
+        for name in &entries {
+            if directory.entry_is_directory(name)? {
+                return Err(ProfileError::UnexpectedManagedSubdirectory(
+                    name.to_string_lossy().into_owned(),
+                ));
+            }
+        }
+        let mut removed = 0;
+        for name in &entries {
+            if let Err(error) = directory.unlink_os(name) {
+                if removed == 0 {
+                    return Err(error);
+                }
+                return Err(ProfileError::PartialManagedCleanup {
+                    removed,
+                    operation: error.to_string(),
+                });
+            }
+            removed += 1;
+        }
+        if removed > 0 {
+            directory.sync_committed("managed profile cleanup")?;
+        }
+        Ok(entries.len())
+    }
+
+    fn decode(&self, id: &str, file: File) -> Result<StoredProfile, ProfileError> {
+        let decoded = decode(id, file)?;
+        Ok(StoredProfile {
+            record: ProfileRecord {
+                id: id.to_string(),
+                name: decoded.name,
+                bytes: decoded.profile.as_json().len(),
+                digest: decoded.digest,
+                created_epoch_secs: decoded.created_epoch_secs,
+            },
+            profile: decoded.profile,
+        })
+    }
+}
+
+fn build_credential_snapshot(
+    records: &[ProfileRecord],
+    selection: Option<&ProfileSelection>,
+    live_references: BTreeSet<CredentialRef>,
+) -> Result<ProfileCredentialSnapshot, ProfileError> {
+    let live_references = live_references.into_iter().collect::<Vec<_>>();
+    let mut profiles = records
+        .iter()
+        .map(|record| CredentialSnapshotProfile {
+            id: &record.id,
+            digest: &record.digest,
+        })
+        .collect::<Vec<_>>();
+    profiles.sort_unstable_by(|left, right| left.id.cmp(right.id));
+    let selected_profile_id = selection.map(ProfileSelection::profile_id);
+    let identity = CredentialSnapshotIdentity {
+        schema_version: 1,
+        profiles,
+        selected_profile_id,
+        live_references: &live_references,
+    };
+    let bytes = serde_json::to_vec(&identity)?;
+    Ok(ProfileCredentialSnapshot {
+        snapshot_digest: sha256_hex(&bytes),
+        live_references,
+        selected_profile_id: selected_profile_id.map(ToOwned::to_owned),
+        profile_count: records.len(),
+    })
+}
+
+fn ensure_repository_bytes(current: u64, additional: usize) -> Result<(), ProfileError> {
+    let additional = u64::try_from(additional)
+        .map_err(|_| ProfileError::RepositoryTooLarge { actual: u64::MAX })?;
+    let actual = current
+        .checked_add(additional)
+        .ok_or(ProfileError::RepositoryTooLarge { actual: u64::MAX })?;
+    if actual > MAX_REPOSITORY_BYTES {
+        Err(ProfileError::RepositoryTooLarge { actual })
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_credential_reference_capacity(actual: usize) -> Result<(), ProfileError> {
+    if actual > MAX_REPOSITORY_CREDENTIAL_REFERENCES {
+        Err(ProfileError::TooManyCredentialReferences)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_credential_reference_capacity, ensure_repository_bytes};
+    use crate::{MAX_REPOSITORY_BYTES, MAX_REPOSITORY_CREDENTIAL_REFERENCES, ProfileError};
+
+    #[test]
+    fn aggregate_repository_limit_is_checked_before_a_new_write() {
+        ensure_repository_bytes(MAX_REPOSITORY_BYTES - 1, 1).expect("exact limit is admitted");
+        assert!(matches!(
+            ensure_repository_bytes(MAX_REPOSITORY_BYTES, 1),
+            Err(ProfileError::RepositoryTooLarge { actual })
+                if actual == MAX_REPOSITORY_BYTES + 1
+        ));
+        assert!(matches!(
+            ensure_repository_bytes(u64::MAX, 1),
+            Err(ProfileError::RepositoryTooLarge { actual: u64::MAX })
+        ));
+    }
+
+    #[test]
+    fn aggregate_credential_refs_cannot_exceed_the_native_vault_capacity() {
+        ensure_credential_reference_capacity(MAX_REPOSITORY_CREDENTIAL_REFERENCES)
+            .expect("exact vault capacity is admitted");
+        assert!(matches!(
+            ensure_credential_reference_capacity(MAX_REPOSITORY_CREDENTIAL_REFERENCES + 1),
+            Err(ProfileError::TooManyCredentialReferences)
+        ));
+    }
+}

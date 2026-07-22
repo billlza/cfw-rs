@@ -1,43 +1,49 @@
-# macOS Platform Foundation
+# macOS platform foundation
 
-The Rust platform boundary for the rebuild lives in
-[`crates/cfw-platform`](/Users/bill/cfw-rs/crates/cfw-platform/src/lib.rs).
+The platform boundary targets arm64 macOS 15 and newer.
 
-## Interfaces
+`cfw-platform` retains only ordinary user-context adapters such as login items,
+diagnostics, file dialogs, and transitional cleanup. It does not own a root
+data plane. Privileged network behavior belongs behind the signed native
+Network Extension/ProxyAgent boundary in `native/macos` and
+`cfw-apple-network`.
 
-- `SystemProxyService`
-  - read current state
-  - set proxy mode against a concrete port
-  - restore original proxy snapshot on exit/failure
-- `HelperService`
-  - install and uninstall privileged helper runtime
-- `LaunchdService`
-  - bootstrap and bootout typed jobs
-- `TunService`
-  - install TUN runtime
-  - start and stop TUN lifecycle
+## Supported boundaries
 
-## Current Decisions
+- Login items use the public ServiceManagement user-login APIs.
+- System Proxy changes use SystemConfiguration preferences transactionally.
+- Tunnel installation and status use SystemExtensions and NetworkExtension.
+- Shared non-sensitive user-mode state uses a versioned App Group contract.
+- The root/global Packet Tunnel system extension uses authenticated XPC and its
+  own provider-local state; it never treats the user App Group as shared files.
+- User-mode credentials use Data Protection Keychain groups. System-extension
+  secrets must be owned in the file-based System Keychain after authenticated
+  IPC transfer.
+- Anti-replay generation lineage uses the host-only Data Protection Keychain
+  group; ProxyAgent cannot read or replace it, and the Packet Tunnel has no
+  Data Protection Keychain entitlement.
+- Native errors are mapped into explicit domain errors and never converted to
+  success, empty state, or an alternate engine.
 
-- Target: `MacOsArm64`
-- Minimum macOS: `13.0`
-- System proxy strategy:
-  native `SystemConfiguration`-style manager with explicit snapshot/restore
-- Helper strategy:
-  keep privileged operations outside the UI shell
-- launchd strategy:
-  typed contract, no ad-hoc product-layer shell scripts
-- TUN strategy:
-  **current:** privileged helper via `SMAppService` + root helper for TUN
-  (`SmAppServiceRootHelper`). **long-term optional:** `NetworkExtension`
-  packet tunnel — not the shipping path for 0.1.x.
+## Retired boundary
 
-## Why This Matters
+The old helper label, control session, root core, routes, and DNS settings are
+handled only by the one-way migration cleanup. Cleanup can stop, remove, verify,
+and unregister; it can never start a core. Any incomplete cleanup becomes an
+explicit manual-cleanup-required state and blocks all new network modes.
 
-This keeps the rebuild aligned with user-visible CFW behavior while avoiding
-hard-coded legacy implementation details such as:
+Startup is not a cleanup trigger. It either re-verifies a previously completed
+retirement without mutation or leaves the legacy network in
+`awaiting_confirmation`. New profiles use `sing-box-profiles-v1`; historical
+Clash profiles remain under `profiles`, so pre-cutover staging cannot be
+deleted by the legacy cleanup transaction. The destructive command requires a
+positive user confirmation, an exclusive engine-maintenance lease, a selected
+valid replacement profile, an Off replacement engine, and signed-native
+credential/System Extension preflight readiness before the app performs the false-first retirement transaction. The tombstone descriptor itself performs no cleanup or network mutation.
 
-- Electron-owned privileged flows
-- Intel-specific binary selection
-- hidden platform shell-outs as the primary source of truth
-
+Legacy proxy and DNS values are not blindly restored from an old snapshot.
+Proxy cleanup verifies that the relevant SystemConfiguration services are no
+longer enabled. DNS cleanup requires an explicit review action because the old
+snapshot does not prove that the current value is still owned by this product.
+An ambiguous, changed, or still-enabled value remains visible as a blocking
+manual action; cleanup does not overwrite a later user or administrator change.

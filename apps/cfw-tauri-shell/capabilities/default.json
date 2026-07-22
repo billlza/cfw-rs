@@ -4,13 +4,7 @@
   "description": "Main desktop capability for Clash for Mac",
   "windows": ["main"],
   "permissions": [
-    "core:path:default",
-    "core:event:default",
-    "core:window:default",
-    "core:app:default",
-    "core:resources:default",
-    "core:menu:default",
-    "core:tray:default",
-    "updater:default"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
   ]
 }

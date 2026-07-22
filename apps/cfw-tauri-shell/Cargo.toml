@@ -1,7 +1,8 @@
 [package]
 name = "cfw-tauri-shell"
-version = "0.3.5"
+version = "0.4.0"
 edition = "2024"
+license.workspace = true
 build = "build.rs"
 autobins = false
 
@@ -10,25 +11,35 @@ name = "clash-for-mac"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
-cfw-controller = { path = "../../crates/cfw-controller" }
+cfw-application = { path = "../../crates/cfw-application" }
+cfw-apple-network = { path = "../../crates/cfw-apple-network" }
 cfw-core = { path = "../../crates/cfw-core" }
+cfw-engine-api = { path = "../../crates/cfw-engine-api" }
 cfw-platform = { path = "../../crates/cfw-platform" }
 cfw-profiles = { path = "../../crates/cfw-profiles" }
-cfw-runtime = { path = "../../crates/cfw-runtime" }
+cfw-singbox-config = { path = "../../crates/cfw-singbox-config" }
+base64.workspace = true
 futures-util.workspace = true
-qrcode.workspace = true
+flate2.workspace = true
+libc.workspace = true
+minisign-verify.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+plist.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
-tauri = { version = "2.11.5", features = ["tray-icon"] }
-tauri-plugin-deep-link = "2"
-tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
-tauri-plugin-updater = "2"
+tauri = { version = "=2.11.5", features = ["tray-icon"] }
+tauri-plugin-single-instance = "=2.4.3"
+thiserror.workspace = true
+tempfile.workspace = true
+tar.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
-tracing.workspace = true
-urlencoding.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
 
 [build-dependencies]
-tauri-build = { version = "2.6.3", features = [] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tauri-build = { version = "=2.6.3", features = [] }

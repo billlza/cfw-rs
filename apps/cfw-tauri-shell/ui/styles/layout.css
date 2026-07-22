@@ -1,0 +1,162 @@
+.status-bar {
+  display: none;
+}
+
+.status-progress {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 3px;
+}
+
+.status-progress i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.status-progress i.busy {
+  width: 55%;
+}
+
+.status-progress i.active {
+  width: 100%;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+}
+
+.sidebar {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.traffic-pane {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  padding: 15px 16px;
+}
+
+.traffic-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.traffic-row strong {
+  color: var(--text);
+  font: 500 12px var(--mono);
+}
+
+.nav-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+}
+
+.nav-item {
+  min-height: 42px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  padding: 0 12px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.nav-item:hover {
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.nav-item.active {
+  background: var(--background);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.runtime-pane,
+.sidebar-meta {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  padding: 13px 16px;
+}
+
+.runtime-pane {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.runtime-pane strong {
+  overflow: hidden;
+  color: var(--text);
+  font: 500 11px var(--mono);
+  text-overflow: ellipsis;
+}
+
+.connected-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.connected-line i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.connected-line i.on {
+  background: var(--accent);
+}
+
+.workspace,
+.page {
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.general-layout,
+.profiles-layout,
+.settings-layout,
+.logs-layout,
+.about-layout {
+  height: 100%;
+  overflow: auto;
+}
+
+.panel {
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+  padding: 18px 22px;
+}
+
+.hero-panel,
+.toolbar-panel,
+.setting-row,
+.profile-row,
+.profile-row-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}

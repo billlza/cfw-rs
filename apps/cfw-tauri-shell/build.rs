@@ -1,8 +1,735 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactManifest {
+    algorithm: String,
+    root: String,
+    sha256: String,
+    entries: Vec<ArtifactEntry>,
+    metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+enum ArtifactEntry {
+    Directory {
+        path: String,
+    },
+    File {
+        path: String,
+        size: u64,
+        sha256: String,
+    },
+    Symlink {
+        path: String,
+        target: String,
+    },
+}
+
+impl ArtifactEntry {
+    fn path(&self) -> &str {
+        match self {
+            Self::Directory { path } | Self::File { path, .. } | Self::Symlink { path, .. } => path,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeDependencyLock {
+    go: String,
+    gomobile: String,
+    sing_box: SingBoxLock,
+    sing_box_for_apple_reference: AppleReferenceLock,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SingBoxLock {
+    commit: String,
+    tag: String,
+    android_reference_commit: String,
+    security_patch: SingBoxSecurityPatchLock,
+    raw_packet_patch: SingBoxSourcePatchLock,
+    dns_failover_patch: SingBoxSourcePatchLock,
+    combined_diff_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SingBoxSecurityPatchLock {
+    path: String,
+    sha256: String,
+    patched_diff_sha256: String,
+    patched_go_mod_sha256: String,
+    patched_go_sum_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SingBoxSourcePatchLock {
+    path: String,
+    sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppleReferenceLock {
+    commit: String,
+}
+
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     if target_os != "macos" || target_arch != "aarch64" {
         panic!("cfw-tauri-shell supports only aarch64-apple-darwin");
     }
+
+    let manifest_dir = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is required"),
+    );
+    let repository_root = manifest_dir
+        .ancestors()
+        .nth(2)
+        .expect("Tauri manifest must remain under apps/cfw-tauri-shell");
+    println!(
+        "cargo:rerun-if-changed={}",
+        repository_root
+            .join("native/macos/Dependencies.lock.json")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        repository_root
+            .join("scripts/dependency_pins.env")
+            .display()
+    );
+
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        verify_release_native_artifacts(repository_root)
+            .unwrap_or_else(|error| panic!("native release artifact validation failed: {error}"));
+    }
     tauri_build::build()
+}
+
+fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String> {
+    reject_source_marker(
+        &repository_root.join("apps/cfw-tauri-shell/src/engine.rs"),
+        "MissingNativeBridge",
+    )?;
+    reject_source_marker(
+        &repository_root.join("native/macos/Sources/CFWProxyAgent/ProxyAgentExecutable.swift"),
+        "MissingLibboxProxyEngineFactory",
+    )?;
+    reject_source_marker(
+        &repository_root.join("native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift"),
+        "MissingLibboxEngineFactory",
+    )?;
+    reject_source_marker(
+        &repository_root.join("native/macos/Sources/CFWAppleNetwork/HostBridge.swift"),
+        "MissingSystemExtensionStateTransport",
+    )?;
+    reject_source_marker(
+        &repository_root.join("native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift"),
+        "systemExtensionStateTransportNotLinked",
+    )?;
+    require_real_directory(&repository_root.join("native/macos/Sources/CFWNativeBridge"))?;
+
+    let dependency_lock_path = repository_root.join("native/macos/Dependencies.lock.json");
+    let dependency_lock: NativeDependencyLock = read_json(&dependency_lock_path)?;
+    let pins = read_pins(&repository_root.join("scripts/dependency_pins.env"))?;
+    require_pin(&pins, "GO_VERSION", &dependency_lock.go)?;
+    require_pin(&pins, "GOMOBILE_VERSION", &dependency_lock.gomobile)?;
+    require_pin(&pins, "SING_BOX_VERSION", &dependency_lock.sing_box.tag)?;
+    require_pin(&pins, "SING_BOX_COMMIT", &dependency_lock.sing_box.commit)?;
+    require_pin(
+        &pins,
+        "SING_BOX_ANDROID_REFERENCE_COMMIT",
+        &dependency_lock.sing_box.android_reference_commit,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_SECURITY_PATCH_PATH",
+        &dependency_lock.sing_box.security_patch.path,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_SECURITY_PATCH_SHA256",
+        &dependency_lock.sing_box.security_patch.sha256,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_RAW_PACKET_PATCH_PATH",
+        &dependency_lock.sing_box.raw_packet_patch.path,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_RAW_PACKET_PATCH_SHA256",
+        &dependency_lock.sing_box.raw_packet_patch.sha256,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_DNS_FAILOVER_PATCH_PATH",
+        &dependency_lock.sing_box.dns_failover_patch.path,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+        &dependency_lock.sing_box.dns_failover_patch.sha256,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_PATCHED_DIFF_SHA256",
+        &dependency_lock.sing_box.security_patch.patched_diff_sha256,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_COMBINED_DIFF_SHA256",
+        &dependency_lock.sing_box.combined_diff_sha256,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_PATCHED_GO_MOD_SHA256",
+        &dependency_lock
+            .sing_box
+            .security_patch
+            .patched_go_mod_sha256,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_PATCHED_GO_SUM_SHA256",
+        &dependency_lock
+            .sing_box
+            .security_patch
+            .patched_go_sum_sha256,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_APPLE_REFERENCE_COMMIT",
+        &dependency_lock.sing_box_for_apple_reference.commit,
+    )?;
+    let security_patch_path = repository_root.join(safe_relative_path(
+        &dependency_lock.sing_box.security_patch.path,
+    )?);
+    println!("cargo:rerun-if-changed={}", security_patch_path.display());
+    require_regular_file(&security_patch_path)?;
+    let security_patch = fs::read(&security_patch_path).map_err(|error| {
+        format!(
+            "read sing-box security patch {}: {error}",
+            security_patch_path.display()
+        )
+    })?;
+    if sha256_hex(&security_patch) != dependency_lock.sing_box.security_patch.sha256.as_str() {
+        return Err("sing-box security patch digest differs from dependency lock".into());
+    }
+    let raw_packet_patch_path = repository_root.join(safe_relative_path(
+        &dependency_lock.sing_box.raw_packet_patch.path,
+    )?);
+    println!("cargo:rerun-if-changed={}", raw_packet_patch_path.display());
+    require_regular_file(&raw_packet_patch_path)?;
+    let raw_packet_patch = fs::read(&raw_packet_patch_path).map_err(|error| {
+        format!(
+            "read sing-box raw packet patch {}: {error}",
+            raw_packet_patch_path.display()
+        )
+    })?;
+    if sha256_hex(&raw_packet_patch) != dependency_lock.sing_box.raw_packet_patch.sha256.as_str() {
+        return Err("sing-box raw packet patch digest differs from dependency lock".into());
+    }
+    let dns_failover_patch_path = repository_root.join(safe_relative_path(
+        &dependency_lock.sing_box.dns_failover_patch.path,
+    )?);
+    println!(
+        "cargo:rerun-if-changed={}",
+        dns_failover_patch_path.display()
+    );
+    require_regular_file(&dns_failover_patch_path)?;
+    let dns_failover_patch = fs::read(&dns_failover_patch_path).map_err(|error| {
+        format!(
+            "read sing-box DNS failover patch {}: {error}",
+            dns_failover_patch_path.display()
+        )
+    })?;
+    if sha256_hex(&dns_failover_patch)
+        != dependency_lock.sing_box.dns_failover_patch.sha256.as_str()
+    {
+        return Err("sing-box DNS failover patch digest differs from dependency lock".into());
+    }
+
+    let dependency_root = repository_root.join("target/native-dependencies");
+    let framework = dependency_root.join("Libbox.xcframework");
+    let manifest_path = dependency_root.join("Libbox.xcframework.manifest.json");
+    let manifest: ArtifactManifest = read_json(&manifest_path)?;
+    verify_manifest(&framework, &manifest)?;
+    let libbox_manifest_sha256 = sha256_hex(
+        &fs::read(&manifest_path)
+            .map_err(|error| format!("read {}: {error}", manifest_path.display()))?,
+    );
+    require_metadata(&manifest, "sourceTag", &dependency_lock.sing_box.tag)?;
+    require_metadata(&manifest, "sourceCommit", &dependency_lock.sing_box.commit)?;
+    require_metadata(&manifest, "goVersion", &dependency_lock.go)?;
+    require_metadata(&manifest, "gomobileVersion", &dependency_lock.gomobile)?;
+    require_metadata(
+        &manifest,
+        "headerNormalization",
+        "angleBracketFrameworkImports-v1",
+    )?;
+    for (metadata_key, pin_key) in [
+        ("gomobileCommit", "GOMOBILE_COMMIT"),
+        ("gomobileModuleSum", "GOMOBILE_MODULE_SUM"),
+    ] {
+        let expected = pins
+            .get(pin_key)
+            .ok_or_else(|| format!("required pin {pin_key} is missing"))?;
+        require_metadata(&manifest, metadata_key, expected)?;
+    }
+    for (metadata_key, pin_key) in [
+        ("platform", "LIBBOX_APPLE_PLATFORM"),
+        ("buildTags", "LIBBOX_BUILD_TAGS"),
+        ("nonMacOsTags", "LIBBOX_NON_MACOS_TAGS"),
+        ("upstreamGoModSha256", "SING_BOX_UPSTREAM_GO_MOD_SHA256"),
+        ("upstreamGoSumSha256", "SING_BOX_UPSTREAM_GO_SUM_SHA256"),
+        ("securityPatchSha256", "SING_BOX_SECURITY_PATCH_SHA256"),
+        ("rawPacketPatchSha256", "SING_BOX_RAW_PACKET_PATCH_SHA256"),
+        (
+            "dnsFailoverPatchSha256",
+            "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+        ),
+        ("patchedDiffSha256", "SING_BOX_PATCHED_DIFF_SHA256"),
+        ("combinedDiffSha256", "SING_BOX_COMBINED_DIFF_SHA256"),
+        ("patchedGoModSha256", "SING_BOX_PATCHED_GO_MOD_SHA256"),
+        ("patchedGoSumSha256", "SING_BOX_PATCHED_GO_SUM_SHA256"),
+    ] {
+        let expected = pins
+            .get(pin_key)
+            .ok_or_else(|| format!("required pin {pin_key} is missing"))?;
+        require_metadata(&manifest, metadata_key, expected)?;
+    }
+
+    let native_source_sha256 = native_build_inputs_digest(repository_root)?;
+    let xcode_version = pins
+        .get("XCODE_VERSION")
+        .ok_or_else(|| "required pin XCODE_VERSION is missing".to_string())?;
+    let xcode_build = pins
+        .get("XCODE_BUILD_VERSION")
+        .ok_or_else(|| "required pin XCODE_BUILD_VERSION is missing".to_string())?;
+    let deployment_target = pins
+        .get("MACOS_DEPLOYMENT_TARGET")
+        .ok_or_else(|| "required pin MACOS_DEPLOYMENT_TARGET is missing".to_string())?;
+    let products = repository_root.join("target/native-products");
+    for (product, artifact_kind) in [
+        ("CFWNativeBridge.framework", "native-host-bridge-v1"),
+        ("CFWProxyAgent.app", "native-proxy-agent-v1"),
+        ("CFWPacketTunnel.systemextension", "native-packet-tunnel-v1"),
+    ] {
+        let product_path = products.join(product);
+        let product_manifest_path = products.join(format!("{product}.manifest.json"));
+        let product_manifest: ArtifactManifest = read_json(&product_manifest_path)?;
+        verify_manifest(&product_path, &product_manifest)?;
+        require_metadata(&product_manifest, "artifactKind", artifact_kind)?;
+        require_metadata(
+            &product_manifest,
+            "singBoxCommit",
+            &dependency_lock.sing_box.commit,
+        )?;
+        require_metadata(&product_manifest, "architecture", "arm64")?;
+        require_metadata(&product_manifest, "configuration", "Release")?;
+        require_metadata(&product_manifest, "deploymentTarget", deployment_target)?;
+        require_metadata(
+            &product_manifest,
+            "libboxManifestSha256",
+            &libbox_manifest_sha256,
+        )?;
+        require_metadata(&product_manifest, "libboxTreeSha256", &manifest.sha256)?;
+        require_metadata(
+            &product_manifest,
+            "nativeSourceSha256",
+            &native_source_sha256,
+        )?;
+        require_metadata(&product_manifest, "xcodeVersion", xcode_version)?;
+        require_metadata(&product_manifest, "xcodeBuild", xcode_build)?;
+        match product_manifest
+            .metadata
+            .get("signingMode")
+            .map(String::as_str)
+        {
+            Some("unsigned-validation" | "developer-id") => {}
+            Some(value) => {
+                return Err(format!("unsupported native product signing mode: {value}"));
+            }
+            None => return Err("native product signingMode metadata is missing".into()),
+        }
+    }
+    let bridge_header = products.join("CFWNativeBridge.framework/Headers/CFWNativeBridge.h");
+    require_regular_file(&bridge_header)?;
+    let tombstone_root = products.join("CFWLegacyTombstone");
+    let tombstone_manifest_path = products.join("CFWLegacyTombstone.manifest.json");
+    let tombstone_manifest: ArtifactManifest = read_json(&tombstone_manifest_path)?;
+    verify_manifest(&tombstone_root, &tombstone_manifest)?;
+    require_metadata(
+        &tombstone_manifest,
+        "artifactKind",
+        "legacy-service-tombstone-v1",
+    )?;
+    let rust_version = pins
+        .get("RUST_VERSION")
+        .ok_or_else(|| "required pin RUST_VERSION is missing".to_string())?;
+    require_metadata(&tombstone_manifest, "rustVersion", rust_version)?;
+    require_file_digest_metadata(
+        &tombstone_manifest,
+        "sourceSha256",
+        &repository_root.join("crates/cfw-legacy-tombstone/src/main.rs"),
+    )?;
+    require_file_digest_metadata(
+        &tombstone_manifest,
+        "cargoManifestSha256",
+        &repository_root.join("crates/cfw-legacy-tombstone/Cargo.toml"),
+    )?;
+    require_file_digest_metadata(
+        &tombstone_manifest,
+        "cargoLockSha256",
+        &repository_root.join("Cargo.lock"),
+    )?;
+    let tombstone = tombstone_root.join("cfw-helper-tombstone");
+    require_regular_file(&tombstone)?;
+    reject_retired_helper_markers(&tombstone)?;
+    require_regular_file(
+        &repository_root
+            .join("apps/cfw-tauri-shell/macos/legacy-tombstone/com.bill.clashformac.helper.plist"),
+    )?;
+
+    println!("cargo:rustc-link-search=framework={}", products.display());
+    println!("cargo:rustc-link-lib=framework=CFWNativeBridge");
+    Ok(())
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn read_pins(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let text =
+        fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let mut pins = BTreeMap::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| format!("invalid pin at {}:{}", path.display(), index + 1))?;
+        if key.is_empty() || value.is_empty() || pins.insert(key.into(), value.into()).is_some() {
+            return Err(format!(
+                "invalid or duplicate pin at {}:{}",
+                path.display(),
+                index + 1
+            ));
+        }
+    }
+    Ok(pins)
+}
+
+fn require_pin(pins: &BTreeMap<String, String>, key: &str, expected: &str) -> Result<(), String> {
+    match pins.get(key).map(String::as_str) {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => Err(format!("pin {key} is {actual}, expected {expected}")),
+        None => Err(format!("required pin {key} is missing")),
+    }
+}
+
+fn require_metadata(manifest: &ArtifactManifest, key: &str, expected: &str) -> Result<(), String> {
+    match manifest.metadata.get(key).map(String::as_str) {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => Err(format!(
+            "artifact metadata {key} is {actual}, expected {expected}"
+        )),
+        None => Err(format!("artifact metadata {key} is missing")),
+    }
+}
+
+fn require_file_digest_metadata(
+    manifest: &ArtifactManifest,
+    key: &str,
+    path: &Path,
+) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    require_metadata(manifest, key, &sha256_hex(&bytes))
+}
+
+fn reject_retired_helper_markers(path: &Path) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    for marker in [
+        b"mihomo".as_slice(),
+        b"clash-rs".as_slice(),
+        b"clash-darwin".as_slice(),
+        b"CFW_CORE_KIND".as_slice(),
+        b"core install".as_slice(),
+        b"want_core".as_slice(),
+    ] {
+        if bytes.windows(marker.len()).any(|window| window == marker) {
+            return Err(format!(
+                "legacy tombstone contains retired supervisor marker: {}",
+                String::from_utf8_lossy(marker)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn native_build_inputs_digest(repository_root: &Path) -> Result<String, String> {
+    let mut relative_files = BTreeSet::new();
+    for relative in [
+        "native/macos/Config",
+        "native/macos/Headers",
+        "native/macos/Sources",
+        "native/macos/SystemExtension",
+        "native/macos/Dependencies.lock.json",
+        "native/macos/Package.swift",
+        "native/macos/project.yml",
+    ] {
+        collect_native_build_inputs(
+            repository_root,
+            &repository_root.join(relative),
+            &mut relative_files,
+        )?;
+    }
+
+    let mut digest = Sha256::new();
+    for relative in relative_files {
+        let path = repository_root.join(&relative);
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("read native build input {}: {error}", path.display()))?;
+        let mut entry = BTreeMap::new();
+        entry.insert("path", serde_json::Value::String(relative));
+        entry.insert("sha256", serde_json::Value::String(sha256_hex(&bytes)));
+        entry.insert("size", serde_json::Value::from(bytes.len() as u64));
+        let encoded = serde_json::to_string(&entry).map_err(|error| error.to_string())?;
+        digest.update(encoded.as_bytes());
+        digest.update(b"\n");
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn collect_native_build_inputs(
+    repository_root: &Path,
+    path: &Path,
+    output: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect native build input {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "native build input must not be a symlink: {}",
+            path.display()
+        ));
+    }
+    if metadata.file_type().is_file() {
+        let relative = path
+            .strip_prefix(repository_root)
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !output.insert(relative.clone()) {
+            return Err(format!("duplicate native build input: {relative}"));
+        }
+        return Ok(());
+    }
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "unsupported native build input: {}",
+            path.display()
+        ));
+    }
+    for entry in fs::read_dir(path)
+        .map_err(|error| format!("enumerate native build input {}: {error}", path.display()))?
+    {
+        let entry = entry.map_err(|error| format!("enumerate native build input: {error}"))?;
+        collect_native_build_inputs(repository_root, &entry.path(), output)?;
+    }
+    Ok(())
+}
+
+fn reject_source_marker(path: &Path, marker: &str) -> Result<(), String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("read release source gate {}: {error}", path.display()))?;
+    if text.contains(marker) {
+        return Err(format!(
+            "release source gate is still wired to {marker}: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn verify_manifest(root: &Path, manifest: &ArtifactManifest) -> Result<(), String> {
+    require_real_directory(root)?;
+    if manifest.algorithm != "sha256-tree-v1" {
+        return Err(format!(
+            "unsupported artifact algorithm: {}",
+            manifest.algorithm
+        ));
+    }
+    if root.file_name().and_then(|name| name.to_str()) != Some(manifest.root.as_str()) {
+        return Err("artifact manifest root name mismatch".into());
+    }
+
+    let mut actual_paths = BTreeSet::new();
+    collect_paths(root, root, &mut actual_paths)?;
+    let manifest_paths = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.path().to_string())
+        .collect::<BTreeSet<_>>();
+    if manifest_paths.len() != manifest.entries.len() || manifest_paths != actual_paths {
+        return Err("artifact entries differ from the signed tree manifest".into());
+    }
+
+    let mut tree_digest = Sha256::new();
+    for entry in &manifest.entries {
+        let relative = safe_relative_path(entry.path())?;
+        let path = root.join(relative);
+        let encoded = match entry {
+            ArtifactEntry::Directory { path: relative } => {
+                require_real_directory(&path)?;
+                serde_json::json!({ "path": relative, "type": "directory" })
+            }
+            ArtifactEntry::File {
+                path: relative,
+                size,
+                sha256,
+            } => {
+                require_regular_file(&path)?;
+                let bytes = fs::read(&path)
+                    .map_err(|error| format!("read artifact {}: {error}", path.display()))?;
+                if bytes.len() as u64 != *size || sha256_hex(&bytes) != *sha256 {
+                    return Err(format!("artifact file digest mismatch: {relative}"));
+                }
+                serde_json::json!({
+                    "path": relative,
+                    "sha256": sha256,
+                    "size": size,
+                    "type": "file",
+                })
+            }
+            ArtifactEntry::Symlink {
+                path: relative,
+                target,
+            } => {
+                safe_symlink_target(target)?;
+                let actual = fs::read_link(&path).map_err(|error| {
+                    format!("read artifact symlink {}: {error}", path.display())
+                })?;
+                if actual != Path::new(target) {
+                    return Err(format!("artifact symlink target mismatch: {relative}"));
+                }
+                serde_json::json!({ "path": relative, "target": target, "type": "symlink" })
+            }
+        };
+        let line = serde_json::to_string(&encoded).map_err(|error| error.to_string())?;
+        tree_digest.update(line.as_bytes());
+        tree_digest.update(b"\n");
+    }
+    let actual_tree_digest = tree_digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual_tree_digest != manifest.sha256 {
+        return Err("artifact tree digest mismatch".into());
+    }
+    Ok(())
+}
+
+fn safe_symlink_target(value: &str) -> Result<(), String> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!("unsafe artifact symlink target: {value}"));
+    }
+    Ok(())
+}
+
+fn collect_paths(
+    root: &Path,
+    directory: &Path,
+    output: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(directory)
+        .map_err(|error| format!("enumerate artifact {}: {error}", directory.display()))?
+    {
+        let entry = entry.map_err(|error| format!("enumerate artifact entry: {error}"))?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        output.insert(relative);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect artifact {}: {error}", path.display()))?;
+        if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+            collect_paths(root, &path, output)?;
+        }
+    }
+    Ok(())
+}
+
+fn safe_relative_path(value: &str) -> Result<&Path, String> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!("unsafe artifact manifest path: {value}"));
+    }
+    Ok(path)
+}
+
+fn require_real_directory(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect required directory {}: {error}", path.display()))?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(format!(
+            "required path is not a real directory: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn require_regular_file(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect required file {}: {error}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(format!(
+            "required path is not a regular file: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

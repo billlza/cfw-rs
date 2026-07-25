@@ -37,6 +37,10 @@ pub(crate) fn legacy_retirement_status(
     retirement.status()
 }
 
+// Tauri commands receive each renderer argument as a separate parameter, so the
+// injected handles plus the explicit confirmation flags exceed the default
+// argument threshold without any of them being removable.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub(crate) async fn disable_service_mode(
     app: AppHandle,

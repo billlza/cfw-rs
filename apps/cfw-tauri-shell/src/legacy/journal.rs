@@ -166,7 +166,7 @@ impl CutoverJournal {
             || self.legacy_gui.pid == 0
             || self.legacy_gui.start_identity.is_empty()
             || self.legacy_gui.executable
-                != PathBuf::from("/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac")
+                != Path::new("/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac")
         {
             return Err("legacy cutover journal identity is invalid".into());
         }

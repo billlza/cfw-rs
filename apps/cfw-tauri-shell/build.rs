@@ -5,6 +5,23 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+/// The candidate build lanes (`scripts/build_unsigned_candidate.sh` and
+/// `scripts/build_signed_candidate.sh`) export the immutable, candidate-scoped
+/// native product root and the native build scripts refuse any other layout.
+/// A release build of this crate reads the root from this variable only: there
+/// is no shared directory, no implicit default, and no stale-directory recovery.
+const NATIVE_PRODUCTS_OUTPUT_ENV: &str = "CFW_NATIVE_PRODUCTS_OUTPUT";
+
+/// Every native product the release bundle embeds, with its required artifact
+/// kind. The full set must be present in the candidate root; a partial set is a
+/// hard failure.
+const NATIVE_PRODUCTS: [(&str, &str); 4] = [
+    ("CFWGlobalAuthority", "native-global-authority-v1"),
+    ("CFWNativeBridge.framework", "native-host-bridge-v1"),
+    ("CFWProxyAgent.app", "native-proxy-agent-v1"),
+    ("CFWPacketTunnel.systemextension", "native-packet-tunnel-v1"),
+];
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactManifest {
@@ -110,6 +127,7 @@ fn main() {
             .join("scripts/dependency_pins.env")
             .display()
     );
+    println!("cargo:rerun-if-env-changed={NATIVE_PRODUCTS_OUTPUT_ENV}");
 
     if std::env::var("PROFILE").as_deref() == Ok("release") {
         verify_release_native_artifacts(repository_root)
@@ -322,12 +340,8 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     let deployment_target = pins
         .get("MACOS_DEPLOYMENT_TARGET")
         .ok_or_else(|| "required pin MACOS_DEPLOYMENT_TARGET is missing".to_string())?;
-    let products = repository_root.join("target/native-products");
-    for (product, artifact_kind) in [
-        ("CFWNativeBridge.framework", "native-host-bridge-v1"),
-        ("CFWProxyAgent.app", "native-proxy-agent-v1"),
-        ("CFWPacketTunnel.systemextension", "native-packet-tunnel-v1"),
-    ] {
+    let products = candidate_native_products_root(repository_root)?;
+    for (product, artifact_kind) in NATIVE_PRODUCTS {
         let product_path = products.join(product);
         let product_manifest_path = products.join(format!("{product}.manifest.json"));
         let product_manifest: ArtifactManifest = read_json(&product_manifest_path)?;
@@ -406,7 +420,81 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
 
     println!("cargo:rustc-link-search=framework={}", products.display());
     println!("cargo:rustc-link-lib=framework=CFWNativeBridge");
+    // The host executable loads the bridge from the bundle it ships in
+    // (Contents/Frameworks), never from the candidate build directory.
+    println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/../Frameworks");
     Ok(())
+}
+
+/// Resolve the candidate-scoped native product root that the release build must
+/// consume. The lane-exported `CFW_NATIVE_PRODUCTS_OUTPUT` is the only accepted
+/// input: it must be an absolute path to a real directory named
+/// `native-products` under `target/candidates/<version>/<lane>/`, and every
+/// native product manifest must already be published there. A missing variable,
+/// a non-candidate layout, or an incomplete product set fails the build.
+fn candidate_native_products_root(repository_root: &Path) -> Result<PathBuf, String> {
+    let version = std::env::var("CARGO_PKG_VERSION")
+        .map_err(|error| format!("CARGO_PKG_VERSION is unavailable: {error}"))?;
+    let candidate_root = repository_root.join(format!("target/candidates/{version}"));
+    let declared = std::env::var_os(NATIVE_PRODUCTS_OUTPUT_ENV).ok_or_else(|| {
+        format!(
+            "{NATIVE_PRODUCTS_OUTPUT_ENV} is unset: a release build must be driven by \
+             scripts/build_unsigned_candidate.sh or scripts/build_signed_candidate.sh, which \
+             publish and export the immutable candidate native product root \
+             {}/<lane>/native-products",
+            candidate_root.display()
+        )
+    })?;
+    let declared = PathBuf::from(declared);
+    if !declared.is_absolute() {
+        return Err(format!(
+            "{NATIVE_PRODUCTS_OUTPUT_ENV} must be an absolute path, found {}",
+            declared.display()
+        ));
+    }
+    require_real_directory(&declared)?;
+    let products = fs::canonicalize(&declared).map_err(|error| {
+        format!(
+            "resolve {NATIVE_PRODUCTS_OUTPUT_ENV} {}: {error}",
+            declared.display()
+        )
+    })?;
+    let candidate_root = fs::canonicalize(&candidate_root).map_err(|error| {
+        format!(
+            "resolve candidate root {}: {error}",
+            candidate_root.display()
+        )
+    })?;
+    let relative = products.strip_prefix(&candidate_root).map_err(|_| {
+        format!(
+            "{NATIVE_PRODUCTS_OUTPUT_ENV} must be candidate-scoped under {}, found {}",
+            candidate_root.display(),
+            products.display()
+        )
+    })?;
+    let lane = relative.components().collect::<Vec<_>>();
+    if lane.len() < 2
+        || lane
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || relative.file_name().and_then(|name| name.to_str()) != Some("native-products")
+    {
+        return Err(format!(
+            "{NATIVE_PRODUCTS_OUTPUT_ENV} must name <lane>/native-products under {}, found {}",
+            candidate_root.display(),
+            products.display()
+        ));
+    }
+    for (product, _) in NATIVE_PRODUCTS {
+        let manifest_path = products.join(format!("{product}.manifest.json"));
+        require_regular_file(&manifest_path).map_err(|error| {
+            format!(
+                "candidate native product root {} is incomplete: {error}",
+                products.display()
+            )
+        })?;
+    }
+    Ok(products)
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
@@ -574,19 +662,42 @@ fn reject_source_marker(path: &Path, marker: &str) -> Result<(), String> {
 }
 
 fn verify_manifest(root: &Path, manifest: &ArtifactManifest) -> Result<(), String> {
-    require_real_directory(root)?;
     if manifest.algorithm != "sha256-tree-v1" {
         return Err(format!(
             "unsupported artifact algorithm: {}",
             manifest.algorithm
         ));
     }
-    if root.file_name().and_then(|name| name.to_str()) != Some(manifest.root.as_str()) {
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("artifact path has no name: {}", root.display()))?;
+    if name != manifest.root.as_str() {
         return Err("artifact manifest root name mismatch".into());
     }
+    let file_type = fs::symlink_metadata(root)
+        .map_err(|error| format!("inspect artifact {}: {error}", root.display()))?
+        .file_type();
 
-    let mut actual_paths = BTreeSet::new();
-    collect_paths(root, root, &mut actual_paths)?;
+    // A bundle artifact hashes its tree relative to the bundle root. A bare
+    // executable product, such as the launchd Global Authority daemon, is a
+    // single-file artifact whose only entry is its own file name, so its entries
+    // resolve against the containing directory.
+    let (base, actual_paths) = if file_type.is_dir() && !file_type.is_symlink() {
+        let mut paths = BTreeSet::new();
+        collect_paths(root, root, &mut paths)?;
+        (root.to_path_buf(), paths)
+    } else if file_type.is_file() {
+        let parent = root
+            .parent()
+            .ok_or_else(|| format!("artifact has no parent directory: {}", root.display()))?;
+        (parent.to_path_buf(), BTreeSet::from([name.to_string()]))
+    } else {
+        return Err(format!(
+            "artifact is neither a real directory nor a regular file: {}",
+            root.display()
+        ));
+    };
     let manifest_paths = manifest
         .entries
         .iter()
@@ -599,7 +710,7 @@ fn verify_manifest(root: &Path, manifest: &ArtifactManifest) -> Result<(), Strin
     let mut tree_digest = Sha256::new();
     for entry in &manifest.entries {
         let relative = safe_relative_path(entry.path())?;
-        let path = root.join(relative);
+        let path = base.join(relative);
         let encoded = match entry {
             ArtifactEntry::Directory { path: relative } => {
                 require_real_directory(&path)?;

@@ -66,6 +66,26 @@
   redacted out of every returned error, event payload, and `Debug` rendering.
   With no ready engine they fail closed with the unreachable-controller error
   instead of probing an unknown listener.
+- Restore the profile-text, subscription, runtime-configuration, engine-switch,
+  and shell command surfaces as four bounded command modules. Subscriptions are
+  fetched over bounded HTTPS only, validated into the closed profile schema, and
+  projected for both modes before they can be stored; the subscription URL lives
+  inside the integrity-checked profile envelope and never appears in a profile
+  listing. The runtime-configuration preview redacts the app-owned controller
+  secret and fails closed if it survives redaction.
+- Express the System Proxy and TUN switches as engine-mode transitions through
+  the single Authority-mediated transition path, so neither switch can write a
+  system proxy, a DNS server, a route, or a network preference, and neither can
+  stop the other mode's data plane. Switches that the projection cannot honour
+  (LAN exposure, non-loopback bind address, engine log level, profile mixin) and
+  requests to write host DNS or fetch a GeoIP database now fail closed with an
+  explicit reason instead of being accepted and ignored. Legacy Clash YAML
+  profiles are reported, never converted.
+- Restore tray proxy-group switching, window, deep-link, and diagnostics
+  helpers. Tray labels and menu ids are bounded and generated, so a controller
+  response cannot inject a menu entry, and diagnostics reads
+  SystemConfiguration only: the fields the retired `networksetup`, `scutil`, and
+  `route` invocations supplied are reported as explicitly unavailable.
 
 ### Supply chain and release status
 

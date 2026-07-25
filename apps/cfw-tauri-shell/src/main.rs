@@ -9,16 +9,24 @@ use cfw_apple_network::NativeFrameworkBridge;
 use cfw_core::SettingsStore;
 use cfw_engine_api::EngineEvent;
 use commands::{
-    LiveStreams, automatic_updates_enabled, build_managed_profiles, cancel_credential_gc,
-    close_all_connections, close_connection, commit_credential_gc, controller_snapshot,
-    controller_version, delete_profile, dns_query, flush_fake_ip_cache,
-    health_check_all_proxy_providers, health_check_proxy_provider, import_profile_text,
+    LiveStreams, apply_active_profile, apply_restore_dns_servers, automatic_updates_enabled,
+    build_managed_profiles, cancel_credential_gc, close_all_connections, close_connection,
+    commit_credential_gc, controller_snapshot, controller_version, current_platform_design,
+    delete_profile, dns_query, flush_fake_ip_cache, force_quit_app, geoip_database_status,
+    health_check_all_proxy_providers, health_check_proxy_provider, import_profile_file,
+    import_profile_text, import_profile_url, migrate_legacy_cfw_profiles,
+    move_dashboard_to_nearest_monitor, network_diagnostics, open_external_url,
+    open_login_items_settings, open_page, open_profile_externally, parse_deep_links,
     preview_credential_gc, profile_credential_presence, profile_credential_requirements,
-    profiles_snapshot, providers_snapshot, provision_profile_credentials, read_settings_snapshot,
-    rules_snapshot, select_profile, select_proxy, set_launch_at_login_enabled,
-    start_connections_stream, start_log_stream, test_proxy_delays, update_all_proxy_providers,
-    update_all_rule_providers, update_proxy_provider, update_rule_provider,
-    write_settings_snapshot,
+    profile_qrcode_svg, profiles_snapshot, providers_snapshot, provision_profile_credentials,
+    read_profile_text, read_runtime_config_text, read_settings_snapshot, reapply_runtime_config,
+    refresh_tray_menu, reset_settings_snapshot, reveal_home_directory, reveal_logs_directory,
+    reveal_profile, rules_snapshot, save_profile_text, select_profile, select_proxy, set_allow_lan,
+    set_bind_address, set_launch_at_login_enabled, set_log_level, set_mixin_enabled,
+    set_proxy_mode, set_system_proxy_enabled, set_tun_enabled, start_connections_stream,
+    start_log_stream, system_proxy_state, test_proxy_delays, toggle_devtools, tun_runtime_state,
+    update_all_proxy_providers, update_all_rule_providers, update_geoip_database, update_profile,
+    update_profile_info, update_proxy_provider, update_rule_provider, write_settings_snapshot,
 };
 use engine::{
     boot_payload, build_managed_engine, engine_snapshot, prepare_legacy_cutover, set_engine_mode,
@@ -30,7 +38,8 @@ use legacy::{
 };
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
 use shell::{
-    apply_silent_start, build_app_menu, build_tray, focus_main_window, handle_app_menu_event,
+    TrayMenuState, apply_silent_start, build_app_menu, build_tray, focus_main_window,
+    handle_app_menu_event,
 };
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use updater::{
@@ -83,6 +92,7 @@ fn main() {
         .manage(LegacyRetirementGate::default())
         .manage(AppLifecycle::default())
         .manage(LiveStreams::default())
+        .manage(TrayMenuState::default())
         .manage(UpdaterSecurityState::default());
     // The explicit handoff instance must coexist with the still-running 0.3.5
     // GUI so it can validate 0.4.0 without asking the user to quit and trigger
@@ -141,6 +151,44 @@ fn main() {
             close_all_connections,
             dns_query,
             flush_fake_ip_cache,
+            read_profile_text,
+            save_profile_text,
+            read_runtime_config_text,
+            reapply_runtime_config,
+            apply_active_profile,
+            import_profile_url,
+            import_profile_file,
+            update_profile,
+            update_profile_info,
+            profile_qrcode_svg,
+            reveal_profile,
+            open_profile_externally,
+            geoip_database_status,
+            update_geoip_database,
+            migrate_legacy_cfw_profiles,
+            set_system_proxy_enabled,
+            system_proxy_state,
+            set_tun_enabled,
+            tun_runtime_state,
+            set_proxy_mode,
+            set_allow_lan,
+            set_bind_address,
+            set_log_level,
+            set_mixin_enabled,
+            apply_restore_dns_servers,
+            reset_settings_snapshot,
+            current_platform_design,
+            open_external_url,
+            open_page,
+            reveal_home_directory,
+            reveal_logs_directory,
+            open_login_items_settings,
+            move_dashboard_to_nearest_monitor,
+            refresh_tray_menu,
+            toggle_devtools,
+            force_quit_app,
+            parse_deep_links,
+            network_diagnostics,
         ])
         .setup(|app| {
             let native_bridge = NativeFrameworkBridge::load();

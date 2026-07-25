@@ -20,6 +20,7 @@ use objc2_system_configuration::{
 };
 
 use crate::legacy_proxy::{LegacyProxyCutoverPlan, LegacyProxyServiceIdentity};
+use crate::network_observation::{NetworkProxyProtocolObservation, NetworkServiceObservation};
 
 const PREFS_NAME: &str = "com.bill.clashformac.legacy-cutover";
 const MAX_SERVICES: usize = 64;
@@ -269,6 +270,91 @@ fn read_observation(service: &SCNetworkService) -> Result<ProxyObservation> {
             unsafe { kSCPropNetProxiesProxyAutoDiscoveryEnable },
             "proxy auto-discovery",
         )?,
+    })
+}
+
+/// Read-only diagnostics view of the current network set.
+///
+/// Unlike [`read_observation`], a service that carries no Proxies protocol or no
+/// proxy configuration is reported as "nothing enabled" instead of failing, so a
+/// single unusual service cannot make diagnostics unavailable. Nothing here
+/// writes, commits, or applies preferences.
+pub(crate) fn observe_network_services() -> Result<Vec<NetworkServiceObservation>> {
+    let session = PreferencesSession::open()?;
+    let services = current_services(&session.preferences)?;
+    let mut observations = Vec::with_capacity(services.len());
+    for (order, service) in services.iter().enumerate() {
+        let id = service_id(service)?;
+        let display_name = service_name(service, &id)?;
+        let configuration = service
+            .protocol(unsafe { kSCNetworkProtocolTypeProxies })
+            .and_then(|protocol| protocol.configuration());
+        let Some(configuration) = configuration else {
+            observations.push(NetworkServiceObservation {
+                service_id: id,
+                display_name,
+                order,
+                web: NetworkProxyProtocolObservation::default(),
+                secure_web: NetworkProxyProtocolObservation::default(),
+                socks: NetworkProxyProtocolObservation::default(),
+                pac_enabled: false,
+                wpad_enabled: false,
+            });
+            continue;
+        };
+        let configuration = as_config_dict(&configuration);
+        observations.push(NetworkServiceObservation {
+            service_id: id,
+            display_name,
+            order,
+            web: observe_protocol(
+                configuration,
+                unsafe { kSCPropNetProxiesHTTPEnable },
+                unsafe { kSCPropNetProxiesHTTPProxy },
+                unsafe { kSCPropNetProxiesHTTPPort },
+                "HTTP proxy",
+            )?,
+            secure_web: observe_protocol(
+                configuration,
+                unsafe { kSCPropNetProxiesHTTPSEnable },
+                unsafe { kSCPropNetProxiesHTTPSProxy },
+                unsafe { kSCPropNetProxiesHTTPSPort },
+                "HTTPS proxy",
+            )?,
+            socks: observe_protocol(
+                configuration,
+                unsafe { kSCPropNetProxiesSOCKSEnable },
+                unsafe { kSCPropNetProxiesSOCKSProxy },
+                unsafe { kSCPropNetProxiesSOCKSPort },
+                "SOCKS proxy",
+            )?,
+            pac_enabled: enabled_flag(
+                configuration,
+                unsafe { kSCPropNetProxiesProxyAutoConfigEnable },
+                "PAC proxy configuration",
+            )?,
+            wpad_enabled: enabled_flag(
+                configuration,
+                unsafe { kSCPropNetProxiesProxyAutoDiscoveryEnable },
+                "proxy auto-discovery",
+            )?,
+        });
+    }
+    Ok(observations)
+}
+
+fn observe_protocol(
+    dict: &ConfigDict,
+    enable: &CFString,
+    host: &CFString,
+    port: &CFString,
+    label: &str,
+) -> Result<NetworkProxyProtocolObservation> {
+    let state = read_protocol(dict, enable, host, port, label)?;
+    Ok(NetworkProxyProtocolObservation {
+        enabled: state.enabled,
+        server: state.server,
+        port: state.port,
     })
 }
 

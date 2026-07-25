@@ -82,12 +82,12 @@ pub(crate) enum ControllerCommandError {
 impl ControllerCommandError {
     /// Renders the failure for IPC. Redaction is applied here so no path can
     /// return a message that still carries the controller secret.
-    fn to_ipc(&self) -> String {
+    pub(super) fn to_ipc(&self) -> String {
         redact_controller_secret(&self.to_string())
     }
 }
 
-fn ipc_error(error: impl Into<ControllerCommandError>) -> String {
+pub(super) fn ipc_error(error: impl Into<ControllerCommandError>) -> String {
     error.into().to_ipc()
 }
 
@@ -173,12 +173,17 @@ fn client_for_endpoint(
 }
 
 /// The one way a command obtains a controller client.
-fn controller_client(engine: &ManagedEngine) -> Result<ControllerClient, ControllerCommandError> {
+pub(super) fn controller_client(
+    engine: &ManagedEngine,
+) -> Result<ControllerClient, ControllerCommandError> {
     require_running_controller(&engine.coordinator.snapshot())?;
     client_for_endpoint(engine.controller_access().client_endpoint())
 }
 
-fn client_from_app(app: &AppHandle) -> Result<ControllerClient, String> {
+/// Controller client of the engine this process started, resolved from an app
+/// handle. Shared with the tray, which reads proxy groups and applies a
+/// selection the controller itself reported.
+pub(crate) fn client_from_app(app: &AppHandle) -> Result<ControllerClient, String> {
     controller_client(&app.state::<ManagedEngine>()).map_err(|error| error.to_ipc())
 }
 

@@ -9,10 +9,15 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    MAX_ENVELOPE_BYTES, MAX_PROFILE_NAME_CHARS, PROFILE_FILE_SUFFIX, PROFILE_SCHEMA_VERSION,
-    ProfileError,
+    MAX_ENVELOPE_BYTES, MAX_PROFILE_NAME_CHARS, MAX_SOURCE_URL_BYTES, MIN_SOURCE_URL_CHARS,
+    PROFILE_FILE_SUFFIX, PROFILE_SCHEMA_VERSION, ProfileError,
 };
 
+/// On-disk profile envelope.
+///
+/// `source_url` is appended last and skipped when absent, so an envelope written
+/// before subscriptions existed re-serializes to exactly its stored bytes and
+/// still satisfies the canonical-form check in [`decode`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileEnvelope {
@@ -22,12 +27,15 @@ struct ProfileEnvelope {
     profile: Value,
     digest: String,
     created_epoch_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_url: Option<String>,
 }
 
 pub(crate) struct DecodedEnvelope {
     pub(crate) name: String,
     pub(crate) digest: String,
     pub(crate) created_epoch_secs: u64,
+    pub(crate) source_url: Option<String>,
     pub(crate) profile: ValidatedSingBoxProfile,
 }
 
@@ -35,6 +43,18 @@ pub(crate) fn encode(
     id: &str,
     name: &str,
     profile: &ValidatedSingBoxProfile,
+    source_url: Option<&str>,
+) -> Result<Vec<u8>, ProfileError> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    encode_with_timestamp(id, name, profile, source_url, now)
+}
+
+pub(crate) fn encode_with_timestamp(
+    id: &str,
+    name: &str,
+    profile: &ValidatedSingBoxProfile,
+    source_url: Option<&str>,
+    created_epoch_secs: u64,
 ) -> Result<Vec<u8>, ProfileError> {
     let envelope = ProfileEnvelope {
         schema_version: PROFILE_SCHEMA_VERSION,
@@ -42,7 +62,11 @@ pub(crate) fn encode(
         name: name.to_string(),
         profile: serde_json::from_str(profile.as_json())?,
         digest: profile.digest().to_string(),
-        created_epoch_secs: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        created_epoch_secs,
+        source_url: source_url
+            .map(normalize_source_url)
+            .transpose()?
+            .map(ToOwned::to_owned),
     };
     let bytes = serde_json::to_vec(&envelope)?;
     if bytes.len() > MAX_ENVELOPE_BYTES {
@@ -94,6 +118,11 @@ pub(crate) fn decode(expected_id: &str, mut file: File) -> Result<DecodedEnvelop
     if normalize_name(&envelope.name)? != envelope.name {
         return Err(ProfileError::InvalidName);
     }
+    if let Some(source_url) = envelope.source_url.as_deref()
+        && normalize_source_url(source_url)? != source_url
+    {
+        return Err(ProfileError::InvalidSourceUrl);
+    }
     if serde_json::to_vec(&envelope)? != bytes {
         return Err(ProfileError::NonCanonicalEnvelope(expected_id.to_string()));
     }
@@ -108,6 +137,7 @@ pub(crate) fn decode(expected_id: &str, mut file: File) -> Result<DecodedEnvelop
         name: envelope.name,
         digest: envelope.digest,
         created_epoch_secs: envelope.created_epoch_secs,
+        source_url: envelope.source_url,
         profile,
     })
 }
@@ -127,6 +157,25 @@ pub(crate) fn normalize_name(name: &str) -> Result<String, ProfileError> {
         return Err(ProfileError::InvalidName);
     }
     Ok(name.to_string())
+}
+
+/// Accepts only a bounded, whitespace-free `https` subscription URL.
+///
+/// The repository treats the value as opaque text: it never fetches it. Plain
+/// HTTP is rejected here as well as at fetch time, so a stored profile can never
+/// carry a URL the product would refuse to refresh.
+pub(crate) fn normalize_source_url(url: &str) -> Result<&str, ProfileError> {
+    if url.trim() != url
+        || url.len() < MIN_SOURCE_URL_CHARS
+        || url.len() > MAX_SOURCE_URL_BYTES
+        || url.chars().any(|character| {
+            character.is_control() || character.is_whitespace() || character == '"'
+        })
+        || !url.starts_with("https://")
+    {
+        return Err(ProfileError::InvalidSourceUrl);
+    }
+    Ok(url)
 }
 
 pub(crate) fn validate_profile_id(id: &str) -> Result<&str, ProfileError> {

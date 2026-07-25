@@ -11,12 +11,14 @@ mod launchctl;
 mod legacy_proxy;
 mod legacy_service;
 mod login_item;
+mod network_observation;
 
 #[cfg(target_os = "macos")]
 mod sysproxy_sc;
 
 pub use legacy_proxy::{LegacyProxyCutoverPlan, LegacyProxyServiceIdentity};
 pub use legacy_service::LegacyServiceRetirement;
+pub use network_observation::{NetworkProxyProtocolObservation, NetworkServiceObservation};
 
 /// Registration state reported by `SMAppService`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

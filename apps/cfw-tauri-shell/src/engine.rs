@@ -30,6 +30,25 @@ pub(crate) use cutover::{
     CutoverAuthority, prepare_legacy_cutover, run_native_preflight, validate_outcome_binding,
 };
 
+/// Maps an independent 0.3.5-style on/off switch onto the mutually exclusive
+/// 0.4.0 engine modes.
+///
+/// `None` means "no transition": turning a switch off that does not own the
+/// current desired mode must not stop the other mode's data plane, and turning
+/// on a mode that is already desired must not restart it.
+pub(crate) fn switch_transition(
+    desired_mode: EngineMode,
+    switch: EngineMode,
+    enabled: bool,
+) -> Option<EngineMode> {
+    debug_assert_ne!(switch, EngineMode::Off, "a switch owns a real mode");
+    match (enabled, desired_mode == switch) {
+        (true, false) => Some(switch),
+        (false, true) => Some(EngineMode::Off),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 pub(crate) struct EngineCapabilities {
     system_proxy: bool,
@@ -43,6 +62,14 @@ pub(crate) struct EngineStatusPayload {
     cutover_ready: bool,
     cutover_unavailable_reason: Option<String>,
     unavailable_reason: Option<String>,
+}
+
+impl EngineStatusPayload {
+    /// Why the replacement network is unavailable, when it is. Callers report
+    /// it verbatim; it never carries an endpoint or a secret.
+    pub(crate) fn unavailable_reason(&self) -> Option<&str> {
+        self.unavailable_reason.as_deref()
+    }
 }
 
 pub(crate) struct ManagedEngine {
@@ -130,7 +157,7 @@ impl ManagedEngine {
         self.cutover.take(receipt_id, Instant::now())
     }
 
-    fn status_payload(
+    pub(crate) fn status_payload(
         &self,
         retirement: &LegacyRetirementGate,
     ) -> Result<EngineStatusPayload, String> {
@@ -278,6 +305,23 @@ pub(crate) async fn set_engine_mode(
     profiles: State<'_, ManagedProfiles>,
     mode: EngineMode,
 ) -> Result<EngineStatusPayload, String> {
+    apply_engine_mode(&engine, &retirement, &profiles, mode).await
+}
+
+/// The single in-process path to a mode transition.
+///
+/// Every renderer entry point that changes what the data plane is doing — the
+/// explicit mode command, the restored System Proxy and TUN switches, and the
+/// profile reapply commands — funnels through here, so the maintenance lease,
+/// the legacy-retirement gate, the capability check, the selected-profile
+/// requirement, and the app-owned engine settings are applied exactly once and
+/// cannot be skipped by adding another command later.
+pub(crate) async fn apply_engine_mode(
+    engine: &ManagedEngine,
+    retirement: &LegacyRetirementGate,
+    profiles: &ManagedProfiles,
+    mode: EngineMode,
+) -> Result<EngineStatusPayload, String> {
     let _mode_lease = engine
         .begin_mode_change(mode)
         .map_err(|error| error.to_string())?;
@@ -292,7 +336,7 @@ pub(crate) async fn set_engine_mode(
         .set_mode(mode, profile, engine.engine_settings().clone())
         .await
         .map_err(|error| error.to_string())?;
-    engine.status_payload(&retirement)
+    engine.status_payload(retirement)
 }
 
 fn selected_profile_for_mode(

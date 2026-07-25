@@ -7,8 +7,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::envelope::{
-    decode, encode, normalize_name, profile_file_name, profile_id_from_file_name,
-    validate_profile_id,
+    decode, encode, encode_with_timestamp, normalize_name, profile_file_name,
+    profile_id_from_file_name, validate_profile_id,
 };
 use crate::selection::{ProfileSelection, decode as decode_selection, encode as encode_selection};
 use crate::storage::RepositoryDirectory;
@@ -38,6 +38,12 @@ pub struct ProfileRecord {
 pub struct StoredProfile {
     pub record: ProfileRecord,
     pub profile: ValidatedSingBoxProfile,
+    /// Subscription URL this profile was fetched from, when it has one.
+    ///
+    /// It is deliberately absent from [`ProfileRecord`], so listing profiles
+    /// cannot publish a token-bearing URL: only an explicit single-profile load
+    /// can reach it.
+    pub source_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -127,6 +133,19 @@ impl ProfileRepository {
         name: Option<&str>,
         profile: &ValidatedSingBoxProfile,
     ) -> Result<ProfileImportResult, ProfileError> {
+        self.import_with_source(name, profile, None)
+    }
+
+    /// Imports a profile together with the subscription URL it came from.
+    ///
+    /// The URL is stored as opaque bounded text. This crate never fetches it;
+    /// refreshing a subscription is the caller's transport decision.
+    pub fn import_with_source(
+        &self,
+        name: Option<&str>,
+        profile: &ValidatedSingBoxProfile,
+        source_url: Option<&str>,
+    ) -> Result<ProfileImportResult, ProfileError> {
         let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
         directory.lock_exclusive()?;
         directory.recover_owned_temporaries()?;
@@ -143,7 +162,7 @@ impl ProfileRepository {
         ensure_entry_capacity(existing.records.len())?;
         let id = Uuid::new_v4().hyphenated().to_string();
         let name = normalize_name(name.unwrap_or("Local profile"))?;
-        let bytes = encode(&id, &name, profile)?;
+        let bytes = encode(&id, &name, profile, source_url)?;
         ensure_repository_bytes(existing.stored_bytes, bytes.len())?;
         directory.write_new_atomic(&profile_file_name(&id), &bytes)?;
         Ok(ProfileImportResult {
@@ -154,8 +173,122 @@ impl ProfileRepository {
         })
     }
 
+    /// Replaces the document of an existing profile in place.
+    ///
+    /// The identity stays stable so an edited or re-fetched subscription keeps
+    /// its credentials and its selection. When the replaced profile is the
+    /// selected one, its selection metadata is rebound to the new digest under
+    /// the same exclusive lock, so no reader can observe the digest mismatch
+    /// that a bare profile rewrite would create.
+    pub fn replace(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        profile: &ValidatedSingBoxProfile,
+        source_url: Option<&str>,
+    ) -> Result<ProfileImportResult, ProfileError> {
+        let id = validate_profile_id(id)?;
+        let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+        let existing = self.read_all(&directory)?;
+        let file = directory.open_profile_file(id)?;
+        let replaced_bytes = file.metadata()?.len();
+        let current = self.decode(id, file)?;
+        let mut prospective_references = existing.live_references.clone();
+        for reference in current.profile.credential_references() {
+            prospective_references.remove(&reference);
+        }
+        prospective_references.extend(profile.credential_references());
+        ensure_credential_reference_capacity(prospective_references.len())?;
+        let name = match name {
+            Some(name) => normalize_name(name)?,
+            None => current.record.name.clone(),
+        };
+        let bytes = encode(id, &name, profile, source_url)?;
+        ensure_repository_bytes(
+            existing.stored_bytes.saturating_sub(replaced_bytes),
+            bytes.len(),
+        )?;
+        let selection = existing
+            .selection
+            .as_ref()
+            .filter(|selection| selection.profile_id() == id)
+            .map(|_| ProfileSelection::new(id, profile.digest()))
+            .transpose()?;
+        directory.write_replace_atomic(&profile_file_name(id), &bytes)?;
+        if let Some(selection) = selection {
+            directory.write_replace_atomic(SELECTION_FILE_NAME, &encode_selection(&selection)?)?;
+        }
+        Ok(ProfileImportResult {
+            id: id.to_owned(),
+            name,
+            bytes: profile.as_json().len(),
+            digest: profile.digest().to_string(),
+        })
+    }
+
+    /// Renames a profile and/or rebinds its subscription URL without touching
+    /// the validated document, so neither the digest nor the selection changes.
+    pub fn update_metadata(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        source_url: Option<&str>,
+    ) -> Result<ProfileRecord, ProfileError> {
+        let id = validate_profile_id(id)?;
+        let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
+        directory.lock_exclusive()?;
+        directory.recover_owned_temporaries()?;
+        let existing = self.read_all(&directory)?;
+        let file = directory.open_profile_file(id)?;
+        let replaced_bytes = file.metadata()?.len();
+        let current = self.decode(id, file)?;
+        let name = match name {
+            Some(name) => normalize_name(name)?,
+            None => current.record.name.clone(),
+        };
+        // The document and its creation time are preserved: renaming or
+        // rebinding a subscription URL is not an update of the profile itself.
+        let bytes = encode_with_timestamp(
+            id,
+            &name,
+            &current.profile,
+            source_url,
+            current.record.created_epoch_secs,
+        )?;
+        ensure_repository_bytes(
+            existing.stored_bytes.saturating_sub(replaced_bytes),
+            bytes.len(),
+        )?;
+        directory.write_replace_atomic(&profile_file_name(id), &bytes)?;
+        let mut record = current.record;
+        record.name = name;
+        Ok(record)
+    }
+
     pub fn list(&self) -> Result<Vec<ProfileRecord>, ProfileError> {
         self.snapshot().map(|snapshot| snapshot.profiles)
+    }
+
+    /// Repository entry name of an existing profile.
+    ///
+    /// This is the only path from a profile id to a filesystem name. It returns
+    /// the bare entry name, never a full path, so a caller can reveal or open
+    /// the stored envelope without being able to construct a name the repository
+    /// would not accept.
+    pub fn profile_entry_name(&self, id: &str) -> Result<Option<String>, ProfileError> {
+        let id = validate_profile_id(id)?;
+        let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
+            return Ok(None);
+        };
+        directory.lock_exclusive()?;
+        let file_name = profile_file_name(id);
+        if directory.entry_exists(&file_name)? {
+            Ok(Some(file_name))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn snapshot(&self) -> Result<ProfileRepositorySnapshot, ProfileError> {
@@ -449,6 +582,7 @@ impl ProfileRepository {
     fn decode(&self, id: &str, file: File) -> Result<StoredProfile, ProfileError> {
         let decoded = decode(id, file)?;
         Ok(StoredProfile {
+            source_url: decoded.source_url,
             record: ProfileRecord {
                 id: id.to_string(),
                 name: decoded.name,

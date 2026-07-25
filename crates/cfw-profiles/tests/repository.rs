@@ -536,3 +536,239 @@ fn explicit_selection_can_repair_stale_metadata() {
 
     fs::remove_dir_all(root).expect("remove test directory");
 }
+
+#[test]
+fn subscription_url_survives_a_round_trip_and_is_bounded() {
+    let (root, repository) = repository("subscription-round-trip");
+    let imported = repository
+        .import_with_source(
+            Some("Remote"),
+            &profile(),
+            Some("https://example.com/sub?token=t"),
+        )
+        .expect("import remote profile");
+    let stored = repository
+        .load(&imported.id)
+        .expect("load profile")
+        .expect("stored profile");
+    assert_eq!(
+        stored.source_url.as_deref(),
+        Some("https://example.com/sub?token=t")
+    );
+
+    // A local import has no subscription URL, and the listing never carries one.
+    let local = repository
+        .import(Some("Local"), &profile())
+        .expect("import local profile");
+    assert_eq!(
+        repository
+            .load(&local.id)
+            .expect("load local")
+            .expect("stored local")
+            .source_url,
+        None
+    );
+    let listed = serde_json::to_string(&repository.list().expect("list profiles"))
+        .expect("serialize records");
+    assert!(!listed.contains("token=t"));
+    assert!(!listed.contains("source_url"));
+
+    for rejected in [
+        "not-a-url",
+        "http://example.com/sub",
+        "https://example.com/ sub",
+        " https://example.com/sub",
+    ] {
+        assert!(
+            matches!(
+                repository.import_with_source(Some("Rejected"), &profile(), Some(rejected)),
+                Err(ProfileError::InvalidSourceUrl)
+            ),
+            "accepted invalid subscription URL: {rejected}"
+        );
+    }
+    let oversized = format!("https://example.com/{}", "a".repeat(2_048));
+    assert!(matches!(
+        repository.import_with_source(Some("Oversized"), &profile(), Some(&oversized)),
+        Err(ProfileError::InvalidSourceUrl)
+    ));
+
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn envelopes_written_before_subscriptions_existed_are_still_canonical() {
+    let (root, repository) = repository("legacy-envelope");
+    let imported = repository
+        .import(Some("Legacy"), &profile())
+        .expect("import profile");
+    let path = stored_path(&root, &imported.id);
+    let bytes = fs::read(&path).expect("read envelope");
+    let rendered = String::from_utf8(bytes).expect("utf-8 envelope");
+    assert!(
+        !rendered.contains("source_url"),
+        "an absent subscription URL must not be written"
+    );
+
+    // The unchanged bytes must still decode, so an installation created before
+    // this field existed keeps working.
+    let stored = repository
+        .load(&imported.id)
+        .expect("load legacy envelope")
+        .expect("stored profile");
+    assert_eq!(stored.source_url, None);
+    assert_eq!(stored.record.name, "Legacy");
+
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn replace_keeps_identity_credentials_and_rebinds_the_selection_digest() {
+    let (root, repository) = repository("replace");
+    let imported = repository
+        .import_with_source(
+            Some("Remote"),
+            &credential_profile("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            Some("https://example.com/sub"),
+        )
+        .expect("import remote profile");
+    repository.select(&imported.id).expect("select profile");
+
+    let replacement = credential_profile("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    let saved = repository
+        .replace(
+            &imported.id,
+            None,
+            &replacement,
+            Some("https://example.com/sub2"),
+        )
+        .expect("replace profile");
+    assert_eq!(saved.id, imported.id, "identity must be stable");
+    assert_eq!(saved.name, "Remote", "the name is preserved by default");
+    assert_eq!(saved.digest, replacement.digest());
+
+    // The selection is rebound under the same lock, so the repository is
+    // readable and the selected profile is the replacement.
+    let selected = repository
+        .load_selected()
+        .expect("load selection after replace")
+        .expect("selected profile");
+    assert_eq!(selected.record.id, imported.id);
+    assert_eq!(selected.record.digest, replacement.digest());
+    assert_eq!(
+        selected.source_url.as_deref(),
+        Some("https://example.com/sub2")
+    );
+    assert_eq!(
+        selected.profile.credential_references(),
+        replacement.credential_references()
+    );
+    assert_eq!(
+        repository
+            .credential_snapshot()
+            .expect("credential snapshot")
+            .live_references,
+        replacement.credential_references(),
+        "the replaced document's credential references are no longer live"
+    );
+
+    // Only one entry plus the selection exists: replacing never adds a profile.
+    let entries = fs::read_dir(root.join("profiles"))
+        .expect("read profiles")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("entries");
+    assert_eq!(entries.len(), 2);
+
+    assert!(matches!(
+        repository.replace(
+            "34db18b6-9903-4e9f-8854-15648e19e4f3",
+            None,
+            &profile(),
+            None
+        ),
+        Err(ProfileError::Io(_))
+    ));
+    assert!(matches!(
+        repository.replace("not-a-uuid", None, &profile(), None),
+        Err(ProfileError::InvalidProfileId(_))
+    ));
+
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn metadata_updates_change_no_document_digest_or_selection() {
+    let (root, repository) = repository("metadata");
+    let imported = repository
+        .import(Some("Original"), &profile())
+        .expect("import profile");
+    repository.select(&imported.id).expect("select profile");
+    let before = repository
+        .load(&imported.id)
+        .expect("load profile")
+        .expect("stored profile");
+
+    let renamed = repository
+        .update_metadata(
+            &imported.id,
+            Some(" Renamed "),
+            Some("https://example.com/sub"),
+        )
+        .expect("update metadata");
+    assert_eq!(renamed.name, "Renamed");
+    assert_eq!(renamed.digest, before.record.digest);
+    assert_eq!(
+        renamed.created_epoch_secs, before.record.created_epoch_secs,
+        "renaming is not an update of the profile itself"
+    );
+
+    let after = repository
+        .load_selected()
+        .expect("load selection")
+        .expect("selected profile");
+    assert_eq!(after.record.id, imported.id);
+    assert_eq!(after.record.name, "Renamed");
+    assert_eq!(after.source_url.as_deref(), Some("https://example.com/sub"));
+
+    // Clearing the subscription URL is allowed and keeps the profile intact.
+    repository
+        .update_metadata(&imported.id, None, None)
+        .expect("clear subscription");
+    let cleared = repository
+        .load(&imported.id)
+        .expect("load profile")
+        .expect("stored profile");
+    assert_eq!(cleared.source_url, None);
+    assert_eq!(cleared.record.name, "Renamed");
+    assert_eq!(cleared.record.digest, before.record.digest);
+
+    assert!(matches!(
+        repository.update_metadata(&imported.id, Some("bad/name"), None),
+        Err(ProfileError::InvalidName)
+    ));
+
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn profile_entry_name_resolves_only_existing_canonical_ids() {
+    let (root, repository) = repository("entry-name");
+    let imported = repository
+        .import(Some("Local"), &profile())
+        .expect("import profile");
+    assert_eq!(
+        repository
+            .profile_entry_name(&imported.id)
+            .expect("entry name"),
+        Some(format!("{}.profile.json", imported.id))
+    );
+    assert_eq!(
+        repository
+            .profile_entry_name("34db18b6-9903-4e9f-8854-15648e19e4f3")
+            .expect("absent profile"),
+        None
+    );
+    assert!(repository.profile_entry_name("../escape").is_err());
+
+    fs::remove_dir_all(root).expect("remove test directory");
+}

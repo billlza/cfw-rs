@@ -28,6 +28,11 @@ const SELECTION_SCHEMA_VERSION: u16 = 1;
 const SELECTION_FILE_NAME: &str = "selected-profile-v1.json";
 const MAX_SELECTION_BYTES: usize = 1_024;
 const MAX_PROFILE_NAME_CHARS: usize = 256;
+/// Shortest string that can still be an absolute `https` URL with a host.
+const MIN_SOURCE_URL_CHARS: usize = "https://a".len();
+/// Subscription URLs are stored verbatim inside the bounded envelope, so they
+/// are capped well below the envelope limit.
+const MAX_SOURCE_URL_BYTES: usize = 2_048;
 const MAX_REPOSITORY_ENTRIES: usize = 4_096;
 const MAX_REPOSITORY_CREDENTIAL_REFERENCES: usize = 512;
 const MAX_REPOSITORY_BYTES: u64 = 256 * 1024 * 1024;
@@ -52,6 +57,10 @@ pub enum ProfileError {
     InvalidName,
     #[error("profile id is not a canonical UUID: {0}")]
     InvalidProfileId(String),
+    #[error(
+        "subscription URL must be a bounded https URL of at most {MAX_SOURCE_URL_BYTES} bytes without whitespace"
+    )]
+    InvalidSourceUrl,
     #[error("profile repository path contains a NUL byte")]
     InvalidRepositoryPath,
     #[error("profile repository is not an effective-user-owned real directory")]

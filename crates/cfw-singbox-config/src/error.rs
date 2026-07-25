@@ -36,6 +36,8 @@ pub enum ConfigError {
     TooComplex { maximum: usize },
     #[error("mixed proxy port must be between 1 and 65535")]
     InvalidMixedPort,
+    #[error("controller port {0} must be at least 1024 and must not reuse the mixed proxy port")]
+    InvalidControllerPort(u16),
     #[error("tunnel MTU must be between 1280 and 9000, got {0}")]
     InvalidTunnelMtu(u16),
     #[error("tunnel bootstrap DNS servers are invalid: {0}")]

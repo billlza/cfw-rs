@@ -3,6 +3,7 @@
 //! The application owns listeners, logging, experimental APIs, and privileged
 //! selectors. Imported profiles may only describe routing and outbound policy.
 
+mod controller;
 mod credentials;
 mod error;
 mod profile;
@@ -11,6 +12,9 @@ mod profile_validation;
 mod projection;
 mod validation;
 
+pub use controller::{
+    CLASH_API_ADDRESS, ClashApiEndpoint, DEFAULT_CLASH_API_PORT, MIN_CLASH_API_PORT,
+};
 pub use credentials::{
     CredentialKind, CredentialRef, CredentialSecret, CredentialSlot, CredentialSlotError,
     CredentialTarget, InvalidCredentialRef, InvalidCredentialSecret, MAX_CREDENTIAL_SLOTS,

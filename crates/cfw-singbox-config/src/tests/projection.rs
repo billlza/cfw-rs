@@ -2,8 +2,8 @@ use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::{
-    AuthenticatedDnsServer, CredentialSlot, EngineSettings, ProjectionMode, TUNNEL_ADDRESS_PLAN,
-    ValidatedSingBoxProfile,
+    AuthenticatedDnsServer, ConfigError, CredentialSlot, DEFAULT_CLASH_API_PORT, EngineSettings,
+    MIN_CLASH_API_PORT, ProjectionMode, TUNNEL_ADDRESS_PLAN, ValidatedSingBoxProfile,
 };
 
 const SS_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -108,6 +108,105 @@ fn projections_have_exactly_one_application_owned_inbound() {
         })
     );
     assert_ne!(proxy.digest(), tunnel.digest());
+}
+
+#[test]
+fn application_injects_the_loopback_controller_that_profiles_may_never_supply() {
+    // `experimental` stays forbidden for imported profiles at the top level and
+    // at any depth, so the controller can only come from this projection.
+    assert_eq!(
+        ValidatedSingBoxProfile::parse(
+            r#"{"experimental":{"clash_api":{"external_controller":"0.0.0.0:9090"}}}"#
+        )
+        .expect_err("profiles must not carry experimental options"),
+        ConfigError::UnsupportedTopLevelKey("experimental".into())
+    );
+    assert!(matches!(
+        ValidatedSingBoxProfile::parse(
+            r#"{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"experimental":{"clash_api":{}}}}"#
+        )
+        .expect_err("nested experimental options must stay forbidden"),
+        ConfigError::ForbiddenKey { key, .. } if key == "experimental"
+    ));
+
+    let settings = EngineSettings::default();
+    let endpoint = settings.clash_api_endpoint().expect("default endpoint");
+    let profile = ValidatedSingBoxProfile::direct();
+    for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
+        let projected = profile.project(mode, &settings).expect("projection");
+        let config: serde_json::Value =
+            serde_json::from_str(projected.as_json()).expect("projected config");
+        let clash_api = &config["experimental"]["clash_api"];
+        assert_eq!(
+            clash_api["external_controller"],
+            serde_json::json!(format!("127.0.0.1:{DEFAULT_CLASH_API_PORT}"))
+        );
+        let secret = clash_api["secret"].as_str().expect("controller secret");
+        assert_eq!(secret.len(), 64);
+        assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(secret, endpoint.expose_secret());
+        assert_eq!(projected.clash_api(), endpoint);
+        assert_eq!(endpoint.address(), Ipv4Addr::LOCALHOST);
+        assert!(endpoint.address().is_loopback());
+        assert_eq!(
+            clash_api.as_object().expect("clash_api object").len(),
+            2,
+            "the injected block stays minimal"
+        );
+        // The secret must not leak through diagnostics.
+        let rendered = format!("{projected:?}");
+        assert!(!rendered.contains(secret));
+        assert!(format!("{endpoint:?}").contains("[REDACTED]"));
+    }
+}
+
+#[test]
+fn controller_port_is_taken_from_settings_and_stays_bounded() {
+    let profile = ValidatedSingBoxProfile::direct();
+    let baseline = profile
+        .project(ProjectionMode::Tunnel, &EngineSettings::default())
+        .expect("baseline tunnel");
+    let moved_settings = EngineSettings {
+        controller_port: 19_090,
+        ..EngineSettings::default()
+    };
+    let moved = profile
+        .project(ProjectionMode::Tunnel, &moved_settings)
+        .expect("relocated controller tunnel");
+    assert_eq!(
+        moved.clash_api().external_controller(),
+        "127.0.0.1:19090".to_owned()
+    );
+    assert_ne!(baseline.as_json(), moved.as_json());
+    assert_ne!(
+        baseline.configuration_digest(),
+        moved.configuration_digest()
+    );
+    assert_ne!(baseline.digest(), moved.digest());
+
+    for port in [
+        0,
+        80,
+        MIN_CLASH_API_PORT - 1,
+        EngineSettings::default().mixed_port,
+    ] {
+        let settings = EngineSettings {
+            controller_port: port,
+            ..EngineSettings::default()
+        };
+        assert_eq!(
+            settings.clash_api_endpoint().expect_err("bounded port"),
+            ConfigError::InvalidControllerPort(port)
+        );
+        for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
+            assert_eq!(
+                profile
+                    .project(mode, &settings)
+                    .expect_err("projection refuses an unusable controller port"),
+                ConfigError::InvalidControllerPort(port)
+            );
+        }
+    }
 }
 
 #[test]

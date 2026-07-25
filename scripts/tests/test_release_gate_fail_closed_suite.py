@@ -200,6 +200,10 @@ _PINNED_INPUTS = (
     "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch",
     "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
     "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",
+    # Sources the pinned libbox build tags are bound to: the controller block and
+    # the projection that injects it require `with_clash_api` in the artifact.
+    "crates/cfw-singbox-config/src/controller.rs",
+    "crates/cfw-singbox-config/src/projection.rs",
 )
 _SECURITY_PATCH = "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch"
 _PINS_ENV = "scripts/dependency_pins.env"
@@ -245,6 +249,23 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
             root = _copy_pinned_tree(Path(tmp))
             (root / _SECURITY_PATCH).unlink()
             with self.assertRaisesRegex(PinnedInputError, "missing or not regular"):
+                verify_pinned(root)
+
+    def test_dropped_engine_start_path_build_tag_fails_closed(self) -> None:
+        # An artifact built without `with_clash_api` cannot start the engine at
+        # all: the patched tree enables the clash API whenever a platform log
+        # writer is installed and the daemon always installs one, so the stub
+        # constructor fails every `box.New`. Dropping the tag from the shipped
+        # pins must therefore be rejected statically.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _copy_pinned_tree(Path(tmp))
+            for relative in (_PINS_ENV, "scripts/pinned_build_inputs.json"):
+                path = root / relative
+                path.write_text(
+                    path.read_text(encoding="utf-8").replace(",with_clash_api", ""),
+                    encoding="utf-8",
+                )
+            with self.assertRaisesRegex(PinnedInputError, "with_clash_api"):
                 verify_pinned(root)
 
 

@@ -51,11 +51,20 @@ symbol scan found reachable advisories in `golang.org/x/crypto`,
 `golang.org/x/net`, `golang.org/x/text`, and `google.golang.org/grpc`. The pinned
 patch raises those modules, `filippo.io/edwards25519`, and their coupled `x/*`
 requirements to the first tested fixed closure. `go mod verify` passes and the
-same symbol scan reports zero reachable vulnerabilities and zero vulnerabilities
-in imported packages. It still reports `GO-2026-5932` at module scope because
-`golang.org/x/crypto/openpgp` has no fixed version; that package is absent from
-the scanned import graph. This exact no-call-path boundary remains a release
-review item rather than a suppressed advisory. The upstream commit, both patch
+same symbol scan reports zero reachable vulnerabilities. It still reports
+`GO-2026-5932` at module scope because `golang.org/x/crypto/openpgp` has no fixed
+version; that package is absent from the scanned import graph.
+
+Adding the required `with_clash_api` tag enlarged the scanned import graph, so
+the 2026-07-26 rescan additionally reports `GO-2026-5774`, `GO-2026-5775`, and
+`GO-2026-5777` in the imported `github.com/go-chi/chi/v5@v5.2.5` router
+(`middleware.RealIP` header spoofing, fixed in `v5.3.0`). The scan finds no call
+path to them: sing-box's clash API router does not install `RealIP`, and the
+controller this product injects binds `127.0.0.1` only with a per-run secret, so
+no forwarded-header input reaches that middleware. Raising chi is a source
+change to the pinned tree and therefore a new patch with new digests, not a
+silent bump. These exact no-call-path boundaries remain release review items
+rather than suppressed advisories. The upstream commit, both patch
 byte streams, the combined source diff, and the patched module files are
 independently hashed so a release cannot silently substitute either the tag or
 a downstream modification. The raw-packet patch is confined to
@@ -78,7 +87,7 @@ gomobile bind \
 The recorded tags match the pinned upstream builder:
 
 ```text
-with_quic,with_utls,badlinkname,tfogo_checklinkname0,grpcnotrace
+with_quic,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,grpcnotrace
 ```
 
 `with_low_memory` is the upstream non-macOS-only tag and is not applied to the
@@ -87,9 +96,20 @@ macOS slice.
 The direct binder invocation adds the explicit `-macosversion 15.0` release
 requirement, which the upstream wrapper does not expose. The product tag set is
 intentionally smaller than the upstream Apple client: unsupported Naive,
-Clash-API, WireGuard, Tailscale, gVisor, and DHCP surfaces are not compiled, so
-their transitive archives and warning-prone Cronet payload are absent rather
-than suppressed.
+WireGuard, Tailscale, gVisor, and DHCP surfaces are not compiled, so their
+transitive archives and warning-prone Cronet payload are absent rather than
+suppressed.
+
+`with_clash_api` is not optional. The patched tree sets `needClashAPI` whenever a
+platform log writer is installed (`box.go`), and `daemon/instance.go` always
+installs one, which is the path our Swift runtime takes through
+`LibboxNewCommandServer`. Without the tag, `include/clashapi_stub.go` is compiled
+instead of `experimental/clashapi` and its registered constructor fails every
+`box.New` call with `clash api is not included in this build`. The tag is also
+what makes the application-owned, loopback-bound `experimental.clash_api` block
+in the projection (`crates/cfw-singbox-config/src/controller.rs`) reachable.
+`scripts/verify_pinned_build_inputs.py` pins the tag list and fails closed if
+that block exists without the tag.
 
 ## Artifact identity
 

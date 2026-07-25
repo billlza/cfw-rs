@@ -79,7 +79,7 @@ pub(crate) async fn disable_service_mode(
     let selected = locked_profile.stored();
     if selected.record.id != authority.profile_id()
         || selected.record.digest != authority.profile_digest()
-        || authority.settings() != &cfw_singbox_config::EngineSettings::default()
+        || authority.settings() != engine.engine_settings()
     {
         return Err(
             "CutoverReceiptStale: selected profile or engine settings changed; the legacy VPN was not changed"
@@ -311,7 +311,7 @@ pub(crate) async fn recover_legacy_cutover(
         return Err(message.into());
     }
     engine.require_capability(journal.target)?;
-    let settings = cfw_singbox_config::EngineSettings::default();
+    let settings = engine.engine_settings().clone();
 
     let active_digest = match journal.target {
         EngineMode::SystemProxy => journal.system_proxy_digest.as_str(),

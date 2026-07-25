@@ -12,6 +12,9 @@ to the tracked release configuration without invoking any toolchain or the netwo
 * known legacy/partial patch digests are rejected;
 * the verified Go module inputs (module sums and go.mod/go.sum digests) are present
   and well formed;
+* the pinned libbox Go build tag list is exactly the pinned value, is well formed,
+  and contains every tag the engine start path requires — including the tags whose
+  omission would make ``box.New`` fail on every start;
 * the native dependency lock agrees with the pins (source-tree binding);
 * the offline libbox build script references the pins with no floating versions and
   no network or recursive build actions;
@@ -215,6 +218,86 @@ def _verify_go_module_inputs(manifest: dict, env: dict[str, str]) -> None:
             raise PinnedInputError(f"Go module sum {key} is not an h1: checksum: {value!r}")
 
 
+def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: Path) -> None:
+    """Bind the pinned libbox Go build tag list to the tags the engine requires.
+
+    The tag list is a build input exactly like a version or a digest: omitting a
+    tag silently removes compiled-in behaviour the runtime depends on. The
+    ``with_clash_api`` omission made ``box.New`` fail on every engine start
+    because the patched tree enables the clash API whenever a platform log writer
+    is installed and the daemon always installs one, so the stub constructor
+    returned an error instead of a server. This check therefore pins the exact
+    tag list, requires each tag the start path needs, and additionally binds
+    tracked source triggers (such as the application-owned
+    ``experimental.clash_api`` projection block) to the tag that makes them
+    reachable, so the same class of defect fails closed statically.
+    """
+    spec = manifest.get("libboxBuildTags")
+    if not isinstance(spec, dict):
+        raise PinnedInputError("pinned-input manifest has no libbox build tag binding")
+    pin_key = spec.get("pinKey")
+    expected_value = spec.get("value")
+    if not isinstance(pin_key, str) or not isinstance(expected_value, str):
+        raise PinnedInputError("libbox build tag binding has no pin key or pinned value")
+    actual_value = _require_env(env, pin_key)
+    if actual_value != expected_value:
+        raise PinnedInputError(
+            f"pinned libbox build tags {pin_key} must be {expected_value!r} but "
+            f"dependency_pins.env has {actual_value!r}"
+        )
+
+    tags: list[str] = actual_value.split(",")
+    seen: set[str] = set()
+    for tag in tags:
+        if not re.fullmatch(r"[a-z0-9_]+", tag):
+            raise PinnedInputError(f"pinned libbox build tag is malformed: {tag!r}")
+        if tag in seen:
+            raise PinnedInputError(f"pinned libbox build tags repeat {tag!r}")
+        seen.add(tag)
+
+    required = spec.get("required")
+    if not isinstance(required, list) or not required:
+        raise PinnedInputError("libbox build tag binding pins no required tags")
+    for entry in required:
+        if not isinstance(entry, dict):
+            raise PinnedInputError("libbox required-tag entry is malformed")
+        tag = entry.get("tag")
+        reason = entry.get("reason")
+        if not isinstance(tag, str) or not tag:
+            raise PinnedInputError("libbox required-tag entry has no tag")
+        if not isinstance(reason, str) or not reason:
+            raise PinnedInputError(f"libbox required tag {tag} has no recorded reason")
+        if tag not in seen:
+            raise PinnedInputError(
+                f"pinned libbox build tags are missing the required tag {tag!r}: {reason}"
+            )
+
+    for binding in spec.get("engineStartPathBindings") or []:
+        if not isinstance(binding, dict):
+            raise PinnedInputError("libbox tag source binding is malformed")
+        tag = binding.get("tag")
+        relative = binding.get("path")
+        trigger = binding.get("requiredWhenContains")
+        reason = binding.get("reason")
+        if not all(isinstance(item, str) and item for item in (tag, relative, trigger, reason)):
+            raise PinnedInputError("libbox tag source binding is incomplete")
+        text = _read_text(
+            _safe_repository_path(repository, relative, "libbox tag source binding"),
+            f"libbox tag source binding {relative}",
+        )
+        present = trigger in text
+        if binding.get("triggerRequired") and not present:
+            raise PinnedInputError(
+                f"{relative} no longer contains the pinned tag trigger {trigger!r}; "
+                f"re-pin the libbox build tags deliberately ({reason})"
+            )
+        if present and tag not in seen:
+            raise PinnedInputError(
+                f"{relative} requires libbox build tag {tag!r} but the pinned tag list "
+                f"omits it: {reason}"
+            )
+
+
 def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -> None:
     relative = manifest.get("nativeLockPath")
     if not isinstance(relative, str):
@@ -307,6 +390,7 @@ def verify(repository: Path) -> None:
     patch_digests = _verify_patches(manifest, env, repository)
     _verify_combined_diff(manifest, env, patch_digests)
     _verify_go_module_inputs(manifest, env)
+    _verify_libbox_build_tags(manifest, env, repository)
     _verify_native_lock(manifest, env, repository)
     _verify_build_scripts(manifest, repository)
 
@@ -321,7 +405,8 @@ def main() -> int:
     print(
         "pinned build inputs verified: Rust/Node/Go/gomobile/govulncheck/sing-box "
         "versions, commit, three patch digests, combined diff, Go module inputs, "
-        "native lock binding, and offline artifact-hash build-script references"
+        "libbox build tags required by the engine start path, native lock binding, "
+        "and offline artifact-hash build-script references"
     )
     return 0
 

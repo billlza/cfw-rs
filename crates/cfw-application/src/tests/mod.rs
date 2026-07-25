@@ -1,4 +1,5 @@
 mod callback_isolation;
+mod controller;
 mod cutover;
 mod generation_isolation_property;
 mod lifecycle;

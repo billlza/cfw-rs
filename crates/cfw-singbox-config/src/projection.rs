@@ -6,8 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    ConfigError, CredentialSlot, ValidatedSingBoxProfile, credentials::validate_slots,
-    profile_projection::DomainResolverTags, sha256_hex, validation::canonicalize,
+    ConfigError, CredentialSlot, ValidatedSingBoxProfile,
+    controller::{ClashApiEndpoint, DEFAULT_CLASH_API_PORT},
+    credentials::validate_slots,
+    profile_projection::DomainResolverTags,
+    sha256_hex,
+    validation::canonicalize,
 };
 
 const BOOTSTRAP_DNS_PRIMARY_TAG: &str = "cfw-bootstrap-dns-0";
@@ -46,6 +50,9 @@ pub struct AuthenticatedDnsServer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineSettings {
     pub mixed_port: u16,
+    /// Loopback port of the application-owned clash-compatible controller. The
+    /// address and the secret are not settings: see [`crate::ClashApiEndpoint`].
+    pub controller_port: u16,
     pub enable_ipv6: bool,
     pub bypass_private_networks: bool,
     pub tunnel_mtu: u16,
@@ -63,6 +70,7 @@ impl Default for EngineSettings {
     fn default() -> Self {
         Self {
             mixed_port: 7890,
+            controller_port: DEFAULT_CLASH_API_PORT,
             enable_ipv6: true,
             bypass_private_networks: true,
             tunnel_mtu: 1_500,
@@ -87,6 +95,16 @@ impl Default for EngineSettings {
     }
 }
 
+impl EngineSettings {
+    /// Resolves the application-owned controller endpoint these settings open.
+    ///
+    /// The port comes from settings and is bounded; the loopback address and the
+    /// per-run secret are owned by the application.
+    pub fn clash_api_endpoint(&self) -> Result<ClashApiEndpoint, ConfigError> {
+        ClashApiEndpoint::resolve(self.controller_port, self.mixed_port)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionMode {
     SystemProxy,
@@ -98,6 +116,7 @@ pub struct ProjectedConfig {
     mode: ProjectionMode,
     json: String,
     credential_slots: Vec<CredentialSlot>,
+    clash_api: ClashApiEndpoint,
     configuration_digest: String,
     digest: String,
 }
@@ -108,6 +127,7 @@ impl fmt::Debug for ProjectedConfig {
             .debug_struct("ProjectedConfig")
             .field("mode", &self.mode)
             .field("credential_slots", &self.credential_slots)
+            .field("clash_api", &self.clash_api)
             .field("configuration_digest", &self.configuration_digest)
             .field("digest", &self.digest)
             .field("json", &"[REDACTED CONFIG TEMPLATE]")
@@ -126,6 +146,11 @@ impl ProjectedConfig {
 
     pub fn credential_slots(&self) -> &[CredentialSlot] {
         &self.credential_slots
+    }
+
+    /// The application-owned controller this configuration exposes.
+    pub fn clash_api(&self) -> ClashApiEndpoint {
+        self.clash_api
     }
 
     pub fn digest(&self) -> &str {
@@ -154,8 +179,13 @@ impl ValidatedSingBoxProfile {
                 server: BOOTSTRAP_DNS_PRIMARY_TAG,
                 fallback_server: BOOTSTRAP_DNS_FALLBACK_TAG,
             })?;
+        let clash_api = settings.clash_api_endpoint()?;
         let mut root = Map::new();
         root.insert("log".into(), json!({ "level": "info", "timestamp": true }));
+        // `experimental` is forbidden in imported profiles; the clash-compatible
+        // controller exists only because the application injects it here, bound
+        // to loopback and to this run's secret.
+        root.insert("experimental".into(), clash_api.experimental_value());
         root.insert("outbounds".into(), Value::Array(outbounds));
 
         validate_authenticated_dns_servers(settings)?;
@@ -304,6 +334,7 @@ impl ValidatedSingBoxProfile {
             mode,
             json,
             credential_slots,
+            clash_api,
             configuration_digest,
             digest,
         })

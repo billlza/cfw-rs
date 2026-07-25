@@ -64,6 +64,12 @@
 
 - Move the workspace to GPL-3.0-or-later and pin the arm64 macOS 15 release
   toolchain and source-built libbox inputs.
+- Build libbox with `with_clash_api`. The patched tree enables the clash API
+  whenever a platform log writer is installed and the daemon always installs
+  one, so the previous artifact failed every engine start in the stub
+  constructor. The pinned tag list is now itself a verified build input: the
+  pinned-input gate fails closed when a tag the engine start path requires is
+  missing.
 - Add fail-closed release documentation for nested signing, provisioning,
   notarization, SBOM/license evidence, real packet evidence, weak-network
   recovery, resource limits, and physical-device testing.

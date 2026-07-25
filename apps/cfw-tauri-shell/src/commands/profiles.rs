@@ -139,7 +139,7 @@ pub(crate) fn import_profile_text(
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
     let profile = ValidatedSingBoxProfile::parse(&body).map_err(|error| error.to_string())?;
-    let settings = cfw_singbox_config::EngineSettings::default();
+    let settings = engine.engine_settings().clone();
     profile
         .project(cfw_singbox_config::ProjectionMode::SystemProxy, &settings)
         .map_err(|error| error.to_string())?;

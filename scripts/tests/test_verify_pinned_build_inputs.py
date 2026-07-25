@@ -54,6 +54,17 @@ python3 hash_artifact.py "$out" \\
   --metadata "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
 """
 BUILD_NATIVE = '#!/usr/bin/env bash\necho "--metadata singBoxCommit=$SING_BOX_COMMIT"\n'
+BUILD_TAGS = "with_quic,with_clash_api,grpcnotrace"
+CONTROLLER_RELATIVE_PATH = "crates/cfw-singbox-config/src/controller.rs"
+CONTROLLER_TRIGGER = '"clash_api": {'
+CONTROLLER_SOURCE = (
+    "fn experimental_value(&self) -> Value {\n"
+    "    json!({\n"
+    f"        {CONTROLLER_TRIGGER}\n"
+    '            "external_controller": self.external_controller(),\n'
+    "    })\n"
+    "}\n"
+)
 BUILD_UNSIGNED = (
     "#!/usr/bin/env bash\n"
     'echo "sourceCommit=$SING_BOX_COMMIT"\n'
@@ -87,8 +98,10 @@ class Fixture:
             "SING_BOX_COMBINED_DIFF_SHA256": COMBINED_SHA,
             "SING_BOX_PATCHED_GO_MOD_SHA256": _sha(b"patched go.mod"),
             "SING_BOX_PATCHED_GO_SUM_SHA256": _sha(b"patched go.sum"),
+            "LIBBOX_BUILD_TAGS": BUILD_TAGS,
         }
         self.patch_bodies = dict(PATCH_BODIES)
+        self.controller_source = CONTROLLER_SOURCE
         self.manifest = {
             "schema": "cfw-pinned-build-inputs-v1",
             "dependencyPinsPath": "scripts/dependency_pins.env",
@@ -134,6 +147,24 @@ class Fixture:
                 "SING_BOX_PATCHED_GO_SUM_SHA256",
             ],
             "rejectedPatchDigests": [LEGACY_SHA],
+            "libboxBuildTags": {
+                "pinKey": "LIBBOX_BUILD_TAGS",
+                "value": BUILD_TAGS,
+                "required": [
+                    {"tag": "with_quic", "reason": "QUIC outbounds"},
+                    {"tag": "with_clash_api", "reason": "engine start path needs the server"},
+                    {"tag": "grpcnotrace", "reason": "no gRPC trace surface"},
+                ],
+                "engineStartPathBindings": [
+                    {
+                        "tag": "with_clash_api",
+                        "path": CONTROLLER_RELATIVE_PATH,
+                        "requiredWhenContains": CONTROLLER_TRIGGER,
+                        "triggerRequired": True,
+                        "reason": "the projected controller block needs the real server",
+                    }
+                ],
+            },
             "buildScripts": {
                 "scripts/build_libbox.sh": {
                     "requirePinReferences": [
@@ -189,6 +220,9 @@ class Fixture:
     def write(self, root: Path) -> Path:
         (root / "scripts").mkdir(parents=True, exist_ok=True)
         (root / "native/macos/patches").mkdir(parents=True, exist_ok=True)
+        controller = root / CONTROLLER_RELATIVE_PATH
+        controller.parent.mkdir(parents=True, exist_ok=True)
+        controller.write_text(self.controller_source, encoding="utf-8")
         (root / MANIFEST_RELATIVE_PATH).write_text(json.dumps(self.manifest), encoding="utf-8")
         (root / "scripts/dependency_pins.env").write_text(self.env_text(), encoding="utf-8")
         for key, body in self.patch_bodies.items():
@@ -279,6 +313,72 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture.manifest["combinedDiffSha256"] = SECURITY_SHA
         fixture.lock["singBox"]["combinedDiffSha256"] = SECURITY_SHA
         self._assert_fails(fixture, "partial")
+
+    # --- libbox build tags --------------------------------------------------
+
+    def test_missing_engine_start_path_tag_fails(self) -> None:
+        # The exact defect this check exists for: dropping with_clash_api while the
+        # projection still injects experimental.clash_api, which makes box.New fail
+        # on every engine start.
+        fixture = Fixture()
+        reduced = "with_quic,grpcnotrace"
+        fixture.env["LIBBOX_BUILD_TAGS"] = reduced
+        fixture.manifest["libboxBuildTags"]["value"] = reduced
+        self._assert_fails(fixture, "required tag 'with_clash_api'")
+
+    def test_tag_list_drift_from_manifest_fails(self) -> None:
+        fixture = Fixture()
+        fixture.env["LIBBOX_BUILD_TAGS"] = "with_quic,grpcnotrace"
+        self._assert_fails(fixture, "pinned libbox build tags LIBBOX_BUILD_TAGS")
+
+    def test_missing_tag_pin_fails_closed(self) -> None:
+        fixture = Fixture()
+        del fixture.env["LIBBOX_BUILD_TAGS"]
+        self._assert_fails(fixture, "LIBBOX_BUILD_TAGS")
+
+    def test_malformed_tag_fails(self) -> None:
+        fixture = Fixture()
+        malformed = "with_quic, with_clash_api,grpcnotrace"
+        fixture.env["LIBBOX_BUILD_TAGS"] = malformed
+        fixture.manifest["libboxBuildTags"]["value"] = malformed
+        self._assert_fails(fixture, "malformed")
+
+    def test_repeated_tag_fails(self) -> None:
+        fixture = Fixture()
+        repeated = "with_quic,with_clash_api,grpcnotrace,with_quic"
+        fixture.env["LIBBOX_BUILD_TAGS"] = repeated
+        fixture.manifest["libboxBuildTags"]["value"] = repeated
+        self._assert_fails(fixture, "repeat")
+
+    def test_source_binding_without_required_tag_fails(self) -> None:
+        # A source trigger may not be satisfied by the required-tag table alone:
+        # removing the tag from both the pin and the required table still fails
+        # because the tracked source still needs it.
+        fixture = Fixture()
+        reduced = "with_quic,grpcnotrace"
+        fixture.env["LIBBOX_BUILD_TAGS"] = reduced
+        fixture.manifest["libboxBuildTags"]["value"] = reduced
+        fixture.manifest["libboxBuildTags"]["required"] = [
+            entry
+            for entry in fixture.manifest["libboxBuildTags"]["required"]
+            if entry["tag"] != "with_clash_api"
+        ]
+        self._assert_fails(fixture, "requires libbox build tag 'with_clash_api'")
+
+    def test_vanished_source_trigger_fails(self) -> None:
+        fixture = Fixture()
+        fixture.controller_source = "fn experimental_value() {}\n"
+        self._assert_fails(fixture, "no longer contains the pinned tag trigger")
+
+    def test_missing_tag_binding_section_fails_closed(self) -> None:
+        fixture = Fixture()
+        del fixture.manifest["libboxBuildTags"]
+        self._assert_fails(fixture, "no libbox build tag binding")
+
+    def test_required_tag_without_reason_fails(self) -> None:
+        fixture = Fixture()
+        del fixture.manifest["libboxBuildTags"]["required"][1]["reason"]
+        self._assert_fails(fixture, "no recorded reason")
 
     # --- malformed / unavailable inputs -------------------------------------
 

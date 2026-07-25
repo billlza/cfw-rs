@@ -46,6 +46,52 @@
   "rejectedPatchDigests": [
     "66128ca96ff613b0803cc92b3269b4e7822cd2532c43597e9e283acc6d9f4dde"
   ],
+  "libboxBuildTags": {
+    "pinKey": "LIBBOX_BUILD_TAGS",
+    "value": "with_quic,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0,grpcnotrace",
+    "required": [
+      {
+        "tag": "with_quic",
+        "reason": "QUIC-based outbounds (Hysteria2, TUIC, and QUIC transports) are product features."
+      },
+      {
+        "tag": "with_utls",
+        "reason": "uTLS client fingerprints are required by the supported TLS outbounds."
+      },
+      {
+        "tag": "with_clash_api",
+        "reason": "box.New sets needClashAPI whenever a platform log writer is installed and daemon/instance.go always installs one, so without this tag include/clashapi_stub.go fails every engine start with 'clash api is not included in this build'."
+      },
+      {
+        "tag": "badlinkname",
+        "reason": "The pinned Go toolchain requires the upstream linkname escape hatch used by sing-box."
+      },
+      {
+        "tag": "tfogo_checklinkname0",
+        "reason": "tfo-go requires the matching -checklinkname=0 build configuration."
+      },
+      {
+        "tag": "grpcnotrace",
+        "reason": "Drops the gRPC trace surface that the product never exposes."
+      }
+    ],
+    "engineStartPathBindings": [
+      {
+        "tag": "with_clash_api",
+        "path": "crates/cfw-singbox-config/src/controller.rs",
+        "requiredWhenContains": "\"clash_api\": {",
+        "triggerRequired": true,
+        "reason": "The application-owned experimental.clash_api projection block is only served by the real clash API server, which exists in the artifact only when with_clash_api is pinned."
+      },
+      {
+        "tag": "with_clash_api",
+        "path": "crates/cfw-singbox-config/src/projection.rs",
+        "requiredWhenContains": "root.insert(\"experimental\".into(), clash_api.experimental_value());",
+        "triggerRequired": true,
+        "reason": "Every projected configuration carries the controller block, so every engine start needs the clash API server compiled in."
+      }
+    ]
+  },
   "buildScripts": {
     "scripts/build_libbox.sh": {
       "requirePinReferences": [
@@ -53,6 +99,7 @@
         "$GOMOBILE_VERSION",
         "$SING_BOX_VERSION",
         "$SING_BOX_COMMIT",
+        "$LIBBOX_BUILD_TAGS",
         "$SING_BOX_COMBINED_DIFF_SHA256",
         "$SING_BOX_SECURITY_PATCH_SHA256",
         "$SING_BOX_RAW_PACKET_PATCH_SHA256",
@@ -64,6 +111,7 @@
   "artifactBindings": {
     "scripts/build_libbox.sh": [
       "sourceCommit=$SING_BOX_COMMIT",
+      "buildTags=$LIBBOX_BUILD_TAGS",
       "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256",
       "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
       "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",

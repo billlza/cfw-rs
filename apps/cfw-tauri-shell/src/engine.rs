@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use cfw_apple_network::{
     AppleNetworkBackend, KeychainEngineGenerationStore, NativeFrameworkBridge,
 };
-use cfw_application::EngineModeCoordinator;
+use cfw_application::{EngineControllerAccess, EngineModeCoordinator};
 use cfw_engine_api::{
     CutoverPreflightBackend, EngineBackend, EngineEvent, EngineMode, EngineSnapshot,
 };
@@ -52,9 +52,19 @@ pub(crate) struct ManagedEngine {
     pub(crate) preflight_backend: Arc<dyn CutoverPreflightBackend>,
     cutover: CutoverPreparationGate,
     maintenance: EngineMaintenanceGate,
+    /// Engine settings plus the loopback controller they open. The per-run
+    /// controller secret lives here in memory only: it is never persisted, never
+    /// logged, and never published in an engine snapshot.
+    controller: EngineControllerAccess,
 }
 
 impl ManagedEngine {
+    /// The single engine-settings value this process starts modes with, so the
+    /// running engine's controller is exactly the one held in memory here.
+    pub(crate) fn engine_settings(&self) -> &EngineSettings {
+        self.controller.settings()
+    }
+
     fn begin_mode_change(
         &self,
         mode: EngineMode,
@@ -178,6 +188,8 @@ impl ManagedEngine {
 }
 
 pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<ManagedEngine, String> {
+    let controller = EngineControllerAccess::resolve(EngineSettings::default())
+        .map_err(|error| format!("engine settings are unusable: {error}"))?;
     let store = settings_store()?;
     store.ensure_layout().map_err(|error| error.to_string())?;
     let native_available = bridge.is_available();
@@ -222,6 +234,7 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
         preflight_backend,
         cutover: CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),
+        controller,
     })
 }
 
@@ -269,7 +282,7 @@ pub(crate) async fn set_engine_mode(
         .map_err(|error| error.to_string())?;
     engine
         .coordinator
-        .set_mode(mode, profile, EngineSettings::default())
+        .set_mode(mode, profile, engine.engine_settings().clone())
         .await
         .map_err(|error| error.to_string())?;
     engine.status_payload(&retirement)

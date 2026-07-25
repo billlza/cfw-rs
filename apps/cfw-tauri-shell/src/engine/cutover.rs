@@ -267,7 +267,7 @@ pub(crate) async fn prepare_legacy_cutover(
         .repository()
         .require_selected()
         .map_err(|error| error.to_string())?;
-    let settings = EngineSettings::default();
+    let settings = engine.engine_settings().clone();
     let request = engine
         .coordinator
         .prepare_cutover(target, selected.profile.clone(), settings.clone())

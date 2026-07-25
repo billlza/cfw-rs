@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "teamIdentifier": "YKUPL7Z869",
+  "description": "Canonical inside-out nested code signing order for the Clash for Mac native product graph. Every nested component (framework, Global Authority daemon, ProxyAgent app, Packet Tunnel system extension, and the one-way legacy tombstone) is signed before the outer host app, so the outer seal always covers every embedded component. The outer host app is always signed last.",
+  "nested": [
+    {
+      "name": "CFWNativeBridge",
+      "kind": "framework",
+      "destination": "Contents/Frameworks/CFWNativeBridge.framework",
+      "stagedArtifact": "CFWNativeBridge.framework",
+      "bundleIdentifier": "com.bill.clashformac.native-bridge"
+    },
+    {
+      "name": "CFWGlobalAuthority",
+      "kind": "daemon-executable",
+      "destination": "Contents/Library/HelperTools/CFWGlobalAuthority",
+      "stagedArtifact": "CFWGlobalAuthority",
+      "bundleIdentifier": "com.bill.clashformac.global-authority",
+      "launchdPlist": "Contents/Library/LaunchDaemons/com.bill.clashformac.global-authority.plist",
+      "machService": "YKUPL7Z869.group.com.bill.clashformac.global-authority"
+    },
+    {
+      "name": "CFWProxyAgent",
+      "kind": "application",
+      "destination": "Contents/Library/LoginItems/CFWProxyAgent.app",
+      "stagedArtifact": "CFWProxyAgent.app",
+      "bundleIdentifier": "com.bill.clashformac.proxy-agent"
+    },
+    {
+      "name": "CFWPacketTunnel",
+      "kind": "system-extension",
+      "destination": "Contents/Library/SystemExtensions/CFWPacketTunnel.systemextension",
+      "stagedArtifact": "CFWPacketTunnel.systemextension",
+      "bundleIdentifier": "com.bill.clashformac.packet-tunnel"
+    },
+    {
+      "name": "CFWLegacyTombstone",
+      "kind": "tombstone-executable",
+      "destination": "Contents/Library/HelperTools/cfw-helper-tombstone",
+      "stagedArtifact": "CFWLegacyTombstone/cfw-helper-tombstone"
+    }
+  ],
+  "outer": {
+    "name": "ClashForMac",
+    "kind": "application",
+    "destination": ".",
+    "bundleIdentifier": "com.bill.clashformac",
+    "signedLast": true
+  }
+}

@@ -128,7 +128,7 @@ pub(super) fn verify_process_listens_on_ports(
     process: &ProcessRecord,
     ports: &[u16],
 ) -> Result<(), String> {
-    if ports.is_empty() || ports.iter().any(|port| *port == 0) {
+    if ports.is_empty() || ports.contains(&0) {
         return Err("legacy listener ownership requires non-zero ports".into());
     }
     let output = command_output("/usr/sbin/netstat", &["-anv", "-p", "tcp"])?;

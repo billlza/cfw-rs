@@ -99,6 +99,34 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "210F4254709EF100DF35AF5F"
+               BuildableName = "libCFWGlobalAuthority.a"
+               BlueprintName = "CFWGlobalAuthority"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "5B338A8641E1107D998A9CDF"
+               BuildableName = "CFWGlobalAuthorityTests.xctest"
+               BlueprintName = "CFWGlobalAuthorityTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "17B3C9D2B13016E208E240AC"
                BuildableName = "libCFWLibboxObjC.a"
                BlueprintName = "CFWLibboxObjC"
@@ -271,6 +299,17 @@
                BlueprintIdentifier = "5A779EA1E34B8B72AC357B3D"
                BuildableName = "CFWSharedProtocolTests.xctest"
                BlueprintName = "CFWSharedProtocolTests"
+               ReferencedContainer = "container:CFWNative.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "5B338A8641E1107D998A9CDF"
+               BuildableName = "CFWGlobalAuthorityTests.xctest"
+               BlueprintName = "CFWGlobalAuthorityTests"
                ReferencedContainer = "container:CFWNative.xcodeproj">
             </BuildableReference>
          </TestableReference>

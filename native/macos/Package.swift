@@ -2,6 +2,10 @@
 
 import PackageDescription
 
+let releaseAuthoritySwiftSettings: [SwiftSetting] = [
+  .define("CFW_GLOBAL_AUTHORITY_REQUIRED", .when(configuration: .release))
+]
+
 let package = Package(
   name: "CFWNative",
   platforms: [
@@ -9,6 +13,7 @@ let package = Package(
   ],
   products: [
     .library(name: "CFWSharedProtocol", targets: ["CFWSharedProtocol"]),
+    .library(name: "CFWGlobalAuthority", targets: ["CFWGlobalAuthority"]),
     .library(name: "CFWPacketTransport", targets: ["CFWPacketTransport"]),
     .library(name: "CFWAppleNetwork", targets: ["CFWAppleNetwork"]),
     .library(name: "CFWCredentialTransport", targets: ["CFWCredentialTransport"]),
@@ -16,15 +21,31 @@ let package = Package(
     .library(name: "CFWLibboxRuntime", targets: ["CFWLibboxRuntime"]),
     .library(name: "CFWPacketTunnel", targets: ["CFWPacketTunnel"]),
     .library(name: "CFWNativeBridge", targets: ["CFWNativeBridge"]),
+    .executable(name: "CFWGlobalAuthorityDaemon", targets: ["CFWGlobalAuthorityDaemon"]),
     .executable(name: "CFWProxyAgent", targets: ["CFWProxyAgent"]),
   ],
   targets: [
     .target(
       name: "CFWSharedProtocol",
+      swiftSettings: releaseAuthoritySwiftSettings,
       linkerSettings: [
         .linkedFramework("CryptoKit"),
         .linkedFramework("Security"),
       ]
+    ),
+    .target(
+      name: "CFWGlobalAuthority",
+      dependencies: ["CFWSharedProtocol"],
+      linkerSettings: [
+        .linkedFramework("CryptoKit"),
+        .linkedFramework("Security"),
+        .linkedFramework("SystemConfiguration"),
+      ]
+    ),
+    .executableTarget(
+      name: "CFWGlobalAuthorityDaemon",
+      dependencies: ["CFWGlobalAuthority"],
+      path: "Sources/CFWGlobalAuthorityMain"
     ),
     .target(
       name: "CFWPacketTransport",
@@ -88,7 +109,12 @@ let package = Package(
     ),
     .testTarget(
       name: "CFWSharedProtocolTests",
-      dependencies: ["CFWSharedProtocol"]
+      dependencies: ["CFWSharedProtocol"],
+      swiftSettings: releaseAuthoritySwiftSettings
+    ),
+    .testTarget(
+      name: "CFWGlobalAuthorityTests",
+      dependencies: ["CFWGlobalAuthority", "CFWSharedProtocol"]
     ),
     .testTarget(
       name: "CFWPacketTransportTests",

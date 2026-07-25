@@ -7,6 +7,8 @@ import OSLog
 
 public enum PacketTunnelProviderError: Error, Equatable, Sendable {
   case providerUnavailable
+  case globalAuthorityUnavailable
+  case invalidStartTicket
   case malformedProviderConfiguration
   case invalidConfigurationSlot
   case lifecycleConflict
@@ -25,6 +27,10 @@ extension PacketTunnelProviderError: LocalizedError {
     switch self {
     case .providerUnavailable:
       return "Packet tunnel provider lifecycle is unavailable."
+    case .globalAuthorityUnavailable:
+      return GlobalAuthorityGateError.stableMessage
+    case .invalidStartTicket:
+      return "Packet tunnel start ticket is missing or invalid."
     case .malformedProviderConfiguration:
       return "Packet tunnel provider configuration is malformed."
     case .invalidConfigurationSlot:
@@ -60,6 +66,18 @@ extension PacketTunnelProviderError {
           "tunnel-provider-unavailable",
           "Packet tunnel provider lifecycle is unavailable.",
           true
+        )
+      case .globalAuthorityUnavailable:
+        (
+          GlobalAuthorityGateError.stableCode,
+          GlobalAuthorityGateError.stableMessage,
+          false
+        )
+      case .invalidStartTicket:
+        (
+          "tunnel-start-ticket-invalid",
+          "Packet tunnel start ticket is missing or invalid.",
+          false
         )
       case .malformedProviderConfiguration:
         (
@@ -136,23 +154,6 @@ extension PacketTunnelProviderError {
   }
 }
 
-private final class TunnelMachineEngineLease: EngineLeaseHolding, @unchecked Sendable {
-  private let lease: CrossProcessEngineLease
-
-  init(_ lease: CrossProcessEngineLease) {
-    self.lease = lease
-  }
-
-  func release() {
-    lease.release()
-  }
-
-  func markStopFailed() {
-    // Keep the socket lease until cleanup proves the engine stopped or the
-    // provider process exits and the kernel closes both descriptors.
-  }
-}
-
 private final class ProviderMessageCompletion: @unchecked Sendable {
   private let lock = NSLock()
   private var handler: ((Data?) -> Void)?
@@ -176,19 +177,44 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     category: "packet-tunnel"
   )
   private let engineFactory: any PacketEngineFactory
-  private let engineLeaseStore = CrossProcessEngineLeaseStore()
-  private let acceptanceStore: Result<SandboxConfigurationAcceptanceStore, Error>
   private var sessionLifecycle: PacketTunnelSessionLifecycle?
+  private var startCoordinator: TunnelTicketStartCoordinator?
 
   public override init() {
     engineFactory = LibboxPacketEngineFactory()
-    acceptanceStore = Result { try SandboxConfigurationAcceptanceStore() }
     super.init()
-    sessionLifecycle = PacketTunnelSessionLifecycle(
+    let lifecycle = PacketTunnelSessionLifecycle(
       engineFactory: engineFactory,
       dependencies: makeSessionDependencies()
     ) { [weak self] error in
       self?.cancelTunnelWithError(error)
+    }
+    sessionLifecycle = lifecycle
+    // Production ships without an authenticated Provider owner XPC channel yet, so
+    // the default owner client fails closed. Real redemption is wired by the Host
+    // and Authority integration tasks; the ticket-only start path here never falls
+    // back to a direct configuration/credential payload.
+    startCoordinator = TunnelTicketStartCoordinator(
+      authority: FailClosedEngineOwnerAuthorityClient(),
+      sessionLifecycle: lifecycle
+    )
+  }
+
+  /// Extracts the single bounded, opaque 32-byte start ticket from the tunnel start
+  /// options. The production channel carries only this value; a missing, extra, or
+  /// wrong-sized entry fails closed with `invalidStartTicket`.
+  static func startTicket(from options: [String: NSObject]?) throws -> StartTicket {
+    guard
+      let options,
+      options.count == 1,
+      let ticketData = options[NativeProtocolConstants.tunnelStartTicketOptionKey] as? NSData
+    else {
+      throw PacketTunnelProviderError.invalidStartTicket
+    }
+    do {
+      return try StartTicket(copying: ticketData as Data)
+    } catch {
+      throw PacketTunnelProviderError.invalidStartTicket
     }
   }
 
@@ -197,55 +223,40 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     completionHandler: @escaping @Sendable (Error?) -> Void
   ) {
     do {
-      guard let sessionLifecycle else {
-        throw PacketTunnelProviderError.providerUnavailable
-      }
-      guard
-        let options,
-        options.count == 1,
-        let encodedPayload = options[NativeProtocolConstants.tunnelStartPayloadOptionKey]
-          as? NSData
-      else {
-        throw PacketTunnelProviderError.malformedProviderConfiguration
-      }
-      var payload = try TunnelStartPayloadCodec.decode(encodedPayload as Data)
-      defer { payload.erase() }
-      let descriptor = try configurationDescriptor()
-      guard payload.descriptor == descriptor else {
-        throw PacketTunnelProviderError.malformedProviderConfiguration
-      }
-      let credentialMaterial: CredentialMaterial
-      if descriptor.credentialSlots.isEmpty {
-        guard payload.credentialPayload == nil else {
-          throw PacketTunnelProviderError.malformedProviderConfiguration
-        }
-        credentialMaterial = .empty
-      } else {
-        guard let credentialPayload = payload.credentialPayload else {
-          throw PacketTunnelProviderError.malformedProviderConfiguration
-        }
-        credentialMaterial = try EphemeralCredentialCodec.decode(credentialPayload)
-      }
-      sessionLifecycle.start(
-        descriptor: descriptor,
-        configuration: payload.configuration,
-        credentialMaterial: credentialMaterial,
-        completionHandler: completionHandler
-      )
+      try GlobalAuthorityReleaseGate.requireStartAuthorization()
+    } catch {
+      completionHandler(PacketTunnelProviderError.globalAuthorityUnavailable)
+      return
+    }
+    guard let startCoordinator else {
+      completionHandler(PacketTunnelProviderError.providerUnavailable)
+      return
+    }
+    let ticket: StartTicket
+    let descriptor: ConfigurationDescriptor
+    do {
+      ticket = try Self.startTicket(from: options)
+      descriptor = try configurationDescriptor()
     } catch {
       completionHandler(error)
+      return
     }
+    startCoordinator.start(
+      ticket: ticket,
+      descriptor: descriptor,
+      completion: completionHandler
+    )
   }
 
   public override func stopTunnel(
     with reason: NEProviderStopReason,
     completionHandler: @escaping @Sendable () -> Void
   ) {
-    guard let sessionLifecycle else {
-      completionHandler()
+    guard let startCoordinator else {
+      sessionLifecycle?.stop(completionHandler: completionHandler)
       return
     }
-    sessionLifecycle.stop(completionHandler: completionHandler)
+    startCoordinator.stop(completion: completionHandler)
   }
 
   public override func handleAppMessage(
@@ -307,11 +318,12 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
         guard try configurationDescriptor() == descriptor else {
           throw PacketTunnelProviderError.malformedProviderConfiguration
         }
-        let lease = try engineLeaseStore.acquire()
+        // The Global Authority owns the single machine-wide lease under the
+        // ticket-only model, so the Provider holds no local cross-process lease.
         return PreparedTunnelConfiguration(
           descriptor: descriptor,
           configuration: configuration,
-          lease: TunnelMachineEngineLease(lease)
+          lease: UnleasedEngineOwnership()
         )
       },
       resolveConfiguration: { template, descriptor, credentialMaterial in
@@ -344,11 +356,9 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
           completionHandler: completion
         )
       },
-      recordAcceptance: { [weak self] descriptor in
-        guard let self else {
-          throw PacketTunnelProviderError.providerUnavailable
-        }
-        try acceptanceStore.get().accept(descriptor)
+      recordAcceptance: { _ in
+        // Replay protection is enforced by the Global Authority's single-use ticket
+        // redemption. The Provider no longer keeps a local acceptance cursor.
       }
     )
   }

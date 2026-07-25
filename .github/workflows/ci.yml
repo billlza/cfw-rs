@@ -40,6 +40,10 @@ jobs:
           test "$(xcodebuild -version)" = $'Xcode 26.6\nBuild version 17F113'
       - name: Verify build-script boundary
         run: ./scripts/verify_build_boundaries.sh
+      - name: Audit deterministic CI lanes for masking and toolchain drift
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_ci_no_masking.py
+      - name: Verify evidence manifest lane (positive and negative)
+        run: ./scripts/verify_evidence_manifest_lane.sh
       - name: Verify 0.4.0 version contract
         run: PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_version_contract.py
       - name: Check Rust formatting

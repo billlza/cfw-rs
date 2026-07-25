@@ -47,7 +47,9 @@
       "entitlements": "macos/entitlements.plist",
       "files": {
         "Frameworks/CFWNativeBridge.framework": "../../target/native-products/CFWNativeBridge.framework",
+        "Library/HelperTools/CFWGlobalAuthority": "../../target/native-products/CFWGlobalAuthority",
         "Library/HelperTools/cfw-helper-tombstone": "../../target/native-products/CFWLegacyTombstone/cfw-helper-tombstone",
+        "Library/LaunchDaemons/com.bill.clashformac.global-authority.plist": "../../native/macos/Config/com.bill.clashformac.global-authority.plist",
         "Library/LaunchDaemons/com.bill.clashformac.helper.plist": "macos/legacy-tombstone/com.bill.clashformac.helper.plist",
         "Library/LaunchAgents/com.bill.clashformac.proxy-agent.plist": "../../native/macos/Config/com.bill.clashformac.proxy-agent.plist",
         "Library/LoginItems/CFWProxyAgent.app": "../../target/native-products/CFWProxyAgent.app",

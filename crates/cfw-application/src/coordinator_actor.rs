@@ -71,6 +71,7 @@ pub(crate) async fn run_coordinator(
     let mut state = CoordinatorState {
         snapshot: initial_snapshot,
         native_lease: None,
+        quarantine: None,
     };
     let startup_failure = match reconcile_initial_state(
         backend.as_ref(),

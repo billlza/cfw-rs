@@ -109,8 +109,9 @@ public enum NativeTunnelInstallOutcome: String, Codable, Sendable {
   case awaitingApproval = "awaiting_approval"
 }
 
-public enum NativeBridgeErrorCode: String, Codable, Sendable {
+public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
   case busy
+  case resourceExhausted = "resource_exhausted"
   case permissionDenied = "permission_denied"
   case approvalDenied = "approval_denied"
   case configurationRejected = "configuration_rejected"
@@ -118,19 +119,91 @@ public enum NativeBridgeErrorCode: String, Codable, Sendable {
   case credentialConflict = "credential_conflict"
   case credentialVaultMissing = "credential_vault_missing"
   case credentialGCConflict = "credential_gc_conflict"
+  case globalAuthorityUnavailable = "global_authority_unavailable"
+  case globalAuthorityRegistrationRequired = "global_authority_registration_required"
+  case globalAuthorityApprovalRequired = "global_authority_approval_required"
+  case globalAuthorityIdentityRejected = "global_authority_identity_rejected"
+  case globalAuthorityProtocolMismatch = "global_authority_protocol_mismatch"
+  case globalAuthorityRecovering = "global_authority_recovering"
+  case globalAuthorityTimeout = "global_authority_timeout"
+  case globalAuthorityInterrupted = "global_authority_interrupted"
+  case globalLeaseConflict = "global_lease_conflict"
+  case replayRejected = "replay_rejected"
+  case staleOperation = "stale_operation"
+  case ticketExpired = "ticket_expired"
+  case ticketAlreadyRedeemed = "ticket_already_redeemed"
+  case ticketInvalid = "ticket_invalid"
+  case compensationConflict = "compensation_conflict"
+  case cleanupUnproven = "cleanup_unproven"
+  case quarantined
+  case invalidMessage = "invalid_message"
+  case secretBoundsExceeded = "secret_bounds_exceeded"
+  case secretLifecycleViolation = "secret_lifecycle_violation"
+  case journalCorrupt = "journal_corrupt"
+  case ownerUnresponsive = "owner_unresponsive"
   case identityRejected = "identity_rejected"
   case timeout
   case unavailable
   case `internal`
+
+  public var stableMessage: String {
+    switch self {
+    case .busy: "Global Authority mutation is busy."
+    case .resourceExhausted: "Global Authority read capacity is exhausted."
+    case .permissionDenied: "The native operation was denied."
+    case .approvalDenied: "Required operating-system approval was denied."
+    case .configurationRejected: "The native configuration was rejected."
+    case .credentialsUnavailable: "Required credentials are unavailable."
+    case .credentialConflict: "Credential material conflicts with an immutable entry."
+    case .credentialVaultMissing: "The credential vault is unavailable."
+    case .credentialGCConflict: "Credential cleanup requires a fresh preview."
+    case .globalAuthorityUnavailable: "Global Authority is unavailable."
+    case .globalAuthorityRegistrationRequired: "Global Authority registration is required."
+    case .globalAuthorityApprovalRequired: "Global Authority approval is required."
+    case .globalAuthorityIdentityRejected: "Global Authority peer identity was rejected."
+    case .globalAuthorityProtocolMismatch: "Global Authority protocol is incompatible."
+    case .globalAuthorityRecovering: "Global Authority is recovering; starts are disabled."
+    case .globalAuthorityTimeout: "The Authority operation timed out."
+    case .globalAuthorityInterrupted: "The Authority connection was interrupted."
+    case .globalLeaseConflict: "A conflicting Global Authority lease exists."
+    case .replayRejected: "Authority replay protection rejected the context."
+    case .staleOperation: "Authority operation context is stale."
+    case .ticketExpired: "The Authority start ticket expired."
+    case .ticketAlreadyRedeemed: "The Authority start ticket was already redeemed."
+    case .ticketInvalid: "The Authority start ticket is invalid."
+    case .compensationConflict: "Tunnel preference compensation conflicted."
+    case .cleanupUnproven: "Global cleanup could not be proven."
+    case .quarantined: "Global Authority is quarantined pending reconciliation."
+    case .invalidMessage: "The Authority message is invalid."
+    case .secretBoundsExceeded: "Authority secret material exceeds a fixed bound."
+    case .secretLifecycleViolation: "Authority secret lifecycle verification failed."
+    case .journalCorrupt: "The Authority journal is corrupt."
+    case .ownerUnresponsive: "The Authority engine owner is unresponsive."
+    case .identityRejected: "The native peer identity was rejected."
+    case .timeout: "The native operation timed out."
+    case .unavailable: "The native operation is unavailable."
+    case .internal: "The native bridge failed at a stable internal boundary."
+    }
+  }
+
+  public init(from decoder: Decoder) throws {
+    let wireCode = try decoder.singleValueContainer().decode(String.self)
+    self = Self(rawValue: wireCode) ?? .internal
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encode(rawValue)
+  }
 }
 
 public struct NativeBridgeFailure: Codable, Equatable, Sendable {
   public let code: NativeBridgeErrorCode
   public let message: String
 
-  public init(code: NativeBridgeErrorCode, message: String) {
+  public init(code: NativeBridgeErrorCode, message _: String) {
     self.code = code
-    self.message = message
+    self.message = code.stableMessage
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -140,22 +213,19 @@ public struct NativeBridgeFailure: Codable, Equatable, Sendable {
 
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    let code = try container.decode(NativeBridgeErrorCode.self, forKey: .code)
-    let message = try container.decode(String.self, forKey: .message)
-    guard Self.isValidMessage(message) else {
+    let wireCode = try container.decode(String.self, forKey: .code)
+    let suppliedMessage = try container.decode(String.self, forKey: .message)
+    guard Self.isValidMessage(suppliedMessage) else {
       throw NativeBridgeProtocolError.invalidResponse
     }
-    self.code = code
-    self.message = message
+    code = NativeBridgeErrorCode(rawValue: wireCode) ?? .internal
+    message = code.stableMessage
   }
 
   public func encode(to encoder: Encoder) throws {
-    guard Self.isValidMessage(message) else {
-      throw NativeBridgeProtocolError.invalidResponse
-    }
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(code, forKey: .code)
-    try container.encode(message, forKey: .message)
+    try container.encode(code.stableMessage, forKey: .message)
   }
 
   private static func isValidMessage(_ message: String) -> Bool {

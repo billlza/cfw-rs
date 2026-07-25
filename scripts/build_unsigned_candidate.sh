@@ -77,6 +77,7 @@ print(json.dumps({
             "bundleVersion": build,
             "files": {
                 "Frameworks/CFWNativeBridge.framework": f"{native}/CFWNativeBridge.framework",
+                "Library/HelperTools/CFWGlobalAuthority": f"{native}/CFWGlobalAuthority",
                 "Library/HelperTools/cfw-helper-tombstone": (
                     f"{native}/CFWLegacyTombstone/cfw-helper-tombstone"
                 ),

@@ -46,10 +46,12 @@ protocol NativeConfigurationStoring: Sendable {
 extension AppGroupConfigurationStore: NativeConfigurationStoring {}
 
 protocol NativeEngineLeaseInspecting: Sendable {
-  func isAvailable() throws -> Bool
+  func isAvailable() async throws -> Bool
+  /// Reports the Global Authority's machine-wide ownership observation used to
+  /// require exact agreement before declaring an owner Active. A default
+  /// implementation derives a coarse observation from `isAvailable()`.
+  func authorityOwnership() async throws -> AuthorityOwnershipObservation
 }
-
-extension CrossProcessEngineLeaseStore: NativeEngineLeaseInspecting {}
 
 actor NativeBridgeCoordinator {
   let proxy: any ProxyAgentTransporting
@@ -140,29 +142,45 @@ actor NativeBridgeCoordinator {
       )
     }
 
-    let leaseAvailable: Bool
+    let ownership: AuthorityOwnershipObservation
     do {
-      leaseAvailable = try engineLease.isAvailable()
+      ownership = try await engineLease.authorityOwnership()
     } catch {
       throw Self.map(error)
     }
 
     if let proxyDescriptor {
-      guard tunnelDescriptor == nil, Self.isStableOff(tunnelSnapshot), !leaseAvailable else {
+      guard tunnelDescriptor == nil, Self.isStableOff(tunnelSnapshot) else {
         throw NativeBridgeExecutionError.failure(
           .identityRejected,
           "ProxyAgent readiness does not match machine-wide engine ownership."
         )
       }
+      // Classify Active only on exact agreement between the Global_Lease,
+      // Operation_Context, owner-ready attestation, configuration digest, and the
+      // effective SystemConfiguration owner state. Any mismatch fails closed.
+      try Self.requireActiveAgreement(
+        descriptor: proxyDescriptor,
+        mode: .systemProxy,
+        ownership: ownership
+      )
       return .systemProxy(try Self.runtime(descriptor: proxyDescriptor, proxy: true))
     }
     if let tunnelDescriptor {
-      guard Self.isStableOff(proxySnapshot), !leaseAvailable else {
+      guard Self.isStableOff(proxySnapshot) else {
         throw NativeBridgeExecutionError.failure(
           .identityRejected,
           "Packet Tunnel readiness does not match machine-wide engine ownership."
         )
       }
+      // Classify Active only on exact agreement between the Global_Lease,
+      // Operation_Context, owner-ready attestation, configuration digest, and the
+      // effective Network Extension owner state. Any mismatch fails closed.
+      try Self.requireActiveAgreement(
+        descriptor: tunnelDescriptor,
+        mode: .tunnel,
+        ownership: ownership
+      )
       return .tunnel(try Self.runtime(descriptor: tunnelDescriptor, proxy: false))
     }
     guard Self.isStableOff(proxySnapshot), Self.isStableOff(tunnelSnapshot) else {
@@ -171,12 +189,7 @@ actor NativeBridgeCoordinator {
         "A native endpoint is not at the stable Off barrier."
       )
     }
-    guard leaseAvailable else {
-      throw NativeBridgeExecutionError.failure(
-        .busy,
-        "Another user or native engine process holds the machine-wide engine lease."
-      )
-    }
+    try Self.requireGlobalOff(ownership)
     return .off
   }
 }

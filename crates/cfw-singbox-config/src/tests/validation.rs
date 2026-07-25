@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use crate::{ConfigError, CredentialSecret, MAX_PROFILE_NODES, ValidatedSingBoxProfile};
+use crate::{
+    ConfigError, CredentialSecret, MAX_PROFILE_BYTES, MAX_PROFILE_NODES, ValidatedSingBoxProfile,
+};
 
 const SS_ID: &str = "11111111-1111-4111-8111-111111111111";
 const VMESS_ID: &str = "22222222-2222-4222-8222-222222222222";
@@ -230,10 +232,13 @@ fn typed_remote_endpoints_reject_non_routable_and_tunnel_reserved_literals() {
 
 #[test]
 fn excessively_wide_profiles_are_rejected_before_projection() {
-    let outbounds = std::iter::repeat_n("null", MAX_PROFILE_NODES)
+    // One byte per node keeps the input well under the 384 KiB byte ceiling so
+    // the rejection can only come from the node budget.
+    let outbounds = std::iter::repeat_n("0", MAX_PROFILE_NODES)
         .collect::<Vec<_>>()
         .join(",");
     let input = format!(r#"{{"outbounds":[{outbounds}]}}"#);
+    assert!(input.len() < MAX_PROFILE_BYTES);
     let error = ValidatedSingBoxProfile::parse(&input)
         .expect_err("node count must remain bounded independently of byte size");
     assert_eq!(

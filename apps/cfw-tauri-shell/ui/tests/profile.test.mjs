@@ -72,7 +72,11 @@ test("rejects profiles larger than four MiB", () => {
 });
 
 test("rejects profiles with an excessive node count", () => {
-  const complex = JSON.stringify({ route: { rules: Array.from({ length: 100_001 }, () => null) } });
+  // Two bytes per node keeps the fixture well under the 384 KiB byte ceiling so
+  // the rejection can only come from the node budget, mirroring the
+  // authoritative Rust validator contract.
+  const complex = JSON.stringify({ route: { rules: Array.from({ length: 100_001 }, () => 0) } });
+  assert.ok(new TextEncoder().encode(complex).byteLength < 384 * 1024);
   assert.throws(() => validateSingBoxProfileText(complex), /too complex/u);
 });
 

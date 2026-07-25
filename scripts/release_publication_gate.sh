@@ -44,6 +44,13 @@ verify_release_publication_evidence() {
     echo "error: publication evidence directory is missing or is a symlink: $publication_evidence_root" >&2
     return 1
   fi
+  # Publication artifacts may only be created once the immutable sealed outer
+  # Evidence Manifest authorizes publication: P0 source implementation, unsigned
+  # CI, signed-installed evidence, sealed closure, the final-candidate binding,
+  # and updater-key custody must all pass. A missing, blocked, or hand-edited
+  # manifest refuses publication; there is no override and no fallback.
+  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+    "$publication_repo_root/scripts/sealed_evidence_manifest.py" publication-gate
   local native_products_root
   native_products_root="$(release_native_products_root_for_app "$app_path")" || return 1
   "$publication_repo_root/scripts/verify_release_app.sh" "$app_path" "$native_products_root"

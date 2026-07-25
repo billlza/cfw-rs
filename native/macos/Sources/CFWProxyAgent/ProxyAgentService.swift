@@ -21,11 +21,11 @@ private final class ProxyXPCReply: @unchecked Sendable {
 }
 
 final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Sendable {
-  private let lifecycle: ProxySessionLifecycle
+  private let lifecycle: any ProxySystemProxyOwning
   private let configurationChecker: any LibboxConfigurationChecking
 
   init(
-    lifecycle: ProxySessionLifecycle,
+    lifecycle: any ProxySystemProxyOwning,
     configurationChecker: any LibboxConfigurationChecking
   ) {
     self.lifecycle = lifecycle
@@ -57,6 +57,20 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
         )
       }
     case .startSystemProxy:
+      do {
+        try GlobalAuthorityReleaseGate.requireStartAuthorization()
+      } catch {
+        respond(
+          requestID: request.requestID,
+          failure: EngineFailure(
+            code: GlobalAuthorityGateError.stableCode,
+            message: GlobalAuthorityGateError.stableMessage,
+            isRetryable: false
+          ),
+          reply: reply
+        )
+        return
+      }
       guard let configuration = request.command.configuration else {
         respond(
           requestID: request.requestID,

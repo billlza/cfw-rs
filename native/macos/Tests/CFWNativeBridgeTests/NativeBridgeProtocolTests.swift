@@ -36,20 +36,19 @@ import Testing
   )
   let encoded = try NativeBridgeProtocolCodec.encodeResponse(valid)
   #expect(try JSONDecoder().decode(NativeResponseEnvelope.self, from: encoded) == valid)
+  #expect(valid.failure?.message == NativeBridgeErrorCode.unavailable.stableMessage)
 
-  let oversized = NativeResponseEnvelope(
-    requestID: nil,
-    failure: NativeBridgeFailure(code: .unavailable, message: maximum + "a")
+  let oversized = Data(
+    "{\"code\":\"unavailable\",\"message\":\"\(maximum)a\"}".utf8
   )
   #expect(throws: NativeBridgeProtocolError.invalidResponse) {
-    try NativeBridgeProtocolCodec.encodeResponse(oversized)
+    try JSONDecoder().decode(NativeBridgeFailure.self, from: oversized)
   }
-  let controlled = NativeResponseEnvelope(
-    requestID: nil,
-    failure: NativeBridgeFailure(code: .unavailable, message: "unsafe\u{0}message")
+  let controlled = Data(
+    "{\"code\":\"unavailable\",\"message\":\"unsafe\\u0000message\"}".utf8
   )
   #expect(throws: NativeBridgeProtocolError.invalidResponse) {
-    try NativeBridgeProtocolCodec.encodeResponse(controlled)
+    try JSONDecoder().decode(NativeBridgeFailure.self, from: controlled)
   }
 }
 
@@ -143,4 +142,17 @@ private func contractFixture(_ name: String) throws -> Data {
   }
   #expect(result.orphanCount == 1)
   #expect(result.vaultRevision.uuidString.lowercased() == "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+}
+
+@Test func nativePublicQueryJSONContractIsUnchanged() throws {
+  let fixture = try contractFixture("query-request.json")
+  let request = try NativeBridgeProtocolCodec.decodeRequest(fixture)
+  let encoded = try JSONEncoder().encode(request)
+  #expect(try NativeBridgeProtocolCodec.decodeRequest(encoded) == request)
+
+  let expected = try #require(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+  var actual = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+  let encodedRequestID = try #require(actual["request_id"] as? String)
+  actual["request_id"] = encodedRequestID.lowercased()
+  #expect(NSDictionary(dictionary: actual) == NSDictionary(dictionary: expected))
 }

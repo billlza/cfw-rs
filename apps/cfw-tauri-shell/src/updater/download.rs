@@ -200,8 +200,8 @@ pub(super) fn validate_release_asset_url(url: &Url) -> std::result::Result<(), S
 }
 
 fn embedded_public_key() -> Result<PublicKey> {
-    let config: serde_json::Value = serde_json::from_str(EMBEDDED_TAURI_CONFIG)
-        .map_err(|_| UpdateError::InvalidPublicKey)?;
+    let config: serde_json::Value =
+        serde_json::from_str(EMBEDDED_TAURI_CONFIG).map_err(|_| UpdateError::InvalidPublicKey)?;
     let encoded = config
         .pointer("/plugins/updater/pubkey")
         .and_then(serde_json::Value::as_str)
@@ -226,7 +226,9 @@ fn validate_signature_archive(signature: &Signature, expected_archive: &str) -> 
 
 fn parse_trusted_comment(comment: &str) -> Result<&str> {
     if comment.len() > MAX_TRUSTED_COMMENT_BYTES
-        || comment.bytes().any(|byte| byte.is_ascii_control() && byte != b'\t')
+        || comment
+            .bytes()
+            .any(|byte| byte.is_ascii_control() && byte != b'\t')
     {
         return Err(UpdateError::InvalidSignatureComment);
     }
@@ -459,10 +461,7 @@ mod tests {
         validate_signature_archive(&signature, "Clash.for.Mac_0.3.5_aarch64.app.tar.gz")
             .expect("matching signed filename");
         assert!(matches!(
-            validate_signature_archive(
-                &signature,
-                "Clash.for.Mac_0.4.0_aarch64.app.tar.gz"
-            ),
+            validate_signature_archive(&signature, "Clash.for.Mac_0.4.0_aarch64.app.tar.gz"),
             Err(UpdateError::SignatureArchiveMismatch)
         ));
     }

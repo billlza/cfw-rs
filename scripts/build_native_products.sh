@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the three native release products from the tracked Xcode project.
+# Build the four native release products from the tracked Xcode project.
 # Unsigned mode is for CI validation only. Developer ID mode requires the
 # product's exact identity and target-specific provisioning profiles.
 set -euo pipefail
@@ -72,6 +72,7 @@ mkdir -p "$output_input"
 output_root="$(cd "$output_input" && pwd -P)"
 
 products=(
+  CFWGlobalAuthority
   CFWNativeBridge.framework
   CFWProxyAgent.app
   CFWPacketTunnel.systemextension
@@ -107,6 +108,10 @@ common_arguments=(
   MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
   CFW_BUILD_NUMBER="$CFW_BUILD_NUMBER"
   CURRENT_PROJECT_VERSION="$CFW_BUILD_NUMBER"
+  # "\$(inherited)" is passed through to xcodebuild verbatim; escaping keeps the
+  # literal build-setting reference without a single-quoted expansion warning.
+  "GCC_PREPROCESSOR_DEFINITIONS=\$(inherited) CFW_GLOBAL_AUTHORITY_REQUIRED=1"
+  "SWIFT_ACTIVE_COMPILATION_CONDITIONS=\$(inherited) CFW_GLOBAL_AUTHORITY_REQUIRED"
   GCC_TREAT_WARNINGS_AS_ERRORS=YES
   SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
 )
@@ -146,6 +151,7 @@ build_scheme() {
 }
 
 build_scheme CFWNativeBridge
+build_scheme CFWGlobalAuthorityDaemon
 if [[ "$signing_mode" == "developer-id" ]]; then
   build_scheme CFWProxyAgent \
     PROVISIONING_PROFILE_SPECIFIER="$PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER"
@@ -173,8 +179,8 @@ trap cleanup EXIT
 
 for product in "${products[@]}"; do
   source_path="$built_root/$product"
-  [[ -d "$source_path" && ! -L "$source_path" ]] ||
-    die "Xcode did not produce a real $product bundle"
+  [[ -e "$source_path" && ! -L "$source_path" ]] ||
+    die "Xcode did not produce a real $product"
   /usr/bin/ditto --noqtn "$source_path" "$staging/$product"
 done
 
@@ -191,10 +197,11 @@ verify_macho() {
     die "native product deployment target differs from $MACOS_DEPLOYMENT_TARGET: $binary"
 }
 
+authority_binary="$staging/CFWGlobalAuthority"
 bridge_binary="$staging/CFWNativeBridge.framework/Versions/A/CFWNativeBridge"
 agent_binary="$staging/CFWProxyAgent.app/Contents/MacOS/CFWProxyAgent"
 tunnel_binary="$staging/CFWPacketTunnel.systemextension/Contents/MacOS/CFWPacketTunnel"
-for binary in "$bridge_binary" "$agent_binary" "$tunnel_binary"; do
+for binary in "$authority_binary" "$bridge_binary" "$agent_binary" "$tunnel_binary"; do
   [[ -f "$binary" && ! -L "$binary" ]] || die "native product executable is unavailable: $binary"
   verify_macho "$binary"
 done
@@ -220,6 +227,14 @@ if [[ "$signing_mode" == "developer-id" ]]; then
     [[ "$signature" == *"Timestamp="* && "$signature" != *"Timestamp=none"* ]] ||
       die "native product has no secure timestamp: $product"
     [[ "$signature" != *"Signature=adhoc"* ]] || die "ad-hoc native product is forbidden: $product"
+    if [[ "$product" == "CFWGlobalAuthority" ]]; then
+      [[ "$signature" == *"Identifier=com.bill.clashformac.global-authority"* ]] ||
+        die "Global Authority signing identifier mismatch"
+      expected_requirement='anchor apple generic and identifier "com.bill.clashformac.global-authority" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "YKUPL7Z869"'
+      authority_requirement="$(codesign -d -r- "$staging/$product" 2>&1)"
+      [[ "$authority_requirement" == "designated => $expected_requirement" ]] ||
+        die "Global Authority designated requirement mismatch"
+    fi
   done
 fi
 
@@ -240,6 +255,7 @@ PY
 
 for product in "${products[@]}"; do
   case "$product" in
+    CFWGlobalAuthority) artifact_kind="native-global-authority-v1" ;;
     CFWNativeBridge.framework) artifact_kind="native-host-bridge-v1" ;;
     CFWProxyAgent.app) artifact_kind="native-proxy-agent-v1" ;;
     CFWPacketTunnel.systemextension) artifact_kind="native-packet-tunnel-v1" ;;

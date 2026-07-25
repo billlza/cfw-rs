@@ -7,6 +7,11 @@ extension NativeBridgeCoordinator {
   func startSystemProxy(_ request: EngineStartRequest) async throws
     -> NativeRuntimeIdentity
   {
+    do {
+      try GlobalAuthorityReleaseGate.requireStartAuthorization()
+    } catch {
+      throw Self.map(error)
+    }
     try beginMutation()
     defer { endMutation() }
     guard request.tunnelOptions == nil else {
@@ -126,6 +131,11 @@ extension NativeBridgeCoordinator {
   }
 
   func startTunnel(_ request: EngineStartRequest) async throws -> NativeRuntimeIdentity {
+    do {
+      try GlobalAuthorityReleaseGate.requireStartAuthorization()
+    } catch {
+      throw Self.map(error)
+    }
     try beginMutation()
     defer { endMutation() }
     guard request.tunnelOptions != nil else {

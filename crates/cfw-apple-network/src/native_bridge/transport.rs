@@ -3,9 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cfw_engine_api::{
-    BackendErrorKind, CutoverPreflightOutcome, EngineMode, EngineOwner, MAX_CREDENTIAL_SLOTS,
-    NativeBridgeFailure, NativeBridgeResult, NativeEngineStatus, NativeResponseEnvelope,
-    RuntimeIdentity,
+    CutoverPreflightOutcome, EngineMode, EngineOwner, MAX_CREDENTIAL_SLOTS, NativeBridgeFailure,
+    NativeBridgeResult, NativeEngineStatus, NativeResponseEnvelope, RuntimeIdentity,
 };
 use tokio::sync::oneshot;
 
@@ -268,26 +267,48 @@ pub(super) unsafe extern "C" fn bridge_completion(
 }
 
 fn map_wire_failure(failure: NativeBridgeFailure) -> NativeBridgeError {
-    let code = match failure.code {
-        BackendErrorKind::Busy => NativeBridgeErrorCode::Busy,
-        BackendErrorKind::PermissionDenied => NativeBridgeErrorCode::PermissionDenied,
-        BackendErrorKind::ApprovalDenied => NativeBridgeErrorCode::ApprovalDenied,
-        BackendErrorKind::ConfigurationRejected => NativeBridgeErrorCode::ConfigurationRejected,
-        BackendErrorKind::CredentialsUnavailable => NativeBridgeErrorCode::CredentialsUnavailable,
-        BackendErrorKind::CredentialConflict => NativeBridgeErrorCode::CredentialConflict,
-        BackendErrorKind::CredentialVaultMissing => NativeBridgeErrorCode::CredentialVaultMissing,
-        BackendErrorKind::CredentialGcConflict => NativeBridgeErrorCode::CredentialGcConflict,
-        BackendErrorKind::IdentityRejected => NativeBridgeErrorCode::IdentityRejected,
-        BackendErrorKind::Timeout => NativeBridgeErrorCode::Timeout,
-        BackendErrorKind::Unavailable => NativeBridgeErrorCode::Unavailable,
-        BackendErrorKind::Internal => NativeBridgeErrorCode::Internal,
-    };
-    NativeBridgeError::new(code, failure.message)
+    let code = failure.code;
+    NativeBridgeError::new(code.into(), code.stable_message())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cfw_engine_api::BackendErrorKind;
+
+    #[test]
+    fn unknown_wire_failure_maps_to_stable_internal_non_retryable_error() {
+        let request_id =
+            uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("request UUID");
+        let response = format!(
+            "{{\"schema_version\":3,\"request_id\":\"{request_id}\",\"result\":null,\"failure\":{{\"code\":\"future_authority_code\",\"message\":\"/private/path secret identity\"}}}}"
+        );
+        let error = parse_response(request_id, response.as_bytes()).expect_err("unknown code");
+        assert_eq!(error.code, NativeBridgeErrorCode::Internal);
+        assert_eq!(error.message, BackendErrorKind::Internal.stable_message());
+        assert!(!error.message.contains("private"));
+        assert!(!error.message.contains("secret"));
+        let kind = BackendErrorKind::from(error.code);
+        assert!(!kind.allows_automatic_retry(true));
+    }
+
+    #[test]
+    fn global_authority_failure_preserves_code_and_discards_wire_text() {
+        let error = map_wire_failure(NativeBridgeFailure {
+            code: BackendErrorKind::GlobalAuthorityUnavailable,
+            message: "/Users/alice/private/secret localized diagnostic".into(),
+        });
+        assert_eq!(
+            error.code,
+            NativeBridgeErrorCode::GlobalAuthorityUnavailable
+        );
+        assert_eq!(
+            error.message,
+            BackendErrorKind::GlobalAuthorityUnavailable.stable_message()
+        );
+        assert!(!error.message.contains("alice"));
+        assert!(!error.message.contains("secret"));
+    }
 
     #[test]
     fn cross_language_preview_response_is_validated() {

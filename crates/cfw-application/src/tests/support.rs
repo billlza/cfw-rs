@@ -32,6 +32,14 @@ pub(super) struct FakeBackend {
     pub(super) fail_proxy_start: Mutex<bool>,
     pub(super) fail_proxy_stop: Mutex<bool>,
     pub(super) fail_query: Mutex<bool>,
+    /// When true, a successful stop attests the owner stopped (returns `Ok`) but
+    /// does not clear the native observation, so a subsequent independent
+    /// OS-state query still reports the prior owner. Models a stop whose owner
+    /// stopped attestation succeeds while the Global Off barrier stays unproven.
+    pub(super) stop_leaves_owner_present: Mutex<bool>,
+    pub(super) proxy_start_error: Mutex<Option<BackendErrorKind>>,
+    pub(super) tunnel_install_error: Mutex<Option<BackendErrorKind>>,
+    pub(super) tunnel_start_error: Mutex<Option<BackendErrorKind>>,
     pub(super) hang_proxy_start: Mutex<bool>,
     pub(super) proxy_start_delay: Mutex<Duration>,
     pub(super) proxy_start_gate: Mutex<Option<Arc<Notify>>>,
@@ -190,6 +198,16 @@ impl EngineBackend for FakeBackend {
             }
             let delay = *self.proxy_start_delay.lock().expect("start delay lock");
             tokio::time::sleep(delay).await;
+            if let Some(kind) = *self
+                .proxy_start_error
+                .lock()
+                .expect("proxy start error lock")
+            {
+                return Err(BackendError::new(
+                    kind,
+                    "proxy start reported a typed backend error",
+                ));
+            }
             if *self.fail_proxy_start.lock().expect("fail start lock") {
                 return Err(BackendError::new(
                     BackendErrorKind::Unavailable,
@@ -236,7 +254,13 @@ impl EngineBackend for FakeBackend {
                     "proxy stop barrier failed",
                 ));
             }
-            *self.native_status.lock().expect("native status lock") = NativeEngineStatus::Off;
+            if !*self
+                .stop_leaves_owner_present
+                .lock()
+                .expect("stop leaves owner lock")
+            {
+                *self.native_status.lock().expect("native status lock") = NativeEngineStatus::Off;
+            }
             Ok(())
         })
     }
@@ -254,6 +278,16 @@ impl EngineBackend for FakeBackend {
                 .lock()
                 .expect("tunnel install contexts lock")
                 .push(context);
+            if let Some(kind) = *self
+                .tunnel_install_error
+                .lock()
+                .expect("tunnel install error lock")
+            {
+                return Err(BackendError::new(
+                    kind,
+                    "tunnel install reported a typed backend error",
+                ));
+            }
             if *self.awaiting_approval.lock().expect("approval lock") {
                 Ok(TunnelInstallOutcome::AwaitingApproval)
             } else {
@@ -288,6 +322,16 @@ impl EngineBackend for FakeBackend {
                 .expect("tunnel requests lock")
                 .push(request.clone());
             tokio::time::sleep(Duration::from_millis(5)).await;
+            if let Some(kind) = *self
+                .tunnel_start_error
+                .lock()
+                .expect("tunnel start error lock")
+            {
+                return Err(BackendError::new(
+                    kind,
+                    "tunnel start reported a typed backend error",
+                ));
+            }
             let runtime = RuntimeIdentity {
                 owner: EngineOwner::PacketTunnelSystemExtension,
                 context: request.context,
@@ -311,7 +355,13 @@ impl EngineBackend for FakeBackend {
                 .lock()
                 .expect("tunnel stop contexts lock")
                 .push(context);
-            *self.native_status.lock().expect("native status lock") = NativeEngineStatus::Off;
+            if !*self
+                .stop_leaves_owner_present
+                .lock()
+                .expect("stop leaves owner lock")
+            {
+                *self.native_status.lock().expect("native status lock") = NativeEngineStatus::Off;
+            }
             Ok(())
         })
     }

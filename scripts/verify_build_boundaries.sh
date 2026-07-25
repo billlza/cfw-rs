@@ -6,6 +6,38 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_release_authority_gate.py
+
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_pinned_build_inputs.py
+
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_production_boundary_removal.py
+
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_native_product_graph.py
+
+# Confirm the Signed_Installed physical-evidence aggregator is wired to all four
+# harnesses and the Evidence_Manifest level order. This is a source-boundary
+# contract check only; the physical evidence itself requires signed Apple
+# Silicon runs on two macOS versions and is captured separately.
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/harness/physical_evidence_aggregator.py --self-check
+
+# Confirm the final-candidate notarization/installed binder (Task 12.2) is wired
+# to the physical-evidence aggregator, the sealed-closure pins, and the
+# path/name-only updater-key blocker, and that it requires the full inside-out
+# identity set plus the installed-matrix/packet/performance/security/soak report
+# families across both required macOS run sets. This is a source-boundary
+# contract check only; the notarization/staple/Gatekeeper and physical evidence
+# themselves require a signed, notarized candidate captured separately.
+PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'from scripts.publication.final_candidate import self_check; self_check(); print("final candidate binder self-check ok")'
+
+# Confirm the immutable sealed outer Evidence Manifest and publication gate
+# (Task 12.3) is wired to the Evidence_Manifest level order, the physical
+# aggregator, the sealed closure, the final-candidate binder, and the
+# path/name-only updater-key blocker, and that an empty gate table authorizes no
+# evidence level and refuses publication. This is a source-boundary contract
+# check only; sealing the manifest additionally requires the signed, notarized,
+# and physical evidence captured separately.
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/sealed_evidence_manifest.py self-check
+
 build_scripts="$(git ls-files '**/build.rs' 'build.rs')"
 if [[ -z "$build_scripts" ]]; then
   echo "error: no tracked Cargo build scripts found" >&2

@@ -87,6 +87,7 @@ export CFW_NATIVE_DERIVED_DATA="$build_root/xcode-derived-data"
 "$repo_root/scripts/build_legacy_tombstone.sh" --developer-id
 
 for product in \
+  CFWGlobalAuthority \
   CFWNativeBridge.framework \
   CFWProxyAgent.app \
   CFWPacketTunnel.systemextension; do
@@ -118,6 +119,7 @@ print(json.dumps({
             "bundleVersion": build,
             "files": {
                 "Frameworks/CFWNativeBridge.framework": f"{native}/CFWNativeBridge.framework",
+                "Library/HelperTools/CFWGlobalAuthority": f"{native}/CFWGlobalAuthority",
                 "Library/HelperTools/cfw-helper-tombstone": (
                     f"{native}/CFWLegacyTombstone/cfw-helper-tombstone"
                 ),
@@ -159,6 +161,7 @@ staged_app="$staging/Clash for Mac.app"
 
 for nested in \
   "$staged_app/Contents/Frameworks/CFWNativeBridge.framework" \
+  "$staged_app/Contents/Library/HelperTools/CFWGlobalAuthority" \
   "$staged_app/Contents/Library/LoginItems/CFWProxyAgent.app" \
   "$staged_app/Contents/Library/SystemExtensions/CFWPacketTunnel.systemextension" \
   "$staged_app/Contents/Library/HelperTools/cfw-helper-tombstone"; do

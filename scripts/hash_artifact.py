@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Hash a directory without embedding machine-specific absolute paths."""
+"""Hash an artifact tree or single-file product without embedding machine-specific
+absolute paths."""
 
 from __future__ import annotations
 
@@ -22,13 +23,23 @@ def file_digest(path: Path) -> str:
 def build_manifest(root: Path, metadata: dict[str, str] | None = None) -> dict[str, object]:
     if root.is_symlink():
         raise ValueError(f"artifact root must not be a symlink: {root}")
-    if not root.is_dir():
-        raise ValueError(f"artifact directory does not exist: {root}")
+    if root.is_dir():
+        members = [
+            (path, path.relative_to(root).as_posix())
+            for path in sorted(
+                root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()
+            )
+        ]
+    elif root.is_file():
+        # A bare executable product, such as the launchd Global Authority daemon,
+        # is a single-file artifact rather than a bundle tree.
+        members = [(root, root.name)]
+    else:
+        raise ValueError(f"artifact does not exist: {root}")
 
     entries: list[dict[str, object]] = []
     tree_digest = hashlib.sha256()
-    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
-        relative = path.relative_to(root).as_posix()
+    for path, relative in members:
         if path.is_symlink():
             target = os.readlink(path)
             entry = {"path": relative, "type": "symlink", "target": target}

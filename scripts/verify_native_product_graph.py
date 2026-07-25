@@ -1,0 +1,542 @@
+"""Static native product-graph packaging gate.
+
+This gate proves — without building, signing, notarizing, or installing
+anything — that the tracked generation inputs describe the *complete* native
+product graph the macOS 15 Network Extension migration requires:
+
+* the Host application, the ProxyAgent, the Packet Tunnel System Extension, and
+  the Global Authority launchd daemon are all present as XcodeGen targets, are
+  reflected in the generated Xcode project, are built by the candidate build
+  script, and are embedded by the Tauri bundle configuration;
+* every product uses the macOS 15 arm64 release settings and the
+  ``CFW_GLOBAL_AUTHORITY_REQUIRED=1`` Release gate is defined in the XcodeGen
+  spec, the SwiftPM manifest, the generated Xcode project, and the candidate
+  build script;
+* the launchd daemon plist embeds under ``Contents/Library/LaunchDaemons`` and
+  the daemon executable embeds under ``Contents/Library/HelperTools``, exports
+  exactly the fixed root-context Mach service, and declares no data-plane or
+  broad-resource launchd surface;
+* the exact entitlements, bundle identifiers, and provisioning inputs are
+  present for each signed product;
+* the canonical inside-out signing-order manifest lists every nested component
+  before the outer host app, its destinations agree with the Tauri embedding
+  map, and the candidate signing script signs the outer app strictly after
+  every nested component.
+
+The gate is offline and non-recursive: it only reads tracked files and never
+invokes another build system, a network client, or a solver.  It fails closed —
+a missing target, plist, entitlement, Mach service, embedding path, signing
+stage, or Release gate raises rather than silently passing.
+"""
+
+from __future__ import annotations
+
+import json
+import plistlib
+import sys
+from pathlib import Path
+from typing import Any
+
+
+class NativeProductGraphError(RuntimeError):
+    """Raised when the tracked generation inputs do not describe the complete,
+    correctly configured native product graph, or when a required input is
+    unavailable, unreadable, or malformed."""
+
+
+TEAM_ID = "YKUPL7Z869"
+APP_GROUP = "group.com.bill.clashformac"
+MACH_SERVICE = f"{TEAM_ID}.{APP_GROUP}.global-authority"
+HOST_ID = "com.bill.clashformac"
+BRIDGE_ID = "com.bill.clashformac.native-bridge"
+AGENT_ID = "com.bill.clashformac.proxy-agent"
+EXTENSION_ID = "com.bill.clashformac.packet-tunnel"
+AUTHORITY_ID = "com.bill.clashformac.global-authority"
+DEPLOYMENT_TARGET = "15.0"
+
+DAEMON_EMBED = "Library/HelperTools/CFWGlobalAuthority"
+DAEMON_PLIST_EMBED = "Library/LaunchDaemons/com.bill.clashformac.global-authority.plist"
+BRIDGE_EMBED = "Frameworks/CFWNativeBridge.framework"
+AGENT_EMBED = "Library/LoginItems/CFWProxyAgent.app"
+EXTENSION_EMBED = "Library/SystemExtensions/CFWPacketTunnel.systemextension"
+
+
+# ---------------------------------------------------------------------------
+# Low-level readers (fail closed on missing / malformed inputs).
+# ---------------------------------------------------------------------------
+def read_text(root: Path, relative: str) -> str:
+    path = root / relative
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise NativeProductGraphError(
+            f"required generation input is unavailable: {relative} ({error})"
+        ) from error
+    except UnicodeDecodeError as error:
+        raise NativeProductGraphError(
+            f"required generation input is malformed (non-UTF-8): {relative} ({error})"
+        ) from error
+
+
+def read_json(root: Path, relative: str) -> Any:
+    text = read_text(root, relative)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        raise NativeProductGraphError(
+            f"required generation input is not valid JSON: {relative} ({error})"
+        ) from error
+
+
+def read_plist(root: Path, relative: str) -> dict[str, Any]:
+    path = root / relative
+    try:
+        value = plistlib.loads(path.read_bytes())
+    except OSError as error:
+        raise NativeProductGraphError(
+            f"required property list is unavailable: {relative} ({error})"
+        ) from error
+    except plistlib.InvalidFileException as error:
+        raise NativeProductGraphError(
+            f"required property list is malformed: {relative} ({error})"
+        ) from error
+    if not isinstance(value, dict):
+        raise NativeProductGraphError(
+            f"required property list root is not a dictionary: {relative}"
+        )
+    return value
+
+
+def require_text(text: str, expected: str, label: str) -> None:
+    if expected not in text:
+        raise NativeProductGraphError(f"{label} is missing {expected!r}")
+
+
+# ---------------------------------------------------------------------------
+# XcodeGen spec, SwiftPM manifest, generated project, build script.
+# ---------------------------------------------------------------------------
+def verify_xcodegen_spec(project: str) -> None:
+    require_text(project, 'macOS: "15.0"', "XcodeGen deployment target")
+    require_text(project, "ARCHS: arm64", "XcodeGen base settings")
+    require_text(
+        project,
+        "CFW_GLOBAL_AUTHORITY_REQUIRED=1",
+        "XcodeGen Release configuration",
+    )
+    require_text(
+        project,
+        "SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) CFW_GLOBAL_AUTHORITY_REQUIRED",
+        "XcodeGen Release configuration",
+    )
+
+    # Each of the four products must be a declared target.
+    for target in (
+        "CFWGlobalAuthorityDaemon:",
+        "CFWProxyAgent:",
+        "CFWPacketTunnelExtension:",
+        "CFWNativeBridge:",
+    ):
+        require_text(project, f"  {target}", "XcodeGen targets")
+
+    # Product identities.
+    require_text(
+        project,
+        f"PRODUCT_BUNDLE_IDENTIFIER: {AUTHORITY_ID}",
+        "Global Authority daemon target",
+    )
+    require_text(
+        project, "productName: CFWGlobalAuthority", "Global Authority daemon target"
+    )
+    require_text(
+        project, f"PRODUCT_BUNDLE_IDENTIFIER: {AGENT_ID}", "ProxyAgent target"
+    )
+    require_text(
+        project, f"PRODUCT_BUNDLE_IDENTIFIER: {EXTENSION_ID}", "Packet Tunnel target"
+    )
+    require_text(
+        project, f"PRODUCT_BUNDLE_IDENTIFIER: {BRIDGE_ID}", "Native Bridge target"
+    )
+
+    # The Packet Tunnel Mach service must be declared in the generated project.
+    require_text(
+        project,
+        f"NEMachServiceName: $(TeamIdentifierPrefix){EXTENSION_ID}",
+        "Packet Tunnel Mach service declaration",
+    )
+
+    # Each product must have a build scheme so the candidate build can drive it.
+    for scheme in (
+        "  CFWGlobalAuthorityDaemon:",
+        "  CFWProxyAgent:",
+        "  CFWPacketTunnelExtension:",
+        "  CFWNativeBridge:",
+    ):
+        require_text(project, scheme, "XcodeGen schemes")
+
+    # Manual signing so provisioning is applied per product at signing time.
+    require_text(project, "CODE_SIGN_STYLE: Manual", "XcodeGen signed target settings")
+
+
+def verify_swiftpm_manifest(package: str) -> None:
+    require_text(package, ".macOS(.v15)", "SwiftPM platform")
+    require_text(
+        package,
+        '.define("CFW_GLOBAL_AUTHORITY_REQUIRED", .when(configuration: .release))',
+        "SwiftPM Release configuration",
+    )
+    require_text(
+        package,
+        'name: "CFWGlobalAuthorityDaemon"',
+        "SwiftPM Global Authority daemon product",
+    )
+    require_text(
+        package, 'name: "CFWProxyAgent"', "SwiftPM ProxyAgent product"
+    )
+    require_text(
+        package, 'name: "CFWNativeBridge"', "SwiftPM Native Bridge product"
+    )
+
+
+def verify_generated_project(pbx: str) -> None:
+    require_text(pbx, "CFW_GLOBAL_AUTHORITY_REQUIRED=1", "generated Xcode project")
+    for identifier in (AUTHORITY_ID, AGENT_ID, EXTENSION_ID):
+        require_text(pbx, identifier, "generated Xcode project bundle identifiers")
+
+
+def verify_packet_tunnel_info(info: dict[str, Any]) -> None:
+    network = info.get("NetworkExtension")
+    if not isinstance(network, dict):
+        raise NativeProductGraphError(
+            "generated Packet Tunnel Info.plist has no NetworkExtension dictionary"
+        )
+    if (
+        network.get("NEMachServiceName")
+        != f"$(TeamIdentifierPrefix){EXTENSION_ID}"
+    ):
+        raise NativeProductGraphError(
+            "generated Packet Tunnel Info.plist Mach service declaration is missing or wrong"
+        )
+    provider_classes = network.get("NEProviderClasses")
+    if (
+        not isinstance(provider_classes, dict)
+        or provider_classes.get("com.apple.networkextension.packet-tunnel")
+        != "CFWPacketTunnel.PacketTunnelProvider"
+    ):
+        raise NativeProductGraphError(
+            "generated Packet Tunnel Info.plist provider class declaration is missing or wrong"
+        )
+
+
+def verify_native_build_script(build: str) -> None:
+    require_text(build, "CFW_GLOBAL_AUTHORITY_REQUIRED=1", "candidate native build")
+    for product in (
+        "CFWGlobalAuthority",
+        "CFWNativeBridge.framework",
+        "CFWProxyAgent.app",
+        "CFWPacketTunnel.systemextension",
+    ):
+        require_text(build, product, "candidate native build products")
+    for scheme in (
+        "build_scheme CFWNativeBridge",
+        "build_scheme CFWGlobalAuthorityDaemon",
+        "build_scheme CFWProxyAgent",
+        "build_scheme CFWPacketTunnelExtension",
+    ):
+        require_text(build, scheme, "candidate native build schemes")
+    # Provisioning inputs for the signed products must be required by the build.
+    require_text(
+        build,
+        "PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER",
+        "candidate native build provisioning",
+    )
+    require_text(
+        build,
+        "PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER",
+        "candidate native build provisioning",
+    )
+    require_text(build, "ARCHS=arm64", "candidate native build architecture")
+
+
+# ---------------------------------------------------------------------------
+# Tauri embedding map.
+# ---------------------------------------------------------------------------
+def tauri_embedding(tauri: Any) -> dict[str, str]:
+    if not isinstance(tauri, dict):
+        raise NativeProductGraphError("Tauri configuration root is not an object")
+    bundle = tauri.get("bundle")
+    macos = bundle.get("macOS") if isinstance(bundle, dict) else None
+    if not isinstance(macos, dict):
+        raise NativeProductGraphError("Tauri configuration has no bundle.macOS object")
+    if macos.get("minimumSystemVersion") != DEPLOYMENT_TARGET:
+        raise NativeProductGraphError(
+            "Tauri bundle.macOS.minimumSystemVersion is not "
+            f"{DEPLOYMENT_TARGET}: {macos.get('minimumSystemVersion')!r}"
+        )
+    files = macos.get("files")
+    if not isinstance(files, dict):
+        raise NativeProductGraphError("Tauri bundle.macOS.files is not an object")
+    return files
+
+
+def verify_tauri_embedding(files: dict[str, str]) -> None:
+    required = {
+        BRIDGE_EMBED: "Host native bridge framework",
+        DAEMON_EMBED: "Global Authority daemon executable",
+        DAEMON_PLIST_EMBED: "Global Authority launchd daemon plist",
+        AGENT_EMBED: "ProxyAgent application",
+        EXTENSION_EMBED: "Packet Tunnel system extension",
+    }
+    for destination, label in required.items():
+        if destination not in files:
+            raise NativeProductGraphError(
+                f"Tauri bundle is missing the {label} embedding: {destination}"
+            )
+    # The daemon executable must embed under HelperTools and its launchd plist
+    # under LaunchDaemons; assert the exact Contents-relative layout.
+    if not DAEMON_EMBED.startswith("Library/HelperTools/"):
+        raise NativeProductGraphError(
+            "Global Authority daemon must embed under Contents/Library/HelperTools"
+        )
+    if not DAEMON_PLIST_EMBED.startswith("Library/LaunchDaemons/"):
+        raise NativeProductGraphError(
+            "Global Authority launchd plist must embed under Contents/Library/LaunchDaemons"
+        )
+
+
+# ---------------------------------------------------------------------------
+# launchd daemon plist and entitlements.
+# ---------------------------------------------------------------------------
+def verify_daemon_plist(plist: dict[str, Any]) -> None:
+    if plist.get("Label") != AUTHORITY_ID:
+        raise NativeProductGraphError(
+            f"Global Authority launchd Label mismatch: {plist.get('Label')!r}"
+        )
+    if plist.get("BundleProgram") != f"Contents/{DAEMON_EMBED}":
+        raise NativeProductGraphError(
+            "Global Authority launchd BundleProgram must be the HelperTools daemon: "
+            f"{plist.get('BundleProgram')!r}"
+        )
+    if plist.get("UserName") != "root":
+        raise NativeProductGraphError(
+            "Global Authority launchd daemon must run as root"
+        )
+    services = plist.get("MachServices")
+    if services != {MACH_SERVICE: True}:
+        raise NativeProductGraphError(
+            f"Global Authority launchd MachServices must be exactly {{{MACH_SERVICE!r}: true}}"
+        )
+    for forbidden in ("ProgramArguments", "Sockets", "WatchPaths", "QueueDirectories"):
+        if forbidden in plist:
+            raise NativeProductGraphError(
+                f"Global Authority launchd plist declares a forbidden key: {forbidden}"
+            )
+
+
+def verify_entitlements(root: Path) -> None:
+    authority = read_plist(root, "native/macos/Config/GlobalAuthority.entitlements")
+    if authority:
+        raise NativeProductGraphError(
+            "Global Authority entitlements must be empty (no data-plane or broad grants)"
+        )
+
+    packet = read_plist(root, "native/macos/Config/PacketTunnel.entitlements")
+    if packet.get("com.apple.developer.networking.networkextension") != [
+        "packet-tunnel-provider-systemextension"
+    ]:
+        raise NativeProductGraphError(
+            "Packet Tunnel entitlements must declare the packet-tunnel-provider-systemextension role"
+        )
+    for key in (
+        "com.apple.security.app-sandbox",
+        "com.apple.security.network.client",
+        "com.apple.security.network.server",
+    ):
+        if packet.get(key) is not True:
+            raise NativeProductGraphError(
+                f"Packet Tunnel entitlements must set {key} to true"
+            )
+    if "com.apple.security.application-groups" in packet:
+        raise NativeProductGraphError(
+            "Packet Tunnel entitlements must not claim an App Group"
+        )
+
+    agent = read_plist(root, "native/macos/Config/ProxyAgent.entitlements")
+    if agent.get("com.apple.security.application-groups") != [
+        "$(TeamIdentifierPrefix)group.com.bill.clashformac"
+    ]:
+        raise NativeProductGraphError(
+            "ProxyAgent entitlements must declare the shared App Group"
+        )
+    if not isinstance(agent.get("keychain-access-groups"), list) or not agent[
+        "keychain-access-groups"
+    ]:
+        raise NativeProductGraphError(
+            "ProxyAgent entitlements must declare keychain access groups"
+        )
+
+    host = read_plist(root, "native/macos/Config/Host.entitlements")
+    if host.get("com.apple.developer.system-extension.install") is not True:
+        raise NativeProductGraphError(
+            "Host entitlements must permit System Extension installation"
+        )
+    if host.get("com.apple.developer.networking.networkextension") != [
+        "packet-tunnel-provider-systemextension"
+    ]:
+        raise NativeProductGraphError(
+            "Host entitlements must declare the packet-tunnel-provider-systemextension role"
+        )
+    if host.get("com.apple.security.application-groups") != [
+        "$(TeamIdentifierPrefix)group.com.bill.clashformac"
+    ]:
+        raise NativeProductGraphError(
+            "Host entitlements must declare the shared App Group"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Inside-out signing-order manifest.
+# ---------------------------------------------------------------------------
+def verify_signing_order(
+    manifest: Any, files: dict[str, str], signing_script: str
+) -> None:
+    if not isinstance(manifest, dict):
+        raise NativeProductGraphError("signing-order manifest root is not an object")
+    if manifest.get("schemaVersion") != 1:
+        raise NativeProductGraphError("signing-order manifest schema version must be 1")
+    if manifest.get("teamIdentifier") != TEAM_ID:
+        raise NativeProductGraphError("signing-order manifest Team ID mismatch")
+
+    nested = manifest.get("nested")
+    outer = manifest.get("outer")
+    if not isinstance(nested, list) or not nested:
+        raise NativeProductGraphError("signing-order manifest has no nested components")
+    if not isinstance(outer, dict):
+        raise NativeProductGraphError("signing-order manifest has no outer app entry")
+
+    # The outer app is always signed last.
+    if outer.get("signedLast") is not True:
+        raise NativeProductGraphError("signing-order manifest outer app must be signed last")
+    if outer.get("bundleIdentifier") != HOST_ID:
+        raise NativeProductGraphError("signing-order manifest outer bundle identifier mismatch")
+
+    # Every native product in the graph must be a nested signing stage, and the
+    # daemon stage must bind the HelperTools destination, LaunchDaemons plist,
+    # and the fixed Mach service.
+    destinations = {entry.get("destination") for entry in nested if isinstance(entry, dict)}
+    required_nested = {
+        f"Contents/{BRIDGE_EMBED}",
+        f"Contents/{DAEMON_EMBED}",
+        f"Contents/{AGENT_EMBED}",
+        f"Contents/{EXTENSION_EMBED}",
+    }
+    missing = required_nested - destinations
+    if missing:
+        raise NativeProductGraphError(
+            f"signing-order manifest is missing nested components: {sorted(missing)}"
+        )
+
+    daemon = next(
+        (
+            entry
+            for entry in nested
+            if isinstance(entry, dict)
+            and entry.get("destination") == f"Contents/{DAEMON_EMBED}"
+        ),
+        None,
+    )
+    if daemon is None:
+        raise NativeProductGraphError("signing-order manifest has no daemon stage")
+    if daemon.get("launchdPlist") != f"Contents/{DAEMON_PLIST_EMBED}":
+        raise NativeProductGraphError(
+            "signing-order daemon stage must bind the LaunchDaemons plist"
+        )
+    if daemon.get("machService") != MACH_SERVICE:
+        raise NativeProductGraphError(
+            "signing-order daemon stage must bind the fixed root Mach service"
+        )
+
+    # Every nested destination under Contents/ must map to a Tauri embedding.
+    for entry in nested:
+        if not isinstance(entry, dict):
+            raise NativeProductGraphError("signing-order nested entry is not an object")
+        destination = entry.get("destination")
+        if not isinstance(destination, str) or not destination.startswith("Contents/"):
+            raise NativeProductGraphError(
+                f"signing-order nested destination is invalid: {destination!r}"
+            )
+        embed_key = destination[len("Contents/") :]
+        if embed_key not in files:
+            raise NativeProductGraphError(
+                "signing-order nested component is not embedded by the Tauri bundle: "
+                f"{destination}"
+            )
+
+    # The candidate signing script must sign the outer app strictly after every
+    # nested component, proving the inside-out order in the executable pipeline.
+    # The single `--sign` of the Developer ID identity is the outer host app
+    # seal; nested components are pre-signed during the native product build.
+    outer_index = signing_script.find('--sign "$MACOS_SIGN_IDENTITY"')
+    if outer_index < 0 or signing_script.count('--sign "$MACOS_SIGN_IDENTITY"') != 1:
+        raise NativeProductGraphError(
+            "candidate signing script does not sign the outer host app exactly once"
+        )
+    for entry in nested:
+        destination = entry["destination"]
+        staged_reference = f'"$staged_app/{destination}"'
+        nested_index = signing_script.find(staged_reference)
+        if nested_index < 0:
+            raise NativeProductGraphError(
+                "candidate signing script does not reference nested component "
+                f"before the outer app: {destination}"
+            )
+        if nested_index > outer_index:
+            raise NativeProductGraphError(
+                "candidate signing script signs the outer app before nested component: "
+                f"{destination}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Top-level verification.
+# ---------------------------------------------------------------------------
+def verify_repository(root: Path) -> None:
+    project = read_text(root, "native/macos/project.yml")
+    package = read_text(root, "native/macos/Package.swift")
+    pbx = read_text(root, "native/macos/CFWNative.xcodeproj/project.pbxproj")
+    native_build = read_text(root, "scripts/build_native_products.sh")
+    signing_script = read_text(root, "scripts/build_signed_candidate.sh")
+
+    verify_xcodegen_spec(project)
+    verify_swiftpm_manifest(package)
+    verify_generated_project(pbx)
+    verify_native_build_script(native_build)
+
+    tauri = read_json(root, "apps/cfw-tauri-shell/tauri.conf.json")
+    files = tauri_embedding(tauri)
+    verify_tauri_embedding(files)
+
+    daemon_plist = read_plist(
+        root, "native/macos/Config/com.bill.clashformac.global-authority.plist"
+    )
+    verify_daemon_plist(daemon_plist)
+    packet_info = read_plist(root, "native/macos/Config/PacketTunnel-Info.plist")
+    verify_packet_tunnel_info(packet_info)
+    verify_entitlements(root)
+
+    manifest = read_json(root, "native/macos/Config/signing-order.json")
+    verify_signing_order(manifest, files, signing_script)
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parent.parent
+    try:
+        verify_repository(root)
+    except NativeProductGraphError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    print("Native product graph packaging contract verified")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

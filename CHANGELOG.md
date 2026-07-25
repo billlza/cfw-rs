@@ -59,6 +59,13 @@
 - Split the Tauri composition root, UI JavaScript, CSS, platform adapters, and
   profile repository into bounded modules; remove the parallel tracked UI
   bundle.
+- Restore the controller-backed read, query, and stream commands (proxy, rule,
+  provider, connection, log, DNS, and version surfaces) as a bounded command
+  module. Their client is built only from the running engine's app-owned
+  loopback controller, never from settings or a profile; the per-run secret is
+  redacted out of every returned error, event payload, and `Debug` rendering.
+  With no ready engine they fail closed with the unreachable-controller error
+  instead of probing an unknown listener.
 
 ### Supply chain and release status
 

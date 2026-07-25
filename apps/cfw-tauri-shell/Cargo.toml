@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 cfw-application = { path = "../../crates/cfw-application" }
 cfw-apple-network = { path = "../../crates/cfw-apple-network" }
+cfw-controller = { path = "../../crates/cfw-controller" }
 cfw-core = { path = "../../crates/cfw-core" }
 cfw-engine-api = { path = "../../crates/cfw-engine-api" }
 cfw-platform = { path = "../../crates/cfw-platform" }
@@ -35,6 +36,7 @@ thiserror.workspace = true
 tempfile.workspace = true
 tar.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 

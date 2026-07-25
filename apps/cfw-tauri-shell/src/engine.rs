@@ -65,6 +65,13 @@ impl ManagedEngine {
         self.controller.settings()
     }
 
+    /// The app-owned controller of the engine this process starts. Command
+    /// handlers build their client endpoint from here, so a controller host,
+    /// port, or secret can never come from user settings or from a profile.
+    pub(crate) fn controller_access(&self) -> &EngineControllerAccess {
+        &self.controller
+    }
+
     fn begin_mode_change(
         &self,
         mode: EngineMode,

@@ -9,10 +9,16 @@ use cfw_apple_network::NativeFrameworkBridge;
 use cfw_core::SettingsStore;
 use cfw_engine_api::EngineEvent;
 use commands::{
-    automatic_updates_enabled, build_managed_profiles, cancel_credential_gc, commit_credential_gc,
-    delete_profile, import_profile_text, preview_credential_gc, profile_credential_presence,
-    profile_credential_requirements, profiles_snapshot, provision_profile_credentials,
-    read_settings_snapshot, select_profile, set_launch_at_login_enabled, write_settings_snapshot,
+    LiveStreams, automatic_updates_enabled, build_managed_profiles, cancel_credential_gc,
+    close_all_connections, close_connection, commit_credential_gc, controller_snapshot,
+    controller_version, delete_profile, dns_query, flush_fake_ip_cache,
+    health_check_all_proxy_providers, health_check_proxy_provider, import_profile_text,
+    preview_credential_gc, profile_credential_presence, profile_credential_requirements,
+    profiles_snapshot, providers_snapshot, provision_profile_credentials, read_settings_snapshot,
+    rules_snapshot, select_profile, select_proxy, set_launch_at_login_enabled,
+    start_connections_stream, start_log_stream, test_proxy_delays, update_all_proxy_providers,
+    update_all_rule_providers, update_proxy_provider, update_rule_provider,
+    write_settings_snapshot,
 };
 use engine::{
     boot_payload, build_managed_engine, engine_snapshot, prepare_legacy_cutover, set_engine_mode,
@@ -76,6 +82,7 @@ fn main() {
         })
         .manage(LegacyRetirementGate::default())
         .manage(AppLifecycle::default())
+        .manage(LiveStreams::default())
         .manage(UpdaterSecurityState::default());
     // The explicit handoff instance must coexist with the still-running 0.3.5
     // GUI so it can validate 0.4.0 without asking the user to quit and trigger
@@ -116,6 +123,24 @@ fn main() {
             check_for_updates,
             install_available_update,
             cancel_update_install,
+            controller_snapshot,
+            controller_version,
+            providers_snapshot,
+            rules_snapshot,
+            select_proxy,
+            test_proxy_delays,
+            health_check_proxy_provider,
+            health_check_all_proxy_providers,
+            update_proxy_provider,
+            update_all_proxy_providers,
+            update_rule_provider,
+            update_all_rule_providers,
+            start_log_stream,
+            start_connections_stream,
+            close_connection,
+            close_all_connections,
+            dns_query,
+            flush_fake_ip_cache,
         ])
         .setup(|app| {
             let native_bridge = NativeFrameworkBridge::load();

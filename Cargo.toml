@@ -55,6 +55,9 @@ thiserror = "2.0.19"
 tempfile = "3.27.0"
 tar = "0.4.46"
 tokio = { version = "1.53.1", features = ["macros", "sync", "time"] }
+# Loopback-only websocket client for the clash-compatible controller streams.
+# No TLS feature is enabled: the controller is reachable at ws://127.0.0.1 only.
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 urlencoding = "2.1.3"
 uuid = { version = "1", features = ["serde", "v4"] }
 zeroize = "1.9.0"

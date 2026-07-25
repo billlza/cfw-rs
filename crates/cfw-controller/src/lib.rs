@@ -91,10 +91,24 @@ impl ControllerEndpoint {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ControllerClient {
     endpoint: ControllerEndpoint,
     http: reqwest::Client,
+}
+
+/// The HTTP client authenticates with the controller secret in a default
+/// `Authorization` header, and `reqwest::Client`'s own `Debug` prints its
+/// default headers. Rendering the client through this impl keeps the secret out
+/// of any diagnostic that formats a client, or a value that owns one.
+impl fmt::Debug for ControllerClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ControllerClient")
+            .field("endpoint", &self.endpoint)
+            .field("http", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl ControllerClient {

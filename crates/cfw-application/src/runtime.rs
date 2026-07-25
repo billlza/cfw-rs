@@ -3,7 +3,7 @@ use std::time::Duration;
 use cfw_engine_api::{
     BackendError, BackendErrorKind, EngineBackend, EngineCommandContext, EngineGenerationStore,
     EngineLineage, EngineMode, EngineOwner, EngineSessionIdentity, EngineSnapshot, EngineState,
-    NativeEngineStatus, RuntimeIdentity,
+    NativeEngineStatus, RetryDirective, RuntimeIdentity,
 };
 use tokio::{sync::watch, time::timeout};
 use uuid::Uuid;
@@ -27,6 +27,25 @@ pub(crate) struct NativeLease {
 pub(crate) struct CoordinatorState {
     pub(crate) snapshot: EngineSnapshot,
     pub(crate) native_lease: Option<NativeLease>,
+    /// Fail-closed quarantine set when an accepted operation ends with cleanup
+    /// or ownership that cannot be proven (compensation conflict, unproven
+    /// cleanup, journal corruption, secret-lifecycle violation, recovering, or
+    /// an explicit quarantine). While present, every non-Off transition is
+    /// rejected with this exact typed error without touching the native
+    /// backend; only an explicit Off reconciliation that proves the stop
+    /// barrier clears it. Ambiguity is never treated as Off.
+    pub(crate) quarantine: Option<EngineCoordinatorError>,
+}
+
+/// Classifies a native failure whose only safe recovery is an explicit Off
+/// reconciliation. These are exactly the Authority error kinds that leave
+/// cleanup or ownership unproven, so the coordinator must retain its exact
+/// native lease and stay fail-closed rather than assume the data plane is Off.
+pub(crate) fn requires_explicit_reconciliation(kind: BackendErrorKind) -> bool {
+    matches!(
+        kind.retry_directive(),
+        RetryDirective::ExplicitReconciliation
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -129,6 +148,67 @@ pub(crate) async fn reconcile_active_runtime(
     }
 
     Ok(())
+}
+
+/// Independently proves the global Off barrier after the current owner has
+/// attested stopped, before any fresh generation is allocated for the other
+/// mode (Requirements 2.4, 2.5, 3.2, 3.3, 7.3).
+///
+/// The stop itself (via `stop_owned_runtime`) is the Authority revocation and
+/// exact owner-stopped attestation. This helper adds the independent OS-state
+/// observation: a fresh native query must report exactly
+/// `NativeEngineStatus::Off`. The native boundary is responsible for only
+/// reporting `Off` once ticket/secret/owner-endpoint removal and the effective
+/// SystemConfiguration / `NEVPNStatus` (disconnected/invalid for the exact
+/// managed descriptor) observations agree; `NEVPNStatus` or a connection loss
+/// alone is never Off.
+///
+/// Any still-reported owner endpoint, or an unavailable observation, leaves the
+/// coordinator fail-closed (published `Failed` plus a sticky quarantine) so a
+/// missing Off predicate can never allocate a fresh generation, start the other
+/// mode, or be mistaken for Off. `Failed`, an unavailable query (connection
+/// loss), and a lingering owner are never aliased to Off. Only an explicit Off
+/// reconciliation that proves the stop barrier clears the quarantine.
+pub(crate) async fn prove_global_off(
+    backend: &dyn EngineBackend,
+    state: &mut CoordinatorState,
+    snapshots: &watch::Sender<EngineSnapshot>,
+    status_query_timeout: Duration,
+) -> Result<(), EngineCoordinatorError> {
+    let target = state.snapshot.desired_mode;
+    let generation = state.snapshot.generation;
+    let observation = match call_backend(
+        status_query_timeout,
+        EngineOperation::QueryStatus,
+        backend.query_status(),
+    )
+    .await
+    {
+        Ok(observation) => observation,
+        Err(source) => {
+            // Connection loss or a failed observation is not proof of Off. Stay
+            // fail-closed and quarantine until an explicit Off reconciliation
+            // proves cleanup; never treat an unavailable query as Off.
+            let error = backend_error(EngineOperation::QueryStatus, source);
+            state.quarantine = Some(error.clone());
+            set_failed(state, snapshots, target, generation, &error);
+            return Err(error);
+        }
+    };
+    match observation {
+        NativeEngineStatus::Off => Ok(()),
+        observed => {
+            // An owner endpoint is still reported: the Off barrier is unproven.
+            // Quarantine fail-closed rather than allocating a fresh generation
+            // or starting the other mode from an ambiguous state.
+            let error = EngineCoordinatorError::GlobalOffUnproven {
+                observed: Box::new(observed),
+            };
+            state.quarantine = Some(error.clone());
+            set_failed(state, snapshots, target, generation, &error);
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn validate_recovered_runtime(

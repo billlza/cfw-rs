@@ -8,6 +8,8 @@ use std::{collections::BTreeSet, fmt, future::Future, pin::Pin};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod authority_v1;
+
 pub use cfw_singbox_config::{
     AuthenticatedDnsServer, CredentialKind, CredentialRef, CredentialSecret, CredentialSlot,
     CredentialTarget, EngineSettings, MAX_CREDENTIAL_SLOTS, ValidatedSingBoxProfile,
@@ -426,8 +428,7 @@ impl CredentialGarbageCollectionCommitRequest {
         let mut expected_orphan_references = preview.orphan_references.clone();
         validate_and_sort_references(&mut expected_orphan_references)?;
         if expected_orphan_references != preview.orphan_references
-            || usize::try_from(preview.orphan_count).ok()
-                != Some(expected_orphan_references.len())
+            || usize::try_from(preview.orphan_count).ok() != Some(expected_orphan_references.len())
         {
             return Err(CredentialGarbageCollectionRequestError::InvalidPreview);
         }
@@ -488,9 +489,7 @@ pub enum CredentialGarbageCollectionRequestError {
     SnapshotChanged,
 }
 
-fn validate_snapshot_digest(
-    digest: &str,
-) -> Result<(), CredentialGarbageCollectionRequestError> {
+fn validate_snapshot_digest(digest: &str) -> Result<(), CredentialGarbageCollectionRequestError> {
     if digest.len() == 64
         && digest
             .bytes()
@@ -503,8 +502,7 @@ fn validate_snapshot_digest(
 }
 
 fn is_canonical_uuid(value: &str) -> bool {
-    uuid::Uuid::parse_str(value)
-        .is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
+    uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
 }
 
 fn validate_and_sort_references(
@@ -647,8 +645,7 @@ impl CutoverPreflightRequest {
         if target == EngineMode::Off {
             return Err(CutoverPreflightRequestError::ActiveTargetRequired);
         }
-        if system_proxy_request.tunnel_options.is_some()
-            || tunnel_request.tunnel_options.is_none()
+        if system_proxy_request.tunnel_options.is_some() || tunnel_request.tunnel_options.is_none()
         {
             return Err(CutoverPreflightRequestError::ProjectionModeMismatch);
         }
@@ -760,19 +757,15 @@ pub enum CutoverPreflightOutcome {
     },
 }
 
-pub type CutoverPreflightFuture<'a> = Pin<
-    Box<dyn Future<Output = Result<CutoverPreflightOutcome, BackendError>> + Send + 'a>,
->;
+pub type CutoverPreflightFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CutoverPreflightOutcome, BackendError>> + Send + 'a>>;
 
 /// Read-only replacement validation used immediately before the one-way
 /// legacy cutover. Implementations may request System Extension activation,
 /// but must never start libbox, bind a listener, start a VPN, or mutate system
 /// proxy, route, or DNS state.
 pub trait CutoverPreflightBackend: Send + Sync + 'static {
-    fn preflight_cutover(
-        &self,
-        request: CutoverPreflightRequest,
-    ) -> CutoverPreflightFuture<'_>;
+    fn preflight_cutover(&self, request: CutoverPreflightRequest) -> CutoverPreflightFuture<'_>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -782,10 +775,11 @@ pub enum TunnelInstallOutcome {
     AwaitingApproval,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendErrorKind {
     Busy,
+    ResourceExhausted,
     PermissionDenied,
     ApprovalDenied,
     ConfigurationRejected,
@@ -793,10 +787,163 @@ pub enum BackendErrorKind {
     CredentialConflict,
     CredentialVaultMissing,
     CredentialGcConflict,
+    GlobalAuthorityUnavailable,
+    GlobalAuthorityRegistrationRequired,
+    GlobalAuthorityApprovalRequired,
+    GlobalAuthorityIdentityRejected,
+    GlobalAuthorityProtocolMismatch,
+    GlobalAuthorityRecovering,
+    GlobalAuthorityTimeout,
+    GlobalAuthorityInterrupted,
+    GlobalLeaseConflict,
+    ReplayRejected,
+    StaleOperation,
+    TicketExpired,
+    TicketAlreadyRedeemed,
+    TicketInvalid,
+    CompensationConflict,
+    CleanupUnproven,
+    Quarantined,
+    InvalidMessage,
+    SecretBoundsExceeded,
+    SecretLifecycleViolation,
+    JournalCorrupt,
+    OwnerUnresponsive,
     IdentityRejected,
     Timeout,
     Unavailable,
+    #[serde(other)]
     Internal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryDirective {
+    Never,
+    IdempotentReadOnly,
+    RegistrationStatusChange,
+    CompatibleSoftwareUpdate,
+    FreshSnapshotAfterOff,
+    FreshContext,
+    FreshGenerationAfterOff,
+    ExplicitReconciliation,
+}
+
+impl BackendErrorKind {
+    pub const AUTHORITY_KINDS: [Self; 24] = [
+        Self::GlobalAuthorityUnavailable,
+        Self::GlobalAuthorityRegistrationRequired,
+        Self::GlobalAuthorityApprovalRequired,
+        Self::GlobalAuthorityIdentityRejected,
+        Self::GlobalAuthorityProtocolMismatch,
+        Self::GlobalAuthorityRecovering,
+        Self::GlobalAuthorityTimeout,
+        Self::GlobalAuthorityInterrupted,
+        Self::Busy,
+        Self::ResourceExhausted,
+        Self::GlobalLeaseConflict,
+        Self::ReplayRejected,
+        Self::StaleOperation,
+        Self::TicketExpired,
+        Self::TicketAlreadyRedeemed,
+        Self::TicketInvalid,
+        Self::SecretBoundsExceeded,
+        Self::SecretLifecycleViolation,
+        Self::CompensationConflict,
+        Self::CleanupUnproven,
+        Self::Quarantined,
+        Self::InvalidMessage,
+        Self::JournalCorrupt,
+        Self::OwnerUnresponsive,
+    ];
+
+    pub const fn retry_directive(self) -> RetryDirective {
+        match self {
+            Self::ResourceExhausted
+            | Self::OwnerUnresponsive
+            | Self::GlobalAuthorityTimeout
+            | Self::GlobalAuthorityInterrupted
+            | Self::Timeout
+            | Self::Unavailable => RetryDirective::IdempotentReadOnly,
+            Self::GlobalAuthorityUnavailable
+            | Self::GlobalAuthorityRegistrationRequired
+            | Self::GlobalAuthorityApprovalRequired => RetryDirective::RegistrationStatusChange,
+            Self::GlobalAuthorityProtocolMismatch => RetryDirective::CompatibleSoftwareUpdate,
+            Self::Busy | Self::GlobalLeaseConflict => RetryDirective::FreshSnapshotAfterOff,
+            Self::ReplayRejected | Self::StaleOperation => RetryDirective::FreshContext,
+            Self::TicketExpired | Self::TicketAlreadyRedeemed => {
+                RetryDirective::FreshGenerationAfterOff
+            }
+            Self::GlobalAuthorityRecovering
+            | Self::SecretLifecycleViolation
+            | Self::CompensationConflict
+            | Self::CleanupUnproven
+            | Self::Quarantined
+            | Self::JournalCorrupt => RetryDirective::ExplicitReconciliation,
+            Self::PermissionDenied
+            | Self::ApprovalDenied
+            | Self::ConfigurationRejected
+            | Self::CredentialsUnavailable
+            | Self::CredentialConflict
+            | Self::CredentialVaultMissing
+            | Self::CredentialGcConflict
+            | Self::GlobalAuthorityIdentityRejected
+            | Self::TicketInvalid
+            | Self::InvalidMessage
+            | Self::SecretBoundsExceeded
+            | Self::IdentityRejected
+            | Self::Internal => RetryDirective::Never,
+        }
+    }
+
+    pub const fn allows_automatic_retry(self, is_idempotent_read_only: bool) -> bool {
+        is_idempotent_read_only
+            && matches!(self.retry_directive(), RetryDirective::IdempotentReadOnly)
+    }
+
+    pub const fn stable_message(self) -> &'static str {
+        match self {
+            Self::Busy => "Global Authority mutation is busy.",
+            Self::ResourceExhausted => "Global Authority read capacity is exhausted.",
+            Self::PermissionDenied => "The native operation was denied.",
+            Self::ApprovalDenied => "Required operating-system approval was denied.",
+            Self::ConfigurationRejected => "The native configuration was rejected.",
+            Self::CredentialsUnavailable => "Required credentials are unavailable.",
+            Self::CredentialConflict => "Credential material conflicts with an immutable entry.",
+            Self::CredentialVaultMissing => "The credential vault is unavailable.",
+            Self::CredentialGcConflict => "Credential cleanup requires a fresh preview.",
+            Self::GlobalAuthorityUnavailable => "Global Authority is unavailable.",
+            Self::GlobalAuthorityRegistrationRequired => {
+                "Global Authority registration is required."
+            }
+            Self::GlobalAuthorityApprovalRequired => "Global Authority approval is required.",
+            Self::GlobalAuthorityIdentityRejected => "Global Authority peer identity was rejected.",
+            Self::GlobalAuthorityProtocolMismatch => "Global Authority protocol is incompatible.",
+            Self::GlobalAuthorityRecovering => {
+                "Global Authority is recovering; starts are disabled."
+            }
+            Self::GlobalAuthorityTimeout => "The Authority operation timed out.",
+            Self::GlobalAuthorityInterrupted => "The Authority connection was interrupted.",
+            Self::GlobalLeaseConflict => "A conflicting Global Authority lease exists.",
+            Self::ReplayRejected => "Authority replay protection rejected the context.",
+            Self::StaleOperation => "Authority operation context is stale.",
+            Self::TicketExpired => "The Authority start ticket expired.",
+            Self::TicketAlreadyRedeemed => "The Authority start ticket was already redeemed.",
+            Self::TicketInvalid => "The Authority start ticket is invalid.",
+            Self::CompensationConflict => "Tunnel preference compensation conflicted.",
+            Self::CleanupUnproven => "Global cleanup could not be proven.",
+            Self::Quarantined => "Global Authority is quarantined pending reconciliation.",
+            Self::InvalidMessage => "The Authority message is invalid.",
+            Self::SecretBoundsExceeded => "Authority secret material exceeds a fixed bound.",
+            Self::SecretLifecycleViolation => "Authority secret lifecycle verification failed.",
+            Self::JournalCorrupt => "The Authority journal is corrupt.",
+            Self::OwnerUnresponsive => "The Authority engine owner is unresponsive.",
+            Self::IdentityRejected => "The native peer identity was rejected.",
+            Self::Timeout => "The native operation timed out.",
+            Self::Unavailable => "The native operation is unavailable.",
+            Self::Internal => "The native bridge failed at a stable internal boundary.",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
@@ -1067,7 +1214,10 @@ mod tests {
 
         let existing_only = CredentialProvisionRequest::new(PROFILE_ID, &profile, Vec::new())
             .expect("the vault validates omitted references atomically");
-        assert_eq!(existing_only.required_references(), &[reference.clone()]);
+        assert_eq!(
+            existing_only.required_references(),
+            std::slice::from_ref(&reference)
+        );
         assert!(existing_only.entries().is_empty());
         assert!(matches!(
             CredentialProvisionRequest::new(
@@ -1111,7 +1261,76 @@ mod tests {
             panic!("fixture response kind");
         };
         assert_eq!(preview.orphan_count, 1);
-        assert_eq!(preview.vault_revision, "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+        assert_eq!(
+            preview.vault_revision,
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        );
+    }
+
+    #[derive(Deserialize)]
+    struct AuthorityErrorContract {
+        errors: Vec<AuthorityErrorFixture>,
+    }
+
+    #[derive(Deserialize)]
+    struct AuthorityErrorFixture {
+        code: String,
+        retry: String,
+        message: String,
+    }
+
+    #[test]
+    fn authority_error_fixture_is_unique_complete_and_stable() {
+        let contract: AuthorityErrorContract = serde_json::from_str(include_str!(
+            "../../../fixtures/authority-v1/error-contract.json"
+        ))
+        .expect("authority error fixture");
+        assert_eq!(
+            contract.errors.len(),
+            BackendErrorKind::AUTHORITY_KINDS.len()
+        );
+
+        let mut codes = BTreeSet::new();
+        for entry in contract.errors {
+            assert!(codes.insert(entry.code.clone()), "duplicate Authority code");
+            let kind: BackendErrorKind = serde_json::from_str(&format!("\"{}\"", entry.code))
+                .expect("known Authority wire code");
+            assert!(BackendErrorKind::AUTHORITY_KINDS.contains(&kind));
+            assert_eq!(
+                serde_json::to_value(kind).expect("wire code"),
+                serde_json::Value::String(entry.code)
+            );
+            assert_eq!(kind.stable_message(), entry.message);
+            assert_eq!(
+                serde_json::to_value(kind.retry_directive()).expect("retry directive"),
+                serde_json::Value::String(entry.retry)
+            );
+            assert!(!kind.allows_automatic_retry(false));
+            assert_eq!(
+                kind.allows_automatic_retry(true),
+                kind.retry_directive() == RetryDirective::IdempotentReadOnly
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_wire_error_is_internal_and_never_retryable() {
+        let unknown: BackendErrorKind =
+            serde_json::from_str("\"future_authority_code\"").expect("safe unknown mapping");
+        assert_eq!(unknown, BackendErrorKind::Internal);
+        assert_eq!(unknown.retry_directive(), RetryDirective::Never);
+        assert!(!unknown.allows_automatic_retry(true));
+    }
+
+    #[test]
+    fn native_public_query_json_contract_is_unchanged() {
+        let bytes = include_bytes!("../../../contracts/native-bridge-v3/query-request.json");
+        let request: NativeRequestEnvelope =
+            serde_json::from_slice(bytes).expect("public query request fixture");
+        assert_eq!(
+            serde_json::to_value(request).expect("request value"),
+            serde_json::from_slice::<serde_json::Value>(bytes).expect("fixture value")
+        );
     }
 
     #[test]

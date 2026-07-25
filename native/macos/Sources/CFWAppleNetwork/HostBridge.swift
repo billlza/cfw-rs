@@ -126,6 +126,7 @@ public enum AppleNetworkError: Error, Equatable, Sendable {
   case preferenceLoadFailed(String)
   case preferenceSaveFailed(String)
   case duplicateTunnelManagers(Int)
+  case globalAuthorityUnavailable
   case invalidConfigurationSlot
   case systemExtensionStateTransportFailed(String)
   case systemExtensionStateTransportTimedOut
@@ -138,6 +139,141 @@ public enum AppleNetworkError: Error, Equatable, Sendable {
   case providerMessageFailed(String)
   case providerResponseMismatch
   case providerFailure(EngineFailure)
+  case managedManagerVerificationFailed(String)
+  /// Compensation observed a managed-preference change it must not overwrite
+  /// (external/administrator edit or a missing prior value); leaves Quarantined.
+  case compensationConflict(String)
+  /// Compensation could not prove cleanup within its bounded budget (stop timeout
+  /// or an unverifiable restored result); leaves Quarantined.
+  case cleanupUnproven(String)
+}
+
+/// Bounded, non-secret inputs the Host hands to the Global Authority when it
+/// prepares a Tunnel start. The configuration and credential bytes travel to the
+/// Authority over its typed XPC prepare call and are never written to preferences
+/// or `startVPNTunnel(options:)`.
+public struct HostTunnelStartPreparation: Sendable {
+  public let descriptor: ConfigurationDescriptor
+  public let configuration: Data
+  public let credentialPayload: Data?
+
+  public init(
+    descriptor: ConfigurationDescriptor,
+    configuration: Data,
+    credentialPayload: Data?
+  ) {
+    self.descriptor = descriptor
+    self.configuration = configuration
+    self.credentialPayload = credentialPayload
+  }
+}
+
+/// The single-use opaque Start Ticket plus the bounded non-secret descriptor the
+/// Authority authorized. Only these two values leave preparation; no configuration
+/// or credential bytes are returned to the Host.
+public struct HostPreparedTunnelStart: Sendable {
+  public let ticket: StartTicket
+  public let descriptor: ConfigurationDescriptor
+
+  public init(ticket: StartTicket, descriptor: ConfigurationDescriptor) {
+    self.ticket = ticket
+    self.descriptor = descriptor
+  }
+}
+
+/// Injectable seam over the Global Authority prepare step. Implementations must
+/// prepare with the Authority BEFORE any preference or network mutation and fail
+/// closed with a typed Authority error when the Authority is unavailable or
+/// unproven. There is no direct configuration/credential payload fallback.
+public protocol TunnelStartPreparing: Sendable {
+  func prepareTunnelStart(
+    _ preparation: HostTunnelStartPreparation
+  ) async throws -> HostPreparedTunnelStart
+}
+
+/// Default production preparer used until the authenticated Host→Authority XPC
+/// client is wired end to end. It fails closed so no Tunnel start can proceed
+/// without a real Authority preparation and single-use ticket.
+public struct FailClosedTunnelStartPreparer: TunnelStartPreparing {
+  public init() {}
+
+  public func prepareTunnelStart(
+    _ preparation: HostTunnelStartPreparation
+  ) async throws -> HostPreparedTunnelStart {
+    throw AppleNetworkError.globalAuthorityUnavailable
+  }
+}
+
+/// Injectable seam over the exact `NETunnelProviderManager` operations the
+/// ticket-only start flow needs. Extracted so the flow is exercised with an
+/// in-memory fake and requires no real NetworkExtension in tests.
+protocol ManagedTunnelOperating: Sendable {
+  /// Persists ONLY the descriptor-only provider configuration to the managed
+  /// manager, creating it when absent. No configuration or credential bytes are
+  /// ever written.
+  func saveDescriptorOnly(_ descriptor: ConfigurationDescriptor) async throws
+  /// Reloads the managed manager from preferences and returns the descriptor read
+  /// back so the caller verifies the exact round trip before starting.
+  func reloadDescriptor() async throws -> ConfigurationDescriptor
+  /// Starts the managed tunnel connection with ONLY the one-use start ticket.
+  func startWithTicket(_ ticketBytes: Data) async throws
+}
+
+/// Ordered ticket-only Tunnel start: prepare with the Authority before any
+/// preference mutation, save the descriptor-only manager, reload and verify the
+/// exact descriptor, then start with only the single-use ticket. Every Authority,
+/// XPC, and NetworkExtension side effect lives behind an injected seam.
+enum TicketOnlyTunnelStartFlow {
+  static func run(
+    descriptor: ConfigurationDescriptor,
+    configuration: Data,
+    credentialPayload: Data?,
+    preparer: any TunnelStartPreparing,
+    manager: any ManagedTunnelOperating,
+    checkCancellation: @Sendable () throws -> Void = { try Task.checkCancellation() }
+  ) async throws {
+    try checkCancellation()
+    guard descriptor.slot == .tunnel else {
+      throw AppleNetworkError.invalidConfigurationSlot
+    }
+    // (1) Prepare with the Global Authority BEFORE any preference mutation. This
+    // yields the single-use opaque ticket and the bounded non-secret descriptor.
+    let prepared = try await preparer.prepareTunnelStart(
+      HostTunnelStartPreparation(
+        descriptor: descriptor,
+        configuration: configuration,
+        credentialPayload: credentialPayload
+      )
+    )
+    let ticket = prepared.ticket
+    defer { ticket.erase() }
+    let preparedDescriptor = prepared.descriptor
+    guard preparedDescriptor.slot == .tunnel else {
+      throw AppleNetworkError.invalidConfigurationSlot
+    }
+    try checkCancellation()
+
+    // (2) Save only the descriptor-only provider configuration.
+    try await manager.saveDescriptorOnly(preparedDescriptor)
+    // Saving preferences is a committed external mutation and cannot be canceled
+    // through NetworkExtension. Honor cancellation before reloading and, critically,
+    // before starting the data plane.
+    try checkCancellation()
+
+    // (3) Reload and verify the exact managed manager/descriptor round trip.
+    let reloaded = try await manager.reloadDescriptor()
+    guard reloaded == preparedDescriptor else {
+      throw AppleNetworkError.managedManagerVerificationFailed(
+        "Reloaded managed tunnel descriptor does not match the prepared descriptor."
+      )
+    }
+    try checkCancellation()
+
+    // (4) Start with ONLY the one-use ticket. No configuration or credential bytes.
+    var ticketBytes = try ticket.withUnsafeBytes { Data($0) }
+    defer { ticketBytes.resetBytes(in: ticketBytes.startIndex..<ticketBytes.endIndex) }
+    try await manager.startWithTicket(ticketBytes)
+  }
 }
 
 public protocol SystemExtensionInstalling: Sendable {
@@ -289,16 +425,26 @@ public protocol TunnelHostBridging: Sendable {
 /// Serializes all NETunnelProviderManager mutations in one actor. It never
 /// reports TunnelActive from NEVPNStatus alone: the connected provider must
 /// return a typed snapshot whose configuration digest matches preferences.
-public actor NetworkExtensionHostBridge: TunnelHostBridging {
+public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperating {
   private let providerBundleIdentifier: String
   private let installer: any SystemExtensionInstalling
+  private let preparer: any TunnelStartPreparing
+  private var inFlightManager: NETunnelProviderManager?
 
   public init(
     providerBundleIdentifier: String,
-    installer: any SystemExtensionInstalling
+    installer: any SystemExtensionInstalling,
+    preparer: any TunnelStartPreparing = FailClosedTunnelStartPreparer()
   ) {
     self.providerBundleIdentifier = providerBundleIdentifier
     self.installer = installer
+    self.preparer = preparer
+  }
+
+  /// Builds the single-key `startVPNTunnel(options:)` dictionary carrying only the
+  /// bounded, opaque start ticket. Exposed for focused ticket-only option tests.
+  static func ticketStartOptions(_ ticketBytes: Data) -> [String: NSData] {
+    [NativeProtocolConstants.tunnelStartTicketOptionKey: ticketBytes as NSData]
   }
 
   public func installTunnel() async throws -> SystemExtensionInstallResult {
@@ -317,41 +463,60 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging {
     descriptor: ConfigurationDescriptor,
     credentialPayload: Data?
   ) async throws {
-    try Task.checkCancellation()
-    guard descriptor.slot == .tunnel else {
-      throw AppleNetworkError.invalidConfigurationSlot
+    do {
+      try GlobalAuthorityReleaseGate.requireStartAuthorization()
+    } catch {
+      throw AppleNetworkError.globalAuthorityUnavailable
     }
+    // Prepare with the Global Authority before any preference mutation, persist only
+    // the descriptor-only manager, verify the exact reloaded descriptor, and start
+    // with only the single-use ticket. There is no direct configuration/credential
+    // payload path: `startVPNTunnel(options:)` carries only the ticket.
+    try await TicketOnlyTunnelStartFlow.run(
+      descriptor: descriptor,
+      configuration: configuration,
+      credentialPayload: credentialPayload,
+      preparer: preparer,
+      manager: self
+    )
+  }
+
+  // MARK: - ManagedTunnelOperating (NetworkExtension-backed)
+
+  func saveDescriptorOnly(_ descriptor: ConfigurationDescriptor) async throws {
     let manager = try await loadOrCreateManager()
-    try Task.checkCancellation()
     let tunnelProtocol = NETunnelProviderProtocol()
     tunnelProtocol.providerBundleIdentifier = providerBundleIdentifier
     tunnelProtocol.serverAddress = "Clash for Mac"
+    // Only the bounded non-secret descriptor identity and network options are
+    // written; no configuration bytes and no credentials ever reach preferences.
     tunnelProtocol.providerConfiguration = try descriptor.providerConfiguration()
     manager.protocolConfiguration = tunnelProtocol
     manager.localizedDescription = "Clash for Mac Tunnel"
     manager.isEnabled = true
     try await save(manager)
-    // Saving preferences is a committed external mutation and cannot be
-    // canceled through NetworkExtension. Honor cancellation before reloading
-    // and, critically, before starting the data plane.
-    try Task.checkCancellation()
-    try await reload(manager)
-    try Task.checkCancellation()
+    inFlightManager = manager
+  }
 
+  func reloadDescriptor() async throws -> ConfigurationDescriptor {
+    guard let manager = inFlightManager else {
+      throw AppleNetworkError.managedManagerVerificationFailed(
+        "No managed tunnel manager is staged for reload verification."
+      )
+    }
+    try await reload(manager)
+    return try manager.configurationDescriptor()
+  }
+
+  func startWithTicket(_ ticketBytes: Data) async throws {
+    guard let manager = inFlightManager else {
+      throw AppleNetworkError.managedManagerVerificationFailed(
+        "No managed tunnel manager is staged for start."
+      )
+    }
+    defer { inFlightManager = nil }
     do {
-      try Task.checkCancellation()
-      var payload = try TunnelStartPayloadCodec.encode(
-        descriptor: descriptor,
-        configuration: configuration,
-        credentialPayload: credentialPayload
-      )
-      defer {
-        payload.resetBytes(in: payload.startIndex..<payload.endIndex)
-        payload.removeAll(keepingCapacity: false)
-      }
-      try manager.connection.startVPNTunnel(
-        options: [NativeProtocolConstants.tunnelStartPayloadOptionKey: payload as NSData]
-      )
+      try manager.connection.startVPNTunnel(options: Self.ticketStartOptions(ticketBytes))
     } catch let startError {
       if startError is CancellationError {
         throw startError
@@ -536,7 +701,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging {
 }
 
 extension ConfigurationDescriptor {
-  fileprivate func providerConfiguration() throws -> [String: Any] {
+  func providerConfiguration() throws -> [String: Any] {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     let credentialSlotsData = try encoder.encode(credentialSlots)

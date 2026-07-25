@@ -161,10 +161,33 @@ fn map_vault_error(error: NativeBridgeError) -> CredentialVaultError {
         NativeBridgeErrorCode::ConfigurationRejected => CredentialVaultError::InvalidMaterial,
         NativeBridgeErrorCode::IdentityRejected => CredentialVaultError::Corrupt,
         NativeBridgeErrorCode::Busy
+        | NativeBridgeErrorCode::ResourceExhausted
         | NativeBridgeErrorCode::ApprovalDenied
         | NativeBridgeErrorCode::CredentialsUnavailable
+        | NativeBridgeErrorCode::GlobalAuthorityUnavailable
+        | NativeBridgeErrorCode::GlobalAuthorityRegistrationRequired
+        | NativeBridgeErrorCode::GlobalAuthorityApprovalRequired
+        | NativeBridgeErrorCode::GlobalAuthorityIdentityRejected
+        | NativeBridgeErrorCode::GlobalAuthorityProtocolMismatch
+        | NativeBridgeErrorCode::GlobalAuthorityRecovering
+        | NativeBridgeErrorCode::GlobalAuthorityTimeout
+        | NativeBridgeErrorCode::GlobalAuthorityInterrupted
+        | NativeBridgeErrorCode::GlobalLeaseConflict
+        | NativeBridgeErrorCode::ReplayRejected
+        | NativeBridgeErrorCode::StaleOperation
+        | NativeBridgeErrorCode::TicketExpired
+        | NativeBridgeErrorCode::TicketAlreadyRedeemed
+        | NativeBridgeErrorCode::TicketInvalid
+        | NativeBridgeErrorCode::CompensationConflict
+        | NativeBridgeErrorCode::CleanupUnproven
+        | NativeBridgeErrorCode::Quarantined
+        | NativeBridgeErrorCode::OwnerUnresponsive
         | NativeBridgeErrorCode::Timeout
         | NativeBridgeErrorCode::Unavailable => CredentialVaultError::Unavailable,
-        NativeBridgeErrorCode::Internal => CredentialVaultError::Internal,
+        NativeBridgeErrorCode::InvalidMessage
+        | NativeBridgeErrorCode::SecretBoundsExceeded
+        | NativeBridgeErrorCode::SecretLifecycleViolation
+        | NativeBridgeErrorCode::JournalCorrupt
+        | NativeBridgeErrorCode::Internal => CredentialVaultError::Internal,
     }
 }

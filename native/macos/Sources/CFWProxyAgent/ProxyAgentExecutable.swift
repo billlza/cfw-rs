@@ -47,24 +47,21 @@ public enum ProxyAgentExecutable {
     let configurationStore = try AppGroupConfigurationStore(
       appGroupIdentifier: appGroupIdentifier
     )
-    let engineLeaseStore = CrossProcessEngineLeaseStore()
     let journalStore = try KeychainProxyOwnershipJournalStore(
       keychainAccessGroup: journalKeychainAccessGroup
     )
     let credentialVault = try CredentialVault(accessGroup: credentialKeychainAccessGroup)
+    // Machine-wide Proxy/Tunnel/multi-user exclusion is owned by the Global Authority
+    // lease, not a provider-local rendezvous: the data-plane lifecycle holds only an
+    // unleased local ownership handle. There is no `CrossProcessEngineLeaseStore` in
+    // the ProxyAgent Release path.
     let lifecycle = ProxySessionLifecycle(
       dependencies: ProxySessionDependencies(
         prepareConfiguration: { descriptor in
-          let lease = try engineLeaseStore.acquire()
-          do {
-            return PreparedProxyConfiguration(
-              configuration: try configurationStore.load(descriptor),
-              lease: ProxyMachineEngineLease(lease)
-            )
-          } catch {
-            lease.release()
-            throw error
-          }
+          PreparedProxyConfiguration(
+            configuration: try configurationStore.load(descriptor),
+            lease: UnleasedProxyOwnership()
+          )
         },
         resolveConfiguration: { template, descriptor in
           var material = try credentialVault.resolve(slots: descriptor.credentialSlots)
@@ -75,17 +72,27 @@ public enum ProxyAgentExecutable {
             material: material
           )
         },
-        recoverCleanupLease: { _ in
-          ProxyMachineEngineLease(try engineLeaseStore.acquire())
-        },
+        recoverCleanupLease: { _ in UnleasedProxyOwnership() },
         engineFactory: LibboxProxyEngineFactory(),
         preferences: SCPreferencesSystemProxyPreferences(),
         journalStore: journalStore,
         readinessTimeout: 10
       )
     )
-    let service = ProxyAgentService(
+    // The Authority owner coordinator binds an Authority owner capability before any
+    // libbox or System Proxy mutation, attests exact ready/stopped state with the
+    // exact operation context and effective proxy observation, and forces a stop on
+    // revocation. It fails closed with a typed Authority error until the authenticated
+    // Host→ProxyAgent capability channel and Authority owner XPC client are wired.
+    let owner = ProxySystemProxyOwnerCoordinator(
+      authority: FailClosedProxyOwnerAuthorityClient(),
+      capabilitySource: FailClosedProxyOwnerCapabilitySource(),
+      observer: FailClosedEffectiveSystemProxyObserver(),
       lifecycle: lifecycle,
+      revocation: ProxyRevocationChannel()
+    )
+    let service = ProxyAgentService(
+      lifecycle: owner,
       configurationChecker: SourceBuiltLibboxConfigurationChecker()
     )
 
@@ -99,23 +106,5 @@ public enum ProxyAgentExecutable {
     listener.resume()
     RunLoop.current.run()
     throw ProxyAgentRuntimeError.runLoopExited
-  }
-}
-
-private final class ProxyMachineEngineLease: ProxyEngineLeaseHolding, @unchecked Sendable {
-  private let lease: CrossProcessEngineLease
-
-  init(_ lease: CrossProcessEngineLease) {
-    self.lease = lease
-  }
-
-  func release() {
-    lease.release()
-  }
-
-  func markStopFailed() {
-    // Retain both socket descriptors until a later cleanup succeeds or the
-    // process exits. Releasing after an unproven engine stop could permit a
-    // second libbox data plane.
   }
 }

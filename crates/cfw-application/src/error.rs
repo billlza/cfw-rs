@@ -94,6 +94,10 @@ pub enum EngineCoordinatorError {
         expected_mode: EngineMode,
         actual: Box<NativeEngineStatus>,
     },
+    #[error(
+        "global Off barrier is unproven: the native backend still reports an owner ({observed:?}) after the current owner attested stopped, so no fresh generation is allocated and the other mode is not started"
+    )]
+    GlobalOffUnproven { observed: Box<NativeEngineStatus> },
     #[error("native startup reconciliation rejected the observed runtime: {mismatch}")]
     RecoveredRuntimeMismatch {
         mismatch: RecoveredRuntimeMismatch,

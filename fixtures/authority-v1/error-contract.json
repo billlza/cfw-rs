@@ -1,0 +1,28 @@
+{
+  "errors": [
+    {"code":"global_authority_unavailable","retry":"registration_status_change","message":"Global Authority is unavailable."},
+    {"code":"global_authority_registration_required","retry":"registration_status_change","message":"Global Authority registration is required."},
+    {"code":"global_authority_approval_required","retry":"registration_status_change","message":"Global Authority approval is required."},
+    {"code":"global_authority_identity_rejected","retry":"never","message":"Global Authority peer identity was rejected."},
+    {"code":"global_authority_protocol_mismatch","retry":"compatible_software_update","message":"Global Authority protocol is incompatible."},
+    {"code":"global_authority_recovering","retry":"explicit_reconciliation","message":"Global Authority is recovering; starts are disabled."},
+    {"code":"global_authority_timeout","retry":"idempotent_read_only","message":"The Authority operation timed out."},
+    {"code":"global_authority_interrupted","retry":"idempotent_read_only","message":"The Authority connection was interrupted."},
+    {"code":"busy","retry":"fresh_snapshot_after_off","message":"Global Authority mutation is busy."},
+    {"code":"resource_exhausted","retry":"idempotent_read_only","message":"Global Authority read capacity is exhausted."},
+    {"code":"global_lease_conflict","retry":"fresh_snapshot_after_off","message":"A conflicting Global Authority lease exists."},
+    {"code":"replay_rejected","retry":"fresh_context","message":"Authority replay protection rejected the context."},
+    {"code":"stale_operation","retry":"fresh_context","message":"Authority operation context is stale."},
+    {"code":"ticket_expired","retry":"fresh_generation_after_off","message":"The Authority start ticket expired."},
+    {"code":"ticket_already_redeemed","retry":"fresh_generation_after_off","message":"The Authority start ticket was already redeemed."},
+    {"code":"ticket_invalid","retry":"never","message":"The Authority start ticket is invalid."},
+    {"code":"secret_bounds_exceeded","retry":"never","message":"Authority secret material exceeds a fixed bound."},
+    {"code":"secret_lifecycle_violation","retry":"explicit_reconciliation","message":"Authority secret lifecycle verification failed."},
+    {"code":"compensation_conflict","retry":"explicit_reconciliation","message":"Tunnel preference compensation conflicted."},
+    {"code":"cleanup_unproven","retry":"explicit_reconciliation","message":"Global cleanup could not be proven."},
+    {"code":"quarantined","retry":"explicit_reconciliation","message":"Global Authority is quarantined pending reconciliation."},
+    {"code":"invalid_message","retry":"never","message":"The Authority message is invalid."},
+    {"code":"journal_corrupt","retry":"explicit_reconciliation","message":"The Authority journal is corrupt."},
+    {"code":"owner_unresponsive","retry":"idempotent_read_only","message":"The Authority engine owner is unresponsive."}
+  ]
+}

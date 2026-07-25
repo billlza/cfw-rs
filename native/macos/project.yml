@@ -22,6 +22,10 @@ settings:
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_TREAT_WARNINGS_AS_ERRORS: true
     SWIFT_VERSION: "6.0"
+  configs:
+    Release:
+      GCC_PREPROCESSOR_DEFINITIONS: $(inherited) CFW_GLOBAL_AUTHORITY_REQUIRED=1
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) CFW_GLOBAL_AUTHORITY_REQUIRED
 
 targets:
   CFWSharedProtocol:
@@ -36,6 +40,47 @@ targets:
       base:
         ENABLE_USER_SCRIPT_SANDBOXING: false
         PRODUCT_MODULE_NAME: CFWSharedProtocol
+
+  CFWGlobalAuthority:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/CFWGlobalAuthority
+    dependencies:
+      - target: CFWSharedProtocol
+      - sdk: CryptoKit.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        PRODUCT_MODULE_NAME: CFWGlobalAuthority
+
+  CFWGlobalAuthorityDaemon:
+    type: tool
+    platform: macOS
+    productName: CFWGlobalAuthority
+    sources:
+      - Sources/CFWGlobalAuthorityMain
+    dependencies:
+      - target: CFWGlobalAuthority
+        link: true
+      - target: CFWSharedProtocol
+        link: true
+      - sdk: CryptoKit.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    entitlements:
+      path: Config/GlobalAuthority.entitlements
+    settings:
+      base:
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: false
+        CODE_SIGN_STYLE: Manual
+        CREATE_INFOPLIST_SECTION_IN_BINARY: true
+        PRODUCT_BUNDLE_IDENTIFIER: com.bill.clashformac.global-authority
+        PRODUCT_MODULE_NAME: CFWGlobalAuthorityDaemonMain
+        PRODUCT_NAME: CFWGlobalAuthority
+        SKIP_INSTALL: true
 
   CFWPacketTransport:
     type: library.static
@@ -81,10 +126,16 @@ targets:
       - sdk: Security.framework
       - sdk: ServiceManagement.framework
       - sdk: SystemExtensions.framework
+    info:
+      path: Config/NativeBridge-Info.plist
+      properties:
+        CFBundlePackageType: FMWK
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
     settings:
       base:
         DEFINES_MODULE: true
-        CURRENT_PROJECT_VERSION: $(CFW_BUILD_NUMBER)
         PRODUCT_BUNDLE_IDENTIFIER: com.bill.clashformac.native-bridge
         PRODUCT_MODULE_NAME: CFWNativeBridge
         PRODUCT_NAME: CFWNativeBridge
@@ -131,6 +182,13 @@ targets:
     settings:
       base:
         ENABLE_USER_SCRIPT_SANDBOXING: false
+        # The pinned single-slice libbox XCFramework is also named directly: the
+        # `analyze` action does not materialize an XCFramework slice into
+        # BUILT_PRODUCTS_DIR, so `import Libbox` must resolve from the source
+        # tree as well.
+        FRAMEWORK_SEARCH_PATHS:
+          - $(inherited)
+          - ../../target/native-dependencies/Libbox.xcframework/macos-arm64
         PRODUCT_MODULE_NAME: CFWLibboxRuntime
 
   CFWLibboxObjC:
@@ -150,6 +208,11 @@ targets:
         CLANG_ENABLE_MODULES: true
         CLANG_WARN_DOCUMENTATION_COMMENTS: true
         DEFINES_MODULE: true
+        # See CFWLibboxRuntime: `#import <Libbox/Libbox.h>` must resolve during
+        # the `analyze` action too, which never processes the XCFramework.
+        FRAMEWORK_SEARCH_PATHS:
+          - $(inherited)
+          - ../../target/native-dependencies/Libbox.xcframework/macos-arm64
         PRODUCT_MODULE_NAME: CFWLibboxObjC
 
   CFWPacketTunnel:
@@ -299,6 +362,22 @@ targets:
       base:
         CODE_SIGNING_ALLOWED: false
 
+  CFWGlobalAuthorityTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/CFWGlobalAuthorityTests
+    dependencies:
+      - target: CFWGlobalAuthority
+      - target: CFWSharedProtocol
+      - sdk: AppIntents.framework
+      - sdk: CryptoKit.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: false
+
   CFWPacketTransportTests:
     type: bundle.unit-test
     platform: macOS
@@ -306,6 +385,10 @@ targets:
       - Tests/CFWPacketTransportTests
     dependencies:
       - target: CFWPacketTransport
+      # CFWPacketTransport references CFWSharedProtocol symbols
+      # (TunnelNetworkOptions MTU bounds); a static library dependency is not
+      # transitively linked into the test bundle, so it is named explicitly.
+      - target: CFWSharedProtocol
       - sdk: AppIntents.framework
     settings:
       base:
@@ -372,10 +455,20 @@ targets:
       - Tests/CFWNativeBridgeTests
     dependencies:
       - target: CFWNativeBridge
+      # CFWNativeBridge.framework already absorbs these static libraries.
+      # Linking them into the test bundle as well would place a second copy of
+      # every type descriptor in the image, so a value created in the test would
+      # fail `as?` against the framework's copy (a cross-module cast that
+      # silently degrades typed failures to `.internal`). The modules stay
+      # importable; only the duplicate link is removed.
       - target: CFWAppleNetwork
+        link: false
       - target: CFWCredentialTransport
+        link: false
       - target: CFWCredentialVault
+        link: false
       - target: CFWSharedProtocol
+        link: false
       - sdk: AppIntents.framework
       - sdk: Security.framework
       - sdk: ServiceManagement.framework
@@ -440,6 +533,7 @@ schemes:
     build:
       targets:
         CFWSharedProtocol: all
+        CFWGlobalAuthority: all
         CFWPacketTransport: all
         CFWAppleNetwork: all
         CFWNativeBridge: all
@@ -448,6 +542,7 @@ schemes:
         CFWLibboxRuntime: all
         CFWLibboxObjC: all
         CFWSharedProtocolTests: [test]
+        CFWGlobalAuthorityTests: [test]
         CFWPacketTransportTests: [test]
         CFWPacketTunnelTests: [test]
         CFWAppleNetworkTests: [test]
@@ -459,6 +554,7 @@ schemes:
     test:
       targets:
         - CFWSharedProtocolTests
+        - CFWGlobalAuthorityTests
         - CFWPacketTransportTests
         - CFWPacketTunnelTests
         - CFWAppleNetworkTests
@@ -472,6 +568,11 @@ schemes:
     build:
       targets:
         CFWPacketTunnelExtension: all
+
+  CFWGlobalAuthorityDaemon:
+    build:
+      targets:
+        CFWGlobalAuthorityDaemon: all
 
   CFWProxyAgent:
     build:

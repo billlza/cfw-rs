@@ -57,9 +57,17 @@ private enum ProductionNativeBridge {
       extensionIdentifier: "com.bill.clashformac.packet-tunnel",
       approvalHandler: {}
     )
+    // One shared, typed, bounded Host Authority client backs both the machine-wide
+    // lease inspector and the Tunnel-start preparer. Its connection lifecycle
+    // (bounded timeouts, invalidation/interruption) fails closed.
+    let authorityClient = BoundedAuthorityXPCClient(remote: NSXPCGlobalAuthorityRemote())
     let tunnel = NetworkExtensionHostBridge(
       providerBundleIdentifier: "com.bill.clashformac.packet-tunnel",
-      installer: installer
+      installer: installer,
+      // Production stays fail-closed until an end-to-end signed Host→Authority
+      // channel is provable; the concrete Authority-backed preparer is wired but
+      // not selected until then.
+      preparer: HostTunnelStartPreparerFactory.production(authority: authorityClient)
     )
     let proxy = try AuthenticatedProxyAgentTransport(
       machServiceName: "com.bill.clashformac.proxy-agent",
@@ -76,7 +84,7 @@ private enum ProductionNativeBridge {
       proxy: proxy,
       tunnel: tunnel,
       configurationStore: configurationStore,
-      engineLease: CrossProcessEngineLeaseStore(),
+      engineLease: GlobalAuthorityEngineLeaseInspector(authority: authorityClient),
       credentialVault: credentialVault
     )
   }.mapError { error in

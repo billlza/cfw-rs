@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.bill.clashformac.global-authority</string>
+	<key>BundleProgram</key>
+	<string>Contents/Library/HelperTools/CFWGlobalAuthority</string>
+	<key>MachServices</key>
+	<dict>
+		<key>YKUPL7Z869.group.com.bill.clashformac.global-authority</key>
+		<true/>
+	</dict>
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+	<key>UserName</key>
+	<string>root</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.bill.clashformac</string>
+	</array>
+</dict>
+</plist>

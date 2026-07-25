@@ -1,4 +1,9 @@
+mod callback_isolation;
 mod cutover;
+mod generation_isolation_property;
 mod lifecycle;
+mod mode_cycle_integration;
+mod off_barrier;
+mod off_ordering_property;
 mod support;
 mod transitions;

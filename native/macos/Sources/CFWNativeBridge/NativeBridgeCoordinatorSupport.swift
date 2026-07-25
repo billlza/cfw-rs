@@ -103,6 +103,12 @@ extension NativeBridgeCoordinator {
     if let error = error as? NativeBridgeExecutionError {
       return error
     }
+    if let error = error as? AuthorityDomainError {
+      return .failure(error.code.nativeBridgeCode, error.code.stableMessage)
+    }
+    if error is GlobalAuthorityGateError {
+      return .failure(.globalAuthorityUnavailable, GlobalAuthorityGateError.stableMessage)
+    }
     if let error = error as? ProxyAgentHostError {
       switch error {
       case .registrationRequiresApproval:
@@ -130,13 +136,20 @@ extension NativeBridgeCoordinator {
       case .systemExtensionStateTransportTimedOut, .providerMessageTimedOut,
         .tunnelStopTimedOut:
         return .failure(.timeout, error.localizedDescription)
-      case .staleStopRequest, .providerResponseMismatch:
+      case .staleStopRequest, .providerResponseMismatch,
+        .managedManagerVerificationFailed:
         return .failure(.identityRejected, error.localizedDescription)
+      case .compensationConflict(let message):
+        return .failure(.compensationConflict, message)
+      case .cleanupUnproven(let message):
+        return .failure(.cleanupUnproven, message)
       case .providerFailure(let failure):
         return .failure(
           failure.isRetryable ? .unavailable : .configurationRejected,
           error.localizedDescription
         )
+      case .globalAuthorityUnavailable:
+        return .failure(.globalAuthorityUnavailable, GlobalAuthorityGateError.stableMessage)
       case .invalidConfigurationSlot:
         return .failure(.configurationRejected, error.localizedDescription)
       case .systemExtensionInstallationFailed(let code, let message):

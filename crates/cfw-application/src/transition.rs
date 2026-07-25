@@ -12,8 +12,9 @@ use crate::{
     cutover::start_request,
     runtime::{
         CoordinatorState, NativeLease, NativeLeaseKind, TransitionContext, backend_error,
-        call_backend, publish, reconcile_active_runtime, reserve_next_generation, set_failed,
-        set_off, validate_runtime,
+        call_backend, prove_global_off, publish, reconcile_active_runtime,
+        requires_explicit_reconciliation, reserve_next_generation, set_failed, set_off,
+        validate_runtime,
     },
 };
 
@@ -42,6 +43,13 @@ pub(crate) async fn transition(
         )
         .await;
     }
+    // Fail closed while quarantined: a prior accepted operation left cleanup or
+    // ownership unproven, so no target mode may be prepared or started until an
+    // explicit Off reconciliation proves the stop barrier. This never falls
+    // back to another mode and never mutates the native backend.
+    if let Some(quarantine) = &state.quarantine {
+        return Err(quarantine.clone());
+    }
     let projected = match target {
         EngineMode::SystemProxy => profile.project(ProjectionMode::SystemProxy, settings)?,
         EngineMode::Tunnel => profile.project(ProjectionMode::Tunnel, settings)?,
@@ -64,12 +72,22 @@ pub(crate) async fn transition(
         return Ok(state.snapshot.clone());
     }
 
-    let generation = reserve_next_generation(state, generation_store)?;
+    // Off-mediated switch ordering (Requirement 3.2): stop the current owner,
+    // prove the global Off barrier with an independent OS-state observation,
+    // and only then allocate a fresh generation for the target mode. The Off
+    // commit must precede the fresh generation so a failed stop or an unproven
+    // Off can never consume a generation for, or start, the other mode, and the
+    // previous mode is never restarted on failure.
     state.snapshot.desired_mode = target;
-    state.snapshot.generation = generation;
-
+    let owned_previous_runtime = state.native_lease.is_some();
     stop_owned_runtime(backend, state, snapshots, operation_timeout).await?;
+    if owned_previous_runtime {
+        prove_global_off(backend, state, snapshots, status_query_timeout).await?;
+    }
     set_off(state, snapshots);
+
+    let generation = reserve_next_generation(state, generation_store)?;
+    state.snapshot.generation = generation;
 
     let context = EngineCommandContext::new(session, generation);
     let request = start_request(&projected, settings, context.clone());
@@ -247,9 +265,15 @@ pub(crate) async fn stop_owned_runtime(
     };
 
     if let Err(source) = result {
+        let kind = source.kind;
         let error = backend_error(operation, source);
         let target = state.snapshot.desired_mode;
         let generation = state.snapshot.generation;
+        // A stop that ends in unprovable cleanup keeps the exact native lease
+        // and quarantines the coordinator: ambiguity must never become Off.
+        if requires_explicit_reconciliation(kind) {
+            state.quarantine = Some(error.clone());
+        }
         set_failed(state, snapshots, target, generation, &error);
         return Err(error);
     }
@@ -268,6 +292,16 @@ async fn fail_backend(
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
     let target = state.snapshot.desired_mode;
     let generation = state.snapshot.generation;
+    // When the native start itself reports unprovable cleanup or ownership, the
+    // coordinator retains the exact lease and quarantines instead of issuing an
+    // optimistic stop whose success could be misread as proof of Off. Only an
+    // explicit Off reconciliation clears the quarantine.
+    if requires_explicit_reconciliation(source.kind) {
+        let error = backend_error(operation, source);
+        state.quarantine = Some(error.clone());
+        set_failed(state, snapshots, target, generation, &error);
+        return Err(error);
+    }
     let error = match stop_owned_runtime(backend, state, snapshots, operation_timeout).await {
         Ok(()) => backend_error(operation, source),
         Err(EngineCoordinatorError::Backend {
@@ -325,7 +359,20 @@ pub(crate) async fn transition_to_off(
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
     let was_already_off = state.native_lease.is_none() && state.snapshot.state == EngineState::Off;
     state.snapshot.desired_mode = EngineMode::Off;
+    let owned_previous_runtime = state.native_lease.is_some();
     stop_owned_runtime(backend, state, snapshots, operation_timeout).await?;
+    // Route stop through owner revocation/stopped attestation (the stop above)
+    // and an independent OS-state observation before committing Off. A lingering
+    // owner or an unavailable observation keeps the coordinator fail-closed and
+    // leaves any quarantine in place; it never becomes Off from ambiguity.
+    if owned_previous_runtime {
+        prove_global_off(backend, state, snapshots, operation_timeout).await?;
+    }
+    // The stop barrier plus the proven Off observation above are the explicit
+    // reconciliation that proves Off, so any prior quarantine is now cleared. A
+    // failed stop or unproven Off returns early above and leaves the quarantine
+    // in place.
+    state.quarantine = None;
     set_off(state, snapshots);
     if was_already_off {
         return Ok(state.snapshot.clone());

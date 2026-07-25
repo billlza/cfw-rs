@@ -23,6 +23,7 @@ pub type NativeBridgeFuture<'a, T> =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeBridgeErrorCode {
     Busy,
+    ResourceExhausted,
     PermissionDenied,
     ApprovalDenied,
     ConfigurationRejected,
@@ -30,10 +31,132 @@ pub enum NativeBridgeErrorCode {
     CredentialConflict,
     CredentialVaultMissing,
     CredentialGcConflict,
+    GlobalAuthorityUnavailable,
+    GlobalAuthorityRegistrationRequired,
+    GlobalAuthorityApprovalRequired,
+    GlobalAuthorityIdentityRejected,
+    GlobalAuthorityProtocolMismatch,
+    GlobalAuthorityRecovering,
+    GlobalAuthorityTimeout,
+    GlobalAuthorityInterrupted,
+    GlobalLeaseConflict,
+    ReplayRejected,
+    StaleOperation,
+    TicketExpired,
+    TicketAlreadyRedeemed,
+    TicketInvalid,
+    CompensationConflict,
+    CleanupUnproven,
+    Quarantined,
+    InvalidMessage,
+    SecretBoundsExceeded,
+    SecretLifecycleViolation,
+    JournalCorrupt,
+    OwnerUnresponsive,
     IdentityRejected,
     Timeout,
     Unavailable,
     Internal,
+}
+
+impl From<NativeBridgeErrorCode> for BackendErrorKind {
+    fn from(code: NativeBridgeErrorCode) -> Self {
+        match code {
+            NativeBridgeErrorCode::Busy => Self::Busy,
+            NativeBridgeErrorCode::ResourceExhausted => Self::ResourceExhausted,
+            NativeBridgeErrorCode::PermissionDenied => Self::PermissionDenied,
+            NativeBridgeErrorCode::ApprovalDenied => Self::ApprovalDenied,
+            NativeBridgeErrorCode::ConfigurationRejected => Self::ConfigurationRejected,
+            NativeBridgeErrorCode::CredentialsUnavailable => Self::CredentialsUnavailable,
+            NativeBridgeErrorCode::CredentialConflict => Self::CredentialConflict,
+            NativeBridgeErrorCode::CredentialVaultMissing => Self::CredentialVaultMissing,
+            NativeBridgeErrorCode::CredentialGcConflict => Self::CredentialGcConflict,
+            NativeBridgeErrorCode::GlobalAuthorityUnavailable => Self::GlobalAuthorityUnavailable,
+            NativeBridgeErrorCode::GlobalAuthorityRegistrationRequired => {
+                Self::GlobalAuthorityRegistrationRequired
+            }
+            NativeBridgeErrorCode::GlobalAuthorityApprovalRequired => {
+                Self::GlobalAuthorityApprovalRequired
+            }
+            NativeBridgeErrorCode::GlobalAuthorityIdentityRejected => {
+                Self::GlobalAuthorityIdentityRejected
+            }
+            NativeBridgeErrorCode::GlobalAuthorityProtocolMismatch => {
+                Self::GlobalAuthorityProtocolMismatch
+            }
+            NativeBridgeErrorCode::GlobalAuthorityRecovering => Self::GlobalAuthorityRecovering,
+            NativeBridgeErrorCode::GlobalAuthorityTimeout => Self::GlobalAuthorityTimeout,
+            NativeBridgeErrorCode::GlobalAuthorityInterrupted => Self::GlobalAuthorityInterrupted,
+            NativeBridgeErrorCode::GlobalLeaseConflict => Self::GlobalLeaseConflict,
+            NativeBridgeErrorCode::ReplayRejected => Self::ReplayRejected,
+            NativeBridgeErrorCode::StaleOperation => Self::StaleOperation,
+            NativeBridgeErrorCode::TicketExpired => Self::TicketExpired,
+            NativeBridgeErrorCode::TicketAlreadyRedeemed => Self::TicketAlreadyRedeemed,
+            NativeBridgeErrorCode::TicketInvalid => Self::TicketInvalid,
+            NativeBridgeErrorCode::CompensationConflict => Self::CompensationConflict,
+            NativeBridgeErrorCode::CleanupUnproven => Self::CleanupUnproven,
+            NativeBridgeErrorCode::Quarantined => Self::Quarantined,
+            NativeBridgeErrorCode::InvalidMessage => Self::InvalidMessage,
+            NativeBridgeErrorCode::SecretBoundsExceeded => Self::SecretBoundsExceeded,
+            NativeBridgeErrorCode::SecretLifecycleViolation => Self::SecretLifecycleViolation,
+            NativeBridgeErrorCode::JournalCorrupt => Self::JournalCorrupt,
+            NativeBridgeErrorCode::OwnerUnresponsive => Self::OwnerUnresponsive,
+            NativeBridgeErrorCode::IdentityRejected => Self::IdentityRejected,
+            NativeBridgeErrorCode::Timeout => Self::Timeout,
+            NativeBridgeErrorCode::Unavailable => Self::Unavailable,
+            NativeBridgeErrorCode::Internal => Self::Internal,
+        }
+    }
+}
+
+impl From<BackendErrorKind> for NativeBridgeErrorCode {
+    fn from(kind: BackendErrorKind) -> Self {
+        match kind {
+            BackendErrorKind::Busy => Self::Busy,
+            BackendErrorKind::ResourceExhausted => Self::ResourceExhausted,
+            BackendErrorKind::PermissionDenied => Self::PermissionDenied,
+            BackendErrorKind::ApprovalDenied => Self::ApprovalDenied,
+            BackendErrorKind::ConfigurationRejected => Self::ConfigurationRejected,
+            BackendErrorKind::CredentialsUnavailable => Self::CredentialsUnavailable,
+            BackendErrorKind::CredentialConflict => Self::CredentialConflict,
+            BackendErrorKind::CredentialVaultMissing => Self::CredentialVaultMissing,
+            BackendErrorKind::CredentialGcConflict => Self::CredentialGcConflict,
+            BackendErrorKind::GlobalAuthorityUnavailable => Self::GlobalAuthorityUnavailable,
+            BackendErrorKind::GlobalAuthorityRegistrationRequired => {
+                Self::GlobalAuthorityRegistrationRequired
+            }
+            BackendErrorKind::GlobalAuthorityApprovalRequired => {
+                Self::GlobalAuthorityApprovalRequired
+            }
+            BackendErrorKind::GlobalAuthorityIdentityRejected => {
+                Self::GlobalAuthorityIdentityRejected
+            }
+            BackendErrorKind::GlobalAuthorityProtocolMismatch => {
+                Self::GlobalAuthorityProtocolMismatch
+            }
+            BackendErrorKind::GlobalAuthorityRecovering => Self::GlobalAuthorityRecovering,
+            BackendErrorKind::GlobalAuthorityTimeout => Self::GlobalAuthorityTimeout,
+            BackendErrorKind::GlobalAuthorityInterrupted => Self::GlobalAuthorityInterrupted,
+            BackendErrorKind::GlobalLeaseConflict => Self::GlobalLeaseConflict,
+            BackendErrorKind::ReplayRejected => Self::ReplayRejected,
+            BackendErrorKind::StaleOperation => Self::StaleOperation,
+            BackendErrorKind::TicketExpired => Self::TicketExpired,
+            BackendErrorKind::TicketAlreadyRedeemed => Self::TicketAlreadyRedeemed,
+            BackendErrorKind::TicketInvalid => Self::TicketInvalid,
+            BackendErrorKind::CompensationConflict => Self::CompensationConflict,
+            BackendErrorKind::CleanupUnproven => Self::CleanupUnproven,
+            BackendErrorKind::Quarantined => Self::Quarantined,
+            BackendErrorKind::InvalidMessage => Self::InvalidMessage,
+            BackendErrorKind::SecretBoundsExceeded => Self::SecretBoundsExceeded,
+            BackendErrorKind::SecretLifecycleViolation => Self::SecretLifecycleViolation,
+            BackendErrorKind::JournalCorrupt => Self::JournalCorrupt,
+            BackendErrorKind::OwnerUnresponsive => Self::OwnerUnresponsive,
+            BackendErrorKind::IdentityRejected => Self::IdentityRejected,
+            BackendErrorKind::Timeout => Self::Timeout,
+            BackendErrorKind::Unavailable => Self::Unavailable,
+            BackendErrorKind::Internal => Self::Internal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,21 +300,7 @@ impl<B: NativeBridge> CutoverPreflightBackend for AppleNetworkBackend<B> {
 }
 
 fn map_bridge_error(error: NativeBridgeError) -> BackendError {
-    let kind = match error.code {
-        NativeBridgeErrorCode::Busy => BackendErrorKind::Busy,
-        NativeBridgeErrorCode::PermissionDenied => BackendErrorKind::PermissionDenied,
-        NativeBridgeErrorCode::ApprovalDenied => BackendErrorKind::ApprovalDenied,
-        NativeBridgeErrorCode::ConfigurationRejected => BackendErrorKind::ConfigurationRejected,
-        NativeBridgeErrorCode::CredentialsUnavailable => BackendErrorKind::CredentialsUnavailable,
-        NativeBridgeErrorCode::CredentialConflict => BackendErrorKind::ConfigurationRejected,
-        NativeBridgeErrorCode::CredentialVaultMissing => BackendErrorKind::CredentialsUnavailable,
-        NativeBridgeErrorCode::CredentialGcConflict => BackendErrorKind::Busy,
-        NativeBridgeErrorCode::IdentityRejected => BackendErrorKind::IdentityRejected,
-        NativeBridgeErrorCode::Timeout => BackendErrorKind::Timeout,
-        NativeBridgeErrorCode::Unavailable => BackendErrorKind::Unavailable,
-        NativeBridgeErrorCode::Internal => BackendErrorKind::Internal,
-    };
-    BackendError::new(kind, error.message)
+    BackendError::new(error.code.into(), error.message)
 }
 
 /// Explicit fail-closed transport used until the signed Swift C ABI artifact is
@@ -382,6 +491,14 @@ mod tests {
                 bypass_private_networks: true,
                 mtu: 1_500,
             }),
+        }
+    }
+
+    #[test]
+    fn authority_error_mapping_is_one_to_one() {
+        for kind in BackendErrorKind::AUTHORITY_KINDS {
+            let bridge = NativeBridgeErrorCode::from(kind);
+            assert_eq!(BackendErrorKind::from(bridge), kind);
         }
     }
 

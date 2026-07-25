@@ -93,7 +93,9 @@ fn validate_signature_archive(
 // trusted comment only when stream finalization succeeds.
 fn parse_trusted_comment(comment: &str) -> Result<&str, String> {
     if comment.len() > MAX_TRUSTED_COMMENT_BYTES
-        || comment.bytes().any(|byte| byte.is_ascii_control() && byte != b'\t')
+        || comment
+            .bytes()
+            .any(|byte| byte.is_ascii_control() && byte != b'\t')
     {
         return Err("updater signature trusted comment is invalid".into());
     }
@@ -279,8 +281,8 @@ mod tests {
     fn trusted_comment_diagnostics_do_not_echo_untrusted_names() {
         let secret = "must-not-reach-diagnostics";
         let oversized = format!("timestamp:1784639874\tfile:{secret}{}", "a".repeat(1024));
-        let diagnostic = parse_trusted_comment(&oversized)
-            .expect_err("oversized comment must fail");
+        let diagnostic =
+            parse_trusted_comment(&oversized).expect_err("oversized comment must fail");
         assert!(!diagnostic.contains(secret));
 
         let mismatch = validate_signature_archive_for_names(secret, "expected.tar.gz")

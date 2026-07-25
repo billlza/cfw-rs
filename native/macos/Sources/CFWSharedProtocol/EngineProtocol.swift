@@ -6,6 +6,10 @@ public enum NativeProtocolConstants {
   public static let maximumConfigurationBytes: UInt64 = 384 * 1_024
   public static let maximumFailureMessageBytes = 1_024
   public static let tunnelStartPayloadOptionKey = "cfw.tunnel-start-payload-v1"
+  /// The sole `startVPNTunnel(options:)` key in the production ticket-only path.
+  /// Its value is the bounded, opaque 32-byte Authority start ticket and carries
+  /// no configuration or credential bytes.
+  public static let tunnelStartTicketOptionKey = "cfw.tunnel-start-ticket-v1"
 }
 
 public enum ProtocolValidationError: Error, Equatable, Sendable {

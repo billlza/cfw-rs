@@ -124,7 +124,7 @@ private struct NoopConfigurationStore: NativeConfigurationStoring {
 }
 
 private struct AvailableEngineLease: NativeEngineLeaseInspecting {
-  func isAvailable() throws -> Bool { true }
+  func isAvailable() async throws -> Bool { true }
 }
 
 private final class RecordingGarbageCollectionVault:

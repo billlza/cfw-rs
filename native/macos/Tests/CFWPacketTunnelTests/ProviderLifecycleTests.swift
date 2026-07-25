@@ -421,6 +421,7 @@ struct ProviderLifecycleTests {
   @Test func everyProviderFailureProducesAStableEncodableSnapshot() throws {
     let errors: [PacketTunnelProviderError] = [
       .providerUnavailable,
+      .invalidStartTicket,
       .malformedProviderConfiguration,
       .invalidConfigurationSlot,
       .lifecycleConflict,

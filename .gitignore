@@ -40,3 +40,6 @@ __pycache__/
 # Tauri updater private signing key (public key lives in tauri.conf.json)
 /.tauri/*.key
 /.tauri/*.log
+
+# Xcode derived data from local native builds
+/native/macos/build/

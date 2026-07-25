@@ -14,13 +14,13 @@
     },
     "rawPacketPatch": {
       "path": "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
-      "sha256": "66128ca96ff613b0803cc92b3269b4e7822cd2532c43597e9e283acc6d9f4dde"
+      "sha256": "5e578e7f3695116f8e1dfbb3fc7c2fc276c9b8c193428e5fd6fa71dc57fb8d60"
     },
     "dnsFailoverPatch": {
       "path": "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",
       "sha256": "d52fc83c28b5baa919a4d1590a90f7353daaa3120b6ac39aa8e4476133c602d3"
     },
-    "combinedDiffSha256": "6b604a21e0b352273a06d912bd270e7931b9d2b0185b4ed0bb1ead016e3803a1"
+    "combinedDiffSha256": "f3d84e99e7832495975e4d78fd73744f63c1d0f79393b7276cce2f6e3e80c233"
   },
   "singBoxForAppleReference": {
     "commit": "794eb1741f91765a91f1513e5639296503f072b2"

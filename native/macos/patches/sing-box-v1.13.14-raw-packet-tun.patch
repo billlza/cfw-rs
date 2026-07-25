@@ -422,7 +422,7 @@ new file mode 100644
 index 00000000..cf0fa9a2
 --- /dev/null
 +++ b/experimental/libbox/raw_packet_tun_darwin_test.go
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,303 @@
 +//go:build darwin
 +
 +package libbox

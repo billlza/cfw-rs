@@ -1,0 +1,80 @@
+{
+  "schema": "cfw-pinned-build-inputs-v1",
+  "description": "Design-pinned libbox and toolchain build inputs for macos15-network-extension-migration (Requirement 5.1). This manifest is the offline source of truth; verify_pinned_build_inputs.py binds it to scripts/dependency_pins.env, the tracked patch files, the native dependency lock, and the offline build scripts.",
+  "dependencyPinsPath": "scripts/dependency_pins.env",
+  "nativeLockPath": "native/macos/Dependencies.lock.json",
+  "tools": {
+    "RUST_VERSION": "1.97.1",
+    "NODE_VERSION": "24.18.0",
+    "GO_VERSION": "1.26.5",
+    "GOMOBILE_VERSION": "v0.1.12",
+    "GOVULNCHECK_VERSION": "v1.6.0",
+    "SING_BOX_VERSION": "v1.13.14"
+  },
+  "singBoxCommitKey": "SING_BOX_COMMIT",
+  "singBoxCommit": "25a600db24f7680ad9806ce5427bd0ab8afe1114",
+  "patches": [
+    {
+      "name": "sing-box security dependencies patch",
+      "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
+      "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
+      "sha256": "ca751c4ec4b82a60d4dd8716627dc2665b154901a988603108bb5e4e718cf439"
+    },
+    {
+      "name": "sing-box raw packet tun patch",
+      "pathKey": "SING_BOX_RAW_PACKET_PATCH_PATH",
+      "sha256Key": "SING_BOX_RAW_PACKET_PATCH_SHA256",
+      "sha256": "5e578e7f3695116f8e1dfbb3fc7c2fc276c9b8c193428e5fd6fa71dc57fb8d60"
+    },
+    {
+      "name": "sing-box DNS failover patch",
+      "pathKey": "SING_BOX_DNS_FAILOVER_PATCH_PATH",
+      "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+      "sha256": "d52fc83c28b5baa919a4d1590a90f7353daaa3120b6ac39aa8e4476133c602d3"
+    }
+  ],
+  "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
+  "combinedDiffSha256": "f3d84e99e7832495975e4d78fd73744f63c1d0f79393b7276cce2f6e3e80c233",
+  "verifiedGoModuleInputKeys": [
+    "GOMOBILE_MODULE_SUM",
+    "GOVULNCHECK_MODULE_SUM",
+    "SING_BOX_UPSTREAM_GO_MOD_SHA256",
+    "SING_BOX_UPSTREAM_GO_SUM_SHA256",
+    "SING_BOX_PATCHED_GO_MOD_SHA256",
+    "SING_BOX_PATCHED_GO_SUM_SHA256"
+  ],
+  "rejectedPatchDigests": [
+    "66128ca96ff613b0803cc92b3269b4e7822cd2532c43597e9e283acc6d9f4dde"
+  ],
+  "buildScripts": {
+    "scripts/build_libbox.sh": {
+      "requirePinReferences": [
+        "$GO_VERSION",
+        "$GOMOBILE_VERSION",
+        "$SING_BOX_VERSION",
+        "$SING_BOX_COMMIT",
+        "$SING_BOX_COMBINED_DIFF_SHA256",
+        "$SING_BOX_SECURITY_PATCH_SHA256",
+        "$SING_BOX_RAW_PACKET_PATCH_SHA256",
+        "$SING_BOX_DNS_FAILOVER_PATCH_SHA256"
+      ],
+      "forbidNetworkRecursion": true
+    }
+  },
+  "artifactBindings": {
+    "scripts/build_libbox.sh": [
+      "sourceCommit=$SING_BOX_COMMIT",
+      "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256",
+      "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
+      "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+      "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
+    ],
+    "scripts/build_native_products.sh": [
+      "singBoxCommit=$SING_BOX_COMMIT"
+    ],
+    "scripts/build_unsigned_candidate.sh": [
+      "sourceCommit=$SING_BOX_COMMIT",
+      "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
+    ]
+  }
+}

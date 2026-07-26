@@ -56,9 +56,20 @@
   path. The pinned source patch permits one bounded retry for transport failure
   or rejected response, never on cancellation; duplicate, loopback,
   link-local, documentation, and virtual-tunnel endpoints are rejected.
-- Split the Tauri composition root, UI JavaScript, CSS, platform adapters, and
-  profile repository into bounded modules; remove the parallel tracked UI
-  bundle.
+- Split the Tauri composition root, platform adapters, and profile repository
+  into bounded modules; remove the parallel tracked UI bundle.
+- Keep the 0.3.5 dashboard: the same status bar, sidebar, nine pages, liquid-glass
+  menus and dialogs, rebuilt against the 0.4.0 command surface instead of being
+  replaced. Every entry point whose command is retired is gone with the row,
+  button, or menu item around it — Service Mode and the privileged helper,
+  starting/stopping and installing cores, the kernel benchmark, the tray-script
+  and child-process runners, and the IPv6 switch. Controls the product cannot
+  honour are disabled and state the backend's own reason instead of appearing to
+  work: LAN exposure, bind address, engine log level, profile mixin, GeoIP
+  download, and host DNS restore. Values the 0.4.0 payloads no longer carry are
+  reported as unavailable rather than invented, profile mutations are offered
+  only while the engine is Off, and an active data plane is claimed only after the
+  engine snapshot's runtime identity, generation, digest, and readiness agree.
 - Restore the controller-backed read, query, and stream commands (proxy, rule,
   provider, connection, log, DNS, and version surfaces) as a bounded command
   module. Their client is built only from the running engine's app-owned

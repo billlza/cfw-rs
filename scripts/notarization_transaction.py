@@ -49,6 +49,10 @@ if __package__:
         validate_normalized_documents,
     )
     from .verify_artifact_manifest import MAX_MANIFEST_BYTES
+    from .validate_notary_archive import (
+        NotaryArchiveError,
+        validate_notarization_zip,
+    )
 else:
     from candidate_artifact_binding import (
         TOOLCHAIN_METADATA_ORDER,
@@ -67,6 +71,10 @@ else:
         validate_normalized_documents,
     )
     from verify_artifact_manifest import MAX_MANIFEST_BYTES
+    from validate_notary_archive import (
+        NotaryArchiveError,
+        validate_notarization_zip,
+    )
 
 
 VERSION = "0.4.0"
@@ -90,6 +98,24 @@ FINAL_INVENTORY_TEMPLATE = {
     "notarization-log.json",
     "gatekeeper.json",
 }
+_SINGLE_SIGNATURE_DIAGNOSTIC_PREFIX = "Only one signature found in "
+_SINGLE_SIGNATURE_DIAGNOSTIC_SUFFIX = ", skipping dual signature check\n"
+_KNOWN_NOTARY_FALSE_POSITIVE_LONG_ERROR = (
+    "Gatekeeper rejected this file. If there isn't a more descriptive error "
+    "elsewhere in this output, please file a Feedback through Feedback "
+    "Assistant.app so we can continue to improve syspolicy_check. Please include "
+    "the app bundle you are checking and a sysdiagnose taken immediately after "
+    "running syspolicy_check."
+)
+_MISSING_TICKET_LONG_ERROR = (
+    "A Notarization ticket is not stapled to this application."
+)
+_MISSING_TICKET_ADVICE = (
+    "If this application has already been uploaded to the Apple notary service, "
+    "please make sure to attach the ticket with the `stapler staple` command. If "
+    "not, please upload to the Apple notary service using Xcode or via "
+    "`notarytool`. "
+)
 
 
 class TransactionError(RuntimeError):
@@ -115,6 +141,7 @@ class DuplicateKeyError(ValueError):
 
 class CommandRole(Enum):
     NOTARY_READINESS = "notary-readiness"
+    NOTARY_READINESS_CORROBORATION = "notary-readiness-corroboration"
     SUBMIT = "submit"
     WAIT = "wait"
     FETCH_LOG = "fetch-log"
@@ -124,11 +151,36 @@ class CommandRole(Enum):
     DISTRIBUTION_CHECK = "distribution-check"
 
 
+class PreSubmissionPolicyMode(Enum):
+    NATIVE = "native"
+    MACOS_27_26A5388G_COMPATIBILITY = "macos-27-26A5388g-compatibility"
+
+
 @dataclass(frozen=True)
 class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class HostSystemIdentity:
+    product_name: str
+    product_version: str
+    build_version: str
+    kernel_name: str
+    kernel_release: str
+    architecture: str
+
+
+KNOWN_MACOS_27_COMPATIBILITY_IDENTITY = HostSystemIdentity(
+    product_name="macOS",
+    product_version="27.0",
+    build_version="26A5388g",
+    kernel_name="Darwin",
+    kernel_release="27.0.0",
+    architecture="arm64",
+)
 
 
 @dataclass(frozen=True)
@@ -197,6 +249,7 @@ class TransactionContext:
 
 CommandRunner = Callable[[CommandRole, list[str], float], CommandResult]
 ArchiveBuilder = Callable[[Path, Path], None]
+ArchiveValidator = Callable[[Path, Path], None]
 GatekeeperCapture = Callable[[Path, str], dict[str, Any]]
 ManifestWriter = Callable[[Path, Path, dict[str, str]], None]
 ManifestVerifier = Callable[[Path, Path, dict[str, str]], None]
@@ -205,6 +258,7 @@ ToolchainMetadataReader = Callable[[Path], dict[str, str]]
 Publisher = Callable[[Path, Path], None]
 Clock = Callable[[], str]
 AttemptIdFactory = Callable[[], str]
+HostSystemIdentityReader = Callable[[], HostSystemIdentity]
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -665,6 +719,16 @@ def production_command_runner(
 
 
 def production_archive_builder(app: Path, archive: Path) -> None:
+    if app.parent != archive.parent:
+        raise TransactionError(
+            "unsafe_archive_path",
+            "notarization archive must share the signed app staging directory",
+        )
+    if os.path.lexists(archive):
+        raise TransactionError(
+            "archive_exists",
+            "notarization archive destination already exists",
+        )
     environment = dict(os.environ)
     environment["COPYFILE_DISABLE"] = "1"
     try:
@@ -674,7 +738,10 @@ def production_archive_builder(app: Path, archive: Path) -> None:
                 "-c",
                 "-k",
                 "--keepParent",
-                "--sequesterRsrc",
+                "--norsrc",
+                "--noextattr",
+                "--noqtn",
+                "--noacl",
                 app.name,
                 archive.name,
             ],
@@ -694,6 +761,69 @@ def production_archive_builder(app: Path, archive: Path) -> None:
         )
     os.chmod(archive, 0o600, follow_symlinks=False)
     _fsync_directory(archive.parent)
+
+
+def production_archive_validator(archive: Path, app: Path) -> None:
+    try:
+        validate_notarization_zip(archive, app)
+    except (NotaryArchiveError, OSError) as error:
+        raise TransactionError(
+            "archive_validation_failed",
+            "notarization archive differs from the signed application",
+        ) from error
+
+
+def _read_exact_system_identity_value(
+    command: list[str],
+    label: str,
+) -> str:
+    result = _run_bounded_process(command, 30)
+    if result.returncode != 0 or result.stderr:
+        raise TransactionError(
+            "host_system_identity_unavailable",
+            f"cannot read the release host {label}",
+            exit_code=result.returncode,
+        )
+    if (
+        not result.stdout.endswith("\n")
+        or result.stdout.count("\n") != 1
+        or len(result.stdout) > 256
+        or "\0" in result.stdout
+    ):
+        raise TransactionError(
+            "host_system_identity_invalid",
+            f"release host {label} is malformed",
+        )
+    value = result.stdout[:-1]
+    if not value or any(character.isspace() for character in value):
+        raise TransactionError(
+            "host_system_identity_invalid",
+            f"release host {label} is malformed",
+        )
+    return value
+
+
+def production_host_system_identity_reader() -> HostSystemIdentity:
+    return HostSystemIdentity(
+        product_name=_read_exact_system_identity_value(
+            ["/usr/bin/sw_vers", "-productName"], "product name"
+        ),
+        product_version=_read_exact_system_identity_value(
+            ["/usr/bin/sw_vers", "-productVersion"], "product version"
+        ),
+        build_version=_read_exact_system_identity_value(
+            ["/usr/bin/sw_vers", "-buildVersion"], "build version"
+        ),
+        kernel_name=_read_exact_system_identity_value(
+            ["/usr/bin/uname", "-s"], "kernel name"
+        ),
+        kernel_release=_read_exact_system_identity_value(
+            ["/usr/bin/uname", "-r"], "kernel release"
+        ),
+        architecture=_read_exact_system_identity_value(
+            ["/usr/bin/uname", "-m"], "architecture"
+        ),
+    )
 
 
 def production_gatekeeper_capture(app: Path, tree_sha256: str) -> dict[str, Any]:
@@ -1080,6 +1210,21 @@ def _archive_metadata(context: TransactionContext) -> dict[str, str]:
     }
 
 
+def _capture_command_result(
+    runner: CommandRunner,
+    role: CommandRole,
+    command: list[str],
+    timeout: float,
+) -> CommandResult:
+    try:
+        return runner(role, command, timeout)
+    except Exception as error:
+        raise TransactionError(
+            f"{role.value}_execution_failed",
+            f"{role.value} command did not complete",
+        ) from error
+
+
 def _result_or_error(
     runner: CommandRunner,
     role: CommandRole,
@@ -1089,13 +1234,15 @@ def _result_or_error(
     uncertain: bool = False,
 ) -> CommandResult:
     try:
-        result = runner(role, command, timeout)
-    except Exception as error:
-        raise TransactionError(
-            f"{role.value}_execution_failed",
-            f"{role.value} command did not complete",
-            terminal_state="outcome_unknown" if uncertain else "failed",
-        ) from error
+        result = _capture_command_result(runner, role, command, timeout)
+    except TransactionError as error:
+        if uncertain:
+            raise TransactionError(
+                error.code,
+                str(error),
+                terminal_state="outcome_unknown",
+            ) from error
+        raise
     if result.returncode != 0:
         raise TransactionError(
             f"{role.value}_failed",
@@ -1109,6 +1256,7 @@ def _result_or_error(
 def _require_syspolicy_success(
     result: CommandResult,
     role: CommandRole,
+    app: Path,
 ) -> None:
     value = _parse_command_json(result.stdout)
     if not isinstance(value, dict) or set(value) != {"output"}:
@@ -1121,11 +1269,163 @@ def _require_syspolicy_success(
             f"{role.value}_finding",
             f"{role.value} reported a release-blocking finding",
         )
-    if result.stderr:
+    _require_syspolicy_diagnostic(result, role, app)
+
+
+def _require_syspolicy_diagnostic(
+    result: CommandResult,
+    role: CommandRole,
+    app: Path,
+) -> None:
+    expected = (
+        f"{_SINGLE_SIGNATURE_DIAGNOSTIC_PREFIX}{app.resolve().as_uri()}"
+        f"{_SINGLE_SIGNATURE_DIAGNOSTIC_SUFFIX}"
+    )
+    if result.stderr not in {"", expected}:
         raise TransactionError(
             f"{role.value}_stderr",
             f"{role.value} emitted unexpected diagnostic output",
         )
+
+
+def _require_exact_syspolicy_finding(
+    result: CommandResult,
+    role: CommandRole,
+    app: Path,
+    expected_finding: dict[str, str],
+    *,
+    expected_returncode: int,
+) -> None:
+    if result.returncode != expected_returncode:
+        raise TransactionError(
+            f"{role.value}_unexpected_status",
+            f"{role.value} returned an unsupported status",
+            exit_code=result.returncode,
+        )
+    value = _parse_command_json(result.stdout)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"output"}
+        or not isinstance(value["output"], list)
+        or value["output"] != [expected_finding]
+    ):
+        raise TransactionError(
+            f"{role.value}_finding_mismatch",
+            f"{role.value} did not return the exact expected finding",
+            exit_code=result.returncode,
+        )
+    _require_syspolicy_diagnostic(result, role, app)
+
+
+def _require_exact_macos_27_notary_false_positive(
+    result: CommandResult,
+    app: Path,
+    identity: HostSystemIdentity,
+) -> None:
+    role = CommandRole.NOTARY_READINESS
+    if identity != KNOWN_MACOS_27_COMPATIBILITY_IDENTITY:
+        raise TransactionError(
+            "notary-readiness_compatibility_unsupported_host",
+            "notary readiness failed outside the single known host compatibility build",
+            exit_code=result.returncode,
+        )
+    executable = app.resolve() / "Contents/MacOS/clash-for-mac"
+    _require_exact_syspolicy_finding(
+        result,
+        role,
+        app,
+        {
+            "SyspolicyCheckAdditionalInformation": "",
+            "SyspolicyCheckAdvice": "",
+            "SyspolicyCheckDocumentationLink": (
+                "https://developer.apple.com/forums/thread/706442"
+            ),
+            "SyspolicyCheckErrorFile": str(executable),
+            "SyspolicyCheckErrorLevel": "Fatal",
+            "SyspolicyCheckLongError": _KNOWN_NOTARY_FALSE_POSITIVE_LONG_ERROR,
+            "SyspolicyCheckShortError": "Codesign Error",
+        },
+        expected_returncode=70,
+    )
+
+
+def _require_exact_pre_notary_missing_ticket(
+    result: CommandResult,
+    app: Path,
+) -> None:
+    role = CommandRole.NOTARY_READINESS_CORROBORATION
+    _require_exact_syspolicy_finding(
+        result,
+        role,
+        app,
+        {
+            "SyspolicyCheckAdditionalInformation": "",
+            "SyspolicyCheckAdvice": _MISSING_TICKET_ADVICE,
+            "SyspolicyCheckDocumentationLink": (
+                "https://developer.apple.com/documentation/security/"
+                "notarizing_macos_software_before_distribution."
+            ),
+            "SyspolicyCheckErrorFile": str(app.resolve()),
+            "SyspolicyCheckErrorLevel": "Fatal",
+            "SyspolicyCheckLongError": _MISSING_TICKET_LONG_ERROR,
+            "SyspolicyCheckShortError": "Notary Ticket Missing",
+        },
+        expected_returncode=70,
+    )
+
+
+def _establish_pre_submission_policy(
+    runner: CommandRunner,
+    app: Path,
+    identity_reader: HostSystemIdentityReader,
+) -> PreSubmissionPolicyMode:
+    readiness = _capture_command_result(
+        runner,
+        CommandRole.NOTARY_READINESS,
+        [
+            "/usr/bin/syspolicy_check",
+            "notary-submission",
+            str(app),
+            "--json",
+        ],
+        600,
+    )
+    if readiness.returncode == 0:
+        _require_syspolicy_success(
+            readiness,
+            CommandRole.NOTARY_READINESS,
+            app,
+        )
+        return PreSubmissionPolicyMode.NATIVE
+    if readiness.returncode != 70:
+        raise TransactionError(
+            "notary-readiness_failed",
+            "notary-readiness command failed",
+            exit_code=readiness.returncode,
+        )
+    try:
+        identity = identity_reader()
+    except TransactionError:
+        raise
+    except Exception as error:
+        raise TransactionError(
+            "host_system_identity_unavailable",
+            "cannot derive the release host identity",
+        ) from error
+    _require_exact_macos_27_notary_false_positive(readiness, app, identity)
+    corroboration = _capture_command_result(
+        runner,
+        CommandRole.NOTARY_READINESS_CORROBORATION,
+        [
+            "/usr/bin/syspolicy_check",
+            "distribution",
+            str(app),
+            "--json",
+        ],
+        600,
+    )
+    _require_exact_pre_notary_missing_ticket(corroboration, app)
+    return PreSubmissionPolicyMode.MACOS_27_26A5388G_COMPATIBILITY
 
 
 def _require_empty_notary_stderr(
@@ -1204,6 +1504,7 @@ def execute_transaction(
     *,
     command_runner: CommandRunner = production_command_runner,
     archive_builder: ArchiveBuilder = production_archive_builder,
+    archive_validator: ArchiveValidator = production_archive_validator,
     gatekeeper_capture: GatekeeperCapture = production_gatekeeper_capture,
     manifest_writer: ManifestWriter = production_manifest_writer,
     manifest_verifier: ManifestVerifier = production_manifest_verifier,
@@ -1214,6 +1515,9 @@ def execute_transaction(
     publisher: Publisher = publish_exclusive,
     clock: Clock = _utc_now,
     attempt_id_factory: AttemptIdFactory = lambda: str(uuid.uuid4()),
+    host_system_identity_reader: HostSystemIdentityReader = (
+        production_host_system_identity_reader
+    ),
 ) -> Path:
     _validate_context(context)
     _require_source_identity(context, source_identity_reader)
@@ -1241,6 +1545,26 @@ def execute_transaction(
         archive_builder(work_app, archive)
         _fsync_regular_file(archive)
         archive_sha256, archive_size = _archive_identity(archive)
+        try:
+            archive_validator(archive, work_app)
+        except TransactionError:
+            raise
+        except Exception as error:
+            raise TransactionError(
+                "archive_validation_failed",
+                "notarization archive validation did not complete",
+            ) from error
+        _require_archive_identity(archive, archive_sha256, archive_size)
+        validated_app_sha256 = _app_tree_sha256(
+            work_app,
+            failure_code="archive_source_identity_drift",
+            failure_message="signed app changed while validating its archive",
+        )
+        if validated_app_sha256 != pre_staple_app_sha256:
+            raise TransactionError(
+                "archive_source_identity_drift",
+                "signed app changed while validating its archive",
+            )
         archive_manifest = work / f"{context.archive_name}.manifest.json"
         archive_metadata = _archive_metadata(context)
         manifest_writer(archive, archive_manifest, archive_metadata)
@@ -1271,22 +1595,15 @@ def execute_transaction(
         intent_sha256 = _sha256_file(intent_path)
         journal = EventJournal(events, intent_sha256, clock)
         journal.append("prepared")
-        readiness = _result_or_error(
+        readiness_mode = _establish_pre_submission_policy(
             command_runner,
-            CommandRole.NOTARY_READINESS,
-            [
-                "/usr/bin/syspolicy_check",
-                "notary-submission",
-                str(work_app),
-                "--json",
-            ],
-            600,
+            work_app,
+            host_system_identity_reader,
         )
-        _require_syspolicy_success(
-            readiness,
-            CommandRole.NOTARY_READINESS,
-        )
-        journal.append("notary_ready")
+        if readiness_mode is PreSubmissionPolicyMode.NATIVE:
+            journal.append("notary_ready")
+        else:
+            journal.append("pre_submission_policy_compatibility_applied")
         _require_source_identity(context, source_identity_reader)
         _require_toolchain_identity(context, toolchain_metadata_reader)
         _require_archive_identity(archive, archive_sha256, archive_size)
@@ -1562,6 +1879,7 @@ def execute_transaction(
         _require_syspolicy_success(
             distribution,
             CommandRole.DISTRIBUTION_CHECK,
+            final_app,
         )
         journal.append("distribution_verified", submission_id=submission_id)
         expected_inventory = set(FINAL_INVENTORY_TEMPLATE)

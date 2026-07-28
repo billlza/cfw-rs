@@ -20,14 +20,20 @@ from unittest.mock import patch
 import scripts.notarization_transaction as transaction_module
 from scripts.gatekeeper_assessment import validate_evidence as validate_gatekeeper_evidence
 from scripts.notarization_transaction import (
+    KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
     MAX_COMMAND_OUTPUT_BYTES,
     CommandResult,
     CommandRole,
+    HostSystemIdentity,
+    PreSubmissionPolicyMode,
     TransactionContext,
     TransactionError,
     _claim_attempt,
+    _establish_pre_submission_policy,
     _run_bounded_process,
     execute_transaction,
+    production_archive_builder,
+    production_host_system_identity_reader,
     production_manifest_verifier,
     production_manifest_writer,
     publish_exclusive,
@@ -154,6 +160,7 @@ class Fixture:
         return {
             "command_runner": self.runner,
             "archive_builder": self.archive_builder,
+            "archive_validator": lambda _archive, _app: None,
             "gatekeeper_capture": self.gatekeeper,
             "source_identity_reader": self.source_identity,
             "toolchain_metadata_reader": lambda _repository: (
@@ -171,6 +178,439 @@ class Fixture:
 
     def execute(self, **overrides):
         return self.execute_context(self.context, **overrides)
+
+
+def single_signature_diagnostic(app: Path) -> str:
+    return (
+        f"Only one signature found in {app.resolve().as_uri()}, "
+        "skipping dual signature check\n"
+    )
+
+
+def known_notary_false_positive(app: Path) -> dict[str, str]:
+    return {
+        "SyspolicyCheckAdditionalInformation": "",
+        "SyspolicyCheckAdvice": "",
+        "SyspolicyCheckDocumentationLink": (
+            "https://developer.apple.com/forums/thread/706442"
+        ),
+        "SyspolicyCheckErrorFile": str(
+            app.resolve() / "Contents/MacOS/clash-for-mac"
+        ),
+        "SyspolicyCheckErrorLevel": "Fatal",
+        "SyspolicyCheckLongError": (
+            "Gatekeeper rejected this file. If there isn't a more descriptive "
+            "error elsewhere in this output, please file a Feedback through "
+            "Feedback Assistant.app so we can continue to improve "
+            "syspolicy_check. Please include the app bundle you are checking "
+            "and a sysdiagnose taken immediately after running syspolicy_check."
+        ),
+        "SyspolicyCheckShortError": "Codesign Error",
+    }
+
+
+def known_missing_ticket(app: Path) -> dict[str, str]:
+    return {
+        "SyspolicyCheckAdditionalInformation": "",
+        "SyspolicyCheckAdvice": (
+            "If this application has already been uploaded to the Apple notary "
+            "service, please make sure to attach the ticket with the `stapler "
+            "staple` command. If not, please upload to the Apple notary service "
+            "using Xcode or via `notarytool`. "
+        ),
+        "SyspolicyCheckDocumentationLink": (
+            "https://developer.apple.com/documentation/security/"
+            "notarizing_macos_software_before_distribution."
+        ),
+        "SyspolicyCheckErrorFile": str(app.resolve()),
+        "SyspolicyCheckErrorLevel": "Fatal",
+        "SyspolicyCheckLongError": (
+            "A Notarization ticket is not stapled to this application."
+        ),
+        "SyspolicyCheckShortError": "Notary Ticket Missing",
+    }
+
+
+class ReadinessRunner:
+    def __init__(
+        self,
+        readiness: CommandResult,
+        corroboration: CommandResult | None = None,
+    ) -> None:
+        self.readiness = readiness
+        self.corroboration = corroboration
+        self.calls: list[CommandRole] = []
+
+    def __call__(
+        self,
+        role: CommandRole,
+        _command: list[str],
+        _timeout: float,
+    ) -> CommandResult:
+        self.calls.append(role)
+        if role is CommandRole.NOTARY_READINESS:
+            return self.readiness
+        if role is CommandRole.NOTARY_READINESS_CORROBORATION:
+            if self.corroboration is None:
+                raise AssertionError("unexpected corroboration command")
+            return self.corroboration
+        raise AssertionError(f"unexpected command role: {role}")
+
+
+class NotarizationReadinessPolicyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.app = Path(self.temporary.name).resolve() / "Clash for Mac.app"
+        executable = self.app / "Contents/MacOS/clash-for-mac"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"signed")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _exact_runner(self, *, diagnostic: str = "") -> ReadinessRunner:
+        return ReadinessRunner(
+            CommandResult(
+                70,
+                json.dumps({"output": [known_notary_false_positive(self.app)]}),
+                diagnostic,
+            ),
+            CommandResult(
+                70,
+                json.dumps({"output": [known_missing_ticket(self.app)]}),
+                diagnostic,
+            ),
+        )
+
+    def test_standard_success_never_uses_beta_adapter(self) -> None:
+        for diagnostic in ("", single_signature_diagnostic(self.app)):
+            with self.subTest(diagnostic=bool(diagnostic)):
+                runner = ReadinessRunner(
+                    CommandResult(0, json.dumps({"output": []}), diagnostic)
+                )
+
+                def unexpected_identity() -> HostSystemIdentity:
+                    raise AssertionError("native readiness must not read host identity")
+
+                mode = _establish_pre_submission_policy(
+                    runner,
+                    self.app,
+                    unexpected_identity,
+                )
+                self.assertIs(mode, PreSubmissionPolicyMode.NATIVE)
+                self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
+
+    def test_accepts_exact_beta_failure_only_after_exact_corroboration(self) -> None:
+        for diagnostic in ("", single_signature_diagnostic(self.app)):
+            with self.subTest(diagnostic=bool(diagnostic)):
+                runner = self._exact_runner(diagnostic=diagnostic)
+                mode = _establish_pre_submission_policy(
+                    runner,
+                    self.app,
+                    lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
+                )
+                self.assertIs(
+                    mode,
+                    PreSubmissionPolicyMode.MACOS_27_26A5388G_COMPATIBILITY,
+                )
+                self.assertEqual(
+                    runner.calls,
+                    [
+                        CommandRole.NOTARY_READINESS,
+                        CommandRole.NOTARY_READINESS_CORROBORATION,
+                    ],
+                )
+
+
+class ProductionArchiveBuilderTests(unittest.TestCase):
+    def test_uses_the_exact_metadata_stripping_ditto_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary).resolve()
+            app = parent / "Clash for Mac.app"
+            app.mkdir()
+            archive = parent / "notary.zip"
+            observed: dict[str, object] = {}
+
+            def run(
+                command: list[str],
+                timeout: float,
+                *,
+                cwd: Path | None = None,
+                environment: dict[str, str] | None = None,
+            ) -> CommandResult:
+                observed.update(
+                    command=command,
+                    timeout=timeout,
+                    cwd=cwd,
+                    environment=environment,
+                )
+                archive.write_bytes(b"zip")
+                return CommandResult(0, "", "")
+
+            with (
+                patch(
+                    "scripts.notarization_transaction._run_bounded_process",
+                    side_effect=run,
+                ),
+                patch(
+                    "scripts.notarization_transaction._fsync_directory"
+                ) as fsync_directory,
+            ):
+                production_archive_builder(app, archive)
+
+            self.assertEqual(
+                observed["command"],
+                [
+                    "/usr/bin/ditto",
+                    "-c",
+                    "-k",
+                    "--keepParent",
+                    "--norsrc",
+                    "--noextattr",
+                    "--noqtn",
+                    "--noacl",
+                    app.name,
+                    archive.name,
+                ],
+            )
+            self.assertEqual(observed["timeout"], 1800)
+            self.assertEqual(observed["cwd"], app.parent)
+            environment = observed["environment"]
+            self.assertIsInstance(environment, dict)
+            assert isinstance(environment, dict)
+            self.assertEqual(environment["COPYFILE_DISABLE"], "1")
+            self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o600)
+            fsync_directory.assert_called_once_with(archive.parent)
+            with self.assertRaisesRegex(TransactionError, "destination already exists"):
+                production_archive_builder(app, archive)
+            other_archive = parent / "other/notary.zip"
+            with self.assertRaisesRegex(TransactionError, "share the signed app"):
+                production_archive_builder(app, other_archive)
+
+    def test_archive_contract_failure_prevents_intent_and_remote_submission(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def reject(_archive: Path, _app: Path) -> None:
+            raise ValueError("invalid archive fixture")
+
+        with self.assertRaisesRegex(
+            TransactionError,
+            "archive validation did not complete",
+        ):
+            fixture.execute(archive_validator=reject)
+        self.assertEqual(fixture.runner.calls, [])
+        self.assertFalse((fixture.context.attempt_root / "intent.json").exists())
+        self.assertFalse(
+            (fixture.context.attempt_root / "submission-receipt.json").exists()
+        )
+        self.assertTrue(
+            (
+                fixture.context.attempt_root
+                / f"work/{fixture.context.archive_name}"
+            ).is_file()
+        )
+
+
+class HostSystemIdentityReaderTests(unittest.TestCase):
+    def test_reads_the_exact_absolute_release_host_identity(self) -> None:
+        values = {
+            ("/usr/bin/sw_vers", "-productName"): "macOS",
+            ("/usr/bin/sw_vers", "-productVersion"): "27.0",
+            ("/usr/bin/sw_vers", "-buildVersion"): "26A5388g",
+            ("/usr/bin/uname", "-s"): "Darwin",
+            ("/usr/bin/uname", "-r"): "27.0.0",
+            ("/usr/bin/uname", "-m"): "arm64",
+        }
+        calls: list[tuple[tuple[str, ...], float]] = []
+
+        def run(command: list[str], timeout: float) -> CommandResult:
+            key = tuple(command)
+            calls.append((key, timeout))
+            return CommandResult(0, f"{values[key]}\n", "")
+
+        with patch(
+            "scripts.notarization_transaction._run_bounded_process",
+            side_effect=run,
+        ):
+            identity = production_host_system_identity_reader()
+        self.assertEqual(identity, KNOWN_MACOS_27_COMPATIBILITY_IDENTITY)
+        self.assertEqual(
+            calls,
+            [(command, 30) for command in values],
+        )
+
+    def test_rejects_failed_or_malformed_host_identity_output(self) -> None:
+        cases = (
+            CommandResult(1, "", ""),
+            CommandResult(0, "macOS", ""),
+            CommandResult(0, "mac OS\n", ""),
+            CommandResult(0, "macOS\n", "warning\n"),
+        )
+        for result in cases:
+            with self.subTest(result=result):
+                with patch(
+                    "scripts.notarization_transaction._run_bounded_process",
+                    return_value=result,
+                ):
+                    with self.assertRaises(TransactionError):
+                        production_host_system_identity_reader()
+
+
+class NotarizationReadinessPolicyMutationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.app = Path(self.temporary.name).resolve() / "Clash for Mac.app"
+        executable = self.app / "Contents/MacOS/clash-for-mac"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"signed")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _exact_runner(self) -> ReadinessRunner:
+        return ReadinessRunner(
+            CommandResult(
+                70,
+                json.dumps({"output": [known_notary_false_positive(self.app)]}),
+                "",
+            ),
+            CommandResult(
+                70,
+                json.dumps({"output": [known_missing_ticket(self.app)]}),
+                "",
+            ),
+        )
+
+    def test_rejects_every_host_identity_near_match(self) -> None:
+        for field in HostSystemIdentity.__dataclass_fields__:
+            with self.subTest(field=field):
+                runner = self._exact_runner()
+                identity = replace(
+                    KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
+                    **{field: "different"},
+                )
+                with self.assertRaises(TransactionError):
+                    _establish_pre_submission_policy(
+                        runner,
+                        self.app,
+                        lambda identity=identity: identity,
+                    )
+                self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
+
+    def test_rejects_every_notary_finding_and_diagnostic_near_match(self) -> None:
+        expected = known_notary_false_positive(self.app)
+        mutations: list[tuple[str, CommandResult]] = [
+            ("wrong-returncode", CommandResult(69, "{}", "")),
+            (
+                "empty-output",
+                CommandResult(70, json.dumps({"output": []}), ""),
+            ),
+            (
+                "two-findings",
+                CommandResult(
+                    70,
+                    json.dumps({"output": [expected, expected]}),
+                    "",
+                ),
+            ),
+            (
+                "extra-field",
+                CommandResult(
+                    70,
+                    json.dumps({"output": [{**expected, "extra": "value"}]}),
+                    "",
+                ),
+            ),
+        ]
+        for field in expected:
+            changed = dict(expected)
+            changed[field] = f"{changed[field]}x"
+            mutations.append(
+                (
+                    f"field-{field}",
+                    CommandResult(70, json.dumps({"output": [changed]}), ""),
+                )
+            )
+        diagnostic = single_signature_diagnostic(self.app)
+        for label, value in (
+            ("wrong-uri", diagnostic.replace("Clash%20for%20Mac", "Other")),
+            ("missing-newline", diagnostic[:-1]),
+            ("extra-line", diagnostic + "warning\n"),
+        ):
+            mutations.append(
+                (
+                    label,
+                    CommandResult(
+                        70,
+                        json.dumps({"output": [expected]}),
+                        value,
+                    ),
+                )
+            )
+        for label, readiness in mutations:
+            with self.subTest(label=label):
+                runner = ReadinessRunner(readiness)
+                with self.assertRaises(TransactionError):
+                    _establish_pre_submission_policy(
+                        runner,
+                        self.app,
+                        lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
+                    )
+                self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
+
+    def test_rejects_every_missing_ticket_corroboration_near_match(self) -> None:
+        exact = self._exact_runner()
+        assert exact.corroboration is not None
+        expected = known_missing_ticket(self.app)
+        mutations: list[tuple[str, CommandResult]] = [
+            ("success", CommandResult(0, json.dumps({"output": []}), "")),
+            ("wrong-returncode", CommandResult(71, "{}", "")),
+            ("empty-output", CommandResult(70, json.dumps({"output": []}), "")),
+            (
+                "extra-finding",
+                CommandResult(
+                    70,
+                    json.dumps({"output": [expected, expected]}),
+                    "",
+                ),
+            ),
+        ]
+        for field in expected:
+            changed = dict(expected)
+            changed[field] = f"{changed[field]}x"
+            mutations.append(
+                (
+                    f"field-{field}",
+                    CommandResult(70, json.dumps({"output": [changed]}), ""),
+                )
+            )
+        mutations.append(
+            (
+                "diagnostic",
+                CommandResult(
+                    70,
+                    json.dumps({"output": [expected]}),
+                    single_signature_diagnostic(self.app) + "warning\n",
+                ),
+            )
+        )
+        for label, corroboration in mutations:
+            with self.subTest(label=label):
+                runner = ReadinessRunner(exact.readiness, corroboration)
+                with self.assertRaises(TransactionError):
+                    _establish_pre_submission_policy(
+                        runner,
+                        self.app,
+                        lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
+                    )
+                self.assertEqual(
+                    runner.calls,
+                    [
+                        CommandRole.NOTARY_READINESS,
+                        CommandRole.NOTARY_READINESS_CORROBORATION,
+                    ],
+                )
 
 
 class NotarizationTransactionSuccessTests(unittest.TestCase):
@@ -289,6 +729,178 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             self.assertEqual(event["intent_sha256"], intent_sha256)
             self.assertEqual(event["previous_event_sha256"], previous_sha256)
             previous_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_exact_beta_compatibility_is_durable_and_never_claims_notary_ready(
+        self,
+    ) -> None:
+        fixture = self.fixture
+        work_app = fixture.context.attempt_root / "work/Clash for Mac.app"
+
+        def compatibility_runner(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role in {
+                CommandRole.NOTARY_READINESS,
+                CommandRole.NOTARY_READINESS_CORROBORATION,
+            }:
+                fixture.runner.calls.append(role)
+                fixture.runner.command_calls.append((role, tuple(command), timeout))
+                finding = (
+                    known_notary_false_positive(work_app)
+                    if role is CommandRole.NOTARY_READINESS
+                    else known_missing_ticket(work_app)
+                )
+                return CommandResult(
+                    70,
+                    json.dumps({"output": [finding]}),
+                    single_signature_diagnostic(work_app),
+                )
+            return fixture.runner(role, command, timeout)
+
+        final_app = fixture.execute(
+            command_runner=compatibility_runner,
+            host_system_identity_reader=(
+                lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY
+            ),
+        )
+        self.assertTrue(final_app.is_dir())
+        self.assertEqual(
+            fixture.runner.calls[:3],
+            [
+                CommandRole.NOTARY_READINESS,
+                CommandRole.NOTARY_READINESS_CORROBORATION,
+                CommandRole.SUBMIT,
+            ],
+        )
+        events = sorted((fixture.context.attempt_root / "events").glob("*.json"))
+        states = [json.loads(path.read_text(encoding="utf-8"))["state"] for path in events]
+        self.assertEqual(
+            states,
+            [
+                "prepared",
+                "pre_submission_policy_compatibility_applied",
+                "submitting",
+                "submitted",
+                "accepted",
+                "log_verified",
+                "stapling",
+                "stapled",
+                "gatekeeper_verified",
+                "app_verified",
+                "distribution_verified",
+                "sealed",
+            ],
+        )
+
+    def test_beta_near_match_fails_before_submit_and_persists_failure(self) -> None:
+        fixture = self.fixture
+        work_app = fixture.context.attempt_root / "work/Clash for Mac.app"
+
+        def mismatch_runner(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            fixture.runner.calls.append(role)
+            fixture.runner.command_calls.append((role, tuple(command), timeout))
+            if role is not CommandRole.NOTARY_READINESS:
+                self.fail(f"unexpected command after readiness mismatch: {role}")
+            finding = known_notary_false_positive(work_app)
+            finding["SyspolicyCheckErrorFile"] = str(work_app.resolve())
+            return CommandResult(70, json.dumps({"output": [finding]}), "")
+
+        with self.assertRaises(TransactionError):
+            fixture.execute(
+                command_runner=mismatch_runner,
+                host_system_identity_reader=(
+                    lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY
+                ),
+            )
+        self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertFalse(
+            (fixture.context.attempt_root / "submission-receipt.json").exists()
+        )
+        events = sorted((fixture.context.attempt_root / "events").glob("*.json"))
+        terminal = json.loads(events[-1].read_text(encoding="utf-8"))
+        self.assertEqual(terminal["state"], "failed")
+        self.assertEqual(
+            terminal["failure_code"],
+            "notary-readiness_finding_mismatch",
+        )
+
+    def test_beta_corroboration_near_match_is_persisted_before_submit(self) -> None:
+        fixture = self.fixture
+        work_app = fixture.context.attempt_root / "work/Clash for Mac.app"
+
+        def mismatch_runner(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            fixture.runner.calls.append(role)
+            fixture.runner.command_calls.append((role, tuple(command), timeout))
+            if role is CommandRole.NOTARY_READINESS:
+                finding = known_notary_false_positive(work_app)
+            elif role is CommandRole.NOTARY_READINESS_CORROBORATION:
+                finding = known_missing_ticket(work_app)
+                finding["SyspolicyCheckErrorFile"] = str(
+                    work_app.resolve() / "Contents"
+                )
+            else:
+                self.fail(f"unexpected command after corroboration mismatch: {role}")
+            return CommandResult(70, json.dumps({"output": [finding]}), "")
+
+        with self.assertRaises(TransactionError):
+            fixture.execute(
+                command_runner=mismatch_runner,
+                host_system_identity_reader=(
+                    lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY
+                ),
+            )
+        self.assertEqual(
+            fixture.runner.calls,
+            [
+                CommandRole.NOTARY_READINESS,
+                CommandRole.NOTARY_READINESS_CORROBORATION,
+            ],
+        )
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertFalse(
+            (fixture.context.attempt_root / "submission-receipt.json").exists()
+        )
+        events = sorted((fixture.context.attempt_root / "events").glob("*.json"))
+        terminal = json.loads(events[-1].read_text(encoding="utf-8"))
+        self.assertEqual(terminal["state"], "failed")
+        self.assertEqual(
+            terminal["failure_code"],
+            "notary-readiness-corroboration_finding_mismatch",
+        )
+
+    def test_final_distribution_accepts_only_the_path_bound_benign_diagnostic(
+        self,
+    ) -> None:
+        fixture = self.fixture
+
+        def distribution_diagnostic(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role is CommandRole.DISTRIBUTION_CHECK:
+                fixture.runner.calls.append(role)
+                fixture.runner.command_calls.append((role, tuple(command), timeout))
+                return CommandResult(
+                    0,
+                    json.dumps({"output": []}),
+                    single_signature_diagnostic(Path(command[-2])),
+                )
+            return fixture.runner(role, command, timeout)
+
+        final_app = fixture.execute(command_runner=distribution_diagnostic)
+        self.assertTrue(final_app.is_dir())
 
     def test_sensitive_command_output_is_never_persisted(self) -> None:
         sentinel = "person@example.test /Users/person private-key fixture-profile"

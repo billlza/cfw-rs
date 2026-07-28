@@ -35,8 +35,6 @@ Validates: Requirements 1.2, 4.1, 5.1, 6.5, 7.3, 7.5, 8.1
 from __future__ import annotations
 
 import builtins
-import copy
-import hashlib
 import shutil
 import tempfile
 import unittest
@@ -204,6 +202,7 @@ _PINNED_INPUTS = (
     "scripts/build_unsigned_candidate.sh",
     "scripts/build_signed_candidate.sh",
     "scripts/notarization_transaction.py",
+    "scripts/validate_notary_archive.py",
     "scripts/tauri_host_skeleton.sh",
     "scripts/verify_artifact_manifest.py",
     "scripts/verify_candidate_bundle.py",

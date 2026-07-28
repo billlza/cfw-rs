@@ -5,6 +5,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+# shellcheck source=scripts/release_toolchain_contract.sh
+source "$repo_root/scripts/release_toolchain_contract.sh"
+cfw_require_supported_python
 
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_release_authority_gate.py
 
@@ -13,6 +16,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_pinned_build_inputs.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_production_boundary_removal.py
 
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_native_product_graph.py
+
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/notarization_transaction.py --self-check
 
 # Confirm the Signed_Installed physical-evidence aggregator is wired to all four
 # harnesses and the Evidence_Manifest level order. This is a source-boundary

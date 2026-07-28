@@ -31,6 +31,8 @@ die() {
   exit 1
 }
 
+cfw_require_supported_python
+
 [[ $# -eq 0 ]] || die "usage: scripts/build_unsigned_candidate.sh"
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "candidate builds require Apple Silicon macOS"

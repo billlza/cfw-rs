@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # Shared fail-closed contract for release toolchains installed under
-# target/toolchains. Callers must source dependency_pins.env first.
+# target/toolchains. Callers invoking managed-tree functions must source
+# dependency_pins.env first.
+
+cfw_require_supported_python() {
+  local contract_python="${1:-python3}"
+  "$contract_python" -c \
+    'import sys; raise SystemExit(not ((3, 11) <= sys.version_info[:2] < (4, 0)))' || {
+    echo "error: Python 3.11 through 3.x is required" >&2
+    return 1
+  }
+}
 
 cfw_verify_release_toolchain_manifest() {
   local contract_repository="$1"

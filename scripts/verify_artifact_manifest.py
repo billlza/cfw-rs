@@ -35,6 +35,18 @@ _MODE_RE = re.compile(r"[0-7]{4}\Z")
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 
 
+def _manifest_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+        metadata.st_nlink,
+    )
+
+
 def _read_manifest(path: Path) -> str:
     try:
         before = os.lstat(path)
@@ -55,8 +67,12 @@ def _read_manifest(path: Path) -> str:
         raise SystemExit(f"error: cannot open artifact manifest: {error}") from error
     try:
         opened = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+        if _manifest_identity(before) != _manifest_identity(opened):
             raise SystemExit("error: artifact manifest changed while opening")
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise SystemExit(
+                "error: opened artifact manifest is not a single-link regular file"
+            )
         data = bytearray()
         while len(data) <= MAX_MANIFEST_BYTES:
             chunk = os.read(descriptor, min(1024 * 1024, MAX_MANIFEST_BYTES + 1 - len(data)))
@@ -66,9 +82,14 @@ def _read_manifest(path: Path) -> str:
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
-    if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+    if _manifest_identity(opened) != _manifest_identity(after) or after.st_nlink != 1:
         raise SystemExit("error: artifact manifest changed while reading")
+    try:
+        rebound = os.lstat(path)
+    except OSError as error:
+        raise SystemExit("error: artifact manifest changed after reading") from error
+    if _manifest_identity(opened) != _manifest_identity(rebound):
+        raise SystemExit("error: artifact manifest changed after reading")
     if len(data) != opened.st_size or len(data) > MAX_MANIFEST_BYTES:
         raise SystemExit("error: artifact manifest size changed while reading")
     try:
@@ -226,9 +247,10 @@ def main() -> None:
     )
     arguments = parser.parse_args()
 
+    manifest_text = _read_manifest(arguments.manifest)
     try:
         expected = json.loads(
-            _read_manifest(arguments.manifest),
+            manifest_text,
             object_pairs_hook=_strict_object,
         )
     except (OSError, json.JSONDecodeError, DuplicateKeyError) as error:
@@ -263,6 +285,8 @@ def main() -> None:
     for key, value in required_metadata.items():
         if metadata.get(key) != value:
             raise SystemExit(f"error: artifact metadata {key} mismatch")
+    if _read_manifest(arguments.manifest) != manifest_text:
+        raise SystemExit("error: artifact manifest changed during verification")
     if arguments.print_tree_sha256:
         print(expected["sha256"])
     else:

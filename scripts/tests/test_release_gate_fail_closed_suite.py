@@ -203,6 +203,7 @@ _PINNED_INPUTS = (
     "scripts/build_native_products.sh",
     "scripts/build_unsigned_candidate.sh",
     "scripts/build_signed_candidate.sh",
+    "scripts/notarization_transaction.py",
     "scripts/tauri_host_skeleton.sh",
     "scripts/verify_artifact_manifest.py",
     "scripts/verify_candidate_bundle.py",

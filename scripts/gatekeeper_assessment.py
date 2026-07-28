@@ -67,6 +67,11 @@ def _require_utc_timestamp(value: object) -> str:
     return value
 
 
+def _reject_diagnostic_lines(lines: list[str], label: str) -> None:
+    if any(line.casefold().startswith(("warning:", "error:")) for line in lines):
+        raise GatekeeperEvidenceError(f"{label} contains a warning or error diagnostic")
+
+
 def validate_status_output(value: object) -> str:
     """Require the only successful global Gatekeeper state."""
     output = _bounded_output(value, "spctl status output")
@@ -85,6 +90,7 @@ def validate_assessment_output(
     """Return the notarization source, origin, and normalized raw output."""
     output = _bounded_output(value, "spctl assessment output")
     lines = [line.strip() for line in output.splitlines() if line.strip()]
+    _reject_diagnostic_lines(lines, "spctl assessment output")
     lowered = [line.lower() for line in lines]
     if any(line.startswith("override=") for line in lowered):
         raise GatekeeperEvidenceError(
@@ -116,6 +122,7 @@ def validate_codesign_output(
     """Return the leaf signing authority and normalized raw codesign output."""
     output = _bounded_output(value, "codesign detail output")
     lines = [line.strip() for line in output.splitlines() if line.strip()]
+    _reject_diagnostic_lines(lines, "codesign detail output")
     authorities = [
         line.partition("=")[2] for line in lines if line.startswith("Authority=")
     ]

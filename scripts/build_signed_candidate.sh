@@ -26,6 +26,8 @@ die() {
   exit 1
 }
 
+cfw_require_supported_python
+
 require_regular_file() {
   local path="$1"
   [[ -f "$path" && ! -L "$path" ]] || die "expected a regular non-symlink file: $path"
@@ -57,17 +59,16 @@ PY
 if [[ "$build_kind" == "validation" ]]; then
   build_root="$candidate_base/validation/$CFW_BUILD_NUMBER"
   final_root="$build_root/signed"
-  artifact_kind="notarized-validation-candidate-v1"
 else
   build_root="$candidate_base/release-build/$CFW_BUILD_NUMBER"
   final_root="$candidate_base/signed"
-  artifact_kind="notarized-release-v1"
   validated_review="$candidate_base/review/validated-candidate.json"
   PYTHONDONTWRITEBYTECODE=1 python3 -B \
     "$repo_root/scripts/validated_candidate_evidence.py" \
     "$validated_review" \
     --final-build-number "$CFW_BUILD_NUMBER"
 fi
+attempt_root="$candidate_base/notary-attempts/$build_kind/$CFW_BUILD_NUMBER"
 native_products="$build_root/native-products"
 cargo_target="$build_root/cargo"
 built_app="$cargo_target/release/bundle/macos/Clash for Mac.app"
@@ -102,9 +103,29 @@ for parent in "$repo_root/target" "$repo_root/target/candidates" "$candidate_bas
   mkdir -p "$parent"
   [[ -d "$parent" ]] || die "candidate parent is not a directory: $parent"
 done
-for output in "$final_root" "$build_root"; do
-  [[ ! -e "$output" && ! -L "$output" ]] || die "refusing to replace candidate output: $output"
-done
+[[ ! -e "$final_root" && ! -L "$final_root" ]] ||
+  die "refusing to replace candidate output: $final_root"
+build_parent="$(dirname "$build_root")"
+[[ ! -L "$build_parent" ]] || die "build parent must not be a symlink: $build_parent"
+mkdir -p "$build_parent"
+[[ -d "$build_parent" && ! -L "$build_parent" ]] ||
+  die "build parent is not a real directory: $build_parent"
+mkdir "$build_root" || die "candidate build number is already reserved: $CFW_BUILD_NUMBER"
+
+staging=""
+completed=0
+cleanup() {
+  if [[ ! -e "$attempt_root" && ! -L "$attempt_root" && \
+    -n "${staging:-}" && -d "$staging" && \
+    "$staging" == "$candidate_base/.signed-stage."* ]]; then
+    /bin/rm -r "$staging"
+  fi
+  if [[ $completed -ne 1 && ! -e "$attempt_root" && ! -L "$attempt_root" && \
+    -d "$build_root" && ! -L "$build_root" ]]; then
+    /bin/rm -r "$build_root"
+  fi
+}
+trap cleanup EXIT
 
 export CFW_NATIVE_PRODUCTS_OUTPUT="$native_products"
 export CFW_NATIVE_DERIVED_DATA="$build_root/xcode-derived-data"
@@ -248,19 +269,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifes
   --metadata "releaseSourceSha256=$release_source_sha256" \
   --metadata "repositoryCommit=$repository_commit"
 staging="$(mktemp -d "$candidate_base/.signed-stage.XXXXXX")"
-completed=0
-cleanup() {
-  if [[ -n "${staging:-}" && -d "$staging" && "$staging" == "$candidate_base/.signed-stage."* ]]; then
-    /bin/rm -r "$staging"
-  fi
-  if [[ $completed -ne 1 && -d "$final_root" && ! -L "$final_root" ]]; then
-    /bin/rm -r "$final_root"
-  fi
-  if [[ $completed -ne 1 && -d "$build_root" && ! -L "$build_root" ]]; then
-    /bin/rm -r "$build_root"
-  fi
-}
-trap cleanup EXIT
 staged_app="$staging/Clash for Mac.app"
 [[ "$(sha256_file "$pre_sign_manifest")" == "$pre_sign_manifest_sha256" ]] ||
   die "pre-sign manifest changed before staging"
@@ -352,121 +360,28 @@ codesign --verify --deep --strict --verbose=4 "$staged_app"
 "$repo_root/scripts/verify_release_app.sh" --pre-notary "$staged_app" "$native_products"
 /bin/rm "$decoded_host_profile" "$host_signing_identities" "$host_release_xcent"
 
-notary_zip="$staging/Clash.for.Mac_0.4.0_${CFW_BUILD_NUMBER}_notary.zip"
-notary_result="$staging/notary-result.json"
-notary_log="$staging/notarization-log.json"
-gatekeeper_evidence="$staging/gatekeeper.json"
-(
-  cd "$staging"
-  COPYFILE_DISABLE=1 /usr/bin/ditto \
-    -c \
-    -k \
-    --keepParent \
-    --sequesterRsrc \
-    "Clash for Mac.app" \
-    "$notary_zip"
-)
-xcrun notarytool submit "$notary_zip" \
-  --wait \
-  --keychain-profile "$NOTARY_PROFILE" \
-  --output-format json >"$notary_result"
-notary_submission_id="$(python3 - "$notary_result" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if result.get("status") != "Accepted" or not result.get("id"):
-    raise SystemExit(
-        "error: Apple notarization was not accepted "
-        f"(status={result.get('status')!r}, id={result.get('id')!r})"
-    )
-print(result["id"])
-PY
-)"
-echo "notarization accepted: $notary_submission_id"
-xcrun notarytool log \
-  "$notary_submission_id" \
-  "$notary_log" \
-  --keychain-profile "$NOTARY_PROFILE"
 PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/verify_notary_log.py" \
-  "$notary_result" \
-  "$notary_log" \
-  "$notary_zip"
-xcrun stapler staple "$staged_app"
-xcrun stapler validate "$staged_app"
-signed_app_tree_sha256="$(PYTHONDONTWRITEBYTECODE=1 python3 -B - \
-  "$repo_root" "$staged_app" <<'PY'
-import sys
-from pathlib import Path
-
-sys.path.insert(0, sys.argv[1] + "/scripts")
-from hash_artifact import build_manifest
-
-print(build_manifest(Path(sys.argv[2]))["sha256"])
-PY
-)"
-PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/gatekeeper_assessment.py" \
-  --target "$staged_app" \
-  --assessment-type execute \
-  --target-signed-app-tree-sha256 "$signed_app_tree_sha256" \
-  --output "$gatekeeper_evidence"
-"$repo_root/scripts/verify_release_app.sh" "$staged_app" "$native_products"
-
-mkdir "$final_root"
-/bin/mv "$staged_app" "$final_app"
-/bin/mv "$notary_result" "$final_root/notarization.json"
-/bin/mv "$notary_log" "$final_root/notarization-log.json"
-/bin/mv "$gatekeeper_evidence" "$final_root/gatekeeper.json"
-/bin/mv "$notary_zip" "$final_root/Clash.for.Mac_0.4.0_${CFW_BUILD_NUMBER}_notary.zip"
-rmdir "$staging"
+  "$repo_root/scripts/notarization_transaction.py" \
+  --build-kind "$build_kind" \
+  --build-number "$CFW_BUILD_NUMBER" \
+  --staged-app "$staged_app" \
+  --native-products "$native_products" \
+  --notary-profile "$NOTARY_PROFILE" \
+  --repository-commit "$repository_commit" \
+  --release-source-sha256 "$release_source_sha256" \
+  --deployment-target "$MACOS_DEPLOYMENT_TARGET" \
+  --go-module-cache-tree-sha256 "$go_module_cache_tree_sha256" \
+  --go-toolchain-tree-sha256 "$go_toolchain_tree_sha256" \
+  --go-tools-tree-sha256 "$go_tools_tree_sha256" \
+  --node-toolchain-tree-sha256 "$node_toolchain_tree_sha256" \
+  --tauri-toolchain-tree-sha256 "$tauri_toolchain_tree_sha256" \
+  --toolchain-sha256 "$toolchain_sha256" \
+  --ui-dependencies-tree-sha256 "$ui_dependencies_tree_sha256" \
+  --xcodegen-toolchain-tree-sha256 "$xcodegen_toolchain_tree_sha256"
 staging=""
-source_identity_final="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/repository_source_identity.py" --require-clean)" ||
-  die "release repository changed before final artifact sealing"
-[[ "$source_identity_final" == "$source_identity_start" ]] ||
-  die "release source identity changed before final artifact sealing"
-python3 "$repo_root/scripts/hash_artifact.py" \
-  "$final_app" \
-  --output "$final_root/Clash for Mac.app.manifest.json" \
-  --metadata "artifactKind=$artifact_kind" \
-  --metadata "architecture=arm64" \
-  --metadata "buildNumber=$CFW_BUILD_NUMBER" \
-  --metadata "deploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
-  --metadata "goModuleCacheTreeSha256=$go_module_cache_tree_sha256" \
-  --metadata "goToolchainTreeSha256=$go_toolchain_tree_sha256" \
-  --metadata "goToolsTreeSha256=$go_tools_tree_sha256" \
-  --metadata "nodeToolchainTreeSha256=$node_toolchain_tree_sha256" \
-  --metadata "releaseSourceSha256=$release_source_sha256" \
-  --metadata "repositoryCommit=$repository_commit" \
-  --metadata "tauriToolchainTreeSha256=$tauri_toolchain_tree_sha256" \
-  --metadata "teamID=$expected_team_id" \
-  --metadata "toolchainSha256=$toolchain_sha256" \
-  --metadata "uiDependenciesTreeSha256=$ui_dependencies_tree_sha256" \
-  --metadata "xcodegenToolchainTreeSha256=$xcodegen_toolchain_tree_sha256" \
-  --metadata "version=0.4.0"
-python3 "$repo_root/scripts/hash_artifact.py" \
-  "$final_root/Clash.for.Mac_0.4.0_${CFW_BUILD_NUMBER}_notary.zip" \
-  --output "$final_root/Clash.for.Mac_0.4.0_${CFW_BUILD_NUMBER}_notary.zip.manifest.json" \
-  --metadata "artifactKind=notarization-submission-v1" \
-  --metadata "architecture=arm64" \
-  --metadata "buildNumber=$CFW_BUILD_NUMBER" \
-  --metadata "goModuleCacheTreeSha256=$go_module_cache_tree_sha256" \
-  --metadata "goToolchainTreeSha256=$go_toolchain_tree_sha256" \
-  --metadata "goToolsTreeSha256=$go_tools_tree_sha256" \
-  --metadata "nodeToolchainTreeSha256=$node_toolchain_tree_sha256" \
-  --metadata "releaseSourceSha256=$release_source_sha256" \
-  --metadata "repositoryCommit=$repository_commit" \
-  --metadata "tauriToolchainTreeSha256=$tauri_toolchain_tree_sha256" \
-  --metadata "teamID=$expected_team_id" \
-  --metadata "toolchainSha256=$toolchain_sha256" \
-  --metadata "uiDependenciesTreeSha256=$ui_dependencies_tree_sha256" \
-  --metadata "xcodegenToolchainTreeSha256=$xcodegen_toolchain_tree_sha256" \
-  --metadata "version=0.4.0"
 completed=1
 trap - EXIT
 
-echo "signed and notarized 0.4.0 $build_kind build $CFW_BUILD_NUMBER: $final_app"
+final_app_relative="${final_app#"$repo_root/"}"
+echo "signed and notarized 0.4.0 $build_kind build $CFW_BUILD_NUMBER: $final_app_relative"
 echo "the app has not been installed or launched"

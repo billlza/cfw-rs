@@ -4,6 +4,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=scripts/release_toolchain_contract.sh
+source "$repo_root/scripts/release_toolchain_contract.sh"
 # shellcheck source=scripts/release_publication_gate.sh
 source "$repo_root/scripts/release_publication_gate.sh"
 readonly expected_team_id="YKUPL7Z869"
@@ -12,6 +14,8 @@ die() {
   echo "error: $*" >&2
   exit 1
 }
+
+cfw_require_supported_python
 
 assert_semver() {
   local version="$1"

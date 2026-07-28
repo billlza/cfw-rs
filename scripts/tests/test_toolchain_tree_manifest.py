@@ -657,6 +657,24 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             with self.subTest(function=function):
                 self.assertEqual(text.count(function), 2)
 
+    def test_release_environment_requires_the_supported_python_line(self) -> None:
+        contract = (SCRIPTS / "release_toolchain_contract.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("(3, 11) <= sys.version_info[:2] < (4, 0)", contract)
+        self.assertIn("Python 3.11 through 3.x is required", contract)
+        for relative in (
+            "build_signed_candidate.sh",
+            "build_unsigned_candidate.sh",
+            "verify_release_environment.sh",
+            "verify_build_boundaries.sh",
+            "make_dmg.sh",
+            "make_updater_manifest.sh",
+        ):
+            with self.subTest(script=relative):
+                text = (SCRIPTS / relative).read_text(encoding="utf-8")
+                self.assertIn("cfw_require_supported_python", text)
+
     def test_tauri_installer_uses_isolated_clean_payload(self) -> None:
         installer = (SCRIPTS / "install_pinned_tauri_cli.sh").read_text(encoding="utf-8")
         for fragment in (

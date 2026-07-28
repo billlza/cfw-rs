@@ -15,6 +15,7 @@ from scripts.gatekeeper_assessment import (
     GatekeeperEvidenceError,
     capture,
     validate_assessment_output,
+    validate_codesign_output,
     validate_evidence,
     validate_status_output,
 )
@@ -105,6 +106,14 @@ class GatekeeperAssessmentTests(unittest.TestCase):
         with self.assertRaisesRegex(GatekeeperEvidenceError, EXPECTED_TEAM_ID):
             validate_assessment_output(output)
 
+    def test_assessment_warning_line_is_release_blocking(self) -> None:
+        with self.assertRaisesRegex(GatekeeperEvidenceError, "warning or error"):
+            validate_assessment_output(ASSESSMENT_OUTPUT + "warning: degraded check\n")
+
+    def test_codesign_warning_line_is_release_blocking(self) -> None:
+        with self.assertRaisesRegex(GatekeeperEvidenceError, "warning or error"):
+            validate_codesign_output(CODESIGN_OUTPUT + "warning: degraded check\n")
+
 
 class GatekeeperEvidenceTests(unittest.TestCase):
     def test_complete_raw_evidence_round_trips(self) -> None:
@@ -165,23 +174,33 @@ class GatekeeperEvidenceTests(unittest.TestCase):
 
 class GatekeeperReleaseScriptWiringTests(unittest.TestCase):
     def test_every_release_assessment_uses_the_enabled_state_gate(self) -> None:
-        for relative in (
-            "scripts/build_signed_candidate.sh",
-            "scripts/verify_release_app.sh",
-            "scripts/make_dmg.sh",
-        ):
+        for relative in ("scripts/verify_release_app.sh", "scripts/make_dmg.sh"):
             with self.subTest(relative=relative):
                 source = (REPOSITORY / relative).read_text(encoding="utf-8")
                 self.assertIn("scripts/gatekeeper_assessment.py", source)
                 self.assertNotIn("spctl --assess", source)
-
-    def test_signed_candidate_retrieves_and_validates_the_notary_log(self) -> None:
-        source = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
+        signed = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
             encoding="utf-8"
         )
-        self.assertIn("notarytool log", source)
-        self.assertIn("scripts/verify_notary_log.py", source)
-        self.assertIn('notarization-log.json', source)
+        transaction = (REPOSITORY / "scripts/notarization_transaction.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("scripts/notarization_transaction.py", signed)
+        self.assertIn("capture as capture_gatekeeper", transaction)
+        self.assertIn("validate_gatekeeper_evidence", transaction)
+        self.assertNotIn("spctl --assess", transaction)
+
+    def test_signed_candidate_retrieves_and_validates_the_notary_log(self) -> None:
+        shell = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
+            encoding="utf-8"
+        )
+        transaction = (REPOSITORY / "scripts/notarization_transaction.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("scripts/notarization_transaction.py", shell)
+        self.assertIn('"notarytool",\n            "log"', transaction)
+        self.assertIn("validate_documents", transaction)
+        self.assertIn('"notarization-log.json"', transaction)
 
     def test_dmg_retrieves_and_publishes_bound_notarization_evidence(self) -> None:
         source = (REPOSITORY / "scripts/make_dmg.sh").read_text(encoding="utf-8")

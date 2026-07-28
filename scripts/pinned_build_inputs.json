@@ -282,6 +282,8 @@
       "pre_sign_manifest_sha256",
       "host_executable_sha256",
       "Contents/embedded.provisionprofile=$host_profile_sha256:$host_profile_size",
+      "scripts/notarization_transaction.py",
+      "--notary-profile \"$NOTARY_PROFILE\"",
       "goModuleCacheTreeSha256=$go_module_cache_tree_sha256",
       "goToolchainTreeSha256=$go_toolchain_tree_sha256",
       "goToolsTreeSha256=$go_tools_tree_sha256",
@@ -290,6 +292,24 @@
       "toolchainSha256=$toolchain_sha256",
       "uiDependenciesTreeSha256=$ui_dependencies_tree_sha256",
       "xcodegenToolchainTreeSha256=$xcodegen_toolchain_tree_sha256"
+    ],
+    "scripts/notarization_transaction.py": [
+      "notary-attempts",
+      "--no-wait",
+      "\"wait\"",
+      "RENAME_EXCL",
+      "RENAME_NOFOLLOW_ANY",
+      "syspolicy_check",
+      "notary-submission",
+      "distribution",
+      "--json",
+      "sha256-tree-v2",
+      "notarization-submission-v1",
+      "publish-ready",
+      "source_identity_drift",
+      "derive_candidate_toolchain_metadata",
+      "validate_documents",
+      "validate_gatekeeper_evidence"
     ],
     "scripts/tauri_host_skeleton.sh": [
       "cfw_build_tauri_host_skeleton()",

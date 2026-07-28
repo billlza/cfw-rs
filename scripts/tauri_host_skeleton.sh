@@ -9,31 +9,35 @@ cfw_build_tauri_host_skeleton() {
     return 1
   fi
 
-  local app_dir="$1"
-  local tauri_bin="$2"
-  local config_override="$3"
-  local variable
+  local contract_tauri_host_app_dir="$1"
+  local contract_tauri_host_bin="$2"
+  local contract_tauri_host_config_override="$3"
+  local contract_tauri_host_signing_variable
 
-  [[ "$app_dir" == /* && -d "$app_dir" && ! -L "$app_dir" ]] || {
+  [[ "$contract_tauri_host_app_dir" == /* && \
+    -d "$contract_tauri_host_app_dir" && ! -L "$contract_tauri_host_app_dir" ]] || {
     echo "error: Tauri application root must be an absolute real directory" >&2
     return 1
   }
-  [[ "$tauri_bin" == /* && -f "$tauri_bin" && ! -L "$tauri_bin" && -x "$tauri_bin" ]] || {
+  [[ "$contract_tauri_host_bin" == /* && -f "$contract_tauri_host_bin" && \
+    ! -L "$contract_tauri_host_bin" && -x "$contract_tauri_host_bin" ]] || {
     echo "error: pinned Tauri CLI must be an absolute executable regular file" >&2
     return 1
   }
 
-  for variable in \
+  for contract_tauri_host_signing_variable in \
     APPLE_CERTIFICATE \
     APPLE_CERTIFICATE_PASSWORD \
     APPLE_SIGNING_IDENTITY; do
-    if /usr/bin/printenv "$variable" >/dev/null 2>&1; then
-      echo "error: $variable must be unset while Tauri builds the unsigned Host skeleton" >&2
+    if /usr/bin/printenv "$contract_tauri_host_signing_variable" >/dev/null 2>&1; then
+      echo "error: $contract_tauri_host_signing_variable must be unset while Tauri builds the unsigned Host skeleton" >&2
       return 1
     fi
   done
 
-  PYTHONDONTWRITEBYTECODE=1 python3 -B - "$app_dir" "$config_override" <<'PY' || return 1
+  PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+    "$contract_tauri_host_app_dir" \
+    "$contract_tauri_host_config_override" <<'PY' || return 1
 import json
 import os
 import stat
@@ -108,7 +112,7 @@ require_no_signing_identity(override, "inline override")
 PY
 
   (
-    cd "$app_dir" || {
+    cd "$contract_tauri_host_app_dir" || {
       echo "error: cannot enter Tauri application root" >&2
       return 1
     }
@@ -116,6 +120,7 @@ PY
       -u APPLE_CERTIFICATE \
       -u APPLE_CERTIFICATE_PASSWORD \
       -u APPLE_SIGNING_IDENTITY \
-      "$tauri_bin" build --bundles app --ci --config "$config_override"
+      "$contract_tauri_host_bin" build --bundles app --ci --config \
+      "$contract_tauri_host_config_override"
   )
 }

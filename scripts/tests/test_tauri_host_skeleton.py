@@ -54,28 +54,37 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         override: str | None = None,
         environment_updates: dict[str, str] | None = None,
         errexit: bool = True,
+        readonly_caller_tauri: Path | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         environment = dict(os.environ)
         for variable in SIGNING_VARIABLES:
             environment.pop(variable, None)
         if environment_updates:
             environment.update(environment_updates)
-        shell = (
-            ("set -euo pipefail; " if errexit else "set -uo pipefail; ")
-            + 'source "$1"; '
-            'cfw_build_tauri_host_skeleton "$2" "$3" "$4"'
-        )
+        shell = ("set -euo pipefail; " if errexit else "set -uo pipefail; ")
+        shell += 'source "$1"; '
+        if readonly_caller_tauri is not None:
+            shell += (
+                'readonly app_dir="$2"; '
+                'readonly tauri_bin="$5"; '
+                'readonly config_override="$4"; '
+                'readonly variable="caller-variable"; '
+            )
+        shell += 'cfw_build_tauri_host_skeleton "$2" "$3" "$4"'
+        command = [
+            "/bin/bash",
+            "-c",
+            shell,
+            "tauri-host-skeleton-test",
+            str(CONTRACT),
+            str(self.app_dir),
+            str(self.tauri),
+            self.override if override is None else override,
+        ]
+        if readonly_caller_tauri is not None:
+            command.append(str(readonly_caller_tauri))
         return subprocess.run(
-            [
-                "/bin/bash",
-                "-c",
-                shell,
-                "tauri-host-skeleton-test",
-                str(CONTRACT),
-                str(self.app_dir),
-                str(self.tauri),
-                self.override if override is None else override,
-            ],
+            command,
             check=False,
             env=environment,
             stdout=subprocess.PIPE,
@@ -88,6 +97,32 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         arguments = completed.stdout.decode()
         self.assertIn("[build]\n[--bundles]\n[app]\n[--ci]\n[--config]\n", arguments)
         self.assertNotIn("--no-sign", arguments)
+
+    def test_runner_isolated_from_readonly_caller_variables_without_errexit(self) -> None:
+        caller_tauri = self.root / "caller-tauri"
+        caller_tauri.write_text(
+            "#!/bin/sh\nprintf '[caller-tauri]\\n'\n",
+            encoding="utf-8",
+        )
+        caller_tauri.chmod(0o755)
+
+        completed = self.run_contract(
+            errexit=False,
+            readonly_caller_tauri=caller_tauri,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertEqual(completed.stderr, b"")
+        expected_arguments = (
+            "[build]\n"
+            "[--bundles]\n"
+            "[app]\n"
+            "[--ci]\n"
+            "[--config]\n"
+            f"[{self.override}]\n"
+        )
+        self.assertEqual(completed.stdout.decode(), expected_arguments)
+        self.assertNotIn(b"caller-tauri", completed.stdout)
 
     def test_runner_rejects_every_signing_environment_variable_even_when_empty(self) -> None:
         for variable in SIGNING_VARIABLES:

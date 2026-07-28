@@ -37,6 +37,7 @@ from scripts.notarization_transaction import (
     production_manifest_verifier,
     production_manifest_writer,
     publish_exclusive,
+    recover_transaction,
 )
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 from scripts.tests.notary_fixture import (
@@ -45,6 +46,7 @@ from scripts.tests.notary_fixture import (
     SUBMISSION_ID,
     accepted_log,
     response,
+    submit_response,
 )
 from scripts.verify_notary_log import validate_documents
 
@@ -63,10 +65,12 @@ class FakeRunner:
         self.crash_role: CommandRole | None = None
         self.crash_occurrence = 1
         self.role_counts: dict[CommandRole, int] = {}
-        self.submit_status = "In Progress"
         self.wait_status = "Accepted"
+        self.info_status = "Accepted"
+        self.info_created_at = "2026-07-28T04:02:00Z"
+        self.history_entries: list[dict[str, str]] | None = None
         self.stderr = ""
-        self.message = "fixture response"
+        self.message = "Processing complete"
         self.log = accepted_log(archive_name)
 
     def __call__(
@@ -84,7 +88,36 @@ class FakeRunner:
         if role == self.fail_role and occurrence == self.fail_occurrence:
             return CommandResult(9, "", self.stderr)
         if role == CommandRole.SUBMIT:
-            stdout = response(self.submit_status, self.message)
+            stdout = submit_response(command[3])
+        elif role == CommandRole.INFO:
+            stdout = json.dumps(
+                {
+                    "createdDate": self.info_created_at,
+                    "id": SUBMISSION_ID,
+                    "message": "Successfully received submission info",
+                    "name": self.archive_name,
+                    "status": self.info_status,
+                },
+                sort_keys=True,
+            )
+        elif role == CommandRole.HISTORY:
+            history_entries = self.history_entries
+            if history_entries is None:
+                history_entries = [
+                    {
+                        "createdDate": self.info_created_at,
+                        "id": SUBMISSION_ID,
+                        "name": self.archive_name,
+                        "status": self.info_status,
+                    }
+                ]
+            stdout = json.dumps(
+                {
+                    "history": history_entries,
+                    "message": "Successfully received submission history.",
+                },
+                sort_keys=True,
+            )
         elif role == CommandRole.WAIT:
             stdout = response(self.wait_status, self.message)
         elif role == CommandRole.FETCH_LOG:
@@ -178,6 +211,51 @@ class Fixture:
 
     def execute(self, **overrides):
         return self.execute_context(self.context, **overrides)
+
+    def recover(self, submission_id: str = SUBMISSION_ID, **overrides):
+        arguments = self.arguments()
+        arguments.pop("archive_builder")
+        arguments.pop("attempt_id_factory")
+        arguments.pop("host_system_identity_reader", None)
+        arguments.update(
+            recovery_tool_identity_reader=lambda _repository: {
+                "repositoryCommit": "c" * 40,
+                "releaseSourceSha256": "d" * 64,
+            }
+        )
+        arguments.update(overrides)
+        return recover_transaction(
+            replace(self.context, staged_app=None),
+            submission_id,
+            self.repository,
+            **arguments,
+        )
+
+    def create_orphaned_submit_attempt(self) -> None:
+        def legacy_submit_shape(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role == CommandRole.SUBMIT:
+                self.runner.calls.append(role)
+                self.runner.command_calls.append((role, tuple(command), timeout))
+                return CommandResult(
+                    0,
+                    response("In Progress"),
+                    "",
+                )
+            return self.runner(role, command, timeout)
+
+        try:
+            self.execute(command_runner=legacy_submit_shape)
+        except TransactionError as error:
+            if error.code != "invalid_notary_response":
+                raise AssertionError(
+                    f"unexpected orphan fixture failure: {error.code}"
+                ) from error
+        else:
+            raise AssertionError("legacy submit shape unexpectedly succeeded")
 
 
 def single_signature_diagnostic(app: Path) -> str:
@@ -912,17 +990,14 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
                 if path.is_file():
                     self.assertNotIn(sentinel.encode(), path.read_bytes(), path)
 
-    def test_bounded_submit_message_is_projected_without_persistence(self) -> None:
+    def test_unexpected_wait_message_is_rejected_without_persistence(self) -> None:
         sentinel = "person@example.test /Users/person private-key fixture-profile"
         self.fixture.runner.message = sentinel
-        self.fixture.execute()
-        for root in (
-            self.fixture.context.attempt_root,
-            self.fixture.context.final_root,
-        ):
-            for path in root.rglob("*"):
-                if path.is_file():
-                    self.assertNotIn(sentinel.encode(), path.read_bytes(), path)
+        with self.assertRaisesRegex(TransactionError, "unexpected message"):
+            self.fixture.execute()
+        for path in self.fixture.context.attempt_root.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(sentinel.encode(), path.read_bytes(), path)
 
     def test_private_attempt_modes_ignore_ambient_umask(self) -> None:
         previous = os.umask(0o022)
@@ -937,6 +1012,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
         for path in (
             self.fixture.context.attempt_root / "intent.json",
+            self.fixture.context.attempt_root / "submission-observation.json",
             self.fixture.context.attempt_root / "submission-receipt.json",
             self.fixture.context.attempt_root / "receipt.json",
         ):
@@ -970,6 +1046,601 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         self.assertEqual(manifest["algorithm"], "sha256-tree-v2")
         self.assertEqual(manifest["metadata"]["artifactKind"], "notarized-release-v1")
         self.assertEqual(manifest["metadata"]["buildNumber"], "40001")
+
+
+class NotarizationRecoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = Fixture()
+        self.fixture.create_orphaned_submit_attempt()
+
+    def tearDown(self) -> None:
+        self.fixture.close()
+
+    def _original_event_bytes(self) -> list[bytes]:
+        return [
+            path.read_bytes()
+            for path in sorted(
+                (self.fixture.context.attempt_root / "events").iterdir()
+            )[:4]
+        ]
+
+    def _reset_runner_observations(self) -> None:
+        self.fixture.runner.calls.clear()
+        self.fixture.runner.command_calls.clear()
+        self.fixture.runner.role_counts.clear()
+
+    def test_frozen_legacy_40001_event_prefix_is_recoverable(self) -> None:
+        snapshot_path = (
+            Path(__file__).parent
+            / "fixtures/notarization_40001_orphan.json"
+        )
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        intent_bytes = transaction_module._canonical_json(
+            snapshot["intent"]
+        ).encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(intent_bytes).hexdigest(),
+            snapshot["intentSha256"],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            event_directory = Path(temporary) / "events"
+            event_directory.mkdir(mode=0o700)
+            for event in snapshot["events"]:
+                event_path = event_directory / f"{event['sequence']:08d}.json"
+                event_path.write_bytes(
+                    transaction_module._canonical_json(event).encode("utf-8")
+                )
+                event_path.chmod(0o600)
+            journal = transaction_module.EventJournal.load_existing(
+                event_directory,
+                snapshot["intentSha256"],
+                lambda: "2026-07-28T17:41:00Z",
+            )
+            boundary = transaction_module._require_recoverable_event_prefix(
+                journal
+            )
+
+        self.assertEqual(boundary[0].isoformat(), "2026-07-28T17:40:01+00:00")
+        self.assertEqual(boundary[1].isoformat(), "2026-07-28T17:40:13+00:00")
+        self.assertEqual(boundary[3:], (4, None, False, False))
+        self.assertEqual(snapshot["archiveSize"], 30062052)
+        self.assertEqual(
+            snapshot["archiveSha256"],
+            "34976cb5eaeef4fd5547304405a305f794d8ddff95676733996971173273839a",
+        )
+
+        for invalid_exit_code in (None, 0):
+            with self.subTest(invalid_exit_code=invalid_exit_code):
+                tampered = dict(journal.documents[-1])
+                tampered["failure_code"] = "submit_failed"
+                tampered["exit_code"] = invalid_exit_code
+                journal.documents[-1] = tampered
+                with self.assertRaises(TransactionError):
+                    transaction_module._require_recoverable_event_prefix(journal)
+        journal.documents[-1] = snapshot["events"][-1]
+
+    def test_reconciles_exact_orphan_without_resubmission(self) -> None:
+        original_events = self._original_event_bytes()
+        self._reset_runner_observations()
+
+        final_app = self.fixture.recover()
+
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, self.fixture.runner.calls)
+        self.assertEqual(
+            self.fixture.runner.calls[:4],
+            [
+                CommandRole.FINAL_VERIFY,
+                CommandRole.INFO,
+                CommandRole.HISTORY,
+                CommandRole.FETCH_LOG,
+            ],
+        )
+        event_paths = sorted(
+            (self.fixture.context.attempt_root / "events").iterdir()
+        )
+        self.assertEqual(
+            [path.read_bytes() for path in event_paths[:4]],
+            original_events,
+        )
+        states = [
+            json.loads(path.read_text(encoding="utf-8"))["state"]
+            for path in event_paths
+        ]
+        self.assertEqual(
+            states,
+            [
+                "prepared",
+                "notary_ready",
+                "submitting",
+                "outcome_unknown",
+                "reconciliation_started",
+                "submission_reconciled",
+                "finalization_started",
+                "accepted",
+                "log_verified",
+                "stapling",
+                "stapled",
+                "gatekeeper_verified",
+                "app_verified",
+                "distribution_verified",
+                "sealed",
+            ],
+        )
+        receipt = json.loads(
+            (
+                self.fixture.context.attempt_root / "submission-receipt.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(receipt["schema_version"], 2)
+        self.assertEqual(receipt["acquisition"], "explicit-recovery")
+        self.assertEqual(
+            receipt["causal_binding"], "unique-history-window-and-log"
+        )
+        self.assertIsNone(receipt["submission_observation_sha256"])
+        self.assertRegex(receipt["recovery_intent_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_ambiguous_history_fails_before_staple_or_receipt(self) -> None:
+        duplicate = {
+            "createdDate": self.fixture.runner.info_created_at,
+            "id": "22222222-3333-4444-8555-666666666666",
+            "name": self.fixture.context.archive_name,
+            "status": "Accepted",
+        }
+        self.fixture.runner.history_entries = [
+            {
+                "createdDate": self.fixture.runner.info_created_at,
+                "id": SUBMISSION_ID,
+                "name": self.fixture.context.archive_name,
+                "status": "Accepted",
+            },
+            duplicate,
+        ]
+        self._reset_runner_observations()
+
+        with self.assertRaisesRegex(TransactionError, "uniquely bind"):
+            self.fixture.recover()
+
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.STAPLE, self.fixture.runner.calls)
+        self.assertFalse(
+            (self.fixture.context.attempt_root / "submission-receipt.json").exists()
+        )
+        terminal = json.loads(
+            sorted((self.fixture.context.attempt_root / "events").iterdir())[-1]
+            .read_text(encoding="utf-8")
+        )
+        self.assertEqual(terminal["state"], "failed")
+        self.assertEqual(
+            terminal["failure_code"], "submission_causal_binding_unproven"
+        )
+
+    def test_same_id_can_retry_after_read_only_info_failure(self) -> None:
+        self.fixture.runner.fail_role = CommandRole.INFO
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover()
+        self.assertEqual(raised.exception.code, "info_failed")
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertFalse(
+            (self.fixture.context.attempt_root / "submission-receipt.json").exists()
+        )
+
+        self.fixture.runner.fail_role = None
+        self._reset_runner_observations()
+        final_app = self.fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        states = [
+            json.loads(path.read_text(encoding="utf-8"))["state"]
+            for path in sorted(
+                (self.fixture.context.attempt_root / "events").iterdir()
+            )
+        ]
+        self.assertEqual(
+            states[4:8],
+            [
+                "reconciliation_started",
+                "reconciliation_deferred",
+                "reconciliation_started",
+                "submission_reconciled",
+            ],
+        )
+
+    def test_same_id_can_retry_after_malformed_read_only_info(self) -> None:
+        def malformed_info(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role == CommandRole.INFO:
+                return CommandResult(0, "{", "")
+            return self.fixture.runner(role, command, timeout)
+
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(command_runner=malformed_info)
+        self.assertEqual(raised.exception.code, "invalid_command_output")
+        terminal = json.loads(
+            sorted(
+                (self.fixture.context.attempt_root / "events").glob("*.json")
+            )[-1].read_text(encoding="utf-8")
+        )
+        self.assertEqual(terminal["state"], "reconciliation_deferred")
+
+        self._reset_runner_observations()
+        final_app = self.fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_recovery_intent_rejects_a_different_submission_id(self) -> None:
+        self.fixture.runner.fail_role = CommandRole.INFO
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError):
+            self.fixture.recover()
+        self.fixture.runner.fail_role = None
+        self._reset_runner_observations()
+
+        with self.assertRaisesRegex(TransactionError, "differs"):
+            self.fixture.recover("22222222-3333-4444-8555-666666666666")
+
+        self.assertEqual(self.fixture.runner.calls, [CommandRole.FINAL_VERIFY])
+        self.assertNotIn(CommandRole.INFO, self.fixture.runner.calls)
+
+    def test_wait_failure_reuses_direct_receipt_without_resubmission(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        fixture.runner.fail_role = CommandRole.WAIT
+        with self.assertRaises(TransactionError) as raised:
+            fixture.execute()
+        self.assertEqual(raised.exception.code, "wait_failed")
+        self.assertTrue(
+            (fixture.context.attempt_root / "submission-observation.json").is_file()
+        )
+        self.assertTrue(
+            (fixture.context.attempt_root / "submission-receipt.json").is_file()
+        )
+
+        fixture.runner.fail_role = None
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+        final_app = fixture.recover()
+
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.HISTORY, fixture.runner.calls)
+        receipt = json.loads(
+            (fixture.context.attempt_root / "submission-receipt.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(receipt["acquisition"], "submit-no-wait")
+
+    def test_wait_process_crash_after_submitted_event_is_recoverable(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        fixture.runner.crash_role = CommandRole.WAIT
+        with self.assertRaises(SimulatedCrash):
+            fixture.execute()
+        states = [
+            json.loads(path.read_text(encoding="utf-8"))["state"]
+            for path in sorted(
+                (fixture.context.attempt_root / "events").glob("*.json")
+            )
+        ]
+        self.assertEqual(states[-1], "submitted")
+
+        fixture.runner.crash_role = None
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+        final_app = fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_crash_before_submitted_event_reuses_durable_direct_receipt(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        original_append = transaction_module.EventJournal.append
+
+        def crash_before_submitted(
+            journal,
+            state: str,
+            **fields,
+        ) -> None:
+            if state == "submitted":
+                raise SimulatedCrash(state)
+            original_append(journal, state, **fields)
+
+        with patch.object(
+            transaction_module.EventJournal,
+            "append",
+            crash_before_submitted,
+        ):
+            with self.assertRaises(SimulatedCrash):
+                fixture.execute()
+        self.assertEqual(
+            len(list((fixture.context.attempt_root / "events").glob("*.json"))),
+            3,
+        )
+
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+        final_app = fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+
+    def test_explicit_recovery_receipt_survives_crash_before_journal_event(self) -> None:
+        original_writer = transaction_module._write_json_exclusive
+
+        def crash_after_recovery_receipt(path: Path, value: object) -> None:
+            original_writer(path, value)
+            if (
+                path.name == "submission-receipt.json"
+                and isinstance(value, dict)
+                and value.get("acquisition") == "explicit-recovery"
+            ):
+                raise SimulatedCrash(path.name)
+
+        self._reset_runner_observations()
+        with patch.object(
+            transaction_module,
+            "_write_json_exclusive",
+            crash_after_recovery_receipt,
+        ):
+            with self.assertRaises(SimulatedCrash):
+                self.fixture.recover()
+
+        self._reset_runner_observations()
+        final_app = self.fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_reconciled_event_survives_crash_before_finalizer(self) -> None:
+        self._reset_runner_observations()
+        with patch.object(
+            transaction_module,
+            "_finalize_accepted_submission",
+            side_effect=SimulatedCrash("before-finalizer"),
+        ):
+            with self.assertRaises(SimulatedCrash):
+                self.fixture.recover()
+        states = [
+            json.loads(path.read_text(encoding="utf-8"))["state"]
+            for path in sorted(
+                (self.fixture.context.attempt_root / "events").glob("*.json")
+            )
+        ]
+        self.assertEqual(states[-1], "finalization_started")
+
+        self._reset_runner_observations()
+        final_app = self.fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_partial_staple_crash_restarts_from_immutable_source(self) -> None:
+        self._reset_runner_observations()
+
+        def partial_staple_crash(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role == CommandRole.STAPLE:
+                executable = (
+                    Path(command[-1])
+                    / "Contents/MacOS/clash-for-mac"
+                )
+                executable.write_bytes(b"partially-mutated-staple-workspace")
+                raise SimulatedCrash(role.value)
+            return self.fixture.runner(role, command, timeout)
+
+        with self.assertRaises(SimulatedCrash):
+            self.fixture.recover(command_runner=partial_staple_crash)
+
+        immutable_executable = (
+            self.fixture.context.attempt_root
+            / "recovery-source/Clash for Mac.app/Contents/MacOS/clash-for-mac"
+        )
+        self.assertEqual(immutable_executable.read_bytes(), b"signed-app")
+
+        self._reset_runner_observations()
+        final_app = self.fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertEqual(
+            (final_app / "Contents/MacOS/clash-for-mac").read_bytes(),
+            b"signed-app",
+        )
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        states = [
+            json.loads(path.read_text(encoding="utf-8"))["state"]
+            for path in sorted(
+                (self.fixture.context.attempt_root / "events").glob("*.json")
+            )
+        ]
+        self.assertEqual(states.count("finalization_started"), 2)
+
+    def test_staple_failure_retries_from_immutable_source(self) -> None:
+        self.fixture.runner.fail_role = CommandRole.STAPLE
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover()
+        self.assertEqual(raised.exception.code, "staple_failed")
+        self.assertTrue(
+            (self.fixture.context.attempt_root / "recovery-source").is_dir()
+        )
+
+        self.fixture.runner.fail_role = None
+        self._reset_runner_observations()
+        final_app = self.fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        states = [
+            json.loads(path.read_text(encoding="utf-8"))["state"]
+            for path in sorted(
+                (self.fixture.context.attempt_root / "events").glob("*.json")
+            )
+        ]
+        self.assertIn("failed", states)
+        self.assertEqual(states.count("finalization_started"), 2)
+
+    def test_history_status_must_match_accepted_info(self) -> None:
+        self.fixture.runner.history_entries = [
+            {
+                "createdDate": self.fixture.runner.info_created_at,
+                "id": SUBMISSION_ID,
+                "name": self.fixture.context.archive_name,
+                "status": "Rejected",
+            }
+        ]
+        self._reset_runner_observations()
+
+        with self.assertRaisesRegex(TransactionError, "uniquely bind"):
+            self.fixture.recover()
+
+        self.assertNotIn(CommandRole.STAPLE, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_history_page_must_cover_complete_submit_window(self) -> None:
+        self.fixture.runner.history_entries = [
+            {
+                "createdDate": self.fixture.runner.info_created_at,
+                "id": (
+                    SUBMISSION_ID
+                    if index == 0
+                    else f"00000000-0000-4000-8000-{index:012d}"
+                ),
+                "name": self.fixture.context.archive_name,
+                "status": "Accepted",
+            }
+            for index in range(100)
+        ]
+        self._reset_runner_observations()
+
+        with self.assertRaisesRegex(TransactionError, "complete submit window"):
+            self.fixture.recover()
+
+        self.assertNotIn(CommandRole.STAPLE, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_recovery_log_upload_time_must_follow_info_within_window(self) -> None:
+        self.fixture.runner.log["uploadDate"] = "2026-07-28T04:02:01.000Z"
+        self._reset_runner_observations()
+
+        with self.assertRaisesRegex(TransactionError, "uploadDate"):
+            self.fixture.recover()
+
+        self.assertNotIn(CommandRole.STAPLE, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_legacy_second_window_accepts_same_second_apple_fraction(self) -> None:
+        self.fixture.runner.log["uploadDate"] = "2026-07-28T04:02:00.999Z"
+        self._reset_runner_observations()
+
+        final_app = self.fixture.recover()
+
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_recovery_lock_allows_only_one_reconciler(self) -> None:
+        self._reset_runner_observations()
+        info_entered = threading.Event()
+        release_info = threading.Event()
+
+        def blocking_runner(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role == CommandRole.INFO:
+                info_entered.set()
+                if not release_info.wait(5):
+                    raise AssertionError("test did not release blocked info call")
+            return self.fixture.runner(role, command, timeout)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(
+                self.fixture.recover,
+                command_runner=blocking_runner,
+            )
+            self.assertTrue(info_entered.wait(2))
+            second = executor.submit(
+                self.fixture.recover,
+                command_runner=blocking_runner,
+            )
+            try:
+                with self.assertRaises(TransactionError) as raised:
+                    second.result(timeout=2)
+                self.assertEqual(raised.exception.code, "recovery_in_progress")
+            finally:
+                release_info.set()
+            self.assertTrue(first.result(timeout=5).is_dir())
+
+        self.assertEqual(
+            self.fixture.runner.calls.count(CommandRole.INFO),
+            1,
+        )
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_recovery_reserves_event_capacity_before_remote_reads(self) -> None:
+        self._reset_runner_observations()
+        current_events = len(
+            list((self.fixture.context.attempt_root / "events").glob("*.json"))
+        )
+        with patch.object(
+            transaction_module,
+            "MAX_EVENT_DOCUMENTS",
+            current_events + transaction_module.RECOVERY_SUCCESS_EVENT_RESERVE - 1,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                self.fixture.recover()
+
+        self.assertEqual(
+            raised.exception.code,
+            "event_journal_capacity_exceeded",
+        )
+        self.assertNotIn(CommandRole.INFO, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_recovery_tool_source_drift_blocks_every_finalization_checkpoint(self) -> None:
+        for drift_call in (2, 3, 4):
+            with self.subTest(drift_call=drift_call):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                fixture.create_orphaned_submit_attempt()
+                fixture.runner.calls.clear()
+                fixture.runner.command_calls.clear()
+                fixture.runner.role_counts.clear()
+                identity_calls = 0
+
+                def drifting_recovery_identity(_repository: Path) -> dict[str, str]:
+                    nonlocal identity_calls
+                    identity_calls += 1
+                    return {
+                        "repositoryCommit": (
+                            "e" * 40 if identity_calls >= drift_call else "c" * 40
+                        ),
+                        "releaseSourceSha256": (
+                            "f" * 64 if identity_calls >= drift_call else "d" * 64
+                        ),
+                    }
+
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.recover(
+                        recovery_tool_identity_reader=drifting_recovery_identity
+                    )
+
+                self.assertEqual(
+                    raised.exception.code,
+                    "recovery_tool_identity_drift",
+                )
+                self.assertFalse(os.path.lexists(fixture.context.final_root))
+                self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
 
 
 class NotarizationTransactionFailureTests(unittest.TestCase):
@@ -1698,7 +2369,7 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
             "outcome_unknown",
         )
 
-    def test_unknown_submit_field_is_not_silently_projected(self) -> None:
+    def test_unknown_submit_field_is_fail_closed_after_safe_identity_projection(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
 
@@ -1714,8 +2385,8 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                     json.dumps(
                         {
                             "id": SUBMISSION_ID,
-                            "message": "uploaded",
-                            "status": "In Progress",
+                            "message": "Successfully uploaded file",
+                            "path": command[3],
                             "warnings": ["unreviewed semantic field"],
                         }
                     ),
@@ -1728,6 +2399,189 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         self.assertEqual(raised.exception.terminal_state, "outcome_unknown")
         self.assertFalse(
             (fixture.context.attempt_root / "submission-receipt.json").exists()
+        )
+        observation_path = (
+            fixture.context.attempt_root / "submission-observation.json"
+        )
+        observation = json.loads(observation_path.read_text(encoding="utf-8"))
+        self.assertEqual(observation["submission_id"], SUBMISSION_ID)
+        self.assertEqual(observation["path_binding"], "exact")
+        self.assertNotIn(b"warnings", observation_path.read_bytes())
+
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+        final_app = fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.HISTORY, fixture.runner.calls)
+
+    def test_submit_anomalies_preserve_safe_identity_for_read_only_recovery(self) -> None:
+        for label, returncode, stderr, expected_code in (
+            ("nonzero", 9, "", "submit_failed"),
+            ("stderr", 0, "unexpected diagnostic", "submit_stderr"),
+        ):
+            with self.subTest(label=label):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+
+                def anomalous_submit(
+                    role: CommandRole,
+                    command: list[str],
+                    timeout: float,
+                ) -> CommandResult:
+                    if role == CommandRole.SUBMIT:
+                        fixture.runner.calls.append(role)
+                        return CommandResult(
+                            returncode,
+                            submit_response(command[3]),
+                            stderr,
+                        )
+                    return fixture.runner(role, command, timeout)
+
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.execute(command_runner=anomalous_submit)
+                self.assertEqual(raised.exception.code, expected_code)
+                observation = json.loads(
+                    (
+                        fixture.context.attempt_root
+                        / "submission-observation.json"
+                    ).read_text(encoding="utf-8")
+                )
+                self.assertEqual(observation["submission_id"], SUBMISSION_ID)
+
+                fixture.runner.calls.clear()
+                fixture.runner.command_calls.clear()
+                fixture.runner.role_counts.clear()
+                final_app = fixture.recover()
+                self.assertTrue(final_app.is_dir())
+                self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+                self.assertNotIn(CommandRole.HISTORY, fixture.runner.calls)
+
+    def test_id_bearing_outcome_rejects_deleted_submit_observation(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def unknown_submit(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role == CommandRole.SUBMIT:
+                return CommandResult(
+                    0,
+                    json.dumps(
+                        {
+                            "id": SUBMISSION_ID,
+                            "message": "Successfully uploaded file",
+                            "path": command[3],
+                            "warnings": ["unknown field"],
+                        }
+                    ),
+                    "",
+                )
+            return fixture.runner(role, command, timeout)
+
+        with self.assertRaises(TransactionError):
+            fixture.execute(command_runner=unknown_submit)
+        (
+            fixture.context.attempt_root / "submission-observation.json"
+        ).unlink()
+        fixture.runner.calls.clear()
+
+        with self.assertRaises(TransactionError) as raised:
+            fixture.recover()
+
+        self.assertEqual(raised.exception.code, "submission_observation_missing")
+        self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+
+    def test_missing_observation_keeps_journal_id_and_requires_history(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        original_writer = transaction_module._write_json_exclusive
+
+        def fail_observation(path: Path, value: object) -> None:
+            if path.name == "submission-observation.json":
+                raise TransactionError(
+                    "evidence_write_failed",
+                    "simulated observation durability failure",
+                )
+            original_writer(path, value)
+
+        with patch.object(
+            transaction_module,
+            "_write_json_exclusive",
+            fail_observation,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                fixture.execute()
+        self.assertEqual(raised.exception.code, "submission_observation_failed")
+
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+        with self.assertRaises(TransactionError) as mismatch:
+            fixture.recover("22222222-3333-4444-8555-666666666666")
+        self.assertEqual(mismatch.exception.code, "submission_id_mismatch")
+        self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+        final_app = fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertIn(CommandRole.HISTORY, fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+
+    def test_status_shaped_submit_response_is_rejected_without_an_identity_projection(
+        self,
+    ) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def legacy_submit(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role == CommandRole.SUBMIT:
+                fixture.runner.calls.append(role)
+                return CommandResult(0, response("In Progress"), "")
+            return fixture.runner(role, command, timeout)
+
+        with self.assertRaisesRegex(TransactionError, "projectable identity"):
+            fixture.execute(command_runner=legacy_submit)
+        self.assertFalse(
+            (fixture.context.attempt_root / "submission-observation.json").exists()
+        )
+        self.assertFalse(
+            (fixture.context.attempt_root / "submission-receipt.json").exists()
+        )
+
+    def test_submit_path_mismatch_is_rejected_before_identity_persistence(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def mismatched_path(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role == CommandRole.SUBMIT:
+                fixture.runner.calls.append(role)
+                return CommandResult(
+                    0,
+                    submit_response(str(Path(command[3]).with_name("other.zip"))),
+                    "",
+                )
+            return fixture.runner(role, command, timeout)
+
+        with self.assertRaisesRegex(TransactionError, "path differs"):
+            fixture.execute(command_runner=mismatched_path)
+        self.assertFalse(
+            (fixture.context.attempt_root / "submission-observation.json").exists()
         )
 
     def test_uppercase_submit_id_is_not_silently_canonicalized(self) -> None:
@@ -1746,8 +2600,8 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                     json.dumps(
                         {
                             "id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".upper(),
-                            "message": "uploaded",
-                            "status": "In Progress",
+                            "message": "Successfully uploaded file",
+                            "path": command[3],
                         }
                     ),
                     "",
@@ -2253,6 +3107,133 @@ class AttemptConcurrencyTests(unittest.TestCase):
             results = list(executor.map(run, contexts))
         self.assertEqual(sorted(results), ["attempt_exists", "published"])
         self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
+
+
+class NotarizationCliTests(unittest.TestCase):
+    def _common_arguments(self) -> list[str]:
+        return [
+            "--build-kind",
+            "validation",
+            "--build-number",
+            "40001",
+            "--native-products",
+            "/tmp/cfw-native-products",
+            "--notary-profile",
+            "fixture-profile",
+            "--repository-commit",
+            "a" * 40,
+            "--release-source-sha256",
+            "b" * 64,
+            "--deployment-target",
+            "15.0",
+            "--go-module-cache-tree-sha256",
+            "1" * 64,
+            "--go-toolchain-tree-sha256",
+            "2" * 64,
+            "--go-tools-tree-sha256",
+            "3" * 64,
+            "--node-toolchain-tree-sha256",
+            "4" * 64,
+            "--tauri-toolchain-tree-sha256",
+            "5" * 64,
+            "--toolchain-sha256",
+            "6" * 64,
+            "--ui-dependencies-tree-sha256",
+            "7" * 64,
+            "--xcodegen-toolchain-tree-sha256",
+            "8" * 64,
+        ]
+
+    def _run(self, mode_arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(Path(transaction_module.__file__).resolve()),
+                *self._common_arguments(),
+                *mode_arguments,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_submit_and_recovery_modes_are_mutually_exclusive(self) -> None:
+        result = self._run(
+            [
+                "--staged-app",
+                "/tmp/Clash for Mac.app",
+                "--recover-submission-id",
+                SUBMISSION_ID,
+                "--artifact-repository",
+                "/tmp/artifact-repository",
+            ]
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not allowed with argument", result.stderr)
+
+    def test_recovery_requires_separate_artifact_repository(self) -> None:
+        result = self._run(["--recover-submission-id", SUBMISSION_ID])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("recovery requires --artifact-repository", result.stderr)
+
+    def test_recovery_requires_explicit_toolchain_root(self) -> None:
+        result = self._run(
+            [
+                "--recover-submission-id",
+                SUBMISSION_ID,
+                "--artifact-repository",
+                "/tmp/artifact-repository",
+            ]
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("recovery requires --toolchain-root", result.stderr)
+
+    def test_recovery_dispatch_separates_artifact_tool_and_toolchain_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            artifact_repository = root / "artifact-repository"
+            toolchain_root = root / "toolchains"
+            artifact_repository.mkdir()
+            toolchain_root.mkdir()
+            final_app = (
+                artifact_repository
+                / "target/candidates/0.4.0/validation/40001/signed/Clash for Mac.app"
+            )
+            argv = [
+                str(Path(transaction_module.__file__).resolve()),
+                *self._common_arguments(),
+                "--recover-submission-id",
+                SUBMISSION_ID,
+                "--artifact-repository",
+                str(artifact_repository),
+                "--toolchain-root",
+                str(toolchain_root),
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.dict(os.environ, {}, clear=False),
+                patch.object(
+                    transaction_module,
+                    "recover_transaction",
+                    return_value=final_app,
+                ) as recover,
+                patch("builtins.print"),
+            ):
+                transaction_module.main()
+                self.assertEqual(
+                    os.environ["CFW_TOOLCHAIN_ROOT"],
+                    str(toolchain_root),
+                )
+
+            context, submission_id, recovery_tool_repository = recover.call_args.args
+            self.assertEqual(context.repository, artifact_repository)
+            self.assertIsNone(context.staged_app)
+            self.assertEqual(submission_id, SUBMISSION_ID)
+            self.assertEqual(
+                recovery_tool_repository,
+                Path(transaction_module.__file__).resolve().parent.parent,
+            )
 
 
 class ExclusivePublishTests(unittest.TestCase):

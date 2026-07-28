@@ -11,7 +11,14 @@ ARCHIVE_BYTES = b"archive"
 ARCHIVE_SHA256 = hashlib.sha256(ARCHIVE_BYTES).hexdigest()
 
 
-def response(status: str, message: str = "fixture response") -> str:
+def submit_response(path: str, message: str = "Successfully uploaded file") -> str:
+    return json.dumps(
+        {"id": SUBMISSION_ID, "message": message, "path": path},
+        sort_keys=True,
+    )
+
+
+def response(status: str, message: str = "Processing complete") -> str:
     return json.dumps(
         {"id": SUBMISSION_ID, "message": message, "status": status},
         sort_keys=True,
@@ -26,7 +33,7 @@ def accepted_log(archive_name: str) -> dict:
         "statusSummary": "Ready for distribution",
         "statusCode": 0,
         "archiveFilename": archive_name,
-        "uploadDate": "2026-07-28T04:00:00.000Z",
+        "uploadDate": "2026-07-28T04:02:00.000Z",
         "sha256": ARCHIVE_SHA256,
         "ticketContents": [
             {

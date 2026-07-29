@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::gui_handoff::LegacyGuiIdentity;
+#[cfg(test)]
+use super::handoff_ticket::ProcessStartIdentity;
 use super::process_cleanup::ProcessRecord;
 
 const JOURNAL_FILE: &str = "legacy-cutover-journal-v1.json";
@@ -47,7 +49,7 @@ pub(super) struct CutoverJournal {
     pub(super) legacy_session: Option<LegacySessionJournalIdentity>,
     pub(super) legacy_proxy_services: Vec<LegacyProxyServiceIdentity>,
     pub(super) legacy_proxy_port: Option<u16>,
-    pub(super) legacy_gui: LegacyGuiIdentity,
+    pub(super) legacy_gui: Option<LegacyGuiIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,7 +75,7 @@ impl CutoverJournal {
         profile_digest: impl Into<String>,
         request: &CutoverPreflightRequest,
         legacy: LegacyNetworkJournalInput,
-        legacy_gui: LegacyGuiIdentity,
+        legacy_gui: Option<LegacyGuiIdentity>,
     ) -> Result<Self, String> {
         let journal = Self {
             schema_version: SCHEMA_VERSION,
@@ -162,11 +164,19 @@ impl CutoverJournal {
                     || service.display_name().chars().any(char::is_control)
             })
             || self.legacy_proxy_port == Some(0)
-            || self.legacy_gui.uid != unsafe { libc::geteuid() }
-            || self.legacy_gui.pid == 0
-            || self.legacy_gui.start_identity.is_empty()
-            || self.legacy_gui.executable
-                != Path::new("/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac")
+            || self.legacy_gui.as_ref().is_some_and(|legacy_gui| {
+                legacy_gui.uid != unsafe { libc::geteuid() }
+                    || legacy_gui.pid == 0
+                    || !legacy_gui.start_identity.is_valid()
+                    || legacy_gui.executable
+                        != Path::new("/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac")
+            })
+            || self.legacy_gui.is_none()
+                && (self.legacy_interface.is_some()
+                    || self.legacy_process.is_some()
+                    || self.legacy_session.is_some()
+                    || !self.legacy_proxy_services.is_empty()
+                    || self.legacy_proxy_port.is_some())
         {
             return Err("legacy cutover journal identity is invalid".into());
         }
@@ -187,6 +197,62 @@ impl CutoverJournal {
 #[derive(Debug, Clone)]
 pub(super) struct CutoverJournalStore {
     root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum JournalAdvanceError {
+    Failed(String),
+    CommitUncertain(Box<CommitUncertainJournal>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CommitUncertainJournal {
+    intended: CutoverJournal,
+    persisted: Result<Option<CutoverJournal>, String>,
+    detail: String,
+}
+
+impl JournalAdvanceError {
+    pub(super) fn commit_is_uncertain(&self) -> bool {
+        matches!(self, Self::CommitUncertain(_))
+    }
+}
+
+impl std::fmt::Display for JournalAdvanceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(message) => formatter.write_str(message),
+            Self::CommitUncertain(state) => write!(
+                formatter,
+                "cutover journal {:?} commit durability is uncertain after rename ({detail}); lock-bound reread phase: {}",
+                state.intended.phase,
+                match &state.persisted {
+                    Ok(Some(journal)) => format!("{:?}", journal.phase),
+                    Ok(None) => "missing".into(),
+                    Err(error) => format!("unreadable ({error})"),
+                },
+                detail = state.detail,
+            ),
+        }
+    }
+}
+
+impl From<String> for JournalAdvanceError {
+    fn from(value: String) -> Self {
+        Self::Failed(value)
+    }
+}
+
+impl From<JournalAdvanceError> for String {
+    fn from(value: JournalAdvanceError) -> Self {
+        value.to_string()
+    }
+}
+
+#[derive(Debug)]
+enum AtomicWriteError {
+    Failed(String),
+    CommitUncertain(String),
 }
 
 impl CutoverJournalStore {
@@ -219,24 +285,57 @@ impl CutoverJournalStore {
         &self,
         expected: CutoverPhase,
         next: CutoverPhase,
-    ) -> Result<CutoverJournal, String> {
+    ) -> Result<CutoverJournal, JournalAdvanceError> {
+        self.advance_with_directory_sync(expected, next, File::sync_all)
+    }
+
+    fn advance_with_directory_sync(
+        &self,
+        expected: CutoverPhase,
+        next: CutoverPhase,
+        sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<CutoverJournal, JournalAdvanceError> {
         if !valid_transition(expected, next) {
-            return Err("invalid legacy cutover journal phase transition".into());
-        }
-        let directory = Directory::open_or_create(&self.root)?;
-        directory.lock()?;
-        let mut journal = directory
-            .read_journal()?
-            .ok_or_else(|| "legacy cutover journal is missing".to_owned())?;
-        if journal.phase != expected {
-            return Err(format!(
-                "legacy cutover journal is {:?}, expected {expected:?}",
-                journal.phase
+            return Err(JournalAdvanceError::Failed(
+                "invalid legacy cutover journal phase transition".into(),
             ));
         }
+        let directory = Directory::open_or_create(&self.root).map_err(JournalAdvanceError::from)?;
+        directory.lock().map_err(JournalAdvanceError::from)?;
+        let mut journal = directory
+            .read_journal()
+            .map_err(JournalAdvanceError::from)?
+            .ok_or_else(|| {
+                JournalAdvanceError::Failed("legacy cutover journal is missing".to_owned())
+            })?;
+        if journal.phase != expected {
+            return Err(JournalAdvanceError::Failed(format!(
+                "legacy cutover journal is {:?}, expected {expected:?}",
+                journal.phase
+            )));
+        }
         journal.phase = next;
-        directory.write_atomic(&journal.canonical_bytes()?)?;
-        Ok(journal)
+        let bytes = journal
+            .canonical_bytes()
+            .map_err(JournalAdvanceError::from)?;
+        match directory.write_atomic_with_directory_sync(&bytes, sync_directory) {
+            Ok(()) => Ok(journal),
+            Err(AtomicWriteError::Failed(error)) => Err(JournalAdvanceError::Failed(error)),
+            Err(AtomicWriteError::CommitUncertain(detail)) => {
+                // The directory remains exclusively locked while binding the
+                // visible journal back to the exact intended operation/phase.
+                // Even an exact reread remains durability-uncertain and must
+                // never be converted to ordinary success.
+                let persisted = directory.read_journal();
+                Err(JournalAdvanceError::CommitUncertain(Box::new(
+                    CommitUncertainJournal {
+                        intended: journal,
+                        persisted,
+                        detail,
+                    },
+                )))
+            }
+        }
     }
 
     pub(super) fn abandon_pre_network(&self, expected: CutoverPhase) -> Result<(), String> {
@@ -461,7 +560,22 @@ impl Directory {
     }
 
     fn write_atomic(&self, bytes: &[u8]) -> Result<(), String> {
-        self.remove_stale_temporary()?;
+        self.write_atomic_with_directory_sync(bytes, File::sync_all)
+            .map_err(|error| match error {
+                AtomicWriteError::Failed(message) => message,
+                AtomicWriteError::CommitUncertain(message) => format!(
+                    "cutover journal commit durability is uncertain after rename: {message}"
+                ),
+            })
+    }
+
+    fn write_atomic_with_directory_sync(
+        &self,
+        bytes: &[u8],
+        sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<(), AtomicWriteError> {
+        self.remove_stale_temporary()
+            .map_err(AtomicWriteError::Failed)?;
         let temporary = CString::new(TEMPORARY_FILE).expect("fixed name");
         let descriptor = unsafe {
             libc::openat(
@@ -472,13 +586,13 @@ impl Directory {
             )
         };
         if descriptor == -1 {
-            return Err(format!(
+            return Err(AtomicWriteError::Failed(format!(
                 "failed to create legacy cutover journal temporary: {}",
                 std::io::Error::last_os_error()
-            ));
+            )));
         }
         let mut file = unsafe { File::from_raw_fd(descriptor) };
-        let operation = (|| -> Result<(), String> {
+        let before_rename = (|| -> Result<(), String> {
             if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } == -1 {
                 return Err(format!(
                     "failed to secure journal temporary: {}",
@@ -505,16 +619,17 @@ impl Directory {
                     std::io::Error::last_os_error()
                 ));
             }
-            self.file
-                .sync_all()
-                .map_err(|error| format!("cutover journal commit durability is uncertain: {error}"))
+            Ok(())
         })();
-        if operation.is_err() {
+        if let Err(error) = before_rename {
             unsafe {
                 libc::unlinkat(self.file.as_raw_fd(), temporary.as_ptr(), 0);
             }
+            return Err(AtomicWriteError::Failed(error));
         }
-        operation
+        sync_directory(&self.file).map_err(|error| {
+            AtomicWriteError::CommitUncertain(format!("directory fsync failed: {error}"))
+        })
     }
 
     fn remove_stale_temporary(&self) -> Result<(), String> {
@@ -617,14 +732,17 @@ mod tests {
             "33".repeat(32),
             &request(),
             LegacyNetworkJournalInput::default(),
-            LegacyGuiIdentity {
+            Some(LegacyGuiIdentity {
                 uid: unsafe { libc::geteuid() },
                 pid: 42,
-                start_identity: "Tue Jul 21 21:30:57 2026".into(),
+                start_identity: ProcessStartIdentity {
+                    seconds: 1_721_599_857,
+                    microseconds: 123_456,
+                },
                 executable: PathBuf::from(
                     "/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac",
                 ),
-            },
+            }),
         )
         .expect("journal");
         store.write_prepared(&journal).expect("write prepared");
@@ -654,6 +772,51 @@ mod tests {
     }
 
     #[test]
+    fn post_rename_directory_fsync_failure_is_bound_and_commit_uncertain() {
+        let root = tempfile::tempdir().expect("temp");
+        let store = CutoverJournalStore::new(root.path());
+        let journal = CutoverJournal::prepared(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "33".repeat(32),
+            &request(),
+            LegacyNetworkJournalInput::default(),
+            Some(LegacyGuiIdentity {
+                uid: unsafe { libc::geteuid() },
+                pid: 42,
+                start_identity: ProcessStartIdentity {
+                    seconds: 1_721_599_857,
+                    microseconds: 123_456,
+                },
+                executable: PathBuf::from(
+                    "/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac",
+                ),
+            }),
+        )
+        .expect("journal");
+        store.write_prepared(&journal).expect("write prepared");
+
+        let failure = store
+            .advance_with_directory_sync(CutoverPhase::Prepared, CutoverPhase::GuiStopped, |_| {
+                Err(std::io::Error::other("injected directory fsync failure"))
+            })
+            .expect_err("directory fsync must remain commit-uncertain");
+        assert!(failure.commit_is_uncertain());
+        match failure {
+            JournalAdvanceError::CommitUncertain(state) => {
+                assert_eq!(state.intended.phase, CutoverPhase::GuiStopped);
+                assert_eq!(state.persisted, Ok(Some(state.intended.clone())));
+                assert!(state.detail.contains("injected directory fsync failure"));
+            }
+            other => panic!("unexpected fault classification: {other:?}"),
+        }
+        assert_eq!(
+            store.load().expect("load").expect("journal").phase,
+            CutoverPhase::GuiStopped,
+            "the lock-bound reread must expose the renamed phase; callers keep the GUI stopped"
+        );
+    }
+
+    #[test]
     fn malformed_or_writable_journal_fails_closed() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -662,5 +825,22 @@ mod tests {
         fs::write(&path, b"{}").expect("write malformed");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).expect("chmod");
         assert!(CutoverJournalStore::new(root.path()).load().is_err());
+    }
+
+    #[test]
+    fn fresh_install_journal_has_no_invented_legacy_gui_identity() {
+        let journal = CutoverJournal::prepared(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "33".repeat(32),
+            &request(),
+            LegacyNetworkJournalInput::default(),
+            None,
+        )
+        .expect("fresh journal");
+        assert!(journal.legacy_gui.is_none());
+
+        let mut inconsistent = journal;
+        inconsistent.legacy_interface = Some("utun7".into());
+        assert!(inconsistent.validate().is_err());
     }
 }

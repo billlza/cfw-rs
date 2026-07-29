@@ -215,6 +215,14 @@ pub(crate) fn handle_app_menu_event(app: &AppHandle, id: &str) {
     match app_menu_action(id) {
         Some(AppMenuAction::OpenPage(page)) => show_main_page(app, page),
         Some(AppMenuAction::CheckForUpdates(page)) => {
+            if app.state::<crate::LaunchContext>().migration_handoff {
+                emit_shell_error(
+                    app,
+                    "handoff_command_rejected",
+                    "update checks are unavailable during migration handoff".into(),
+                );
+                return;
+            }
             show_main_page(app, page);
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -370,23 +378,29 @@ pub(crate) fn focus_main_window(app: &AppHandle) {
     show_main_page(app, MainPage::General);
 }
 
+pub(crate) fn prepare_migration_handoff_window(app: &AppHandle) -> Result<(), String> {
+    show_main_page_result(app, MainPage::General)
+}
+
 fn show_main_page(app: &AppHandle, page: MainPage) {
-    let result = (|| -> Result<(), String> {
-        app.set_activation_policy(tauri::ActivationPolicy::Regular)
-            .map_err(|error| error.to_string())?;
-        app.set_dock_visibility(true)
-            .map_err(|error| error.to_string())?;
-        let window = app
-            .get_webview_window("main")
-            .ok_or_else(|| "main window is unavailable".to_string())?;
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        app.emit("cfw://page", page.id())
-            .map_err(|error| error.to_string())
-    })();
+    let result = show_main_page_result(app, page);
     if let Err(error) = result {
         emit_shell_error(app, "window_activation_failed", error);
     }
+}
+
+fn show_main_page_result(app: &AppHandle, page: MainPage) -> Result<(), String> {
+    app.set_activation_policy(tauri::ActivationPolicy::Regular)
+        .map_err(|error| error.to_string())?;
+    app.set_dock_visibility(true)
+        .map_err(|error| error.to_string())?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+    app.emit("cfw://page", page.id())
+        .map_err(|error| error.to_string())
 }
 
 fn emit_shell_error(app: &AppHandle, kind: &str, message: String) {

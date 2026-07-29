@@ -1,6 +1,7 @@
 mod admission;
 mod cutover_plan;
 mod gui_handoff;
+mod handoff_ticket;
 mod journal;
 mod migration;
 mod network_fingerprint;
@@ -26,6 +27,9 @@ use journal::{
 };
 
 pub(crate) use admission::require_canonical_handoff_candidate;
+pub(crate) use handoff_ticket::{
+    ConsumedHandoffTicket, LaunchArguments, ProcessIdentity, parse_launch_arguments,
+};
 pub(crate) use journal::MigrationHandoffLease;
 
 pub(crate) use state_gate::{LegacyRetirementGate, LegacyRetirementStatus};
@@ -44,11 +48,13 @@ pub(crate) fn legacy_retirement_status(
 /// command rejects a non-handoff launch). This is the one renderer entry point
 /// that starts the handoff: it refuses to run inside a handoff instance, proves
 /// the running app is the installed, signed, notarized release before spawning,
-/// and starts a detached sibling process that acquires the exclusive handoff
-/// lease itself. It never stops the current instance, mutates the network, or
-/// touches proxy/DNS/route state.
+/// and starts a sibling process that acquires the exclusive handoff lease. The
+/// dashboard exits only after that child completes setup and publishes a
+/// ticket-bound readiness acknowledgement. This command never mutates proxy,
+/// DNS, route, or legacy process state.
 #[tauri::command]
-pub(crate) fn begin_migration_handoff(
+pub(crate) async fn begin_migration_handoff(
+    app: AppHandle,
     launch: State<'_, crate::LaunchContext>,
 ) -> Result<(), String> {
     if launch.migration_handoff {
@@ -57,11 +63,34 @@ pub(crate) fn begin_migration_handoff(
     admission::require_canonical_handoff_candidate()?;
     let executable = std::env::current_exe()
         .map_err(|error| format!("cannot resolve the running executable: {error}"))?;
-    std::process::Command::new(executable)
-        .arg("--migration-handoff")
-        .spawn()
-        .map(std::mem::drop)
-        .map_err(|error| format!("failed to launch the migration handoff instance: {error}"))
+    let store = crate::settings_store()?;
+    store.ensure_layout().map_err(|error| error.to_string())?;
+    let pending = handoff_ticket::PendingHandoff::create(&store.paths().app_home, &executable)?;
+    let cleanup = pending.cleanup_handle();
+    let readiness = tauri::async_runtime::spawn_blocking(move || {
+        let mut child = pending.spawn()?;
+        pending.wait_until_ready(&mut child)?;
+        Ok::<_, String>((pending, child))
+    })
+    .await;
+    let (pending, mut child) = match readiness {
+        Ok(result) => result?,
+        Err(error) => {
+            return cleanup.fail(format!("migration handoff readiness task failed: {error}"));
+        }
+    };
+    if let Err(error) = crate::lifecycle::prepare_handoff_exit(app.clone()).await {
+        let termination = pending.terminate_child(&mut child);
+        let documents = pending.cleanup_handle().cleanup();
+        return match (termination, documents) {
+            (Ok(()), Ok(())) => Err(error),
+            (termination, documents) => Err(format!(
+                "{error}; handoff shutdown cleanup failed: termination={termination:?}, documents={documents:?}"
+            )),
+        };
+    }
+    app.exit(0);
+    Ok(())
 }
 
 // Tauri commands receive each renderer argument as a separate parameter, so the
@@ -86,6 +115,7 @@ pub(crate) async fn disable_service_mode(
         );
     }
     admission::require_canonical_handoff_candidate()?;
+    launch.require_handoff_parent_absent()?;
     require_explicit_cutover_confirmation(cutover_confirmed)?;
     // Immediate exclusive admission requires exact Off and rejects any prior
     // mode change. The lease remains held through retirement and replacement
@@ -163,7 +193,10 @@ pub(crate) async fn disable_service_mode(
                 .into(),
         );
     }
-    let mut legacy_gui = LegacyGuiHandoff::capture()?;
+    let parent = launch
+        .handoff_parent_identity()
+        .ok_or_else(|| "migration handoff has no ticket-bound parent identity".to_owned())?;
+    let mut legacy_gui = LegacyGuiHandoff::capture(parent, plan.fresh_install_absence_proven())?;
 
     let journal_store = CutoverJournalStore::new(plan.store.paths().app_home.clone());
     let journal = CutoverJournal::prepared(
@@ -183,7 +216,7 @@ pub(crate) async fn disable_service_mode(
             proxy_services: plan.legacy_proxy_services().to_vec(),
             proxy_port: plan.legacy_proxy_port(),
         },
-        legacy_gui.identity().clone(),
+        legacy_gui.identity().cloned(),
     )?;
     // This fsync-backed Prepared record is the last barrier before any
     // destructive operation. Failure here leaves the old VPN untouched.
@@ -194,6 +227,12 @@ pub(crate) async fn disable_service_mode(
     };
     legacy_gui.stop()?;
     if let Err(error) = journal_store.advance(CutoverPhase::Prepared, CutoverPhase::GuiStopped) {
+        if error.commit_is_uncertain() {
+            legacy_gui.seal_legacy_retired();
+            return Err(format!(
+                "legacy GUI remains stopped because the GuiStopped journal rename completed but durability is uncertain; explicit recovery is required: {error}"
+            ));
+        }
         return Err(format!(
             "legacy GUI was resumed because its stopped phase could not be persisted: {error}"
         ));
@@ -201,6 +240,12 @@ pub(crate) async fn disable_service_mode(
     if let Err(error) =
         journal_store.advance(CutoverPhase::GuiStopped, CutoverPhase::NetworkRetiring)
     {
+        if error.commit_is_uncertain() {
+            legacy_gui.seal_legacy_retired();
+            return Err(format!(
+                "legacy GUI remains stopped because the NetworkRetiring journal rename completed but durability is uncertain; explicit recovery is required: {error}"
+            ));
+        }
         return Err(format!(
             "legacy GUI was resumed because network-retirement intent could not be persisted: {error}"
         ));
@@ -302,6 +347,7 @@ pub(crate) async fn recover_legacy_cutover(
         );
     }
     admission::require_canonical_handoff_candidate()?;
+    launch.require_handoff_parent_absent()?;
     let _maintenance = engine
         .reserve_maintenance()
         .map_err(|error| error.to_string())?;
@@ -324,6 +370,9 @@ pub(crate) async fn recover_legacy_cutover(
     if journal.phase == CutoverPhase::CleanupComplete {
         migration::run_launch_preflight(&app)?;
         return Ok(());
+    }
+    if journal.phase == CutoverPhase::NetworkRetiring {
+        recovery::ensure_network_retiring_gui_stopped(&journal)?;
     }
 
     let Some(mut attempt) = retirement.begin_attempt()? else {
@@ -429,7 +478,9 @@ pub(crate) async fn recover_legacy_cutover(
     }
 
     debug_assert!(replacement_active);
-    LegacyGuiHandoff::terminate_persisted_after_replacement_active(&journal.legacy_gui)?;
+    if let Some(legacy_gui) = journal.legacy_gui.as_ref() {
+        LegacyGuiHandoff::terminate_persisted_after_replacement_active(legacy_gui)?;
+    }
     match migration::finalize_recovered_legacy_data(&app) {
         Ok(()) => {
             if journal.phase == CutoverPhase::ReplacementActive {
@@ -502,7 +553,8 @@ fn advance_journal_after_active(store: &CutoverJournalStore) -> Result<(), Strin
     match phase {
         CutoverPhase::LegacyRetired => store
             .advance(CutoverPhase::LegacyRetired, CutoverPhase::ReplacementActive)
-            .map(|_| ()),
+            .map(|_| ())
+            .map_err(String::from),
         CutoverPhase::ReplacementActive => Ok(()),
         other => Err(format!(
             "cutover journal cannot record replacement Active from phase {other:?}"

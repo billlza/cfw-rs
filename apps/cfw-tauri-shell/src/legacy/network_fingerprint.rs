@@ -15,6 +15,19 @@ pub(super) struct LegacyNetworkFingerprint {
 }
 
 impl LegacyNetworkFingerprint {
+    pub(super) fn verify_absent() -> Result<(), String> {
+        let interfaces = command_output("/sbin/ifconfig", &[])?;
+        let matches = legacy_interfaces(&interfaces);
+        if matches.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "legacy TUN fingerprint remains on interfaces {}; fresh-install absence is not proven",
+                matches.join(", ")
+            ))
+        }
+    }
+
     pub(super) fn interface(&self) -> &str {
         &self.interface
     }

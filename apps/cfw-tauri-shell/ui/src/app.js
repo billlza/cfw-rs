@@ -51,6 +51,17 @@ import {
   normalizeGcReceipt,
 } from "./credentials.js";
 
+import {
+  clearCutoverReceipt,
+  cutoverConfirmArguments,
+  cutoverReceiptIsCurrent,
+  migrationRoute,
+  newCutoverState,
+  normalizeCutoverPreparation,
+  normalizeRetirementStatus,
+  unverifiableRetirementStatus,
+} from "./migration.js";
+
 /// Reasons the dashboard shows next to a control the 0.4.0 backend refuses.
 /// Each one states what the product does instead, so a disabled switch is never
 /// unexplained and never silently does nothing.
@@ -550,27 +561,56 @@ function renderRowNote(short, reason) {
 function renderMigrationBanner() {
   const retirement = state.retirement;
   if (!retirement || typeof retirement.state !== "string") return "";
-  const stateTag = retirement.state;
-  const needsMigration = ["awaiting_confirmation", "manual_cleanup_required", "recovery_start_required"].includes(stateTag);
-  if (!needsMigration) return "";
-  const cutover = state.cutover;
+  const route = migrationRoute(retirement, state.migrationHandoff);
+  if (route === "none") return "";
+  let cutover = state.cutover;
+  if (cutover.receiptId && !cutoverReceiptIsCurrent(cutover)) {
+    state.cutover = clearCutoverReceipt(cutover, {
+      message: "The cutover preparation expired. Prepare the replacement again.",
+    });
+    cutover = state.cutover;
+  }
 
-  if (!state.migrationHandoff) {
-    const detail = stateTag === "recovery_start_required"
+  if (route === "unverifiable") {
+    return `
+      <div class="cfw-migration-banner cfw-migration-unverifiable" role="alert">
+        <div class="cfw-migration-copy">
+          <strong>Migration state cannot be verified</strong>
+          <small>${escapeHtml(retirement.message ?? "The durable legacy-retirement state could not be read. Networking remains fail-closed.")}</small>
+        </div>
+      </div>
+    `;
+  }
+
+  if (route === "busy") {
+    return `
+      <div class="cfw-migration-banner" role="status">
+        <div class="cfw-migration-copy">
+          <strong>Migration is in progress</strong>
+          <small>The signed handoff is completing the one-way network transition.</small>
+        </div>
+      </div>
+    `;
+  }
+
+  if (route === "launch_prepare" || route === "launch_recovery") {
+    const recovery = route === "launch_recovery";
+    const detail = recovery
       ? "A previous one-way cutover was interrupted. Recovery runs in a separate, signed migration session."
       : "This install has not retired the legacy network yet. The network stays disabled until you complete the one-way cutover, which runs in a separate, signed migration session while the old app keeps running.";
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
-          <strong>Finish setup: migrate to the 0.4.0 network</strong>
+          <strong>${recovery ? "Recovery required" : "Finish setup: migrate to the 0.4.0 network"}</strong>
           <small>${escapeHtml(detail)}</small>
+          ${retirement.message ? `<small>${escapeHtml(retirement.message)}</small>` : ""}
         </div>
-        <button type="button" class="cfw-big-button" data-action="begin-migration-handoff">Start Migration…</button>
+        <button type="button" class="cfw-big-button" data-action="begin-migration-handoff">${recovery ? "Open Recovery…" : "Start Migration…"}</button>
       </div>
     `;
   }
 
-  if (stateTag === "recovery_start_required") {
+  if (route === "recover") {
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
@@ -583,17 +623,17 @@ function renderMigrationBanner() {
     `;
   }
 
-  const target = cutover.target ?? (engineTunnelPreferred() ? "tunnel" : "system_proxy");
+  const target = cutover.target;
   const targetLabel = target === "tunnel" ? "TUN" : "System Proxy";
-  const ready = Boolean(cutover.receiptId);
+  const ready = cutoverReceiptIsCurrent(cutover);
   const step = ready
     ? `
         <label class="cfw-migration-confirm">
-          <input type="checkbox" data-cutover-confirm ${cutover.confirmChecked ? "checked" : ""} />
+          <input type="checkbox" data-cutover-confirm ${cutover.confirmedReceiptId === cutover.receiptId ? "checked" : ""} />
           <span>I understand this one-way cutover retires the legacy network and cannot be undone.</span>
         </label>
         <label class="cfw-migration-confirm">
-          <input type="checkbox" data-cutover-dns-review ${cutover.dnsReviewChecked ? "checked" : ""} />
+          <input type="checkbox" data-cutover-dns-review ${cutover.dnsReviewedReceiptId === cutover.receiptId ? "checked" : ""} />
           <span>I have reviewed DNS for every active service in System Settings.</span>
         </label>
         <button type="button" class="cfw-big-button danger" data-action="confirm-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Migrating…" : `Confirm one-way cutover to ${escapeHtml(targetLabel)}`}</button>
@@ -609,6 +649,13 @@ function renderMigrationBanner() {
       <div class="cfw-migration-copy">
         <strong>Migration session — retire the legacy network</strong>
         <small>The old app keeps running until you confirm. Prepare stages and validates the replacement; nothing on the network changes until you explicitly confirm.</small>
+        <label class="cfw-migration-target">
+          <span>Replacement</span>
+          <select data-cutover-target ${ready || cutover.busy ? "disabled" : ""}>
+            <option value="system_proxy" ${target === "system_proxy" ? "selected" : ""}>System Proxy</option>
+            <option value="tunnel" ${target === "tunnel" ? "selected" : ""}>TUN</option>
+          </select>
+        </label>
         ${retirement.message ? `<small>${escapeHtml(retirement.message)}</small>` : ""}
         ${cutover.message ? `<small>${escapeHtml(cutover.message)}</small>` : ""}
         ${approvalNote}
@@ -616,10 +663,6 @@ function renderMigrationBanner() {
       ${step}
     </div>
   `;
-}
-
-function engineTunnelPreferred() {
-  return state.engine.desiredMode === "tunnel";
 }
 
 function renderGeneral() {
@@ -2843,13 +2886,26 @@ function bindPageEvents() {
   const cutoverConfirm = document.querySelector("[data-cutover-confirm]");
   if (cutoverConfirm) {
     cutoverConfirm.addEventListener("change", (event) => {
-      state.cutover.confirmChecked = event.currentTarget.checked === true;
+      state.cutover.confirmedReceiptId = event.currentTarget.checked === true
+        ? state.cutover.receiptId
+        : null;
     });
   }
   const cutoverDnsReview = document.querySelector("[data-cutover-dns-review]");
   if (cutoverDnsReview) {
     cutoverDnsReview.addEventListener("change", (event) => {
-      state.cutover.dnsReviewChecked = event.currentTarget.checked === true;
+      state.cutover.dnsReviewedReceiptId = event.currentTarget.checked === true
+        ? state.cutover.receiptId
+        : null;
+    });
+  }
+  const cutoverTarget = document.querySelector("[data-cutover-target]");
+  if (cutoverTarget) {
+    cutoverTarget.addEventListener("change", (event) => {
+      const target = event.currentTarget.value;
+      if (target !== "system_proxy" && target !== "tunnel") return;
+      state.cutover = clearCutoverReceipt(state.cutover, { targetValue: target, message: null });
+      renderPage();
     });
   }
 
@@ -3037,7 +3093,7 @@ async function applyToggle(key, checked, source) {
   }
 }
 
-async function handleAction(action) {
+export async function handleAction(action) {
   if (action === "open-settings") {
     state.activePage = "settings";
   }
@@ -3045,60 +3101,69 @@ async function handleAction(action) {
     try {
       await invoke("begin_migration_handoff");
       appendLog("info", "migration", "Launching the signed migration session…");
-      state.cutover.message = "A separate migration window is opening. Complete the cutover there; this window stays available.";
+      state.cutover.message = "The verified migration window is ready. This dashboard will now close.";
     } catch (error) {
       state.cutover.message = errorText(error);
       appendLog("error", "migration", `Could not start the migration session: ${errorText(error)}`);
     }
   }
   if (action === "prepare-cutover") {
+    const requestedTarget = state.cutover.target;
+    state.cutover = clearCutoverReceipt(state.cutover, {
+      targetValue: requestedTarget,
+      message: null,
+    });
     state.cutover.busy = true;
-    state.cutover.message = null;
     renderPage();
     try {
-      const target = state.engine.desiredMode === "tunnel" ? "tunnel" : "system_proxy";
-      const preparation = await invoke("prepare_legacy_cutover", { target });
-      if (preparation?.status === "ready") {
-        state.cutover.receiptId = preparation.receipt_id;
-        state.cutover.target = preparation.target;
+      const response = await invoke("prepare_legacy_cutover", { target: requestedTarget });
+      const preparation = normalizeCutoverPreparation(response, requestedTarget);
+      if (preparation.status === "ready") {
+        state.cutover.receiptId = preparation.receiptId;
+        state.cutover.receiptTarget = preparation.target;
+        state.cutover.receiptIssuedAt = preparation.issuedAt;
+        state.cutover.receiptExpiresAt = preparation.expiresAt;
         state.cutover.awaitingApproval = false;
         state.cutover.message = "Replacement staged and validated. Confirm the one-way cutover to proceed.";
-      } else {
-        state.cutover.receiptId = null;
-        state.cutover.target = preparation?.target ?? target;
+      } else if (preparation.status === "awaiting_approval") {
         state.cutover.awaitingApproval = true;
         state.cutover.message = "System Extension approval is pending.";
       }
     } catch (error) {
-      state.cutover.receiptId = null;
-      state.cutover.message = errorText(error);
+      state.cutover = clearCutoverReceipt(state.cutover, {
+        targetValue: requestedTarget,
+        message: errorText(error),
+      });
       appendLog("error", "migration", `Prepare cutover failed: ${errorText(error)}`);
     } finally {
       state.cutover.busy = false;
     }
   }
   if (action === "confirm-cutover") {
-    if (!state.cutover.receiptId) {
-      state.cutover.message = "Prepare the cutover before confirming.";
-    } else if (!state.cutover.confirmChecked) {
-      state.cutover.message = "Tick the one-way cutover confirmation to proceed.";
-    } else {
+    let confirmArgs;
+    try {
+      confirmArgs = cutoverConfirmArguments(state.cutover);
+    } catch (error) {
+      if (cutoverReceiptIsCurrent(state.cutover)) {
+        state.cutover.message = errorText(error);
+      } else {
+        state.cutover = clearCutoverReceipt(state.cutover, {
+          message: errorText(error),
+        });
+      }
+    }
+    if (confirmArgs) {
       state.cutover.busy = true;
       state.cutover.message = null;
       renderPage();
       try {
-        await invoke("disable_service_mode", {
-          receiptId: state.cutover.receiptId,
-          cutoverConfirmed: true,
-          dnsReviewConfirmed: Boolean(state.cutover.dnsReviewChecked),
-        });
-        state.cutover = { busy: false, receiptId: null, target: null, awaitingApproval: false, message: "Cutover complete. Replacement networking is active." };
+        await invoke("disable_service_mode", confirmArgs);
+        state.cutover = newCutoverState(state.cutover.target, "Cutover complete. Replacement networking is active.");
         appendLog("info", "migration", "Legacy network retired; replacement is active.");
         await loadEngineStatus();
         await loadRetirementStatus();
       } catch (error) {
-        state.cutover.receiptId = null;
-        state.cutover.message = errorText(error);
+        state.cutover = clearCutoverReceipt(state.cutover, { message: errorText(error) });
         appendLog("error", "migration", `Cutover failed: ${errorText(error)}`);
         await loadRetirementStatus();
       } finally {
@@ -3107,8 +3172,8 @@ async function handleAction(action) {
     }
   }
   if (action === "recover-cutover") {
+    state.cutover = clearCutoverReceipt(state.cutover, { message: null });
     state.cutover.busy = true;
-    state.cutover.message = null;
     renderPage();
     try {
       await invoke("recover_legacy_cutover");
@@ -3802,12 +3867,12 @@ async function loadEngineStatus() {
 
 /// Reads the legacy-retirement state machine so the dashboard can surface the
 /// fresh-install AwaitingConfirmation lock and offer the migration path. A read
-/// failure is non-fatal: it leaves the previous value and logs a warning.
+/// or schema failure becomes an explicit fail-closed `unverifiable` state.
 async function loadRetirementStatus() {
   try {
-    state.retirement = await invoke("legacy_retirement_status");
+    state.retirement = normalizeRetirementStatus(await invoke("legacy_retirement_status"));
   } catch (error) {
-    state.retirement = null;
+    state.retirement = unverifiableRetirementStatus(errorText(error));
     appendLog("warning", "engine", `Unable to read the legacy retirement state: ${errorText(error)}`);
   }
 }

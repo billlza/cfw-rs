@@ -213,7 +213,8 @@ fn finalize_legacy_data_state(
         .map_err(|error| format!("failed to publish migrated settings: {error}"))
 }
 
-fn require_retired_managed_paths_absent(store: &SettingsStore) -> Result<(), String> {
+pub(super) fn require_retired_managed_paths_absent(store: &SettingsStore) -> Result<(), String> {
+    require_path_absent(&store.paths().legacy_settings_file, "legacy settings file")?;
     require_path_absent(
         &store.paths().legacy_cores_dir,
         "legacy managed core directory",

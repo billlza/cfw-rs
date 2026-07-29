@@ -71,12 +71,23 @@ export const state = {
   // read from `boot_payload`. The default (main) dashboard offers the restart
   // that enters the handoff; only the handoff instance drives the cutover.
   migrationHandoff: false,
-  // Latest `legacy_retirement_status` (`{ state, ... }`) or null when unread.
-  // Surfaces the fresh-install AwaitingConfirmation lock so the dashboard is
-  // never permanently stuck on a disabled network with no path forward.
+  // Latest validated `legacy_retirement_status` (`{ state, ... }`). An IPC or
+  // schema failure becomes the explicit local `unverifiable` state; it is
+  // never represented as an ordinary absence or a cleared migration.
   retirement: null,
   // In-flight cutover progress within the handoff instance.
-  cutover: { busy: false, receiptId: null, target: null, awaitingApproval: false, message: null },
+  cutover: {
+    busy: false,
+    target: "system_proxy",
+    awaitingApproval: false,
+    message: null,
+    receiptId: null,
+    receiptTarget: null,
+    receiptIssuedAt: null,
+    receiptExpiresAt: null,
+    confirmedReceiptId: null,
+    dnsReviewedReceiptId: null,
+  },
   // Values read out of the projected engine configuration. Null means the
   // projection could not be read, never a placeholder port or endpoint.
   projection: { mixedPort: null, controller: null, logLevel: null, error: null },

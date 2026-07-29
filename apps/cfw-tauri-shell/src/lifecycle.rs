@@ -32,6 +32,27 @@ impl AppLifecycle {
     }
 }
 
+pub(crate) async fn prepare_handoff_exit(app: AppHandle) -> Result<(), String> {
+    let lifecycle = app.state::<AppLifecycle>();
+    if !lifecycle.begin_shutdown() {
+        return Err("application shutdown is already in progress".into());
+    }
+    let coordinator = app.state::<ManagedEngine>().coordinator.clone();
+    match coordinator.shutdown().await {
+        Ok(_) => {
+            app.state::<LiveStreams>().stop_all();
+            lifecycle.mark_exit_ready();
+            Ok(())
+        }
+        Err(error) => {
+            lifecycle.reset_after_failure();
+            Err(format!(
+                "dashboard shutdown failed; migration handoff was cancelled: {error}"
+            ))
+        }
+    }
+}
+
 pub(crate) fn request_shutdown(app: AppHandle, exit_code: i32) {
     let lifecycle = app.state::<AppLifecycle>();
     if lifecycle.exit_ready() {

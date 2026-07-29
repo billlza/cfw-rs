@@ -242,6 +242,7 @@ const responses = {
 };
 
 const invoked = [];
+const invocationDetails = [];
 const rejected = {
   providers_snapshot: "controller capability `provider management` is unsupported by pinned engine sing-box 1.13.14",
 };
@@ -259,13 +260,14 @@ globalThis.window.__TAURI_INTERNALS__ = {
     }
     if (command === "plugin:event|unlisten") return null;
     invoked.push(command);
+    invocationDetails.push({ command, args });
     if (command in rejected) throw new Error(rejected[command]);
     if (!(command in responses)) throw new Error(`no canned response for ${command}`);
     return responses[command];
   },
 };
 
-await import("../src/app.js");
+const appModule = await import("../src/app.js");
 const { state } = await import("../src/state.js");
 await new Promise((resolve) => setTimeout(resolve, 150));
 
@@ -443,6 +445,81 @@ test("the General page surfaces approval and capability reasons", async () => {
     unavailable_reason: "native runtime unavailable",
   });
   assert.ok((await renderPage("general")).includes("native runtime unavailable"));
+});
+
+test("General routes recovery, post-cutover cleanup and unreadable state without changing pages", async () => {
+  state.migrationHandoff = true;
+  state.retirement = { state: "recovery_start_required", target: "tunnel", message: "durable journal remains" };
+  let html = await renderPage("general");
+  assert.ok(html.includes("Recover Replacement"));
+  assert.equal(html.includes("Prepare cutover"), false);
+
+  state.retirement = { state: "post_cutover_cleanup_required", message: "old data remains" };
+  html = await renderPage("general");
+  assert.ok(html.includes("Recover Replacement"));
+
+  state.retirement = { state: "unverifiable", message: "journal unreadable" };
+  html = await renderPage("general");
+  assert.ok(html.includes("Migration state cannot be verified"));
+  assert.equal(html.includes("Prepare cutover"), false);
+
+  state.retirement = { state: "awaiting_confirmation" };
+  state.cutover = {
+    ...state.cutover,
+    target: "system_proxy",
+    receiptId: null,
+  };
+  html = await renderPage("general");
+  assert.ok(html.includes("data-cutover-target"));
+  assert.ok(html.includes("System Proxy"));
+  assert.ok(html.includes("TUN"));
+
+  state.migrationHandoff = false;
+  state.retirement = { state: "cleared" };
+});
+
+test("migration actions invoke exact target, receipt and confirmation arguments", async () => {
+  state.migrationHandoff = true;
+  state.retirement = { state: "awaiting_confirmation" };
+  state.cutover = {
+    ...state.cutover,
+    target: "tunnel",
+    receiptId: null,
+  };
+  responses.prepare_legacy_cutover = { status: "awaiting_approval", target: "tunnel" };
+  await appModule.handleAction("prepare-cutover");
+  assert.deepEqual(invocationDetails.at(-1), {
+    command: "prepare_legacy_cutover",
+    args: { target: "tunnel" },
+  });
+  assert.equal(state.cutover.awaitingApproval, true);
+  assert.equal(state.cutover.receiptId, null);
+
+  responses.prepare_legacy_cutover = {
+    status: "ready",
+    receipt_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    target: "tunnel",
+    profile_id: PROFILE_ID,
+    valid_for_millis: 60_000,
+  };
+  await appModule.handleAction("prepare-cutover");
+  state.cutover.confirmedReceiptId = state.cutover.receiptId;
+  state.cutover.dnsReviewedReceiptId = state.cutover.receiptId;
+  responses.disable_service_mode = null;
+  responses.legacy_retirement_status = { state: "cleared" };
+  await appModule.handleAction("confirm-cutover");
+  const disable = invocationDetails.findLast((entry) => entry.command === "disable_service_mode");
+  assert.deepEqual(disable, {
+    command: "disable_service_mode",
+    args: {
+      receiptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      cutoverConfirmed: true,
+      dnsReviewConfirmed: true,
+    },
+  });
+
+  state.migrationHandoff = false;
+  state.retirement = { state: "cleared" };
 });
 
 test("the Settings page reports the diagnostics fields the backend calls unavailable", async () => {

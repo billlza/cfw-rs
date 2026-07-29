@@ -26,7 +26,9 @@ pub(super) fn resume_pre_network_cutover_if_intact(
         return Err("cutover journal is not in a resumable pre-network phase".into());
     }
     verify_legacy_network_intact(journal, store)?;
-    LegacyGuiHandoff::resume_persisted_if_stopped(&journal.legacy_gui)?;
+    if let Some(legacy_gui) = journal.legacy_gui.as_ref() {
+        LegacyGuiHandoff::resume_persisted_if_stopped(legacy_gui)?;
+    }
     CutoverJournalStore::new(store.paths().app_home.clone()).abandon_pre_network(journal.phase)
 }
 
@@ -97,6 +99,8 @@ pub(super) async fn finish_network_retirement(
         return Err("network retirement recovery requires NetworkRetiring phase".into());
     }
 
+    ensure_network_retiring_gui_stopped(journal)?;
+
     match (&journal.legacy_process, &journal.legacy_session) {
         (Some(expected), Some(_)) => {
             let current = managed_processes(store.paths().legacy_cores_dir.as_path())?;
@@ -146,6 +150,20 @@ pub(super) async fn finish_network_retirement(
         .retire_legacy_service()
         .map_err(|error| format!("failed to unregister retired Service Mode: {error}"))?;
     verify_privileged_artifacts_are_gone(store.paths().legacy_cores_dir.as_path())
+}
+
+pub(super) fn ensure_network_retiring_gui_stopped(journal: &CutoverJournal) -> Result<(), String> {
+    if journal.phase != CutoverPhase::NetworkRetiring {
+        return Err("GUI stop recovery requires NetworkRetiring phase".into());
+    }
+    // NetworkRetiring is a one-way intent record. Before any replacement or
+    // legacy network mutation, bind the persisted GUI identity to the live
+    // kernel incarnation and prove it is stopped. A crash between journal
+    // commit and stop confirmation can only re-stop that exact process or fail.
+    if let Some(legacy_gui) = journal.legacy_gui.as_ref() {
+        LegacyGuiHandoff::ensure_persisted_stopped_for_network_retirement(legacy_gui)?;
+    }
+    Ok(())
 }
 
 fn request_stop_if_session_remains(

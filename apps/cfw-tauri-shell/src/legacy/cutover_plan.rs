@@ -7,6 +7,7 @@ use cfw_platform::{
     MacOsPlatformService, ServiceModeStatus,
 };
 
+use super::migration::require_retired_managed_paths_absent;
 use super::migration::restore_legacy_dns;
 use super::network_fingerprint::LegacyNetworkFingerprint;
 use super::process_cleanup::{
@@ -27,6 +28,7 @@ pub(super) struct LegacyCutoverPlan {
     tunnel: Option<LegacyNetworkFingerprint>,
     control_session: Option<LegacyControlSessionObservation>,
     managed_process: Option<ProcessRecord>,
+    fresh_install_absence_proven: bool,
 }
 
 #[derive(Debug)]
@@ -153,6 +155,27 @@ impl LegacyCutoverPlan {
             None
         };
 
+        let fresh_install_candidate = !retirement_completed
+            && legacy_settings.is_none()
+            && matches!(
+                service_status,
+                ServiceModeStatus::NotRegistered | ServiceModeStatus::NotFound
+            )
+            && control_session.is_none()
+            && managed_process.is_none()
+            && proxy.is_none()
+            && tunnel.is_none()
+            && !network.system_proxy
+            && !network.tun_mode;
+        let fresh_install_absence_proven = if fresh_install_candidate {
+            verify_privileged_artifacts_are_gone(store.paths().legacy_cores_dir.as_path())?;
+            require_retired_managed_paths_absent(&store)?;
+            LegacyNetworkFingerprint::verify_absent()?;
+            true
+        } else {
+            false
+        };
+
         Ok(Self {
             store,
             retirement_completed,
@@ -162,6 +185,7 @@ impl LegacyCutoverPlan {
             tunnel,
             control_session,
             managed_process,
+            fresh_install_absence_proven,
         })
     }
 
@@ -230,6 +254,10 @@ impl LegacyCutoverPlan {
         self.tunnel
             .as_ref()
             .map(LegacyNetworkFingerprint::interface)
+    }
+
+    pub(super) fn fresh_install_absence_proven(&self) -> bool {
+        self.fresh_install_absence_proven
     }
 
     pub(super) fn legacy_process(&self) -> Option<&ProcessRecord> {

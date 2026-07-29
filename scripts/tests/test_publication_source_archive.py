@@ -47,6 +47,19 @@ class PublicationSourceArchiveTests(unittest.TestCase):
                 stream.truncate(source_archive.MAX_SOURCE_ARCHIVE_BYTES + 1)
             self.assert_rejected_before_hash_or_tar(archive)
 
+    def test_manifest_schema_version_requires_a_json_integer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "corresponding-source.tar.gz"
+            archive.write_bytes(b"archive")
+            for invalid in (1.0, True):
+                with self.subTest(invalid=invalid):
+                    manifest = empty_manifest()
+                    manifest["schema_version"] = invalid
+                    with self.assertRaisesRegex(PublicationError, "unsupported"):
+                        source_archive.verify_source_archive(
+                            archive, manifest, hashlib.sha256(b"archive").hexdigest()
+                        )
+
     def test_oversized_dense_regular_archive_is_rejected_before_hash_or_tar(
         self,
     ) -> None:

@@ -49,7 +49,8 @@ def _verify_evidence_manifest(root: Path) -> None:
         "publication evidence manifest",
     )
     if (
-        manifest["schema_version"] != 1
+        type(manifest["schema_version"]) is not int
+        or manifest["schema_version"] != 1
         or manifest["algorithm"] != "sha256-tree-v1"
         or manifest["root"] != "publication-evidence"
     ):
@@ -130,7 +131,8 @@ def _verify_inventory(
 ) -> None:
     app_manifest = machine["app"]
     if (
-        inventory["schema_version"] != 1
+        type(inventory["schema_version"]) is not int
+        or inventory["schema_version"] != 1
         or inventory["fixture"] is not fixture
         or inventory["product"] != identity
         or inventory["bundle_build_number"] != identity["build_number"]
@@ -163,7 +165,11 @@ def verify_evidence(root: Path, app: Path, fixture: bool) -> None:
         },
         "machine closure",
     )
-    if machine["schema_version"] != 1 or machine["fixture"] is not fixture:
+    if (
+        type(machine["schema_version"]) is not int
+        or machine["schema_version"] != 1
+        or machine["fixture"] is not fixture
+    ):
         raise PublicationError("machine closure mode/version mismatch")
     identity = product(machine["product"], fixture)
     if not fixture:

@@ -15,7 +15,7 @@ from scripts.publication.final_candidate import (
     REPORT_CATEGORIES,
     REQUIRED_NESTED_CODE,
     TEAM_ID,
-    UPDATER_KEY_BLOCK,
+    WORKSPACE_SECRET_BLOCK,
     VERIFIED,
     build_final_candidate_binding as _build_final_candidate_binding,
     environment_status,
@@ -130,10 +130,6 @@ def _request(**overrides) -> dict:
         },
         "xcframework": _xcframework(),
         "nested_code": _nested_code(),
-        "evidence_binding": {
-            "artifact_hash_manifest_sha256": manifest["sha256"],
-            "superseded_report_hashes": [],
-        },
         "post_verification": {"app_tree_sha256": SIGNED_TREE, "observed_at": OBSERVED_AT},
         "notarization": {
             "status": "Accepted",
@@ -179,6 +175,10 @@ class FinalCandidateRoundTripTests(_CleanWorkspaceMixin):
         self.assertEqual(binding["visibility"], "private-release-operations")
         self.assertEqual(binding["status"], VERIFIED)
         self.assertEqual(binding["blocked_inputs"], [])
+        self.assertEqual(
+            binding["physical_artifact_hash_manifest_sha256"],
+            binding["final_artifacts"]["artifact_hash_manifest"]["sha256"],
+        )
         self.validate(binding, require_verified=True)
 
     def test_unconfigured_production_collector_key_is_an_explicit_blocker(self) -> None:
@@ -191,6 +191,7 @@ class FinalCandidateRoundTripTests(_CleanWorkspaceMixin):
         )
         self.assertEqual(binding["status"], BLOCKED)
         self.assertIn("collector_trust_policy", binding["blocked_inputs"])
+        self.assertIsNone(binding["physical_artifact_hash_manifest_sha256"])
         self.assertIsNone(binding["physical_trust_policy_sha256"])
 
     def test_all_inside_out_identities_are_bound(self) -> None:
@@ -232,12 +233,20 @@ class FinalCandidateRoundTripTests(_CleanWorkspaceMixin):
                 REPOSITORY, binding, fixture=False, workspace_root=self.workspace
             )
 
-    def test_legacy_v1_binding_is_rejected_after_gatekeeper_schema_hardening(self) -> None:
+    def test_legacy_v2_binding_is_rejected_after_physical_manifest_hardening(self) -> None:
         binding = self.build()
-        binding["schema_version"] = 1
-        binding["document"] = "final-candidate-notarization-installed-binding-v1"
+        binding["schema_version"] = 2
+        binding["document"] = "final-candidate-notarization-installed-binding-v2"
         with self.assertRaisesRegex(PublicationError, "unsupported schema/document"):
             self.validate(binding)
+
+    def test_schema_version_rejects_float_and_bool(self) -> None:
+        for invalid in (3.0, True):
+            with self.subTest(invalid=invalid):
+                binding = self.build()
+                binding["schema_version"] = invalid
+                with self.assertRaisesRegex(PublicationError, "unsupported schema/document"):
+                    self.validate(binding)
 
 
 class FinalCandidateUpdaterKeyTests(_CleanWorkspaceMixin):
@@ -247,14 +256,14 @@ class FinalCandidateUpdaterKeyTests(_CleanWorkspaceMixin):
         (self.workspace / ".tauri" / "cfw-rs.key").write_text("PRIVATE", encoding="utf-8")
         binding = self.build()
         self.assertEqual(binding["status"], BLOCKED)
-        self.assertIn(UPDATER_KEY_BLOCK, binding["blocked_inputs"])
+        self.assertIn(WORKSPACE_SECRET_BLOCK, binding["blocked_inputs"])
         with self.assertRaisesRegex(PublicationError, "environment-gated"):
             self.validate(binding, require_verified=True)
 
     def test_pem_updater_key_also_invalidates(self) -> None:
         (self.workspace / "release.pem").write_text("KEY", encoding="utf-8")
         binding = self.build()
-        self.assertIn(UPDATER_KEY_BLOCK, binding["blocked_inputs"])
+        self.assertIn(WORKSPACE_SECRET_BLOCK, binding["blocked_inputs"])
 
 
 class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
@@ -383,12 +392,35 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
     def test_physical_evidence_foreign_tree_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            physical = PhysicalEvidenceFixture(root)
-            physical.aggregate["candidate"]["signed_app_tree_sha256"] = "f" * 64
+            physical = PhysicalEvidenceFixture(root, signed_tree_sha256="f" * 64)
             request = _request(
                 physical_evidence=physical.write_aggregate_artifact()
             )
-            with self.assertRaises(PublicationError):
+            with self.assertRaisesRegex(
+                PublicationError,
+                "physical evidence signed app tree does not match the final candidate",
+            ):
+                _build_final_candidate_binding(
+                    REPOSITORY,
+                    request,
+                    fixture=True,
+                    workspace_root=self.workspace,
+                    physical_evidence_root=root,
+                    physical_trust_policy=physical.policy,
+                )
+
+    def test_physical_aggregate_v3_is_rejected_without_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            physical = PhysicalEvidenceFixture(root)
+            physical.aggregate["schema_version"] = 3
+            physical.aggregate["aggregator_version"] = "physical-evidence-aggregator-v3"
+            request = _request(
+                physical_evidence=physical.write_aggregate_artifact()
+            )
+            with self.assertRaisesRegex(
+                PublicationError, "aggregate schema_version must be 4"
+            ):
                 _build_final_candidate_binding(
                     REPOSITORY,
                     request,
@@ -403,10 +435,14 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
             root = Path(temporary)
             physical = PhysicalEvidenceFixture(root)
             physical.aggregate["candidate"]["built_at"] = "2026-01-01T00:00:00Z"
+            for run_index in range(len(physical.aggregate["runs"])):
+                physical.resign_run(run_index)
             request = _request(
                 physical_evidence=physical.write_aggregate_artifact()
             )
-            with self.assertRaisesRegex(PublicationError, "collector receipt signature is invalid"):
+            with self.assertRaisesRegex(
+                PublicationError, "physical evidence build time does not match"
+            ):
                 _build_final_candidate_binding(
                     REPOSITORY,
                     request,
@@ -500,23 +536,43 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
                 REPOSITORY, request, fixture=True, workspace_root=self.workspace
             )
 
-    def test_reports_bound_to_superseded_artifact_manifest_rejected(self) -> None:
+    def test_caller_supplied_evidence_binding_is_rejected(self) -> None:
         request = _request()
-        request["evidence_binding"]["artifact_hash_manifest_sha256"] = _sha("older-manifest")
-        with self.assertRaisesRegex(PublicationError, "superseded final artifact-hash manifest"):
+        request["evidence_binding"] = {
+            "artifact_hash_manifest_sha256": _sha("caller-only-manifest"),
+            "superseded_report_hashes": [],
+        }
+        with self.assertRaisesRegex(PublicationError, "unexpected field set"):
             build_final_candidate_binding(
                 REPOSITORY, request, fixture=True, workspace_root=self.workspace
             )
 
-    def test_superseded_raw_report_rejected(self) -> None:
-        binding = self.build()
-        superseded = binding["report_bindings"][0]["report_sha256"]
-        request = _request()
-        request["evidence_binding"]["superseded_report_hashes"] = [superseded]
-        with self.assertRaisesRegex(PublicationError, "binds superseded raw reports"):
-            build_final_candidate_binding(
-                REPOSITORY, request, fixture=True, workspace_root=self.workspace
+    def test_signed_physical_manifest_must_match_recomputed_final_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            physical = PhysicalEvidenceFixture(
+                root,
+                artifact_hash_manifest_sha256=_sha("older-final-manifest"),
             )
+            request = _request(physical_evidence=physical.write_aggregate_artifact())
+            with self.assertRaisesRegex(
+                PublicationError,
+                "artifact-hash manifest does not match the recomputed final manifest",
+            ):
+                _build_final_candidate_binding(
+                    REPOSITORY,
+                    request,
+                    fixture=True,
+                    workspace_root=self.workspace,
+                    physical_evidence_root=root,
+                    physical_trust_policy=physical.policy,
+                )
+
+    def test_derived_physical_manifest_binding_cannot_be_hand_edited(self) -> None:
+        binding = self.build()
+        binding["physical_artifact_hash_manifest_sha256"] = _sha("hand-edited")
+        with self.assertRaisesRegex(PublicationError, "hand-edited|content digest"):
+            self.validate(binding)
 
     def test_all_report_families_are_bound_for_both_run_sets(self) -> None:
         binding = self.build()
@@ -641,7 +697,7 @@ class FinalCandidateEnvironmentStatusTests(_CleanWorkspaceMixin):
         self.assertEqual(report["blocked_inputs"], sorted(PHYSICAL_INPUTS))
         for name in PHYSICAL_INPUTS:
             self.assertEqual(report["inputs"][name]["state"], NOT_RUN)
-        self.assertEqual(report["updater_key_blocks"], [])
+        self.assertEqual(report["workspace_secret_blocks"], [])
 
     def test_present_inputs_are_reported_without_granting_acceptance(self) -> None:
         directory = self.workspace / "evidence"
@@ -677,9 +733,9 @@ class FinalCandidateEnvironmentStatusTests(_CleanWorkspaceMixin):
             evidence_directory=self.workspace / "missing",
             workspace_root=self.workspace,
         )
-        self.assertIn(UPDATER_KEY_BLOCK, report["blocked_inputs"])
-        self.assertEqual(len(report["updater_key_blocks"]), 1)
-        block = report["updater_key_blocks"][0]
+        self.assertIn(WORKSPACE_SECRET_BLOCK, report["blocked_inputs"])
+        self.assertEqual(len(report["workspace_secret_blocks"]), 1)
+        block = report["workspace_secret_blocks"][0]
         self.assertEqual(block["name"], "cfw-rs.key")
         self.assertNotIn(secret, canonical_json(report).decode("utf-8"))
 
@@ -702,7 +758,7 @@ class FinalCandidateSelfCheckTests(unittest.TestCase):
         # right now is a transient environment fact - the mandated remediation
         # relocates it to an access-controlled store outside the repository - so
         # this test asserts the invariant instead of the current state.
-        from scripts.updater_key_release_blocker import evaluate_workspace
+        from scripts.release_secret_material_blocker import evaluate_workspace
 
         # Independent path/name-only oracle for what the workspace holds now.
         live = evaluate_workspace(REPOSITORY)
@@ -710,14 +766,14 @@ class FinalCandidateSelfCheckTests(unittest.TestCase):
 
         # The reported gate mirrors the real scan exactly, key or no key.
         self.assertEqual(
-            [block["path"] for block in report["updater_key_blocks"]],
+            [block["path"] for block in report["workspace_secret_blocks"]],
             [response.detected_path for response in live],
         )
         self.assertEqual(
-            UPDATER_KEY_BLOCK in report["blocked_inputs"],
-            bool(report["updater_key_blocks"]),
+            WORKSPACE_SECRET_BLOCK in report["blocked_inputs"],
+            bool(report["workspace_secret_blocks"]),
         )
-        for block in report["updater_key_blocks"]:
+        for block in report["workspace_secret_blocks"]:
             # Path/name and response flags only; no key bytes are ever carried.
             self.assertEqual(
                 set(block),
@@ -727,12 +783,25 @@ class FinalCandidateSelfCheckTests(unittest.TestCase):
                     "relocation_target",
                     "exposure_plausible",
                     "rotation_required",
-                    "trust_migration_required",
+                    "credential_kind",
+                    "required_trust_action",
+                    "updater_trust_migration_required",
+                    "notary_profile_reprovision_required",
+                    "trust_domain_identification_required",
                 },
             )
             self.assertTrue(block["path"].endswith(block["name"]))
-            self.assertIn(Path(block["name"]).suffix.lower(), {".key", ".pem"})
-            self.assertEqual(block["rotation_required"], block["trust_migration_required"])
+            self.assertIn(
+                Path(block["name"]).suffix.lower(),
+                {".key", ".p8", ".pem"},
+            )
+            if block["credential_kind"] == "updater-signing-key":
+                self.assertEqual(
+                    block["rotation_required"],
+                    block["updater_trust_migration_required"],
+                )
+            else:
+                self.assertFalse(block["updater_trust_migration_required"])
         # The status is derived from the blocked-input set; it is never acceptance.
         self.assertEqual(
             report["status"], BLOCKED if report["blocked_inputs"] else "inputs-present"

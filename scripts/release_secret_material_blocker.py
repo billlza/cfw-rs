@@ -1,20 +1,19 @@
-"""Updater-key atomic release blocker (Requirement 8.1).
+"""Path/name-only release secret-material blocker (Requirement 8.1).
 
-An ``Updater_Key_File`` is any updater-key-named ``.key`` or ``.pem`` file in
-the reviewable release workspace: repository source files plus every generated
-``target`` subtree except a small allowlist of managed, content-addressed heavy
-roots (for example ``.tauri/cfw-rs.key`` or
-``target/candidates/0.4.0/review/updater.pem``). If key material exists anywhere
-in that bounded surface, the release gate must execute *one atomic security
-response* that:
+A secret-material candidate is any ``.key``, ``.pem``, or ``.p8`` file in the
+reviewable release workspace. Detection remains deliberately path/name-only,
+while response policy distinguishes the known updater signing key, an Apple
+App Store Connect ``.p8`` API key, and an otherwise unknown private-key
+candidate. If secret material exists in that bounded surface, the gate executes
+one atomic, typed security response that:
 
 1. blocks release;
 2. inspects and reports **only** the file path and name, never opening or
    reading file contents;
 3. requires relocation to an access-controlled external store;
 4. prevents omission of any response step; and
-5. requires key rotation **plus** an updater trust migration when backup,
-   archive, or sharing exposure is plausible.
+5. requires the trust-domain-specific rotation action when backup, archive, or
+   sharing exposure is plausible.
 
 This module scans **by path and name only**.  It never calls ``open`` and never
 reads a candidate's bytes: detection uses directory entry names and entry
@@ -22,32 +21,39 @@ type/symlink metadata (a ``stat``-level fact, not file content).  Exposure
 plausibility is likewise decided from path/name signals alone.
 
 The blocker fails **closed**: an unavailable, symlinked, or malformed workspace
-root, or any traversal error, raises :class:`UpdaterKeyReleaseBlock` rather than
+root, or any traversal error, raises :class:`SecretMaterialReleaseBlock` rather than
 silently reporting "no key material".  Its presence is never downgraded to a
-warning and the response can never omit a mandated step.
+warning and the response can never omit a mandated domain-specific step.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import stat
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 
-class UpdaterKeyReleaseBlock(RuntimeError):
+class SecretMaterialReleaseBlock(RuntimeError):
     """Raised when the blocker must fail closed because an input required by
     the path/name scan is unavailable, untrustworthy, or malformed."""
 
 
-# Updater-key material is identified by extension only; the blocker never opens
-# a candidate to confirm it.
-KEY_SUFFIXES: frozenset[str] = frozenset({".key", ".pem"})
+# Secret material is detected by extension only; classification additionally
+# uses the path/name contract and never opens a candidate to inspect its bytes.
+SECRET_SUFFIXES: frozenset[str] = frozenset({".key", ".p8", ".pem"})
+UPDATER_KEY_NAMES: frozenset[str] = frozenset(
+    {"cfw-rs.key", "cfw-rs-v2.key", "updater.key", "updater.pem"}
+)
+PINNED_NOTARY_ASC_KEY_NAME = "AuthKey_DYHRNJ2Z4M.p8"
+APPLE_AUTH_KEY_RE = re.compile(r"^AuthKey_[A-Z0-9]{10}\.p8$")
 
 # Directories that are not part of the reviewable source surface. ``.git`` is
-# pruned because updater keys living in workspace *files* are the concern; its
+# pruned because secret candidates living in workspace *files* are the concern; its
 # presence is still read (by name only) as an exposure signal.
 PRUNE_DIR_NAMES: frozenset[str] = frozenset(
     {".git", "node_modules", ".build"}
@@ -96,17 +102,45 @@ EXPOSURE_PATH_MARKERS: frozenset[str] = frozenset(
 RELOCATION_TARGET = "an access-controlled external key store outside the repository workspace"
 
 
+class SecretMaterialKind(str, Enum):
+    """Trust-domain classification derived only from a candidate path/name."""
+
+    UPDATER_SIGNING_KEY = "updater-signing-key"
+    APPLE_ASC_NOTARY_KEY = "apple-app-store-connect-notary-api-key"
+    APPLE_API_PRIVATE_KEY = "apple-api-private-key-candidate"
+    UNKNOWN_PRIVATE_KEY = "unknown-private-key"
+
+
+class RequiredTrustAction(str, Enum):
+    """One complete response selected from exposure and trust domain."""
+
+    RELOCATE_ONLY = "relocate-outside-workspace"
+    ROTATE_UPDATER_AND_MIGRATE_TRUST = "rotate-updater-key-and-migrate-updater-trust"
+    ROTATE_ASC_AND_REPROVISION_NOTARY = (
+        "revoke-and-rotate-app-store-connect-key-and-reprovision-notary-profile"
+    )
+    IDENTIFY_APPLE_DOMAIN_AND_RELOCATE = (
+        "identify-apple-api-domain-and-relocate-credential"
+    )
+    IDENTIFY_APPLE_DOMAIN_AND_ROTATE = (
+        "identify-apple-api-domain-and-revoke-or-rotate-credential"
+    )
+    IDENTIFY_DOMAIN_AND_RELOCATE = "identify-trust-domain-and-relocate-credential"
+    IDENTIFY_DOMAIN_AND_ROTATE = "identify-trust-domain-and-rotate-credential"
+
+
 @dataclass(frozen=True)
-class DetectedUpdaterKey:
-    """An updater-key candidate identified by path and name only."""
+class DetectedSecretMaterial:
+    """A secret-material candidate identified by path and name only."""
 
     path: str
     name: str
+    kind: SecretMaterialKind
 
 
 @dataclass(frozen=True)
 class SecurityResponse:
-    """The one atomic security response for a single detected updater key.
+    """The one atomic security response for one detected secret candidate.
 
     Only ``path`` and ``name`` describe the file; no field ever carries file
     contents.  Every mandated step is an explicit field so omission is
@@ -115,17 +149,36 @@ class SecurityResponse:
 
     detected_path: str
     detected_name: str
+    credential_kind: SecretMaterialKind
     block_release: bool
     relocation_required: bool
     relocation_target: str
     exposure_plausible: bool
     rotation_required: bool
-    trust_migration_required: bool
+    required_trust_action: RequiredTrustAction
+    updater_trust_migration_required: bool
+    notary_profile_reprovision_required: bool
+    trust_domain_identification_required: bool
 
 
-def has_key_suffix(name: str) -> bool:
-    """Return True if ``name`` is an updater-key-named ``.key``/``.pem`` file."""
-    return Path(name).suffix.lower() in KEY_SUFFIXES
+def has_secret_suffix(name: str) -> bool:
+    """Return True for a ``.key``/``.pem``/``.p8`` candidate."""
+    return Path(name).suffix.lower() in SECRET_SUFFIXES
+
+
+def classify_secret_material(path: Path, name: str) -> SecretMaterialKind:
+    """Classify a candidate without reading it or guessing from its contents."""
+
+    lowered_name = name.lower()
+    if name == PINNED_NOTARY_ASC_KEY_NAME:
+        return SecretMaterialKind.APPLE_ASC_NOTARY_KEY
+    if APPLE_AUTH_KEY_RE.fullmatch(name):
+        return SecretMaterialKind.APPLE_API_PRIVATE_KEY
+    if lowered_name in UPDATER_KEY_NAMES or ".tauri" in {
+        part.lower() for part in path.parts
+    }:
+        return SecretMaterialKind.UPDATER_SIGNING_KEY
+    return SecretMaterialKind.UNKNOWN_PRIVATE_KEY
 
 
 def _is_pruned_target(root: Path, path: Path) -> bool:
@@ -149,7 +202,7 @@ def _require_acyclic_symlink_edges(
 
     def visit(node: tuple[int, int]) -> None:
         if node in visiting:
-            raise UpdaterKeyReleaseBlock(
+            raise SecretMaterialReleaseBlock(
                 "workspace directory symlinks form a traversal cycle"
             )
         if node in visited:
@@ -164,7 +217,9 @@ def _require_acyclic_symlink_edges(
         visit(node)
 
 
-def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdaterKey]:
+def scan_workspace(
+    workspace_root: str | os.PathLike[str],
+) -> list[DetectedSecretMaterial]:
     """Scan the bounded release workspace by path and name only.
 
     Never opens or reads a candidate.  Fails closed on an unavailable,
@@ -174,27 +229,27 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
 
     try:
         if root.is_symlink():
-            raise UpdaterKeyReleaseBlock(
+            raise SecretMaterialReleaseBlock(
                 f"workspace root is a symlink; scan cannot be trusted: {root}"
             )
         if not root.is_dir():
-            raise UpdaterKeyReleaseBlock(
+            raise SecretMaterialReleaseBlock(
                 f"workspace root is unavailable or not a directory: {root}"
             )
     except OSError as exc:  # pragma: no cover - defensive fail-closed
-        raise UpdaterKeyReleaseBlock(
+        raise SecretMaterialReleaseBlock(
             f"workspace root could not be inspected: {root}"
         ) from exc
 
     try:
         canonical_root = root.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        raise UpdaterKeyReleaseBlock(
+        raise SecretMaterialReleaseBlock(
             f"workspace root could not be resolved: {root}"
         ) from exc
 
     target = root / "target"
-    detected: list[DetectedUpdaterKey] = []
+    detected: list[DetectedSecretMaterial] = []
     stack: list[Path] = [root]
     visited_directories: set[tuple[int, int]] = set()
     visited_regular_files: set[tuple[int, int]] = set()
@@ -208,7 +263,7 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
         try:
             current_metadata = current.stat(follow_symlinks=False)
             if not stat.S_ISDIR(current_metadata.st_mode):
-                raise UpdaterKeyReleaseBlock(
+                raise SecretMaterialReleaseBlock(
                     f"workspace traversal reached a non-directory: {current}"
                 )
             current_identity = (current_metadata.st_dev, current_metadata.st_ino)
@@ -222,13 +277,13 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                         is_file = entry.is_file(follow_symlinks=False)
                         is_symlink = entry.is_symlink()
                     except OSError as exc:
-                        raise UpdaterKeyReleaseBlock(
+                        raise SecretMaterialReleaseBlock(
                             f"workspace entry could not be classified: {entry.path}"
                         ) from exc
                     entry_path = Path(entry.path)
                     if current == target and entry.name in MANAGED_TARGET_ROOTS:
                         if not is_dir or is_symlink:
-                            raise UpdaterKeyReleaseBlock(
+                            raise SecretMaterialReleaseBlock(
                                 "managed target root is not a trustworthy real "
                                 f"directory: {entry.path}"
                             )
@@ -244,15 +299,19 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                     # reachable by its canonical workspace path. We never walk
                     # through the alias; the real path is scanned normally.
                     if is_symlink:
-                        if has_key_suffix(entry.name):
+                        if has_secret_suffix(entry.name):
                             detected.append(
-                                DetectedUpdaterKey(path=entry.path, name=entry.name)
+                                DetectedSecretMaterial(
+                                    path=entry.path,
+                                    name=entry.name,
+                                    kind=classify_secret_material(entry_path, entry.name),
+                                )
                             )
                             continue
                         try:
                             target_metadata = entry.stat(follow_symlinks=True)
                         except OSError as exc:
-                            raise UpdaterKeyReleaseBlock(
+                            raise SecretMaterialReleaseBlock(
                                 "workspace symlink target could not be classified: "
                                 f"{entry.path}"
                             ) from exc
@@ -261,12 +320,12 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                                 resolved_target = entry_path.resolve(strict=True)
                                 resolved_target.relative_to(canonical_root)
                             except (OSError, RuntimeError, ValueError) as exc:
-                                raise UpdaterKeyReleaseBlock(
+                                raise SecretMaterialReleaseBlock(
                                     "workspace directory symlink escapes, loops, or "
                                     f"is unavailable: {entry.path}"
                                 ) from exc
                             if _is_pruned_target(canonical_root, resolved_target):
-                                raise UpdaterKeyReleaseBlock(
+                                raise SecretMaterialReleaseBlock(
                                     "workspace directory symlink reaches an excluded "
                                     f"tree only through an alias: {entry.path}"
                                 )
@@ -277,7 +336,7 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                                 not stat.S_ISDIR(resolved_metadata.st_mode)
                                 or resolved_target.is_symlink()
                             ):
-                                raise UpdaterKeyReleaseBlock(
+                                raise SecretMaterialReleaseBlock(
                                     "workspace directory symlink does not resolve to "
                                     f"a real directory: {entry.path}"
                                 )
@@ -289,7 +348,7 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                                 target_metadata.st_dev,
                                 target_metadata.st_ino,
                             ):
-                                raise UpdaterKeyReleaseBlock(
+                                raise SecretMaterialReleaseBlock(
                                     "workspace directory symlink changed while resolving: "
                                     f"{entry.path}"
                                 )
@@ -299,7 +358,7 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                             ).add(target_identity)
                             continue
                         if not stat.S_ISREG(target_metadata.st_mode):
-                            raise UpdaterKeyReleaseBlock(
+                            raise SecretMaterialReleaseBlock(
                                 "workspace symlink target is not a regular file: "
                                 f"{entry.path}"
                             )
@@ -307,12 +366,12 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                             resolved_target = entry_path.resolve(strict=True)
                             resolved_target.relative_to(canonical_root)
                         except (OSError, RuntimeError, ValueError) as exc:
-                            raise UpdaterKeyReleaseBlock(
+                            raise SecretMaterialReleaseBlock(
                                 "workspace file symlink escapes, loops, or is unavailable: "
                                 f"{entry.path}"
                             ) from exc
                         if _is_pruned_target(canonical_root, resolved_target):
-                            raise UpdaterKeyReleaseBlock(
+                            raise SecretMaterialReleaseBlock(
                                 "workspace file symlink reaches an excluded tree only "
                                 f"through an alias: {entry.path}"
                             )
@@ -329,7 +388,7 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                             or target_identity
                             != (resolved_metadata.st_dev, resolved_metadata.st_ino)
                         ):
-                            raise UpdaterKeyReleaseBlock(
+                            raise SecretMaterialReleaseBlock(
                                 "workspace file symlink does not resolve to a stable real "
                                 f"file: {entry.path}"
                             )
@@ -338,31 +397,33 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                     if is_file:
                         file_metadata = entry.stat(follow_symlinks=False)
                         if not stat.S_ISREG(file_metadata.st_mode):
-                            raise UpdaterKeyReleaseBlock(
+                            raise SecretMaterialReleaseBlock(
                                 f"workspace file changed while scanning: {entry.path}"
                             )
                         visited_regular_files.add(
                             (file_metadata.st_dev, file_metadata.st_ino)
                         )
-                        if has_key_suffix(entry.name):
+                        if has_secret_suffix(entry.name):
                             detected.append(
-                                DetectedUpdaterKey(
-                                    path=entry.path, name=entry.name
+                                DetectedSecretMaterial(
+                                    path=entry.path,
+                                    name=entry.name,
+                                    kind=classify_secret_material(entry_path, entry.name),
                                 )
                             )
         except OSError as exc:
             # A directory we cannot traverse means the scan is incomplete; a
             # partial scan must never be reported as "clean".
-            raise UpdaterKeyReleaseBlock(
+            raise SecretMaterialReleaseBlock(
                 f"workspace traversal failed under {current}"
             ) from exc
 
     if not directory_symlink_targets.issubset(visited_directories):
-        raise UpdaterKeyReleaseBlock(
+        raise SecretMaterialReleaseBlock(
             "workspace directory symlink target is not reachable by a scanned real path"
         )
     if not file_symlink_targets.issubset(visited_regular_files):
-        raise UpdaterKeyReleaseBlock(
+        raise SecretMaterialReleaseBlock(
             "workspace file symlink target is not reachable by a scanned real path"
         )
     _require_acyclic_symlink_edges(directory_symlink_edges)
@@ -371,10 +432,10 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
 
 
 def exposure_is_plausible(
-    detected: DetectedUpdaterKey, workspace_root: str | os.PathLike[str]
+    detected: DetectedSecretMaterial, workspace_root: str | os.PathLike[str]
 ) -> bool:
     """Decide, from path/name signals only, whether backup/archive/sharing
-    exposure of a detected updater key is plausible.
+    exposure of a detected secret candidate is plausible.
 
     Signals (any one suffices):
 
@@ -392,7 +453,8 @@ def exposure_is_plausible(
         if part.lower() in EXPOSURE_PATH_MARKERS:
             return True
 
-    # A distributed public counterpart makes updater trust migration necessary.
+    # A public counterpart is a path/name-only exposure signal. The response
+    # layer decides which trust-domain action is required.
     public_counterpart = candidate.with_name(candidate.name + ".pub")
     try:
         if public_counterpart.exists():
@@ -410,63 +472,95 @@ def exposure_is_plausible(
     return False
 
 
-def build_security_response(
-    detected: DetectedUpdaterKey, workspace_root: str | os.PathLike[str]
+def _response_for_exposure(
+    detected: DetectedSecretMaterial, *, exposure_plausible: bool
 ) -> SecurityResponse:
-    """Build the one atomic security response for a detected updater key.
+    """Derive the exact response for an already-established exposure state."""
 
-    Uses only the file's path and name plus path/name-derived exposure signals.
-    Rotation and updater trust migration are jointly required exactly when
-    exposure is plausible.
-    """
-    plausible = exposure_is_plausible(detected, workspace_root)
+    action = RequiredTrustAction.RELOCATE_ONLY
+    updater_migration = False
+    notary_reprovision = False
+    identify_domain = detected.kind in {
+        SecretMaterialKind.APPLE_API_PRIVATE_KEY,
+        SecretMaterialKind.UNKNOWN_PRIVATE_KEY,
+    }
+    if detected.kind is SecretMaterialKind.APPLE_API_PRIVATE_KEY:
+        action = RequiredTrustAction.IDENTIFY_APPLE_DOMAIN_AND_RELOCATE
+    elif identify_domain:
+        action = RequiredTrustAction.IDENTIFY_DOMAIN_AND_RELOCATE
+    if exposure_plausible:
+        if detected.kind is SecretMaterialKind.UPDATER_SIGNING_KEY:
+            action = RequiredTrustAction.ROTATE_UPDATER_AND_MIGRATE_TRUST
+            updater_migration = True
+        elif detected.kind is SecretMaterialKind.APPLE_ASC_NOTARY_KEY:
+            action = RequiredTrustAction.ROTATE_ASC_AND_REPROVISION_NOTARY
+            notary_reprovision = True
+        elif detected.kind is SecretMaterialKind.APPLE_API_PRIVATE_KEY:
+            action = RequiredTrustAction.IDENTIFY_APPLE_DOMAIN_AND_ROTATE
+        else:
+            action = RequiredTrustAction.IDENTIFY_DOMAIN_AND_ROTATE
+            identify_domain = True
     return SecurityResponse(
         detected_path=detected.path,
         detected_name=detected.name,
+        credential_kind=detected.kind,
         block_release=True,
         relocation_required=True,
         relocation_target=RELOCATION_TARGET,
-        exposure_plausible=plausible,
-        rotation_required=plausible,
-        trust_migration_required=plausible,
+        exposure_plausible=exposure_plausible,
+        rotation_required=exposure_plausible,
+        required_trust_action=action,
+        updater_trust_migration_required=updater_migration,
+        notary_profile_reprovision_required=notary_reprovision,
+        trust_domain_identification_required=identify_domain,
+    )
+
+
+def build_security_response(
+    detected: DetectedSecretMaterial, workspace_root: str | os.PathLike[str]
+) -> SecurityResponse:
+    """Build one atomic, trust-domain-specific security response.
+
+    Uses only the file's path and name plus path/name-derived exposure signals.
+    Exposure requires rotation, but only a known updater key requires updater
+    trust migration; an ASC key instead requires notary-profile reprovisioning.
+    """
+
+    return _response_for_exposure(
+        detected,
+        exposure_plausible=exposure_is_plausible(detected, workspace_root),
     )
 
 
 def assert_response_complete(response: SecurityResponse) -> None:
     """Ensure no mandated response step was omitted.
 
-    Raises :class:`UpdaterKeyReleaseBlock` when the response fails to block, has
-    no file identity, fails to require relocation, or requires rotation without
-    the paired updater trust migration (or vice versa) when exposure is
-    plausible.
+    Raises :class:`SecretMaterialReleaseBlock` when the response omits a common
+    custody step or selects an action inconsistent with its credential kind.
     """
     if not response.block_release:
-        raise UpdaterKeyReleaseBlock(
+        raise SecretMaterialReleaseBlock(
             "atomic response omitted the release-block step"
         )
     if not response.detected_path or not response.detected_name:
-        raise UpdaterKeyReleaseBlock(
+        raise SecretMaterialReleaseBlock(
             "atomic response omitted the path/name report step"
         )
     if not response.relocation_required or not response.relocation_target:
-        raise UpdaterKeyReleaseBlock(
+        raise SecretMaterialReleaseBlock(
             "atomic response omitted the external-relocation step"
         )
-    if response.exposure_plausible:
-        if not response.rotation_required:
-            raise UpdaterKeyReleaseBlock(
-                "atomic response omitted the key-rotation step under plausible exposure"
-            )
-        if not response.trust_migration_required:
-            raise UpdaterKeyReleaseBlock(
-                "atomic response omitted the updater-trust-migration step "
-                "under plausible exposure"
-            )
-    # Rotation and trust migration are inseparable: a rotated key without a
-    # trust migration would leave the distributed anchor trusting a dead key.
-    if response.rotation_required != response.trust_migration_required:
-        raise UpdaterKeyReleaseBlock(
-            "atomic response split key rotation from updater trust migration"
+    expected = _response_for_exposure(
+        DetectedSecretMaterial(
+            path=response.detected_path,
+            name=response.detected_name,
+            kind=response.credential_kind,
+        ),
+        exposure_plausible=response.exposure_plausible,
+    )
+    if response != expected:
+        raise SecretMaterialReleaseBlock(
+            "atomic response trust action differs from its credential kind/exposure"
         )
 
 
@@ -475,7 +569,7 @@ def evaluate_workspace(
 ) -> list[SecurityResponse]:
     """Return the complete, validated atomic responses for a workspace.
 
-    An empty list means no updater-key material was found and this gate does not
+    An empty list means no secret material was found and this gate does not
     block release.  A non-empty list blocks release.  Fails closed by raising
     on any scan or completeness failure.
     """
@@ -489,17 +583,23 @@ def evaluate_workspace(
 def format_response(response: SecurityResponse) -> str:
     """Render a response using only path and name; contents are never read."""
     lines = [
-        f"blocked updater-key file: {response.detected_path}",
+        f"blocked release secret-material file: {response.detected_path}",
         f"  name: {response.detected_name}",
+        f"  credential kind: {response.credential_kind.value}",
         "  step 1 block release: yes",
         "  step 2 report (path/name only, contents never read): yes",
         f"  step 3 relocate to {response.relocation_target}: required",
         f"  backup/archive/sharing exposure plausible: "
         f"{'yes' if response.exposure_plausible else 'no'}",
-        f"  step 4 rotate updater key: "
+        f"  step 4 rotate credential: "
         f"{'required' if response.rotation_required else 'not required'}",
-        f"  step 5 migrate updater trust: "
-        f"{'required' if response.trust_migration_required else 'not required'}",
+        f"  required trust action: {response.required_trust_action.value}",
+        f"  updater trust migration: "
+        f"{'required' if response.updater_trust_migration_required else 'not required'}",
+        f"  notary profile reprovision: "
+        f"{'required' if response.notary_profile_reprovision_required else 'not required'}",
+        f"  trust-domain identification: "
+        f"{'required' if response.trust_domain_identification_required else 'not required'}",
     ]
     return "\n".join(lines)
 
@@ -507,7 +607,7 @@ def format_response(response: SecurityResponse) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Atomically block release when an updater-key file exists in the "
+            "Atomically block release when secret material exists in the "
             "reviewable source/candidate/release workspace (path/name scan "
             "only; never reads file contents)."
         )
@@ -522,21 +622,24 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         responses = evaluate_workspace(args.workspace_root)
-    except UpdaterKeyReleaseBlock as exc:
-        print(f"error: updater-key release blocker failed closed: {exc}", file=sys.stderr)
+    except SecretMaterialReleaseBlock as exc:
+        print(
+            f"error: release secret-material blocker failed closed: {exc}",
+            file=sys.stderr,
+        )
         return 1
 
     if responses:
         for response in responses:
             print(format_response(response), file=sys.stderr)
         print(
-            "error: updater signing key material is present in the workspace; "
+            "error: release secret material is present in the workspace; "
             "release is blocked until the atomic security response is completed",
             file=sys.stderr,
         )
         return 1
 
-    print("no updater-key material found; this gate does not block release")
+    print("no release secret material found; this gate does not block release")
     return 0
 
 

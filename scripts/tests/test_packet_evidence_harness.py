@@ -146,6 +146,31 @@ class PacketEvidenceHarnessTests(unittest.TestCase):
         absence_cases = sum(not spec.token_observed for spec in REQUIRED_CASES.values())
         self.assertEqual(len(result["artifacts"]), len(REQUIRED_CASES) * 2 + absence_cases)
 
+    def test_schema_versions_require_json_integers(self) -> None:
+        for invalid in (3.0, True):
+            with self.subTest(scope="report", invalid=invalid):
+                document = copy.deepcopy(self.document)
+                document["schema_version"] = invalid
+                with self.assertRaisesRegex(PacketEvidenceError, "schema_version must be 3"):
+                    self.validate(document)
+
+        case = self.document["cases"][0]
+        descriptor = case["provenance_artifact"]
+        path = self.root / descriptor["path"]
+        original = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            for invalid in (1.0, True):
+                with self.subTest(scope="capture-provenance", invalid=invalid):
+                    provenance = copy.deepcopy(original)
+                    provenance["schema_version"] = invalid
+                    self.fixture.rewrite_json(descriptor, provenance)
+                    with self.assertRaisesRegex(
+                        PacketEvidenceError, "provenance schema_version must be 1"
+                    ):
+                        self.validate()
+        finally:
+            self.fixture.rewrite_json(descriptor, original)
+
     def test_presence_declaration_with_token_absent_fails(self) -> None:
         self.document["cases"][0]["token"] = "different-unique-target-token"
         with self.assertRaisesRegex(PacketEvidenceError, "unique token is absent"):

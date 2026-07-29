@@ -78,18 +78,20 @@ user confirmation and server-side native/profile preflight both succeed.
 The release operator must have:
 
 - a Developer ID identity with the exact product Team ID;
-- explicit Network Extension and System Extension provisioning for the app and
-  Packet Tunnel bundle identifiers;
+- exact Developer ID profiles for the Host, Packet Tunnel, and ProxyAgent
+  bundle identifiers, including the Host/System Extension and Packet Tunnel
+  Network Extension authorizations;
 - the matching App Group, host Keychain group, and ProxyAgent Keychain group;
 - no Data Protection Keychain access-group entitlement on the Packet Tunnel
   system extension;
 - the exact host-only Keychain group for Keychain-authoritative generation
   lineage, isolated from ProxyAgent and every system-extension store;
-- a notarytool Keychain profile;
-- the Tauri updater signing key outside the repository;
+- the validated `clashformac-notary` notarytool Keychain profile;
+- the encrypted Tauri updater signing key outside the repository and its
+  non-synchronizing Keychain-held password;
 - clean macOS 15 and current macOS Apple Silicon test machines.
 
-`verify_release_environment.sh` rejects ignored `.key`/`.pem` material under
+`verify_release_environment.sh` rejects `.key`, `.pem`, or `.p8` material under
 the repository workspace. Git ignore rules are not a key-management boundary:
 the active updater key must live in an access-controlled external secret store
 or hardware-backed workflow. If a workspace copy may have escaped through a
@@ -290,9 +292,11 @@ transaction instead derives a canonical path-free public projection only after
 revalidating that private document against the original assessed target and the
 final DMG bytes. The projection binds the exact private-document SHA-256,
 assessment policy/result, target digest, signing identity, and capture time.
-This intentionally advances the outer final-candidate binding to schema v2;
-pre-existing v1 bindings lack the effective Gatekeeper-state proof and must be
-regenerated rather than migrated or accepted through a compatibility wrapper.
+This intentionally advances the outer final-candidate binding to schema v3;
+pre-existing v1/v2 bindings lack either the effective Gatekeeper-state proof or
+the PS256 physical aggregate to physical-candidate artifact-manifest
+cross-binding and must be regenerated rather than migrated or accepted through
+a compatibility wrapper.
 
 The signed-candidate builder also requires a clean repository and records the
 real Git `HEAD` together with the complete release-source digest in every native
@@ -333,7 +337,7 @@ submission-ID observation, and hash-chained events survive a crash. A normal
 rerun is refused once an attempt exists. Resume only with the same Apple ID:
 
 ```bash
-NOTARY_PROFILE=release-profile \
+NOTARY_PROFILE=clashformac-notary \
   scripts/make_dmg.sh --recover-submission-id UUID
 ```
 
@@ -379,6 +383,60 @@ scripts/release_publication_gate.sh \
   "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
 ```
 
+### Fixed 40002 to 40003 physical-candidate evidence sequence
+
+The production evidence composer has no fixture, path, output, build-number, or
+success-override option. Run this sequence exactly once from one clean release
+commit:
+
+1. build, notarize, install, and exercise validation build `40002`; preserve its
+   fixed CI/toolchain, app-manifest, notarization, and runtime-recovery records;
+2. have a human reviewer approve those exact bytes in
+   `target/candidates/0.4.0/review/validated-candidate.json`;
+3. build, sign inside-out, notarize, staple, and Gatekeeper-verify final build
+   `40003` from the same clean source identity;
+4. freeze the signed/notarized runtime candidate before collection:
+
+   ```bash
+   python3 -B scripts/production_release_evidence.py \
+     prepare-physical-candidate-manifest
+   ```
+
+   This exclusively creates
+   `target/candidates/0.4.0/release/final-candidate/physical-candidate-artifact-hash-manifest.json`.
+   It reopens the publish-ready notarization receipt and journal lineage and
+   binds the post-staple app, app manifest, libbox, notarization archive/result/
+   log, Gatekeeper evidence, publication closure, SBOMs, receipt, intent, and
+   event tree. It refuses to replace an existing file; any drift requires a new
+   build and clean evidence root, never an in-place rewrite;
+5. run the source-pinned production collector on both required clean physical
+   machines (`macos15` and `current-macos`) following
+   [`docs/physical-evidence-v4.md`](./docs/physical-evidence-v4.md). Both PS256
+   run receipts and the aggregate must bind the exact manifest digest from step
+   4. Retain all raw private bytes and place only the strict aggregate descriptor
+   at
+   `target/candidates/0.4.0/release/final-candidate/physical-evidence.json`;
+6. after both machine archives are complete, seal the runtime evidence:
+
+   ```bash
+   python3 -B scripts/production_release_evidence.py seal
+   ```
+
+   The composer reopens every input, rehashes the final `.app` after all other
+   evidence, validates the fixed 99 capability-owned report bindings, and
+   exclusively publishes the private documents under
+   `target/candidates/0.4.0/release/sealed-manifest/`. A pre-existing output,
+   absent raw archive, unconfigured collector trust policy, receipt ambiguity,
+   hash drift, stale timestamp, missing capability, or failed gate blocks the
+   seal.
+
+This physical-candidate manifest and sealed runtime evidence intentionally do
+not claim to contain a DMG, updater signature, or remote release asset. Only
+after step 6 may the post-signing DMG/updater packaging transactions run. Their
+later distribution artifact-set seal binds the final DMG, updater archive and
+signature, public projections, upload bundle, and remote-download verification;
+neither layer may be renamed or treated as the other.
+
 Do not copy component or blocker counts from an older review into a release
 claim. `component-review.json`, `publication-blockers.json`, the SBOM, and every
 corresponding-source root must be regenerated after any lock, source, patch,
@@ -420,6 +478,50 @@ and privileged AppleScript fallback are not linked. See Apple's
 [`SMAppService.register()`](https://developer.apple.com/documentation/servicemanagement/smappservice/register%28%29)
 documentation and the corresponding
 [Apple DTS guidance](https://developer.apple.com/forums/thread/783539).
+
+The updater artifact key embedded in 0.3.5 is not available for 0.4.0 signing.
+Consequently, 0.3.5 to 0.4.0 is an explicit manual-DMG migration: publish no
+legacy-key, dual-signature, alternate-origin, or unsigned compatibility path.
+The 0.4.0 archive and its embedded trust configuration use replacement key ID
+`233E924581F20ACB`; the signed, notarized, stapled DMG remains the supported
+installation artifact.
+
+This updater rotation is independent of the physical collector trust root.
+Production physical receipts accept only the source-pinned aggregate v4 /
+receipt v3 / proof v3 PS256 contract backed by one versioned Cloud KMS HSM
+RSA-3072 key. The checked-in collector policy remains `not-configured`; release
+is blocked until external release operations provision and verify the HSM key,
+attestation and public-key digests, collector source/executable digests,
+least-privilege signing identity, Data Access audit retention, nonce issuance,
+and replay ledger. No updater key, Apple notarization key, local private key, or
+older RS256 receipt may substitute for that missing trust root.
+
+On the provisioned release Mac, invoke updater packaging through its executable
+entrypoint. Do not prefix it with `bash`: its `#!/bin/bash -p` boundary prevents
+`BASH_ENV`, imported functions, and caller shell options from executing before
+the custody checks.
+
+```bash
+set +x
+scripts/make_updater_manifest.sh \
+  "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
+```
+
+The shell entrypoint rejects xtrace, exported shell-option state, startup-hook
+variables, dynamic-loader/import/archive environment overrides, and every
+current or legacy caller-supplied Tauri secret variable. It resets `PATH`,
+resolves one fixed Homebrew Python probe to a canonical interpreter, disables
+Python site customization with `-S`, and calls the source-pinned launcher in an
+empty, explicit environment with only the archive path.
+The launcher verifies the complete fixed Tauri 2.11.4 toolchain tree and signer
+digest before requesting the password. It then opens the fixed owner-only key
+at `~/Library/Application Support/Clash for Mac Release/Updater/cfw-rs-v2.key`
+with `O_NOFOLLOW`, validates the private `~/Library` anchor and every held
+path/inode/mode/link/ACL boundary, and reads exactly one non-synchronizable item
+from the explicit login Keychain under service
+`com.bill.clashformac.release.updater`, account `updater-v2`. Only the final
+signer receives the password, in the one environment variable required by
+Tauri; neither the password nor a caller-selected key/signer path enters argv.
 
 Release assets do not become uploadable as independent files. The updater
 archive, signature, `latest.json`, and the verifier's embedded-public-key
@@ -487,6 +589,46 @@ archive is capped separately at 1.25 GiB, non-CCS inputs at 256 MiB total, and
 the remaining capacity is reserved for the canonical bundle manifest and tar/
 gzip container overhead. The 15-path upload allowlist is also below GitHub's
 1000-asset limit. See [GitHub's release storage and bandwidth quotas](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases#storage-and-bandwidth-quotas).
+
+### Read-only remote publication verification
+
+Before uploading, retain `distribution-set.seal.json` on offline media and
+retain its lowercase SHA-256 independently. The trusted seal must be the exact
+file that passed the local `--upload-assets` gate; a seal or digest downloaded
+from the release being checked is not a trust root. After all 15 allowlisted
+assets have been uploaded to the public `vVERSION` GitHub release, run:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_remote_release.py \
+  --version 0.4.0 \
+  --trusted-distribution-seal /path/on/offline-media/distribution-set.seal.json \
+  --trusted-distribution-seal-sha256 '<64-lowercase-hex>'
+```
+
+This command has no upload, publication, URL-override, token, cookie, or output
+file option. Before any network request it requires the current repository to
+be clean and its commit plus release-source digest to equal the trusted seal;
+a different or dirty verifier checkout fails closed. It then issues
+credential-free `GET` requests to the fixed public
+`github.com/billlza/cfw-rs/releases/download/vVERSION/` paths, accepts only the
+certificate-validated HTTPS transition to GitHub's documented
+`release-assets.githubusercontent.com` download host, and requires an exact
+200 response, `Content-Length`, sealed size, and SHA-256 for every object. See
+[GitHub's release-asset network requirement](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#communication-requirements-for-github-hosted-runners).
+
+Downloads exist only in a mode-0700 temporary directory. Each file is created
+through the retained directory descriptor with exclusive, no-follow flags and
+is removed after the final second hash pass. The verifier derives the exact
+12 release-asset names and size limits from `release_artifact_set`, adds the two
+component seals and the trusted distribution seal, and refuses anything other
+than exactly 15 unique files. Any redirect drift, partial response, transform,
+extra suffix, size mismatch, hash mismatch, symlink/hard-link, or concurrent
+mutation fails closed.
+
+Remote verification proves that the public bytes are identical to the offline
+distribution seal's already-authorized upload set. It does not replace the
+separate local signing, notarization, stapling, Gatekeeper, updater-signature,
+physical-runtime, or publication-semantic gates.
 
 ## 7. GPL publication set
 

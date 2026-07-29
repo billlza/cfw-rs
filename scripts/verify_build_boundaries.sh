@@ -46,9 +46,11 @@ for node in ast.walk(tree):
         )
 PY
 
-# Confirm the Signed_Installed physical-evidence aggregator is wired to all four
-# v2 proof-to-byte harnesses, the source-pinned collector policy bytes, and the
-# Evidence_Manifest level order. This is a source-boundary contract check only;
+# Confirm the Signed_Installed physical-evidence aggregate v4 / receipt v3 /
+# proof v3 gate is wired to packet and lifecycle v3 plus performance and
+# adversarial v2, the source-pinned PS256 Cloud KMS HSM policy bytes, and the
+# Evidence_Manifest level order.
+# This is a source-boundary contract check only;
 # the physical evidence itself requires signed Apple Silicon runs on two macOS
 # versions and an externally provisioned collector trust root.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/harness/physical_evidence_aggregator.py --self-check
@@ -70,6 +72,47 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'from scripts.publication.final_candidat
 # check only; sealing the manifest additionally requires the signed, notarized,
 # and physical evidence captured separately.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/sealed_evidence_manifest.py self-check
+
+# The production composer is deliberately distinct from the generic fixture-
+# capable validators. Its source-bound self-check fixes the 40002 -> 40003
+# sequence and proves that the requirements-derived nine-capability inventory
+# is complete before any physical or publication evidence is considered.
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/production_release_evidence.py self-check
+
+for fragment in \
+  'VALIDATION_BUILD = "40002"' \
+  'FINAL_BUILD = "40003"' \
+  'prepare_physical_candidate_manifest' \
+  'seal_production_evidence' \
+  'require_clean=True' \
+  'validate_published_transaction_receipt' \
+  'validate_source_gate_document' \
+  'validate_ci_lane_document' \
+  'build_manifest' \
+  '_require_final_inputs_unchanged' \
+  'expected_report_contracts' \
+  'artifact_hash_manifest_sha256' \
+  'fixture=False' \
+  'require_verified=True' \
+  'artifacts_permitted'; do
+  grep -Fq "$fragment" scripts/publication/orchestrator.py || {
+    echo "error: production release orchestrator is missing $fragment" >&2
+    exit 1
+  }
+done
+
+for fragment in \
+  'CAPABILITY_SECTION' \
+  'require_complete_capability_set' \
+  'expected_report_contracts' \
+  'require_fixed_evidence_mapping' \
+  'unknown numbered section' \
+  'does not cover every numbered requirement exactly once'; do
+  grep -Fq "$fragment" scripts/release_capability_inventory.py || {
+    echo "error: release capability inventory validator is missing $fragment" >&2
+    exit 1
+  }
+done
 
 build_scripts="$(git ls-files '**/build.rs' 'build.rs')"
 if [[ -z "$build_scripts" ]]; then

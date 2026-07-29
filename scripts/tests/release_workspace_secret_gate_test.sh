@@ -19,12 +19,19 @@ if verify_release_workspace_has_no_key_material "$temporary_root" >/dev/null 2>&
 fi
 /bin/rm "$temporary_root/.tauri/updater.key"
 
+: >"$temporary_root/AuthKey_WORKSPACE.p8"
+if verify_release_workspace_has_no_key_material "$temporary_root" >/dev/null 2>&1; then
+  echo "error: .p8 signing-key fixture unexpectedly passed the gate" >&2
+  exit 1
+fi
+/bin/rm "$temporary_root/AuthKey_WORKSPACE.p8"
+
 # Install a self-contained gate fixture so direct execution with no arguments
 # proves that main resolves and scans its own repository root.
 fixture_repo="$temporary_root/direct-repository"
 mkdir -p "$fixture_repo/scripts"
 /bin/cp "$repo_root/scripts/release_workspace_secret_gate.sh" "$fixture_repo/scripts/"
-/bin/cp "$repo_root/scripts/updater_key_release_blocker.py" "$fixture_repo/scripts/"
+/bin/cp "$repo_root/scripts/release_secret_material_blocker.py" "$fixture_repo/scripts/"
 
 bash "$fixture_repo/scripts/release_workspace_secret_gate.sh"
 mkdir -p "$fixture_repo/target/candidates/0.4.0"
@@ -43,6 +50,7 @@ bash "$fixture_repo/scripts/release_workspace_secret_gate.sh" "$fixture_repo"
 
 for relative_key in \
   "target/tmp/transient.pem" \
+  "target/candidates/0.4.0/AuthKey_GENERATED.p8" \
   "target/release/historical.key" \
   "target/unexpected/unexpected.key"
 do

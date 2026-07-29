@@ -267,7 +267,11 @@ def build_machine_closure(prepared: Path, app: Path, fixture: bool) -> dict[str,
         },
         "prepared publication closure",
     )
-    if specification["schema_version"] != 1 or specification["fixture"] is not fixture:
+    if (
+        type(specification["schema_version"]) is not int
+        or specification["schema_version"] != 1
+        or specification["fixture"] is not fixture
+    ):
         raise PublicationError("prepared publication closure mode/version mismatch")
     identity = product(specification["product"], fixture)
     components = _normalize_components(prepared, specification["components"])

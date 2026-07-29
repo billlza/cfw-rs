@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import unittest
@@ -36,6 +37,30 @@ class PerformanceGateTests(unittest.TestCase):
         result = self.validate()
         self.assertEqual(result["artifacts"][0]["subject"], "measurements")
         self.assertEqual(percentiles([1.0, 2.0, 3.0]), {"p50": 2.0, "p95": 3.0, "p99": 3.0})
+
+    def test_schema_versions_require_json_integers(self) -> None:
+        for invalid in (2.0, True):
+            with self.subTest(scope="report", invalid=invalid):
+                document = copy.deepcopy(self.document)
+                document["schema_version"] = invalid
+                with ArtifactReader(self.root) as artifacts, self.assertRaisesRegex(
+                    PerformanceGateError, "schema_version must be 2"
+                ):
+                    validate_performance_evidence(document, artifacts)
+
+        original = self.raw()
+        try:
+            for invalid in (1.0, True):
+                with self.subTest(scope="samples", invalid=invalid):
+                    raw = copy.deepcopy(original)
+                    raw["schema_version"] = invalid
+                    self.fixture.rewrite_json(self.artifact, raw)
+                    with self.assertRaisesRegex(
+                        PerformanceGateError, "schema_version must be 1"
+                    ):
+                        self.validate()
+        finally:
+            self.fixture.rewrite_json(self.artifact, original)
 
     def test_declared_percentile_disagrees_with_raw_samples(self) -> None:
         self.document["latency"]["connect_ms"]["p95"] = 1.0

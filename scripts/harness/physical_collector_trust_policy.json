@@ -1,1 +1,1 @@
-{"reason":"Production collector public key and approved source/tool digests have not been provisioned.","schema_version":1,"state":"not-configured"}
+{"reason":"Production PS256 Cloud KMS HSM key version, public-key digest, attestation digest, and approved collector source/tool digests have not been provisioned.","schema_version":2,"state":"not-configured"}

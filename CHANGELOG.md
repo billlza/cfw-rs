@@ -126,6 +126,12 @@
 - Add fail-closed release documentation for nested signing, provisioning,
   notarization, SBOM/license evidence, real packet evidence, weak-network
   recovery, resource limits, and physical-device testing.
+- Upgrade physical evidence to aggregate schema v4, receipt schema v3, proof
+  schema v3, and trust-policy schema v2. The only accepted collector signature
+  is PS256 with a source-pinned RSA-PSS-3072 Cloud KMS HSM key version; every
+  harness report and receipt binds that identity and the recomputed final
+  artifact-hash manifest. Final-candidate schema v3 derives the binding from the
+  reopened aggregate and rejects the former caller-only evidence declaration.
 - Build XcodeGen from checksum-bound source with a digest-pinned
   installed-resource patch, isolated resolved-only SwiftPM state, a real project
   generation probe, debug-path stripping, and a complete tree-v2 manifest.
@@ -134,6 +140,11 @@
   canonical GitHub identity and opens the official DMG release page. The app
   no longer downloads, extracts, or swaps its own installed bundle, and does
   not replace that bundle in process.
+- Rotate the updater artifact trust root for 0.4.0 after the 0.3.5 private key
+  became unavailable. Existing 0.3.5 installations cannot authenticate the
+  new release archive and must install 0.4.0 from its signed, notarized DMG;
+  there is no unsigned or alternate-key fallback. The replacement public key
+  is embedded in 0.4.0 and its private half remains outside the repository.
 - Keep in-process replacement intentionally absent because the required
   verified `SMAppService` daemon re-registration transaction is not implemented
   yet; metadata or a browser handoff is never reported as installation.

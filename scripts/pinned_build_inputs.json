@@ -350,6 +350,11 @@
       "recovery_continuation_sha256",
       "recovery_intent_anchored",
       "recovery_tool_continued",
+      "PublishedTransactionEvidence",
+      "validate_published_transaction_receipt",
+      "_load_existing_recovery_intent",
+      "_unique_matching_published_receipt",
+      "identity_at_commit",
       "direct_finalization_preparing",
       "direct_finalization_ready",
       "submission-observation.json",
@@ -471,6 +476,28 @@
       "verify_distribution_set",
       "verify_release_sets"
     ],
+    "scripts/repository_source_identity.py": [
+      "identity_at_commit",
+      "_historical_release_paths",
+      "ast.parse",
+      "cat-file",
+      "historical RELEASE_PATHS is not a literal sequence"
+    ],
+    "scripts/verify_remote_release.py": [
+      "DISTRIBUTION_SEAL_NAME",
+      "OFFICIAL_RELEASE_ORIGIN",
+      "current_identity",
+      "require_clean=True",
+      "_release_asset_paths",
+      "_validate_artifact_record",
+      "https://github.com/billlza/cfw-rs/releases/download",
+      "release-assets.githubusercontent.com",
+      "Content-Length",
+      "O_EXCL",
+      "O_NOFOLLOW",
+      "Authorization",
+      "asset_count\": 15"
+    ],
     "scripts/make_dmg.sh": [
       "scripts/dmg_notarization_transaction.py",
       "--recover-submission-id",
@@ -481,6 +508,18 @@
       "dmg-set.seal.json"
     ],
     "scripts/make_updater_manifest.sh": [
+      "refuses shell xtrace",
+      "requires its /bin/bash -p entrypoint",
+      "refuses shell startup hooks",
+      "refuses unsafe exported environment state",
+      "ulimit -c 0",
+      "TAURI_PRIVATE_KEY_PATH",
+      "unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PATH",
+      "/opt/homebrew/bin/python3",
+      "python_bin",
+      "/usr/bin/env -i",
+      "-I -S -B",
+      "scripts/updater_signing_launcher.py",
       "--no-xattrs",
       "--no-mac-metadata",
       "--no-acls",
@@ -489,11 +528,18 @@
       "seal-updater",
       "updater-set.seal.json"
     ],
+    "scripts/release_toolchain_contract.sh": [
+      "cfw_require_supported_python",
+      "cfw_verify_release_toolchain_manifest",
+      "-S -B",
+      "--exact-metadata"
+    ],
     "scripts/release_publication_gate.sh": [
       "--seal-assets",
       "--upload-assets",
       "seal_release_upload_artifacts",
       "verify_release_upload_artifacts",
+      "python3 -S -B",
       "scripts/release_artifact_set.py",
       "seal-release",
       "verify-release"
@@ -501,14 +547,43 @@
     "scripts/release_workspace_secret_gate.sh": [
       "release_workspace_secret_gate_main",
       "verify_release_workspace_has_no_key_material",
-      "updater_key_release_blocker.py"
+      "-I -S -B",
+      ".p8",
+      "release_secret_material_blocker.py"
     ],
-    "scripts/updater_key_release_blocker.py": [
+    "scripts/release_secret_material_blocker.py": [
+      "SECRET_SUFFIXES",
+      ".p8",
+      "PINNED_NOTARY_ASC_KEY_NAME",
+      "APPLE_AUTH_KEY_RE",
+      "APPLE_ASC_NOTARY_KEY",
+      "APPLE_API_PRIVATE_KEY",
+      "UNKNOWN_PRIVATE_KEY",
+      "ROTATE_UPDATER_AND_MIGRATE_TRUST",
+      "ROTATE_ASC_AND_REPROVISION_NOTARY",
+      "IDENTIFY_APPLE_DOMAIN_AND_RELOCATE",
+      "IDENTIFY_APPLE_DOMAIN_AND_ROTATE",
       "MANAGED_TARGET_ROOTS",
       "target",
       "workspace file symlink target is not reachable by a scanned real path",
       "workspace directory symlinks form a traversal cycle",
       "scan_workspace"
+    ],
+    "scripts/updater_signing_launcher.py": [
+      "com.bill.clashformac.release.updater",
+      "updater-v2",
+      "Library/Keychains/login.keychain-db",
+      "Clash for Mac Release/Updater/cfw-rs-v2.key",
+      "PINNED_TAURI_TREE_SHA256",
+      "PINNED_TAURI_SIGNER_SHA256",
+      "verify_pinned_tauri_signer",
+      "\"-S\"",
+      "require_no_macos_acl_grants",
+      "CREDENTIAL_LOOKUP_TIMEOUT_SECONDS",
+      "TAURI_PRIVATE_KEY_PATH",
+      "O_NOFOLLOW",
+      "/dev/fd",
+      "os.execve"
     ],
     "scripts/validate_updater_archive.py": [
       "sha256-tree-v2",
@@ -575,8 +650,120 @@
       "added-file transforms require sha256-tree-v1",
       "added-file path is not canonical and relative"
     ],
+    "scripts/release_capability_inventory.json": [
+      "cfw-release-capability-inventory-v1",
+      "platform-command-boundary",
+      "provisioning-entitlement-contract",
+      "global-authority-peer-authentication",
+      "state-recovery-failure-semantics",
+      "ticket-only-packet-tunnel",
+      "authority-owned-system-proxy",
+      "secret-lifecycle-diagnostics",
+      "signed-publication-evidence",
+      "stable-fail-closed-ui",
+      "docs/release/macos15-network-extension-migration/requirements.md",
+      "8.11"
+    ],
+    "scripts/release_capability_inventory.py": [
+      "CAPABILITY_SECTION",
+      "if __package__",
+      "KIND_LEVEL",
+      "LEVEL_ORDER",
+      "require_complete_capability_set",
+      "expected_report_contracts",
+      "expected_capability_levels",
+      "require_fixed_evidence_mapping",
+      "unknown numbered section",
+      "canonical_json(value) != data",
+      "does not cover every numbered requirement exactly once"
+    ],
+    "scripts/harness/physical_collector_trust_policy.json": [
+      "Production PS256 Cloud KMS HSM",
+      "\"schema_version\":2",
+      "\"state\":\"not-configured\""
+    ],
+    "scripts/harness/raw_artifacts.py": [
+      "COLLECTOR_SIGNATURE_ALGORITHM = \"PS256\"",
+      "KMS_SIGNATURE_ALGORITHM = \"RSA_SIGN_PSS_3072_SHA256\"",
+      "KMS_PROTECTION_LEVEL = \"HSM\"",
+      "KMS_ATTESTATION_FORMATS",
+      "PROOF_SCHEMA_VERSION = 3",
+      "verify_ps256",
+      "rsa_spki_sha256"
+    ],
+    "scripts/harness/physical_evidence_aggregator.py": [
+      "SCHEMA_VERSION = 4",
+      "AGGREGATOR_VERSION = \"physical-evidence-aggregator-v4\"",
+      "RECEIPT_SCHEMA_VERSION = 3",
+      "verify_ps256",
+      "key_version",
+      "algorithm"
+    ],
+    "scripts/publication/orchestrator.py": [
+      "RELEASE_VERSION",
+      "VALIDATION_BUILD = \"40002\"",
+      "FINAL_BUILD = \"40003\"",
+      "prepare_physical_candidate_manifest",
+      "physical-candidate-artifact-hash-manifest.json",
+      "seal_production_evidence",
+      "require_clean=True",
+      "validate_candidate_review",
+      "validate_notary_files",
+      "validate_published_transaction_receipt",
+      "validate_source_gate_document",
+      "validate_ci_lane_document",
+      "build_manifest",
+      "_require_final_inputs_unchanged",
+      "physical-candidate inputs changed during evidence sealing",
+      "load_physical_evidence_artifact",
+      "artifact_hash_manifest_sha256",
+      "fixture=False",
+      "require_verified=True",
+      "artifacts_permitted",
+      "refusing to replace sealed production evidence"
+    ],
+    "scripts/production_release_evidence.py": [
+      "if __package__",
+      "prepare-physical-candidate-manifest",
+      "seal",
+      "self-check",
+      "production release evidence"
+    ],
+    "scripts/publication/sealed_manifest.py": [
+      "CAPABILITY_INVENTORY_PATH",
+      "require_complete_capability_set",
+      "require_fixed_evidence_mapping",
+      "validate_source_gate_document",
+      "validate_ci_lane_document",
+      "SOURCE_GATE_SCHEMA_VERSION = 1",
+      "SOURCE_GATE_DOCUMENT = \"p0-source-gates-v1\"",
+      "type(parsed[\"schema_version\"]) is not int",
+      "raw report differs from its binding"
+    ],
+    "scripts/evidence_manifest.py": [
+      "type(document[\"schema_version\"]) is not int",
+      "Evidence_Manifest schema_version must be"
+    ],
+    "scripts/publication/sealed_closure.py": [
+      "type(parsed[\"schema_version\"]) is not int",
+      "sealed closure has an unsupported schema/document kind"
+    ],
+    "scripts/publication/final_candidate.py": [
+      "type(parsed[\"schema_version\"]) is not int",
+      "final candidate binding has an unsupported schema/document kind"
+    ],
+    "scripts/validated_candidate_evidence.py": [
+      "type(document[\"schema_version\"]) is not int",
+      "validated candidate is not explicitly approved"
+    ],
+    "scripts/sealed_evidence_manifest.py": [
+      "SOURCE_GATE_SCHEMA_VERSION",
+      "SOURCE_GATE_DOCUMENT",
+      "collect-source-gates"
+    ],
     "scripts/verify_release_app.sh": [
-      "libbox_verify_xcframework_artifact"
+      "libbox_verify_xcframework_artifact",
+      "python3 -S -B"
     ]
   }
 }

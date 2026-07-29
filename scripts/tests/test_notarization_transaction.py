@@ -24,6 +24,7 @@ import uuid
 import scripts.gatekeeper_assessment as gatekeeper_module
 import scripts.notarization_transaction as transaction_module
 from scripts.gatekeeper_assessment import validate_evidence as validate_gatekeeper_evidence
+from scripts.hash_artifact import build_manifest
 from scripts.notarization_transaction import (
     KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
     MAX_COMMAND_OUTPUT_BYTES,
@@ -7817,6 +7818,173 @@ class NotarizationCliTests(unittest.TestCase):
                 recovery_tool_repository,
                 Path(transaction_module.__file__).resolve().parent.parent,
             )
+
+
+class PublishedTransactionReceiptValidationTests(unittest.TestCase):
+    @staticmethod
+    def _tree_digest(root: Path) -> str:
+        return build_manifest(root, algorithm="sha256-tree-v2")["sha256"]
+
+    @staticmethod
+    def _validate(fixture: Fixture):
+        def historical_identity(_repository: Path, commit: str) -> dict[str, str]:
+            if commit == "c" * 40:
+                digest = "d" * 64
+            elif commit == "e" * 40:
+                digest = "f" * 64
+            else:
+                raise AssertionError(f"unexpected historical commit: {commit}")
+            return {"repositoryCommit": commit, "releaseSourceSha256": digest}
+
+        context = replace(fixture.context, staged_app=None)
+        with (
+            patch.object(
+                transaction_module,
+                "production_source_identity_reader",
+                side_effect=fixture.source_identity,
+            ),
+            patch.object(
+                transaction_module,
+                "production_toolchain_metadata_reader",
+                side_effect=lambda _repository: fixture.context.toolchain_metadata,
+            ),
+            patch.object(
+                transaction_module,
+                "production_archive_validator",
+                side_effect=lambda _archive, _app: None,
+            ),
+            patch.object(
+                transaction_module,
+                "identity_at_commit",
+                side_effect=historical_identity,
+            ),
+        ):
+            return transaction_module.validate_published_transaction_receipt(context)
+
+    def test_current_direct_publication_validates_without_mutating_attempt(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        fixture.execute()
+        before = self._tree_digest(fixture.context.attempt_root)
+        evidence = self._validate(fixture)
+        after = self._tree_digest(fixture.context.attempt_root)
+        self.assertEqual(after, before)
+        self.assertEqual(evidence.receipt["state"], "publish-ready")
+        self.assertEqual(evidence.receipt_path, sole_finalization_receipt(fixture))
+        self.assertEqual(evidence.prepared_at, "2026-07-28T04:02:00Z")
+
+    def test_unique_recovery_publication_validates_without_mutating_attempt(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        fixture.create_orphaned_submit_attempt()
+        fixture.recover()
+        before = self._tree_digest(fixture.context.attempt_root)
+        evidence = self._validate(fixture)
+        after = self._tree_digest(fixture.context.attempt_root)
+        self.assertEqual(after, before)
+        self.assertEqual(evidence.receipt_path, sole_finalization_receipt(fixture))
+        self.assertIsNotNone(evidence.receipt["recovery_intent_sha256"])
+
+    def test_ambiguous_recovery_receipts_fail_without_mutating_attempt(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        fixture.create_orphaned_submit_attempt()
+        fixture.recover()
+        receipt_path = sole_finalization_receipt(fixture)
+        duplicate = (
+            fixture.context.attempt_root
+            / "finalization-runs/11111111-2222-4333-8444-555555555555"
+        )
+        duplicate.mkdir(mode=0o700)
+        (duplicate / "receipt.json").write_bytes(receipt_path.read_bytes())
+        (duplicate / "receipt.json").chmod(0o600)
+        before = self._tree_digest(fixture.context.attempt_root)
+        with self.assertRaisesRegex(TransactionError, "one exact sealed receipt"):
+            self._validate(fixture)
+        self.assertEqual(self._tree_digest(fixture.context.attempt_root), before)
+
+    def test_recovery_intent_disappearance_or_replacement_never_recreates_it(self) -> None:
+        for attack in ("delete", "replace"):
+            with self.subTest(attack=attack):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                fixture.create_orphaned_submit_attempt()
+                fixture.recover()
+                intent_path = fixture.context.attempt_root / "recovery-intent.json"
+                real_read = transaction_module._read_regular_bytes
+                attacked_tree: str | None = None
+                intent_reads = 0
+
+                def attack_after_first_read(path: Path, maximum: int = transaction_module.MAX_JSON_BYTES):
+                    nonlocal attacked_tree, intent_reads
+                    data = real_read(path, maximum)
+                    if path == intent_path:
+                        intent_reads += 1
+                        if intent_reads == 1:
+                            if attack == "delete":
+                                intent_path.unlink()
+                            else:
+                                intent_path.write_bytes(b'{"replaced":true}')
+                                intent_path.chmod(0o600)
+                            attacked_tree = self._tree_digest(
+                                fixture.context.attempt_root
+                            )
+                    return data
+
+                with patch.object(
+                    transaction_module,
+                    "_read_regular_bytes",
+                    side_effect=attack_after_first_read,
+                ):
+                    with self.assertRaises(TransactionError):
+                        self._validate(fixture)
+                self.assertIsNotNone(attacked_tree)
+                self.assertEqual(
+                    self._tree_digest(fixture.context.attempt_root),
+                    attacked_tree,
+                )
+                if attack == "delete":
+                    self.assertFalse(intent_path.exists())
+                else:
+                    self.assertEqual(intent_path.read_bytes(), b'{"replaced":true}')
+
+    def test_selected_direct_and_recovery_receipt_replacement_is_revalidated(self) -> None:
+        for recovery in (False, True):
+            with self.subTest(recovery=recovery):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                if recovery:
+                    fixture.create_orphaned_submit_attempt()
+                    fixture.recover()
+                else:
+                    fixture.execute()
+                real_unique = transaction_module._unique_matching_published_receipt
+                attacked_tree: str | None = None
+
+                def replace_selected_receipt(*args, **kwargs):
+                    nonlocal attacked_tree
+                    path = real_unique(*args, **kwargs)
+                    receipt = json.loads(path.read_text(encoding="utf-8"))
+                    receipt["state"] = "replaced-after-selection"
+                    path.write_bytes(
+                        transaction_module._canonical_json(receipt).encode("utf-8")
+                    )
+                    path.chmod(0o600)
+                    attacked_tree = self._tree_digest(fixture.context.attempt_root)
+                    return path
+
+                with patch.object(
+                    transaction_module,
+                    "_unique_matching_published_receipt",
+                    side_effect=replace_selected_receipt,
+                ):
+                    with self.assertRaises(TransactionError):
+                        self._validate(fixture)
+                self.assertIsNotNone(attacked_tree)
+                self.assertEqual(
+                    self._tree_digest(fixture.context.attempt_root),
+                    attacked_tree,
+                )
 
 
 class ExclusivePublishTests(unittest.TestCase):

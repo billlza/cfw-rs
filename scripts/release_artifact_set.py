@@ -969,8 +969,8 @@ def _validate_release_verifier_binding(
     )
     if (
         value["document"] != RELEASE_VERIFIER_BINDING_DOCUMENT
+        or type(value["schema_version"]) is not int
         or value["schema_version"] != 1
-        or isinstance(value["schema_version"], bool)
         or value["network"] != "offline"
         or value["target"] != RELEASE_VERIFIER_TARGET
         or value["build_command"] != RELEASE_VERIFIER_BUILD_COMMAND
@@ -2248,8 +2248,8 @@ def verify_updater_set(
         directory / UPDATER_SEAL_NAME, seal, seal_data, "updater release seal"
     )
     if (
-        seal["schema_version"] != 1
-        or isinstance(seal["schema_version"], bool)
+        type(seal["schema_version"]) is not int
+        or seal["schema_version"] != 1
         or seal["document"] != UPDATER_SEAL_DOCUMENT
         or seal["product"] != PRODUCT
         or seal["version"] != version
@@ -2429,8 +2429,8 @@ def _validate_dmg_submission(
     }
     value = _require_exact_keys(value, fields, "DMG submission receipt")
     if (
-        value["schema_version"] != 1
-        or isinstance(value["schema_version"], bool)
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
         or value["document"] != DMG_SUBMISSION_DOCUMENT
         or value["version"] != version
         or value["build_number"] != build_number
@@ -2651,8 +2651,8 @@ def verify_dmg_set(
         directory / DMG_SEAL_NAME, seal, seal_data, "DMG release seal"
     )
     if (
-        seal["schema_version"] != 1
-        or isinstance(seal["schema_version"], bool)
+        type(seal["schema_version"]) is not int
+        or seal["schema_version"] != 1
         or seal["document"] != DMG_SEAL_DOCUMENT
         or seal["product"] != PRODUCT
         or seal["version"] != version
@@ -3755,8 +3755,8 @@ def verify_distribution_set(
         seal_path, seal, seal_data, "distribution release seal"
     )
     if (
-        seal["schema_version"] != 1
-        or isinstance(seal["schema_version"], bool)
+        type(seal["schema_version"]) is not int
+        or seal["schema_version"] != 1
         or seal["document"] != DISTRIBUTION_SEAL_DOCUMENT
         or seal["product"] != PRODUCT
         or seal["version"] != version

@@ -5,7 +5,7 @@
 
 cfw_require_supported_python() {
   local contract_python="${1:-python3}"
-  "$contract_python" -c \
+  "$contract_python" -S -B -c \
     'import sys; raise SystemExit(not ((3, 11) <= sys.version_info[:2] < (4, 0)))' || {
     echo "error: Python 3.11 through 3.x is required" >&2
     return 1
@@ -24,7 +24,7 @@ cfw_verify_release_toolchain_manifest() {
     contract_metadata_arguments+=(--metadata "$contract_metadata")
   done
 
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
     "$contract_repository/scripts/verify_artifact_manifest.py" \
     "$contract_artifact" \
     "$contract_manifest" \

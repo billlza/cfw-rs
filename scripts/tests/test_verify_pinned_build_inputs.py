@@ -448,6 +448,7 @@ class Fixture:
         self.xcodegen_bootstrap = XCODEGEN_BOOTSTRAP
         self.tauri_installer = TAURI_INSTALLER
         self.ci_workflow = CI_WORKFLOW
+        self.extra_artifact_files: dict[str, str] = {}
         self._extra_env_text = ""
 
     def env_text(self) -> str:
@@ -489,6 +490,10 @@ class Fixture:
         )
         (root / ".github/workflows").mkdir(parents=True, exist_ok=True)
         (root / ".github/workflows/ci.yml").write_text(self.ci_workflow, encoding="utf-8")
+        for relative, contents in self.extra_artifact_files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents, encoding="utf-8")
         return root
 
 
@@ -774,6 +779,40 @@ class PinnedBuildInputsTests(unittest.TestCase):
             "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256", "missing-binding"
         )
         self._assert_fails(fixture, "artifact-hash binding")
+
+    def test_production_orchestrator_binding_drift_fails(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/orchestrator.py"
+        fixture.manifest["artifactBindings"][path] = [
+            'VALIDATION_BUILD = "40002"',
+            'FINAL_BUILD = "40003"',
+            "seal_production_evidence",
+            "require_verified=True",
+        ]
+        fixture.extra_artifact_files[path] = (
+            'VALIDATION_BUILD = "40002"\n'
+            'FINAL_BUILD = "40003"\n'
+            "def seal_production_evidence():\n"
+            "    require_verified=True\n"
+        )
+        self._verify_fixture(fixture)
+        fixture.extra_artifact_files[path] = fixture.extra_artifact_files[path].replace(
+            "require_verified=True", "require_verified=False"
+        )
+        self._assert_fails(fixture, "artifact-hash binding")
+
+    def test_real_manifest_pins_complete_production_orchestrator_surface(self) -> None:
+        manifest = json.loads((REPO_ROOT / MANIFEST_RELATIVE_PATH).read_text(encoding="utf-8"))
+        bindings = manifest["artifactBindings"]
+        for path in (
+            "scripts/release_capability_inventory.json",
+            "scripts/release_capability_inventory.py",
+            "scripts/publication/orchestrator.py",
+            "scripts/production_release_evidence.py",
+            "scripts/publication/sealed_manifest.py",
+        ):
+            self.assertIn(path, bindings)
+            self.assertTrue(bindings[path])
 
 
 if __name__ == "__main__":

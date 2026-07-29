@@ -220,6 +220,14 @@ class SealedClosureRejectionTests(unittest.TestCase):
     def _base(self) -> dict:
         return build_sealed_closure(REPOSITORY, _request(), fixture=True)
 
+    def test_schema_version_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                closure = self._base()
+                closure["schema_version"] = invalid
+                with self.assertRaisesRegex(PublicationError, "unsupported schema/document"):
+                    validate_sealed_closure(REPOSITORY, closure, fixture=True)
+
     def test_unreviewed_license_node_rejected(self) -> None:
         graph = _sbom_graph()
         graph["components"][1]["license_expression"] = "NOASSERTION"

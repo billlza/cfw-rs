@@ -215,7 +215,7 @@ def _validate_signature_evidence(
     evidence = exact_object(
         value, SIGNATURE_EVIDENCE_FIELDS, f"signing.{client}.raw_evidence"
     )
-    if evidence["schema_version"] != 1:
+    if type(evidence["schema_version"]) is not int or evidence["schema_version"] != 1:
         raise AdversarialMatrixError(f"signing.{client} evidence schema_version must be 1")
     if parse_proof_binding(evidence["proof"], f"signing.{client}.raw_evidence.proof") != proof:
         raise AdversarialMatrixError(f"signing.{client} evidence proof differs from its report")
@@ -321,7 +321,7 @@ def _validate_transcript(
     nonces: set[str],
 ) -> tuple[datetime, datetime]:
     transcript = exact_object(value, TRANSCRIPT_FIELDS, f"{case_id}.transcript")
-    if transcript["schema_version"] != 1:
+    if type(transcript["schema_version"]) is not int or transcript["schema_version"] != 1:
         raise AdversarialMatrixError(f"{case_id} transcript schema_version must be 1")
     if parse_proof_binding(transcript["proof"], f"{case_id}.transcript.proof") != proof:
         raise AdversarialMatrixError(f"{case_id} transcript proof differs from its report")
@@ -377,7 +377,10 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         },
         "adversarial matrix",
     )
-    if document["schema_version"] != SCHEMA_VERSION:
+    if (
+        type(document["schema_version"]) is not int
+        or document["schema_version"] != SCHEMA_VERSION
+    ):
         raise AdversarialMatrixError(f"adversarial schema_version must be {SCHEMA_VERSION}")
     if document["harness_version"] != HARNESS_VERSION:
         raise AdversarialMatrixError(

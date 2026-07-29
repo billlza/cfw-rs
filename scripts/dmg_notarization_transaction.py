@@ -608,8 +608,8 @@ def _validate_intent(context: DmgContext, value: object) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != INTENT_FIELDS:
         raise TransactionError("intent_identity_drift", "DMG notarization intent has unexpected fields")
     if (
-        value["schema_version"] != 1
-        or isinstance(value["schema_version"], bool)
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
         or value["document"] != INTENT_DOCUMENT
         or value["version"] != context.version
         or value["build_number"] != context.build_number
@@ -649,8 +649,8 @@ def _validate_observation(
             "DMG submission observation has unexpected fields",
         )
     if (
-        value["schema_version"] != 1
-        or isinstance(value["schema_version"], bool)
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
         or value["document"] != OBSERVATION_DOCUMENT
         or value["attempt_id"] != intent["attempt_id"]
         or value["intent_sha256"] != intent_sha256
@@ -675,8 +675,8 @@ def _validate_submission_receipt(
             "DMG submission receipt has unexpected fields",
         )
     if (
-        value["schema_version"] != 1
-        or isinstance(value["schema_version"], bool)
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
         or value["document"] != DMG_SUBMISSION_DOCUMENT
         or value["attempt_id"] != intent["attempt_id"]
         or value["intent_sha256"] != intent_sha256

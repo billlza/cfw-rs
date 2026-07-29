@@ -39,7 +39,8 @@ test items do not imply a signed physical-device release.
 - [x] strict Tauri CSP and no global Tauri JavaScript injection
 - [x] source/build dependency pins, offline libbox build, native-product graph,
       production-boundary, Authority-ordering, notary-log, Gatekeeper-state,
-      and final-candidate schema v2 fail-closed gates
+      and final-candidate schema v3 fail-closed gates, including the PS256
+      physical aggregate to physical-candidate manifest cross-binding
 - [x] controller snapshots, proxy selection/delay, rules, connection/log streams,
       connection close, DNS query, and cache flush use real typed commands;
       pinned-engine provider management is explicitly unsupported rather than

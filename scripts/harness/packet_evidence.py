@@ -175,9 +175,7 @@ def _capture_provenance(
     proof: dict[str, Any],
 ) -> dict[str, Any]:
     provenance = exact_object(value, PROVENANCE_FIELDS, f"{case_id}.capture_provenance")
-    if provenance["schema_version"] != 1 or isinstance(
-        provenance["schema_version"], bool
-    ):
+    if type(provenance["schema_version"]) is not int or provenance["schema_version"] != 1:
         raise PacketEvidenceError(f"{case_id} capture provenance schema_version must be 1")
     if parse_proof_binding(
         provenance["proof"], f"{case_id}.capture_provenance.proof"
@@ -292,7 +290,7 @@ def _send_attempt(
     capture_provenance_sha256: str,
 ) -> tuple[Fraction, Fraction, Fraction]:
     attempt = exact_object(value, ATTEMPT_FIELDS, f"{case_id}.send_attempt")
-    if attempt["schema_version"] != 1 or isinstance(attempt["schema_version"], bool):
+    if type(attempt["schema_version"]) is not int or attempt["schema_version"] != 1:
         raise PacketEvidenceError(f"{case_id} send attempt schema_version must be 1")
     if parse_proof_binding(attempt["proof"], f"{case_id}.send_attempt.proof") != proof:
         raise PacketEvidenceError(f"{case_id} send attempt proof differs from its report")
@@ -361,7 +359,10 @@ def _validate(
         },
         "packet evidence",
     )
-    if document["schema_version"] != SCHEMA_VERSION:
+    if (
+        type(document["schema_version"]) is not int
+        or document["schema_version"] != SCHEMA_VERSION
+    ):
         raise PacketEvidenceError(f"packet evidence schema_version must be {SCHEMA_VERSION}")
     if document["harness_version"] != HARNESS_VERSION:
         raise PacketEvidenceError(

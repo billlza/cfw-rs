@@ -160,10 +160,15 @@ def _review_records(path: Path, seeds: dict[str, ComponentSeed]) -> dict[str, di
     document = require_exact_keys(
         load_json(path), {"schema_version", "product", "components"}, "reviewed component input"
     )
-    if document["schema_version"] != 1 or document["product"] != {
-        "name": PRODUCT_NAME,
-        "version": RELEASE_VERSION,
-    }:
+    if (
+        type(document["schema_version"]) is not int
+        or document["schema_version"] != 1
+        or document["product"]
+        != {
+            "name": PRODUCT_NAME,
+            "version": RELEASE_VERSION,
+        }
+    ):
         raise PublicationError("reviewed component input is not for the fixed 0.4.0 product")
     raw_records = document["components"]
     if not isinstance(raw_records, list):

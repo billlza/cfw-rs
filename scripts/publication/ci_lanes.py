@@ -217,8 +217,8 @@ LANES: tuple[Lane, ...] = (
     ),
     Lane(
         "release-tooling-tests",
-        "PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s scripts/tests "
-        "-p 'test_*.py'; "
+        "PYTHONWARNINGS=error PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest "
+        "discover -s scripts/tests -p 'test_*.py'; "
         'while IFS= read -r test_script; do bash "$test_script"; done '
         "< <(find scripts/tests -type f -name '*_test.sh' | sort)",
         timeout=7200,

@@ -36,6 +36,7 @@ from pathlib import Path
 
 from scripts.evidence_manifest import LEVEL_ORDER
 from scripts.publication.common import PublicationError
+from scripts.release_capability_inventory import CAPABILITY_IDS
 from scripts.publication.sealed_manifest import (
     BLOCKED,
     COMPOSED_INPUTS,
@@ -65,16 +66,6 @@ from scripts.tests.test_sealed_manifest import (
 
 ACCEPT_CASES = 120
 REJECT_CASES = 200
-CAPABILITY_POOL = (
-    "global-authority",
-    "ticket-only-tunnel",
-    "authority-owned-lease",
-    "global-off-barrier",
-    "one-way-migration",
-    "release-evidence",
-)
-
-
 def build_sealed_evidence_manifest(*args, **kwargs):
     kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
     kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
@@ -100,8 +91,9 @@ def _sha(rng: random.Random) -> str:
 
 
 def _capabilities(rng: random.Random) -> tuple[str, ...]:
-    count = rng.randint(1, 4)
-    return tuple(sorted(rng.sample(CAPABILITY_POOL, count)))
+    capabilities = list(CAPABILITY_IDS)
+    rng.shuffle(capabilities)
+    return tuple(capabilities)
 
 
 def _accept_request(rng: random.Random, workspace: Path, depth: int) -> dict:
@@ -348,6 +340,12 @@ def tamper_unknown_field(document, rng):
     return "tampered-unknown-field"
 
 
+def tamper_schema_numeric_type(document, rng):
+    document["schema_version"] = rng.choice((1.0, True))
+    reseal(document)
+    return "tampered-schema-numeric-type"
+
+
 DOCUMENT_MUTATORS = (
     tamper_capability_level,
     tamper_duplicate_capability,
@@ -361,6 +359,7 @@ DOCUMENT_MUTATORS = (
     tamper_field_without_reseal,
     tamper_platform,
     tamper_unknown_field,
+    tamper_schema_numeric_type,
 )
 
 UPDATER_KEY_DEFECT = "updater-key-present"

@@ -449,7 +449,7 @@ def _validate_raw(
         "soak",
     }
     raw_value = exact_object(raw, fields, "raw performance samples")
-    if raw_value["schema_version"] != 1:
+    if type(raw_value["schema_version"]) is not int or raw_value["schema_version"] != 1:
         raise PerformanceGateError("raw performance schema_version must be 1")
     if parse_proof_binding(raw_value["proof"], "raw.performance.proof") != proof:
         raise PerformanceGateError("raw performance proof differs from its report")
@@ -490,7 +490,10 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         "samples_artifact",
     }
     document = exact_object(value, fields, "performance evidence")
-    if document["schema_version"] != SCHEMA_VERSION:
+    if (
+        type(document["schema_version"]) is not int
+        or document["schema_version"] != SCHEMA_VERSION
+    ):
         raise PerformanceGateError(f"performance schema_version must be {SCHEMA_VERSION}")
     if document["harness_version"] != HARNESS_VERSION:
         raise PerformanceGateError(

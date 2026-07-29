@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
 
-# Strengthened Requirement 8.1 response. The path/name-only atomic blocker
-# reports the file path and name, mandates external relocation, and mandates
-# key rotation plus updater trust migration when backup/archive/sharing
-# exposure is plausible. It never opens or reads a candidate's bytes and fails
-# closed on unavailable or malformed inputs.
-run_updater_key_atomic_blocker() {
+# Requirement 8.1 path/name-only secret-material gate. One scanner classifies
+# known updater keys, Apple App Store Connect .p8 keys, and unknown candidates,
+# then emits the matching trust-domain response without reading file bytes.
+run_release_secret_material_blocker() {
   local workspace_root="$1"
   local gate_dir
   gate_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
-    "$gate_dir/updater_key_release_blocker.py" "$workspace_root"
+  PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B \
+    "$gate_dir/release_secret_material_blocker.py" "$workspace_root"
 }
 
 verify_release_workspace_has_no_key_material() {
   local workspace_root="$1"
   # The Python blocker is the single scanner and policy owner. It emits and
   # enforces the complete Requirement 8.1 response by path and name only.
-  run_updater_key_atomic_blocker "$workspace_root"
+  run_release_secret_material_blocker "$workspace_root"
 }
 
 release_workspace_secret_gate_main() {

@@ -55,9 +55,9 @@ digest, provider readiness, and OS status.
 ## Release evidence
 
 Store raw measurements as strict artifact descriptors under the evidence root.
-The v2 validator reopens and hashes the bytes, recomputes every summary, and
+The v4 aggregate validator reopens and hashes the bytes, recomputes every summary, and
 requires a source-pinned signed collector receipt over the complete report/raw
-set. See [Physical evidence v2](physical-evidence-v2.md). CI may run fast
+set. See [Physical evidence v4](physical-evidence-v4.md). CI may run fast
 deterministic unit tests, but physical Apple Silicon data-plane, weak-net,
 resource, soak, and external collector-trust gates remain mandatory publication
 gates.

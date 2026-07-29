@@ -22,8 +22,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.evidence_manifest import LEVEL_ORDER, REQUIRED_BINDINGS, REQUIRED_KINDS
-from scripts.publication.common import PublicationError, canonical_json, tree_digest
+from scripts.evidence_manifest import KIND_LEVEL, LEVEL_ORDER, REQUIRED_BINDINGS
+from scripts.publication.common import PublicationError, canonical_json
 from scripts.publication.final_candidate import (
     REQUIRED_NESTED_CODE,
     TEAM_ID,
@@ -31,6 +31,11 @@ from scripts.publication.final_candidate import (
 )
 from scripts.publication.sealed_closure import build_sealed_closure, derive_supply_chain
 from scripts.repository_source_identity import repository_commit
+from scripts.release_capability_inventory import (
+    CAPABILITY_IDS,
+    expected_capability_levels,
+    expected_report_contracts,
+)
 from scripts.publication.sealed_manifest import (
     BLOCKED,
     DOCUMENT_KIND,
@@ -43,6 +48,8 @@ from scripts.publication.sealed_manifest import (
     REQUIRED_SOURCE_GATES,
     SEALED,
     SEALED_LEVEL,
+    SOURCE_GATE_DOCUMENT,
+    SOURCE_GATE_SCHEMA_VERSION,
     _documents,
     authorize_publication_artifacts as _authorize_publication_artifacts,
     build_sealed_evidence_manifest as _build_sealed_evidence_manifest,
@@ -61,6 +68,11 @@ from scripts.tests.test_physical_evidence_aggregator import (
     SIGNED_TREE,
     fixture as physical_fixture,
 )
+from scripts.tests.physical_evidence_fixture import (
+    XCFRAMEWORK_MANIFEST_SHA,
+    XCFRAMEWORK_SHA,
+    final_artifact_hash_manifest,
+)
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 from scripts.tests.test_sealed_closure import _request as _closure_request
 
@@ -69,12 +81,10 @@ REPOSITORY = Path(__file__).resolve().parent.parent.parent
 COMMIT = repository_commit(REPOSITORY)
 TOOLCHAIN = "4" * 64
 RELEASE_SOURCE = "5" * 64
-XCFRAMEWORK_SHA = "1" * 64
-XCFRAMEWORK_MANIFEST_SHA = "2" * 64
 CAPTURED_AT = "2026-07-22T00:00:00Z"
 OBSERVED_AT = "2026-08-01T00:00:00Z"
 PINNED = derive_supply_chain(REPOSITORY)["patched_source"]
-CAPABILITIES = ("global-authority", "ticket-only-tunnel")
+CAPABILITIES = CAPABILITY_IDS
 
 
 def build_final_candidate_binding(*args, **kwargs):
@@ -123,24 +133,21 @@ def inner_manifest(
         "toolchain_sha256": toolchain,
         "signed_app_sha256": signed_app,
     }
+    highest = LEVEL_ORDER[depth]
     reports: list[dict] = []
-    levels: dict[str, dict] = {}
-    for level in LEVEL_ORDER[: depth + 1]:
-        report_ids: list[str] = []
-        for kind in sorted(REQUIRED_KINDS[level]):
-            report_id = f"{level.replace('_', '-').lower()}-{kind.replace('_', '-')}"
-            reports.append(
-                {
-                    "id": report_id,
-                    "kind": kind,
-                    "path": f"reports/{report_id}.json",
-                    "sha256": digest(f"{salt}{report_id}"),
-                    "status": "passed",
-                    "bindings": {field: identity[field] for field in REQUIRED_BINDINGS[level]},
-                }
-            )
-            report_ids.append(report_id)
-        levels[level] = {"report_ids": report_ids}
+    selected = tuple(capabilities)
+    for contract in expected_report_contracts(highest, capabilities=selected):
+        level = KIND_LEVEL[contract["kind"]]
+        reports.append(
+            {
+                **contract,
+                "sha256": digest(f"{salt}{contract['id']}"),
+                "status": "passed",
+                "bindings": {
+                    field: identity[field] for field in REQUIRED_BINDINGS[level]
+                },
+            }
+        )
     return {
         "schema_version": 1,
         "manifest_version": "evidence-manifest-v1",
@@ -149,8 +156,8 @@ def inner_manifest(
         "capabilities": [
             {
                 "id": capability,
-                "highest_level": LEVEL_ORDER[depth],
-                "levels": copy.deepcopy(levels),
+                "highest_level": highest,
+                "levels": expected_capability_levels(capability, highest),
             }
             for capability in capabilities
         ],
@@ -159,6 +166,8 @@ def inner_manifest(
 
 def source_gates(*, commit: str = COMMIT) -> dict:
     return {
+        "schema_version": SOURCE_GATE_SCHEMA_VERSION,
+        "document": SOURCE_GATE_DOCUMENT,
         "gates": [
             {
                 "id": identifier,
@@ -211,19 +220,7 @@ def sealed_closure_document(*, commit: str = COMMIT, signed_app: str = SIGNED_TR
 
 
 def _artifact_hash_manifest() -> dict:
-    entries = sorted(
-        (
-            {"path": "artifacts/Clash-for-Mac.app.tree.json", "sha256": SIGNED_TREE},
-            {"path": "artifacts/app-manifest.json", "sha256": APP_MANIFEST},
-            {"path": "artifacts/Libbox.xcframework.tree.json", "sha256": XCFRAMEWORK_SHA},
-            {
-                "path": "artifacts/Libbox.xcframework.manifest.json",
-                "sha256": XCFRAMEWORK_MANIFEST_SHA,
-            },
-        ),
-        key=lambda entry: entry["path"],
-    )
-    return {"entries": entries, "sha256": tree_digest(entries)}
+    return copy.deepcopy(final_artifact_hash_manifest())
 
 
 def final_candidate_document(
@@ -260,10 +257,6 @@ def final_candidate_document(
             }
             for role, bundle_id in sorted(REQUIRED_NESTED_CODE.items())
         ],
-        "evidence_binding": {
-            "artifact_hash_manifest_sha256": manifest["sha256"],
-            "superseded_report_hashes": [],
-        },
         "notarization": {
             "status": "Accepted",
             "id": "notary-12-3",
@@ -363,6 +356,25 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
             authorize_publication_artifacts(
                 REPOSITORY, manifest, workspace_root=self.workspace
             )
+
+    def test_omitted_release_capability_is_rejected(self) -> None:
+        payload = request(3, self.workspace)
+        removed = payload["evidence_manifest"]["capabilities"].pop()["id"]
+        payload["evidence_manifest"]["reports"] = [
+            report
+            for report in payload["evidence_manifest"]["reports"]
+            if not report["id"].startswith(f"{removed}-")
+        ]
+        with self.assertRaisesRegex(PublicationError, "inventory is incomplete"):
+            self.build(payload)
+
+    def test_unknown_release_capability_is_rejected(self) -> None:
+        payload = request(3, self.workspace)
+        payload["evidence_manifest"]["capabilities"][-1]["id"] = (
+            "unknown-release-surface"
+        )
+        with self.assertRaisesRegex(PublicationError, "inventory is incomplete or unknown"):
+            self.build(payload)
 
     def test_fixture_validation_reopens_the_private_aggregate(self) -> None:
         payload = request(3, self.workspace)
@@ -485,6 +497,7 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
                 "requirements": "docs/release/macos15-network-extension-migration/requirements.md",
                 "design": "docs/release/macos15-network-extension-migration/design.md",
                 "tasks": "docs/release/macos15-network-extension-migration/tasks.md",
+                "capability-inventory": "scripts/release_capability_inventory.json",
             },
         )
         stale_claims = (
@@ -493,7 +506,8 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
         )
         for relative in REQUIRED_DOCUMENTS.values():
             with self.subTest(document=relative):
-                self.assertEqual(Path(relative).parts[:2], ("docs", "release"))
+                if relative != "scripts/release_capability_inventory.json":
+                    self.assertEqual(Path(relative).parts[:2], ("docs", "release"))
                 contents = (REPOSITORY / relative).read_text(encoding="utf-8")
                 for claim in stale_claims:
                     self.assertNotIn(claim, contents)
@@ -504,6 +518,15 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
             validate_sealed_evidence_manifest(
                 REPOSITORY, manifest, fixture=False, workspace_root=self.workspace
             )
+
+    def test_schema_version_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                manifest = self.build(request(0, self.workspace))
+                manifest["schema_version"] = invalid
+                reseal(manifest)
+                with self.assertRaisesRegex(PublicationError, "unsupported schema/document"):
+                    self.validate(manifest)
 
 
 class SealedManifestCapabilityTests(_CleanWorkspace):
@@ -588,7 +611,7 @@ class SealedManifestCapabilityTests(_CleanWorkspace):
         self.assertEqual(manifest["status"], SEALED)
         self.assertFalse(manifest["publication"]["allowed"])
         self.assertIn(
-            f"capability:global-authority={LEVEL_ORDER[2]}",
+            f"capability:global-authority-peer-authentication={LEVEL_ORDER[2]}",
             manifest["publication"]["refusals"],
         )
         self.validate(manifest)
@@ -599,6 +622,22 @@ class SealedManifestCapabilityTests(_CleanWorkspace):
 
 
 class SealedManifestBindingTests(_CleanWorkspace):
+    def test_source_gate_schema_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                payload = request(0, self.workspace)
+                payload["p0_source"]["schema_version"] = invalid
+                with self.assertRaisesRegex(PublicationError, "unsupported schema"):
+                    self.build(payload)
+
+    def test_inner_manifest_schema_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                payload = request(0, self.workspace)
+                payload["evidence_manifest"]["schema_version"] = invalid
+                with self.assertRaisesRegex(PublicationError, "schema_version"):
+                    self.build(payload)
+
     def test_stale_source_gate_commit_is_rejected(self) -> None:
         payload = request(0, self.workspace)
         payload["p0_source"]["gates"][0]["commit"] = "b" * 40
@@ -796,10 +835,10 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
             manifest = build_sealed_evidence_manifest(
                 REPOSITORY, payload, fixture=True, workspace_root=workspace
             )
-            self.assertEqual(manifest["gates"]["updater_key_custody"]["status"], FAILED)
+            self.assertEqual(manifest["gates"]["release_secret_custody"]["status"], FAILED)
             self.assertEqual(manifest["status"], BLOCKED)
-            self.assertIn("updater_key_custody", manifest["blocked_inputs"])
-            blocks = manifest["gates"]["updater_key_custody"]["evidence"]["blocks"]
+            self.assertIn("release_secret_custody", manifest["blocked_inputs"])
+            blocks = manifest["gates"]["release_secret_custody"]["evidence"]["blocks"]
             self.assertEqual(len(blocks), 1)
             self.assertEqual(blocks[0]["name"], "cfw-rs.key")
             # Path/name only: no content is ever recorded.
@@ -831,9 +870,9 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
             manifest = build_sealed_evidence_manifest(
                 REPOSITORY, downgraded, fixture=True, workspace_root=workspace
             )
-            self.assertEqual(manifest["gates"]["updater_key_custody"]["status"], FAILED)
+            self.assertEqual(manifest["gates"]["release_secret_custody"]["status"], FAILED)
             self.assertEqual(manifest["gates"]["final_candidate"]["status"], BLOCKED)
-            self.assertIn("updater_key_custody", manifest["blocked_inputs"])
+            self.assertIn("release_secret_custody", manifest["blocked_inputs"])
             self.assertFalse(manifest["publication"]["allowed"])
 
     def test_real_workspace_status_reports_the_live_custody_gate(self) -> None:
@@ -844,24 +883,24 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
         # path/name only, and a passing custody gate promotes nothing.
         from scripts.publication.sealed_manifest import (
             COMPOSED_INPUTS,
-            UPDATER_KEY_GATE,
+            RELEASE_SECRET_GATE,
             publication_decision,
         )
-        from scripts.updater_key_release_blocker import evaluate_workspace
+        from scripts.release_secret_material_blocker import evaluate_workspace
 
         # Independent path/name-only oracle for what the workspace holds now.
         live = evaluate_workspace(REPOSITORY)
         report = environment_status(REPOSITORY)
 
         self.assertEqual(
-            [block["path"] for block in report["updater_key_blocks"]],
+            [block["path"] for block in report["workspace_secret_blocks"]],
             [response.detected_path for response in live],
         )
         self.assertEqual(
-            UPDATER_KEY_GATE in report["blocked_inputs"],
-            bool(report["updater_key_blocks"]),
+            RELEASE_SECRET_GATE in report["blocked_inputs"],
+            bool(report["workspace_secret_blocks"]),
         )
-        for block in report["updater_key_blocks"]:
+        for block in report["workspace_secret_blocks"]:
             # Path/name and response flags only; no key bytes are ever carried.
             self.assertEqual(
                 set(block),
@@ -871,12 +910,19 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
                     "relocation_target",
                     "exposure_plausible",
                     "rotation_required",
-                    "trust_migration_required",
+                    "credential_kind",
+                    "required_trust_action",
+                    "updater_trust_migration_required",
+                    "notary_profile_reprovision_required",
+                    "trust_domain_identification_required",
                 },
             )
             self.assertTrue(block["path"].endswith(block["name"]))
-            self.assertIn(Path(block["name"]).suffix.lower(), {".key", ".pem"})
-        self.assertNotIn("contents", json.dumps(report["updater_key_blocks"]))
+            self.assertIn(
+                Path(block["name"]).suffix.lower(),
+                {".key", ".p8", ".pem"},
+            )
+        self.assertNotIn("contents", json.dumps(report["workspace_secret_blocks"]))
         self.assertEqual(
             report["status"], BLOCKED if report["blocked_inputs"] else "inputs-present"
         )
@@ -897,11 +943,11 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
         self.assertEqual(gated["manifest_state"], NOT_RUN)
         # ...and a custody gate that passes on its own never allows publication.
         gates = {name: {"status": NOT_RUN, "evidence": None} for name in GATE_ORDER}
-        gates[UPDATER_KEY_GATE] = {"status": PASSED, "evidence": {"blocks": []}}
+        gates[RELEASE_SECRET_GATE] = {"status": PASSED, "evidence": {"blocks": []}}
         decision = publication_decision(gates, [])
         self.assertFalse(decision["allowed"])
         self.assertFalse(decision["artifacts_permitted"])
-        self.assertNotIn(f"gate:{UPDATER_KEY_GATE}=not-run", decision["refusals"])
+        self.assertNotIn(f"gate:{RELEASE_SECRET_GATE}=not-run", decision["refusals"])
 
         # The scan still fails closed: an unavailable root is never "no key".
         with self.assertRaises(PublicationError):
@@ -921,7 +967,7 @@ class SealedManifestContractTests(unittest.TestCase):
                 "signed_installed",
                 "sealed_closure",
                 "final_candidate",
-                "updater_key_custody",
+                "release_secret_custody",
             ),
         )
 

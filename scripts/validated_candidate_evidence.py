@@ -110,7 +110,11 @@ def validate_candidate_review(
         },
         "validated-candidate review",
     )
-    if document["schema_version"] != 1 or document["decision"] != "approved":
+    if (
+        type(document["schema_version"]) is not int
+        or document["schema_version"] != 1
+        or document["decision"] != "approved"
+    ):
         raise ValidatedCandidateError("validated candidate is not explicitly approved")
     if not isinstance(document["reviewer"], str) or not document["reviewer"].strip():
         raise ValidatedCandidateError("validated candidate has no reviewer")

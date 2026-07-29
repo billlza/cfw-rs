@@ -47,14 +47,15 @@ verify_release_publication_evidence() {
   # Publication artifacts may only be created once the immutable sealed outer
   # Evidence Manifest authorizes publication: P0 source implementation, unsigned
   # CI, signed-installed evidence, sealed closure, the final-candidate binding,
-  # and updater-key custody must all pass. A missing, blocked, or hand-edited
+  # and release-secret custody must all pass. A missing, blocked, or hand-edited
   # manifest refuses publication; there is no override and no fallback.
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
     "$publication_repo_root/scripts/sealed_evidence_manifest.py" publication-gate
   local native_products_root
   native_products_root="$(release_native_products_root_for_app "$app_path")" || return 1
   "$publication_repo_root/scripts/verify_release_app.sh" "$app_path" "$native_products_root"
-  /usr/bin/python3 "$publication_repo_root/scripts/publication_evidence.py" verify \
+  /usr/bin/python3 -S -B \
+    "$publication_repo_root/scripts/publication_evidence.py" verify \
     --evidence "$publication_evidence_root" \
     --app "$app_path"
 }
@@ -70,7 +71,7 @@ verify_release_upload_artifacts() {
   # accepts only the final distribution seal after every package, component
   # seal, candidate manifest, CCS, SBOM, and legal-review byte recomputes.
   verify_release_publication_evidence "$publication_signed_app"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
     "$publication_repo_root/scripts/release_artifact_set.py" verify-release \
     --repository "$publication_repo_root" \
     --release-root "$publication_repo_root/target/candidates/0.4.0/release" \
@@ -86,7 +87,7 @@ seal_release_upload_artifacts() {
   # The distribution seal is deliberately post-packaging: it can be created
   # only after the app/publication lane and both byte-proven package sets pass.
   verify_release_publication_evidence "$publication_signed_app"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
     "$publication_repo_root/scripts/release_artifact_set.py" seal-release \
     --repository "$publication_repo_root" \
     --release-root "$publication_repo_root/target/candidates/0.4.0/release" \

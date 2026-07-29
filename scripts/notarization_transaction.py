@@ -46,7 +46,11 @@ if __package__:
     )
     from .hash_artifact import build_manifest, write_new_manifest
     from .release_build_identity import canonical_build_version
-    from .repository_source_identity import current_identity
+    from .repository_source_identity import (
+        SourceIdentityError,
+        current_identity,
+        identity_at_commit,
+    )
     from .verify_notary_log import (
         NotaryLogError,
         validate_documents,
@@ -68,7 +72,11 @@ else:
     )
     from hash_artifact import build_manifest, write_new_manifest
     from release_build_identity import canonical_build_version
-    from repository_source_identity import current_identity
+    from repository_source_identity import (
+        SourceIdentityError,
+        current_identity,
+        identity_at_commit,
+    )
     from verify_notary_log import (
         NotaryLogError,
         validate_documents,
@@ -445,6 +453,13 @@ class PreparedAttempt:
     recovery_tool_repository: Path | None
     recovery_tool_identity: dict[str, str] | None
     recovery_tool_identity_reader: SourceIdentityReader | None
+
+
+@dataclass(frozen=True)
+class PublishedTransactionEvidence:
+    receipt: dict[str, Any]
+    receipt_path: Path
+    prepared_at: str
 
 
 @dataclass(frozen=True)
@@ -1882,15 +1897,15 @@ def _validate_event_document(
             "notarization event has an unexpected field set",
         )
     if (
-        value.get("schema_version") == 1
-        and not isinstance(value.get("schema_version"), bool)
+        type(value.get("schema_version")) is int
+        and value.get("schema_version") == 1
         and value.get("document") == EVENT_DOCUMENT
         and set(value) == EVENT_FIELDS
     ):
         evidence_sha256 = None
     elif (
-        value.get("schema_version") == 2
-        and not isinstance(value.get("schema_version"), bool)
+        type(value.get("schema_version")) is int
+        and value.get("schema_version") == 2
         and value.get("document") == EVENT_DOCUMENT_V2
         and set(value) == EVENT_V2_FIELDS
         and value.get("state") in EVIDENCE_EVENT_STATES
@@ -2304,8 +2319,8 @@ def _load_recovery_intent_document(
     attempt_id = _canonical_uuid(value["attempt_id"], "local attempt id")
     archive_size = value["archive_size"]
     if (
-        value["schema_version"] != 1
-        or isinstance(value["schema_version"], bool)
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
         or value["document"] != ATTEMPT_DOCUMENT
         or value["lane"] != context.build_kind
         or value["build_number"] != context.build_number
@@ -2833,8 +2848,8 @@ def _load_recoverable_attempt(
             not isinstance(observation, dict)
             or set(observation) != SUBMISSION_OBSERVATION_FIELDS
             or observation_data != _canonical_json(observation).encode("utf-8")
+            or type(observation["schema_version"]) is not int
             or observation["schema_version"] != 1
-            or isinstance(observation["schema_version"], bool)
             or observation["document"] != SUBMISSION_OBSERVATION_DOCUMENT
             or observation["attempt_id"] != intent["attempt_id"]
             or observation["intent_sha256"] != intent_sha256
@@ -2902,8 +2917,8 @@ def _load_recoverable_attempt(
             not isinstance(receipt, dict)
             or set(receipt) != SUBMISSION_RECEIPT_FIELDS
             or receipt_data != _canonical_json(receipt).encode("utf-8")
+            or type(receipt["schema_version"]) is not int
             or receipt["schema_version"] != 2
-            or isinstance(receipt["schema_version"], bool)
             or receipt["document"] != SUBMISSION_DOCUMENT
             or receipt["attempt_id"] != intent["attempt_id"]
             or receipt["archive_name"] != context.archive_name
@@ -3465,8 +3480,8 @@ def _require_submission_acquisition_evidence(
     )
     if (
         set(receipt) != SUBMISSION_RECEIPT_FIELDS
+        or type(receipt["schema_version"]) is not int
         or receipt["schema_version"] != 2
-        or isinstance(receipt["schema_version"], bool)
         or receipt["document"] != SUBMISSION_DOCUMENT
         or receipt["attempt_id"] != prepared.attempt_id
         or receipt["submission_id"] != prepared.submission_id
@@ -4115,8 +4130,8 @@ def _validate_sealed_publication(
         not isinstance(receipt, dict)
         or set(receipt) != PUBLISH_READY_RECEIPT_FIELDS
         or receipt_data != _canonical_json(receipt).encode("utf-8")
+        or type(receipt.get("schema_version")) is not int
         or receipt.get("schema_version") != 3
-        or isinstance(receipt.get("schema_version"), bool)
         or receipt.get("document") != RECEIPT_DOCUMENT
         or receipt.get("attempt_id") != prepared.attempt_id
         or receipt.get("submission_id") != prepared.submission_id
@@ -4555,8 +4570,8 @@ def _resume_direct_sealed_transaction(
         or set(submission_receipt) != SUBMISSION_RECEIPT_FIELDS
         or submission_receipt_data
         != _canonical_json(submission_receipt).encode("utf-8")
+        or type(submission_receipt.get("schema_version")) is not int
         or submission_receipt.get("schema_version") != 2
-        or isinstance(submission_receipt.get("schema_version"), bool)
         or submission_receipt.get("document") != SUBMISSION_DOCUMENT
         or submission_receipt.get("attempt_id") != intent["attempt_id"]
         or submission_receipt.get("submission_id") != submission_id
@@ -4576,8 +4591,8 @@ def _resume_direct_sealed_transaction(
         not isinstance(observation, dict)
         or set(observation) != SUBMISSION_OBSERVATION_FIELDS
         or observation_data != _canonical_json(observation).encode("utf-8")
+        or type(observation.get("schema_version")) is not int
         or observation.get("schema_version") != 1
-        or isinstance(observation.get("schema_version"), bool)
         or observation.get("document") != SUBMISSION_OBSERVATION_DOCUMENT
         or observation.get("attempt_id") != intent["attempt_id"]
         or observation.get("submission_id") != submission_id
@@ -5341,6 +5356,49 @@ def _recovery_intent_static_fields(
     }
 
 
+def _load_existing_recovery_intent(
+    attempt: RecoverableAttempt,
+    submission_id: str,
+    recovery_tool_identity: dict[str, str],
+) -> tuple[dict[str, Any], Path, str]:
+    """Load immutable recovery provenance without any create-capable path."""
+    path = attempt.context.attempt_root / "recovery-intent.json"
+    static = _recovery_intent_static_fields(
+        attempt,
+        submission_id,
+        recovery_tool_identity,
+    )
+    data = _read_regular_bytes(path)
+    value = _decode_json_bytes(data, path)
+    invariant_fields = set(static) - {
+        "recovery_tool_repository_commit",
+        "recovery_tool_release_source_sha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != RECOVERY_FIELDS
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("document") != RECOVERY_DOCUMENT
+        or any(value.get(key) != static[key] for key in invariant_fields)
+        or not isinstance(value.get("recovery_tool_repository_commit"), str)
+        or not COMMIT_RE.fullmatch(value["recovery_tool_repository_commit"])
+        or not isinstance(
+            value.get("recovery_tool_release_source_sha256"), str
+        )
+        or not SHA256_RE.fullmatch(
+            value["recovery_tool_release_source_sha256"]
+        )
+        or data != _canonical_json(value).encode("utf-8")
+    ):
+        raise TransactionError(
+            "recovery_intent_identity_drift",
+            "recovery intent differs from the requested reconciliation",
+        )
+    _parse_utc_timestamp(value["requested_at"], "recovery requested_at")
+    return value, path, hashlib.sha256(data).hexdigest()
+
+
 def _load_or_create_recovery_intent(
     attempt: RecoverableAttempt,
     submission_id: str,
@@ -5354,38 +5412,11 @@ def _load_or_create_recovery_intent(
         recovery_tool_identity,
     )
     if os.path.lexists(path):
-        data = _read_regular_bytes(path)
-        value = _decode_json_bytes(data, path)
-        invariant_fields = set(static) - {
-            "recovery_tool_repository_commit",
-            "recovery_tool_release_source_sha256",
-        }
-        if (
-            not isinstance(value, dict)
-            or set(value) != RECOVERY_FIELDS
-            or value.get("schema_version") != 1
-            or isinstance(value.get("schema_version"), bool)
-            or value.get("document") != RECOVERY_DOCUMENT
-            or any(
-                value.get(key) != static[key]
-                for key in invariant_fields
-            )
-            or not isinstance(value.get("recovery_tool_repository_commit"), str)
-            or not COMMIT_RE.fullmatch(value["recovery_tool_repository_commit"])
-            or not isinstance(
-                value.get("recovery_tool_release_source_sha256"), str
-            )
-            or not SHA256_RE.fullmatch(
-                value["recovery_tool_release_source_sha256"]
-            )
-            or data != _canonical_json(value).encode("utf-8")
-        ):
-            raise TransactionError(
-                "recovery_intent_identity_drift",
-                "recovery intent differs from the requested reconciliation",
-            )
-        _parse_utc_timestamp(value["requested_at"], "recovery requested_at")
-        return value, path, hashlib.sha256(data).hexdigest()
+        return _load_existing_recovery_intent(
+            attempt,
+            submission_id,
+            recovery_tool_identity,
+        )
     if (
         len(attempt.journal.documents) != attempt.recovery_event_start
         and not attempt.direct_finalization_ready
@@ -5668,8 +5699,8 @@ def _validate_recovery_continuation_document(
         not isinstance(value, dict)
         or set(value) != RECOVERY_CONTINUATION_FIELDS
         or data != _canonical_json(value).encode("utf-8")
+        or type(value.get("schema_version")) is not int
         or value.get("schema_version") != 1
-        or isinstance(value.get("schema_version"), bool)
         or value.get("document") != RECOVERY_CONTINUATION_DOCUMENT
         or value.get("attempt_id") != attempt.attempt_id
         or value.get("submission_id") != submission_id
@@ -8425,6 +8456,386 @@ def execute_transaction(
         raise
     finally:
         attempt_lock_scope.close()
+
+
+def _validate_published_transaction_receipt_once(
+    context: TransactionContext,
+) -> PublishedTransactionEvidence:
+    """Read-only validation of one canonical direct or recovered publication.
+
+    This is the production evidence-consumer boundary. It never resumes,
+    appends, repairs, fsyncs, or republishes a transaction. A legacy direct
+    receipt is accepted only at ``attempt_root/receipt.json`` with its exact
+    inventory. Current direct and recovered receipts are accepted only through
+    the journal-bound unique-match validator under ``finalization-runs``.
+    Historical recovery-tool bytes are rederived from immutable Git blobs at
+    the receipt-bound commit, so no caller-selected checkout or unverifiable
+    identity is trusted.
+    """
+    _validate_context(context, recovery=True)
+    _require_source_identity(context, production_source_identity_reader)
+    _require_toolchain_identity(context, production_toolchain_metadata_reader)
+    publication_root = context.final_root
+    _require_real_directory(publication_root, private=True)
+    direct_receipt_path = context.attempt_root / "receipt.json"
+
+    if os.path.lexists(direct_receipt_path):
+        allowed = {
+            "events",
+            "intent.json",
+            "submission-observation.json",
+            "submission-receipt.json",
+            "receipt.json",
+        }
+        inventory = _decode_attempt_inventory(
+            context,
+            allowed_entries=allowed,
+            require_source=False,
+        )
+        if inventory.entries != allowed or not inventory.final_exists:
+            raise TransactionError(
+                "direct_sealed_inventory_mismatch",
+                "published direct attempt inventory is not canonical",
+            )
+        intent, intent_path, intent_sha256 = _load_recovery_intent_document(context)
+        receipt_data = _read_regular_bytes(direct_receipt_path)
+        receipt = _decode_json_bytes(receipt_data, direct_receipt_path)
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != PUBLISH_READY_RECEIPT_FIELDS
+            or receipt_data != _canonical_json(receipt).encode("utf-8")
+        ):
+            raise TransactionError(
+                "sealed_receipt_identity_drift",
+                "direct publish-ready receipt is not canonical",
+            )
+        submission_id = _canonical_uuid(
+            receipt.get("submission_id"),
+            "direct receipt submission id",
+        )
+        submission_receipt_path = context.attempt_root / "submission-receipt.json"
+        submission_receipt_data = _read_regular_bytes(submission_receipt_path)
+        submission_receipt = _decode_json_bytes(
+            submission_receipt_data,
+            submission_receipt_path,
+        )
+        if not isinstance(submission_receipt, dict):
+            raise TransactionError(
+                "submission_receipt_identity_drift",
+                "direct submission receipt is not a JSON object",
+            )
+        journal = EventJournal.load_existing(
+            context.attempt_root / "events",
+            intent_sha256,
+            _utc_now,
+        )
+        prepared = PreparedAttempt(
+            context=context,
+            work=publication_root,
+            work_app=publication_root / "Clash for Mac.app",
+            archive=publication_root / context.archive_name,
+            archive_manifest=(
+                publication_root / f"{context.archive_name}.manifest.json"
+            ),
+            archive_metadata=_archive_metadata(context),
+            archive_sha256=intent["archive_sha256"],
+            archive_size=intent["archive_size"],
+            pre_staple_app_sha256=intent["pre_staple_app_tree_sha256"],
+            attempt_id=intent["attempt_id"],
+            intent=intent,
+            intent_path=intent_path,
+            intent_sha256=intent_sha256,
+            submission_id=submission_id,
+            submission_receipt=submission_receipt,
+            submission_receipt_path=submission_receipt_path,
+            recovery_intent=None,
+            recovery_intent_path=None,
+            recovery_continuation=None,
+            recovery_continuation_path=None,
+            recovery_tool_repository=None,
+            recovery_tool_identity=None,
+            recovery_tool_identity_reader=None,
+        )
+        validated_receipt = _validate_sealed_publication(
+            prepared,
+            journal=journal,
+            publication_root=publication_root,
+            receipt_path=direct_receipt_path,
+            manifest_verifier=production_manifest_verifier,
+            source_identity_reader=production_source_identity_reader,
+            toolchain_metadata_reader=production_toolchain_metadata_reader,
+            allow_direct_publish_failure=True,
+            allow_receipt_durability_unknown=True,
+        )
+        return PublishedTransactionEvidence(
+            receipt=validated_receipt,
+            receipt_path=direct_receipt_path,
+            prepared_at=intent["prepared_at"],
+        )
+
+    attempt = _load_recoverable_attempt(
+        context,
+        archive_validator=production_archive_validator,
+        manifest_verifier=production_manifest_verifier,
+        source_identity_reader=production_source_identity_reader,
+        toolchain_metadata_reader=production_toolchain_metadata_reader,
+        clock=_utc_now,
+    )
+    reduction = _reduce_attempt_events(attempt.journal)
+    if (
+        not attempt.existing_submission_receipt
+        or attempt.existing_submission_receipt_path is None
+        or not attempt.journal.documents
+        or not reduction.reconciled
+    ):
+        raise TransactionError(
+            "published_candidate_unrecognized",
+            "published recovery lacks a reconciled immutable submission",
+        )
+    submission_id = _canonical_uuid(
+        attempt.existing_submission_receipt["submission_id"],
+        "recovery receipt submission id",
+    )
+    recovery_intent_path = context.attempt_root / "recovery-intent.json"
+    if attempt.direct_finalization_ready and not os.path.lexists(recovery_intent_path):
+        prepared_direct = PreparedAttempt(
+            context=context,
+            work=publication_root,
+            work_app=publication_root / "Clash for Mac.app",
+            archive=publication_root / context.archive_name,
+            archive_manifest=(
+                publication_root / f"{context.archive_name}.manifest.json"
+            ),
+            archive_metadata=attempt.archive_metadata,
+            archive_sha256=attempt.archive_sha256,
+            archive_size=attempt.archive_size,
+            pre_staple_app_sha256=attempt.pre_staple_app_sha256,
+            attempt_id=attempt.attempt_id,
+            intent=attempt.intent,
+            intent_path=attempt.intent_path,
+            intent_sha256=attempt.intent_sha256,
+            submission_id=submission_id,
+            submission_receipt=attempt.existing_submission_receipt,
+            submission_receipt_path=attempt.existing_submission_receipt_path,
+            recovery_intent=None,
+            recovery_intent_path=None,
+            recovery_continuation=None,
+            recovery_continuation_path=None,
+            recovery_tool_repository=None,
+            recovery_tool_identity=None,
+            recovery_tool_identity_reader=None,
+        )
+        matching_direct_receipt = _unique_matching_published_receipt(
+            prepared_direct,
+            journal=attempt.journal,
+            publication_root=publication_root,
+            manifest_verifier=production_manifest_verifier,
+            source_identity_reader=production_source_identity_reader,
+            toolchain_metadata_reader=production_toolchain_metadata_reader,
+        )
+        direct_receipt = _validate_sealed_publication(
+            prepared_direct,
+            journal=attempt.journal,
+            publication_root=publication_root,
+            receipt_path=matching_direct_receipt,
+            manifest_verifier=production_manifest_verifier,
+            source_identity_reader=production_source_identity_reader,
+            toolchain_metadata_reader=production_toolchain_metadata_reader,
+        )
+        return PublishedTransactionEvidence(
+            receipt=direct_receipt,
+            receipt_path=matching_direct_receipt,
+            prepared_at=attempt.intent["prepared_at"],
+        )
+
+    preliminary_intent = _decode_json_bytes(
+        _read_regular_bytes(recovery_intent_path),
+        recovery_intent_path,
+    )
+    if not isinstance(preliminary_intent, dict):
+        raise TransactionError(
+            "recovery_intent_identity_drift",
+            "recovery intent is not a JSON object",
+        )
+    initial_tool_identity = {
+        "repositoryCommit": preliminary_intent.get(
+            "recovery_tool_repository_commit"
+        ),
+        "releaseSourceSha256": preliminary_intent.get(
+            "recovery_tool_release_source_sha256"
+        ),
+    }
+    try:
+        observed_initial = identity_at_commit(
+            context.repository,
+            initial_tool_identity["repositoryCommit"],
+        )
+    except (OSError, SourceIdentityError, TypeError) as error:
+        raise TransactionError(
+            "recovery_tool_identity_unavailable",
+            "recovery tool Git object identity is unavailable",
+        ) from error
+    if observed_initial != initial_tool_identity:
+        raise TransactionError(
+            "recovery_tool_identity_drift",
+            "recovery tool Git blobs differ from the immutable intent",
+        )
+    recovery_intent, recovery_intent_path, recovery_intent_sha256 = (
+        _load_existing_recovery_intent(
+            attempt,
+            submission_id,
+            initial_tool_identity,
+        )
+    )
+    if _require_recovery_intent_anchor(
+        attempt,
+        submission_id=submission_id,
+        recovery_intent_sha256=recovery_intent_sha256,
+        append_missing=False,
+    ):
+        raise TransactionError(
+            "recovery_intent_anchor_missing",
+            "published recovery has no immutable recovery intent anchor",
+        )
+
+    continuation_path = context.attempt_root / "recovery-continuation.json"
+    final_tool_identity = initial_tool_identity
+    if os.path.lexists(continuation_path):
+        preliminary_continuation = _decode_json_bytes(
+            _read_regular_bytes(continuation_path),
+            continuation_path,
+        )
+        if not isinstance(preliminary_continuation, dict):
+            raise TransactionError(
+                "recovery_continuation_identity_drift",
+                "recovery continuation is not a JSON object",
+            )
+        final_tool_identity = {
+            "repositoryCommit": preliminary_continuation.get(
+                "continuation_tool_repository_commit"
+            ),
+            "releaseSourceSha256": preliminary_continuation.get(
+                "continuation_tool_release_source_sha256"
+            ),
+        }
+        try:
+            observed_final = identity_at_commit(
+                context.repository,
+                final_tool_identity["repositoryCommit"],
+            )
+        except (OSError, SourceIdentityError, TypeError) as error:
+            raise TransactionError(
+                "recovery_tool_identity_unavailable",
+                "continued recovery tool Git object identity is unavailable",
+            ) from error
+        if observed_final != final_tool_identity:
+            raise TransactionError(
+                "recovery_tool_identity_drift",
+                "continued recovery tool Git blobs differ from immutable provenance",
+            )
+    recovery_continuation, recovery_continuation_path = (
+        _load_existing_recovery_continuation(
+            attempt,
+            submission_id=submission_id,
+            recovery_intent=recovery_intent,
+            recovery_intent_sha256=recovery_intent_sha256,
+            recovery_tool_identity=final_tool_identity,
+        )
+    )
+
+    def historical_identity_reader(_repository: Path) -> dict[str, str]:
+        return identity_at_commit(
+            context.repository,
+            final_tool_identity["repositoryCommit"],
+        )
+
+    prepared = PreparedAttempt(
+        context=context,
+        work=publication_root,
+        work_app=publication_root / "Clash for Mac.app",
+        archive=publication_root / context.archive_name,
+        archive_manifest=(
+            publication_root / f"{context.archive_name}.manifest.json"
+        ),
+        archive_metadata=attempt.archive_metadata,
+        archive_sha256=attempt.archive_sha256,
+        archive_size=attempt.archive_size,
+        pre_staple_app_sha256=attempt.pre_staple_app_sha256,
+        attempt_id=attempt.attempt_id,
+        intent=attempt.intent,
+        intent_path=attempt.intent_path,
+        intent_sha256=attempt.intent_sha256,
+        submission_id=submission_id,
+        submission_receipt=attempt.existing_submission_receipt,
+        submission_receipt_path=attempt.existing_submission_receipt_path,
+        recovery_intent=recovery_intent,
+        recovery_intent_path=recovery_intent_path,
+        recovery_continuation=recovery_continuation,
+        recovery_continuation_path=recovery_continuation_path,
+        recovery_tool_repository=context.repository,
+        recovery_tool_identity=final_tool_identity,
+        recovery_tool_identity_reader=historical_identity_reader,
+    )
+    matching_receipt = _unique_matching_published_receipt(
+        prepared,
+        journal=attempt.journal,
+        publication_root=publication_root,
+        manifest_verifier=production_manifest_verifier,
+        source_identity_reader=production_source_identity_reader,
+        toolchain_metadata_reader=production_toolchain_metadata_reader,
+    )
+    receipt = _validate_sealed_publication(
+        prepared,
+        journal=attempt.journal,
+        publication_root=publication_root,
+        receipt_path=matching_receipt,
+        manifest_verifier=production_manifest_verifier,
+        source_identity_reader=production_source_identity_reader,
+        toolchain_metadata_reader=production_toolchain_metadata_reader,
+    )
+    return PublishedTransactionEvidence(
+        receipt=receipt,
+        receipt_path=matching_receipt,
+        prepared_at=attempt.intent["prepared_at"],
+    )
+
+
+def _published_tree_digest(path: Path, label: str) -> str:
+    try:
+        value = build_manifest(path, algorithm="sha256-tree-v2").get("sha256")
+    except (OSError, ValueError) as error:
+        raise TransactionError(
+            "published_snapshot_unavailable",
+            f"{label} cannot be captured for read-only validation",
+        ) from error
+    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+        raise TransactionError(
+            "published_snapshot_unavailable",
+            f"{label} produced a malformed tree identity",
+        )
+    return value
+
+
+def validate_published_transaction_receipt(
+    context: TransactionContext,
+) -> PublishedTransactionEvidence:
+    """Validate publication without writes and reject any concurrent tree drift."""
+    _validate_context(context, recovery=True)
+    before = (
+        _published_tree_digest(context.attempt_root, "notarization attempt tree"),
+        _published_tree_digest(context.final_root, "published candidate tree"),
+    )
+    evidence = _validate_published_transaction_receipt_once(context)
+    after = (
+        _published_tree_digest(context.attempt_root, "notarization attempt tree"),
+        _published_tree_digest(context.final_root, "published candidate tree"),
+    )
+    if after != before:
+        raise TransactionError(
+            "published_candidate_changed",
+            "published notarization evidence changed during read-only validation",
+        )
+    return evidence
 
 
 def self_check() -> None:

@@ -20,9 +20,9 @@ Two properties are checked:
   wrong Team ID, unaccepted notarization/Gatekeeper, unstapled ticket, foreign
   target, stale report, unbound app-tree hash, manifest digest drift, missing
   identity, a foreign physical app tree, a drifted or off-pin libbox
-  XCFramework, a component linked against another XCFramework, a superseded
-  artifact-manifest binding, a superseded raw report, or an app-tree hash that
-  drifted after verification) is rejected.
+  XCFramework, a component linked against another XCFramework, a legacy
+  caller-only evidence binding, or an app-tree hash that drifted after
+  verification) is rejected.
 """
 
 from __future__ import annotations
@@ -34,14 +34,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.publication.common import PublicationError, tree_digest
+from scripts.publication.common import PublicationError
 from scripts.publication.final_candidate import (
     BLOCKED,
     PHYSICAL_INPUTS,
     REPORT_CATEGORIES,
     REQUIRED_NESTED_CODE,
     TEAM_ID,
-    UPDATER_KEY_BLOCK,
+    WORKSPACE_SECRET_BLOCK,
     VERIFIED,
     build_final_candidate_binding as _build_final_candidate_binding,
     validate_final_candidate_binding as _validate_final_candidate_binding,
@@ -55,8 +55,13 @@ from scripts.tests.test_physical_evidence_aggregator import (
     PHYSICAL_EVIDENCE_ROOT,
     PHYSICAL_TRUST_POLICY,
     SIGNED_TREE,
-    aggregate_fixture,
     fixture as physical_fixture,
+    foreign_tree_fixture,
+)
+from scripts.tests.physical_evidence_fixture import (
+    XCFRAMEWORK_MANIFEST_SHA,
+    XCFRAMEWORK_SHA,
+    final_artifact_hash_manifest,
 )
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 
@@ -66,8 +71,6 @@ ACCEPT_CASES = 120
 REJECT_CASES = 200
 PHYSICAL = PHYSICAL_INPUTS
 PINNED = derive_supply_chain(REPOSITORY)["patched_source"]
-XCFRAMEWORK_SHA = "1" * 64
-XCFRAMEWORK_MANIFEST_SHA = "2" * 64
 OBSERVED_AT = "2026-08-01T00:00:00Z"
 
 
@@ -97,19 +100,8 @@ def _captured_at(rng: random.Random) -> str:
 
 
 def _artifact_manifest(rng: random.Random) -> dict:
-    entries = [
-        {"path": "artifacts/Clash-for-Mac.app.tree.json", "sha256": SIGNED_TREE},
-        {"path": "artifacts/app-manifest.json", "sha256": APP_MANIFEST},
-        {"path": "artifacts/Libbox.xcframework.tree.json", "sha256": XCFRAMEWORK_SHA},
-        {
-            "path": "artifacts/Libbox.xcframework.manifest.json",
-            "sha256": XCFRAMEWORK_MANIFEST_SHA,
-        },
-    ]
-    for index in range(rng.randint(0, 3)):
-        entries.append({"path": f"artifacts/extra-{index}.bin", "sha256": _sha(rng)})
-    entries.sort(key=lambda item: item["path"])
-    return {"entries": entries, "sha256": tree_digest(entries)}
+    _ = rng
+    return copy.deepcopy(final_artifact_hash_manifest())
 
 
 def _xcframework() -> dict:
@@ -156,10 +148,6 @@ def _request(rng: random.Random, drop_physical: str | None = None) -> dict:
         },
         "xcframework": _xcframework(),
         "nested_code": _nested_code(rng),
-        "evidence_binding": {
-            "artifact_hash_manifest_sha256": manifest["sha256"],
-            "superseded_report_hashes": [],
-        },
         "post_verification": {"app_tree_sha256": SIGNED_TREE, "observed_at": OBSERVED_AT},
         "notarization": {
             "status": "Accepted",
@@ -249,7 +237,8 @@ def mutate_missing_identity(request, rng):
 
 
 def mutate_foreign_physical_tree(request, rng):
-    request["physical_evidence"]["sha256"] = "f" * 64
+    _ = rng
+    request["physical_evidence"] = foreign_tree_fixture()
     return request, "foreign-physical-tree"
 
 
@@ -268,16 +257,12 @@ def mutate_linked_other_libbox(request, rng):
     return request, "linked-other-libbox"
 
 
-def mutate_superseded_manifest_binding(request, rng):
-    request["evidence_binding"]["artifact_hash_manifest_sha256"] = _sha(rng)
-    return request, "superseded-manifest-binding"
-
-
-def mutate_superseded_report(request, rng):
-    # Retire a raw report that the aggregate still carries.
-    report = aggregate_fixture()["runs"][0]["reports"]["packet"]["artifact"]["sha256"]
-    request["evidence_binding"]["superseded_report_hashes"] = [report]
-    return request, "superseded-report"
+def mutate_legacy_caller_evidence_binding(request, rng):
+    request["evidence_binding"] = {
+        "artifact_hash_manifest_sha256": _sha(rng),
+        "superseded_report_hashes": [],
+    }
+    return request, "legacy-caller-evidence-binding"
 
 
 def mutate_post_verification_drift(request, rng):
@@ -312,8 +297,7 @@ MUTATORS = (
     mutate_unbound_xcframework,
     mutate_offpin_xcframework,
     mutate_linked_other_libbox,
-    mutate_superseded_manifest_binding,
-    mutate_superseded_report,
+    mutate_legacy_caller_evidence_binding,
     mutate_post_verification_drift,
     mutate_post_verification_precedes_evidence,
     mutate_missing_soak,
@@ -402,10 +386,28 @@ class FinalCandidateRoundTripProperty(_CleanWorkspace):
                     REPOSITORY, _request(rng), fixture=True, workspace_root=workspace
                 )
                 self.assertEqual(binding["status"], BLOCKED)
-                self.assertIn(UPDATER_KEY_BLOCK, binding["blocked_inputs"])
+                self.assertIn(WORKSPACE_SECRET_BLOCK, binding["blocked_inputs"])
 
 
 class FinalCandidateFailClosedProperty(_CleanWorkspace):
+    def test_schema_numeric_type_is_fail_closed_across_generated_bindings(self) -> None:
+        for seed in range(40):
+            rng = random.Random(55_000 + seed)
+            binding = build_final_candidate_binding(
+                REPOSITORY,
+                _request(rng),
+                fixture=True,
+                workspace_root=self.workspace,
+            )
+            binding["schema_version"] = rng.choice((3.0, True))
+            with self.assertRaisesRegex(PublicationError, "unsupported schema/document"):
+                validate_final_candidate_binding(
+                    REPOSITORY,
+                    binding,
+                    fixture=True,
+                    workspace_root=self.workspace,
+                )
+
     def test_single_defect_bindings_are_rejected(self) -> None:
         mutator_hits = {m.__name__: 0 for m in MUTATORS}
         cases = 0

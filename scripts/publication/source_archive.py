@@ -180,7 +180,8 @@ def verify_source_archive(
         "corresponding-source manifest",
     )
     if (
-        expected["schema_version"] != 1
+        type(expected["schema_version"]) is not int
+        or expected["schema_version"] != 1
         or expected["algorithm"] != "sha256-tree-v1"
         or expected["root"] != "corresponding-source"
     ):

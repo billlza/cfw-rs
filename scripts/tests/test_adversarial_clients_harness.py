@@ -39,6 +39,30 @@ class AdversarialMatrixTests(unittest.TestCase):
         self.assertEqual(len(self.document["cases"]), len(REQUIRED_CASES))
         self.assertEqual(len(result["artifacts"]), len(REQUIRED_CASES) + 3)
 
+    def test_schema_versions_require_json_integers(self) -> None:
+        for invalid in (2.0, True):
+            with self.subTest(scope="report", invalid=invalid):
+                document = copy.deepcopy(self.document)
+                document["schema_version"] = invalid
+                with ArtifactReader(self.root) as artifacts, self.assertRaisesRegex(
+                    AdversarialMatrixError, "schema_version must be 2"
+                ):
+                    validate_adversarial_matrix(document, artifacts)
+
+        case, original = self.transcript(0)
+        try:
+            for invalid in (1.0, True):
+                with self.subTest(scope="transcript", invalid=invalid):
+                    transcript = copy.deepcopy(original)
+                    transcript["schema_version"] = invalid
+                    self.fixture.rewrite_json(case["artifact"], transcript)
+                    with self.assertRaisesRegex(
+                        AdversarialMatrixError, "transcript schema_version must be 1"
+                    ):
+                        self.validate()
+        finally:
+            self.fixture.rewrite_json(case["artifact"], original)
+
     def test_missing_attack_transcript_fails(self) -> None:
         self.document["cases"].pop()
         with self.assertRaisesRegex(AdversarialMatrixError, "every case"):

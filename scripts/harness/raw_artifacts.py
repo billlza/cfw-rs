@@ -37,6 +37,26 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+GCP_KMS_KEY_VERSION_RE = re.compile(
+    r"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/"
+    r"locations/[a-z0-9-]{1,63}/"
+    r"keyRings/[A-Za-z0-9_-]{1,63}/"
+    r"cryptoKeys/[A-Za-z0-9_-]{1,63}/"
+    r"cryptoKeyVersions/[1-9][0-9]*$"
+)
+
+COLLECTOR_SIGNATURE_ALGORITHM = "PS256"
+KMS_SIGNATURE_ALGORITHM = "RSA_SIGN_PSS_3072_SHA256"
+KMS_PROTECTION_LEVEL = "HSM"
+KMS_ATTESTATION_FORMATS = frozenset(
+    {"CAVIUM_V1_COMPRESSED", "CAVIUM_V2_COMPRESSED"}
+)
+RSA_MODULUS_BITS = 3072
+RSA_PUBLIC_EXPONENT = 65537
+PS256_SIGNATURE_BYTES = 384
+PS256_HASH_BYTES = 32
+PS256_SALT_BYTES = 32
+PS256_EM_BITS = 3071
 
 MAX_ARTIFACT_COUNT = 512
 MAX_TOTAL_ARTIFACT_BYTES = 256 * 1024 * 1024
@@ -66,23 +86,32 @@ ARTIFACT_KINDS: dict[str, ArtifactKindSpec] = {
     "packet-capture-provenance": ArtifactKindSpec(".json", 256 * 1024),
     "packet-send-attempt": ArtifactKindSpec(".json", 256 * 1024),
     "lifecycle-event": ArtifactKindSpec(".json", 1 * 1024 * 1024),
+    "renderer-ready-trace": ArtifactKindSpec(".json", 1 * 1024 * 1024),
+    "network-extension-trace": ArtifactKindSpec(".json", 1 * 1024 * 1024),
+    "sleep-wake-trace": ArtifactKindSpec(".json", 1 * 1024 * 1024),
+    "wkwebview-metadata": ArtifactKindSpec(".json", 256 * 1024),
+    "wkwebview-rgba": ArtifactKindSpec(".rgba", 16 * 1024 * 1024),
     "performance-samples": ArtifactKindSpec(".json", 16 * 1024 * 1024),
     "adversarial-transcript": ArtifactKindSpec(".json", 1 * 1024 * 1024),
     "client-signature-evidence": ArtifactKindSpec(".json", 256 * 1024),
 }
 
 DESCRIPTOR_FIELDS = {"kind", "path", "size", "sha256"}
-PROOF_FIELDS = {"run_id", "run_nonce", "candidate", "collector"}
+PROOF_SCHEMA_VERSION = 3
+PROOF_FIELDS = {"schema_version", "run_id", "run_nonce", "candidate", "collector"}
 CANDIDATE_FIELDS = {
     "version",
     "build_number",
     "app_manifest_sha256",
     "signed_app_tree_sha256",
+    "artifact_hash_manifest_sha256",
 }
 COLLECTOR_BINDING_FIELDS = {
     "version",
     "source_sha256",
     "executable_sha256",
+    "algorithm",
+    "key_version",
 }
 
 RELEASE_TRUST_POLICY_PATH = Path(__file__).with_name(
@@ -91,9 +120,7 @@ RELEASE_TRUST_POLICY_PATH = Path(__file__).with_name(
 # Updated only together with the canonical policy file. The checked-in policy
 # intentionally has state=not-configured until release engineering provisions
 # and reviews a production collector key.
-RELEASE_TRUST_POLICY_SHA256 = "52d4e515567ee32b333dc3f23043382c7444157c8daafb40cda4968059393319"
-
-_SHA256_DIGEST_INFO_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+RELEASE_TRUST_POLICY_SHA256 = "a616bbc91d72f25a904ae1d4c9c54ddad6106652c8997ca8b4131536b8f3bba4"
 
 
 class RawArtifactError(ValueError):
@@ -135,7 +162,13 @@ class CollectorTrustPolicy:
     """One externally provisioned and source-pinned collector trust root."""
 
     policy_sha256: str
-    key_id: str
+    key_version: str
+    algorithm: str
+    kms_algorithm: str
+    protection_level: str
+    attestation_format: str
+    public_key_sha256: str
+    attestation_sha256: str
     modulus: int
     exponent: int
     collector_version: str
@@ -168,6 +201,12 @@ def require_sha256(value: Any, label: str) -> str:
 def require_identifier(value: Any, label: str) -> str:
     if not isinstance(value, str) or not IDENTIFIER_RE.fullmatch(value):
         raise RawArtifactError(f"{label} is not a canonical identifier")
+    return value
+
+
+def require_kms_key_version(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not GCP_KMS_KEY_VERSION_RE.fullmatch(value):
+        raise RawArtifactError(f"{label} is not a complete GCP KMS key-version resource")
     return value
 
 
@@ -238,6 +277,12 @@ def parse_proof_binding(value: Any, label: str = "proof") -> dict[str, Any]:
     """Parse the common candidate/run/collector binding carried by every report."""
 
     proof = exact_object(value, PROOF_FIELDS, label)
+    if type(proof["schema_version"]) is not int or (
+        proof["schema_version"] != PROOF_SCHEMA_VERSION
+    ):
+        raise RawArtifactError(
+            f"{label}.schema_version must be {PROOF_SCHEMA_VERSION}"
+        )
     run_id = require_identifier(proof["run_id"], f"{label}.run_id")
     run_nonce = require_sha256(proof["run_nonce"], f"{label}.run_nonce")
     candidate = exact_object(proof["candidate"], CANDIDATE_FIELDS, f"{label}.candidate")
@@ -264,6 +309,10 @@ def parse_proof_binding(value: Any, label: str = "proof") -> dict[str, Any]:
             candidate["signed_app_tree_sha256"],
             f"{label}.candidate.signed_app_tree_sha256",
         ),
+        "artifact_hash_manifest_sha256": require_sha256(
+            candidate["artifact_hash_manifest_sha256"],
+            f"{label}.candidate.artifact_hash_manifest_sha256",
+        ),
     }
     collector = exact_object(
         proof["collector"], COLLECTOR_BINDING_FIELDS, f"{label}.collector"
@@ -276,8 +325,17 @@ def parse_proof_binding(value: Any, label: str = "proof") -> dict[str, Any]:
         "executable_sha256": require_sha256(
             collector["executable_sha256"], f"{label}.collector.executable_sha256"
         ),
+        "algorithm": collector["algorithm"],
+        "key_version": require_kms_key_version(
+            collector["key_version"], f"{label}.collector.key_version"
+        ),
     }
+    if parsed_collector["algorithm"] != COLLECTOR_SIGNATURE_ALGORITHM:
+        raise RawArtifactError(
+            f"{label}.collector.algorithm must be {COLLECTOR_SIGNATURE_ALGORITHM}"
+        )
     return {
+        "schema_version": PROOF_SCHEMA_VERSION,
         "run_id": run_id,
         "run_nonce": run_nonce,
         "candidate": parsed_candidate,
@@ -580,39 +638,114 @@ def _base64url_decode(value: Any, label: str) -> bytes:
     return decoded
 
 
-def verify_rs256(
+def _mgf1_sha256(seed: bytes, length: int) -> bytes:
+    """Return MGF1(SHA-256) bytes for the fixed PS256 verification contract."""
+
+    if not isinstance(seed, bytes) or not isinstance(length, int) or length < 0:
+        raise RawArtifactError("PS256 MGF1 input is invalid")
+    if length > (2**32) * PS256_HASH_BYTES:
+        raise RawArtifactError("PS256 MGF1 output length is excessive")
+    blocks = (
+        hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
+        for counter in range((length + PS256_HASH_BYTES - 1) // PS256_HASH_BYTES)
+    )
+    return b"".join(blocks)[:length]
+
+
+def verify_ps256(
     message: bytes,
     signature_base64url: Any,
     *,
     modulus: int,
     exponent: int,
 ) -> None:
-    """Verify RSASSA-PKCS1-v1_5 SHA-256 using only Python's standard library."""
+    """Verify the sole production signature: PS256 with an RSA-3072 key."""
 
+    if not isinstance(message, bytes):
+        raise RawArtifactError("collector receipt message must be bytes")
     if (
-        modulus <= 0
+        not isinstance(modulus, int)
+        or isinstance(modulus, bool)
+        or modulus <= 0
         or modulus % 2 == 0
-        or modulus.bit_length() < 2048
-        or modulus.bit_length() > 4096
+        or modulus.bit_length() != RSA_MODULUS_BITS
     ):
-        raise RawArtifactError("collector RSA modulus must be between 2048 and 4096 bits")
-    if exponent < 65537 or exponent > 0xFFFFFFFF or exponent % 2 == 0:
-        raise RawArtifactError("collector RSA public exponent is outside the accepted range")
+        raise RawArtifactError("collector RSA modulus must be exactly 3072 bits")
+    if (
+        not isinstance(exponent, int)
+        or isinstance(exponent, bool)
+        or exponent != RSA_PUBLIC_EXPONENT
+    ):
+        raise RawArtifactError("collector RSA public exponent must be 65537")
     signature = _base64url_decode(signature_base64url, "collector signature")
-    width = (modulus.bit_length() + 7) // 8
-    if len(signature) != width:
-        raise RawArtifactError("collector signature length does not match its RSA key")
+    if len(signature) != PS256_SIGNATURE_BYTES:
+        raise RawArtifactError("collector PS256 signature must be exactly 384 bytes")
     encoded_integer = int.from_bytes(signature, "big")
     if encoded_integer >= modulus:
         raise RawArtifactError("collector signature representative is outside the RSA modulus")
-    encoded = pow(encoded_integer, exponent, modulus).to_bytes(width, "big")
-    digest_info = _SHA256_DIGEST_INFO_PREFIX + hashlib.sha256(message).digest()
-    padding_length = width - len(digest_info) - 3
-    if padding_length < 8:
-        raise RawArtifactError("collector RSA modulus is too short for RS256")
-    expected = b"\x00\x01" + (b"\xff" * padding_length) + b"\x00" + digest_info
-    if not hmac.compare_digest(encoded, expected):
-        raise RawArtifactError("collector receipt signature is invalid")
+    encoded = pow(encoded_integer, exponent, modulus).to_bytes(
+        PS256_SIGNATURE_BYTES, "big"
+    )
+    if encoded[-1] != 0xBC:
+        raise RawArtifactError("collector PS256 trailer field is invalid")
+
+    masked_db = encoded[: -(PS256_HASH_BYTES + 1)]
+    encoded_hash = encoded[-(PS256_HASH_BYTES + 1) : -1]
+    if len(masked_db) != 351:
+        raise RawArtifactError("collector PS256 encoded DB length is invalid")
+    unused_bits = 8 * PS256_SIGNATURE_BYTES - PS256_EM_BITS
+    if unused_bits != 1 or masked_db[0] & 0x80:
+        raise RawArtifactError("collector PS256 unused high bit is nonzero")
+
+    mask = _mgf1_sha256(encoded_hash, len(masked_db))
+    decoded_db = bytearray(left ^ right for left, right in zip(masked_db, mask, strict=True))
+    decoded_db[0] &= 0x7F
+    padding_length = len(decoded_db) - PS256_SALT_BYTES - 1
+    if padding_length != 318:
+        raise RawArtifactError("collector PS256 salt contract is inconsistent")
+    if not hmac.compare_digest(bytes(decoded_db[:padding_length]), b"\x00" * padding_length):
+        raise RawArtifactError("collector PS256 DB padding is invalid")
+    if decoded_db[padding_length] != 0x01:
+        raise RawArtifactError("collector PS256 DB delimiter is invalid")
+    salt = bytes(decoded_db[-PS256_SALT_BYTES:])
+    expected_hash = hashlib.sha256(
+        b"\x00" * 8 + hashlib.sha256(message).digest() + salt
+    ).digest()
+    if not hmac.compare_digest(encoded_hash, expected_hash):
+        raise RawArtifactError("collector PS256 receipt signature is invalid")
+
+
+def _der_length(length: int) -> bytes:
+    if length < 0:
+        raise RawArtifactError("DER length is negative")
+    if length < 0x80:
+        return bytes((length,))
+    encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes((0x80 | len(encoded),)) + encoded
+
+
+def _der_tlv(tag: int, value: bytes) -> bytes:
+    return bytes((tag,)) + _der_length(len(value)) + value
+
+
+def _der_integer(value: int) -> bytes:
+    if value <= 0:
+        raise RawArtifactError("RSA public integer must be positive")
+    encoded = value.to_bytes((value.bit_length() + 7) // 8, "big")
+    if encoded[0] & 0x80:
+        encoded = b"\x00" + encoded
+    return _der_tlv(0x02, encoded)
+
+
+def rsa_spki_sha256(modulus: int, exponent: int) -> str:
+    """Hash the canonical DER SubjectPublicKeyInfo for the RSA public key."""
+
+    rsa_public_key = _der_tlv(0x30, _der_integer(modulus) + _der_integer(exponent))
+    rsa_encryption_algorithm = bytes.fromhex("300d06092a864886f70d0101010500")
+    subject_public_key = _der_tlv(0x03, b"\x00" + rsa_public_key)
+    return hashlib.sha256(
+        _der_tlv(0x30, rsa_encryption_algorithm + subject_public_key)
+    ).hexdigest()
 
 
 def parse_trust_policy_bytes(
@@ -644,7 +777,8 @@ def parse_trust_policy_bytes(
         )
         reason = value["reason"]
         if (
-            value["schema_version"] != 1
+            type(value["schema_version"]) is not int
+            or value["schema_version"] != 2
             or not isinstance(reason, str)
             or not reason
             or len(reason.encode("utf-8")) > 512
@@ -659,9 +793,14 @@ def parse_trust_policy_bytes(
         {
             "schema_version",
             "state",
-            "key_id",
+            "key_version",
             "kty",
             "alg",
+            "kms_algorithm",
+            "protection_level",
+            "attestation_format",
+            "public_key_sha256",
+            "attestation_sha256",
             "n",
             "e",
             "collector_version",
@@ -670,25 +809,78 @@ def parse_trust_policy_bytes(
         },
         "collector trust policy",
     )
-    if policy["schema_version"] != 1 or policy["state"] != "configured":
+    if (
+        type(policy["schema_version"]) is not int
+        or policy["schema_version"] != 2
+        or policy["state"] != "configured"
+    ):
         raise RawArtifactError("collector trust policy state/schema is unsupported")
-    if policy["kty"] != "RSA" or policy["alg"] != "RS256":
-        raise RawArtifactError("collector trust policy must use RSA/RS256")
+    if policy["kty"] != "RSA" or policy["alg"] != COLLECTOR_SIGNATURE_ALGORITHM:
+        raise RawArtifactError(
+            f"collector trust policy must use RSA/{COLLECTOR_SIGNATURE_ALGORITHM}"
+        )
+    if policy["kms_algorithm"] != KMS_SIGNATURE_ALGORITHM:
+        raise RawArtifactError(
+            f"collector trust policy kms_algorithm must be {KMS_SIGNATURE_ALGORITHM}"
+        )
+    if policy["protection_level"] != KMS_PROTECTION_LEVEL:
+        raise RawArtifactError(
+            f"collector trust policy protection_level must be {KMS_PROTECTION_LEVEL}"
+        )
+    if policy["attestation_format"] not in KMS_ATTESTATION_FORMATS:
+        raise RawArtifactError(
+            "collector trust policy attestation_format is not an allowed "
+            "Cloud HSM attestation format"
+        )
+    key_version = require_kms_key_version(
+        policy["key_version"], "collector trust policy.key_version"
+    )
     modulus_bytes = _base64url_decode(policy["n"], "collector trust policy.n")
     exponent_bytes = _base64url_decode(policy["e"], "collector trust policy.e")
-    if len(modulus_bytes) < 256 or len(modulus_bytes) > 512 or modulus_bytes[0] == 0:
-        raise RawArtifactError("collector trust policy RSA modulus encoding is non-canonical")
-    if not exponent_bytes or len(exponent_bytes) > 4 or exponent_bytes[0] == 0:
-        raise RawArtifactError("collector trust policy RSA exponent encoding is non-canonical")
+    if len(modulus_bytes) != PS256_SIGNATURE_BYTES or modulus_bytes[0] < 0x80:
+        raise RawArtifactError(
+            "collector trust policy RSA modulus must be canonical 3072-bit bytes"
+        )
+    if exponent_bytes != RSA_PUBLIC_EXPONENT.to_bytes(3, "big"):
+        raise RawArtifactError(
+            "collector trust policy RSA exponent must be canonical 65537 bytes"
+        )
     modulus = int.from_bytes(modulus_bytes, "big")
     exponent = int.from_bytes(exponent_bytes, "big")
-    if modulus % 2 == 0 or modulus.bit_length() < 2048 or modulus.bit_length() > 4096:
-        raise RawArtifactError("collector trust policy RSA modulus is outside 2048..4096 bits")
-    if exponent < 65537 or exponent > 0xFFFFFFFF or exponent % 2 == 0:
-        raise RawArtifactError("collector trust policy RSA exponent is outside the accepted range")
+    if modulus % 2 == 0 or modulus.bit_length() != RSA_MODULUS_BITS:
+        raise RawArtifactError(
+            f"collector trust policy RSA modulus must be exactly {RSA_MODULUS_BITS} bits"
+        )
+    if exponent != RSA_PUBLIC_EXPONENT:
+        raise RawArtifactError(
+            f"collector trust policy RSA exponent must be {RSA_PUBLIC_EXPONENT}"
+        )
+    public_key_sha256 = require_sha256(
+        policy["public_key_sha256"], "collector trust policy.public_key_sha256"
+    )
+    computed_public_key_sha256 = rsa_spki_sha256(modulus, exponent)
+    if not hmac.compare_digest(public_key_sha256, computed_public_key_sha256):
+        raise RawArtifactError(
+            "collector trust policy public-key digest does not match n/e"
+        )
+    attestation_sha256 = require_sha256(
+        policy["attestation_sha256"], "collector trust policy.attestation_sha256"
+    )
+    if hmac.compare_digest(attestation_sha256, "0" * 64) or hmac.compare_digest(
+        attestation_sha256, public_key_sha256
+    ):
+        raise RawArtifactError(
+            "collector trust policy attestation digest is not independently provisioned"
+        )
     return CollectorTrustPolicy(
         policy_sha256=actual_digest,
-        key_id=require_identifier(policy["key_id"], "collector trust policy.key_id"),
+        key_version=key_version,
+        algorithm=COLLECTOR_SIGNATURE_ALGORITHM,
+        kms_algorithm=KMS_SIGNATURE_ALGORITHM,
+        protection_level=KMS_PROTECTION_LEVEL,
+        attestation_format=policy["attestation_format"],
+        public_key_sha256=public_key_sha256,
+        attestation_sha256=attestation_sha256,
         modulus=modulus,
         exponent=exponent,
         collector_version=require_identifier(

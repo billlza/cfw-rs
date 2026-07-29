@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +10,7 @@ from pathlib import Path
 from scripts.repository_source_identity import (
     SourceIdentityError,
     current_identity,
+    identity_at_commit,
     release_source_digest,
     repository_commit,
     require_clean_repository,
@@ -16,6 +19,26 @@ from scripts.repository_source_identity import (
 
 def git(root: Path, *arguments: str) -> None:
     subprocess.run(["git", "-C", str(root), *arguments], check=True, capture_output=True)
+
+
+def git_output(root: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def single_file_digest(path: str, data: bytes, *, executable: bool = False) -> str:
+    entry = {
+        "executable": executable,
+        "path": path,
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": len(data),
+    }
+    encoded = json.dumps(entry, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256((encoded + "\n").encode("utf-8")).hexdigest()
 
 
 class RepositorySourceIdentityTests(unittest.TestCase):
@@ -38,7 +61,10 @@ class RepositorySourceIdentityTests(unittest.TestCase):
         self.assertEqual(before["repositoryCommit"], repository_commit(self.root))
         self.assertEqual(before["releaseSourceSha256"], release_source_digest(self.root))
 
-        (self.root / "apps/app.rs").write_text("fn main() { println!(\"changed\"); }\n", encoding="utf-8")
+        (self.root / "apps/app.rs").write_text(
+            'fn main() { println!("changed"); }\n',
+            encoding="utf-8",
+        )
         after = current_identity(self.root)
         self.assertEqual(after["repositoryCommit"], before["repositoryCommit"])
         self.assertNotEqual(after["releaseSourceSha256"], before["releaseSourceSha256"])
@@ -57,6 +83,43 @@ class RepositorySourceIdentityTests(unittest.TestCase):
         (self.root / "target/build.bin").write_bytes(b"generated")
         self.assertEqual(release_source_digest(self.root), before)
         require_clean_repository(self.root)
+
+    def test_historical_identity_uses_target_commits_literal_path_closure(self) -> None:
+        policy = self.root / "scripts/repository_source_identity.py"
+        policy.parent.mkdir()
+        old_data = b"old release input\n"
+        (self.root / "old.txt").write_bytes(old_data)
+        policy.write_text('RELEASE_PATHS = ("old.txt",)\n', encoding="utf-8")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "old closure")
+        old_commit = git_output(self.root, "rev-parse", "HEAD")
+
+        (self.root / "new.txt").write_text("new release input\n", encoding="utf-8")
+        policy.write_text('RELEASE_PATHS = ("new.txt",)\n', encoding="utf-8")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "new closure")
+
+        identity = identity_at_commit(self.root, old_commit)
+        self.assertEqual(identity["repositoryCommit"], old_commit)
+        self.assertEqual(
+            identity["releaseSourceSha256"],
+            single_file_digest("old.txt", old_data),
+        )
+
+    def test_historical_identity_rejects_missing_policy_blob(self) -> None:
+        commit = git_output(self.root, "rev-parse", "HEAD")
+        with self.assertRaisesRegex(SourceIdentityError, "policy blob"):
+            identity_at_commit(self.root, commit)
+
+    def test_historical_identity_rejects_dynamic_path_policy(self) -> None:
+        policy = self.root / "scripts/repository_source_identity.py"
+        policy.parent.mkdir()
+        policy.write_text('RELEASE_PATHS = tuple(["apps"])\n', encoding="utf-8")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "dynamic closure")
+        commit = git_output(self.root, "rev-parse", "HEAD")
+        with self.assertRaisesRegex(SourceIdentityError, "literal sequence"):
+            identity_at_commit(self.root, commit)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,8 @@
 This module consumes the shipped release verifiers as black boxes and drives
 them, as a single integrated suite, over hermetic fixtures. It intentionally
 does not re-cover the per-verifier unit tests (``test_verify_*.py``,
-``test_evidence_manifest.py``, ``test_updater_key_release_blocker.py``); instead
+``test_evidence_manifest.py``, ``test_release_secret_material_blocker.py``);
+instead
 it fills the integration/example gaps this task names:
 
 * migration/build-boundary scans reject a legacy root data plane, a direct
@@ -44,8 +45,8 @@ from scripts.evidence_manifest import (
     EvidenceManifestError,
     validate_evidence_manifest,
 )
-from scripts.updater_key_release_blocker import (
-    UpdaterKeyReleaseBlock,
+from scripts.release_secret_material_blocker import (
+    SecretMaterialReleaseBlock,
     evaluate_workspace,
     format_response,
 )
@@ -205,11 +206,28 @@ _PINNED_INPUTS = (
     "scripts/notarization_transaction.py",
     "scripts/dmg_notarization_transaction.py",
     "scripts/release_artifact_set.py",
+    "scripts/repository_source_identity.py",
+    "scripts/evidence_manifest.py",
+    "scripts/harness/physical_collector_trust_policy.json",
+    "scripts/harness/physical_evidence_aggregator.py",
+    "scripts/harness/raw_artifacts.py",
+    "scripts/production_release_evidence.py",
+    "scripts/publication/final_candidate.py",
+    "scripts/publication/orchestrator.py",
+    "scripts/publication/sealed_closure.py",
+    "scripts/publication/sealed_manifest.py",
+    "scripts/release_capability_inventory.json",
+    "scripts/release_capability_inventory.py",
+    "scripts/sealed_evidence_manifest.py",
+    "scripts/validated_candidate_evidence.py",
+    "scripts/verify_remote_release.py",
     "scripts/make_dmg.sh",
     "scripts/make_updater_manifest.sh",
     "scripts/release_publication_gate.sh",
     "scripts/release_workspace_secret_gate.sh",
-    "scripts/updater_key_release_blocker.py",
+    "scripts/release_secret_material_blocker.py",
+    "scripts/release_toolchain_contract.sh",
+    "scripts/updater_signing_launcher.py",
     "scripts/validate_updater_archive.py",
     "CHANGELOG.md",
     "scripts/validate_notary_archive.py",
@@ -499,7 +517,7 @@ class UpdaterKeyPathNameOnlyBlocking(unittest.TestCase):
                 self.assertEqual(evaluate_workspace(root), [])
 
     def test_unavailable_workspace_root_fails_closed(self) -> None:
-        with self.assertRaises(UpdaterKeyReleaseBlock):
+        with self.assertRaises(SecretMaterialReleaseBlock):
             evaluate_workspace("/nonexistent/release/workspace/root")
 
 

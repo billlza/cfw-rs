@@ -6,7 +6,7 @@ not create a competing framework: it consumes the wave-11 physical-evidence
 aggregate (``harness.physical_evidence_aggregator``) as a black box for the
 installed lifecycle matrix, unique-token packet evidence, performance/soak
 gates, and the adversarial/security matrix, and it consumes the path/name-only
-updater-key release blocker (``updater_key_release_blocker``) unchanged.
+workspace secret-material blocker (``release_secret_material_blocker``).
 
 On top of those, the binder requires — for exactly one unchanged signed app
 tree — accepted notarization, a stapled ticket, a Gatekeeper assessment, the
@@ -25,10 +25,9 @@ It is *fail closed* and invalidates the candidate on:
   app-tree hash re-observed *after* every verification step differs from the
   hash all of that evidence was bound to;
 * a stale report — any notarization/staple/Gatekeeper/physical capture that
-  predates the candidate build, a physical aggregate whose build time or
-  identity does not match the final candidate, a report set bound to a
-  different (superseded) final artifact-hash manifest, or a raw report the
-  operator has recorded as superseded;
+  predates the candidate build, or a physical aggregate whose build time,
+  identity, or signed final artifact-hash manifest does not match the final
+  candidate;
 * an identity mismatch — a wrong Team ID, an unexpected/absent inside-out
   bundle identity, an inside-out component linked against a different libbox
   XCFramework, an XCFramework that is not the pinned patched-source build, or a
@@ -37,9 +36,9 @@ It is *fail closed* and invalidates the candidate on:
   artifact hash, a missing installed-matrix / packet / performance / security /
   soak report for either required macOS run set, or any missing
   physical/notarization/post-verification input; and
-* the updater-key release blocker — if any updater-key file exists in the
-  workspace (for example ``.tauri/cfw-rs.key``), the candidate is invalid.
-  The key is referenced by path/name only and is never opened (Requirement 8.1).
+* the workspace secret-material blocker — if any key candidate exists in the
+  workspace, the candidate is invalid. The candidate is referenced by
+  path/name only and is never opened (Requirement 8.1).
 
 Where the physical, signed, or notarized artifacts are unavailable in this
 environment, the binding is environment-gated: it reports ``blocked`` and can
@@ -87,8 +86,8 @@ try:  # pragma: no cover - import shim exercised by both invocation styles
         parse_descriptor,
     )
     from scripts.release_build_identity import canonical_build_version
-    from scripts.updater_key_release_blocker import (
-        UpdaterKeyReleaseBlock,
+    from scripts.release_secret_material_blocker import (
+        SecretMaterialReleaseBlock,
         evaluate_workspace,
     )
 except ImportError:  # pragma: no cover - CLI invocation style
@@ -108,8 +107,8 @@ except ImportError:  # pragma: no cover - CLI invocation style
         parse_descriptor,
     )
     from scripts.release_build_identity import canonical_build_version
-    from scripts.updater_key_release_blocker import (
-        UpdaterKeyReleaseBlock,
+    from scripts.release_secret_material_blocker import (
+        SecretMaterialReleaseBlock,
         evaluate_workspace,
     )
 
@@ -129,8 +128,8 @@ from scripts.repository_source_identity import (  # noqa: E402
 )
 
 
-SCHEMA_VERSION = 2
-DOCUMENT_KIND = "final-candidate-notarization-installed-binding-v2"
+SCHEMA_VERSION = 3
+DOCUMENT_KIND = "final-candidate-notarization-installed-binding-v3"
 DOCUMENT_VISIBILITY = "private-release-operations"
 VERIFIED = "verified"
 BLOCKED = "blocked"
@@ -190,9 +189,9 @@ PHYSICAL_INPUTS = (
     "post_verification",
 )
 
-# The synthetic blocked marker recorded when the updater-key release blocker
-# fires. The candidate is always invalid while any updater-key file is present.
-UPDATER_KEY_BLOCK = "updater_key_release_blocker"
+# The synthetic blocked marker recorded when the secret-material blocker fires.
+# The candidate is always invalid while any secret candidate is present.
+WORKSPACE_SECRET_BLOCK = "release_secret_material_blocker"
 
 
 def _require_str(value: object, label: str, maximum: int = 256) -> str:
@@ -560,6 +559,13 @@ def _physical_evidence(
         )
     if candidate["app_manifest_sha256"] != final["app_manifest_sha256"]:
         raise PublicationError("physical evidence app manifest does not match the final candidate")
+    if (
+        candidate["artifact_hash_manifest_sha256"]
+        != final["artifact_hash_manifest_sha256"]
+    ):
+        raise PublicationError(
+            "physical evidence artifact-hash manifest does not match the recomputed final manifest"
+        )
     # The aggregate's own candidate build time must equal the final build time so
     # a stale run set from an earlier build cannot be reused.
     built_at = candidate["built_at"]
@@ -660,50 +666,6 @@ def _derive_report_bindings(summary: dict[str, Any]) -> dict[str, Any]:
     return {"report_bindings": bindings, "installed_runs": installed_runs}
 
 
-def _evidence_binding(
-    value: object, artifact_manifest_sha256: str, bound_hashes: set[str]
-) -> dict[str, Any]:
-    """Bind the whole report set to the exact final artifact hashes.
-
-    ``artifact_hash_manifest_sha256`` is the digest of the exact final
-    artifact-hash manifest the reports were captured against. If it names a
-    different (earlier, superseded) manifest, the reports are stale for this
-    candidate. ``superseded_report_hashes`` records raw reports the operator has
-    explicitly retired; binding any of them fails closed.
-    """
-    binding = require_exact_keys(
-        value,
-        {"artifact_hash_manifest_sha256", "superseded_report_hashes"},
-        "evidence_binding",
-    )
-    declared = require_sha256(
-        binding["artifact_hash_manifest_sha256"],
-        "evidence_binding.artifact_hash_manifest_sha256",
-    )
-    if declared != artifact_manifest_sha256:
-        raise PublicationError(
-            "bound reports are stale: they are bound to a superseded final artifact-hash manifest"
-        )
-    raw = binding["superseded_report_hashes"]
-    if not isinstance(raw, list):
-        raise PublicationError("evidence_binding.superseded_report_hashes must be a list")
-    superseded: list[str] = []
-    for index, item in enumerate(raw):
-        digest = require_sha256(item, f"evidence_binding.superseded_report_hashes[{index}]")
-        if digest in superseded:
-            raise PublicationError("evidence_binding repeats a superseded report hash")
-        superseded.append(digest)
-    collision = sorted(set(superseded) & bound_hashes)
-    if collision:
-        raise PublicationError(
-            f"final candidate binds superseded raw reports: {collision}"
-        )
-    return {
-        "artifact_hash_manifest_sha256": declared,
-        "superseded_report_hashes": sorted(superseded),
-    }
-
-
 def _post_verification(
     value: object, signed_app_tree: str, latest_evidence_at: datetime | None
 ) -> dict[str, Any]:
@@ -731,25 +693,27 @@ def _post_verification(
 
 
 # --------------------------------------------------------------------------
-# Updater-key release blocker (path/name only, never opened)
+# Workspace secret-material release blocker (path/name only, never opened)
 # --------------------------------------------------------------------------
 
 
-def _updater_key_responses(workspace_root: Path) -> list[Any]:
-    """Return the atomic updater-key security responses for the workspace.
+def _secret_material_responses(workspace_root: Path) -> list[Any]:
+    """Return typed secret-material security responses for the workspace.
 
     Delegates to the path/name-only blocker; it never opens or reads a key.
     Fails closed: an unreadable/symlinked/malformed workspace raises.
     """
     try:
         return list(evaluate_workspace(workspace_root))
-    except UpdaterKeyReleaseBlock as error:
-        raise PublicationError(f"updater-key release blocker failed closed: {error}") from error
+    except SecretMaterialReleaseBlock as error:
+        raise PublicationError(
+            f"release secret-material blocker failed closed: {error}"
+        ) from error
 
 
-def _updater_key_blocked(workspace_root: Path) -> bool:
-    """Return True when an updater-key file exists in the workspace."""
-    return bool(_updater_key_responses(workspace_root))
+def _secret_material_blocked(workspace_root: Path) -> bool:
+    """Return True when release secret material exists in the workspace."""
+    return bool(_secret_material_responses(workspace_root))
 
 
 # --------------------------------------------------------------------------
@@ -781,7 +745,7 @@ def environment_status(
     """Report which final-candidate inputs exist, without fabricating any.
 
     Every environment-gated input is reported as ``present`` or ``not-run`` from
-    path/type metadata alone, and the updater-key blocker is reported by
+    path/type metadata alone, and the secret-material blocker is reported by
     path/name only. An input that is absent, a symlink, or not a regular file is
     ``not-run`` and blocks the candidate; nothing here can grant acceptance.
     """
@@ -799,23 +763,33 @@ def environment_status(
         inputs[name] = {"path": str(candidate), "state": PRESENT if present else NOT_RUN}
         if not present:
             blocked.append(name)
-    updater_key_blocks = [
+    workspace_secret_blocks = [
         {
             "path": response.detected_path,
             "name": response.detected_name,
+            "credential_kind": response.credential_kind.value,
             "relocation_target": response.relocation_target,
             "exposure_plausible": response.exposure_plausible,
             "rotation_required": response.rotation_required,
-            "trust_migration_required": response.trust_migration_required,
+            "required_trust_action": response.required_trust_action.value,
+            "updater_trust_migration_required": (
+                response.updater_trust_migration_required
+            ),
+            "notary_profile_reprovision_required": (
+                response.notary_profile_reprovision_required
+            ),
+            "trust_domain_identification_required": (
+                response.trust_domain_identification_required
+            ),
         }
-        for response in _updater_key_responses(root)
+        for response in _secret_material_responses(root)
     ]
-    if updater_key_blocks:
-        blocked.append(UPDATER_KEY_BLOCK)
+    if workspace_secret_blocks:
+        blocked.append(WORKSPACE_SECRET_BLOCK)
     return {
         "evidence_directory": str(directory),
         "inputs": inputs,
-        "updater_key_blocks": updater_key_blocks,
+        "workspace_secret_blocks": workspace_secret_blocks,
         "blocked_inputs": sorted(blocked),
         # ``inputs-present`` means only that the files exist; acceptance still
         # requires build + validate over their contents.
@@ -843,8 +817,8 @@ def build_final_candidate_binding(
 ) -> dict[str, Any]:
     """Assemble the canonical final-candidate binding from reviewed inputs.
 
-    ``workspace_root`` is scanned by the updater-key blocker (path/name only);
-    it defaults to ``repository``. A present updater-key file always blocks.
+    ``workspace_root`` is scanned by the secret-material blocker (path/name
+    only); it defaults to ``repository``. A present candidate always blocks.
     """
     root = repository if workspace_root is None else workspace_root
     evidence_root = repository if physical_evidence_root is None else physical_evidence_root
@@ -854,7 +828,6 @@ def build_final_candidate_binding(
         "final_artifacts",
         "xcframework",
         "nested_code",
-        "evidence_binding",
         "notarization",
         "staple",
         "gatekeeper",
@@ -876,6 +849,7 @@ def build_final_candidate_binding(
         "product": product,
         "signed_app_tree_sha256": final_artifacts["signed_app_tree_sha256"],
         "app_manifest_sha256": final_artifacts["app_manifest_sha256"],
+        "artifact_hash_manifest_sha256": final_artifacts["artifact_hash_manifest"]["sha256"],
         "built_at": final_artifacts["built_at"],
     }
     signed_app_tree = final_artifacts["signed_app_tree_sha256"]
@@ -887,6 +861,7 @@ def build_final_candidate_binding(
     gatekeeper = None
     physical_evidence = None
     physical_archive = None
+    physical_artifact_hash_manifest_sha256 = None
     post_verification = None
     report_bindings: list[dict[str, Any]] = []
     installed_runs: list[dict[str, Any]] = []
@@ -942,20 +917,14 @@ def build_final_candidate_binding(
             report_bindings = derived["report_bindings"]
             installed_runs = derived["installed_runs"]
             physical_archive = summary["private_archive"]
+            physical_artifact_hash_manifest_sha256 = summary["candidate"][
+                "artifact_hash_manifest_sha256"
+            ]
             physical_trust_policy_sha256 = summary["trust_policy_sha256"]
             evidence_timestamps.extend(
                 _timestamp(entry["signed_at"], f"report[{entry['os']}.{entry['category']}]")
                 for entry in report_bindings
             )
-
-    # Bind the whole raw-report set to the exact final artifact hashes and reject
-    # superseded reports. This is checked whether or not the physical aggregate is
-    # available, so a wrong manifest binding is caught in every environment.
-    evidence_binding = _evidence_binding(
-        payload["evidence_binding"],
-        final_artifacts["artifact_hash_manifest"]["sha256"],
-        {entry["report_sha256"] for entry in report_bindings},
-    )
 
     latest_evidence_at = max(evidence_timestamps) if evidence_timestamps else None
     if payload["post_verification"] is None:
@@ -965,10 +934,10 @@ def build_final_candidate_binding(
             payload["post_verification"], signed_app_tree, latest_evidence_at
         )
 
-    # The updater-key release blocker always invalidates the candidate while any
-    # updater-key file is present in the workspace (Requirement 8.1).
-    if _updater_key_blocked(root):
-        missing.append(UPDATER_KEY_BLOCK)
+    # Secret material always invalidates the candidate while present in the
+    # workspace (Requirement 8.1).
+    if _secret_material_blocked(root):
+        missing.append(WORKSPACE_SECRET_BLOCK)
 
     blocked_inputs = sorted(set(missing))
     status = VERIFIED if not blocked_inputs else BLOCKED
@@ -990,12 +959,12 @@ def build_final_candidate_binding(
         },
         "xcframework": xcframework,
         "nested_code": nested_code,
-        "evidence_binding": evidence_binding,
         "notarization": notarization,
         "staple": staple,
         "gatekeeper": gatekeeper,
         "physical_evidence": physical_evidence,
         "physical_archive": physical_archive,
+        "physical_artifact_hash_manifest_sha256": physical_artifact_hash_manifest_sha256,
         "physical_trust_policy_sha256": physical_trust_policy_sha256,
         "report_bindings": report_bindings,
         "installed_runs": installed_runs,
@@ -1017,9 +986,9 @@ def validate_final_candidate_binding(
 ) -> dict[str, Any]:
     """Fail-closed validation of a final-candidate binding document.
 
-    Re-derives the binding from the embedded evidence, re-runs the updater-key
+    Re-derives the binding from the embedded evidence, re-runs the secret-material
     scan, and rejects any post-verification mutation, stale report, identity
-    mismatch, missing raw evidence, or updater-key blocker. With
+    mismatch, missing raw evidence, or workspace-secret blocker. With
     ``require_verified`` a ``blocked`` (environment-gated) binding is rejected so
     an incomplete environment can never be promoted.
     """
@@ -1036,19 +1005,23 @@ def validate_final_candidate_binding(
         "final_artifacts",
         "xcframework",
         "nested_code",
-        "evidence_binding",
         "notarization",
         "staple",
         "gatekeeper",
         "physical_evidence",
         "physical_archive",
+        "physical_artifact_hash_manifest_sha256",
         "physical_trust_policy_sha256",
         "report_bindings",
         "installed_runs",
         "post_verification",
     }
     parsed = require_exact_keys(document, fields | {"binding_sha256"}, "final candidate binding")
-    if parsed["schema_version"] != SCHEMA_VERSION or parsed["document"] != DOCUMENT_KIND:
+    if (
+        type(parsed["schema_version"]) is not int
+        or parsed["schema_version"] != SCHEMA_VERSION
+        or parsed["document"] != DOCUMENT_KIND
+    ):
         raise PublicationError("final candidate binding has an unsupported schema/document kind")
     if parsed["visibility"] != DOCUMENT_VISIBILITY:
         raise PublicationError("final candidate binding is not private release-operations evidence")
@@ -1068,7 +1041,6 @@ def validate_final_candidate_binding(
         "final_artifacts": parsed["final_artifacts"],
         "xcframework": parsed["xcframework"],
         "nested_code": parsed["nested_code"],
-        "evidence_binding": parsed["evidence_binding"],
         "notarization": parsed["notarization"],
         "staple": parsed["staple"],
         "gatekeeper": parsed["gatekeeper"],
@@ -1102,6 +1074,13 @@ def validate_final_candidate_binding(
         raise PublicationError(
             "final candidate private evidence archive does not match reopened bytes"
         )
+    if (
+        parsed["physical_artifact_hash_manifest_sha256"]
+        != rebuilt["physical_artifact_hash_manifest_sha256"]
+    ):
+        raise PublicationError(
+            "final candidate physical artifact-hash manifest binding was hand-edited"
+        )
     if parsed["physical_trust_policy_sha256"] != rebuilt["physical_trust_policy_sha256"]:
         raise PublicationError("final candidate collector trust-policy binding was hand-edited")
     if parsed["binding_sha256"] != rebuilt["binding_sha256"]:
@@ -1119,9 +1098,14 @@ def self_check() -> None:
     """Verify the binder's internal wiring without any evidence file.
 
     Lets a static boundary gate confirm the final-candidate binder is wired to
-    the physical aggregator and the updater-key blocker and requires the full
+    the physical aggregator and the secret-material blocker and requires the full
     inside-out identity set, without needing signed/notarized/physical inputs.
     """
+    if (
+        SCHEMA_VERSION != 3
+        or DOCUMENT_KIND != "final-candidate-notarization-installed-binding-v3"
+    ):
+        raise PublicationError("final-candidate schema wiring is inconsistent")
     if set(REQUIRED_NESTED_CODE) != {
         "host",
         "packet-tunnel",

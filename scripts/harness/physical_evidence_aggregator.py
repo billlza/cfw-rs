@@ -46,6 +46,8 @@ if __package__:
         ArtifactReader,
         CollectorTrustNotConfiguredError,
         CollectorTrustPolicy,
+        COLLECTOR_SIGNATURE_ALGORITHM,
+        PROOF_SCHEMA_VERSION,
         RELEASE_TRUST_POLICY_SHA256,
         RawArtifactError,
         canonical_json,
@@ -58,7 +60,7 @@ if __package__:
         require_identifier,
         require_sha256,
         read_release_trust_policy_bytes,
-        verify_rs256,
+        verify_ps256,
     )
     from ..evidence_manifest import LEVEL_ORDER
     from ..release_build_identity import BuildIdentityError, canonical_build_version
@@ -93,6 +95,8 @@ else:  # pragma: no cover - direct-script import path
         ArtifactReader,
         CollectorTrustNotConfiguredError,
         CollectorTrustPolicy,
+        COLLECTOR_SIGNATURE_ALGORITHM,
+        PROOF_SCHEMA_VERSION,
         RELEASE_TRUST_POLICY_SHA256,
         RawArtifactError,
         canonical_json,
@@ -105,14 +109,15 @@ else:  # pragma: no cover - direct-script import path
         require_identifier,
         require_sha256,
         read_release_trust_policy_bytes,
-        verify_rs256,
+        verify_ps256,
     )
     from evidence_manifest import LEVEL_ORDER  # type: ignore
     from release_build_identity import BuildIdentityError, canonical_build_version  # type: ignore
 
 
-SCHEMA_VERSION = 2
-AGGREGATOR_VERSION = "physical-evidence-aggregator-v2"
+SCHEMA_VERSION = 4
+AGGREGATOR_VERSION = "physical-evidence-aggregator-v4"
+RECEIPT_SCHEMA_VERSION = 3
 PRODUCT_VERSION = "0.4.0"
 GRANTED_LEVEL = "Signed_Installed_Verified"
 if GRANTED_LEVEL not in LEVEL_ORDER:
@@ -153,6 +158,7 @@ CANDIDATE_FIELDS = {
     "build_number",
     "app_manifest_sha256",
     "signed_app_tree_sha256",
+    "artifact_hash_manifest_sha256",
     "built_at",
 }
 RUN_FIELDS = {
@@ -173,11 +179,23 @@ COLLECTOR_FIELDS = {
     "version",
     "source_sha256",
     "executable_sha256",
-    "key_id",
+    "key_version",
     "algorithm",
     "signature",
 }
 REPORT_FIELDS = {"tool_version", "captured_at", "completed_at", "signed_at", "artifact"}
+REQUIRED_LIFECYCLE_RAW_SUBJECTS = frozenset(
+    {
+        "renderer-ready-v2:trace",
+        "network-extension-approval:trace",
+        "network-extension-denial:trace",
+        "network-extension-pending:trace",
+        "sleep-wake:trace",
+        "sleep-wake:packet",
+        "wkwebview-850x603:metadata",
+        "wkwebview-850x603:pixels",
+    }
+)
 
 
 class PhysicalEvidenceError(ValueError):
@@ -243,6 +261,10 @@ def _candidate(value: Any) -> tuple[dict[str, Any], datetime]:
         "signed_app_tree_sha256": require_sha256(
             candidate["signed_app_tree_sha256"], "candidate.signed_app_tree_sha256"
         ),
+        "artifact_hash_manifest_sha256": require_sha256(
+            candidate["artifact_hash_manifest_sha256"],
+            "candidate.artifact_hash_manifest_sha256",
+        ),
         "built_at": candidate["built_at"],
     }
     return parsed, _timestamp(candidate["built_at"], "candidate.built_at")
@@ -256,7 +278,7 @@ def _collector(value: Any, policy: CollectorTrustPolicy, label: str) -> dict[str
         "executable_sha256": require_sha256(
             collector["executable_sha256"], f"{label}.executable_sha256"
         ),
-        "key_id": require_identifier(collector["key_id"], f"{label}.key_id"),
+        "key_version": collector["key_version"],
         "algorithm": collector["algorithm"],
         "signature": collector["signature"],
     }
@@ -264,14 +286,17 @@ def _collector(value: Any, policy: CollectorTrustPolicy, label: str) -> dict[str
         "version": policy.collector_version,
         "source_sha256": policy.collector_source_sha256,
         "executable_sha256": policy.collector_executable_sha256,
-        "key_id": policy.key_id,
-        "algorithm": "RS256",
+        "key_version": policy.key_version,
+        "algorithm": policy.algorithm,
     }
     for field, wanted in expected.items():
         if parsed[field] != wanted:
             raise PhysicalEvidenceError(f"{label}.{field} differs from the source-pinned policy")
     if not isinstance(parsed["signature"], str):
-        raise PhysicalEvidenceError(f"{label}.signature must be an RS256 base64url string")
+        raise PhysicalEvidenceError(
+            f"{label}.signature must be a {COLLECTOR_SIGNATURE_ALGORITHM} "
+            "base64url string"
+        )
     return parsed
 
 
@@ -279,6 +304,7 @@ def _proof_expected(
     candidate: dict[str, Any], run: dict[str, Any], collector: dict[str, Any]
 ) -> dict[str, Any]:
     return {
+        "schema_version": PROOF_SCHEMA_VERSION,
         "run_id": run["run_id"],
         "run_nonce": run["run_nonce"],
         "candidate": {key: candidate[key] for key in sorted(CANDIDATE_FIELDS - {"built_at"})},
@@ -286,6 +312,8 @@ def _proof_expected(
             "version": collector["version"],
             "source_sha256": collector["source_sha256"],
             "executable_sha256": collector["executable_sha256"],
+            "algorithm": collector["algorithm"],
+            "key_version": collector["key_version"],
         },
     }
 
@@ -411,6 +439,15 @@ def _validate_report(
         }
         for binding in result["artifacts"]
     ]
+    if harness == "lifecycle":
+        subjects = {binding["subject"] for binding in result["artifacts"]}
+        if len(subjects) != len(result["artifacts"]):
+            raise PhysicalEvidenceError(f"{label} repeats a raw evidence subject")
+        missing = REQUIRED_LIFECYCLE_RAW_SUBJECTS - subjects
+        if missing:
+            raise PhysicalEvidenceError(
+                f"{label} omits required private raw evidence: {sorted(missing)}"
+            )
     return result, report_binding, raw_bindings
 
 
@@ -424,7 +461,7 @@ def _receipt_payload(
     raw_bindings: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": RECEIPT_SCHEMA_VERSION,
         "trust_policy_sha256": policy_sha256,
         "candidate": candidate,
         "run": {
@@ -444,7 +481,13 @@ def _receipt_payload(
         },
         "collector": {
             key: collector[key]
-            for key in ("version", "source_sha256", "executable_sha256", "key_id", "algorithm")
+            for key in (
+                "version",
+                "source_sha256",
+                "executable_sha256",
+                "key_version",
+                "algorithm",
+            )
         },
         "reports": sorted(report_bindings, key=lambda entry: entry["harness"]),
         "raw_artifacts": sorted(
@@ -556,7 +599,7 @@ def _validate_run(
         raw_bindings=raw_bindings,
     )
     try:
-        verify_rs256(
+        verify_ps256(
             canonical_json(payload),
             collector["signature"],
             modulus=policy.modulus,
@@ -640,7 +683,9 @@ def _validate(
         },
         "physical evidence aggregate",
     )
-    if document["schema_version"] != SCHEMA_VERSION:
+    if type(document["schema_version"]) is not int or (
+        document["schema_version"] != SCHEMA_VERSION
+    ):
         raise PhysicalEvidenceError(f"aggregate schema_version must be {SCHEMA_VERSION}")
     if document["aggregator_version"] != AGGREGATOR_VERSION:
         raise PhysicalEvidenceError(
@@ -868,9 +913,16 @@ def load_physical_evidence(
         raise PhysicalEvidenceError(str(error)) from error
 
 
-def self_check() -> None:
+def self_check() -> str:
     """Verify static wiring without granting or requiring physical evidence."""
 
+    if (
+        SCHEMA_VERSION != 4
+        or AGGREGATOR_VERSION != "physical-evidence-aggregator-v4"
+        or PROOF_SCHEMA_VERSION != 3
+        or RECEIPT_SCHEMA_VERSION != 3
+    ):
+        raise PhysicalEvidenceError("physical evidence schema wiring is inconsistent")
     if GRANTED_LEVEL not in LEVEL_ORDER:
         raise PhysicalEvidenceError("granted level is not in Evidence_Manifest")
     if set(HARNESS_VALIDATORS) != REQUIRED_HARNESSES:
@@ -896,9 +948,10 @@ def self_check() -> None:
     except CollectorTrustNotConfiguredError:
         # This is the expected pre-provisioning state. The parse still proved
         # canonical bytes and the exact source digest before returning here.
-        return
+        return "not-configured"
     if not policy.release_source_pinned:
         raise PhysicalEvidenceError("configured release trust policy lost its source pin")
+    return "configured"
 
 
 def main() -> None:
@@ -910,12 +963,12 @@ def main() -> None:
     arguments = parser.parse_args()
     if arguments.self_check:
         try:
-            self_check()
+            trust_state = self_check()
         except PhysicalEvidenceError as error:
             raise SystemExit(f"error: physical aggregator self-check failed: {error}") from error
         print(
             "physical evidence aggregator self-check ok; production collector trust "
-            "remains fail-closed until the source-pinned policy is configured"
+            f"policy state={trust_state}"
         )
         return
     try:

@@ -219,6 +219,20 @@ class ValidatedCandidateEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "strictly greater"):
                 self.validate(repository, review, "40000")
 
+    def test_review_schema_version_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory)
+                review = self.make_review(repository)
+                document = json.loads(review.read_text(encoding="utf-8"))
+                document["schema_version"] = invalid
+                write_json(review, document)
+                with self.assertRaisesRegex(
+                    ValidatedCandidateError,
+                    "explicitly approved",
+                ):
+                    self.validate(repository, review)
+
     def test_runtime_evidence_tamper_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)

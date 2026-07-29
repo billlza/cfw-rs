@@ -4,14 +4,18 @@ import builtins
 import dataclasses
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
-from scripts.updater_key_release_blocker import (
-    DetectedUpdaterKey,
+from scripts.release_secret_material_blocker import (
+    DetectedSecretMaterial,
+    RequiredTrustAction,
+    SecretMaterialKind,
     SecurityResponse,
-    UpdaterKeyReleaseBlock,
+    SecretMaterialReleaseBlock,
     assert_response_complete,
     build_security_response,
+    classify_secret_material,
     evaluate_workspace,
     exposure_is_plausible,
     format_response,
@@ -29,18 +33,17 @@ class _NoFileReads:
     """
 
     def __enter__(self) -> "_NoFileReads":
-        self._original_open = builtins.open
-
         def _forbidden(*args: object, **kwargs: object):
             raise AssertionError(
-                f"updater-key blocker attempted to open a file: {args!r}"
+                f"secret-material blocker attempted to open a file: {args!r}"
             )
 
-        builtins.open = _forbidden  # type: ignore[assignment]
+        self._patcher = mock.patch.object(builtins, "open", side_effect=_forbidden)
+        self._patcher.start()
         return self
 
     def __exit__(self, *exc: object) -> None:
-        builtins.open = self._original_open  # type: ignore[assignment]
+        self._patcher.stop()
 
 
 class ScanByPathAndNameTests(unittest.TestCase):
@@ -50,13 +53,16 @@ class ScanByPathAndNameTests(unittest.TestCase):
             tauri.mkdir()
             (tauri / "cfw-rs.key").write_text("PRIVATE", encoding="utf-8")
             (Path(root) / "cert.pem").write_text("PRIVATE", encoding="utf-8")
+            (Path(root) / "AuthKey_TEST.p8").write_text(
+                "PRIVATE", encoding="utf-8"
+            )
             (Path(root) / "notes.txt").write_text("safe", encoding="utf-8")
 
             with _NoFileReads():
                 detected = scan_workspace(root)
 
             names = sorted(item.name for item in detected)
-            self.assertEqual(names, ["cert.pem", "cfw-rs.key"])
+            self.assertEqual(names, ["AuthKey_TEST.p8", "cert.pem", "cfw-rs.key"])
             for item in detected:
                 self.assertTrue(item.path.endswith(item.name))
 
@@ -99,13 +105,103 @@ class ScanByPathAndNameTests(unittest.TestCase):
     def test_case_insensitive_suffix_match(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             (Path(root) / "UPPER.KEY").write_text("PRIVATE", encoding="utf-8")
+            (Path(root) / "APPSTORE.P8").write_text("PRIVATE", encoding="utf-8")
             detected = scan_workspace(root)
-            self.assertEqual([item.name for item in detected], ["UPPER.KEY"])
+            self.assertEqual(
+                [item.name for item in detected], ["APPSTORE.P8", "UPPER.KEY"]
+            )
+
+
+class ClassificationPolicyTests(unittest.TestCase):
+    def test_exact_current_notary_key_requires_notary_reprovision_when_exposed(
+        self,
+    ) -> None:
+        name = "AuthKey_DYHRNJ2Z4M.p8"
+        path = Path("/ws/backups") / name
+        kind = classify_secret_material(path, name)
+        self.assertIs(kind, SecretMaterialKind.APPLE_ASC_NOTARY_KEY)
+        response = build_security_response(
+            DetectedSecretMaterial(str(path), name, kind),
+            "/ws",
+        )
+        self.assertIs(
+            response.required_trust_action,
+            RequiredTrustAction.ROTATE_ASC_AND_REPROVISION_NOTARY,
+        )
+        self.assertTrue(response.notary_profile_reprovision_required)
+        self.assertFalse(response.updater_trust_migration_required)
+        self.assertIn("updater trust migration: not required", format_response(response))
+
+    def test_other_canonical_apple_key_requires_domain_identification(self) -> None:
+        name = "AuthKey_A1B2C3D4E5.p8"
+        path = Path("/ws/archive") / name
+        kind = classify_secret_material(path, name)
+        self.assertIs(kind, SecretMaterialKind.APPLE_API_PRIVATE_KEY)
+        response = build_security_response(
+            DetectedSecretMaterial(str(path), name, kind),
+            "/ws",
+        )
+        self.assertIs(
+            response.required_trust_action,
+            RequiredTrustAction.IDENTIFY_APPLE_DOMAIN_AND_ROTATE,
+        )
+        self.assertTrue(response.trust_domain_identification_required)
+        self.assertFalse(response.notary_profile_reprovision_required)
+        self.assertFalse(response.updater_trust_migration_required)
+
+        isolated_path = Path("/ws") / name
+        isolated = build_security_response(
+            DetectedSecretMaterial(str(isolated_path), name, kind),
+            "/ws",
+        )
+        self.assertIs(
+            isolated.required_trust_action,
+            RequiredTrustAction.IDENTIFY_APPLE_DOMAIN_AND_RELOCATE,
+        )
+        self.assertFalse(isolated.rotation_required)
+
+    def test_generic_p8_is_unknown_and_never_defaults_to_updater(self) -> None:
+        for name in ("AuthKey_SHORT.p8", "distribution.P8", "unknown.p8"):
+            with self.subTest(name=name):
+                kind = classify_secret_material(Path("/ws") / name, name)
+                self.assertIs(kind, SecretMaterialKind.UNKNOWN_PRIVATE_KEY)
+
+    def test_exact_updater_names_and_tauri_path_are_updater_domain(self) -> None:
+        for path, name in (
+            (Path("/ws/updater.key"), "updater.key"),
+            (Path("/ws/cfw-rs-v2.key"), "cfw-rs-v2.key"),
+            (Path("/ws/.tauri/custom.pem"), "custom.pem"),
+        ):
+            with self.subTest(path=path):
+                self.assertIs(
+                    classify_secret_material(path, name),
+                    SecretMaterialKind.UPDATER_SIGNING_KEY,
+                )
+
+    def test_isolated_unknown_requires_identification_and_relocation(self) -> None:
+        detected = DetectedSecretMaterial(
+            path="/ws/private.pem",
+            name="private.pem",
+            kind=SecretMaterialKind.UNKNOWN_PRIVATE_KEY,
+        )
+        response = build_security_response(detected, "/ws")
+        self.assertIs(
+            response.required_trust_action,
+            RequiredTrustAction.IDENTIFY_DOMAIN_AND_RELOCATE,
+        )
+        self.assertTrue(response.trust_domain_identification_required)
+        self.assertFalse(response.rotation_required)
+        self.assertFalse(response.updater_trust_migration_required)
+        self.assertIn("updater trust migration: not required", format_response(response))
 
 
 class ReportContentTests(unittest.TestCase):
     def test_response_reports_only_path_and_name(self) -> None:
-        detected = DetectedUpdaterKey(path="/ws/.tauri/cfw-rs.key", name="cfw-rs.key")
+        detected = DetectedSecretMaterial(
+            path="/ws/.tauri/cfw-rs.key",
+            name="cfw-rs.key",
+            kind=SecretMaterialKind.UPDATER_SIGNING_KEY,
+        )
         response = build_security_response(detected, "/ws")
 
         field_names = {f.name for f in dataclasses.fields(SecurityResponse)}
@@ -125,7 +221,11 @@ class ReportContentTests(unittest.TestCase):
 
 class AtomicResponseTests(unittest.TestCase):
     def test_complete_response_passes_and_blocks(self) -> None:
-        detected = DetectedUpdaterKey(path="/ws/backup/x.key", name="x.key")
+        detected = DetectedSecretMaterial(
+            path="/ws/backup/x.key",
+            name="x.key",
+            kind=SecretMaterialKind.UNKNOWN_PRIVATE_KEY,
+        )
         response = build_security_response(detected, "/ws")
         # Should not raise.
         assert_response_complete(response)
@@ -133,46 +233,70 @@ class AtomicResponseTests(unittest.TestCase):
         self.assertTrue(response.relocation_required)
 
     def test_omitting_the_block_step_fails_closed(self) -> None:
-        response = SecurityResponse(
-            detected_path="/ws/x.key",
-            detected_name="x.key",
+        response = dataclasses.replace(
+            build_security_response(
+                DetectedSecretMaterial(
+                    path="/ws/backup/x.key",
+                    name="x.key",
+                    kind=SecretMaterialKind.UNKNOWN_PRIVATE_KEY,
+                ),
+                "/ws",
+            ),
             block_release=False,
-            relocation_required=True,
-            relocation_target="external",
-            exposure_plausible=True,
-            rotation_required=True,
-            trust_migration_required=True,
         )
-        with self.assertRaises(UpdaterKeyReleaseBlock):
+        with self.assertRaises(SecretMaterialReleaseBlock):
             assert_response_complete(response)
 
     def test_omitting_the_relocation_step_fails_closed(self) -> None:
-        response = SecurityResponse(
-            detected_path="/ws/x.key",
-            detected_name="x.key",
-            block_release=True,
+        response = dataclasses.replace(
+            build_security_response(
+                DetectedSecretMaterial(
+                    path="/ws/backup/x.key",
+                    name="x.key",
+                    kind=SecretMaterialKind.UNKNOWN_PRIVATE_KEY,
+                ),
+                "/ws",
+            ),
             relocation_required=False,
             relocation_target="",
-            exposure_plausible=True,
-            rotation_required=True,
-            trust_migration_required=True,
         )
-        with self.assertRaises(UpdaterKeyReleaseBlock):
+        with self.assertRaises(SecretMaterialReleaseBlock):
             assert_response_complete(response)
 
     def test_rotation_without_trust_migration_fails_closed(self) -> None:
-        response = SecurityResponse(
-            detected_path="/ws/x.key",
-            detected_name="x.key",
-            block_release=True,
-            relocation_required=True,
-            relocation_target="external",
-            exposure_plausible=True,
-            rotation_required=True,
-            trust_migration_required=False,
+        response = dataclasses.replace(
+            build_security_response(
+                DetectedSecretMaterial(
+                    path="/ws/backups/updater.key",
+                    name="updater.key",
+                    kind=SecretMaterialKind.UPDATER_SIGNING_KEY,
+                ),
+                "/ws",
+            ),
+            updater_trust_migration_required=False,
         )
-        with self.assertRaises(UpdaterKeyReleaseBlock):
+        with self.assertRaises(SecretMaterialReleaseBlock):
             assert_response_complete(response)
+
+    def test_spoofed_updater_action_for_apple_key_fails_closed(self) -> None:
+        valid = build_security_response(
+            DetectedSecretMaterial(
+                path="/ws/backups/AuthKey_DYHRNJ2Z4M.p8",
+                name="AuthKey_DYHRNJ2Z4M.p8",
+                kind=SecretMaterialKind.APPLE_ASC_NOTARY_KEY,
+            ),
+            "/ws",
+        )
+        spoofed = dataclasses.replace(
+            valid,
+            required_trust_action=(
+                RequiredTrustAction.ROTATE_UPDATER_AND_MIGRATE_TRUST
+            ),
+            updater_trust_migration_required=True,
+            notary_profile_reprovision_required=False,
+        )
+        with self.assertRaises(SecretMaterialReleaseBlock):
+            assert_response_complete(spoofed)
 
 
 class ExposurePlausibilityTests(unittest.TestCase):
@@ -182,15 +306,21 @@ class ExposurePlausibilityTests(unittest.TestCase):
             key.write_text("PRIVATE", encoding="utf-8")
             (Path(root) / "cfw-rs.key.pub").write_text("PUBLIC", encoding="utf-8")
 
-            detected = DetectedUpdaterKey(path=str(key), name="cfw-rs.key")
+            detected = DetectedSecretMaterial(
+                path=str(key),
+                name="cfw-rs.key",
+                kind=SecretMaterialKind.UPDATER_SIGNING_KEY,
+            )
             self.assertTrue(exposure_is_plausible(detected, root))
             response = build_security_response(detected, root)
             self.assertTrue(response.rotation_required)
-            self.assertTrue(response.trust_migration_required)
+            self.assertTrue(response.updater_trust_migration_required)
 
     def test_backup_path_marker_makes_exposure_plausible(self) -> None:
-        detected = DetectedUpdaterKey(
-            path="/ws/backups/cfw-rs.key", name="cfw-rs.key"
+        detected = DetectedSecretMaterial(
+            path="/ws/backups/cfw-rs.key",
+            name="cfw-rs.key",
+            kind=SecretMaterialKind.UPDATER_SIGNING_KEY,
         )
         self.assertTrue(exposure_is_plausible(detected, "/ws"))
 
@@ -199,19 +329,27 @@ class ExposurePlausibilityTests(unittest.TestCase):
             (Path(root) / ".git").mkdir()
             key = Path(root) / "cfw-rs.key"
             key.write_text("PRIVATE", encoding="utf-8")
-            detected = DetectedUpdaterKey(path=str(key), name="cfw-rs.key")
+            detected = DetectedSecretMaterial(
+                path=str(key),
+                name="cfw-rs.key",
+                kind=SecretMaterialKind.UPDATER_SIGNING_KEY,
+            )
             self.assertTrue(exposure_is_plausible(detected, root))
 
     def test_isolated_key_has_no_plausible_exposure(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             key = Path(root) / "cfw-rs.key"
             key.write_text("PRIVATE", encoding="utf-8")
-            detected = DetectedUpdaterKey(path=str(key), name="cfw-rs.key")
+            detected = DetectedSecretMaterial(
+                path=str(key),
+                name="cfw-rs.key",
+                kind=SecretMaterialKind.UPDATER_SIGNING_KEY,
+            )
             self.assertFalse(exposure_is_plausible(detected, root))
             response = build_security_response(detected, root)
             # Rotation is conditional; relocation and blocking are not.
             self.assertFalse(response.rotation_required)
-            self.assertFalse(response.trust_migration_required)
+            self.assertFalse(response.updater_trust_migration_required)
             self.assertTrue(response.block_release)
             self.assertTrue(response.relocation_required)
             assert_response_complete(response)
@@ -219,7 +357,7 @@ class ExposurePlausibilityTests(unittest.TestCase):
 
 class FailClosedInputTests(unittest.TestCase):
     def test_missing_workspace_root_fails_closed(self) -> None:
-        with self.assertRaises(UpdaterKeyReleaseBlock):
+        with self.assertRaises(SecretMaterialReleaseBlock):
             scan_workspace("/nonexistent/workspace/root/for/blocker/test")
 
     def test_symlinked_workspace_root_fails_closed(self) -> None:
@@ -228,14 +366,14 @@ class FailClosedInputTests(unittest.TestCase):
             real.mkdir()
             link = Path(parent) / "link"
             link.symlink_to(real, target_is_directory=True)
-            with self.assertRaises(UpdaterKeyReleaseBlock):
+            with self.assertRaises(SecretMaterialReleaseBlock):
                 scan_workspace(link)
 
     def test_file_as_workspace_root_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as parent:
             not_a_dir = Path(parent) / "file.txt"
             not_a_dir.write_text("x", encoding="utf-8")
-            with self.assertRaises(UpdaterKeyReleaseBlock):
+            with self.assertRaises(SecretMaterialReleaseBlock):
                 scan_workspace(not_a_dir)
 
     def test_symlinked_generated_release_subtree_fails_closed(self) -> None:
@@ -250,7 +388,7 @@ class FailClosedInputTests(unittest.TestCase):
                     elsewhere, target_is_directory=True
                 )
                 with self.assertRaisesRegex(
-                    UpdaterKeyReleaseBlock, "directory symlink escapes"
+                    SecretMaterialReleaseBlock, "directory symlink escapes"
                 ):
                     scan_workspace(root)
             finally:
@@ -267,7 +405,7 @@ class FailClosedInputTests(unittest.TestCase):
                 elsewhere, target_is_directory=True
             )
             with self.assertRaisesRegex(
-                UpdaterKeyReleaseBlock, "managed target root is not a trustworthy"
+                SecretMaterialReleaseBlock, "managed target root is not a trustworthy"
             ):
                 scan_workspace(root)
 
@@ -295,7 +433,7 @@ class FailClosedInputTests(unittest.TestCase):
             outside.write_text("PRIVATE", encoding="utf-8")
             (root / "innocent.dat").symlink_to(outside)
             with self.assertRaisesRegex(
-                UpdaterKeyReleaseBlock, "file symlink escapes"
+                SecretMaterialReleaseBlock, "file symlink escapes"
             ):
                 scan_workspace(root)
 
@@ -326,7 +464,7 @@ class FailClosedInputTests(unittest.TestCase):
             second.mkdir()
             (first / "to-second").symlink_to(second, target_is_directory=True)
             (second / "to-first").symlink_to(first, target_is_directory=True)
-            with self.assertRaisesRegex(UpdaterKeyReleaseBlock, "traversal cycle"):
+            with self.assertRaisesRegex(SecretMaterialReleaseBlock, "traversal cycle"):
                 scan_workspace(root)
 
 
@@ -353,7 +491,7 @@ class RealRepositoryTests(unittest.TestCase):
         # rotation and updater trust migration are both required.
         self.assertTrue(blocker_response.exposure_plausible)
         self.assertTrue(blocker_response.rotation_required)
-        self.assertTrue(blocker_response.trust_migration_required)
+        self.assertTrue(blocker_response.updater_trust_migration_required)
         # A populated response list means release is blocked.
         self.assertTrue(responses)
 

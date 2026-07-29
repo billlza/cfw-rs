@@ -6,7 +6,7 @@ extends the existing offline release tooling and composes, as black boxes, the
 P0 source/boundary gates, the deterministic unsigned-CI lanes, the wave-11
 physical/signed-installed aggregate, the task-12.1 sealed source/license/
 vulnerability/SBOM closure, the task-12.2 final-candidate notarization/installed
-binding, and the path/name-only updater-key release blocker.
+binding, and the path/name-only workspace secret-material blocker.
 
 The seal is immutable: ``seal`` refuses to overwrite an existing manifest, and
 ``verify`` re-derives every derived field so a hand-edited manifest is rejected.
@@ -47,6 +47,8 @@ if __package__:
         DEFAULT_MANIFEST_PATH,
         GATE_ORDER,
         REQUIRED_SOURCE_GATES,
+        SOURCE_GATE_DOCUMENT,
+        SOURCE_GATE_SCHEMA_VERSION,
         authorize_publication_artifacts,
         build_sealed_evidence_manifest,
         environment_status,
@@ -69,6 +71,8 @@ else:
         DEFAULT_MANIFEST_PATH,
         GATE_ORDER,
         REQUIRED_SOURCE_GATES,
+        SOURCE_GATE_DOCUMENT,
+        SOURCE_GATE_SCHEMA_VERSION,
         authorize_publication_artifacts,
         build_sealed_evidence_manifest,
         environment_status,
@@ -148,7 +152,11 @@ def command_collect_source_gates(arguments: argparse.Namespace) -> None:
                 "commit": commit,
             }
         )
-    document = {"gates": gates}
+    document = {
+        "schema_version": SOURCE_GATE_SCHEMA_VERSION,
+        "document": SOURCE_GATE_DOCUMENT,
+        "gates": gates,
+    }
     output_path = arguments.output
     if output_path.exists() or output_path.is_symlink():
         raise PublicationError(f"refusing to replace a source gate record: {output_path}")
@@ -270,13 +278,14 @@ def command_status(arguments: argparse.Namespace) -> None:
     for name in sorted(report["inputs"]):
         entry = report["inputs"][name]
         print(f"  {name}: {entry['state']} ({entry['path']})")
-    for block in report["updater_key_blocks"]:
+    for block in report["workspace_secret_blocks"]:
         # Path and name only; the key is never opened (Requirement 8.1).
         print(
-            f"  updater-key release blocker: {block['path']} (name={block['name']}) "
+            f"  release secret blocker: {block['path']} (name={block['name']}) "
+            f"kind={block['credential_kind']} "
             f"relocate to {block['relocation_target']}; "
             f"rotation_required={block['rotation_required']} "
-            f"trust_migration_required={block['trust_migration_required']}"
+            f"action={block['required_trust_action']}"
         )
     print(f"  sealed manifest: {report['manifest_state']} ({report['manifest_path']})")
     print(f"sealed manifest status: {report['status']} blocked={report['blocked_inputs']}")

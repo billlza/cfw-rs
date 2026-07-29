@@ -542,11 +542,40 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             "build_unsigned_candidate.sh",
             "build_signed_candidate.sh",
             "verify_release_environment.sh",
-            "make_updater_manifest.sh",
         ):
             text = (SCRIPTS / relative).read_text(encoding="utf-8")
             self.assertNotIn("cargo tauri", text, relative)
             self.assertIn("tauri-cli-$TAURI_CLI_VERSION", text, relative)
+
+        updater = (SCRIPTS / "make_updater_manifest.sh").read_text(
+            encoding="utf-8"
+        )
+        launcher = (SCRIPTS / "updater_signing_launcher.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("cargo tauri", updater)
+        self.assertNotIn("cargo-tauri", updater)
+        self.assertIn("cfw_verify_tauri_toolchain_tree", updater)
+        self.assertIn('"$repo_root/scripts/updater_signing_launcher.py"', updater)
+
+        # Updater signing deliberately delegates custody to one fixed launcher.
+        # Keep the cross-file contract stronger than the former shell-local
+        # path check: the launcher must pin the same version as the release
+        # toolchain, verify both the complete tree and signer bytes, and derive
+        # the executable only from the repository-owned toolchain root.
+        self.assertNotIn("cargo tauri", launcher)
+        self.assertIn(
+            f'TAURI_CLI_VERSION = "{_pins()["TAURI_CLI_VERSION"]}"', launcher
+        )
+        self.assertIn("PINNED_TAURI_TREE_SHA256", launcher)
+        self.assertIn("PINNED_TAURI_SIGNER_SHA256", launcher)
+        self.assertIn("PINNED_TAURI_SIGNER_BYTES", launcher)
+        self.assertIn(
+            'repository / "target/toolchains" / f"tauri-cli-{TAURI_CLI_VERSION}"',
+            launcher,
+        )
+        self.assertIn('signer_path = toolchain / "bin/cargo-tauri"', launcher)
+        self.assertIn("held_signer = verify_pinned_tauri_signer(repository)", launcher)
 
     def test_managed_tool_consumers_reference_tree_verification(self) -> None:
         expectations = {

@@ -20,8 +20,8 @@ black box, into one canonical, self-sealing, immutable document:
   (``publication.sealed_closure``);
 * the task-12.2 final-candidate notarization / installed binding
   (``publication.final_candidate``);
-* the path/name-only updater-key release blocker
-  (``updater_key_release_blocker``), which never opens a key file; and
+* the path/name-only workspace secret-material blocker
+  (``release_secret_material_blocker``), which never opens a key file; and
 * the canonical inner Evidence_Manifest validator (``scripts/evidence_manifest.py``),
   which owns per-capability level closure, content-addressed report bindings,
   and identity binding.
@@ -46,7 +46,7 @@ On top of those it enforces the rules that only the outer seal can enforce
    field is rejected.
 5. **Publication is fail closed.** Publication artifacts may be created only
    when the P0 source, unsigned-CI, signed-installed, sealed-closure,
-   final-candidate, and updater-key-custody gates all pass and every capability
+   final-candidate, and release-secret-custody gates all pass and every capability
    has reached the sealed level. There is no fallback, no override flag, and no
    way to convert an unavailable input into success.
 
@@ -96,8 +96,8 @@ try:  # pragma: no cover - import shim exercised by both invocation styles
         parse_descriptor,
     )
     from scripts.release_build_identity import BuildIdentityError, canonical_build_version
-    from scripts.updater_key_release_blocker import (
-        UpdaterKeyReleaseBlock,
+    from scripts.release_secret_material_blocker import (
+        SecretMaterialReleaseBlock,
         evaluate_workspace,
     )
 except ImportError:  # pragma: no cover - CLI invocation style
@@ -123,8 +123,8 @@ except ImportError:  # pragma: no cover - CLI invocation style
         parse_descriptor,
     )
     from scripts.release_build_identity import BuildIdentityError, canonical_build_version
-    from scripts.updater_key_release_blocker import (
-        UpdaterKeyReleaseBlock,
+    from scripts.release_secret_material_blocker import (
+        SecretMaterialReleaseBlock,
         evaluate_workspace,
     )
 
@@ -136,6 +136,11 @@ from scripts.publication.final_candidate import (  # noqa: E402
 from scripts.publication.sealed_closure import (  # noqa: E402
     SEALED as CLOSURE_SEALED,
     validate_sealed_closure,
+)
+from scripts.release_capability_inventory import (  # noqa: E402
+    INVENTORY_PATH as CAPABILITY_INVENTORY_PATH,
+    require_complete_capability_set,
+    require_fixed_evidence_mapping,
 )
 
 
@@ -168,6 +173,8 @@ RESULT_STATUSES = frozenset(
 MACOS_MIN = "15.0"
 ARCH = "arm64"
 LICENSE = "GPL-3.0-or-later"
+SOURCE_GATE_SCHEMA_VERSION = 1
+SOURCE_GATE_DOCUMENT = "p0-source-gates-v1"
 
 # The evidence hierarchy is imported from the canonical Evidence_Manifest so the
 # level names can never drift: Source_Implemented < Unsigned_CI_Verified <
@@ -183,7 +190,7 @@ GATE_ORDER = (
     "signed_installed",
     "sealed_closure",
     "final_candidate",
-    "updater_key_custody",
+    "release_secret_custody",
 )
 GATE_LEVEL: dict[str, str] = {
     "p0_source": SOURCE_LEVEL,
@@ -191,13 +198,12 @@ GATE_LEVEL: dict[str, str] = {
     "signed_installed": INSTALLED_LEVEL,
     "sealed_closure": SEALED_LEVEL,
     "final_candidate": SEALED_LEVEL,
-    # Updater-key custody is a release blocker (Requirement 8.1): unresolved
-    # custody blocks the sealed level and publication.
-    "updater_key_custody": SEALED_LEVEL,
+    # Workspace secret custody is a release blocker (Requirement 8.1).
+    "release_secret_custody": SEALED_LEVEL,
 }
 
 # The gates whose input is supplied per environment (``None`` means "not
-# available here"). Updater-key custody is always derived from the workspace.
+# available here"). Secret custody is always derived from the workspace.
 COMPOSED_INPUTS = (
     "p0_source",
     "unsigned_ci",
@@ -205,7 +211,7 @@ COMPOSED_INPUTS = (
     "sealed_closure",
     "final_candidate",
 )
-UPDATER_KEY_GATE = "updater_key_custody"
+RELEASE_SECRET_GATE = "release_secret_custody"
 
 # The P0 source / boundary gates that must all pass before any capability may
 # claim Source_Implemented. Each entry is a real repository gate script; a
@@ -257,6 +263,7 @@ REQUIRED_DOCUMENTS: dict[str, str] = {
     "requirements": "docs/release/macos15-network-extension-migration/requirements.md",
     "design": "docs/release/macos15-network-extension-migration/design.md",
     "tasks": "docs/release/macos15-network-extension-migration/tasks.md",
+    "capability-inventory": CAPABILITY_INVENTORY_PATH,
 }
 
 # Publication documents bound by content digest from the sealed closure. Each
@@ -460,7 +467,17 @@ def _result_set(
 def _source_gate_document(
     repository: Path, value: object, commit: str
 ) -> tuple[dict[str, Any], list[str]]:
-    payload = require_exact_keys(value, {"gates"}, "p0 source gate document")
+    payload = require_exact_keys(
+        value,
+        {"schema_version", "document", "gates"},
+        "p0 source gate document",
+    )
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != SOURCE_GATE_SCHEMA_VERSION
+        or payload["document"] != SOURCE_GATE_DOCUMENT
+    ):
+        raise PublicationError("p0 source gate document has an unsupported schema")
     gates, failures = _result_set(
         payload["gates"],
         "p0 source gate",
@@ -480,7 +497,11 @@ def _source_gate_document(
         if path.is_symlink() or not path.is_file():
             # The gate cannot be proven if the gate script is absent.
             raise PublicationError(f"p0 source gate script is missing: {expected}")
-    return {"gates": gates}, failures
+    return {
+        "schema_version": SOURCE_GATE_SCHEMA_VERSION,
+        "document": SOURCE_GATE_DOCUMENT,
+        "gates": gates,
+    }, failures
 
 
 def _ci_lane_document(
@@ -499,7 +520,11 @@ def _ci_lane_document(
         },
         "unsigned CI lane document",
     )
-    if payload["schema_version"] != 2 or payload["document"] != "unsigned-ci-lanes-v2":
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != 2
+        or payload["document"] != "unsigned-ci-lanes-v2"
+    ):
         raise PublicationError("unsigned CI lane document has an unsupported schema")
     release_source_sha256 = require_sha256(
         payload["release_source_sha256"], "unsigned CI release_source_sha256"
@@ -537,6 +562,24 @@ def _ci_lane_document(
     }, failures
 
 
+def validate_source_gate_document(
+    repository: Path,
+    value: object,
+    commit: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Public composition boundary for the fixed P0 source-gate document."""
+    return _source_gate_document(repository, value, commit)
+
+
+def validate_ci_lane_document(
+    value: object,
+    commit: str,
+    expected_release_source_sha256: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Public composition boundary for the fixed unsigned-CI lane document."""
+    return _ci_lane_document(value, commit, expected_release_source_sha256)
+
+
 # --------------------------------------------------------------------------
 # Composed gate evaluation
 # --------------------------------------------------------------------------
@@ -548,21 +591,33 @@ def _gate(status: str, evidence: Any) -> dict[str, Any]:
     return {"status": status, "evidence": evidence}
 
 
-def _updater_key_gate(workspace_root: Path) -> dict[str, Any]:
-    """Derive the updater-key custody gate by path/name only (Requirement 8.1)."""
+def _release_secret_gate(workspace_root: Path) -> dict[str, Any]:
+    """Derive typed workspace secret custody by path/name only."""
     try:
         responses = list(evaluate_workspace(workspace_root))
-    except UpdaterKeyReleaseBlock as error:
-        raise PublicationError(f"updater-key release blocker failed closed: {error}") from error
+    except SecretMaterialReleaseBlock as error:
+        raise PublicationError(
+            f"release secret-material blocker failed closed: {error}"
+        ) from error
     blocks = [
         {
             # Path and name only; the key file is never opened or read.
             "path": response.detected_path,
             "name": response.detected_name,
+            "credential_kind": response.credential_kind.value,
             "relocation_target": response.relocation_target,
             "exposure_plausible": response.exposure_plausible,
             "rotation_required": response.rotation_required,
-            "trust_migration_required": response.trust_migration_required,
+            "required_trust_action": response.required_trust_action.value,
+            "updater_trust_migration_required": (
+                response.updater_trust_migration_required
+            ),
+            "notary_profile_reprovision_required": (
+                response.notary_profile_reprovision_required
+            ),
+            "trust_domain_identification_required": (
+                response.trust_domain_identification_required
+            ),
         }
         for response in responses
     ]
@@ -755,7 +810,12 @@ def _cross_bind_gates(gates: dict[str, dict[str, Any]], payload: dict[str, Any])
 
 
 def _inner_manifest(
-    value: object, commit: str, gates: dict[str, dict[str, Any]]
+    repository: Path,
+    value: object,
+    commit: str,
+    gates: dict[str, dict[str, Any]],
+    *,
+    fixture: bool,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     """Validate the canonical inner Evidence_Manifest and derive its claims."""
     if not isinstance(value, dict):
@@ -764,6 +824,23 @@ def _inner_manifest(
         summary = validate_evidence_manifest(value)
     except EvidenceManifestError as error:
         raise PublicationError(f"inner Evidence_Manifest is invalid: {error}") from error
+
+    capability_ids = [capability["id"] for capability in summary["capabilities"]]
+    require_complete_capability_set(repository, capability_ids)
+    require_fixed_evidence_mapping(value)
+
+    # Production seals reopen every raw report from the release repository.
+    # The generic inner validator accepts content-addressed descriptors without
+    # a reports root, but the publication boundary must not seal hashes whose
+    # bytes are missing. Fixture mode remains hermetic and is never publishable.
+    if not fixture:
+        for report in summary["reports"].values():
+            relative = safe_relative(report["path"], f"report {report['id']} path")
+            path = repository.joinpath(*relative.parts)
+            if sha256_file(path) != report["sha256"]:
+                raise PublicationError(
+                    f"inner Evidence_Manifest raw report differs from its binding: {report['id']}"
+                )
 
     identity = summary["identity"]
     if identity["commit"] != commit:
@@ -908,7 +985,7 @@ def publication_decision(
 
     Publication requires every composed gate to pass - P0 source implementation,
     unsigned CI, signed-installed evidence, sealed closure, the final-candidate
-    binding, and updater-key custody - and every capability to have reached
+    binding, and workspace secret custody - and every capability to have reached
     ``Sealed_Release_Evidence``. There is no override and no fallback.
     """
     refusals = [
@@ -1054,12 +1131,16 @@ def build_sealed_evidence_manifest(
             evidence_root,
             physical_trust_policy,
         )
-    gates[UPDATER_KEY_GATE] = _updater_key_gate(root)
+    gates[RELEASE_SECRET_GATE] = _release_secret_gate(root)
 
     _cross_bind_gates(gates, payload)
 
     identity, capabilities, report_digests = _inner_manifest(
-        payload["evidence_manifest"], commit, gates
+        repository,
+        payload["evidence_manifest"],
+        commit,
+        gates,
+        fixture=fixture,
     )
     # No level skipping and no masking: every claimed level must be authorized by
     # its own gate and every predecessor gate.
@@ -1171,7 +1252,11 @@ def validate_sealed_evidence_manifest(
     parsed = require_exact_keys(
         document, DOCUMENT_FIELDS | {"manifest_sha256"}, "sealed evidence manifest"
     )
-    if parsed["schema_version"] != SCHEMA_VERSION or parsed["document"] != DOCUMENT_KIND:
+    if (
+        type(parsed["schema_version"]) is not int
+        or parsed["schema_version"] != SCHEMA_VERSION
+        or parsed["document"] != DOCUMENT_KIND
+    ):
         raise PublicationError("sealed evidence manifest has an unsupported schema/document kind")
     if parsed["visibility"] != DOCUMENT_VISIBILITY:
         raise PublicationError("sealed evidence manifest is not private release-operations evidence")
@@ -1330,16 +1415,16 @@ def environment_status(
         inputs[name] = {"path": str(candidate), "state": PRESENT if present else NOT_RUN}
         if not present:
             blocked.append(name)
-    gate = _updater_key_gate(root)
+    gate = _release_secret_gate(root)
     if gate["status"] != PASSED:
-        blocked.append(UPDATER_KEY_GATE)
+        blocked.append(RELEASE_SECRET_GATE)
     sealed_present = manifest.is_file() and not manifest.is_symlink()
     return {
         "evidence_directory": str(directory),
         "manifest_path": str(manifest),
         "manifest_state": PRESENT if sealed_present else NOT_RUN,
         "inputs": inputs,
-        "updater_key_blocks": gate["evidence"]["blocks"],
+        "workspace_secret_blocks": gate["evidence"]["blocks"],
         "blocked_inputs": sorted(blocked),
         "status": BLOCKED if blocked else "inputs-present",
     }
@@ -1358,7 +1443,7 @@ def self_check() -> None:
         raise PublicationError("the physical aggregator no longer grants the installed level")
     if set(GATE_LEVEL) != set(GATE_ORDER) or len(GATE_ORDER) != 6:
         raise PublicationError("publication gate wiring is inconsistent")
-    if set(COMPOSED_INPUTS) | {UPDATER_KEY_GATE} != set(GATE_ORDER):
+    if set(COMPOSED_INPUTS) | {RELEASE_SECRET_GATE} != set(GATE_ORDER):
         raise PublicationError("composed input wiring is inconsistent")
     if set(ENVIRONMENT_INPUT_FILES) != set(COMPOSED_INPUTS):
         raise PublicationError("composed input file wiring is inconsistent")

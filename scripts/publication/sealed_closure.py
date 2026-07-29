@@ -457,7 +457,11 @@ def validate_sealed_closure(
         "vulnerability_reports",
     }
     parsed = require_exact_keys(document, fields | {"closure_sha256"}, "sealed closure")
-    if parsed["schema_version"] != SCHEMA_VERSION or parsed["document"] != DOCUMENT_KIND:
+    if (
+        type(parsed["schema_version"]) is not int
+        or parsed["schema_version"] != SCHEMA_VERSION
+        or parsed["document"] != DOCUMENT_KIND
+    ):
         raise PublicationError("sealed closure has an unsupported schema/document kind")
     if parsed["fixture"] is not bool(fixture):
         raise PublicationError("sealed closure fixture mode mismatch")

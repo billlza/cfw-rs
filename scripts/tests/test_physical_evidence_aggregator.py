@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import atexit
 import copy
+from contextlib import redirect_stdout
 from dataclasses import replace
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -10,13 +12,19 @@ import unittest
 from unittest.mock import patch
 
 from scripts.harness.physical_evidence_aggregator import (
+    AGGREGATOR_VERSION,
+    RECEIPT_SCHEMA_VERSION,
+    SCHEMA_VERSION,
     GRANTED_LEVEL,
     PhysicalEvidenceError,
+    _receipt_payload,
     load_physical_evidence,
     load_physical_evidence_artifact,
+    main,
     self_check,
     validate_physical_evidence,
 )
+from scripts.harness.raw_artifacts import canonical_json
 from scripts.tests.physical_evidence_fixture import (
     APP_MANIFEST as _APP_MANIFEST,
     BUILD_NUMBER as _BUILD_NUMBER,
@@ -24,6 +32,7 @@ from scripts.tests.physical_evidence_fixture import (
     SIGNED_TREE as _SIGNED_TREE,
     TEST_POLICY,
     PhysicalEvidenceFixture,
+    ps256_sign,
 )
 
 APP_MANIFEST = _APP_MANIFEST
@@ -38,6 +47,9 @@ PHYSICAL_TRUST_POLICY = TEST_POLICY
 _CACHED_FIXTURE: PhysicalEvidenceFixture | None = None
 _CACHED_AGGREGATE_ARTIFACT: dict | None = None
 _CACHED_TEMPORARY: tempfile.TemporaryDirectory | None = None
+_CACHED_FOREIGN_FIXTURE: PhysicalEvidenceFixture | None = None
+_CACHED_FOREIGN_AGGREGATE_ARTIFACT: dict | None = None
+_CACHED_FOREIGN_TEMPORARY: tempfile.TemporaryDirectory | None = None
 
 
 def fixture() -> dict:
@@ -47,7 +59,7 @@ def fixture() -> dict:
     if _CACHED_FIXTURE is None:
         parent = REPOSITORY / "target/test-physical-evidence"
         parent.mkdir(parents=True, exist_ok=True)
-        _CACHED_TEMPORARY = tempfile.TemporaryDirectory(prefix="v2-", dir=parent)
+        _CACHED_TEMPORARY = tempfile.TemporaryDirectory(prefix="v4-", dir=parent)
         atexit.register(_CACHED_TEMPORARY.cleanup)
         prefix = Path(_CACHED_TEMPORARY.name).relative_to(REPOSITORY).as_posix()
         _CACHED_FIXTURE = PhysicalEvidenceFixture(
@@ -64,6 +76,32 @@ def aggregate_fixture() -> dict:
     fixture()
     assert _CACHED_FIXTURE is not None
     return copy.deepcopy(_CACHED_FIXTURE.aggregate)
+
+
+def foreign_tree_fixture() -> dict:
+    """Valid PS256 aggregate that consistently binds a different app tree."""
+
+    global _CACHED_FOREIGN_FIXTURE
+    global _CACHED_FOREIGN_AGGREGATE_ARTIFACT
+    global _CACHED_FOREIGN_TEMPORARY
+    if _CACHED_FOREIGN_FIXTURE is None:
+        parent = REPOSITORY / "target/test-physical-evidence"
+        parent.mkdir(parents=True, exist_ok=True)
+        _CACHED_FOREIGN_TEMPORARY = tempfile.TemporaryDirectory(
+            prefix="v4-foreign-tree-", dir=parent
+        )
+        atexit.register(_CACHED_FOREIGN_TEMPORARY.cleanup)
+        prefix = Path(_CACHED_FOREIGN_TEMPORARY.name).relative_to(REPOSITORY).as_posix()
+        _CACHED_FOREIGN_FIXTURE = PhysicalEvidenceFixture(
+            REPOSITORY,
+            prefix=prefix,
+            signed_tree_sha256="f" * 64,
+        )
+        _CACHED_FOREIGN_AGGREGATE_ARTIFACT = (
+            _CACHED_FOREIGN_FIXTURE.write_aggregate_artifact()
+        )
+    assert _CACHED_FOREIGN_AGGREGATE_ARTIFACT is not None
+    return copy.deepcopy(_CACHED_FOREIGN_AGGREGATE_ARTIFACT)
 
 
 class PhysicalEvidenceAggregatorTests(unittest.TestCase):
@@ -88,10 +126,159 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
         self.assertEqual(summary["granted_level"], GRANTED_LEVEL)
         self.assertEqual(summary["reports"], 8)
         self.assertEqual(len(summary["report_bindings"]), 10)
-        self.assertGreater(summary["artifact_count"], 150)
+        self.assertGreater(summary["artifact_count"], 200)
+        self.assertEqual(
+            summary["candidate"]["artifact_hash_manifest_sha256"],
+            self.fixture.candidate["artifact_hash_manifest_sha256"],
+        )
+
+    def test_private_runtime_extensions_are_in_the_signed_raw_set(self) -> None:
+        self.validate()
+        subjects = {binding["subject"] for binding in self.fixture.raw_bindings[0]}
+        self.assertTrue(
+            {
+                "renderer-ready-v2:trace",
+                "network-extension-approval:trace",
+                "network-extension-denial:trace",
+                "network-extension-pending:trace",
+                "sleep-wake:trace",
+                "sleep-wake:packet",
+                "wkwebview-850x603:metadata",
+                "wkwebview-850x603:pixels",
+            }.issubset(subjects)
+        )
 
     def test_static_self_check_does_not_fabricate_trust(self) -> None:
-        self_check()
+        self.assertEqual(self_check(), "not-configured")
+
+    def test_self_check_output_reports_the_actual_policy_state(self) -> None:
+        output = io.StringIO()
+        with patch("sys.argv", ["physical_evidence_aggregator.py", "--self-check"]):
+            with redirect_stdout(output):
+                main()
+        self.assertIn("policy state=not-configured", output.getvalue())
+        self.assertNotIn("remains fail-closed until", output.getvalue())
+
+    def test_receipt_v3_binds_manifest_algorithm_and_key_version(self) -> None:
+        run = self.fixture.aggregate["runs"][0]
+        payload = _receipt_payload(
+            policy_sha256=self.fixture.policy.policy_sha256,
+            candidate=self.fixture.candidate,
+            run=run,
+            collector=run["collector"],
+            report_bindings=self.fixture.report_bindings[0],
+            raw_bindings=self.fixture.raw_bindings[0],
+        )
+        self.assertEqual(payload["schema_version"], RECEIPT_SCHEMA_VERSION)
+        self.assertEqual(
+            payload["candidate"]["artifact_hash_manifest_sha256"],
+            self.fixture.candidate["artifact_hash_manifest_sha256"],
+        )
+        self.assertEqual(payload["collector"]["algorithm"], "PS256")
+        self.assertEqual(
+            payload["collector"]["key_version"], self.fixture.policy.key_version
+        )
+
+    def test_every_harness_report_uses_proof_v3_and_binds_trust_identity(self) -> None:
+        for run_index, documents in enumerate(self.fixture.report_documents):
+            for harness, report in documents.items():
+                with self.subTest(run=run_index, harness=harness):
+                    self.assertEqual(report["proof"]["schema_version"], 3)
+                    self.assertEqual(
+                        report["proof"]["candidate"][
+                            "artifact_hash_manifest_sha256"
+                        ],
+                        self.fixture.candidate["artifact_hash_manifest_sha256"],
+                    )
+                    self.assertEqual(report["proof"]["collector"]["algorithm"], "PS256")
+                    self.assertEqual(
+                        report["proof"]["collector"]["key_version"],
+                        self.fixture.policy.key_version,
+                    )
+
+    def test_proof_v2_is_rejected_without_compatibility(self) -> None:
+        report = self.fixture.report_documents[0]["packet"]
+        report["proof"]["schema_version"] = 2
+        self.fixture.resign_run(0)
+        with self.assertRaisesRegex(PhysicalEvidenceError, "schema_version must be 3"):
+            self.validate()
+
+    def test_receipt_v2_signature_is_rejected_without_compatibility(self) -> None:
+        run = self.fixture.aggregate["runs"][0]
+        payload = _receipt_payload(
+            policy_sha256=self.fixture.policy.policy_sha256,
+            candidate=self.fixture.candidate,
+            run=run,
+            collector=run["collector"],
+            report_bindings=self.fixture.report_bindings[0],
+            raw_bindings=self.fixture.raw_bindings[0],
+        )
+        payload["schema_version"] = 2
+        run["collector"]["signature"] = ps256_sign(canonical_json(payload))
+        with self.assertRaisesRegex(PhysicalEvidenceError, "collector receipt failed"):
+            self.validate()
+
+    def test_proof_schema_rejects_float_and_bool(self) -> None:
+        for schema_version in (3.0, True):
+            report = self.fixture.report_documents[0]["packet"]
+            original = report["proof"]["schema_version"]
+            report["proof"]["schema_version"] = schema_version
+            self.fixture.resign_run(0)
+            try:
+                with self.subTest(schema_version=schema_version), self.assertRaisesRegex(
+                    PhysicalEvidenceError, "schema_version must be 3"
+                ):
+                    self.validate()
+            finally:
+                report["proof"]["schema_version"] = original
+                self.fixture.resign_run(0)
+
+    def test_proof_without_artifact_manifest_digest_is_rejected(self) -> None:
+        report = self.fixture.report_documents[0]["packet"]
+        del report["proof"]["candidate"]["artifact_hash_manifest_sha256"]
+        self.fixture.resign_run(0)
+        with self.assertRaisesRegex(PhysicalEvidenceError, "missing required fields"):
+            self.validate()
+
+    def test_resigned_receipt_cannot_hide_report_manifest_drift(self) -> None:
+        report = self.fixture.report_documents[0]["packet"]
+        report["proof"]["candidate"]["artifact_hash_manifest_sha256"] = "9" * 64
+        self.fixture.resign_run(0)
+        with self.assertRaisesRegex(PhysicalEvidenceError, "proof differs"):
+            self.validate()
+
+    def test_resigned_receipt_cannot_hide_proof_algorithm_downgrade(self) -> None:
+        report = self.fixture.report_documents[0]["packet"]
+        report["proof"]["collector"]["algorithm"] = "RS256"
+        self.fixture.resign_run(0)
+        with self.assertRaisesRegex(PhysicalEvidenceError, "algorithm must be PS256"):
+            self.validate()
+
+    def test_resigned_receipt_cannot_hide_proof_key_version_substitution(self) -> None:
+        report = self.fixture.report_documents[0]["packet"]
+        report["proof"]["collector"]["key_version"] = (
+            "projects/cfw-fixture/locations/global/keyRings/physical-evidence/"
+            "cryptoKeys/collector/cryptoKeyVersions/2"
+        )
+        self.fixture.resign_run(0)
+        with self.assertRaisesRegex(PhysicalEvidenceError, "proof differs"):
+            self.validate()
+
+    def test_aggregate_v3_is_rejected_without_compatibility(self) -> None:
+        self.fixture.aggregate["schema_version"] = 3
+        self.fixture.aggregate["aggregator_version"] = "physical-evidence-aggregator-v3"
+        self.assertEqual(SCHEMA_VERSION, 4)
+        self.assertEqual(AGGREGATOR_VERSION, "physical-evidence-aggregator-v4")
+        with self.assertRaisesRegex(PhysicalEvidenceError, "schema_version must be 4"):
+            self.validate()
+
+    def test_aggregate_schema_rejects_float_and_bool(self) -> None:
+        for schema_version in (4.0, True):
+            self.fixture.aggregate["schema_version"] = schema_version
+            with self.subTest(schema_version=schema_version), self.assertRaisesRegex(
+                PhysicalEvidenceError, "schema_version must be 4"
+            ):
+                self.validate()
 
     def test_handwritten_json_and_random_hash_is_rejected(self) -> None:
         self.fixture.aggregate["runs"][0]["reports"]["packet"]["artifact"][
@@ -219,7 +406,20 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
         self.fixture.aggregate["runs"][0]["collector"]["signature"] = (
             "A" if signature[0] != "A" else "B"
         ) + signature[1:]
-        with self.assertRaisesRegex(PhysicalEvidenceError, "signature is invalid"):
+        with self.assertRaisesRegex(PhysicalEvidenceError, "collector receipt failed"):
+            self.validate()
+
+    def test_collector_algorithm_downgrade_is_rejected_before_signature(self) -> None:
+        self.fixture.aggregate["runs"][0]["collector"]["algorithm"] = "RS256"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "source-pinned policy"):
+            self.validate()
+
+    def test_collector_key_version_substitution_is_rejected(self) -> None:
+        self.fixture.aggregate["runs"][0]["collector"]["key_version"] = (
+            "projects/cfw-fixture/locations/global/keyRings/physical-evidence/"
+            "cryptoKeys/collector/cryptoKeyVersions/2"
+        )
+        with self.assertRaisesRegex(PhysicalEvidenceError, "source-pinned policy"):
             self.validate()
 
     def test_collector_source_digest_must_match_source_pinned_policy(self) -> None:
@@ -345,7 +545,13 @@ class PhysicalEvidenceLoaderTests(unittest.TestCase):
             fixture_value = PhysicalEvidenceFixture(root)
             artifact = fixture_value.write_aggregate_artifact()
             canonical = replace(fixture_value.policy, release_source_pinned=True)
-            forged = replace(canonical, key_id="operator-selected-key")
+            forged = replace(
+                canonical,
+                key_version=(
+                    "projects/cfw-fixture/locations/global/keyRings/physical-evidence/"
+                    "cryptoKeys/collector/cryptoKeyVersions/2"
+                ),
+            )
             with patch(
                 "scripts.harness.physical_evidence_aggregator.load_release_trust_policy",
                 return_value=canonical,

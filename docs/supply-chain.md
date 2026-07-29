@@ -227,6 +227,61 @@ environment-variable bypass for this path contract or the publication gate.
 The `reverse/` tree is reference-only and must never enter a binary, app, DMG,
 updater, publication evidence directory, or corresponding-source archive.
 
+## Release credentials and updater trust
+
+Release credentials are machine-local inputs and never belong in the source
+closure. Notarization uses the dedicated, non-synchronizing Keychain profile
+`clashformac-notary`, backed by an App Store Connect Team API key with the
+Developer role. A candidate may use that profile only after `notarytool`
+validates it; credential presence alone is not notarization evidence.
+
+The workspace secret scanner classifies by path and name only and never opens a
+candidate. The exact current `AuthKey_DYHRNJ2Z4M.p8` name is the notarization
+App Store Connect trust domain; plausible exposure requires revocation/rotation
+and reprovisioning `clashformac-notary`. Another canonical
+`AuthKey_<10 uppercase alphanumeric>.p8` is an Apple API credential candidate
+whose trust domain must be identified before revocation or rotation. Every
+other `.p8` remains unknown private material. None of these names defaults to
+the updater trust domain.
+
+The 0.4.0 updater artifact trust root is the minisign public key whose key ID is
+`233E924581F20ACB`. Its encrypted private key is stored outside every workspace
+at `~/Library/Application Support/Clash for Mac Release/Updater/cfw-rs-v2.key`,
+with owner-only directory and file permissions and a non-synchronizing
+password in the explicit login Keychain under service
+`com.bill.clashformac.release.updater`, account `updater-v2`. Updater packaging
+must run through the executable `#!/bin/bash -p` entrypoint, never `bash
+scripts/make_updater_manifest.sh`. The entrypoint resets caller process state
+and invokes a source-pinned Python launcher with only the archive path. That
+launcher verifies the exact Tauri tree/signer before reading the one fixed
+non-synchronizable Keychain item, holds and revalidates the key/archive/signer
+identities, accepts only strengthening deny-only macOS ACLs, and rejects any ACL
+grant. Every custody Python process disables site customization; the launcher
+itself receives an empty, explicit environment. Release signing injects the
+password only into the final pinned signer
+environment. Shell tracing, startup hooks, caller secret variables,
+repository-local key material, symlinks, hard links, ACL grants, path drift,
+and ambient signer-process inheritance are release failures.
+
+The private half of the updater key embedded in 0.3.5 is unavailable. Therefore
+0.3.5 cannot authenticate the 0.4.0 archive: the supported transition is a
+manual installation from the signed, notarized, stapled 0.4.0 DMG. No second
+signature, legacy key fallback, or unsigned compatibility archive is allowed.
+The application continues to open the canonical GitHub release page instead of
+performing an in-process bundle replacement.
+
+The physical-evidence collector uses a separate trust domain from Apple
+notarization and the updater key. Its production policy is source-pinned but
+remains `state: not-configured`. A configured policy must bind one complete
+Cloud KMS HSM key version using `RSA_SIGN_PSS_3072_SHA256`, the exact DER SPKI
+digest, a verified Cloud HSM attestation format/content digest, and approved
+collector source/executable digests. Provisioning the KMS key, least-privilege
+signer IAM, short-lived workload identity, Data Access audit logging and
+retention, certificate-chain/attestation verification, nonce issuance, and the
+cross-release replay ledger are external release-operations gates. The
+repository creates none of those resources and cannot treat their absence as a
+software fallback. See [Physical evidence v4](physical-evidence-v4.md).
+
 ## Release ordering
 
 The release pipeline is strictly ordered:
@@ -259,9 +314,11 @@ fast-user switching on clean physical machines.
 The durable Authority journal remains bounded without a crash-safe compaction
 protocol, Quarantined has no product repair workflow, and unattended System
 Proxy restoration after Authorization Services rights expire has not been
-proved. No matching Developer ID provisioning, notarization, Gatekeeper, or
-publication evidence is available in the current candidate. The module-only,
-unfixable `GO-2026-5932` boundary also needs explicit release review. Updater
+proved. Matching Developer ID profiles now exist for the Host, Proxy Agent, and
+Packet Tunnel bundle identifiers, but no exact current candidate has yet
+completed signing, notarization, staple, Gatekeeper, or publication evidence.
+The module-only, unfixable `GO-2026-5932` boundary also needs explicit release
+review. Updater
 metadata and its signed artifact contract have project-owned bounds in the
 publication script. Runtime revalidates bounded metadata and consumes a one-use
 authorization before opening the canonical GitHub release page; it does not

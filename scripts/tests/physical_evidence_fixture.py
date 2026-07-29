@@ -1,7 +1,7 @@
 """Deterministic proof-to-byte fixtures for physical-evidence tests only.
 
-The RSA key is the public example key from RFC 7515 Appendix A.2. It is
-intentionally public and must never be used as a production collector key.
+The static RSA-3072 private key below is intentionally committed for tests. It
+must never be provisioned as, or accepted in place of, a production KMS key.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import calendar
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import ipaddress
 from pathlib import Path
@@ -35,14 +35,22 @@ from scripts.harness.performance_gates import (
 )
 from scripts.harness.physical_evidence_aggregator import (
     AGGREGATOR_VERSION,
+    SCHEMA_VERSION as AGGREGATE_SCHEMA_VERSION,
     GRANTED_LEVEL,
     _receipt_payload,
 )
 from scripts.harness.raw_artifacts import (
+    COLLECTOR_SIGNATURE_ALGORITHM,
+    KMS_ATTESTATION_FORMATS,
+    KMS_PROTECTION_LEVEL,
+    KMS_SIGNATURE_ALGORITHM,
     CollectorTrustPolicy,
+    PROOF_SCHEMA_VERSION,
     canonical_json,
     parse_trust_policy_bytes,
+    rsa_spki_sha256,
 )
+from scripts.publication.common import tree_digest
 
 
 APP_MANIFEST = "a" * 64
@@ -58,28 +66,23 @@ RUN_SIGNED_AT = "2026-07-28T13:00:00Z"
 COLLECTOR_VERSION = "physical-collector-v1"
 COLLECTOR_SOURCE = "c" * 64
 COLLECTOR_EXECUTABLE = "d" * 64
-TEST_KEY_ID = "rfc7515-test-only"
-
-# RFC 7515 Appendix A.2 example key, display whitespace removed.
-RFC7515_N = (
-    "ofgWCuLjybRlzo0tZWJjNiuSfb4p4fAkd_wWJcyQoTbji9k0l8W26mPddx"
-    "HmfHQp-Vaw-4qPCJrcS2mJPMEzP1Pt0Bm4d4QlL-yRT-SFd2lZS-pCgNMs"
-    "D1W_YpRPEwOWvG6b32690r2jZ47soMZo9wGzjb_7OMg0LOL-bSf63kpaSH"
-    "SXndS5z5rexMdbBYUsLA9e-KXBdQOS-UTo7WTBEMa2R2CapHg665xsmtdV"
-    "MTBQY4uDZlxvb3qCo5ZwKh9kG4LT6_I5IhlJH7aGhyxXFvUK-DWNmoudF8"
-    "NAco9_h9iaGNj8q2ethFkMLs91kzk2PAcDTW9gb54h4FRWyuXpoQ"
+TEST_KEY_VERSION = (
+    "projects/cfw-fixture/locations/global/keyRings/physical-evidence/"
+    "cryptoKeys/collector/cryptoKeyVersions/1"
 )
-RFC7515_E = "AQAB"
-RFC7515_D = (
-    "Eq5xpGnNCivDflJsRQBXHx1hdR1k6Ulwe2JZD50LpXyWPEAeP88vLNO97I"
-    "jlA7_GQ5sLKMgvfTeXZx9SE-7YwVol2NXOoAJe46sui395IW_GO-pWJ1O0"
-    "BkTGoVEn2bKVRUCgu-GjBVaYLU6f3l9kJfFNS3E0QbVdxzubSu3Mkqzjkn"
-    "439X0M_V51gfpRLI9JYanrC4D4qAdGcopV_0ZHHzQlBjudU2QvXt4ehNYT"
-    "CBr6XCLQUShb1juUO1ZdiYoFaFQT5Tw8bGUl_x_jTj3ccPDVZFD9pIuhLh"
-    "BOneufuBiB4cS98l2SR_RQyGWSeWjnczT0QU91p1DhOVRuOopznQ"
+TEST_ATTESTATION_SHA256 = (
+    "cfa5aaa67ba711050d3da0901a55ec23df669a7e2ce25f47214f4b3afd5f3957"
 )
+TEST_ATTESTATION_FORMAT = "CAVIUM_V2_COMPRESSED"
+assert TEST_ATTESTATION_FORMAT in KMS_ATTESTATION_FORMATS
 
-_DIGEST_INFO_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+TEST_RSA_N = (
+    "2EcuGnEhqLCbHkPQ4n-jNV2C35bMgCc-FxCLnlDVpMG6rska5YOvTT33zEweRzeQ5oETbgI30XyEPMXBa5bf6NPRw5duXfMOAc3VAZnYhZ9BQY46UsJahCyp7qy6XFAdgerF9DvA6A1EyksMcacAb5eYk1kfTHVwBiye4F5H2jyt8YTfR76ywGozntA0ROnunSlYdJj_fydAxhFURmCi45rpvtUY_KwxtGDx_u3h0SDPRcW3ICZWNPtx4KqmNkEu-qiEhbsOQOz7xShwyan0zoHmpIIB5Cc7j0aWFW42wNdML0Nrb-8736I_TH-UCR5q5FmB0PcFNIFIFXVWDtSE5_J49lYjyxIpdbIusLbvdDpEXbc5ph6nfkDweC2EJ6uYpdxYKbbZV4Z1fDLIL2g3-MH7IfXeU06fUdZD3ANw3O6bLqoiSmRdkerdHakvhXaHiMmugjY7gy7jfCt8xrVWqSIA2PMsLkjAnQrQgILh40Lxv8rO8s3pIoj0M9vHQvk_"
+)
+TEST_RSA_E = "AQAB"
+TEST_RSA_D = (
+    "FUv7dARPd_v3M_JVMsIczfF1ixM484zQGWQgsds5EaGeApewLu-NQI7pXe2ugZbGjVwidkLm2jMBSbazbPPAL34Q-f1pLPxbe1cx_v4pcXPII9UGIZ-2KBPGomEFDN5t7JznFz19dmkJrN3ZzaTQCMalvvfkrbO9Im6Cyopq8UhOXJAxjsmhcnJCv2qDHlIZ-mtxPjIFEeR8nveWRxCjzMPOLP0KgKVrU5Bd5AHqqmj2E0nJb_Oc3SS-OiazrURnvIbXvLbgSnfSc3z-mpJcoNaw0zRPL_VjoKEicdqYPDFJBlR4UfblnQW4lec8qdBe12Fxzp72VyhN1DdLisFemDj6BSjzoxjt97N-Ecb-5lApO-TFMoJYlVm04svF_vmPQx1i2qr001iOBPYw38y5yTobckk7OnYy5cvjrdI5RwcjzI4P0t6sryH4iKeU8sUJMZK3x09ErdMePOkQy7UXHjlVclWYbpKhSQF58ZenFEFDYn5UIggpBE7NyOPVYHgx"
+)
 
 
 def _b64url_decode(value: str) -> bytes:
@@ -90,37 +93,85 @@ def _b64url_encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
-RFC_MODULUS = int.from_bytes(_b64url_decode(RFC7515_N), "big")
-RFC_EXPONENT = int.from_bytes(_b64url_decode(RFC7515_E), "big")
-RFC_PRIVATE_EXPONENT = int.from_bytes(_b64url_decode(RFC7515_D), "big")
+TEST_MODULUS = int.from_bytes(_b64url_decode(TEST_RSA_N), "big")
+TEST_EXPONENT = int.from_bytes(_b64url_decode(TEST_RSA_E), "big")
+TEST_PRIVATE_EXPONENT = int.from_bytes(_b64url_decode(TEST_RSA_D), "big")
+TEST_PUBLIC_KEY_SHA256 = rsa_spki_sha256(TEST_MODULUS, TEST_EXPONENT)
+DEFAULT_PSS_SALT = hashlib.sha256(b"cfw-ps256-fixture-salt-v1").digest()
 
 
-def rs256_sign(message: bytes) -> str:
-    width = (RFC_MODULUS.bit_length() + 7) // 8
-    digest_info = _DIGEST_INFO_PREFIX + hashlib.sha256(message).digest()
-    encoded = (
-        b"\x00\x01"
-        + b"\xff" * (width - len(digest_info) - 3)
-        + b"\x00"
-        + digest_info
+def _fixture_mgf(seed: bytes, length: int, hash_name: str) -> bytes:
+    digest_size = hashlib.new(hash_name).digest_size
+    return b"".join(
+        hashlib.new(hash_name, seed + counter.to_bytes(4, "big")).digest()
+        for counter in range((length + digest_size - 1) // digest_size)
+    )[:length]
+
+
+def pss_encoded_message(
+    message: bytes,
+    *,
+    salt: bytes = DEFAULT_PSS_SALT,
+    message_hash_name: str = "sha256",
+    mgf_hash_name: str = "sha256",
+    trailer: int = 0xBC,
+    padding_byte: int = 0,
+    delimiter: int = 1,
+    force_unused_high_bit: bool = False,
+) -> bytes:
+    """Build deterministic EMSA-PSS bytes, including malformed test variants."""
+
+    width = 384
+    message_hash = hashlib.new(message_hash_name, message).digest()
+    hash_length = hashlib.new(message_hash_name).digest_size
+    padding_length = width - hash_length - len(salt) - 2
+    if padding_length < 0:
+        raise ValueError("fixture PSS salt is too long")
+    data_block = bytes((padding_byte,)) * padding_length + bytes((delimiter,)) + salt
+    encoded_hash = hashlib.new(
+        message_hash_name, b"\x00" * 8 + message_hash + salt
+    ).digest()
+    mask = _fixture_mgf(encoded_hash, len(data_block), mgf_hash_name)
+    masked_db = bytearray(
+        left ^ right for left, right in zip(data_block, mask, strict=True)
     )
+    masked_db[0] &= 0x7F
+    if force_unused_high_bit:
+        # Keep the malformed representative below this fixture modulus so RSA
+        # round-trips to the exact EMSA bytes and reaches the high-bit check.
+        masked_db[0] = 0x80 | (masked_db[0] & 0x3F)
+    return bytes(masked_db) + encoded_hash + bytes((trailer,))
+
+
+def sign_encoded_message(encoded: bytes) -> str:
+    if len(encoded) != 384:
+        raise ValueError("fixture encoded message must be exactly 384 bytes")
     signature = pow(
-        int.from_bytes(encoded, "big"), RFC_PRIVATE_EXPONENT, RFC_MODULUS
-    ).to_bytes(width, "big")
+        int.from_bytes(encoded, "big"), TEST_PRIVATE_EXPONENT, TEST_MODULUS
+    ).to_bytes(384, "big")
     return _b64url_encode(signature)
+
+
+def ps256_sign(message: bytes, *, salt: bytes = DEFAULT_PSS_SALT) -> str:
+    return sign_encoded_message(pss_encoded_message(message, salt=salt))
 
 
 def test_policy() -> CollectorTrustPolicy:
     value = {
-        "alg": "RS256",
+        "alg": COLLECTOR_SIGNATURE_ALGORITHM,
+        "attestation_format": TEST_ATTESTATION_FORMAT,
+        "attestation_sha256": TEST_ATTESTATION_SHA256,
         "collector_executable_sha256": COLLECTOR_EXECUTABLE,
         "collector_source_sha256": COLLECTOR_SOURCE,
         "collector_version": COLLECTOR_VERSION,
-        "e": RFC7515_E,
-        "key_id": TEST_KEY_ID,
+        "e": TEST_RSA_E,
+        "key_version": TEST_KEY_VERSION,
+        "kms_algorithm": KMS_SIGNATURE_ALGORITHM,
         "kty": "RSA",
-        "n": RFC7515_N,
-        "schema_version": 1,
+        "n": TEST_RSA_N,
+        "protection_level": KMS_PROTECTION_LEVEL,
+        "public_key_sha256": TEST_PUBLIC_KEY_SHA256,
+        "schema_version": 2,
         "state": "configured",
     }
     data = canonical_json(value) + b"\n"
@@ -134,6 +185,40 @@ TEST_POLICY = test_policy()
 
 def sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+XCFRAMEWORK_SHA = sha("libbox-xcframework")
+XCFRAMEWORK_MANIFEST_SHA = sha("libbox-xcframework-manifest")
+
+
+def final_artifact_hash_manifest(
+    *, signed_tree_sha256: str = SIGNED_TREE
+) -> dict[str, Any]:
+    """Return the one final-artifact manifest bound by the physical fixture."""
+
+    entries = sorted(
+        (
+            {
+                "path": "artifacts/Clash-for-Mac.app.tree.json",
+                "sha256": signed_tree_sha256,
+            },
+            {"path": "artifacts/app-manifest.json", "sha256": APP_MANIFEST},
+            {"path": "artifacts/Clash-for-Mac.dmg", "sha256": sha("dmg")},
+            {
+                "path": "artifacts/Libbox.xcframework.tree.json",
+                "sha256": XCFRAMEWORK_SHA,
+            },
+            {
+                "path": "artifacts/Libbox.xcframework.manifest.json",
+                "sha256": XCFRAMEWORK_MANIFEST_SHA,
+            },
+        ),
+        key=lambda item: item["path"],
+    )
+    return {"entries": entries, "sha256": tree_digest(entries)}
+
+
+ARTIFACT_HASH_MANIFEST_SHA256 = final_artifact_hash_manifest()["sha256"]
 
 
 def descriptor(kind: str, path: str, data: bytes) -> dict[str, Any]:
@@ -161,6 +246,8 @@ def pcap_bytes(
     link_type: int = 1,
     vlan_tags: int = 0,
     include_tcp_fallback: bool = False,
+    extra_tokens: list[bytes] | None = None,
+    start_epoch: int | None = None,
 ) -> bytes:
     """Build a structurally valid transport capture for v3 packet fixtures."""
 
@@ -171,7 +258,11 @@ def pcap_bytes(
         "198.51.100.20" if family == "ipv4" else "2001:db8:2::20"
     )
     remote_port = remote_port or (53 if protocol == "dns" else 443)
-    epoch = calendar.timegm(datetime(2026, 7, 27, 12, tzinfo=timezone.utc).timetuple())
+    epoch = (
+        calendar.timegm(datetime(2026, 7, 27, 12, tzinfo=timezone.utc).timetuple())
+        if start_epoch is None
+        else start_epoch
+    )
     header = struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, link_type)
 
     def dns_query(label: bytes, identifier: int) -> bytes:
@@ -274,6 +365,7 @@ def pcap_bytes(
     tokens = [start_marker]
     if include_token:
         tokens.append(token)
+    tokens.extend(extra_tokens or [])
     tokens.append(end_marker)
     body = bytearray()
     sequence = 1000
@@ -303,19 +395,34 @@ def _summary(samples: list[float]) -> dict[str, float]:
 class PhysicalEvidenceFixture:
     """Materialize one complete two-run aggregate and all referenced bytes."""
 
-    def __init__(self, root: Path, prefix: str = "evidence") -> None:
+    def __init__(
+        self,
+        root: Path,
+        prefix: str = "evidence",
+        *,
+        signed_tree_sha256: str = SIGNED_TREE,
+        artifact_hash_manifest_sha256: str | None = None,
+    ) -> None:
         self.root = root.absolute()
         self.prefix = prefix.strip("/")
         self.policy = TEST_POLICY
+        manifest_sha256 = (
+            final_artifact_hash_manifest(signed_tree_sha256=signed_tree_sha256)[
+                "sha256"
+            ]
+            if artifact_hash_manifest_sha256 is None
+            else artifact_hash_manifest_sha256
+        )
         self.candidate = {
             "version": "0.4.0",
             "build_number": BUILD_NUMBER,
             "app_manifest_sha256": APP_MANIFEST,
-            "signed_app_tree_sha256": SIGNED_TREE,
+            "signed_app_tree_sha256": signed_tree_sha256,
+            "artifact_hash_manifest_sha256": manifest_sha256,
             "built_at": BUILT_AT,
         }
         self.aggregate: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": AGGREGATE_SCHEMA_VERSION,
             "aggregator_version": AGGREGATOR_VERSION,
             "granted_level": GRANTED_LEVEL,
             "trust_policy_sha256": self.policy.policy_sha256,
@@ -351,6 +458,7 @@ class PhysicalEvidenceFixture:
 
     def _proof(self, run_id: str, run_nonce: str) -> dict[str, Any]:
         return {
+            "schema_version": PROOF_SCHEMA_VERSION,
             "run_id": run_id,
             "run_nonce": run_nonce,
             "candidate": {
@@ -360,12 +468,15 @@ class PhysicalEvidenceFixture:
                     "build_number",
                     "app_manifest_sha256",
                     "signed_app_tree_sha256",
+                    "artifact_hash_manifest_sha256",
                 )
             },
             "collector": {
                 "version": COLLECTOR_VERSION,
                 "source_sha256": COLLECTOR_SOURCE,
                 "executable_sha256": COLLECTOR_EXECUTABLE,
+                "algorithm": COLLECTOR_SIGNATURE_ALGORITHM,
+                "key_version": TEST_KEY_VERSION,
             },
         }
 
@@ -516,6 +627,312 @@ class PhysicalEvidenceFixture:
             bindings,
         )
 
+    @staticmethod
+    def _utc(value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
+
+    def _renderer_ready_evidence(
+        self,
+        run_name: str,
+        proof: dict[str, Any],
+        started: datetime,
+        finished: datetime,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        executable_sha256 = sha(f"{run_name}-host-executable")
+        cdhash = sha(f"{run_name}-host-cdhash")[:40]
+        requirement = sha(f"{run_name}-host-requirement")
+        common_identity = {
+            "team_id": "YKUPL7Z869",
+            "signing_identifier": "com.bill.clashformac",
+            "executable_sha256": executable_sha256,
+            "cdhash": cdhash,
+            "designated_requirement_sha256": requirement,
+        }
+        started_unix_us = (
+            calendar.timegm(started.utctimetuple()) * 1_000_000 + started.microsecond
+        )
+        challenge_sha256 = sha(f"{run_name}-renderer-challenge")
+        sequence = (
+            ("handoff-parent", "parent-identity-verified"),
+            ("handoff-parent", "child-spawned"),
+            ("candidate-child", "child-identity-verified"),
+            ("candidate-child", "native-ready"),
+            ("candidate-child", "renderer-challenge-issued"),
+            ("candidate-child", "renderer-ready-v2-published"),
+            ("handoff-parent", "renderer-ready-v2-consumed"),
+            ("handoff-parent", "parent-exit-committed"),
+            ("candidate-child", "parent-absence-proven"),
+        )
+        trace = {
+            "schema_version": 1,
+            "proof": copy.deepcopy(proof),
+            "protocol": "migration-handoff-renderer-ready-v2",
+            "candidate_app_tree_sha256": proof["candidate"]["signed_app_tree_sha256"],
+            "window_label": "main",
+            "started_at": self._utc(started),
+            "completed_at": self._utc(finished),
+            "processes": [
+                {
+                    "role": "handoff-parent",
+                    "pid": 4100 if run_name == "run-0" else 4200,
+                    "start_unix_us": started_unix_us - 10_000_000,
+                    **common_identity,
+                },
+                {
+                    "role": "candidate-child",
+                    "pid": 4101 if run_name == "run-0" else 4201,
+                    "start_unix_us": started_unix_us + 500_000,
+                    **common_identity,
+                },
+            ],
+            "events": [
+                {
+                    "sequence": index,
+                    "offset_ms": index * 1_000,
+                    "process_role": role,
+                    "event": event,
+                    "generation": 1 if index in {4, 5, 6} else None,
+                    "challenge_sha256": challenge_sha256 if index in {4, 5, 6} else None,
+                }
+                for index, (role, event) in enumerate(sequence)
+            ],
+        }
+        artifact = self._write_json(
+            f"{run_name}/lifecycle/renderer-ready-v2-trace.json",
+            trace,
+            "renderer-ready-trace",
+        )
+        return {"trace_artifact": artifact}, [
+            {
+                "harness": "lifecycle",
+                "subject": "renderer-ready-v2:trace",
+                "descriptor": artifact,
+            }
+        ]
+
+    def _network_extension_evidence(
+        self,
+        run_name: str,
+        probe_id: str,
+        proof: dict[str, Any],
+        started: datetime,
+        finished: datetime,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        states = {
+            "network-extension-approval": (
+                ("OSSystemExtensionRequest", "request-submitted"),
+                ("OSSystemExtensionRequest", "awaiting-user-approval"),
+                ("OSSystemExtensionRequest", "extension-activated"),
+                ("NEVPNManager", "configuration-enabled"),
+            ),
+            "network-extension-denial": (
+                ("OSSystemExtensionRequest", "request-submitted"),
+                ("OSSystemExtensionRequest", "awaiting-user-approval"),
+                ("OSSystemExtensionRequest", "user-denied"),
+            ),
+            "network-extension-pending": (
+                ("OSSystemExtensionRequest", "request-submitted"),
+                ("OSSystemExtensionRequest", "awaiting-user-approval"),
+            ),
+        }[probe_id]
+        duration_ms = int((finished - started).total_seconds() * 1_000)
+        offsets = (
+            [0, 1_000]
+            if probe_id == "network-extension-pending"
+            else [index * 1_000 for index in range(len(states))]
+        )
+        if probe_id != "network-extension-pending":
+            offsets[-1] = duration_ms
+        trace = {
+            "schema_version": 1,
+            "proof": copy.deepcopy(proof),
+            "candidate_app_tree_sha256": proof["candidate"]["signed_app_tree_sha256"],
+            "probe_id": probe_id,
+            "request_id": f"request-{run_name}-{probe_id}",
+            "started_at": self._utc(started),
+            "completed_at": self._utc(finished),
+            "extension_identity": {
+                "team_id": "YKUPL7Z869",
+                "host_bundle_id": "com.bill.clashformac",
+                "provider_bundle_id": "com.bill.clashformac.packet-tunnel",
+                "system_extension_wrapper_name": (
+                    "com.bill.clashformac.packet-tunnel.systemextension"
+                ),
+                "executable_sha256": sha(f"{run_name}-packet-tunnel-executable"),
+                "cdhash": sha(f"{run_name}-packet-tunnel-cdhash")[:40],
+                "designated_requirement_sha256": sha(
+                    f"{run_name}-packet-tunnel-requirement"
+                ),
+            },
+            "events": [
+                {
+                    "sequence": index,
+                    "offset_ms": offsets[index],
+                    "source": source,
+                    "state": state,
+                }
+                for index, (source, state) in enumerate(states)
+            ],
+        }
+        artifact = self._write_json(
+            f"{run_name}/lifecycle/{probe_id}-trace.json",
+            trace,
+            "network-extension-trace",
+        )
+        return {"trace_artifact": artifact}, [
+            {
+                "harness": "lifecycle",
+                "subject": f"{probe_id}:trace",
+                "descriptor": artifact,
+            }
+        ]
+
+    def _sleep_wake_evidence(
+        self,
+        run_name: str,
+        proof: dict[str, Any],
+        started: datetime,
+        finished: datetime,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        pre_sleep = "p" + sha(f"{run_name}-pre-sleep")[:19]
+        wake_marker = "w" + sha(f"{run_name}-wake-marker")[:19]
+        post_wake = "r" + sha(f"{run_name}-post-wake")[:19]
+        window_end = "e" + sha(f"{run_name}-wake-finish")[:19]
+        capture = pcap_bytes(
+            start_marker=pre_sleep.encode("ascii"),
+            token=wake_marker.encode("ascii"),
+            end_marker=window_end.encode("ascii"),
+            include_token=True,
+            extra_tokens=[post_wake.encode("ascii")],
+            protocol="tcp",
+            family="ipv4",
+            local_address="192.0.2.10",
+            remote_address="198.51.100.240",
+            local_port=41000,
+            remote_port=443,
+            start_epoch=calendar.timegm(started.utctimetuple()),
+        )
+        capture_artifact = self._write(
+            f"{run_name}/lifecycle/sleep-wake.pcap", capture, "packet-pcap"
+        )
+        trace = {
+            "schema_version": 1,
+            "proof": copy.deepcopy(proof),
+            "probe_id": "sleep-wake",
+            "candidate_app_tree_sha256": proof["candidate"]["signed_app_tree_sha256"],
+            "interface": {"name": "utun5", "index": 5, "link_type": 1},
+            "endpoints": [
+                {
+                    "role": "local",
+                    "address": "192.0.2.10",
+                    "port": 41000,
+                    "transport": "tcp",
+                },
+                {
+                    "role": "remote",
+                    "address": "198.51.100.240",
+                    "port": 443,
+                    "transport": "tcp",
+                },
+            ],
+            "capture_command_sha256": sha(f"{run_name}-sleep-capture-command"),
+            "pre_sleep_send_command_sha256": sha(f"{run_name}-pre-sleep-command"),
+            "post_wake_send_command_sha256": sha(f"{run_name}-post-wake-command"),
+            "capture_sha256": capture_artifact["sha256"],
+            "pre_sleep_token": pre_sleep,
+            "wake_marker_token": wake_marker,
+            "post_wake_token": post_wake,
+            "window_end_token": window_end,
+            "sleep_started_at": self._utc(started + timedelta(milliseconds=500)),
+            "wake_observed_at": self._utc(started + timedelta(seconds=1)),
+            "started_at": self._utc(started),
+            "completed_at": self._utc(finished),
+            "observation_ms": 5_000,
+            "post_wake_observation_ms": 4_000,
+        }
+        trace_artifact = self._write_json(
+            f"{run_name}/lifecycle/sleep-wake-trace.json",
+            trace,
+            "sleep-wake-trace",
+        )
+        return {
+            "trace_artifact": trace_artifact,
+            "capture_artifact": capture_artifact,
+        }, [
+            {
+                "harness": "lifecycle",
+                "subject": "sleep-wake:trace",
+                "descriptor": trace_artifact,
+            },
+            {
+                "harness": "lifecycle",
+                "subject": "sleep-wake:packet",
+                "descriptor": capture_artifact,
+            },
+        ]
+
+    def _wkwebview_evidence(
+        self,
+        run_name: str,
+        proof: dict[str, Any],
+        started: datetime,
+        finished: datetime,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        width = 850
+        height = 603
+        seed = 17 if run_name == "run-0" else 31
+        row = b"".join(
+            bytes(((column + seed) % 256, (column * 3 + seed) % 256, 96, 255))
+            for column in range(width)
+        )
+        pixels = row * height
+        pixels_artifact = self._write(
+            f"{run_name}/lifecycle/wkwebview-850x603.rgba",
+            pixels,
+            "wkwebview-rgba",
+        )
+        metadata = {
+            "schema_version": 1,
+            "proof": copy.deepcopy(proof),
+            "probe_id": "wkwebview-850x603",
+            "candidate_app_tree_sha256": proof["candidate"]["signed_app_tree_sha256"],
+            "window_label": "main",
+            "view_class": "WKWebView",
+            "viewport_width_css_pixels": width,
+            "viewport_height_css_pixels": height,
+            "backing_scale": 1,
+            "pixel_width": width,
+            "pixel_height": height,
+            "bytes_per_row": width * 4,
+            "pixel_format": "rgba8",
+            "color_space": "srgb",
+            "alpha_mode": "opaque",
+            "screenshot_command_sha256": sha(f"{run_name}-wkwebview-command"),
+            "pixels_sha256": pixels_artifact["sha256"],
+            "captured_at": self._utc(started),
+            "completed_at": self._utc(finished),
+        }
+        metadata_artifact = self._write_json(
+            f"{run_name}/lifecycle/wkwebview-850x603-metadata.json",
+            metadata,
+            "wkwebview-metadata",
+        )
+        return {
+            "metadata_artifact": metadata_artifact,
+            "pixels_artifact": pixels_artifact,
+        }, [
+            {
+                "harness": "lifecycle",
+                "subject": "wkwebview-850x603:metadata",
+                "descriptor": metadata_artifact,
+            },
+            {
+                "harness": "lifecycle",
+                "subject": "wkwebview-850x603:pixels",
+                "descriptor": pixels_artifact,
+            },
+        ]
+
     def _lifecycle_report(
         self,
         run_name: str,
@@ -536,6 +953,7 @@ class PhysicalEvidenceFixture:
         }
         probes: list[dict[str, Any]] = []
         bindings: list[dict[str, Any]] = []
+        finishes: list[datetime] = []
         for index, probe_id in enumerate(sorted(PROBE_SPECS)):
             category, exit_code, observation, checks = PROBE_SPECS[probe_id]
             attributes: dict[str, Any] = {}
@@ -544,9 +962,35 @@ class PhysicalEvidenceFixture:
             if "concurrent_start_count" in checks:
                 attributes["concurrent_start_count"] = 2
             started = datetime(2026, 7, 27, 12, index, tzinfo=timezone.utc)
-            finished = datetime(2026, 7, 27, 12, index, 1, tzinfo=timezone.utc)
+            duration_seconds = {
+                "renderer-ready-v2": 8,
+                "network-extension-approval": 3,
+                "network-extension-denial": 2,
+                "network-extension-pending": 30,
+                "sleep-wake": 5,
+            }.get(probe_id, 1)
+            finished = started + timedelta(seconds=duration_seconds)
+            finishes.append(finished)
+            evidence: dict[str, Any] | None = None
+            evidence_bindings: list[dict[str, Any]] = []
+            if probe_id == "renderer-ready-v2":
+                evidence, evidence_bindings = self._renderer_ready_evidence(
+                    run_name, proof, started, finished
+                )
+            elif probe_id.startswith("network-extension-"):
+                evidence, evidence_bindings = self._network_extension_evidence(
+                    run_name, probe_id, proof, started, finished
+                )
+            elif probe_id == "sleep-wake":
+                evidence, evidence_bindings = self._sleep_wake_evidence(
+                    run_name, proof, started, finished
+                )
+            elif probe_id == "wkwebview-850x603":
+                evidence, evidence_bindings = self._wkwebview_evidence(
+                    run_name, proof, started, finished
+                )
             raw = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "proof": copy.deepcopy(proof),
                 "environment": copy.deepcopy(environment),
                 "probe_id": probe_id,
@@ -576,6 +1020,7 @@ class PhysicalEvidenceFixture:
                     },
                 ],
                 "attributes": attributes,
+                "evidence": evidence,
             }
             artifact = self._write_json(
                 f"{run_name}/lifecycle/{probe_id}.json", raw, "lifecycle-event"
@@ -584,18 +1029,17 @@ class PhysicalEvidenceFixture:
             bindings.append(
                 {"harness": "lifecycle", "subject": probe_id, "descriptor": artifact}
             )
-        completed_at = datetime(
-            2026, 7, 27, 12, len(PROBE_SPECS) - 1, 1, tzinfo=timezone.utc
-        )
+            bindings.extend(evidence_bindings)
+        completed_at = max(finishes)
         return (
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "harness_version": LIFECYCLE_VERSION,
                 "proof": copy.deepcopy(proof),
                 "environment": environment,
                 "captured_at": CAPTURED_AT,
                 "completed_at": completed_at.isoformat().replace("+00:00", "Z"),
-                "signed_at": "2026-07-27T12:30:00Z",
+                "signed_at": "2026-07-27T12:35:00Z",
                 "probes": probes,
             },
             bindings,
@@ -908,8 +1352,8 @@ class PhysicalEvidenceFixture:
             "version": COLLECTOR_VERSION,
             "source_sha256": COLLECTOR_SOURCE,
             "executable_sha256": COLLECTOR_EXECUTABLE,
-            "key_id": TEST_KEY_ID,
-            "algorithm": "RS256",
+            "key_version": TEST_KEY_VERSION,
+            "algorithm": COLLECTOR_SIGNATURE_ALGORITHM,
             "signature": "pending",
         }
         run = {
@@ -934,7 +1378,7 @@ class PhysicalEvidenceFixture:
             report_bindings=report_bindings,
             raw_bindings=raw_bindings,
         )
-        collector["signature"] = rs256_sign(canonical_json(payload))
+        collector["signature"] = ps256_sign(canonical_json(payload))
         self.aggregate["runs"].append(run)
         self.report_documents.append(documents)
         self.report_bindings.append(report_bindings)
@@ -953,7 +1397,7 @@ class PhysicalEvidenceFixture:
             report_bindings=self.report_bindings[index],
             raw_bindings=self.raw_bindings[index],
         )
-        run["collector"]["signature"] = rs256_sign(canonical_json(payload))
+        run["collector"]["signature"] = ps256_sign(canonical_json(payload))
 
     def write_aggregate(self, relative: str = "aggregate.json") -> Path:
         path = self.root / self.prefix / relative

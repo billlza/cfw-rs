@@ -1,41 +1,58 @@
 #!/usr/bin/env python3
-"""Weak-network, performance, switch-churn, and soak gate definitions and validator.
+"""Proof-to-byte weak-network, performance, switch, and soak gates.
 
-Requirement 6.3 makes the following mandatory for a Signed_Installed_Verified
-candidate, and Requirement 6.5 forbids any skip, mask, or ``|| true`` that would
-turn an unavailable or failing measurement into success. This module defines the
-gate thresholds and a fail-closed validator over a captured evidence document.
-
-The live measurement requires physical Apple Silicon hardware with a configured
-network-shaping control (latency, loss, bandwidth, and outage injection) and is
-out of scope here. This module supplies the gate definitions, the fail-closed
-result validator, and the percentile arithmetic the harness relies on. The
-validator fails closed on absent shaping controls, incomplete durations,
-malformed samples, or any threshold violation.
+The report contains only declared summaries. All samples, shaping-control
+events, switch records, and soak timestamps/crashes live in one raw artifact
+that is reopened and hashed beneath an explicit evidence root. Every summary
+and threshold is recomputed from those bytes.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+from datetime import datetime
 import math
 from pathlib import Path
+import re
 from typing import Any
 
 if __package__:
-    from ..release_build_identity import canonical_build_version
-else:  # pragma: no cover - direct-script execution fallback
+    from .raw_artifacts import (
+        ArtifactReader,
+        RawArtifactError,
+        exact_object,
+        load_json_file,
+        parse_proof_binding,
+        require_identifier,
+        require_sha256,
+    )
+else:  # pragma: no cover - direct-script import path
     import sys
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from release_build_identity import canonical_build_version
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from raw_artifacts import (  # type: ignore
+        ArtifactReader,
+        RawArtifactError,
+        exact_object,
+        load_json_file,
+        parse_proof_binding,
+        require_identifier,
+        require_sha256,
+    )
 
 
+SCHEMA_VERSION = 2
+HARNESS_VERSION = "performance-gates-v2"
 PRODUCT_VERSION = "0.4.0"
-SHA256_HEX_LENGTH = 64
+MAX_REPORT_BYTES = 1 * 1024 * 1024
+MACOS_BUILD_RE = re.compile(r"^[0-9]{2}[A-Z][0-9]{1,5}[a-z]?$")
+# Twenty observations is the smallest set whose nearest-rank p95 is not simply
+# an under-sampled convenience statistic.
+MIN_SERIES_SAMPLES = 20
+MAX_SERIES_SAMPLES = 100_000
+MAX_SWITCH_RECORDS = 10_001
+MAX_CRASH_EVENTS = 1_000
 
-# Gate definitions (Requirement 6.3). Thresholds are inclusive bounds unless the
-# name says otherwise; IDLE_CPU_MAX_PERCENT is a strict upper bound.
 RECOVERY_P95_MAX_MS = 10_000
 CONNECT_P95_MAX_MS = 5_000
 DISCONNECT_P95_MAX_MS = 3_000
@@ -49,8 +66,6 @@ SWITCH_FD_GROWTH_MAX = 2
 SOAK_MIN_HOURS = 24
 SOAK_MAX_CRASHES = 0
 
-# The three mandatory weak-network profiles. Each is keyed by a stable id and
-# describes the exact shaping control that must have been applied.
 WEAK_NETWORK_PROFILES: dict[str, dict[str, Any]] = {
     "latency-100ms-loss-1pct-10mbps": {
         "kind": "shaping",
@@ -64,25 +79,26 @@ WEAK_NETWORK_PROFILES: dict[str, dict[str, Any]] = {
         "loss_percent": 5.0,
         "bandwidth_mbps": 1.0,
     },
-    "outage-30s": {
-        "kind": "outage",
-        "outage_seconds": 30,
-    },
+    "outage-30s": {"kind": "outage", "outage_seconds": 30},
 }
+
+PARAMETER_FIELDS = {"machine", "network", "power"}
+MACHINE_FIELDS = {
+    "architecture",
+    "macos_version",
+    "macos_build",
+    "hardware_model",
+    "machine_sha256",
+    "clean_install",
+}
+SUMMARY_FIELDS = {"p50", "p95", "p99"}
 
 
 class PerformanceGateError(ValueError):
-    """Performance evidence is absent, incomplete, malformed, or out of bounds."""
+    """Performance evidence is incomplete, drifted, or outside a gate."""
 
 
 def percentiles(samples: list[float]) -> dict[str, float]:
-    """Return nearest-rank p50/p95/p99 of a non-empty numeric sample list.
-
-    Nearest-rank keeps every reported percentile equal to an actual observed
-    sample, so recorded values must reproduce exactly rather than within a
-    tolerance.
-    """
-
     if not samples:
         raise PerformanceGateError("cannot take percentiles of an empty sample set")
     ordered = sorted(samples)
@@ -90,20 +106,9 @@ def percentiles(samples: list[float]) -> dict[str, float]:
 
     def _rank(percent: float) -> float:
         index = math.ceil((percent / 100.0) * count)
-        if index < 1:
-            index = 1
-        if index > count:
-            index = count
-        return ordered[index - 1]
+        return ordered[max(1, min(index, count)) - 1]
 
     return {"p50": _rank(50.0), "p95": _rank(95.0), "p99": _rank(99.0)}
-
-
-def _exact(value: Any, fields: set[str], label: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != fields:
-        actual = sorted(value) if isinstance(value, dict) else type(value).__name__
-        raise PerformanceGateError(f"{label} fields differ: {actual}")
-    return value
 
 
 def _number(value: Any, label: str) -> float:
@@ -129,287 +134,409 @@ def _positive(value: Any, label: str) -> float:
     return result
 
 
-def _integer(value: Any, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise PerformanceGateError(f"{label} must be an integer")
-    return value
-
-
-def _non_empty_string(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise PerformanceGateError(f"{label} must be a non-empty string")
-    return value
-
-
-def _sha256(value: Any, label: str) -> str:
+def _bounded_text(value: Any, label: str, maximum: int = 256) -> str:
     if (
         not isinstance(value, str)
-        or len(value) != SHA256_HEX_LENGTH
-        or any(character not in "0123456789abcdef" for character in value)
+        or not value.strip()
+        or len(value.encode("utf-8")) > maximum
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
     ):
-        raise PerformanceGateError(f"{label} must be a lowercase SHA-256")
+        raise PerformanceGateError(f"{label} must be bounded printable text")
     return value
 
 
-def _series(value: Any, label: str) -> dict[str, float]:
-    """Validate a raw-sample series and its preserved p50/p95/p99 summary."""
-
-    series = _exact(value, {"samples", "p50", "p95", "p99"}, label)
-    samples = series["samples"]
-    if not isinstance(samples, list) or not samples:
-        raise PerformanceGateError(f"{label}.samples must be a non-empty list")
-    clean: list[float] = []
-    for index, sample in enumerate(samples):
-        clean.append(_non_negative(sample, f"{label}.samples[{index}]"))
-    computed = percentiles(clean)
-    for key in ("p50", "p95", "p99"):
-        recorded = _number(series[key], f"{label}.{key}")
-        if recorded != computed[key]:
-            raise PerformanceGateError(
-                f"{label}.{key} ({recorded}) does not match raw samples ({computed[key]})"
-            )
-    return computed
+def _timestamp(value: Any, label: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise PerformanceGateError(f"{label} must be a UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise PerformanceGateError(f"{label} is not ISO-8601") from error
+    if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
+        raise PerformanceGateError(f"{label} must use UTC")
+    return parsed
 
 
-def _validate_parameters(value: Any) -> dict[str, Any]:
-    parameters = _exact(value, {"machine", "network", "power", "build"}, "parameters")
-
-    machine = _exact(
-        parameters["machine"],
-        {"architecture", "macos_version", "hardware_model"},
-        "parameters.machine",
+def _parameters(value: Any, label: str = "parameters") -> dict[str, Any]:
+    parameters = exact_object(value, PARAMETER_FIELDS, label)
+    machine = exact_object(parameters["machine"], MACHINE_FIELDS, f"{label}.machine")
+    if machine["architecture"] != "arm64" or machine["clean_install"] is not True:
+        raise PerformanceGateError(f"{label}.machine must be a clean arm64 machine")
+    _bounded_text(machine["macos_version"], f"{label}.machine.macos_version")
+    macos_build = machine["macos_build"]
+    if not isinstance(macos_build, str) or not MACOS_BUILD_RE.fullmatch(macos_build):
+        raise PerformanceGateError(f"{label}.machine.macos_build is invalid")
+    _bounded_text(machine["hardware_model"], f"{label}.machine.hardware_model")
+    require_sha256(machine["machine_sha256"], f"{label}.machine.machine_sha256")
+    network = exact_object(
+        parameters["network"], {"description", "uplink_mbps"}, f"{label}.network"
     )
-    if machine["architecture"] != "arm64":
-        raise PerformanceGateError("parameters.machine.architecture must be arm64")
-    _non_empty_string(machine["macos_version"], "parameters.machine.macos_version")
-    _non_empty_string(machine["hardware_model"], "parameters.machine.hardware_model")
-
-    network = _exact(
-        parameters["network"],
-        {"description", "uplink_mbps"},
-        "parameters.network",
-    )
-    _non_empty_string(network["description"], "parameters.network.description")
-    _positive(network["uplink_mbps"], "parameters.network.uplink_mbps")
-
-    power = _exact(
-        parameters["power"],
-        {"source", "low_power_mode"},
-        "parameters.power",
+    _bounded_text(network["description"], f"{label}.network.description")
+    _positive(network["uplink_mbps"], f"{label}.network.uplink_mbps")
+    power = exact_object(
+        parameters["power"], {"source", "low_power_mode"}, f"{label}.power"
     )
     if power["source"] not in {"ac", "battery"}:
-        raise PerformanceGateError("parameters.power.source must be 'ac' or 'battery'")
+        raise PerformanceGateError(f"{label}.power.source is invalid")
     if not isinstance(power["low_power_mode"], bool):
-        raise PerformanceGateError("parameters.power.low_power_mode must be boolean")
-
-    build = _exact(
-        parameters["build"],
-        {"version", "build_number", "app_manifest_sha256"},
-        "parameters.build",
-    )
-    if build["version"] != PRODUCT_VERSION:
-        raise PerformanceGateError(
-            f"parameters.build.version must be {PRODUCT_VERSION}"
-        )
-    canonical_build_version(build["build_number"], "parameters.build.build_number")
-    _sha256(build["app_manifest_sha256"], "parameters.build.app_manifest_sha256")
+        raise PerformanceGateError(f"{label}.power.low_power_mode must be boolean")
     return parameters
 
 
-def _validate_weak_network(value: Any) -> None:
-    if not isinstance(value, list) or len(value) != len(WEAK_NETWORK_PROFILES):
+def _raw_series(value: Any, label: str) -> tuple[list[float], dict[str, float]]:
+    if not isinstance(value, list) or not MIN_SERIES_SAMPLES <= len(value) <= MAX_SERIES_SAMPLES:
         raise PerformanceGateError(
-            "weak_network must contain each mandatory profile exactly once"
+            f"{label} must contain {MIN_SERIES_SAMPLES}..{MAX_SERIES_SAMPLES} samples"
         )
-    seen: set[str] = set()
-    for index, raw in enumerate(value):
-        profile = _exact(raw, {"id", "control", "recovery_ms"}, f"weak_network[{index}]")
-        profile_id = profile["id"]
-        if profile_id not in WEAK_NETWORK_PROFILES or profile_id in seen:
+    samples = [_non_negative(sample, f"{label}[{index}]") for index, sample in enumerate(value)]
+    return samples, percentiles(samples)
+
+
+def _declared_summary(value: Any, label: str) -> dict[str, float]:
+    summary = exact_object(value, SUMMARY_FIELDS, label)
+    return {key: _number(summary[key], f"{label}.{key}") for key in sorted(SUMMARY_FIELDS)}
+
+
+def _match_summary(value: Any, computed: dict[str, float], label: str) -> None:
+    declared = _declared_summary(value, label)
+    if declared != computed:
+        raise PerformanceGateError(f"{label} does not match the raw sample bytes")
+
+
+def _control(value: Any, profile_id: str, *, raw: bool, label: str) -> dict[str, Any]:
+    expected = WEAK_NETWORK_PROFILES[profile_id]
+    fields = {"applied", "kind"} | (set(expected) - {"kind"})
+    if raw:
+        fields |= {"applied_at", "command_exit_code"}
+    control = exact_object(value, fields, label)
+    if control["applied"] is not True or control["kind"] != expected["kind"]:
+        raise PerformanceGateError(f"{label} does not prove the required shaping control")
+    for key, wanted in expected.items():
+        if key != "kind" and _number(control[key], f"{label}.{key}") != float(wanted):
+            raise PerformanceGateError(f"{label}.{key} differs from the required profile")
+    if raw:
+        _timestamp(control["applied_at"], f"{label}.applied_at")
+        if control["command_exit_code"] != 0:
+            raise PerformanceGateError(f"{label}.command_exit_code is not zero")
+    return {key: control[key] for key in fields if key not in {"applied_at", "command_exit_code"}}
+
+
+def _weak_network(declared: Any, raw: Any) -> datetime:
+    if not isinstance(declared, list) or not isinstance(raw, list):
+        raise PerformanceGateError("weak_network must be a list")
+    if len(declared) != len(WEAK_NETWORK_PROFILES) or len(raw) != len(declared):
+        raise PerformanceGateError("weak_network must contain every required profile exactly once")
+    declared_by_id: dict[str, dict[str, Any]] = {}
+    for index, entry_value in enumerate(declared):
+        entry = exact_object(
+            entry_value,
+            {"id", "control", "recovery_ms"},
+            f"weak_network[{index}]",
+        )
+        profile_id = entry["id"]
+        if profile_id not in WEAK_NETWORK_PROFILES or profile_id in declared_by_id:
             raise PerformanceGateError(
-                f"weak_network profile is unknown or duplicated: {profile_id!r}"
+                f"weak_network profile is unknown/duplicated: {profile_id!r}"
+            )
+        declared_by_id[profile_id] = entry
+    seen: set[str] = set()
+    applied_times: list[datetime] = []
+    for index, entry_value in enumerate(raw):
+        entry = exact_object(
+            entry_value, {"id", "control", "recovery_ms"}, f"raw.weak_network[{index}]"
+        )
+        profile_id = entry["id"]
+        if profile_id not in declared_by_id or profile_id in seen:
+            raise PerformanceGateError(
+                f"raw weak-network profile is unknown/duplicated: {profile_id!r}"
             )
         seen.add(profile_id)
-        expected = WEAK_NETWORK_PROFILES[profile_id]
-        _validate_control(profile["control"], expected, profile_id)
-        recovery = _series(profile["recovery_ms"], f"weak_network[{profile_id}].recovery_ms")
-        if recovery["p95"] > RECOVERY_P95_MAX_MS:
-            raise PerformanceGateError(
-                f"weak_network[{profile_id}] recovery p95 exceeds {RECOVERY_P95_MAX_MS} ms"
+        declared_entry = declared_by_id[profile_id]
+        if _control(
+            declared_entry["control"],
+            profile_id,
+            raw=False,
+            label=f"weak_network[{profile_id}].control",
+        ) != _control(
+            entry["control"], profile_id, raw=True, label=f"raw.weak_network[{profile_id}].control"
+        ):
+            raise PerformanceGateError(f"weak_network[{profile_id}] control differs from raw bytes")
+        applied_times.append(
+            _timestamp(
+                entry["control"]["applied_at"],
+                f"raw.weak_network[{profile_id}].control.applied_at",
             )
+        )
+        _samples, computed = _raw_series(
+            entry["recovery_ms"], f"raw.weak_network[{profile_id}].recovery_ms"
+        )
+        _match_summary(
+            declared_entry["recovery_ms"], computed, f"weak_network[{profile_id}].recovery_ms"
+        )
+        if computed["p95"] > RECOVERY_P95_MAX_MS:
+            raise PerformanceGateError(f"weak_network[{profile_id}] recovery p95 exceeds the gate")
     if seen != set(WEAK_NETWORK_PROFILES):
-        raise PerformanceGateError("weak_network is missing a mandatory profile")
+        raise PerformanceGateError("raw weak_network is missing a required profile")
+    return min(applied_times)
 
 
-def _validate_control(value: Any, expected: dict[str, Any], profile_id: str) -> None:
-    label = f"weak_network[{profile_id}].control"
-    if expected["kind"] == "shaping":
-        control = _exact(
-            value,
-            {"applied", "kind", "latency_ms", "loss_percent", "bandwidth_mbps"},
-            label,
-        )
-    else:
-        control = _exact(value, {"applied", "kind", "outage_seconds"}, label)
-    if control["applied"] is not True:
-        raise PerformanceGateError(f"{label} was not applied (absent shaping control)")
-    if control["kind"] != expected["kind"]:
-        raise PerformanceGateError(f"{label}.kind is not {expected['kind']!r}")
-    for key, wanted in expected.items():
-        if key == "kind":
-            continue
-        actual = _number(control[key], f"{label}.{key}")
-        if actual != float(wanted):
-            raise PerformanceGateError(
-                f"{label}.{key} ({actual}) does not match profile ({wanted})"
-            )
+def _latency(declared: Any, raw: Any) -> None:
+    fields = {"connect_ms", "disconnect_ms", "added_latency_percent"}
+    declared_value = exact_object(declared, fields, "latency")
+    raw_value = exact_object(raw, fields, "raw.latency")
+    gates = {
+        "connect_ms": CONNECT_P95_MAX_MS,
+        "disconnect_ms": DISCONNECT_P95_MAX_MS,
+        "added_latency_percent": ADDED_LATENCY_MAX_PERCENT,
+    }
+    for name, maximum in gates.items():
+        _samples, computed = _raw_series(raw_value[name], f"raw.latency.{name}")
+        _match_summary(declared_value[name], computed, f"latency.{name}")
+        if computed["p95"] > maximum:
+            raise PerformanceGateError(f"latency.{name} p95 exceeds {maximum}")
 
 
-def _validate_latency(value: Any) -> None:
-    latency = _exact(
-        value,
-        {"connect_ms", "disconnect_ms", "added_latency_percent"},
-        "latency",
+def _throughput(declared: Any, raw: Any) -> None:
+    declared_value = exact_object(
+        declared, {"baseline_mbps", "measured_mbps", "ratio_percent"}, "throughput"
     )
-    connect = _series(latency["connect_ms"], "latency.connect_ms")
-    if connect["p95"] > CONNECT_P95_MAX_MS:
-        raise PerformanceGateError(f"connect p95 exceeds {CONNECT_P95_MAX_MS} ms")
-    disconnect = _series(latency["disconnect_ms"], "latency.disconnect_ms")
-    if disconnect["p95"] > DISCONNECT_P95_MAX_MS:
-        raise PerformanceGateError(f"disconnect p95 exceeds {DISCONNECT_P95_MAX_MS} ms")
-    added = _series(latency["added_latency_percent"], "latency.added_latency_percent")
-    if added["p95"] > ADDED_LATENCY_MAX_PERCENT:
-        raise PerformanceGateError(
-            f"added latency p95 exceeds {ADDED_LATENCY_MAX_PERCENT} percent"
-        )
-
-
-def _validate_throughput(value: Any) -> None:
-    throughput = _exact(
-        value,
-        {"baseline_mbps", "measured_mbps", "ratio_percent"},
-        "throughput",
+    raw_value = exact_object(
+        raw, {"baseline_mbps", "measured_mbps"}, "raw.throughput"
     )
-    baseline = _positive(throughput["baseline_mbps"], "throughput.baseline_mbps")
-    measured = _non_negative(throughput["measured_mbps"], "throughput.measured_mbps")
-    recorded = _number(throughput["ratio_percent"], "throughput.ratio_percent")
-    computed = 100.0 * measured / baseline
-    if not math.isclose(recorded, computed, rel_tol=1e-9, abs_tol=1e-9):
-        raise PerformanceGateError(
-            "throughput.ratio_percent does not match measured/baseline"
-        )
-    if computed < THROUGHPUT_MIN_RATIO_PERCENT:
-        raise PerformanceGateError(
-            f"throughput is below {THROUGHPUT_MIN_RATIO_PERCENT} percent of baseline"
-        )
-
-
-def _validate_resources(value: Any) -> None:
-    resources = _exact(
-        value,
-        {"active_idle_cpu_percent", "active_rss_mib"},
-        "resources",
+    baseline_samples, baseline_summary = _raw_series(
+        raw_value["baseline_mbps"], "raw.throughput.baseline_mbps"
     )
-    cpu = _series(resources["active_idle_cpu_percent"], "resources.active_idle_cpu_percent")
+    measured_samples, measured_summary = _raw_series(
+        raw_value["measured_mbps"], "raw.throughput.measured_mbps"
+    )
+    if len(baseline_samples) != len(measured_samples):
+        raise PerformanceGateError("throughput baseline/measured sample counts differ")
+    baseline = _positive(baseline_summary["p50"], "raw throughput baseline p50")
+    measured = _non_negative(measured_summary["p50"], "raw throughput measured p50")
+    ratio = 100.0 * measured / baseline
+    if _number(declared_value["baseline_mbps"], "throughput.baseline_mbps") != baseline:
+        raise PerformanceGateError("throughput baseline declaration differs from raw samples")
+    if _number(declared_value["measured_mbps"], "throughput.measured_mbps") != measured:
+        raise PerformanceGateError("throughput measured declaration differs from raw samples")
+    recorded = _number(declared_value["ratio_percent"], "throughput.ratio_percent")
+    if not math.isclose(recorded, ratio, rel_tol=1e-12, abs_tol=1e-12):
+        raise PerformanceGateError("throughput ratio declaration differs from raw samples")
+    if ratio < THROUGHPUT_MIN_RATIO_PERCENT:
+        raise PerformanceGateError("throughput ratio is below the gate")
+
+
+def _resources(declared: Any, raw: Any) -> None:
+    fields = {"active_idle_cpu_percent", "active_rss_mib"}
+    declared_value = exact_object(declared, fields, "resources")
+    raw_value = exact_object(raw, fields, "raw.resources")
+    _samples, cpu = _raw_series(
+        raw_value["active_idle_cpu_percent"], "raw.resources.active_idle_cpu_percent"
+    )
+    _match_summary(
+        declared_value["active_idle_cpu_percent"],
+        cpu,
+        "resources.active_idle_cpu_percent",
+    )
     if not cpu["p95"] < IDLE_CPU_MAX_PERCENT:
-        raise PerformanceGateError(
-            f"active idle CPU p95 is not below {IDLE_CPU_MAX_PERCENT} percent"
-        )
-    rss = _series(resources["active_rss_mib"], "resources.active_rss_mib")
+        raise PerformanceGateError("active idle CPU p95 is not below the gate")
+    _samples, rss = _raw_series(raw_value["active_rss_mib"], "raw.resources.active_rss_mib")
+    _match_summary(declared_value["active_rss_mib"], rss, "resources.active_rss_mib")
     if rss["p95"] > ACTIVE_RSS_MAX_MIB:
-        raise PerformanceGateError(f"active RSS p95 exceeds {ACTIVE_RSS_MAX_MIB} MiB")
+        raise PerformanceGateError("active RSS p95 exceeds the gate")
 
 
-def _validate_switch_cycle(value: Any) -> None:
-    switch = _exact(
-        value,
-        {"switch_count", "rss_growth_mib", "fd_growth"},
-        "switch_cycle",
+def _switch_cycle(declared: Any, raw: Any) -> None:
+    declared_value = exact_object(
+        declared, {"switch_count", "rss_growth_mib", "fd_growth"}, "switch_cycle"
     )
-    count = _integer(switch["switch_count"], "switch_cycle.switch_count")
+    raw_value = exact_object(raw, {"records"}, "raw.switch_cycle")
+    records = raw_value["records"]
+    if not isinstance(records, list) or not 2 <= len(records) <= MAX_SWITCH_RECORDS:
+        raise PerformanceGateError("raw.switch_cycle.records count is outside the bound")
+    rss_values: list[float] = []
+    fd_values: list[int] = []
+    for index, raw_record in enumerate(records):
+        record = exact_object(
+            raw_record, {"index", "rss_mib", "fd_count"}, f"raw.switch_cycle.records[{index}]"
+        )
+        if record["index"] != index:
+            raise PerformanceGateError("raw switch record indices are not contiguous")
+        rss_values.append(_non_negative(record["rss_mib"], f"raw switch[{index}].rss_mib"))
+        fd_count = record["fd_count"]
+        if not isinstance(fd_count, int) or isinstance(fd_count, bool) or fd_count < 0:
+            raise PerformanceGateError(f"raw switch[{index}].fd_count must be non-negative integer")
+        fd_values.append(fd_count)
+    count = len(records) - 1
+    rss_growth = max(rss_values) - rss_values[0]
+    fd_growth = max(fd_values) - fd_values[0]
+    expected = {"switch_count": count, "rss_growth_mib": rss_growth, "fd_growth": fd_growth}
+    declared_count = declared_value["switch_count"]
+    declared_fd_growth = declared_value["fd_growth"]
+    if (
+        not isinstance(declared_count, int)
+        or isinstance(declared_count, bool)
+        or not isinstance(declared_fd_growth, int)
+        or isinstance(declared_fd_growth, bool)
+    ):
+        raise PerformanceGateError("switch_cycle count/growth declarations must be integers")
+    declared_normalized = {
+        "switch_count": declared_count,
+        "rss_growth_mib": _number(declared_value["rss_growth_mib"], "switch_cycle.rss_growth_mib"),
+        "fd_growth": declared_fd_growth,
+    }
+    if declared_normalized != expected:
+        raise PerformanceGateError("switch_cycle declaration differs from raw records")
     if count < SWITCH_MIN_COUNT:
+        raise PerformanceGateError("switch_cycle count is below the gate")
+    if rss_growth > SWITCH_RSS_GROWTH_MAX_MIB or fd_growth > SWITCH_FD_GROWTH_MAX:
+        raise PerformanceGateError("switch_cycle resource growth exceeds the gate")
+
+
+def _soak(declared: Any, raw: Any) -> datetime:
+    declared_value = exact_object(declared, {"duration_hours", "crash_count"}, "soak")
+    raw_value = exact_object(raw, {"started_at", "ended_at", "crash_events"}, "raw.soak")
+    started = _timestamp(raw_value["started_at"], "raw.soak.started_at")
+    ended = _timestamp(raw_value["ended_at"], "raw.soak.ended_at")
+    duration_hours = (ended - started).total_seconds() / 3600.0
+    if duration_hours <= 0 or duration_hours > 168:
+        raise PerformanceGateError("raw soak duration is outside 0..168 hours")
+    crash_events = raw_value["crash_events"]
+    if not isinstance(crash_events, list) or len(crash_events) > MAX_CRASH_EVENTS:
+        raise PerformanceGateError("raw soak crash event count exceeds the bound")
+    previous: datetime | None = None
+    for index, raw_event in enumerate(crash_events):
+        event = exact_object(raw_event, {"timestamp", "code"}, f"raw.soak.crash_events[{index}]")
+        timestamp = _timestamp(event["timestamp"], f"raw.soak.crash_events[{index}].timestamp")
+        require_identifier(event["code"], f"raw.soak.crash_events[{index}].code")
+        if (
+            timestamp < started
+            or timestamp > ended
+            or (previous is not None and timestamp <= previous)
+        ):
+            raise PerformanceGateError("raw soak crash timestamps are outside/order-invalid")
+        previous = timestamp
+    declared_duration = _number(declared_value["duration_hours"], "soak.duration_hours")
+    if not math.isclose(declared_duration, duration_hours, rel_tol=0.0, abs_tol=1e-12):
+        raise PerformanceGateError("soak duration declaration differs from raw timestamps")
+    crash_count = declared_value["crash_count"]
+    if not isinstance(crash_count, int) or isinstance(crash_count, bool):
+        raise PerformanceGateError("soak.crash_count must be an integer")
+    if crash_count != len(crash_events):
+        raise PerformanceGateError("soak crash_count declaration differs from raw events")
+    if duration_hours < SOAK_MIN_HOURS or len(crash_events) > SOAK_MAX_CRASHES:
+        raise PerformanceGateError("soak duration/crash result fails the gate")
+    return started
+
+
+def _validate_raw(
+    raw: Any,
+    *,
+    proof: dict[str, Any],
+    parameters: dict[str, Any],
+    document: dict[str, Any],
+) -> None:
+    fields = {
+        "schema_version",
+        "captured_at",
+        "proof",
+        "parameters",
+        "weak_network",
+        "latency",
+        "throughput",
+        "resources",
+        "switch_cycle",
+        "soak",
+    }
+    raw_value = exact_object(raw, fields, "raw performance samples")
+    if raw_value["schema_version"] != 1:
+        raise PerformanceGateError("raw performance schema_version must be 1")
+    if parse_proof_binding(raw_value["proof"], "raw.performance.proof") != proof:
+        raise PerformanceGateError("raw performance proof differs from its report")
+    if _parameters(raw_value["parameters"], "raw.parameters") != parameters:
+        raise PerformanceGateError("raw performance parameters differ from its report")
+    weak_started = _weak_network(document["weak_network"], raw_value["weak_network"])
+    _latency(document["latency"], raw_value["latency"])
+    _throughput(document["throughput"], raw_value["throughput"])
+    _resources(document["resources"], raw_value["resources"])
+    _switch_cycle(document["switch_cycle"], raw_value["switch_cycle"])
+    soak_started = _soak(document["soak"], raw_value["soak"])
+    raw_captured_at = _timestamp(raw_value["captured_at"], "raw.performance.captured_at")
+    if raw_value["captured_at"] != document["captured_at"]:
+        raise PerformanceGateError("raw performance captured_at differs from its report")
+    if raw_captured_at != min(weak_started, soak_started):
+        raise PerformanceGateError("performance captured_at differs from earliest raw event")
+
+
+def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
+    fields = {
+        "schema_version",
+        "harness_version",
+        "captured_at",
+        "proof",
+        "parameters",
+        "weak_network",
+        "latency",
+        "throughput",
+        "resources",
+        "switch_cycle",
+        "soak",
+        "samples_artifact",
+    }
+    document = exact_object(value, fields, "performance evidence")
+    if document["schema_version"] != SCHEMA_VERSION:
+        raise PerformanceGateError(f"performance schema_version must be {SCHEMA_VERSION}")
+    if document["harness_version"] != HARNESS_VERSION:
         raise PerformanceGateError(
-            f"switch_cycle only ran {count} of {SWITCH_MIN_COUNT} required switches"
+            f"performance harness_version must be {HARNESS_VERSION!r}"
         )
-    rss_growth = _non_negative(switch["rss_growth_mib"], "switch_cycle.rss_growth_mib")
-    if rss_growth > SWITCH_RSS_GROWTH_MAX_MIB:
-        raise PerformanceGateError(
-            f"switch_cycle RSS growth exceeds {SWITCH_RSS_GROWTH_MAX_MIB} MiB"
-        )
-    fd_growth = _integer(switch["fd_growth"], "switch_cycle.fd_growth")
-    if fd_growth < 0:
-        raise PerformanceGateError("switch_cycle.fd_growth must be non-negative")
-    if fd_growth > SWITCH_FD_GROWTH_MAX:
-        raise PerformanceGateError(
-            f"switch_cycle file-descriptor growth exceeds {SWITCH_FD_GROWTH_MAX}"
-        )
-
-
-def _validate_soak(value: Any) -> None:
-    soak = _exact(value, {"duration_hours", "crash_count"}, "soak")
-    duration = _non_negative(soak["duration_hours"], "soak.duration_hours")
-    if duration < SOAK_MIN_HOURS:
-        raise PerformanceGateError(
-            f"soak ran {duration} of {SOAK_MIN_HOURS} required hours"
-        )
-    crashes = _integer(soak["crash_count"], "soak.crash_count")
-    if crashes < 0:
-        raise PerformanceGateError("soak.crash_count must be non-negative")
-    if crashes > SOAK_MAX_CRASHES:
-        raise PerformanceGateError(f"soak observed {crashes} crashes")
-
-
-def validate_performance_evidence(value: Any) -> dict[str, Any]:
-    """Validate the whole performance evidence document, failing closed."""
-
-    document = _exact(
-        value,
-        {
-            "schema_version",
-            "parameters",
-            "weak_network",
-            "latency",
-            "throughput",
-            "resources",
-            "switch_cycle",
-            "soak",
-        },
-        "performance evidence",
+    proof = parse_proof_binding(document["proof"])
+    if proof["candidate"]["version"] != PRODUCT_VERSION:
+        raise PerformanceGateError("performance evidence is not for version 0.4.0")
+    parameters = _parameters(document["parameters"])
+    descriptor, raw = artifacts.read_json(
+        document["samples_artifact"],
+        expected_kind="performance-samples",
+        label="performance.samples_artifact",
     )
-    if document["schema_version"] != 1:
-        raise PerformanceGateError("performance evidence schema_version must be 1")
-    _validate_parameters(document["parameters"])
-    _validate_weak_network(document["weak_network"])
-    _validate_latency(document["latency"])
-    _validate_throughput(document["throughput"])
-    _validate_resources(document["resources"])
-    _validate_switch_cycle(document["switch_cycle"])
-    _validate_soak(document["soak"])
-    return document
+    _validate_raw(raw, proof=proof, parameters=parameters, document=document)
+    return {
+        "document": document,
+        "proof": proof,
+        "parameters": parameters,
+        "artifacts": [{"subject": "measurements", "descriptor": descriptor.as_dict()}],
+    }
 
 
-def load_performance_evidence(path: Path) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise PerformanceGateError("performance evidence must be a regular non-symlink file")
+def validate_performance_evidence(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise PerformanceGateError("performance evidence is not valid UTF-8 JSON") from error
-    return validate_performance_evidence(value)
+        return _validate(value, artifacts)
+    except RawArtifactError as error:
+        raise PerformanceGateError(str(error)) from error
+
+
+def load_performance_evidence(path: Path, *, evidence_root: Path) -> dict[str, Any]:
+    try:
+        value = load_json_file(path, maximum=MAX_REPORT_BYTES, label="performance report")
+        with ArtifactReader(evidence_root) as artifacts:
+            return validate_performance_evidence(value, artifacts)
+    except RawArtifactError as error:
+        raise PerformanceGateError(str(error)) from error
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("evidence", type=Path)
+    parser.add_argument("report", type=Path)
+    parser.add_argument("--evidence-root", required=True, type=Path)
     arguments = parser.parse_args()
     try:
-        document = load_performance_evidence(arguments.evidence)
+        result = load_performance_evidence(
+            arguments.report, evidence_root=arguments.evidence_root
+        )
     except (PerformanceGateError, OSError) as error:
-        raise SystemExit(f"error: performance gate evidence failed: {error}") from error
+        raise SystemExit(f"error: performance evidence failed: {error}") from error
     print(
-        "performance gate evidence verified: "
-        f"{PRODUCT_VERSION} ({document['parameters']['build']['build_number']}), "
-        f"{len(document['weak_network'])} weak-network profiles"
+        "performance raw evidence structurally verified (collector signature not checked): "
+        f"{len(result['artifacts'])} sample artifact"
     )
 
 

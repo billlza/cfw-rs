@@ -1,513 +1,343 @@
 from __future__ import annotations
 
 import copy
-import json
+from dataclasses import replace
 import os
+from pathlib import Path
 import tempfile
 import unittest
-from pathlib import Path
+from unittest.mock import patch
 
-from scripts.harness.adversarial_clients import REQUIRED_CASES as ADVERSARIAL_CASES
-from scripts.harness.packet_evidence import REQUIRED_CASES as PACKET_CASES
-from scripts.harness.performance_gates import percentiles
-from scripts.harness.lifecycle_matrix import (
-    HARNESS_VERSION,
-    REQUIRED_PROBES,
-    SCHEMA_VERSION as LIFECYCLE_SCHEMA_VERSION,
-)
 from scripts.harness.physical_evidence_aggregator import (
-    AGGREGATOR_VERSION,
-    EXPECTED_TOOL_VERSIONS,
     GRANTED_LEVEL,
-    REQUIRED_OS,
-    SCHEMA_VERSION,
     PhysicalEvidenceError,
-    _canonical_report_hash,
     load_physical_evidence,
+    load_physical_evidence_artifact,
     self_check,
     validate_physical_evidence,
 )
+from scripts.tests.physical_evidence_fixture import (
+    APP_MANIFEST as _APP_MANIFEST,
+    BUILD_NUMBER as _BUILD_NUMBER,
+    BUILT_AT as _BUILT_AT,
+    SIGNED_TREE as _SIGNED_TREE,
+    TEST_POLICY,
+    PhysicalEvidenceFixture,
+)
 
-# One shared candidate identity across every embedded harness document.
-APP_MANIFEST = "a" * 64
-SIGNED_TREE = "b" * 64
-BUILD_NUMBER = "40000"
-BUILT_AT = "2026-07-01T00:00:00Z"
-CAPTURED_AT = "2026-07-22T00:00:00Z"
-
-# The two required clean physical run sets (macOS 15 and current macOS).
-RUN_PARAMS = {
-    "macos15": {
-        "macos_version": "15.0",
-        "macos_build": "24A335",
-        "machine_sha256": "c" * 64,
-        "operation_id": "op-15aa",
-        "installation_id": "install-15aa",
-        "epoch": 3,
-        "generation": 7,
-    },
-    "current-macos": {
-        "macos_version": "15.5",
-        "macos_build": "24F79",
-        "machine_sha256": "d" * 64,
-        "operation_id": "op-cur9",
-        "installation_id": "install-cur9",
-        "epoch": 4,
-        "generation": 9,
-    },
-}
+APP_MANIFEST = _APP_MANIFEST
+BUILD_NUMBER = _BUILD_NUMBER
+BUILT_AT = _BUILT_AT
+SIGNED_TREE = _SIGNED_TREE
 
 
-def _series(samples: list[float]) -> dict:
-    summary = percentiles([float(sample) for sample in samples])
-    return {
-        "samples": list(samples),
-        "p50": summary["p50"],
-        "p95": summary["p95"],
-        "p99": summary["p99"],
-    }
-
-
-def _lifecycle_doc(run: dict) -> dict:
-    bindings = {
-        "signed_app_tree_sha256": SIGNED_TREE,
-        "machine_sha256": run["machine_sha256"],
-        "macos_build": run["macos_build"],
-        "operation_id": run["operation_id"],
-        "installation_id": run["installation_id"],
-        "epoch": run["epoch"],
-        "generation": run["generation"],
-    }
-    probes = []
-    for index, probe_id in enumerate(sorted(REQUIRED_PROBES)):
-        # A distinct non-secret report hash per probe within this document.
-        report = f"{index:02x}" + "e" * 62
-        attributes: dict = {}
-        if probe_id == "fast-user-switching":
-            attributes = {"user_count": 2}
-        elif probe_id == "concurrent-starts":
-            attributes = {"concurrent_start_count": 2}
-        probes.append(
-            {
-                "id": probe_id,
-                "status": "passed",
-                "report_sha256": report,
-                "bindings": copy.deepcopy(bindings),
-                "attributes": attributes,
-            }
-        )
-    return {
-        "schema_version": LIFECYCLE_SCHEMA_VERSION,
-        "harness_version": HARNESS_VERSION,
-        "candidate": {
-            "signed_app_tree_sha256": SIGNED_TREE,
-            "machine_sha256": run["machine_sha256"],
-            "macos_build": run["macos_build"],
-            "architecture": "arm64",
-            "operation_context": {
-                "operation_id": run["operation_id"],
-                "installation_id": run["installation_id"],
-                "epoch": run["epoch"],
-                "generation": run["generation"],
-            },
-        },
-        "probes": probes,
-    }
-
-
-def _packet_doc(run: dict) -> dict:
-    cases = []
-    for index, (case_id, spec) in enumerate(PACKET_CASES.items()):
-        method = "server_observation" if spec.protocol == "dns" else "packet_capture"
-        cases.append(
-            {
-                "id": case_id,
-                "protocol": spec.protocol,
-                "family": spec.family,
-                "resolver_role": spec.resolver_role,
-                "token": f"unique-packet-token-{index:03d}",
-                "method": method,
-                "vantage": spec.vantage,
-                "token_observed": spec.token_observed,
-                "capture_sha256": f"{index:064x}",
-                "observation_ms": 5_000,
-                "captured_at": CAPTURED_AT,
-                "candidate_app_manifest_sha256": APP_MANIFEST,
-            }
-        )
-    return {
-        "schema_version": 1,
-        "product": {"version": "0.4.0", "build_number": BUILD_NUMBER},
-        "candidate": {
-            "app_manifest_sha256": APP_MANIFEST,
-            "signed_app_tree_sha256": SIGNED_TREE,
-        },
-        "platform": {
-            "architecture": "arm64",
-            "macos_version": run["macos_version"],
-            "hardware_model": "Mac fixture",
-            "clean_install": True,
-        },
-        "captured_at": CAPTURED_AT,
-        "cases": cases,
-    }
-
-
-def _performance_doc(run: dict) -> dict:
-    return {
-        "schema_version": 1,
-        "parameters": {
-            "machine": {
-                "architecture": "arm64",
-                "macos_version": run["macos_version"],
-                "hardware_model": "Mac15,3",
-            },
-            "network": {"description": "lab shaping bridge", "uplink_mbps": 1000},
-            "power": {"source": "ac", "low_power_mode": False},
-            "build": {
-                "version": "0.4.0",
-                "build_number": BUILD_NUMBER,
-                "app_manifest_sha256": APP_MANIFEST,
-            },
-        },
-        "weak_network": [
-            {
-                "id": "latency-100ms-loss-1pct-10mbps",
-                "control": {
-                    "applied": True,
-                    "kind": "shaping",
-                    "latency_ms": 100,
-                    "loss_percent": 1.0,
-                    "bandwidth_mbps": 10.0,
-                },
-                "recovery_ms": _series([4000.0, 5000.0, 6000.0, 7000.0]),
-            },
-            {
-                "id": "latency-300ms-loss-5pct-1mbps",
-                "control": {
-                    "applied": True,
-                    "kind": "shaping",
-                    "latency_ms": 300,
-                    "loss_percent": 5.0,
-                    "bandwidth_mbps": 1.0,
-                },
-                "recovery_ms": _series([6000.0, 7000.0, 8000.0, 9000.0]),
-            },
-            {
-                "id": "outage-30s",
-                "control": {"applied": True, "kind": "outage", "outage_seconds": 30},
-                "recovery_ms": _series([7000.0, 8000.0, 9000.0, 9500.0]),
-            },
-        ],
-        "latency": {
-            "connect_ms": _series([2000.0, 3000.0, 4000.0, 4500.0]),
-            "disconnect_ms": _series([1000.0, 1500.0, 2000.0, 2500.0]),
-            "added_latency_percent": _series([2.0, 4.0, 6.0, 8.0]),
-        },
-        "throughput": {"baseline_mbps": 100.0, "measured_mbps": 95.0, "ratio_percent": 95.0},
-        "resources": {
-            "active_idle_cpu_percent": _series([0.2, 0.4, 0.6, 0.8]),
-            "active_rss_mib": _series([90.0, 100.0, 110.0, 118.0]),
-        },
-        "switch_cycle": {"switch_count": 100, "rss_growth_mib": 4.0, "fd_growth": 1},
-        "soak": {"duration_hours": 24, "crash_count": 0},
-    }
-
-
-def _adversarial_doc(run: dict) -> dict:
-    cases = []
-    for case_id, (category, client, denial_code, cleanup) in ADVERSARIAL_CASES.items():
-        cases.append(
-            {
-                "id": case_id,
-                "category": category,
-                "client": client,
-                "executed": True,
-                "outcome": "denied",
-                "denial_code": denial_code,
-                "cleanup": cleanup,
-                "secret_observed": False,
-            }
-        )
-    return {
-        "schema_version": 1,
-        "product": {"version": "0.4.0", "build_number": BUILD_NUMBER},
-        "app_manifest_sha256": APP_MANIFEST,
-        "captured_at": CAPTURED_AT,
-        "platform": {
-            "architecture": "arm64",
-            "macos_version": run["macos_version"],
-            "hardware_model": "Mac fixture",
-            "clean_install": True,
-        },
-        "signing": {
-            "team_id": "YKUPL7Z869",
-            "allowed_client": {
-                "signing_id": "com.bill.clashformac",
-                "cdhash": "b" * 40,
-                "designated_requirement_sha256": "c" * 64,
-            },
-            "denied_client": {
-                "signing_id": "com.bill.clashformac.adversary",
-                "cdhash": "d" * 40,
-                "designated_requirement_sha256": "e" * 64,
-            },
-        },
-        "baseline": {"client": "allowed", "executed": True, "authorized": True},
-        "cases": cases,
-    }
-
-
-_HARNESS_BUILDERS = {
-    "lifecycle": _lifecycle_doc,
-    "packet": _packet_doc,
-    "performance": _performance_doc,
-    "adversarial": _adversarial_doc,
-}
-
-
-def _report_entry(harness: str, document: dict) -> dict:
-    return {
-        "tool_version": EXPECTED_TOOL_VERSIONS[harness],
-        "report_sha256": _canonical_report_hash(document),
-        "captured_at": CAPTURED_AT,
-        "document": document,
-    }
-
-
-def _rehash(report: dict) -> None:
-    report["report_sha256"] = _canonical_report_hash(report["document"])
-
-
-def _run(os_label: str) -> dict:
-    params = RUN_PARAMS[os_label]
-    reports = {
-        harness: _report_entry(harness, builder(params))
-        for harness, builder in _HARNESS_BUILDERS.items()
-    }
-    return {
-        "os": os_label,
-        "macos_version": params["macos_version"],
-        "macos_build": params["macos_build"],
-        "machine_sha256": params["machine_sha256"],
-        "clean_install": True,
-        "evidence_source": "harness",
-        "captured_at": CAPTURED_AT,
-        "reports": reports,
-    }
+REPOSITORY = Path(__file__).resolve().parent.parent.parent
+PHYSICAL_EVIDENCE_ROOT = REPOSITORY
+PHYSICAL_TRUST_POLICY = TEST_POLICY
+_CACHED_FIXTURE: PhysicalEvidenceFixture | None = None
+_CACHED_AGGREGATE_ARTIFACT: dict | None = None
 
 
 def fixture() -> dict:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "aggregator_version": AGGREGATOR_VERSION,
-        "granted_level": GRANTED_LEVEL,
-        "candidate": {
-            "version": "0.4.0",
-            "build_number": BUILD_NUMBER,
-            "app_manifest_sha256": APP_MANIFEST,
-            "signed_app_tree_sha256": SIGNED_TREE,
-            "built_at": BUILT_AT,
-        },
-        "runs": [_run("macos15"), _run("current-macos")],
-    }
+    """Private-archive descriptor for publication tests under repository/target."""
+
+    global _CACHED_FIXTURE, _CACHED_AGGREGATE_ARTIFACT
+    if _CACHED_FIXTURE is None:
+        _CACHED_FIXTURE = PhysicalEvidenceFixture(
+            REPOSITORY, prefix="target/test-physical-evidence/v2"
+        )
+        _CACHED_AGGREGATE_ARTIFACT = _CACHED_FIXTURE.write_aggregate_artifact()
+    assert _CACHED_AGGREGATE_ARTIFACT is not None
+    return copy.deepcopy(_CACHED_AGGREGATE_ARTIFACT)
 
 
-class PhysicalEvidenceHappyPathTests(unittest.TestCase):
-    def test_two_os_complete_aggregate_grants_signed_installed(self) -> None:
-        summary = validate_physical_evidence(fixture())
+def aggregate_fixture() -> dict:
+    """Parsed aggregate fixture for tests that inspect private archive contents."""
+
+    fixture()
+    assert _CACHED_FIXTURE is not None
+    return copy.deepcopy(_CACHED_FIXTURE.aggregate)
+
+
+class PhysicalEvidenceAggregatorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.fixture = PhysicalEvidenceFixture(self.root)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def validate(self) -> dict:
+        return validate_physical_evidence(
+            self.fixture.aggregate,
+            evidence_root=self.root,
+            trust_policy=self.fixture.policy,
+            fixture=True,
+        )
+
+    def test_complete_signed_raw_set_grants_only_physical_level(self) -> None:
+        summary = self.validate()
         self.assertEqual(summary["granted_level"], GRANTED_LEVEL)
-        self.assertEqual(set(summary["runs"]), set(REQUIRED_OS))
-        # Four harnesses across two runs => eight distinct bound reports.
         self.assertEqual(summary["reports"], 8)
-        self.assertEqual(summary["candidate"]["build_number"], BUILD_NUMBER)
+        self.assertEqual(len(summary["report_bindings"]), 10)
+        self.assertGreater(summary["artifact_count"], 150)
 
-    def test_required_os_set_is_macos15_and_current(self) -> None:
-        self.assertEqual(REQUIRED_OS, frozenset({"macos15", "current-macos"}))
-
-    def test_self_check_contract_holds(self) -> None:
-        # Wiring self-check used by the boundary gate must not raise.
+    def test_static_self_check_does_not_fabricate_trust(self) -> None:
         self_check()
 
+    def test_handwritten_json_and_random_hash_is_rejected(self) -> None:
+        self.fixture.aggregate["runs"][0]["reports"]["packet"]["artifact"][
+            "sha256"
+        ] = "f" * 64
+        with self.assertRaisesRegex(PhysicalEvidenceError, "does not match"):
+            self.validate()
 
-class PhysicalEvidenceFailClosedTests(unittest.TestCase):
-    def test_missing_os_run_set_fails_closed(self) -> None:
-        value = fixture()
-        value["runs"] = [value["runs"][0]]  # drop current-macos
-        with self.assertRaisesRegex(PhysicalEvidenceError, "each required macOS run set exactly once"):
-            validate_physical_evidence(value)
+    def test_missing_raw_artifact_fails_closed(self) -> None:
+        raw = self.fixture.raw_bindings[0][0]["descriptor"]
+        (self.root / raw["path"]).unlink()
+        with self.assertRaisesRegex(PhysicalEvidenceError, "cannot be opened"):
+            self.validate()
 
-    def test_duplicate_os_run_set_fails_closed(self) -> None:
-        value = fixture()
-        value["runs"] = [_run("macos15"), _run("macos15")]
-        with self.assertRaisesRegex(PhysicalEvidenceError, "duplicates the 'macos15' run"):
-            validate_physical_evidence(value)
+    def test_raw_artifact_byte_drift_fails_closed(self) -> None:
+        raw = self.fixture.raw_bindings[0][0]["descriptor"]
+        path = self.root / raw["path"]
+        path.write_bytes(path.read_bytes() + b"drift")
+        with self.assertRaisesRegex(PhysicalEvidenceError, "size does not match"):
+            self.validate()
 
-    def test_unknown_os_run_set_fails_closed(self) -> None:
-        value = fixture()
-        value["runs"][1]["os"] = "macos-beta"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "unknown macOS run set"):
-            validate_physical_evidence(value)
+    def test_report_byte_drift_fails_closed(self) -> None:
+        report = self.fixture.aggregate["runs"][0]["reports"]["packet"]["artifact"]
+        path = self.root / report["path"]
+        path.write_bytes(path.read_bytes() + b"drift")
+        with self.assertRaisesRegex(PhysicalEvidenceError, "size does not match"):
+            self.validate()
 
-    def test_missing_harness_report_fails_closed(self) -> None:
-        value = fixture()
-        del value["runs"][0]["reports"]["packet"]
-        with self.assertRaisesRegex(PhysicalEvidenceError, "missing required fields"):
-            validate_physical_evidence(value)
-
-    def test_mismatched_candidate_identity_fails_closed(self) -> None:
-        value = fixture()
-        # Rebuild the packet report bound to a foreign build number.
-        doc = value["runs"][0]["reports"]["packet"]["document"]
-        doc["product"]["build_number"] = "50000"
-        _rehash(value["runs"][0]["reports"]["packet"])
-        with self.assertRaisesRegex(PhysicalEvidenceError, "build number does not match"):
-            validate_physical_evidence(value)
-
-    def test_mismatched_signed_app_tree_fails_closed(self) -> None:
-        value = fixture()
-        doc = value["runs"][0]["reports"]["lifecycle"]["document"]
-        doc["candidate"]["signed_app_tree_sha256"] = "f" * 64
-        for probe in doc["probes"]:
-            probe["bindings"]["signed_app_tree_sha256"] = "f" * 64
-        _rehash(value["runs"][0]["reports"]["lifecycle"])
-        with self.assertRaisesRegex(PhysicalEvidenceError, "signed app tree does not match"):
-            validate_physical_evidence(value)
-
-    def test_run_macos_version_inconsistent_across_reports_fails_closed(self) -> None:
-        value = fixture()
-        # Performance report claims a different macOS version than the run.
-        doc = value["runs"][0]["reports"]["performance"]["document"]
-        doc["parameters"]["machine"]["macos_version"] = "14.7"
-        _rehash(value["runs"][0]["reports"]["performance"])
-        with self.assertRaisesRegex(PhysicalEvidenceError, "macOS version does not match the run"):
-            validate_physical_evidence(value)
-
-    def test_stale_report_fails_closed(self) -> None:
-        value = fixture()
-        value["runs"][0]["reports"]["adversarial"]["captured_at"] = "2026-06-01T00:00:00Z"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "stale: captured before"):
-            validate_physical_evidence(value)
-
-    def test_duplicated_report_hash_fails_closed(self) -> None:
-        value = fixture()
-        # Replay run 0's lifecycle report verbatim into run 1.
-        value["runs"][1]["reports"]["lifecycle"] = copy.deepcopy(
-            value["runs"][0]["reports"]["lifecycle"]
+    def test_report_and_artifact_replay_across_runs_fails(self) -> None:
+        self.fixture.aggregate["runs"][1]["reports"]["packet"]["artifact"] = copy.deepcopy(
+            self.fixture.aggregate["runs"][0]["reports"]["packet"]["artifact"]
         )
-        with self.assertRaisesRegex(PhysicalEvidenceError, "reuses a raw report hash"):
-            validate_physical_evidence(value)
+        with self.assertRaisesRegex(PhysicalEvidenceError, "reuses artifact"):
+            self.validate()
 
-    def test_tampered_report_hash_fails_closed(self) -> None:
-        value = fixture()
-        # Mutate the document but leave the declared hash untouched.
-        value["runs"][0]["reports"]["packet"]["document"]["captured_at"] = "2026-07-23T00:00:00Z"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "does not content-address"):
-            validate_physical_evidence(value)
+    def test_candidate_run_mismatch_fails_before_receipt(self) -> None:
+        self.fixture.aggregate["runs"][0]["run_id"] = "foreign-run"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "proof differs"):
+            self.validate()
 
-    def test_wrong_tool_version_fails_closed(self) -> None:
-        value = fixture()
-        value["runs"][0]["reports"]["lifecycle"]["tool_version"] = "lifecycle-matrix-v2"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "tool_version is"):
-            validate_physical_evidence(value)
+    def test_candidate_identity_mismatch_fails(self) -> None:
+        self.fixture.aggregate["candidate"]["app_manifest_sha256"] = "e" * 64
+        with self.assertRaisesRegex(PhysicalEvidenceError, "proof differs"):
+            self.validate()
 
-    def test_any_harness_failure_fails_closed(self) -> None:
-        value = fixture()
-        # Drop a probe from the lifecycle matrix so its own validator rejects it,
-        # then re-hash so the failure surfaces from the harness, not the binding.
-        doc = value["runs"][1]["reports"]["lifecycle"]["document"]
-        doc["probes"].pop()
-        _rehash(value["runs"][1]["reports"]["lifecycle"])
-        with self.assertRaisesRegex(PhysicalEvidenceError, "harness validation failed"):
-            validate_physical_evidence(value)
+    def test_duplicate_run_nonce_fails(self) -> None:
+        self.fixture.aggregate["runs"][1]["run_nonce"] = self.fixture.aggregate["runs"][0][
+            "run_nonce"
+        ]
+        with self.assertRaisesRegex(PhysicalEvidenceError, "reuse a run nonce"):
+            self.validate()
 
-    def test_partial_packet_matrix_fails_closed(self) -> None:
-        value = fixture()
-        doc = value["runs"][0]["reports"]["packet"]["document"]
-        doc["cases"] = doc["cases"][:-1]
-        _rehash(value["runs"][0]["reports"]["packet"])
-        with self.assertRaisesRegex(PhysicalEvidenceError, "harness validation failed"):
-            validate_physical_evidence(value)
+    def test_duplicate_machine_fails(self) -> None:
+        self.fixture.aggregate["runs"][1]["machine_sha256"] = self.fixture.aggregate["runs"][0][
+            "machine_sha256"
+        ]
+        with self.assertRaisesRegex(PhysicalEvidenceError, "reuse a machine"):
+            self.validate()
 
-    def test_manual_assertion_fails_closed(self) -> None:
-        value = fixture()
-        value["runs"][0]["evidence_source"] = "manual"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "manual assertions are rejected"):
-            validate_physical_evidence(value)
+    def test_os_labels_require_the_exact_source_pinned_stable_versions(self) -> None:
+        cases = (
+            (0, "26.6"),
+            (1, "15.7.8"),
+            (1, "27.0"),
+        )
+        for run_index, version in cases:
+            with self.subTest(run_index=run_index, version=version):
+                original = self.fixture.aggregate["runs"][run_index]["macos_version"]
+                self.fixture.aggregate["runs"][run_index]["macos_version"] = version
+                try:
+                    with self.assertRaisesRegex(
+                        PhysicalEvidenceError, "source-pinned stable version"
+                    ):
+                        self.validate()
+                finally:
+                    self.fixture.aggregate["runs"][run_index]["macos_version"] = original
 
-    def test_non_clean_install_fails_closed(self) -> None:
-        value = fixture()
-        value["runs"][1]["clean_install"] = False
-        with self.assertRaisesRegex(PhysicalEvidenceError, "clean physical install"):
-            validate_physical_evidence(value)
+    def test_prerelease_build_cannot_masquerade_as_current_stable(self) -> None:
+        self.fixture.aggregate["runs"][1]["macos_build"] = "25G5123a"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "stable build train"):
+            self.validate()
 
-    def test_non_physical_granted_level_fails_closed(self) -> None:
-        value = fixture()
-        value["granted_level"] = "Sealed_Release_Evidence"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "not the physical level"):
-            validate_physical_evidence(value)
+    def test_wrong_darwin_build_train_is_rejected_for_macos15(self) -> None:
+        self.fixture.aggregate["runs"][0]["macos_build"] = "25G123"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "stable build train"):
+            self.validate()
 
-    def test_source_level_claim_fails_closed(self) -> None:
-        value = fixture()
-        value["granted_level"] = "Source_Implemented"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "not the physical level"):
-            validate_physical_evidence(value)
+    def test_collector_signature_missing_fails(self) -> None:
+        del self.fixture.aggregate["runs"][0]["collector"]["signature"]
+        with self.assertRaisesRegex(PhysicalEvidenceError, "missing required fields"):
+            self.validate()
 
-    def test_invalid_macos_build_fails_closed(self) -> None:
-        value = fixture()
-        value["runs"][0]["macos_build"] = "not a build"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "macos_build is not a macOS build"):
-            validate_physical_evidence(value)
+    def test_collector_signature_tamper_fails(self) -> None:
+        signature = self.fixture.aggregate["runs"][0]["collector"]["signature"]
+        self.fixture.aggregate["runs"][0]["collector"]["signature"] = (
+            "A" if signature[0] != "A" else "B"
+        ) + signature[1:]
+        with self.assertRaisesRegex(PhysicalEvidenceError, "signature is invalid"):
+            self.validate()
 
-    def test_wrong_schema_version_fails_closed(self) -> None:
-        value = fixture()
-        value["schema_version"] = 2
-        with self.assertRaisesRegex(PhysicalEvidenceError, "schema_version"):
-            validate_physical_evidence(value)
+    def test_collector_source_digest_must_match_source_pinned_policy(self) -> None:
+        self.fixture.aggregate["runs"][0]["collector"]["source_sha256"] = "0" * 64
+        with self.assertRaisesRegex(PhysicalEvidenceError, "source-pinned policy"):
+            self.validate()
 
-    def test_wrong_aggregator_version_fails_closed(self) -> None:
-        value = fixture()
-        value["aggregator_version"] = "physical-evidence-aggregator-v2"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "aggregator_version"):
-            validate_physical_evidence(value)
+    def test_aggregate_policy_digest_cannot_be_swapped(self) -> None:
+        self.fixture.aggregate["trust_policy_sha256"] = "0" * 64
+        with self.assertRaisesRegex(PhysicalEvidenceError, "source-pinned policy"):
+            self.validate()
 
-    def test_unknown_top_level_field_fails_closed(self) -> None:
-        value = fixture()
-        value["signed_installed_verified"] = True
-        with self.assertRaisesRegex(PhysicalEvidenceError, "unknown fields"):
-            validate_physical_evidence(value)
+    def test_semantic_declaration_mismatch_fails_even_with_resigned_receipt(self) -> None:
+        report = self.fixture.report_documents[0]["performance"]
+        report["latency"]["connect_ms"]["p95"] = 1.0
+        self.fixture.resign_run(0)
+        with self.assertRaisesRegex(PhysicalEvidenceError, "raw sample bytes"):
+            self.validate()
 
-    def test_non_object_document_fails_closed(self) -> None:
-        with self.assertRaisesRegex(PhysicalEvidenceError, "must be a JSON object"):
-            validate_physical_evidence(["not", "an", "object"])
+    def test_stale_report_fails(self) -> None:
+        self.fixture.aggregate["runs"][0]["reports"]["packet"][
+            "captured_at"
+        ] = "2026-01-01T00:00:00Z"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "stale"):
+            self.validate()
+
+    def test_old_claim_only_schema_is_rejected(self) -> None:
+        value = {
+            "schema_version": 1,
+            "aggregator_version": "physical-evidence-aggregator-v1",
+            "granted_level": GRANTED_LEVEL,
+            "candidate": self.fixture.aggregate["candidate"],
+            "runs": [],
+        }
+        with self.assertRaisesRegex(PhysicalEvidenceError, "missing required fields"):
+            validate_physical_evidence(
+                value,
+                evidence_root=self.root,
+                trust_policy=self.fixture.policy,
+                fixture=True,
+            )
 
 
 class PhysicalEvidenceLoaderTests(unittest.TestCase):
-    def test_symlink_file_fails_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            real = os.path.join(tmp, "aggregate.json")
-            with open(real, "w", encoding="utf-8") as handle:
-                json.dump(fixture(), handle)
-            link = os.path.join(tmp, "link.json")
-            os.symlink(real, link)
-            with self.assertRaisesRegex(PhysicalEvidenceError, "non-symlink"):
-                load_physical_evidence(Path(link))
-
-    def test_duplicate_json_key_fails_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "aggregate.json")
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write('{"schema_version": 1, "schema_version": 1}')
-            with self.assertRaisesRegex(PhysicalEvidenceError, "duplicate field"):
-                load_physical_evidence(Path(path))
-
-    def test_valid_aggregate_file_grants_level(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "aggregate.json")
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(fixture(), handle)
-            summary = load_physical_evidence(Path(path))
+    def test_aggregate_path_and_root_are_used_for_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture_value = PhysicalEvidenceFixture(Path(temporary))
+            path = fixture_value.write_aggregate()
+            summary = load_physical_evidence(
+                path,
+                evidence_root=Path(temporary),
+                trust_policy=fixture_value.policy,
+                fixture=True,
+            )
             self.assertEqual(summary["granted_level"], GRANTED_LEVEL)
+            self.assertEqual(summary["aggregate_artifact"]["kind"], "physical-aggregate")
+            self.assertEqual(
+                summary["private_archive"]["aggregate_artifact"],
+                summary["aggregate_artifact"],
+            )
+            self.assertEqual(
+                summary["private_archive"]["artifact_count"], summary["artifact_count"]
+            )
+
+    def test_bound_aggregate_bytes_are_required_not_only_summary_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture_value = PhysicalEvidenceFixture(root)
+            artifact = fixture_value.write_aggregate_artifact()
+            path = root / artifact["path"]
+            path.write_bytes(path.read_bytes() + b"drift")
+            with self.assertRaisesRegex(PhysicalEvidenceError, "size does not match"):
+                load_physical_evidence_artifact(
+                    artifact,
+                    evidence_root=root,
+                    trust_policy=fixture_value.policy,
+                    fixture=True,
+                )
+
+    def test_aggregate_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture_value = PhysicalEvidenceFixture(root)
+            path = fixture_value.write_aggregate()
+            link = root / "aggregate-link.json"
+            os.symlink(path, link)
+            with self.assertRaisesRegex(PhysicalEvidenceError, "non-symlink"):
+                load_physical_evidence(
+                    link,
+                    evidence_root=root,
+                    trust_policy=fixture_value.policy,
+                    fixture=True,
+                )
+
+    def test_caller_supplied_test_policy_cannot_grant_production(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture_value = PhysicalEvidenceFixture(root)
+            path = fixture_value.write_aggregate()
+            with self.assertRaisesRegex(PhysicalEvidenceError, "require fixture mode"):
+                load_physical_evidence(
+                    path,
+                    evidence_root=root,
+                    trust_policy=fixture_value.policy,
+                )
+
+    def test_forged_source_pinned_flag_cannot_bypass_unconfigured_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture_value = PhysicalEvidenceFixture(root)
+            artifact = fixture_value.write_aggregate_artifact()
+            forged = replace(fixture_value.policy, release_source_pinned=True)
+            with self.assertRaisesRegex(PhysicalEvidenceError, "not configured"):
+                load_physical_evidence_artifact(
+                    artifact,
+                    evidence_root=root,
+                    trust_policy=forged,
+                )
+
+    def test_production_policy_object_must_equal_reloaded_source_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture_value = PhysicalEvidenceFixture(root)
+            artifact = fixture_value.write_aggregate_artifact()
+            canonical = replace(fixture_value.policy, release_source_pinned=True)
+            forged = replace(canonical, key_id="operator-selected-key")
+            with patch(
+                "scripts.harness.physical_evidence_aggregator.load_release_trust_policy",
+                return_value=canonical,
+            ):
+                with self.assertRaisesRegex(PhysicalEvidenceError, "does not exactly match"):
+                    load_physical_evidence_artifact(
+                        artifact,
+                        evidence_root=root,
+                        trust_policy=forged,
+                    )
+
+    def test_parsed_aggregate_api_is_fixture_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture_value = PhysicalEvidenceFixture(root)
+            forged = replace(fixture_value.policy, release_source_pinned=True)
+            with self.assertRaisesRegex(PhysicalEvidenceError, "fixture-only"):
+                validate_physical_evidence(
+                    fixture_value.aggregate,
+                    evidence_root=root,
+                    trust_policy=forged,
+                )
+
+    def test_default_release_policy_blocks_when_production_key_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture_value = PhysicalEvidenceFixture(Path(temporary))
+            path = fixture_value.write_aggregate()
+            with self.assertRaisesRegex(PhysicalEvidenceError, "not configured"):
+                load_physical_evidence(path, evidence_root=Path(temporary))
 
 
 if __name__ == "__main__":

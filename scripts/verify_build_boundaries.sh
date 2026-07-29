@@ -20,9 +20,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_native_product_graph.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/notarization_transaction.py --self-check
 
 # Confirm the Signed_Installed physical-evidence aggregator is wired to all four
-# harnesses and the Evidence_Manifest level order. This is a source-boundary
-# contract check only; the physical evidence itself requires signed Apple
-# Silicon runs on two macOS versions and is captured separately.
+# v2 proof-to-byte harnesses, the source-pinned collector policy bytes, and the
+# Evidence_Manifest level order. This is a source-boundary contract check only;
+# the physical evidence itself requires signed Apple Silicon runs on two macOS
+# versions and an externally provisioned collector trust root.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/harness/physical_evidence_aggregator.py --self-check
 
 # Confirm the final-candidate notarization/installed binder (Task 12.2) is wired

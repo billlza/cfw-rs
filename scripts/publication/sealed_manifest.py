@@ -86,7 +86,14 @@ try:  # pragma: no cover - import shim exercised by both invocation styles
     from scripts.harness.physical_evidence_aggregator import (
         GRANTED_LEVEL as PHYSICAL_GRANTED_LEVEL,
         PhysicalEvidenceError,
-        validate_physical_evidence,
+        load_physical_evidence_artifact,
+    )
+    from scripts.harness.raw_artifacts import (
+        CollectorTrustNotConfiguredError,
+        CollectorTrustPolicy,
+        RawArtifactError,
+        load_release_trust_policy,
+        parse_descriptor,
     )
     from scripts.release_build_identity import BuildIdentityError, canonical_build_version
     from scripts.updater_key_release_blocker import (
@@ -106,7 +113,14 @@ except ImportError:  # pragma: no cover - CLI invocation style
     from scripts.harness.physical_evidence_aggregator import (
         GRANTED_LEVEL as PHYSICAL_GRANTED_LEVEL,
         PhysicalEvidenceError,
-        validate_physical_evidence,
+        load_physical_evidence_artifact,
+    )
+    from scripts.harness.raw_artifacts import (
+        CollectorTrustNotConfiguredError,
+        CollectorTrustPolicy,
+        RawArtifactError,
+        load_release_trust_policy,
+        parse_descriptor,
     )
     from scripts.release_build_identity import BuildIdentityError, canonical_build_version
     from scripts.updater_key_release_blocker import (
@@ -555,12 +569,36 @@ def _updater_key_gate(workspace_root: Path) -> dict[str, Any]:
     return _gate(status, {"blocks": blocks})
 
 
-def _signed_installed_gate(value: object, product: dict[str, str]) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise PublicationError("signed-installed aggregate must be a JSON object")
+def _signed_installed_gate(
+    value: object,
+    product: dict[str, str],
+    *,
+    evidence_root: Path,
+    trust_policy: CollectorTrustPolicy | None,
+    fixture: bool,
+) -> dict[str, Any]:
     try:
-        summary = validate_physical_evidence(value)
-    except PhysicalEvidenceError as error:
+        aggregate_artifact = parse_descriptor(
+            value,
+            expected_kinds={"physical-aggregate"},
+            label="signed-installed aggregate artifact",
+        ).as_dict()
+    except RawArtifactError as error:
+        raise PublicationError(f"signed-installed descriptor is invalid: {error}") from error
+    try:
+        policy = load_release_trust_policy() if trust_policy is None else trust_policy
+    except CollectorTrustNotConfiguredError:
+        return _gate(BLOCKED, None)
+    except RawArtifactError as error:
+        raise PublicationError(f"collector trust policy is invalid: {error}") from error
+    try:
+        summary = load_physical_evidence_artifact(
+            aggregate_artifact,
+            evidence_root=evidence_root,
+            trust_policy=policy,
+            fixture=fixture,
+        )
+    except (PhysicalEvidenceError, RawArtifactError) as error:
         raise PublicationError(f"signed-installed evidence is invalid: {error}") from error
     if summary["granted_level"] != INSTALLED_LEVEL:
         raise PublicationError("signed-installed aggregate does not grant the installed level")
@@ -577,6 +615,9 @@ def _signed_installed_gate(value: object, product: dict[str, str]) -> dict[str, 
             "reports": summary["reports"],
             "signed_app_tree_sha256": candidate["signed_app_tree_sha256"],
             "app_manifest_sha256": candidate["app_manifest_sha256"],
+            "trust_policy_sha256": summary["trust_policy_sha256"],
+            "aggregate_artifact": summary["aggregate_artifact"],
+            "private_archive": summary["private_archive"],
         },
     )
 
@@ -615,10 +656,17 @@ def _final_candidate_gate(
     commit: str,
     fixture: bool,
     workspace_root: Path,
+    physical_evidence_root: Path,
+    physical_trust_policy: CollectorTrustPolicy | None,
 ) -> dict[str, Any]:
     try:
         binding = validate_final_candidate_binding(
-            repository, value, fixture=fixture, workspace_root=workspace_root
+            repository,
+            value,
+            fixture=fixture,
+            workspace_root=workspace_root,
+            physical_evidence_root=physical_evidence_root,
+            physical_trust_policy=physical_trust_policy,
         )
     except PublicationError as error:
         raise PublicationError(f"final candidate binding is invalid: {error}") from error
@@ -643,6 +691,9 @@ def _final_candidate_gate(
             ),
             "report_bindings": len(binding["report_bindings"]),
             "installed_runs": [entry["os"] for entry in binding["installed_runs"]],
+            "trust_policy_sha256": binding["physical_trust_policy_sha256"],
+            "aggregate_artifact": binding["physical_evidence"],
+            "private_archive": binding["physical_archive"],
         },
     )
 
@@ -675,12 +726,25 @@ def _cross_bind_gates(gates: dict[str, dict[str, Any]], payload: dict[str, Any])
             raise PublicationError(
                 "signed-installed evidence and final candidate bind different app manifests"
             )
-        # The final candidate embeds the aggregate it was bound to; a different
-        # aggregate here is a stale or substituted run set.
+        if installed["trust_policy_sha256"] != candidate["trust_policy_sha256"]:
+            raise PublicationError(
+                "signed-installed evidence and final candidate bind different "
+                "collector trust policies"
+            )
+        if installed["aggregate_artifact"] != candidate["aggregate_artifact"]:
+            raise PublicationError(
+                "final candidate binds a different physical aggregate artifact than the manifest"
+            )
+        if installed["private_archive"] != candidate["private_archive"]:
+            raise PublicationError(
+                "signed-installed and final-candidate gates derived different private archives"
+            )
+        # Both public inputs carry only the same strict aggregate descriptor;
+        # the raw aggregate and descendants stay in the retained private root.
         embedded = payload["final_candidate"].get("physical_evidence")
         if embedded != payload["signed_installed"]:
             raise PublicationError(
-                "final candidate embeds a different physical evidence aggregate than the manifest"
+                "final candidate binds a different physical evidence descriptor than the manifest"
             )
 
 
@@ -906,7 +970,13 @@ DOCUMENT_FIELDS = {
 
 
 def build_sealed_evidence_manifest(
-    repository: Path, request: object, *, fixture: bool, workspace_root: Path | None = None
+    repository: Path,
+    request: object,
+    *,
+    fixture: bool,
+    workspace_root: Path | None = None,
+    physical_evidence_root: Path | None = None,
+    physical_trust_policy: CollectorTrustPolicy | None = None,
 ) -> dict[str, Any]:
     """Assemble the canonical, self-sealing outer Evidence Manifest.
 
@@ -916,6 +986,7 @@ def build_sealed_evidence_manifest(
     acceptance.
     """
     root = repository if workspace_root is None else workspace_root
+    evidence_root = repository if physical_evidence_root is None else physical_evidence_root
     payload = require_exact_keys(request, REQUEST_FIELDS, "sealed evidence manifest request")
     product = _product(payload["product"])
     commit = _require_commit(payload["commit"], "repository commit")
@@ -948,7 +1019,13 @@ def build_sealed_evidence_manifest(
     if payload["signed_installed"] is None:
         gates["signed_installed"] = _gate(NOT_RUN, None)
     else:
-        gates["signed_installed"] = _signed_installed_gate(payload["signed_installed"], product)
+        gates["signed_installed"] = _signed_installed_gate(
+            payload["signed_installed"],
+            product,
+            evidence_root=evidence_root,
+            trust_policy=physical_trust_policy,
+            fixture=fixture,
+        )
     if payload["sealed_closure"] is None:
         gates["sealed_closure"] = _gate(NOT_RUN, None)
     else:
@@ -959,7 +1036,14 @@ def build_sealed_evidence_manifest(
         gates["final_candidate"] = _gate(NOT_RUN, None)
     else:
         gates["final_candidate"] = _final_candidate_gate(
-            repository, payload["final_candidate"], product, commit, fixture, root
+            repository,
+            payload["final_candidate"],
+            product,
+            commit,
+            fixture,
+            root,
+            evidence_root,
+            physical_trust_policy,
         )
     gates[UPDATER_KEY_GATE] = _updater_key_gate(root)
 
@@ -1008,6 +1092,21 @@ def build_sealed_evidence_manifest(
             [] if candidate_evidence is None else candidate_evidence["final_artifact_hashes"]
         ),
         "installed_runs": [] if installed_evidence is None else installed_evidence["runs"],
+        "physical_trust_policy_sha256": (
+            None
+            if installed_evidence is None
+            else installed_evidence["trust_policy_sha256"]
+        ),
+        "physical_aggregate_sha256": (
+            None
+            if installed_evidence is None
+            else installed_evidence["aggregate_artifact"]["sha256"]
+        ),
+        "physical_private_archive_sha256": (
+            None
+            if installed_evidence is None
+            else installed_evidence["private_archive"]["binding_sha256"]
+        ),
     }
 
     blocked_inputs = sorted(name for name in GATE_ORDER if gates[name]["status"] != PASSED)
@@ -1046,6 +1145,8 @@ def validate_sealed_evidence_manifest(
     *,
     fixture: bool,
     workspace_root: Path | None = None,
+    physical_evidence_root: Path | None = None,
+    physical_trust_policy: CollectorTrustPolicy | None = None,
     require_sealed: bool = False,
 ) -> dict[str, Any]:
     """Fail-closed validation of a sealed outer Evidence Manifest.
@@ -1080,7 +1181,12 @@ def validate_sealed_evidence_manifest(
         "final_candidate": parsed["final_candidate"],
     }
     rebuilt = build_sealed_evidence_manifest(
-        repository, request, fixture=fixture, workspace_root=root
+        repository,
+        request,
+        fixture=fixture,
+        workspace_root=root,
+        physical_evidence_root=physical_evidence_root,
+        physical_trust_policy=physical_trust_policy,
     )
 
     if sorted(parsed["blocked_inputs"]) != rebuilt["blocked_inputs"]:
@@ -1120,6 +1226,8 @@ def authorize_publication_artifacts(
     *,
     fixture: bool = False,
     workspace_root: Path | None = None,
+    physical_evidence_root: Path | None = None,
+    physical_trust_policy: CollectorTrustPolicy | None = None,
 ) -> dict[str, Any]:
     """Authorize creating publication artifacts, or refuse. There is no override.
 
@@ -1132,6 +1240,8 @@ def authorize_publication_artifacts(
         document,
         fixture=fixture,
         workspace_root=workspace_root,
+        physical_evidence_root=physical_evidence_root,
+        physical_trust_policy=physical_trust_policy,
         require_sealed=True,
     )
     decision = result["publication"]
@@ -1246,7 +1356,7 @@ def self_check() -> None:
         raise PublicationError("an empty gate table must authorize no evidence level")
     if publication_decision(empty, [])["allowed"]:
         raise PublicationError("an empty gate table must refuse publication")
-    if validate_physical_evidence is None or evaluate_workspace is None:
+    if load_physical_evidence_artifact is None or evaluate_workspace is None:
         raise PublicationError("outer seal is not wired to its dependencies")
     if validate_sealed_closure is None or validate_final_candidate_binding is None:
         raise PublicationError("outer seal is not wired to the sealed closure / final candidate")

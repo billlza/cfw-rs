@@ -25,7 +25,7 @@ from scripts.publication.common import PublicationError, canonical_json, tree_di
 from scripts.publication.final_candidate import (
     REQUIRED_NESTED_CODE,
     TEAM_ID,
-    build_final_candidate_binding,
+    build_final_candidate_binding as _build_final_candidate_binding,
 )
 from scripts.publication.sealed_closure import build_sealed_closure, derive_supply_chain
 from scripts.repository_source_identity import repository_commit
@@ -42,18 +42,20 @@ from scripts.publication.sealed_manifest import (
     SEALED,
     SEALED_LEVEL,
     _documents,
-    authorize_publication_artifacts,
-    build_sealed_evidence_manifest,
+    authorize_publication_artifacts as _authorize_publication_artifacts,
+    build_sealed_evidence_manifest as _build_sealed_evidence_manifest,
     environment_status,
     load_sealed_manifest,
     seal_manifest,
     self_check,
-    validate_sealed_evidence_manifest,
+    validate_sealed_evidence_manifest as _validate_sealed_evidence_manifest,
 )
 from scripts.tests.test_physical_evidence_aggregator import (
     APP_MANIFEST,
     BUILD_NUMBER,
     BUILT_AT,
+    PHYSICAL_EVIDENCE_ROOT,
+    PHYSICAL_TRUST_POLICY,
     SIGNED_TREE,
     fixture as physical_fixture,
 )
@@ -71,6 +73,30 @@ CAPTURED_AT = "2026-07-22T00:00:00Z"
 OBSERVED_AT = "2026-08-01T00:00:00Z"
 PINNED = derive_supply_chain(REPOSITORY)["patched_source"]
 CAPABILITIES = ("global-authority", "ticket-only-tunnel")
+
+
+def build_final_candidate_binding(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _build_final_candidate_binding(*args, **kwargs)
+
+
+def build_sealed_evidence_manifest(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _build_sealed_evidence_manifest(*args, **kwargs)
+
+
+def validate_sealed_evidence_manifest(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _validate_sealed_evidence_manifest(*args, **kwargs)
+
+
+def authorize_publication_artifacts(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _authorize_publication_artifacts(*args, **kwargs)
 
 
 def digest(label: str) -> str:
@@ -335,6 +361,23 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
             REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
         )
 
+    def test_publication_authorization_reopens_the_private_aggregate(self) -> None:
+        payload = request(3, self.workspace)
+        manifest = self.build(payload)
+        aggregate_path = REPOSITORY / payload["signed_installed"]["path"]
+        original = aggregate_path.read_bytes()
+        try:
+            aggregate_path.write_bytes(original + b"drift")
+            with self.assertRaisesRegex(PublicationError, "size does not match"):
+                authorize_publication_artifacts(
+                    REPOSITORY,
+                    manifest,
+                    fixture=True,
+                    workspace_root=self.workspace,
+                )
+        finally:
+            aggregate_path.write_bytes(original)
+
     def test_every_level_binds_its_own_gates(self) -> None:
         for depth, level in enumerate(LEVEL_ORDER):
             with self.subTest(level=level):
@@ -386,6 +429,16 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
             bindings["final_candidate_sha256"], manifest["final_candidate"]["binding_sha256"]
         )
         self.assertEqual(sorted(bindings["installed_runs"]), ["current-macos", "macos15"])
+        self.assertEqual(
+            bindings["physical_aggregate_sha256"],
+            manifest["signed_installed"]["sha256"],
+        )
+        self.assertEqual(
+            bindings["physical_private_archive_sha256"],
+            manifest["gates"]["signed_installed"]["evidence"]["private_archive"][
+                "binding_sha256"
+            ],
+        )
         # Every feature document and publication document is bound by digest.
         identifiers = {entry["id"] for entry in manifest["documents"]}
         self.assertTrue(set(REQUIRED_DOCUMENTS).issubset(identifiers))
@@ -565,12 +618,16 @@ class SealedManifestBindingTests(_CleanWorkspace):
         with self.assertRaisesRegex(PublicationError, "different signed app trees"):
             self.build(payload)
 
-    def test_final_candidate_must_embed_the_bound_aggregate(self) -> None:
+    def test_final_candidate_must_bind_the_same_aggregate_artifact(self) -> None:
         payload = request(3, self.workspace)
         substituted = copy.deepcopy(payload["signed_installed"])
-        substituted["runs"][0]["captured_at"] = "2026-07-23T00:00:00Z"
+        source = REPOSITORY / substituted["path"]
+        target = source.with_name("aggregate-substituted.json")
+        target.write_bytes(source.read_bytes())
+        self.addCleanup(target.unlink, missing_ok=True)
+        substituted["path"] = target.relative_to(REPOSITORY).as_posix()
         payload["signed_installed"] = substituted
-        with self.assertRaisesRegex(PublicationError, "different physical evidence aggregate"):
+        with self.assertRaisesRegex(PublicationError, "different physical aggregate artifact"):
             self.build(payload)
 
     def test_lane_may_not_mask_a_nonzero_exit(self) -> None:

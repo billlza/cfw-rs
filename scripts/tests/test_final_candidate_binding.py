@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,21 +17,24 @@ from scripts.publication.final_candidate import (
     TEAM_ID,
     UPDATER_KEY_BLOCK,
     VERIFIED,
-    build_final_candidate_binding,
+    build_final_candidate_binding as _build_final_candidate_binding,
     environment_status,
     self_check,
-    validate_final_candidate_binding,
+    validate_final_candidate_binding as _validate_final_candidate_binding,
 )
-from scripts.harness.physical_evidence_aggregator import _canonical_report_hash
 from scripts.publication.sealed_closure import derive_supply_chain
 from scripts.repository_source_identity import repository_commit
 from scripts.tests.test_physical_evidence_aggregator import (
     APP_MANIFEST,
     BUILD_NUMBER,
     BUILT_AT,
+    PHYSICAL_EVIDENCE_ROOT,
+    PHYSICAL_TRUST_POLICY,
     SIGNED_TREE,
+    aggregate_fixture,
     fixture as physical_fixture,
 )
+from scripts.tests.physical_evidence_fixture import PhysicalEvidenceFixture
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 from scripts.tests.gatekeeper_fixture import macos_27_fixture
 
@@ -42,6 +46,18 @@ OBSERVED_AT = "2026-07-26T00:00:00Z"
 # The pinned patched-source identity the XCFramework must declare, taken from the
 # same sealed-closure derivation the release pipeline uses.
 PINNED = derive_supply_chain(REPOSITORY)["patched_source"]
+
+
+def build_final_candidate_binding(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _build_final_candidate_binding(*args, **kwargs)
+
+
+def validate_final_candidate_binding(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _validate_final_candidate_binding(*args, **kwargs)
 
 
 def _sha(label: str) -> str:
@@ -163,6 +179,18 @@ class FinalCandidateRoundTripTests(_CleanWorkspaceMixin):
         self.assertEqual(binding["status"], VERIFIED)
         self.assertEqual(binding["blocked_inputs"], [])
         self.validate(binding, require_verified=True)
+
+    def test_unconfigured_production_collector_key_is_an_explicit_blocker(self) -> None:
+        binding = _build_final_candidate_binding(
+            REPOSITORY,
+            _request(),
+            fixture=True,
+            workspace_root=self.workspace,
+            physical_evidence_root=REPOSITORY,
+        )
+        self.assertEqual(binding["status"], BLOCKED)
+        self.assertIn("collector_trust_policy", binding["blocked_inputs"])
+        self.assertIsNone(binding["physical_trust_policy_sha256"])
 
     def test_all_inside_out_identities_are_bound(self) -> None:
         binding = self.build()
@@ -352,32 +380,84 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
             )
 
     def test_physical_evidence_foreign_tree_rejected(self) -> None:
-        request = _request()
-        # Rebind the physical aggregate's signed tree to a foreign value.
-        request["final_artifacts"]["signed_app_tree_sha256"] = SIGNED_TREE
-        aggregate = request["physical_evidence"]
-        aggregate["candidate"]["signed_app_tree_sha256"] = "f" * 64
-        with self.assertRaises(PublicationError):
-            build_final_candidate_binding(
-                REPOSITORY, request, fixture=True, workspace_root=self.workspace
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            physical = PhysicalEvidenceFixture(root)
+            physical.aggregate["candidate"]["signed_app_tree_sha256"] = "f" * 64
+            request = _request(
+                physical_evidence=physical.write_aggregate_artifact()
             )
+            with self.assertRaises(PublicationError):
+                _build_final_candidate_binding(
+                    REPOSITORY,
+                    request,
+                    fixture=True,
+                    workspace_root=self.workspace,
+                    physical_evidence_root=root,
+                    physical_trust_policy=physical.policy,
+                )
 
     def test_physical_evidence_stale_build_time_rejected(self) -> None:
-        request = _request()
-        request["physical_evidence"]["candidate"]["built_at"] = "2026-01-01T00:00:00Z"
-        with self.assertRaisesRegex(PublicationError, "build time does not match"):
-            build_final_candidate_binding(
-                REPOSITORY, request, fixture=True, workspace_root=self.workspace
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            physical = PhysicalEvidenceFixture(root)
+            physical.aggregate["candidate"]["built_at"] = "2026-01-01T00:00:00Z"
+            request = _request(
+                physical_evidence=physical.write_aggregate_artifact()
             )
+            with self.assertRaisesRegex(PublicationError, "collector receipt signature is invalid"):
+                _build_final_candidate_binding(
+                    REPOSITORY,
+                    request,
+                    fixture=True,
+                    workspace_root=self.workspace,
+                    physical_evidence_root=root,
+                    physical_trust_policy=physical.policy,
+                )
 
     def test_physical_evidence_harness_failure_rejected(self) -> None:
-        request = _request()
-        # Corrupt an embedded harness so its own validator rejects it.
-        del request["physical_evidence"]["runs"][0]["reports"]["packet"]
-        with self.assertRaisesRegex(PublicationError, "physical evidence aggregate is invalid"):
-            build_final_candidate_binding(
-                REPOSITORY, request, fixture=True, workspace_root=self.workspace
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            physical = PhysicalEvidenceFixture(root)
+            del physical.aggregate["runs"][0]["reports"]["packet"]
+            request = _request(
+                physical_evidence=physical.write_aggregate_artifact()
             )
+            with self.assertRaisesRegex(PublicationError, "physical evidence aggregate is invalid"):
+                _build_final_candidate_binding(
+                    REPOSITORY,
+                    request,
+                    fixture=True,
+                    workspace_root=self.workspace,
+                    physical_evidence_root=root,
+                    physical_trust_policy=physical.policy,
+                )
+
+    def test_validation_reopens_the_bound_aggregate_from_the_private_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            physical = PhysicalEvidenceFixture(root)
+            aggregate_artifact = physical.write_aggregate_artifact()
+            request = _request(physical_evidence=aggregate_artifact)
+            binding = _build_final_candidate_binding(
+                REPOSITORY,
+                request,
+                fixture=True,
+                workspace_root=self.workspace,
+                physical_evidence_root=root,
+                physical_trust_policy=physical.policy,
+            )
+            aggregate_path = root / aggregate_artifact["path"]
+            aggregate_path.write_bytes(aggregate_path.read_bytes() + b"drift")
+            with self.assertRaisesRegex(PublicationError, "size does not match"):
+                _validate_final_candidate_binding(
+                    REPOSITORY,
+                    binding,
+                    fixture=True,
+                    workspace_root=self.workspace,
+                    physical_evidence_root=root,
+                    physical_trust_policy=physical.policy,
+                )
 
     def test_xcframework_must_be_bound_by_final_artifact_hashes(self) -> None:
         request = _request()
@@ -452,40 +532,44 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
             [run["os"] for run in binding["installed_runs"]], ["current-macos", "macos15"]
         )
 
-    def test_soak_mutation_changes_the_bound_soak_hash(self) -> None:
-        baseline = self.build()
-        soak_hashes = {
-            entry["report_sha256"]
-            for entry in baseline["report_bindings"]
+    def test_soak_binding_is_the_raw_performance_sample_bytes(self) -> None:
+        binding = self.build()
+        aggregate = aggregate_fixture()
+        expected = {}
+        for run in aggregate["runs"]:
+            report_path = REPOSITORY / run["reports"]["performance"]["artifact"]["path"]
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            expected[run["os"]] = report["samples_artifact"]["sha256"]
+        actual = {
+            entry["os"]: entry["report_sha256"]
+            for entry in binding["report_bindings"]
             if entry["category"] == "soak"
         }
-        request = _request()
-        for run in request["physical_evidence"]["runs"]:
-            run["reports"]["performance"]["document"]["soak"]["duration_hours"] = 25
-            run["reports"]["performance"]["report_sha256"] = _canonical_report_hash(
-                run["reports"]["performance"]["document"]
-            )
-        mutated = build_final_candidate_binding(
-            REPOSITORY, request, fixture=True, workspace_root=self.workspace
-        )
-        mutated_hashes = {
-            entry["report_sha256"]
-            for entry in mutated["report_bindings"]
-            if entry["category"] == "soak"
-        }
-        self.assertTrue(soak_hashes.isdisjoint(mutated_hashes))
+        self.assertEqual(actual, expected)
 
     def test_incomplete_soak_fails_the_level(self) -> None:
-        request = _request()
-        run = request["physical_evidence"]["runs"][0]
-        run["reports"]["performance"]["document"]["soak"]["duration_hours"] = 12
-        run["reports"]["performance"]["report_sha256"] = _canonical_report_hash(
-            run["reports"]["performance"]["document"]
-        )
-        with self.assertRaisesRegex(PublicationError, "physical evidence aggregate is invalid"):
-            build_final_candidate_binding(
-                REPOSITORY, request, fixture=True, workspace_root=self.workspace
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            physical = PhysicalEvidenceFixture(root)
+            report = physical.report_documents[0]["performance"]
+            artifact = report["samples_artifact"]
+            raw = json.loads((root / artifact["path"]).read_text(encoding="utf-8"))
+            raw["soak"]["ended_at"] = "2026-07-22T12:00:00Z"
+            report["soak"]["duration_hours"] = 12.0
+            physical.rewrite_json(artifact, raw)
+            physical.resign_run(0)
+            request = _request(
+                physical_evidence=physical.write_aggregate_artifact()
             )
+            with self.assertRaisesRegex(PublicationError, "physical evidence aggregate is invalid"):
+                build_final_candidate_binding(
+                    REPOSITORY,
+                    request,
+                    fixture=True,
+                    workspace_root=self.workspace,
+                    physical_evidence_root=root,
+                    physical_trust_policy=physical.policy,
+                )
 
     def test_post_verification_app_tree_drift_rejected(self) -> None:
         request = _request()

@@ -36,8 +36,7 @@ metrics must be bounded and observable.
 
 ## Correctness matrix
 
-Each run uses a unique token and packet capture or server-side observation to
-prove:
+Each run uses a unique token and a bounded pcap/pcapng capture to prove:
 
 - TCP over IPv4 and IPv6;
 - UDP and QUIC;
@@ -55,6 +54,10 @@ digest, provider readiness, and OS status.
 
 ## Release evidence
 
-Store raw measurements and hashes as immutable release evidence. CI may run
-fast deterministic unit tests, but physical Apple Silicon data-plane, weak-net,
-resource, and soak gates remain mandatory publication gates.
+Store raw measurements as strict artifact descriptors under the evidence root.
+The v2 validator reopens and hashes the bytes, recomputes every summary, and
+requires a source-pinned signed collector receipt over the complete report/raw
+set. See [Physical evidence v2](physical-evidence-v2.md). CI may run fast
+deterministic unit tests, but physical Apple Silicon data-plane, weak-net,
+resource, soak, and external collector-trust gates remain mandatory publication
+gates.

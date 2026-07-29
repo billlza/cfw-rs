@@ -43,11 +43,15 @@ from scripts.publication.sealed_manifest import (
     PASSED,
     SEALED,
     SEALED_LEVEL,
-    authorize_publication_artifacts,
-    build_sealed_evidence_manifest,
+    authorize_publication_artifacts as _authorize_publication_artifacts,
+    build_sealed_evidence_manifest as _build_sealed_evidence_manifest,
     load_sealed_manifest,
     seal_manifest,
-    validate_sealed_evidence_manifest,
+    validate_sealed_evidence_manifest as _validate_sealed_evidence_manifest,
+)
+from scripts.tests.test_physical_evidence_aggregator import (
+    PHYSICAL_EVIDENCE_ROOT,
+    PHYSICAL_TRUST_POLICY,
 )
 from scripts.tests.test_sealed_manifest import (
     COMMIT,
@@ -69,6 +73,24 @@ CAPABILITY_POOL = (
     "one-way-migration",
     "release-evidence",
 )
+
+
+def build_sealed_evidence_manifest(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _build_sealed_evidence_manifest(*args, **kwargs)
+
+
+def validate_sealed_evidence_manifest(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _validate_sealed_evidence_manifest(*args, **kwargs)
+
+
+def authorize_publication_artifacts(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _authorize_publication_artifacts(*args, **kwargs)
 
 
 def _commit(rng: random.Random) -> str:
@@ -184,9 +206,9 @@ def mutate_stale_closure_signed_app(payload, rng, workspace):
 
 
 def mutate_substituted_aggregate(payload, rng, workspace):
-    aggregate = copy.deepcopy(payload["signed_installed"])
-    aggregate["runs"][0]["captured_at"] = "2026-07-25T12:00:00Z"
-    payload["signed_installed"] = aggregate
+    artifact = copy.deepcopy(payload["signed_installed"])
+    artifact["sha256"] = _sha(rng)
+    payload["signed_installed"] = artifact
     return "substituted-aggregate"
 
 

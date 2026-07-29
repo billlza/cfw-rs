@@ -1,133 +1,149 @@
 #!/usr/bin/env python3
-"""Fail-closed aggregator that grants Signed_Installed_Verified (Task 11.5).
+"""Source-pinned proof-to-byte physical-evidence aggregation gate.
 
-Requirement 6 splits the signed-installed evidence into four physical harnesses:
-the lifecycle matrix (6.1), unique-token packet evidence (6.2), the
-weak-network / performance / switch / soak gates (6.3), and the separately
-signed adversarial / tamper matrix (6.4). Requirement 6.5 forbids turning any
-absent, skipped, masked, stale, or unsuccessful result into success, Requirement
-4.1 keeps each capability pinned to exactly one evidence level, and Requirement
-7.5 keeps source existence separate from physical proof.
+The aggregate contains descriptors for four v2 harness reports, never embedded
+claim-only documents. Each report is reopened and hashed beneath the aggregate's
+evidence root; each harness then reopens and validates its own raw artifacts.
+Finally, a source-pinned external collector key verifies a canonical receipt
+covering the candidate, run identity, report descriptors, and complete raw set.
 
-This module is the completeness gate that sits on top of those four harnesses.
-It consumes each harness's own validator as a black box and only grants
-``Signed_Installed_Verified`` when every one of the following holds:
-
-* both required clean physical run sets are present - macOS 15 *and* the current
-  macOS - each a distinct clean Apple Silicon run;
-* every run carries all four harness documents and each document passes its own
-  harness validator unchanged (any harness-level failure fails the level);
-* every embedded harness document is bound to the exact same candidate identity
-  (product version, build number, app-manifest hash, signed-app-tree hash) and
-  to the run's own macOS version / build;
-* every raw report is content-addressed: the declared ``report_sha256`` equals
-  the canonical hash of the embedded document, and no report hash is reused
-  across the aggregate (no duplicated or replayed report);
-* every report carries the exact tool version for its harness and a UTC capture
-  timestamp no older than the candidate's build time (no stale evidence);
-* the aggregate asserts only the physical level and never hand-asserts a result:
-  a ``manual``/``asserted`` evidence source or any non-physical ``granted_level``
-  is rejected.
-
-Absence is never success: a missing OS, a missing harness, a partial matrix, a
-mismatched candidate, a stale or duplicated report, a manual assertion, or any
-single harness failure raises :class:`PhysicalEvidenceError` and the whole
-Signed_Installed level fails closed.
-
-The signed physical runs themselves require signed Apple Silicon hardware on two
-macOS versions and are out of scope here; they are reported as not-run. This
-module provides the aggregation contract, the fail-closed validator, and
-deterministic unit-test fixtures.
+Without a configured release trust policy this gate fails closed. Filesystem
+checks and hashes do not claim to defend against a malicious operator who owns
+the collector signing key or the collection host.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 from datetime import datetime
+import hashlib
 from pathlib import Path
 import re
 from typing import Any, Callable
 
 if __package__:
-    from .lifecycle_matrix import (
-        HARNESS_VERSION as LIFECYCLE_TOOL_VERSION,
-        MACOS_BUILD_RE,
-        LifecycleMatrixError,
-        validate_lifecycle_matrix,
-    )
-    from .packet_evidence import PacketEvidenceError, validate_packet_evidence
-    from .performance_gates import PerformanceGateError, validate_performance_evidence
-    from .adversarial_clients import AdversarialMatrixError, validate_adversarial_matrix
-    from ..evidence_manifest import LEVEL_ORDER
-    from ..release_build_identity import canonical_build_version
-else:  # pragma: no cover - import shim for direct invocation
-    import sys
-
-    _here = Path(__file__).resolve().parent
-    sys.path.insert(0, str(_here))
-    sys.path.insert(0, str(_here.parent))
-    from lifecycle_matrix import (  # type: ignore
-        HARNESS_VERSION as LIFECYCLE_TOOL_VERSION,
-        MACOS_BUILD_RE,
-        LifecycleMatrixError,
-        validate_lifecycle_matrix,
-    )
-    from packet_evidence import PacketEvidenceError, validate_packet_evidence  # type: ignore
-    from performance_gates import PerformanceGateError, validate_performance_evidence  # type: ignore
-    from adversarial_clients import (  # type: ignore
+    from .adversarial_clients import (
+        HARNESS_VERSION as ADVERSARIAL_VERSION,
         AdversarialMatrixError,
         validate_adversarial_matrix,
     )
+    from .lifecycle_matrix import (
+        HARNESS_VERSION as LIFECYCLE_VERSION,
+        MACOS_BUILD_RE,
+        LifecycleMatrixError,
+        validate_lifecycle_matrix,
+    )
+    from .packet_evidence import (
+        HARNESS_VERSION as PACKET_VERSION,
+        PacketEvidenceError,
+        validate_packet_evidence,
+    )
+    from .performance_gates import (
+        HARNESS_VERSION as PERFORMANCE_VERSION,
+        PerformanceGateError,
+        validate_performance_evidence,
+    )
+    from .raw_artifacts import (
+        ArtifactReader,
+        CollectorTrustNotConfiguredError,
+        CollectorTrustPolicy,
+        RELEASE_TRUST_POLICY_SHA256,
+        RawArtifactError,
+        canonical_json,
+        exact_object,
+        load_json_bytes,
+        load_release_trust_policy,
+        parse_descriptor,
+        parse_proof_binding,
+        read_regular_file_bytes,
+        require_identifier,
+        require_sha256,
+        read_release_trust_policy_bytes,
+        verify_rs256,
+    )
+    from ..evidence_manifest import LEVEL_ORDER
+    from ..release_build_identity import BuildIdentityError, canonical_build_version
+else:  # pragma: no cover - direct-script import path
+    import sys
+
+    here = Path(__file__).resolve().parent
+    sys.path.insert(0, str(here))
+    sys.path.insert(0, str(here.parent))
+    from adversarial_clients import (  # type: ignore
+        HARNESS_VERSION as ADVERSARIAL_VERSION,
+        AdversarialMatrixError,
+        validate_adversarial_matrix,
+    )
+    from lifecycle_matrix import (  # type: ignore
+        HARNESS_VERSION as LIFECYCLE_VERSION,
+        MACOS_BUILD_RE,
+        LifecycleMatrixError,
+        validate_lifecycle_matrix,
+    )
+    from packet_evidence import (  # type: ignore
+        HARNESS_VERSION as PACKET_VERSION,
+        PacketEvidenceError,
+        validate_packet_evidence,
+    )
+    from performance_gates import (  # type: ignore
+        HARNESS_VERSION as PERFORMANCE_VERSION,
+        PerformanceGateError,
+        validate_performance_evidence,
+    )
+    from raw_artifacts import (  # type: ignore
+        ArtifactReader,
+        CollectorTrustNotConfiguredError,
+        CollectorTrustPolicy,
+        RELEASE_TRUST_POLICY_SHA256,
+        RawArtifactError,
+        canonical_json,
+        exact_object,
+        load_json_bytes,
+        load_release_trust_policy,
+        parse_descriptor,
+        parse_proof_binding,
+        read_regular_file_bytes,
+        require_identifier,
+        require_sha256,
+        read_release_trust_policy_bytes,
+        verify_rs256,
+    )
     from evidence_manifest import LEVEL_ORDER  # type: ignore
-    from release_build_identity import canonical_build_version  # type: ignore
+    from release_build_identity import BuildIdentityError, canonical_build_version  # type: ignore
 
 
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SCHEMA_VERSION = 2
+AGGREGATOR_VERSION = "physical-evidence-aggregator-v2"
 PRODUCT_VERSION = "0.4.0"
-
-SCHEMA_VERSION = 1
-AGGREGATOR_VERSION = "physical-evidence-aggregator-v1"
-
-# The single evidence level this aggregator is allowed to grant. It is
-# referenced from the Evidence_Manifest level order as a black box so the level
-# name can never drift from the manifest, and so a source/unsigned/sealed claim
-# can never be smuggled through this physical gate (Requirements 4.1, 7.5).
 GRANTED_LEVEL = "Signed_Installed_Verified"
-assert GRANTED_LEVEL in LEVEL_ORDER, "granted level must be a known Evidence_Manifest level"
+if GRANTED_LEVEL not in LEVEL_ORDER:
+    raise RuntimeError("physical evidence level is absent from Evidence_Manifest")
 
-# Requirement 6.1 requires clean physical runs on macOS 15 and current macOS.
-# Both labels must be present exactly once; a missing OS fails closed.
-REQUIRED_OS: frozenset[str] = frozenset({"macos15", "current-macos"})
-
-# The four physical harnesses, each consumed as a black box: the exact tool
-# version a report must declare and the harness validator that must accept the
-# embedded document unchanged.
-HARNESS_VALIDATORS: dict[str, Callable[[Any], Any]] = {
-    "lifecycle": validate_lifecycle_matrix,
-    "packet": validate_packet_evidence,
-    "performance": validate_performance_evidence,
-    "adversarial": validate_adversarial_matrix,
+REQUIRED_OS = frozenset({"macos15", "current-macos"})
+# Reviewed stable release matrix, source-pinned on 2026-07-29 from Apple's
+# 2026-07-27 security-release list. Updating "current" is a release-source
+# change, never an inference from whichever host happens to run the collector.
+REQUIRED_MACOS_VERSIONS = {
+    "macos15": "15.7.8",
+    "current-macos": "26.6",
 }
-REQUIRED_HARNESSES: frozenset[str] = frozenset(HARNESS_VALIDATORS)
-
-EXPECTED_TOOL_VERSIONS: dict[str, str] = {
-    "lifecycle": LIFECYCLE_TOOL_VERSION,
-    "packet": "packet-evidence-v1",
-    "performance": "performance-gates-v1",
-    "adversarial": "adversarial-clients-v1",
+REQUIRED_MACOS_BUILD_TRAINS = {
+    "macos15": re.compile(r"^24G[0-9]{1,5}$"),
+    "current-macos": re.compile(r"^25G[0-9]{1,5}$"),
 }
-
-# The harness-specific error types raised when an embedded document is rejected.
-# Any of these means a harness-level failure and fails the whole level.
-_HARNESS_ERRORS = (
-    LifecycleMatrixError,
-    PacketEvidenceError,
-    PerformanceGateError,
-    AdversarialMatrixError,
-)
-
+REQUIRED_HARNESSES = frozenset({"lifecycle", "packet", "performance", "adversarial"})
+EXPECTED_TOOL_VERSIONS = {
+    "lifecycle": LIFECYCLE_VERSION,
+    "packet": PACKET_VERSION,
+    "performance": PERFORMANCE_VERSION,
+    "adversarial": ADVERSARIAL_VERSION,
+}
+REPORT_KINDS = {
+    "lifecycle": "lifecycle-report",
+    "packet": "packet-report",
+    "performance": "performance-report",
+    "adversarial": "adversarial-report",
+}
 MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 
 CANDIDATE_FIELDS = {
@@ -143,56 +159,44 @@ RUN_FIELDS = {
     "macos_build",
     "machine_sha256",
     "clean_install",
-    "evidence_source",
     "captured_at",
+    "run_id",
+    "run_nonce",
+    "collector",
     "reports",
 }
-REPORT_FIELDS = {"tool_version", "report_sha256", "captured_at", "document"}
+COLLECTOR_FIELDS = {
+    "version",
+    "source_sha256",
+    "executable_sha256",
+    "key_id",
+    "algorithm",
+    "signature",
+}
+REPORT_FIELDS = {"tool_version", "captured_at", "artifact"}
 
 
 class PhysicalEvidenceError(ValueError):
-    """The aggregate physical evidence is incomplete, unbound, stale, or unproven."""
+    """Physical evidence is incomplete, byte-drifted, replayed, or untrusted."""
 
 
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise PhysicalEvidenceError(f"aggregate has a duplicate field: {key!r}")
-        result[key] = value
-    return result
+def _resolve_trust_policy(
+    trust_policy: CollectorTrustPolicy | None, *, fixture: bool
+) -> CollectorTrustPolicy:
+    """Keep test-key injection out of every production validation path."""
 
-
-def _canonical_loads(text: str) -> Any:
-    try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except json.JSONDecodeError as error:
-        raise PhysicalEvidenceError("physical evidence aggregate is not canonical JSON") from error
-
-
-def _exact(value: Any, fields: set[str], label: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise PhysicalEvidenceError(f"{label} must be a JSON object")
-    actual = set(value)
-    missing = fields - actual
-    unknown = actual - fields
-    if missing:
-        raise PhysicalEvidenceError(f"{label} is missing required fields: {sorted(missing)}")
-    if unknown:
-        raise PhysicalEvidenceError(f"{label} has unknown fields: {sorted(unknown)}")
-    return value
-
-
-def _sha256(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
-        raise PhysicalEvidenceError(f"{label} is not a lowercase SHA-256")
-    return value
-
-
-def _non_empty_string(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise PhysicalEvidenceError(f"{label} must be a non-empty string")
-    return value
+    if fixture:
+        return load_release_trust_policy() if trust_policy is None else trust_policy
+    if trust_policy is not None and not trust_policy.release_source_pinned:
+        raise RawArtifactError(
+            "caller-supplied collector trust policies require fixture mode"
+        )
+    canonical = load_release_trust_policy()
+    if trust_policy is not None and trust_policy != canonical:
+        raise RawArtifactError(
+            "collector trust policy does not exactly match the source-pinned policy"
+        )
+    return canonical
 
 
 def _timestamp(value: Any, label: str) -> datetime:
@@ -207,304 +211,688 @@ def _timestamp(value: Any, label: str) -> datetime:
     return parsed
 
 
-def _canonical_report_hash(document: Any) -> str:
-    """Content-address an embedded harness document with a canonical hash.
-
-    Keeping the raw-report hash equal to a canonical serialization makes the
-    hash immutable with respect to the document: any tamper with the embedded
-    evidence changes the hash and fails the declared binding.
-    """
-
-    encoded = json.dumps(
-        document, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+def _bounded_text(value: Any, label: str, maximum: int = 256) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value.encode("utf-8")) > maximum
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise PhysicalEvidenceError(f"{label} must be bounded printable text")
+    return value
 
 
-def _candidate(value: Any) -> dict[str, Any]:
-    candidate = _exact(value, CANDIDATE_FIELDS, "candidate")
+def _candidate(value: Any) -> tuple[dict[str, Any], datetime]:
+    candidate = exact_object(value, CANDIDATE_FIELDS, "candidate")
     if candidate["version"] != PRODUCT_VERSION:
         raise PhysicalEvidenceError(f"candidate.version must be {PRODUCT_VERSION}")
-    build_number = canonical_build_version(candidate["build_number"], "candidate.build_number")
-    return {
+    try:
+        build_number = canonical_build_version(candidate["build_number"], "candidate.build_number")
+    except BuildIdentityError as error:
+        raise PhysicalEvidenceError(str(error)) from error
+    parsed = {
         "version": PRODUCT_VERSION,
         "build_number": build_number,
-        "app_manifest_sha256": _sha256(
+        "app_manifest_sha256": require_sha256(
             candidate["app_manifest_sha256"], "candidate.app_manifest_sha256"
         ),
-        "signed_app_tree_sha256": _sha256(
+        "signed_app_tree_sha256": require_sha256(
             candidate["signed_app_tree_sha256"], "candidate.signed_app_tree_sha256"
         ),
-        "built_at": _timestamp(candidate["built_at"], "candidate.built_at"),
+        "built_at": candidate["built_at"],
+    }
+    return parsed, _timestamp(candidate["built_at"], "candidate.built_at")
+
+
+def _collector(value: Any, policy: CollectorTrustPolicy, label: str) -> dict[str, Any]:
+    collector = exact_object(value, COLLECTOR_FIELDS, label)
+    parsed = {
+        "version": require_identifier(collector["version"], f"{label}.version"),
+        "source_sha256": require_sha256(collector["source_sha256"], f"{label}.source_sha256"),
+        "executable_sha256": require_sha256(
+            collector["executable_sha256"], f"{label}.executable_sha256"
+        ),
+        "key_id": require_identifier(collector["key_id"], f"{label}.key_id"),
+        "algorithm": collector["algorithm"],
+        "signature": collector["signature"],
+    }
+    expected = {
+        "version": policy.collector_version,
+        "source_sha256": policy.collector_source_sha256,
+        "executable_sha256": policy.collector_executable_sha256,
+        "key_id": policy.key_id,
+        "algorithm": "RS256",
+    }
+    for field, wanted in expected.items():
+        if parsed[field] != wanted:
+            raise PhysicalEvidenceError(f"{label}.{field} differs from the source-pinned policy")
+    if not isinstance(parsed["signature"], str):
+        raise PhysicalEvidenceError(f"{label}.signature must be an RS256 base64url string")
+    return parsed
+
+
+def _proof_expected(
+    candidate: dict[str, Any], run: dict[str, Any], collector: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "run_id": run["run_id"],
+        "run_nonce": run["run_nonce"],
+        "candidate": {key: candidate[key] for key in sorted(CANDIDATE_FIELDS - {"built_at"})},
+        "collector": {
+            "version": collector["version"],
+            "source_sha256": collector["source_sha256"],
+            "executable_sha256": collector["executable_sha256"],
+        },
     }
 
 
-def _check_lifecycle_identity(
-    document: dict[str, Any], candidate: dict[str, Any], run: dict[str, Any], label: str
+def _identity_check(
+    harness: str,
+    result: dict[str, Any],
+    run: dict[str, Any],
+    label: str,
 ) -> None:
-    device = document["candidate"]
-    if device["signed_app_tree_sha256"] != candidate["signed_app_tree_sha256"]:
-        raise PhysicalEvidenceError(f"{label} signed app tree does not match the candidate identity")
-    if device["macos_build"] != run["macos_build"]:
-        raise PhysicalEvidenceError(f"{label} macOS build does not match the run")
+    document = result["document"]
+    if harness == "lifecycle":
+        environment = result["environment"]
+        if environment["machine_sha256"] != run["machine_sha256"]:
+            raise PhysicalEvidenceError(f"{label} machine identity differs from its run")
+        if environment["macos_build"] != run["macos_build"]:
+            raise PhysicalEvidenceError(f"{label} macOS build differs from its run")
+    elif harness == "packet":
+        if document["platform"]["macos_version"] != run["macos_version"]:
+            raise PhysicalEvidenceError(f"{label} macOS version differs from its run")
+    elif harness == "performance":
+        machine = result["parameters"]["machine"]
+        expected = {
+            "macos_version": run["macos_version"],
+            "macos_build": run["macos_build"],
+            "machine_sha256": run["machine_sha256"],
+        }
+        for field, wanted in expected.items():
+            if machine[field] != wanted:
+                raise PhysicalEvidenceError(f"{label} machine.{field} differs from its run")
+    elif harness == "adversarial":
+        if document["platform"]["macos_version"] != run["macos_version"]:
+            raise PhysicalEvidenceError(f"{label} macOS version differs from its run")
+    else:
+        raise PhysicalEvidenceError(f"unknown harness identity check: {harness}")
 
 
-def _check_packet_identity(
-    document: dict[str, Any], candidate: dict[str, Any], run: dict[str, Any], label: str
-) -> None:
-    if document["product"]["version"] != candidate["version"]:
-        raise PhysicalEvidenceError(f"{label} product version does not match the candidate identity")
-    if document["product"]["build_number"] != candidate["build_number"]:
-        raise PhysicalEvidenceError(f"{label} build number does not match the candidate identity")
-    if document["candidate"]["app_manifest_sha256"] != candidate["app_manifest_sha256"]:
-        raise PhysicalEvidenceError(f"{label} app manifest does not match the candidate identity")
-    if document["candidate"]["signed_app_tree_sha256"] != candidate["signed_app_tree_sha256"]:
-        raise PhysicalEvidenceError(f"{label} signed app tree does not match the candidate identity")
-    if document["platform"]["macos_version"] != run["macos_version"]:
-        raise PhysicalEvidenceError(f"{label} macOS version does not match the run")
+def _validate_lifecycle(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
+    return validate_lifecycle_matrix(value, artifacts)
 
 
-def _check_performance_identity(
-    document: dict[str, Any], candidate: dict[str, Any], run: dict[str, Any], label: str
-) -> None:
-    build = document["parameters"]["build"]
-    if build["version"] != candidate["version"]:
-        raise PhysicalEvidenceError(f"{label} product version does not match the candidate identity")
-    if build["build_number"] != candidate["build_number"]:
-        raise PhysicalEvidenceError(f"{label} build number does not match the candidate identity")
-    if build["app_manifest_sha256"] != candidate["app_manifest_sha256"]:
-        raise PhysicalEvidenceError(f"{label} app manifest does not match the candidate identity")
-    if document["parameters"]["machine"]["macos_version"] != run["macos_version"]:
-        raise PhysicalEvidenceError(f"{label} macOS version does not match the run")
+def _validate_packet(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
+    return validate_packet_evidence(value, artifacts)
 
 
-def _check_adversarial_identity(
-    document: dict[str, Any], candidate: dict[str, Any], run: dict[str, Any], label: str
-) -> None:
-    if document["product"]["version"] != candidate["version"]:
-        raise PhysicalEvidenceError(f"{label} product version does not match the candidate identity")
-    if document["product"]["build_number"] != candidate["build_number"]:
-        raise PhysicalEvidenceError(f"{label} build number does not match the candidate identity")
-    if document["app_manifest_sha256"] != candidate["app_manifest_sha256"]:
-        raise PhysicalEvidenceError(f"{label} app manifest does not match the candidate identity")
-    if document["platform"]["macos_version"] != run["macos_version"]:
-        raise PhysicalEvidenceError(f"{label} macOS version does not match the run")
+def _validate_performance(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
+    return validate_performance_evidence(value, artifacts)
 
 
-_IDENTITY_CHECKS: dict[str, Callable[[dict[str, Any], dict[str, Any], dict[str, Any], str], None]] = {
-    "lifecycle": _check_lifecycle_identity,
-    "packet": _check_packet_identity,
-    "performance": _check_performance_identity,
-    "adversarial": _check_adversarial_identity,
+def _validate_adversarial(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
+    return validate_adversarial_matrix(value, artifacts)
+
+
+HARNESS_VALIDATORS: dict[str, Callable[[Any, ArtifactReader], dict[str, Any]]] = {
+    "lifecycle": _validate_lifecycle,
+    "packet": _validate_packet,
+    "performance": _validate_performance,
+    "adversarial": _validate_adversarial,
 }
+
+HARNESS_ERRORS = (
+    LifecycleMatrixError,
+    PacketEvidenceError,
+    PerformanceGateError,
+    AdversarialMatrixError,
+)
 
 
 def _validate_report(
     harness: str,
-    raw: Any,
+    value: Any,
+    *,
+    candidate: dict[str, Any],
+    built_at: datetime,
+    run: dict[str, Any],
+    collector: dict[str, Any],
+    artifacts: ArtifactReader,
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    label = f"run[{run['os']}].reports.{harness}"
+    report = exact_object(value, REPORT_FIELDS, label)
+    if report["tool_version"] != EXPECTED_TOOL_VERSIONS[harness]:
+        raise PhysicalEvidenceError(f"{label}.tool_version differs from the v2 harness")
+    captured_at = _timestamp(report["captured_at"], f"{label}.captured_at")
+    if captured_at < built_at or captured_at > run["captured_at_dt"]:
+        raise PhysicalEvidenceError(f"{label}.captured_at is stale or after its run receipt")
+    descriptor, document = artifacts.read_json(
+        report["artifact"], expected_kind=REPORT_KINDS[harness], label=f"{label}.artifact"
+    )
+    try:
+        result = HARNESS_VALIDATORS[harness](document, artifacts)
+    except HARNESS_ERRORS as error:
+        raise PhysicalEvidenceError(f"{label} harness validation failed: {error}") from error
+    expected_proof = _proof_expected(candidate, run, collector)
+    if parse_proof_binding(result["proof"], f"{label}.proof") != expected_proof:
+        raise PhysicalEvidenceError(f"{label} candidate/run/collector proof differs")
+    if document.get("harness_version") != report["tool_version"]:
+        raise PhysicalEvidenceError(f"{label} report wrapper/tool version differs from its bytes")
+    if "captured_at" in document and document["captured_at"] != report["captured_at"]:
+        raise PhysicalEvidenceError(f"{label} captured_at differs from its report bytes")
+    _identity_check(harness, result, run, label)
+    report_binding = {
+        "harness": harness,
+        "tool_version": report["tool_version"],
+        "captured_at": report["captured_at"],
+        "descriptor": descriptor.as_dict(),
+    }
+    raw_bindings = [
+        {
+            "harness": harness,
+            "subject": binding["subject"],
+            "descriptor": binding["descriptor"],
+        }
+        for binding in result["artifacts"]
+    ]
+    return result, report_binding, raw_bindings
+
+
+def _receipt_payload(
+    *,
+    policy_sha256: str,
     candidate: dict[str, Any],
     run: dict[str, Any],
-    report_hashes: set[str],
-) -> None:
-    label = f"run[{run['os']}].reports.{harness}"
-    report = _exact(raw, REPORT_FIELDS, label)
-
-    tool_version = report["tool_version"]
-    if tool_version != EXPECTED_TOOL_VERSIONS[harness]:
-        raise PhysicalEvidenceError(
-            f"{label} tool_version is {tool_version!r}; expected "
-            f"{EXPECTED_TOOL_VERSIONS[harness]!r}"
-        )
-
-    captured_at = _timestamp(report["captured_at"], f"{label}.captured_at")
-    if captured_at < candidate["built_at"]:
-        # A report captured before the candidate was built cannot describe this
-        # candidate: it is stale evidence and fails closed.
-        raise PhysicalEvidenceError(f"{label} is stale: captured before the candidate was built")
-
-    declared_hash = _sha256(report["report_sha256"], f"{label}.report_sha256")
-    computed_hash = _canonical_report_hash(report["document"])
-    if declared_hash != computed_hash:
-        # The raw-report hash must be immutable with respect to the document.
-        raise PhysicalEvidenceError(f"{label} report_sha256 does not content-address its document")
-    if declared_hash in report_hashes:
-        # A report hash reused across harnesses or runs is a duplicated /
-        # replayed report and fails closed.
-        raise PhysicalEvidenceError(f"{label} reuses a raw report hash already bound")
-    report_hashes.add(declared_hash)
-
-    # Consume the harness validator as a black box. Any harness-level failure
-    # (missing case, partial matrix, unbound result, ...) fails this level.
-    try:
-        HARNESS_VALIDATORS[harness](report["document"])
-    except _HARNESS_ERRORS as error:
-        raise PhysicalEvidenceError(f"{label} harness validation failed: {error}") from error
-
-    _IDENTITY_CHECKS[harness](report["document"], candidate, run, label)
+    collector: dict[str, Any],
+    report_bindings: list[dict[str, Any]],
+    raw_bindings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "trust_policy_sha256": policy_sha256,
+        "candidate": candidate,
+        "run": {
+            key: run[key]
+            for key in (
+                "os",
+                "macos_version",
+                "macos_build",
+                "machine_sha256",
+                "clean_install",
+                "captured_at",
+                "run_id",
+                "run_nonce",
+            )
+        },
+        "collector": {
+            key: collector[key]
+            for key in ("version", "source_sha256", "executable_sha256", "key_id", "algorithm")
+        },
+        "reports": sorted(report_bindings, key=lambda entry: entry["harness"]),
+        "raw_artifacts": sorted(
+            raw_bindings, key=lambda entry: (entry["harness"], entry["subject"])
+        ),
+    }
 
 
 def _validate_run(
-    raw: Any,
+    value: Any,
     index: int,
+    *,
+    policy: CollectorTrustPolicy,
     candidate: dict[str, Any],
+    built_at: datetime,
+    artifacts: ArtifactReader,
     seen_os: set[str],
-    report_hashes: set[str],
-) -> str:
-    run = _exact(raw, RUN_FIELDS, f"runs[{index}]")
-
-    os_label = run["os"]
-    if os_label not in REQUIRED_OS:
-        raise PhysicalEvidenceError(f"runs[{index}] declares an unknown macOS run set: {os_label!r}")
-    if os_label in seen_os:
-        raise PhysicalEvidenceError(f"physical evidence duplicates the {os_label!r} run set")
+    seen_run_ids: set[str],
+    seen_nonces: set[str],
+    seen_machines: set[str],
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], str]:
+    raw = exact_object(value, RUN_FIELDS, f"runs[{index}]")
+    os_label = raw["os"]
+    if os_label not in REQUIRED_OS or os_label in seen_os:
+        raise PhysicalEvidenceError(f"runs[{index}].os is unknown or duplicated")
     seen_os.add(os_label)
-
-    _non_empty_string(run["macos_version"], f"runs[{index}].macos_version")
-    if not isinstance(run["macos_build"], str) or not MACOS_BUILD_RE.fullmatch(run["macos_build"]):
-        raise PhysicalEvidenceError(f"runs[{index}].macos_build is not a macOS build identifier")
-    _sha256(run["machine_sha256"], f"runs[{index}].machine_sha256")
-
-    if run["clean_install"] is not True:
-        raise PhysicalEvidenceError(f"runs[{index}] must be a clean physical install")
-    if run["evidence_source"] != "harness":
-        # A manual / hand-asserted result is never accepted as physical proof.
+    macos_version = _bounded_text(raw["macos_version"], f"runs[{index}].macos_version")
+    expected_version = REQUIRED_MACOS_VERSIONS[os_label]
+    if macos_version != expected_version:
         raise PhysicalEvidenceError(
-            f"runs[{index}] evidence_source is {run['evidence_source']!r}; "
-            "manual assertions are rejected"
+            f"runs[{index}].macos_version must be the source-pinned stable "
+            f"version {expected_version!r} for {os_label!r}"
         )
-    _timestamp(run["captured_at"], f"runs[{index}].captured_at")
-
-    reports = _exact(run["reports"], set(REQUIRED_HARNESSES), f"runs[{index}].reports")
+    macos_build = raw["macos_build"]
+    if not isinstance(macos_build, str) or not MACOS_BUILD_RE.fullmatch(macos_build):
+        raise PhysicalEvidenceError(f"runs[{index}].macos_build is invalid")
+    if not REQUIRED_MACOS_BUILD_TRAINS[os_label].fullmatch(macos_build):
+        raise PhysicalEvidenceError(
+            f"runs[{index}].macos_build is not in the source-pinned stable build "
+            f"train for {os_label!r}"
+        )
+    machine = require_sha256(raw["machine_sha256"], f"runs[{index}].machine_sha256")
+    if machine in seen_machines:
+        raise PhysicalEvidenceError("physical runs reuse a machine identity")
+    seen_machines.add(machine)
+    if raw["clean_install"] is not True:
+        raise PhysicalEvidenceError(f"runs[{index}] is not a clean physical install")
+    captured_at_dt = _timestamp(raw["captured_at"], f"runs[{index}].captured_at")
+    if captured_at_dt < built_at:
+        raise PhysicalEvidenceError(f"runs[{index}] predates the candidate build")
+    run_id = require_identifier(raw["run_id"], f"runs[{index}].run_id")
+    if run_id in seen_run_ids:
+        raise PhysicalEvidenceError("physical runs reuse a run_id")
+    seen_run_ids.add(run_id)
+    run_nonce = require_sha256(raw["run_nonce"], f"runs[{index}].run_nonce")
+    if run_nonce in seen_nonces:
+        raise PhysicalEvidenceError("physical runs reuse a run nonce")
+    seen_nonces.add(run_nonce)
+    run = {
+        "os": os_label,
+        "macos_version": macos_version,
+        "macos_build": macos_build,
+        "machine_sha256": machine,
+        "clean_install": True,
+        "captured_at": raw["captured_at"],
+        "captured_at_dt": captured_at_dt,
+        "run_id": run_id,
+        "run_nonce": run_nonce,
+    }
+    collector = _collector(raw["collector"], policy, f"runs[{index}].collector")
+    reports = exact_object(raw["reports"], set(REQUIRED_HARNESSES), f"runs[{index}].reports")
+    report_bindings: list[dict[str, Any]] = []
+    raw_bindings: list[dict[str, Any]] = []
+    results: dict[str, dict[str, Any]] = {}
     for harness in sorted(REQUIRED_HARNESSES):
-        _validate_report(harness, reports[harness], candidate, run, report_hashes)
-    return os_label
+        result, report_binding, harness_raw = _validate_report(
+            harness,
+            reports[harness],
+            candidate=candidate,
+            built_at=built_at,
+            run=run,
+            collector=collector,
+            artifacts=artifacts,
+        )
+        results[harness] = result
+        report_bindings.append(report_binding)
+        raw_bindings.extend(harness_raw)
+    payload = _receipt_payload(
+        policy_sha256=policy.policy_sha256,
+        candidate=candidate,
+        run=run,
+        collector=collector,
+        report_bindings=report_bindings,
+        raw_bindings=raw_bindings,
+    )
+    try:
+        verify_rs256(
+            canonical_json(payload),
+            collector["signature"],
+            modulus=policy.modulus,
+            exponent=policy.exponent,
+        )
+    except RawArtifactError as error:
+        raise PhysicalEvidenceError(f"runs[{index}] collector receipt failed: {error}") from error
+    receipt_sha256 = hashlib.sha256(canonical_json(payload)).hexdigest()
+
+    # Final-candidate publication binds five categories. Soak is bound directly
+    # to the raw performance-samples bytes; performance itself is bound to its
+    # report document bytes.
+    publication_bindings: list[dict[str, Any]] = []
+    category_map = {
+        "lifecycle": "installed_matrix",
+        "packet": "packet",
+        "performance": "performance",
+        "adversarial": "security",
+    }
+    for binding in report_bindings:
+        descriptor = binding["descriptor"]
+        publication_bindings.append(
+            {
+                "os": os_label,
+                "category": category_map[binding["harness"]],
+                "tool_version": binding["tool_version"],
+                "captured_at": binding["captured_at"],
+                "report_sha256": descriptor["sha256"],
+                "artifact_path": descriptor["path"],
+            }
+        )
+    performance_raw = [
+        entry for entry in raw_bindings if entry["harness"] == "performance"
+    ]
+    if len(performance_raw) != 1:
+        raise PhysicalEvidenceError("performance harness must bind exactly one raw sample artifact")
+    soak_descriptor = performance_raw[0]["descriptor"]
+    performance_report = next(
+        binding for binding in report_bindings if binding["harness"] == "performance"
+    )
+    publication_bindings.append(
+        {
+            "os": os_label,
+            "category": "soak",
+            "tool_version": performance_report["tool_version"],
+            "captured_at": performance_report["captured_at"],
+            "report_sha256": soak_descriptor["sha256"],
+            "artifact_path": soak_descriptor["path"],
+        }
+    )
+    return os_label, publication_bindings, raw_bindings, receipt_sha256
 
 
-def validate_physical_evidence(value: Any) -> dict[str, Any]:
-    """Validate the whole physical-evidence aggregate, failing closed on any gap.
-
-    Returns a summary that grants exactly :data:`GRANTED_LEVEL` on success.
-    Raises :class:`PhysicalEvidenceError` on the first fail-closed condition.
-    """
-
-    document = _exact(
+def _validate(
+    value: Any,
+    *,
+    evidence_root: Path,
+    trust_policy: CollectorTrustPolicy,
+    fixture: bool,
+) -> dict[str, Any]:
+    if not trust_policy.release_source_pinned and not fixture:
+        raise PhysicalEvidenceError(
+            "collector trust policy is not pinned by release source; "
+            "test policies require fixture mode"
+        )
+    document = exact_object(
         value,
-        {"schema_version", "aggregator_version", "granted_level", "candidate", "runs"},
+        {
+            "schema_version",
+            "aggregator_version",
+            "granted_level",
+            "trust_policy_sha256",
+            "candidate",
+            "runs",
+        },
         "physical evidence aggregate",
     )
     if document["schema_version"] != SCHEMA_VERSION:
         raise PhysicalEvidenceError(f"aggregate schema_version must be {SCHEMA_VERSION}")
     if document["aggregator_version"] != AGGREGATOR_VERSION:
-        raise PhysicalEvidenceError(f"aggregate aggregator_version must be {AGGREGATOR_VERSION!r}")
-
-    granted = document["granted_level"]
-    if granted != GRANTED_LEVEL:
-        # This gate proves only the physical level; it may never assert a
-        # source, unsigned, or sealed level. Levels stay separate.
         raise PhysicalEvidenceError(
-            f"aggregate granted_level {granted!r} is not the physical level {GRANTED_LEVEL!r}"
+            f"aggregate aggregator_version must be {AGGREGATOR_VERSION!r}"
         )
-
-    candidate = _candidate(document["candidate"])
-
+    if document["granted_level"] != GRANTED_LEVEL:
+        raise PhysicalEvidenceError("aggregate may grant only Signed_Installed_Verified")
+    declared_policy = require_sha256(
+        document["trust_policy_sha256"], "aggregate.trust_policy_sha256"
+    )
+    if declared_policy != trust_policy.policy_sha256:
+        raise PhysicalEvidenceError("aggregate trust policy differs from the source-pinned policy")
+    candidate, built_at = _candidate(document["candidate"])
     runs = document["runs"]
-    if not isinstance(runs, list):
-        raise PhysicalEvidenceError("aggregate runs must be a list")
-    if len(runs) != len(REQUIRED_OS):
-        raise PhysicalEvidenceError("aggregate must contain each required macOS run set exactly once")
-
+    if not isinstance(runs, list) or len(runs) != len(REQUIRED_OS):
+        raise PhysicalEvidenceError("aggregate must contain both required physical run sets")
     seen_os: set[str] = set()
-    report_hashes: set[str] = set()
-    for index, raw in enumerate(runs):
-        _validate_run(raw, index, candidate, seen_os, report_hashes)
-
-    missing = REQUIRED_OS - seen_os
-    if missing:
-        # Absence is never success: a missing macOS run set fails the level.
-        raise PhysicalEvidenceError(
-            f"physical evidence is missing required macOS run sets: {sorted(missing)}"
+    seen_run_ids: set[str] = set()
+    seen_nonces: set[str] = set()
+    seen_machines: set[str] = set()
+    report_bindings: list[dict[str, Any]] = []
+    raw_bindings: list[dict[str, Any]] = []
+    receipt_hashes: list[str] = []
+    installed_runs: list[dict[str, Any]] = []
+    with ArtifactReader(evidence_root) as artifacts:
+        for index, raw_run in enumerate(runs):
+            _os, publication, raw_artifacts, receipt_sha256 = _validate_run(
+                raw_run,
+                index,
+                policy=trust_policy,
+                candidate=candidate,
+                built_at=built_at,
+                artifacts=artifacts,
+                seen_os=seen_os,
+                seen_run_ids=seen_run_ids,
+                seen_nonces=seen_nonces,
+                seen_machines=seen_machines,
+            )
+            report_bindings.extend(publication)
+            raw_bindings.extend(raw_artifacts)
+            receipt_hashes.append(receipt_sha256)
+            run_value = runs[index]
+            installed_runs.append(
+                {
+                    "os": run_value["os"],
+                    "macos_build": run_value["macos_build"],
+                    "machine_sha256": run_value["machine_sha256"],
+                    "report_hashes": sorted(
+                        entry["report_sha256"] for entry in publication
+                    ),
+                }
+            )
+        artifact_count = artifacts.artifact_count
+        artifact_bytes = artifacts.total_bytes
+    if seen_os != set(REQUIRED_OS):
+        raise PhysicalEvidenceError("aggregate is missing a required macOS run set")
+    if len(set(receipt_hashes)) != len(receipt_hashes):
+        raise PhysicalEvidenceError("physical runs reuse a collector receipt")
+    raw_manifest_sha256 = hashlib.sha256(
+        canonical_json(
+            sorted(
+                raw_bindings,
+                key=lambda entry: (
+                    entry["harness"],
+                    entry["subject"],
+                    entry["descriptor"]["path"],
+                ),
+            )
         )
-
+    ).hexdigest()
     return {
         "granted_level": GRANTED_LEVEL,
-        "candidate": {
-            "version": candidate["version"],
-            "build_number": candidate["build_number"],
-            "app_manifest_sha256": candidate["app_manifest_sha256"],
-            "signed_app_tree_sha256": candidate["signed_app_tree_sha256"],
-        },
+        "trust_policy_sha256": trust_policy.policy_sha256,
+        "candidate": candidate,
         "runs": sorted(seen_os),
-        "reports": len(report_hashes),
+        "reports": len(REQUIRED_OS) * len(REQUIRED_HARNESSES),
+        "report_bindings": sorted(
+            report_bindings, key=lambda entry: (entry["os"], entry["category"])
+        ),
+        "installed_runs": sorted(installed_runs, key=lambda entry: entry["os"]),
+        "raw_artifact_manifest_sha256": raw_manifest_sha256,
+        "collector_receipt_sha256": sorted(receipt_hashes),
+        "artifact_count": artifact_count,
+        "artifact_bytes": artifact_bytes,
     }
 
 
-def load_physical_evidence(path: Path) -> dict[str, Any]:
-    """Load, canonically parse, and validate a physical-evidence aggregate file."""
+def validate_physical_evidence(
+    value: Any,
+    *,
+    evidence_root: Path,
+    trust_policy: CollectorTrustPolicy | None = None,
+    fixture: bool = False,
+) -> dict[str, Any]:
+    """Validate a parsed aggregate only inside an explicit fixture boundary.
 
-    if path.is_symlink() or not path.is_file():
-        raise PhysicalEvidenceError("physical evidence aggregate must be a regular non-symlink file")
-    data = path.read_bytes()
-    if not data or len(data) > MAX_DOCUMENT_BYTES:
-        raise PhysicalEvidenceError("physical evidence aggregate size is outside the accepted range")
+    Production must enter through :func:`load_physical_evidence_artifact`,
+    which reopens the aggregate bytes and internally reloads the one canonical
+    source-pinned policy. A parsed object can never establish release trust.
+    """
+
     try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise PhysicalEvidenceError("physical evidence aggregate is not valid UTF-8") from error
-    return validate_physical_evidence(_canonical_loads(text))
+        if not fixture:
+            raise RawArtifactError(
+                "parsed aggregate validation is fixture-only; production requires "
+                "a bound aggregate artifact"
+            )
+        policy = _resolve_trust_policy(trust_policy, fixture=True)
+        return _validate(
+            value,
+            evidence_root=evidence_root,
+            trust_policy=policy,
+            fixture=True,
+        )
+    except RawArtifactError as error:
+        raise PhysicalEvidenceError(str(error)) from error
+
+
+def _with_private_archive_binding(
+    summary: dict[str, Any], aggregate_artifact: dict[str, Any]
+) -> dict[str, Any]:
+    """Bind the retained private archive without publishing its raw payloads."""
+
+    archive = {
+        "visibility": "private-release-evidence",
+        "aggregate_artifact": aggregate_artifact,
+        "raw_artifact_manifest_sha256": summary["raw_artifact_manifest_sha256"],
+        "collector_receipt_sha256": summary["collector_receipt_sha256"],
+        "trust_policy_sha256": summary["trust_policy_sha256"],
+        "artifact_count": summary["artifact_count"] + 1,
+        "artifact_bytes": summary["artifact_bytes"] + aggregate_artifact["size"],
+    }
+    archive["binding_sha256"] = hashlib.sha256(canonical_json(archive)).hexdigest()
+    result = dict(summary)
+    result["aggregate_artifact"] = aggregate_artifact
+    result["private_archive"] = archive
+    result["artifact_count"] = archive["artifact_count"]
+    result["artifact_bytes"] = archive["artifact_bytes"]
+    return result
+
+
+def load_physical_evidence_artifact(
+    value: Any,
+    *,
+    evidence_root: Path,
+    trust_policy: CollectorTrustPolicy | None = None,
+    fixture: bool = False,
+) -> dict[str, Any]:
+    """Reopen a bound aggregate, then every report/raw byte, from one root.
+
+    The aggregate descriptor is the public edge of a private evidence archive.
+    Its exact bytes are read before validation and reopened once more after all
+    descendant report/raw validation, so a summary digest alone can never grant
+    the release level.
+    """
+
+    root = evidence_root.absolute()
+    try:
+        policy = _resolve_trust_policy(trust_policy, fixture=fixture)
+        descriptor = parse_descriptor(
+            value,
+            expected_kinds={"physical-aggregate"},
+            label="physical evidence aggregate artifact",
+        )
+        with ArtifactReader(root) as aggregate_reader:
+            parsed_descriptor, data = aggregate_reader.read(
+                descriptor.as_dict(),
+                expected_kinds={"physical-aggregate"},
+                label="physical evidence aggregate artifact",
+            )
+        document = load_json_bytes(data, "physical evidence aggregate")
+        summary = _validate(
+            document,
+            evidence_root=root,
+            trust_policy=policy,
+            fixture=fixture,
+        )
+        # Reopen after every descendant has been checked. This catches an
+        # aggregate path/byte drift spanning the complete final-gate traversal.
+        with ArtifactReader(root) as final_reader:
+            final_reader.read(
+                parsed_descriptor.as_dict(),
+                expected_kinds={"physical-aggregate"},
+                label="physical evidence aggregate artifact final reopen",
+            )
+        return _with_private_archive_binding(summary, parsed_descriptor.as_dict())
+    except RawArtifactError as error:
+        raise PhysicalEvidenceError(str(error)) from error
+
+
+def load_physical_evidence(
+    path: Path,
+    *,
+    evidence_root: Path | None = None,
+    trust_policy: CollectorTrustPolicy | None = None,
+    fixture: bool = False,
+) -> dict[str, Any]:
+    """Load an aggregate and verify artifacts relative to its explicit/root directory."""
+
+    root = path.absolute().parent if evidence_root is None else evidence_root.absolute()
+    try:
+        descriptor_path = path.absolute()
+        if descriptor_path.parent != root:
+            # The aggregate itself may live below a separately specified root,
+            # but it must still be a canonical descendant rather than an
+            # unrelated path selected by cwd drift.
+            try:
+                descriptor_path.relative_to(root)
+            except ValueError as error:
+                raise PhysicalEvidenceError(
+                    "aggregate path is outside its evidence root"
+                ) from error
+        data = read_regular_file_bytes(descriptor_path, maximum=MAX_DOCUMENT_BYTES)
+        relative = descriptor_path.relative_to(root).as_posix()
+        descriptor = {
+            "kind": "physical-aggregate",
+            "path": relative,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        return load_physical_evidence_artifact(
+            descriptor,
+            evidence_root=root,
+            trust_policy=trust_policy,
+            fixture=fixture,
+        )
+    except RawArtifactError as error:
+        raise PhysicalEvidenceError(str(error)) from error
 
 
 def self_check() -> None:
-    """Verify the aggregator's internal contract without any evidence file.
-
-    This lets a static boundary gate confirm the physical aggregator is wired to
-    all four harnesses and the Evidence_Manifest level order without requiring
-    physical evidence (which needs signed Apple Silicon on two macOS versions).
-    """
+    """Verify static wiring without granting or requiring physical evidence."""
 
     if GRANTED_LEVEL not in LEVEL_ORDER:
-        raise PhysicalEvidenceError("granted level is not a known Evidence_Manifest level")
-    if len(REQUIRED_OS) != 2:
-        raise PhysicalEvidenceError("physical gate must require exactly two macOS run sets")
+        raise PhysicalEvidenceError("granted level is not in Evidence_Manifest")
     if set(HARNESS_VALIDATORS) != REQUIRED_HARNESSES:
         raise PhysicalEvidenceError("harness validator wiring is inconsistent")
     if set(EXPECTED_TOOL_VERSIONS) != REQUIRED_HARNESSES:
-        raise PhysicalEvidenceError("harness tool-version wiring is inconsistent")
-    if set(_IDENTITY_CHECKS) != REQUIRED_HARNESSES:
-        raise PhysicalEvidenceError("harness identity-check wiring is inconsistent")
+        raise PhysicalEvidenceError("harness version wiring is inconsistent")
+    if set(REPORT_KINDS) != REQUIRED_HARNESSES:
+        raise PhysicalEvidenceError("report artifact kind wiring is inconsistent")
+    if len(REQUIRED_OS) != 2:
+        raise PhysicalEvidenceError("physical gate must require two OS runs")
+    if set(REQUIRED_MACOS_VERSIONS) != set(REQUIRED_OS) or (
+        set(REQUIRED_MACOS_BUILD_TRAINS) != set(REQUIRED_OS)
+    ):
+        raise PhysicalEvidenceError("physical macOS release-matrix wiring is inconsistent")
+    try:
+        policy_bytes = read_release_trust_policy_bytes()
+    except (OSError, RawArtifactError) as error:
+        raise PhysicalEvidenceError("release collector trust policy file is unreadable") from error
+    if hashlib.sha256(policy_bytes).hexdigest() != RELEASE_TRUST_POLICY_SHA256:
+        raise PhysicalEvidenceError("release collector trust policy pin drifted")
+    try:
+        policy = load_release_trust_policy()
+    except CollectorTrustNotConfiguredError:
+        # This is the expected pre-provisioning state. The parse still proved
+        # canonical bytes and the exact source digest before returning here.
+        return
+    if not policy.release_source_pinned:
+        raise PhysicalEvidenceError("configured release trust policy lost its source pin")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("aggregate", nargs="?", type=Path, help="physical evidence aggregate file")
-    group.add_argument(
-        "--self-check",
-        action="store_true",
-        help="verify the aggregator contract is wired to all four harnesses and exit",
-    )
+    group.add_argument("aggregate", nargs="?", type=Path)
+    group.add_argument("--self-check", action="store_true")
+    parser.add_argument("--evidence-root", type=Path)
     arguments = parser.parse_args()
-
     if arguments.self_check:
         try:
             self_check()
         except PhysicalEvidenceError as error:
-            raise SystemExit(f"error: physical evidence aggregator self-check failed: {error}")
+            raise SystemExit(f"error: physical aggregator self-check failed: {error}") from error
         print(
-            "physical evidence aggregator self-check ok: "
-            f"grants {GRANTED_LEVEL} across {sorted(REQUIRED_OS)} using "
-            f"{sorted(REQUIRED_HARNESSES)}"
+            "physical evidence aggregator self-check ok; production collector trust "
+            "remains fail-closed until the source-pinned policy is configured"
         )
         return
-
     try:
-        summary = load_physical_evidence(arguments.aggregate)
+        summary = load_physical_evidence(
+            arguments.aggregate, evidence_root=arguments.evidence_root
+        )
     except (PhysicalEvidenceError, OSError) as error:
         raise SystemExit(f"error: physical evidence aggregation failed: {error}") from error
     print(
         "physical evidence aggregated: "
-        f"{summary['granted_level']} granted for {summary['candidate']['version']} "
-        f"({summary['candidate']['build_number']}) across {summary['runs']}, "
-        f"{summary['reports']} bound reports"
+        f"{summary['granted_level']} for {summary['candidate']['version']} "
+        f"({summary['candidate']['build_number']}), {summary['artifact_count']} artifacts"
     )
 
 

@@ -1,60 +1,56 @@
 #!/usr/bin/env python3
-"""Separately-signed adversarial client / tamper harness for Signed_Installed_Verified.
+"""Proof-to-byte separately-signed adversarial client matrix.
 
-This module owns the *definition* of the adversarial matrix that a physical,
-signed on-device run must execute against Global_Authority, plus a fail-closed
-validator that grades a captured result document.
-
-Scope (task 11.4):
-- Declare the complete adversarial matrix required by Requirement 6.4: identity
-  predicate forgeries, inactive console user, replay/duplicate-redemption/cursor
-  rollback, Authority_Journal truncation/tamper/symlink, oversize/deep/noncanonical
-  protocol input, request floods and in-flight/event-queue saturation, heartbeat
-  loss, Fast User Switching races, late callbacks, and secret-extraction surfaces
-  (logs, preferences, journals, crash records, snapshots, evidence).
-- Bind expected denial and cleanup outcomes to the exact separately-signed
-  allowed-client and denied-client signatures and to the candidate app manifest.
-- Fail closed: a missing fixture, an unexecuted attack case, a wrong signature
-  binding, or a case whose attack was *not* denied (i.e. it succeeded) fails the
-  Signed_Installed level immediately.
-
-The signed on-device execution itself is out of scope here; this file provides the
-harness definition, the result validator, and deterministic unit-test fixtures.
+Client signature assessments and every baseline/attack transcript are reopened
+from strict artifact descriptors. Authorization decisions, denial codes,
+cleanup, secret absence, exit codes, client identity, and request nonces are
+recomputed from the transcript bytes. Aggregate-level collector signature
+verification supplies the external provenance trust boundary.
 """
 
 from __future__ import annotations
 
 import argparse
 from datetime import datetime
-import json
 from pathlib import Path
 import re
 from typing import Any
 
 if __package__:
-    from ..release_build_identity import canonical_build_version
-else:  # pragma: no cover - import shim for direct invocation
+    from .raw_artifacts import (
+        ArtifactReader,
+        RawArtifactError,
+        exact_object,
+        load_json_file,
+        parse_proof_binding,
+        require_sha256,
+    )
+else:  # pragma: no cover - direct-script import path
     import sys
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from release_build_identity import canonical_build_version
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from raw_artifacts import (  # type: ignore
+        ArtifactReader,
+        RawArtifactError,
+        exact_object,
+        load_json_file,
+        parse_proof_binding,
+        require_sha256,
+    )
 
 
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SCHEMA_VERSION = 2
+HARNESS_VERSION = "adversarial-clients-v2"
+PRODUCT_VERSION = "0.4.0"
+MAX_REPORT_BYTES = 1 * 1024 * 1024
 CDHASH_RE = re.compile(r"^[0-9a-f]{40,64}$")
-DENIAL_CODE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9]*$")
-
+DENIAL_CODE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9]{0,63}$")
 TEAM_ID = "YKUPL7Z869"
 ALLOWED_SIGNING_ID = "com.bill.clashformac"
 
-# Each attack case is bound to the exact client signature that must launch it and
-# to the exact denial code + post-attack cleanup outcome the Authority must prove.
-#   id -> (category, expected_client, expected_denial_code, expected_cleanup)
-# expected_client is "denied" for identity forgeries launched from the separately
-# signed adversary bundle, and "allowed" for misbehaviour launched from the
-# correctly signed Host binary that the Authority must still refuse.
+
+# id -> (category, client, denial code, cleanup)
 REQUIRED_CASES: dict[str, tuple[str, str, str, str]] = {
-    # Identity predicate forgeries (launched from the denied adversary client).
     "wrong-team-id": ("identity", "denied", "unauthorizedPeer", "off"),
     "wrong-bundle-identifier": ("identity", "denied", "unauthorizedPeer", "off"),
     "wrong-designated-requirement": ("identity", "denied", "unauthorizedPeer", "off"),
@@ -65,28 +61,37 @@ REQUIRED_CASES: dict[str, tuple[str, str, str, str]] = {
     "stale-audit-evidence": ("identity", "denied", "unauthorizedPeer", "off"),
     "inactive-console-user": ("identity", "denied", "consoleUserMismatch", "off"),
     "same-team-unknown-bundle": ("identity", "denied", "unauthorizedPeer", "off"),
-    # Replay / redemption attacks (launched from the correctly signed client).
     "replayed-operation": ("replay", "allowed", "replayRejected", "off"),
     "replayed-start-ticket": ("replay", "allowed", "ticketReplayRejected", "off"),
     "duplicate-redemption": ("replay", "allowed", "ticketAlreadyRedeemed", "off"),
     "replay-cursor-rollback": ("replay", "allowed", "replayRejected", "quarantined"),
-    # Journal tamper / integrity attacks (must quarantine, never reset).
-    "authority-journal-truncation": ("journal", "allowed", "journalIntegrityFailure", "quarantined"),
-    "authority-journal-tamper": ("journal", "allowed", "journalIntegrityFailure", "quarantined"),
-    "authority-journal-symlink": ("journal", "allowed", "journalIntegrityFailure", "quarantined"),
-    # Protocol bounds attacks (rejected before state mutation).
+    "authority-journal-truncation": (
+        "journal",
+        "allowed",
+        "journalIntegrityFailure",
+        "quarantined",
+    ),
+    "authority-journal-tamper": (
+        "journal",
+        "allowed",
+        "journalIntegrityFailure",
+        "quarantined",
+    ),
+    "authority-journal-symlink": (
+        "journal",
+        "allowed",
+        "journalIntegrityFailure",
+        "quarantined",
+    ),
     "oversize-message": ("protocol", "allowed", "protocolViolation", "off"),
     "deep-message": ("protocol", "allowed", "protocolViolation", "off"),
     "noncanonical-message": ("protocol", "allowed", "protocolViolation", "off"),
-    # Backpressure / saturation attacks (explicit exhaustion, no drop of stop/revoke).
     "request-flood": ("backpressure", "allowed", "resourceExhausted", "off"),
     "in-flight-saturation": ("backpressure", "allowed", "resourceExhausted", "off"),
     "event-queue-saturation": ("backpressure", "allowed", "resourceExhausted", "off"),
-    # Liveness / concurrency attacks.
     "heartbeat-loss": ("liveness", "allowed", "leaseRevoked", "off"),
     "fast-user-switching-race": ("liveness", "allowed", "leaseRevoked", "off"),
     "late-callback": ("liveness", "allowed", "staleOperation", "off"),
-    # Secret-extraction surfaces (every surface must yield no secret bytes).
     "secret-extraction-logs": ("secret", "allowed", "secretAbsent", "off"),
     "secret-extraction-preferences": ("secret", "allowed", "secretAbsent", "off"),
     "secret-extraction-journal": ("secret", "allowed", "secretAbsent", "off"),
@@ -95,13 +100,48 @@ REQUIRED_CASES: dict[str, tuple[str, str, str, str]] = {
     "secret-extraction-evidence": ("secret", "allowed", "secretAbsent", "off"),
 }
 
-VALID_CLIENTS = {"allowed", "denied"}
-VALID_CLEANUP = {"off", "quarantined"}
-CASE_FIELDS = {
-    "id",
+PLATFORM_FIELDS = {"architecture", "macos_version", "hardware_model", "clean_install"}
+SIGNING_FIELDS = {"team_id", "allowed_client", "denied_client"}
+IDENTITY_FIELDS = {
+    "signing_id",
+    "cdhash",
+    "designated_requirement_sha256",
+    "binary_sha256",
+    "evidence_artifact",
+}
+BASELINE_FIELDS = {"client", "artifact"}
+CASE_FIELDS = {"id", "category", "client", "artifact"}
+SIGNATURE_EVIDENCE_FIELDS = {
+    "schema_version",
+    "proof",
+    "client",
+    "team_id",
+    "signing_id",
+    "cdhash",
+    "designated_requirement_sha256",
+    "binary_sha256",
+    "command",
+    "exit_code",
+    "assessed_at",
+}
+TRANSCRIPT_FIELDS = {
+    "schema_version",
+    "proof",
+    "case_id",
     "category",
     "client",
-    "executed",
+    "client_binary_sha256",
+    "request_nonce",
+    "command",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "events",
+}
+TRANSCRIPT_EVENT_FIELDS = {
+    "sequence",
+    "type",
+    "case_id",
     "outcome",
     "denial_code",
     "cleanup",
@@ -110,76 +150,223 @@ CASE_FIELDS = {
 
 
 class AdversarialMatrixError(ValueError):
-    """The adversarial harness result is incomplete, unbound, or not fail-closed."""
+    """Adversarial evidence is incomplete, drifted, or not fail-closed."""
 
 
-def _exact(value: Any, fields: set[str], label: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != fields:
-        actual = sorted(value) if isinstance(value, dict) else type(value).__name__
-        raise AdversarialMatrixError(f"{label} fields differ: {actual}")
-    return value
-
-
-def _sha256(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
-        raise AdversarialMatrixError(f"{label} is not a lowercase SHA-256")
-    return value
-
-
-def _cdhash(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not CDHASH_RE.fullmatch(value):
-        raise AdversarialMatrixError(f"{label} is not a lowercase code-directory hash")
-    return value
-
-
-def _timestamp(value: Any) -> str:
+def _timestamp(value: Any, label: str) -> datetime:
     if not isinstance(value, str) or not value.endswith("Z"):
-        raise AdversarialMatrixError("captured_at must be a UTC timestamp")
+        raise AdversarialMatrixError(f"{label} must be a UTC timestamp")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as error:
-        raise AdversarialMatrixError("captured_at is not ISO-8601") from error
+        raise AdversarialMatrixError(f"{label} is not ISO-8601") from error
     if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
-        raise AdversarialMatrixError("captured_at must use UTC")
+        raise AdversarialMatrixError(f"{label} must use UTC")
+    return parsed
+
+
+def _bounded_text(value: Any, label: str, maximum: int = 256) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value.encode("utf-8")) > maximum
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise AdversarialMatrixError(f"{label} must be bounded printable text")
     return value
 
 
-def _signing_identity(value: Any, label: str) -> dict[str, Any]:
-    identity = _exact(
-        value,
-        {"signing_id", "cdhash", "designated_requirement_sha256"},
-        label,
+def _platform(value: Any) -> dict[str, Any]:
+    platform = exact_object(value, PLATFORM_FIELDS, "platform")
+    if platform["architecture"] != "arm64" or platform["clean_install"] is not True:
+        raise AdversarialMatrixError("adversarial matrix requires a clean Apple Silicon machine")
+    _bounded_text(platform["macos_version"], "platform.macos_version")
+    _bounded_text(platform["hardware_model"], "platform.hardware_model")
+    return platform
+
+
+def _identity(value: Any, client: str) -> dict[str, Any]:
+    identity = exact_object(value, IDENTITY_FIELDS, f"signing.{client}_client")
+    signing_id = _bounded_text(identity["signing_id"], f"signing.{client}.signing_id")
+    cdhash = identity["cdhash"]
+    if not isinstance(cdhash, str) or not CDHASH_RE.fullmatch(cdhash):
+        raise AdversarialMatrixError(f"signing.{client}.cdhash is invalid")
+    return {
+        "signing_id": signing_id,
+        "cdhash": cdhash,
+        "designated_requirement_sha256": require_sha256(
+            identity["designated_requirement_sha256"],
+            f"signing.{client}.designated_requirement_sha256",
+        ),
+        "binary_sha256": require_sha256(
+            identity["binary_sha256"], f"signing.{client}.binary_sha256"
+        ),
+        "evidence_artifact": identity["evidence_artifact"],
+    }
+
+
+def _validate_signature_evidence(
+    value: Any,
+    *,
+    client: str,
+    identity: dict[str, Any],
+    proof: dict[str, Any],
+) -> datetime:
+    evidence = exact_object(
+        value, SIGNATURE_EVIDENCE_FIELDS, f"signing.{client}.raw_evidence"
     )
-    if not isinstance(identity["signing_id"], str) or not identity["signing_id"].strip():
-        raise AdversarialMatrixError(f"{label}.signing_id is empty")
-    _cdhash(identity["cdhash"], f"{label}.cdhash")
-    _sha256(identity["designated_requirement_sha256"], f"{label}.designated_requirement_sha256")
-    return identity
+    if evidence["schema_version"] != 1:
+        raise AdversarialMatrixError(f"signing.{client} evidence schema_version must be 1")
+    if parse_proof_binding(evidence["proof"], f"signing.{client}.raw_evidence.proof") != proof:
+        raise AdversarialMatrixError(f"signing.{client} evidence proof differs from its report")
+    expected = {
+        "client": client,
+        "team_id": TEAM_ID,
+        "signing_id": identity["signing_id"],
+        "cdhash": identity["cdhash"],
+        "designated_requirement_sha256": identity["designated_requirement_sha256"],
+        "binary_sha256": identity["binary_sha256"],
+    }
+    for field, wanted in expected.items():
+        if evidence[field] != wanted:
+            raise AdversarialMatrixError(f"signing.{client} raw {field} differs from its report")
+    if evidence["command"] != [proof["collector"]["version"], "client-signature", client]:
+        raise AdversarialMatrixError(f"signing.{client} assessment command is not canonical")
+    if evidence["exit_code"] != 0:
+        raise AdversarialMatrixError(f"signing.{client} assessment command failed")
+    return _timestamp(evidence["assessed_at"], f"signing.{client}.assessed_at")
 
 
-def _validate_signing(value: Any) -> dict[str, Any]:
-    signing = _exact(value, {"team_id", "allowed_client", "denied_client"}, "signing")
+def _signing(
+    value: Any, proof: dict[str, Any], artifacts: ArtifactReader
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[datetime]]:
+    signing = exact_object(value, SIGNING_FIELDS, "signing")
     if signing["team_id"] != TEAM_ID:
         raise AdversarialMatrixError("signing.team_id is not the product Team ID")
-    allowed = _signing_identity(signing["allowed_client"], "signing.allowed_client")
-    denied = _signing_identity(signing["denied_client"], "signing.denied_client")
-    if allowed["signing_id"] != ALLOWED_SIGNING_ID:
+    identities = {
+        client: _identity(signing[f"{client}_client"], client)
+        for client in ("allowed", "denied")
+    }
+    if identities["allowed"]["signing_id"] != ALLOWED_SIGNING_ID:
         raise AdversarialMatrixError("allowed client is not the signed Host identity")
-    if denied["signing_id"] == ALLOWED_SIGNING_ID:
-        raise AdversarialMatrixError("denied client must be a distinct same-Team bundle")
-    if allowed["cdhash"] == denied["cdhash"]:
+    if identities["denied"]["signing_id"] == ALLOWED_SIGNING_ID:
+        raise AdversarialMatrixError("denied client must have a distinct signing identifier")
+    if identities["allowed"]["cdhash"] == identities["denied"]["cdhash"]:
         raise AdversarialMatrixError("allowed and denied clients must be separately signed")
-    return signing
+    if identities["allowed"]["binary_sha256"] == identities["denied"]["binary_sha256"]:
+        raise AdversarialMatrixError("allowed and denied client binaries must differ")
+    bindings: list[dict[str, Any]] = []
+    assessed_at: list[datetime] = []
+    for client, identity in identities.items():
+        descriptor, evidence = artifacts.read_json(
+            identity["evidence_artifact"],
+            expected_kind="client-signature-evidence",
+            label=f"signing.{client}.evidence_artifact",
+        )
+        assessed_at.append(
+            _validate_signature_evidence(
+                evidence, client=client, identity=identity, proof=proof
+            )
+        )
+        bindings.append(
+            {
+                "subject": f"client-signature:{client}",
+                "descriptor": descriptor.as_dict(),
+            }
+        )
+    return identities, bindings, assessed_at
 
 
-def validate_adversarial_matrix(value: Any) -> dict[str, Any]:
-    """Validate a captured adversarial matrix result document, failing closed."""
-    document = _exact(
+def _events(
+    value: Any,
+    *,
+    case_id: str,
+    outcome: str,
+    denial_code: str,
+    cleanup: str,
+) -> None:
+    if not isinstance(value, list) or len(value) != 3:
+        raise AdversarialMatrixError(f"{case_id} transcript must have three events")
+    expected = (
+        (0, "attack-started", "", "", False),
+        (1, "authorization-decision", outcome, denial_code, False),
+        (2, "attack-finished", "", "", False),
+    )
+    for index, (sequence, event_type, event_outcome, event_code, secret) in enumerate(expected):
+        event = exact_object(value[index], TRANSCRIPT_EVENT_FIELDS, f"{case_id}.events[{index}]")
+        wanted = {
+            "sequence": sequence,
+            "type": event_type,
+            "case_id": case_id,
+            "outcome": event_outcome,
+            "denial_code": event_code,
+            "cleanup": cleanup if index == 1 else "",
+            "secret_observed": secret,
+        }
+        if event != wanted:
+            raise AdversarialMatrixError(f"{case_id}.events[{index}] differs from required outcome")
+
+
+def _validate_transcript(
+    value: Any,
+    *,
+    case_id: str,
+    category: str,
+    client: str,
+    identity: dict[str, Any],
+    proof: dict[str, Any],
+    expected_outcome: str,
+    expected_code: str,
+    expected_cleanup: str,
+    nonces: set[str],
+) -> datetime:
+    transcript = exact_object(value, TRANSCRIPT_FIELDS, f"{case_id}.transcript")
+    if transcript["schema_version"] != 1:
+        raise AdversarialMatrixError(f"{case_id} transcript schema_version must be 1")
+    if parse_proof_binding(transcript["proof"], f"{case_id}.transcript.proof") != proof:
+        raise AdversarialMatrixError(f"{case_id} transcript proof differs from its report")
+    bindings = {
+        "case_id": case_id,
+        "category": category,
+        "client": client,
+        "client_binary_sha256": identity["binary_sha256"],
+    }
+    for field, expected in bindings.items():
+        if transcript[field] != expected:
+            raise AdversarialMatrixError(f"{case_id} transcript {field} binding differs")
+    nonce = require_sha256(transcript["request_nonce"], f"{case_id}.request_nonce")
+    if nonce == proof["run_nonce"] or nonce in nonces:
+        raise AdversarialMatrixError(f"{case_id} request nonce is reused")
+    nonces.add(nonce)
+    if transcript["command"] != [proof["collector"]["version"], "adversarial", case_id]:
+        raise AdversarialMatrixError(f"{case_id} transcript command is not canonical")
+    started = _timestamp(transcript["started_at"], f"{case_id}.started_at")
+    finished = _timestamp(transcript["finished_at"], f"{case_id}.finished_at")
+    duration = (finished - started).total_seconds()
+    if duration <= 0 or duration > 600:
+        raise AdversarialMatrixError(f"{case_id} transcript duration is outside 0..10min")
+    expected_exit = 0 if expected_outcome == "authorized" else 77
+    if transcript["exit_code"] != expected_exit:
+        raise AdversarialMatrixError(f"{case_id} transcript exit_code differs from its outcome")
+    if expected_code and not DENIAL_CODE_RE.fullmatch(expected_code):
+        raise AdversarialMatrixError(f"{case_id} expected denial code is invalid")
+    _events(
+        transcript["events"],
+        case_id=case_id,
+        outcome=expected_outcome,
+        denial_code=expected_code,
+        cleanup=expected_cleanup,
+    )
+    return started
+
+
+def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
+    document = exact_object(
         value,
         {
             "schema_version",
-            "product",
-            "app_manifest_sha256",
+            "harness_version",
+            "proof",
             "captured_at",
             "platform",
             "signing",
@@ -188,119 +375,124 @@ def validate_adversarial_matrix(value: Any) -> dict[str, Any]:
         },
         "adversarial matrix",
     )
-    if document["schema_version"] != 1:
-        raise AdversarialMatrixError("adversarial matrix schema_version must be 1")
-    product = _exact(document["product"], {"version", "build_number"}, "product")
-    if product["version"] != "0.4.0":
-        raise AdversarialMatrixError("adversarial matrix is not for version 0.4.0")
-    canonical_build_version(product["build_number"], "adversarial matrix build_number")
-    _sha256(document["app_manifest_sha256"], "app_manifest_sha256")
-    _timestamp(document["captured_at"])
-    platform = _exact(
-        document["platform"],
-        {"architecture", "macos_version", "hardware_model", "clean_install"},
-        "platform",
+    if document["schema_version"] != SCHEMA_VERSION:
+        raise AdversarialMatrixError(f"adversarial schema_version must be {SCHEMA_VERSION}")
+    if document["harness_version"] != HARNESS_VERSION:
+        raise AdversarialMatrixError(
+            f"adversarial harness_version must be {HARNESS_VERSION!r}"
+        )
+    proof = parse_proof_binding(document["proof"])
+    if proof["candidate"]["version"] != PRODUCT_VERSION:
+        raise AdversarialMatrixError("adversarial evidence is not for version 0.4.0")
+    _platform(document["platform"])
+    identities, bindings, signature_times = _signing(
+        document["signing"], proof, artifacts
     )
-    if platform["architecture"] != "arm64" or platform["clean_install"] is not True:
-        raise AdversarialMatrixError("adversarial matrix requires a clean Apple Silicon machine")
-    if not all(
-        isinstance(platform[key], str) and platform[key].strip()
-        for key in ("macos_version", "hardware_model")
-    ):
-        raise AdversarialMatrixError("adversarial platform identity is incomplete")
+    nonces: set[str] = set()
+    starts: list[datetime] = []
 
-    _validate_signing(document["signing"])
-
-    # Positive control: a correctly signed allowed client must be authorized. This
-    # proves the harness can distinguish grant from denial, so a matrix of denials
-    # is meaningful rather than a system that refuses everything unconditionally.
-    baseline = _exact(document["baseline"], {"client", "executed", "authorized"}, "baseline")
+    baseline = exact_object(document["baseline"], BASELINE_FIELDS, "baseline")
     if baseline["client"] != "allowed":
-        raise AdversarialMatrixError("baseline positive control must use the allowed client")
-    if baseline["executed"] is not True:
-        raise AdversarialMatrixError("baseline positive control was not executed (fail closed)")
-    if baseline["authorized"] is not True:
-        raise AdversarialMatrixError("baseline allowed client was not authorized (fail closed)")
+        raise AdversarialMatrixError("baseline must use the allowed client")
+    descriptor, transcript = artifacts.read_json(
+        baseline["artifact"],
+        expected_kind="adversarial-transcript",
+        label="baseline.artifact",
+    )
+    starts.append(
+        _validate_transcript(
+            transcript,
+            case_id="baseline",
+            category="baseline",
+            client="allowed",
+            identity=identities["allowed"],
+            proof=proof,
+            expected_outcome="authorized",
+            expected_code="",
+            expected_cleanup="off",
+            nonces=nonces,
+        )
+    )
+    bindings.append({"subject": "baseline", "descriptor": descriptor.as_dict()})
 
     cases = document["cases"]
-    if not isinstance(cases, list):
-        raise AdversarialMatrixError("adversarial matrix cases must be a list")
-
-    observed: dict[str, dict[str, Any]] = {}
-    for index, raw in enumerate(cases):
-        case = _exact(raw, CASE_FIELDS, f"cases[{index}]")
+    if not isinstance(cases, list) or len(cases) != len(REQUIRED_CASES):
+        raise AdversarialMatrixError("adversarial matrix must contain every case exactly once")
+    seen: set[str] = set()
+    for index, raw_case in enumerate(cases):
+        case = exact_object(raw_case, CASE_FIELDS, f"cases[{index}]")
         case_id = case["id"]
-        if case_id not in REQUIRED_CASES:
+        if not isinstance(case_id, str) or case_id not in REQUIRED_CASES:
             raise AdversarialMatrixError(f"unknown adversarial case: {case_id!r}")
-        if case_id in observed:
+        if case_id in seen:
             raise AdversarialMatrixError(f"duplicate adversarial case: {case_id!r}")
-        observed[case_id] = case
-
-        category, expected_client, expected_code, expected_cleanup = REQUIRED_CASES[case_id]
-        if case["category"] != category:
-            raise AdversarialMatrixError(f"{case_id} category differs from the required matrix")
-        if case["client"] not in VALID_CLIENTS:
-            raise AdversarialMatrixError(f"{case_id} client is not a known signed identity")
-        # Wrong signature binding fails closed.
-        if case["client"] != expected_client:
-            raise AdversarialMatrixError(
-                f"{case_id} is bound to the wrong client signature: {case['client']!r}"
-            )
-        # An unexecuted attack case fails the level (fail closed).
-        if case["executed"] is not True:
-            raise AdversarialMatrixError(f"{case_id} attack was not executed (fail closed)")
-        # A case that did not deny means the attack succeeded: fail closed.
-        if case["outcome"] != "denied":
-            raise AdversarialMatrixError(
-                f"{case_id} was not denied (attack succeeded): {case['outcome']!r}"
-            )
-        code = case["denial_code"]
-        if not isinstance(code, str) or not DENIAL_CODE_RE.fullmatch(code):
-            raise AdversarialMatrixError(f"{case_id} denial_code is not a stable redacted code")
-        if code != expected_code:
-            raise AdversarialMatrixError(
-                f"{case_id} denial_code differs: {code!r}, expected {expected_code!r}"
-            )
-        if case["cleanup"] not in VALID_CLEANUP:
-            raise AdversarialMatrixError(f"{case_id} cleanup outcome is invalid")
-        if case["cleanup"] != expected_cleanup:
-            raise AdversarialMatrixError(
-                f"{case_id} cleanup differs: {case['cleanup']!r}, expected {expected_cleanup!r}"
-            )
-        # No attack surface may ever reveal secret bytes, even when otherwise denied.
-        if case["secret_observed"] is not False:
-            raise AdversarialMatrixError(f"{case_id} observed secret material (fail closed)")
-
-    missing = set(REQUIRED_CASES) - set(observed)
-    if missing:
-        raise AdversarialMatrixError(
-            "adversarial matrix is missing required cases: " + ", ".join(sorted(missing))
+        seen.add(case_id)
+        category, client, denial_code, cleanup = REQUIRED_CASES[case_id]
+        if case["category"] != category or case["client"] != client:
+            raise AdversarialMatrixError(f"{case_id} category/client binding differs")
+        descriptor, transcript = artifacts.read_json(
+            case["artifact"],
+            expected_kind="adversarial-transcript",
+            label=f"{case_id}.artifact",
         )
-    return document
+        starts.append(
+            _validate_transcript(
+                transcript,
+                case_id=case_id,
+                category=category,
+                client=client,
+                identity=identities[client],
+                proof=proof,
+                expected_outcome="denied",
+                expected_code=denial_code,
+                expected_cleanup=cleanup,
+                nonces=nonces,
+            )
+        )
+        bindings.append({"subject": case_id, "descriptor": descriptor.as_dict()})
+    if seen != set(REQUIRED_CASES):
+        raise AdversarialMatrixError("adversarial matrix is missing a required case")
+    if not starts or max(signature_times) > min(starts):
+        raise AdversarialMatrixError(
+            "client signature assessments must precede adversarial transcripts"
+        )
+    if _timestamp(document["captured_at"], "captured_at") != min(
+        starts + signature_times
+    ):
+        raise AdversarialMatrixError("captured_at differs from the earliest raw evidence")
+    return {"document": document, "proof": proof, "artifacts": bindings}
 
 
-def load_adversarial_matrix(path: Path) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise AdversarialMatrixError("adversarial matrix must be a regular non-symlink file")
+def validate_adversarial_matrix(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise AdversarialMatrixError("adversarial matrix is not valid UTF-8 JSON") from error
-    return validate_adversarial_matrix(value)
+        return _validate(value, artifacts)
+    except RawArtifactError as error:
+        raise AdversarialMatrixError(str(error)) from error
+
+
+def load_adversarial_matrix(path: Path, *, evidence_root: Path) -> dict[str, Any]:
+    try:
+        value = load_json_file(path, maximum=MAX_REPORT_BYTES, label="adversarial report")
+        with ArtifactReader(evidence_root) as artifacts:
+            return validate_adversarial_matrix(value, artifacts)
+    except RawArtifactError as error:
+        raise AdversarialMatrixError(str(error)) from error
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("matrix", type=Path)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("report", type=Path)
+    parser.add_argument("--evidence-root", required=True, type=Path)
     arguments = parser.parse_args()
     try:
-        document = load_adversarial_matrix(arguments.matrix)
+        result = load_adversarial_matrix(
+            arguments.report, evidence_root=arguments.evidence_root
+        )
     except (AdversarialMatrixError, OSError) as error:
-        raise SystemExit(f"error: adversarial matrix failed: {error}") from error
+        raise SystemExit(f"error: adversarial evidence failed: {error}") from error
     print(
-        "adversarial matrix verified: "
-        f"0.4.0 ({document['product']['build_number']}), "
-        f"{len(document['cases'])} denied attack cases"
+        "adversarial raw evidence structurally verified (collector signature not checked): "
+        f"{len(result['artifacts'])} raw artifacts"
     )
 
 

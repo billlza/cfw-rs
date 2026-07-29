@@ -43,8 +43,8 @@ from scripts.publication.final_candidate import (
     TEAM_ID,
     UPDATER_KEY_BLOCK,
     VERIFIED,
-    build_final_candidate_binding,
-    validate_final_candidate_binding,
+    build_final_candidate_binding as _build_final_candidate_binding,
+    validate_final_candidate_binding as _validate_final_candidate_binding,
 )
 from scripts.publication.sealed_closure import derive_supply_chain
 from scripts.repository_source_identity import repository_commit
@@ -52,7 +52,10 @@ from scripts.tests.test_physical_evidence_aggregator import (
     APP_MANIFEST,
     BUILD_NUMBER,
     BUILT_AT,
+    PHYSICAL_EVIDENCE_ROOT,
+    PHYSICAL_TRUST_POLICY,
     SIGNED_TREE,
+    aggregate_fixture,
     fixture as physical_fixture,
 )
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
@@ -66,6 +69,18 @@ PINNED = derive_supply_chain(REPOSITORY)["patched_source"]
 XCFRAMEWORK_SHA = "1" * 64
 XCFRAMEWORK_MANIFEST_SHA = "2" * 64
 OBSERVED_AT = "2026-08-01T00:00:00Z"
+
+
+def build_final_candidate_binding(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _build_final_candidate_binding(*args, **kwargs)
+
+
+def validate_final_candidate_binding(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    return _validate_final_candidate_binding(*args, **kwargs)
 
 
 def _sha(rng: random.Random) -> str:
@@ -234,7 +249,7 @@ def mutate_missing_identity(request, rng):
 
 
 def mutate_foreign_physical_tree(request, rng):
-    request["physical_evidence"]["candidate"]["signed_app_tree_sha256"] = "f" * 64
+    request["physical_evidence"]["sha256"] = "f" * 64
     return request, "foreign-physical-tree"
 
 
@@ -260,7 +275,7 @@ def mutate_superseded_manifest_binding(request, rng):
 
 def mutate_superseded_report(request, rng):
     # Retire a raw report that the aggregate still carries.
-    report = request["physical_evidence"]["runs"][0]["reports"]["packet"]["report_sha256"]
+    report = aggregate_fixture()["runs"][0]["reports"]["packet"]["artifact"]["sha256"]
     request["evidence_binding"]["superseded_report_hashes"] = [report]
     return request, "superseded-report"
 
@@ -276,7 +291,7 @@ def mutate_post_verification_precedes_evidence(request, rng):
 
 
 def mutate_missing_soak(request, rng):
-    del request["physical_evidence"]["runs"][0]["reports"]["performance"]["document"]["soak"]
+    del request["physical_evidence"]["size"]
     return request, "missing-soak"
 
 

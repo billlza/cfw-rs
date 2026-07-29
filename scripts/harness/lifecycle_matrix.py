@@ -1,75 +1,58 @@
 #!/usr/bin/env python3
-"""Automated signed-installed lifecycle matrix harness (Task 11.1).
+"""Proof-to-byte signed-installed lifecycle matrix validator.
 
-This module is the machine-readable half of the Signed_Installed_Verified
-lifecycle gate required by Requirement 6.1. It declares the exact matrix of
-lifecycle probes that a clean physical Apple Silicon run must exercise and a
-strictly fail-closed validator for the raw results those probes emit.
-
-Scope boundary: the *definitions* and the *result validator* live here and are
-covered by deterministic unit tests using fixtures. The actual on-device runs
-require signed Apple Silicon hardware, a notarizable app tree, at least two
-login accounts, and privileged lifecycle control (login/logout/lock, Fast User
-Switching, sleep/wake, reboot, and process kills). Those runs are out of scope
-for this task and are reported as not-run.
-
-Fail-closed contract (Requirements 4.1, 6.1, 6.5):
-
-* Every probe in :data:`REQUIRED_PROBES` must appear exactly once. A missing
-  probe is absence, and absence is never success.
-* A probe contributes evidence only when its ``status`` is exactly
-  ``"passed"``. ``skipped``, ``unavailable``, ``malformed``, ``timeout``,
-  ``failed`` and every other value fail the whole level immediately.
-* Every raw result binds to the exact signed app tree hash, Apple Silicon
-  machine hash, macOS build, operation context, and a non-secret report hash.
-  A missing or mismatched binding fails closed - a raw report can never be
-  reused across candidates, machines, or operations.
-* Parsing is canonical: duplicate JSON keys, unknown fields, and non-object
-  documents are rejected before interpretation, so a malformed document can
-  never be silently narrowed into a passing subset.
+Each required probe references one raw command/event artifact. The validator
+reopens those bytes and recomputes the accepted exit/event sequence; a report
+cannot turn a missing, skipped, or failed command into a passing declaration.
+Collector authenticity remains an aggregate-level external trust gate.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+from datetime import datetime
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-# Realistic macOS build identifiers such as "24A335" or "23F79".
+if __package__:
+    from .raw_artifacts import (
+        ArtifactReader,
+        RawArtifactError,
+        exact_object,
+        load_json_file,
+        parse_proof_binding,
+        require_identifier,
+        require_sha256,
+    )
+else:  # pragma: no cover - direct-script import path
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from raw_artifacts import (  # type: ignore
+        ArtifactReader,
+        RawArtifactError,
+        exact_object,
+        load_json_file,
+        parse_proof_binding,
+        require_identifier,
+        require_sha256,
+    )
+
+
+SCHEMA_VERSION = 2
+HARNESS_VERSION = "lifecycle-matrix-v2"
+PRODUCT_VERSION = "0.4.0"
+REQUIRED_ARCHITECTURE = "arm64"
+MAX_REPORT_BYTES = 1 * 1024 * 1024
 MACOS_BUILD_RE = re.compile(r"^[0-9]{2}[A-Z][0-9]{1,5}[a-z]?$")
 
-SCHEMA_VERSION = 1
-HARNESS_VERSION = "lifecycle-matrix-v1"
 
-# The only architecture accepted by the Signed_Installed gate.
-REQUIRED_ARCHITECTURE = "arm64"
-
-# The only probe status that contributes evidence. Anything else - skipped,
-# unavailable, masked, suppressed, timed-out, malformed, or unsuccessful -
-# fails the associated evidence level (Requirement 6.5).
-ACCEPTED_STATUS = "passed"
-
-MAX_DOCUMENT_BYTES = 1 * 1024 * 1024
+class LifecycleMatrixError(ValueError):
+    """The lifecycle evidence is incomplete, drifted, or behaviorally invalid."""
 
 
-# The complete machine-readable lifecycle matrix. Each probe declares the
-# category it belongs to and any structured attribute constraints its raw
-# result must satisfy. The set is exhaustive for Requirement 6.1: inside-out
-# signatures, exact Team ID, bundle identifiers, entitlements, provisioning,
-# daemon registration approval and denial, System Extension approval / pending
-# approval / restart, upgrade / replacement / downgrade refusal, install and
-# uninstall cleanup, login / logout / lock, two-user Fast User Switching,
-# concurrent starts, cancellation, sleep and wake, reboot recovery, and Host /
-# Global Authority / ProxyAgent / Provider crashes.
-#
-# ``attributes`` maps the exact attribute keys a probe result must carry to a
-# validator callable. A probe with no structured attributes must carry an empty
-# ``attributes`` object, so extra fields cannot smuggle unaudited claims.
-def _positive_int(minimum: int):
+def _positive_int(minimum: int) -> Callable[[Any, str], int]:
     def _check(value: Any, label: str) -> int:
         if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
             raise LifecycleMatrixError(f"{label} must be an integer >= {minimum}")
@@ -78,257 +61,212 @@ def _positive_int(minimum: int):
     return _check
 
 
-PROBE_SPECS: dict[str, dict[str, Any]] = {
-    # Signing, identity, entitlements, provisioning.
-    "inside-out-signatures": {"category": "identity", "attributes": {}},
-    "team-id": {"category": "identity", "attributes": {}},
-    "bundle-identifiers": {"category": "identity", "attributes": {}},
-    "entitlements": {"category": "identity", "attributes": {}},
-    "provisioning": {"category": "identity", "attributes": {}},
-    # Global Authority launchd daemon registration - both outcomes required.
-    "daemon-registration-approval": {"category": "daemon", "attributes": {}},
-    "daemon-registration-denial": {"category": "daemon", "attributes": {}},
-    # System Extension activation lifecycle.
-    "system-extension-approval": {"category": "system-extension", "attributes": {}},
-    "system-extension-pending": {"category": "system-extension", "attributes": {}},
-    "system-extension-restart": {"category": "system-extension", "attributes": {}},
-    # Upgrade / replacement / downgrade.
-    "upgrade": {"category": "packaging", "attributes": {}},
-    "replacement": {"category": "packaging", "attributes": {}},
-    "downgrade-refusal": {"category": "packaging", "attributes": {}},
-    # Install / uninstall cleanup.
-    "install-cleanup": {"category": "packaging", "attributes": {}},
-    "uninstall-cleanup": {"category": "packaging", "attributes": {}},
-    # Session lifecycle.
-    "login": {"category": "session", "attributes": {}},
-    "logout": {"category": "session", "attributes": {}},
-    "lock": {"category": "session", "attributes": {}},
-    # Fast User Switching requires at least two distinct users.
-    "fast-user-switching": {
-        "category": "session",
-        "attributes": {"user_count": _positive_int(2)},
-    },
-    # Concurrency, cancellation, power, and recovery.
-    "concurrent-starts": {
-        "category": "concurrency",
-        "attributes": {"concurrent_start_count": _positive_int(2)},
-    },
-    "cancellation": {"category": "concurrency", "attributes": {}},
-    "sleep-wake": {"category": "power", "attributes": {}},
-    "reboot-recovery": {"category": "power", "attributes": {}},
-    # All four component crash cases.
-    "host-crash": {"category": "crash", "attributes": {}},
-    "global-authority-crash": {"category": "crash", "attributes": {}},
-    "proxy-agent-crash": {"category": "crash", "attributes": {}},
-    "provider-crash": {"category": "crash", "attributes": {}},
+# (category, expected command exit, terminal observation, attribute checks)
+PROBE_SPECS: dict[str, tuple[str, int, str, dict[str, Callable[[Any, str], int]]]] = {
+    "inside-out-signatures": ("identity", 0, "identity-verified", {}),
+    "team-id": ("identity", 0, "identity-verified", {}),
+    "bundle-identifiers": ("identity", 0, "identity-verified", {}),
+    "entitlements": ("identity", 0, "identity-verified", {}),
+    "provisioning": ("identity", 0, "identity-verified", {}),
+    "daemon-registration-approval": ("daemon", 0, "approval-observed", {}),
+    "daemon-registration-denial": ("daemon", 77, "denial-observed", {}),
+    "system-extension-approval": ("system-extension", 0, "approval-observed", {}),
+    "system-extension-pending": ("system-extension", 0, "pending-observed", {}),
+    "system-extension-restart": ("system-extension", 0, "restart-observed", {}),
+    "upgrade": ("packaging", 0, "transition-observed", {}),
+    "replacement": ("packaging", 0, "transition-observed", {}),
+    "downgrade-refusal": ("packaging", 77, "denial-observed", {}),
+    "install-cleanup": ("packaging", 0, "cleanup-observed", {}),
+    "uninstall-cleanup": ("packaging", 0, "cleanup-observed", {}),
+    "login": ("session", 0, "transition-observed", {}),
+    "logout": ("session", 0, "transition-observed", {}),
+    "lock": ("session", 0, "transition-observed", {}),
+    "fast-user-switching": (
+        "session",
+        0,
+        "transition-observed",
+        {"user_count": _positive_int(2)},
+    ),
+    "concurrent-starts": (
+        "concurrency",
+        0,
+        "serialization-observed",
+        {"concurrent_start_count": _positive_int(2)},
+    ),
+    "cancellation": ("concurrency", 0, "cancellation-observed", {}),
+    "sleep-wake": ("power", 0, "recovery-observed", {}),
+    "reboot-recovery": ("power", 0, "recovery-observed", {}),
+    "host-crash": ("crash", 0, "recovery-observed", {}),
+    "global-authority-crash": ("crash", 0, "recovery-observed", {}),
+    "proxy-agent-crash": ("crash", 0, "recovery-observed", {}),
+    "provider-crash": ("crash", 0, "recovery-observed", {}),
 }
 
-REQUIRED_PROBES: frozenset[str] = frozenset(PROBE_SPECS)
-
-# The binding fields every raw probe result must carry and match against the
-# candidate identity. ``operation_id``/``installation_id`` are identifiers,
-# ``epoch``/``generation`` are integers, the rest are hashes/build strings.
-BINDING_FIELDS = (
-    "signed_app_tree_sha256",
+REQUIRED_PROBES = frozenset(PROBE_SPECS)
+OPERATION_FIELDS = {"operation_id", "installation_id", "epoch", "generation"}
+ENVIRONMENT_FIELDS = {
     "machine_sha256",
     "macos_build",
-    "operation_id",
-    "installation_id",
-    "epoch",
-    "generation",
-)
-
-
-class LifecycleMatrixError(ValueError):
-    """The lifecycle matrix evidence is incomplete, unbound, or malformed."""
+    "architecture",
+    "operation_context",
+}
+PROBE_FIELDS = {"id", "attributes", "artifact"}
+EVENT_DOCUMENT_FIELDS = {
+    "schema_version",
+    "proof",
+    "environment",
+    "probe_id",
+    "category",
+    "command",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "events",
+    "attributes",
+}
+EVENT_FIELDS = {"sequence", "type", "probe_id", "observation"}
 
 
 def required_probe_ids() -> frozenset[str]:
-    """Return the exact set of probe ids a signed-installed run must emit."""
     return REQUIRED_PROBES
 
 
 def probe_matrix() -> dict[str, str]:
-    """Return the machine-readable ``{probe_id: category}`` matrix."""
-    return {probe: spec["category"] for probe, spec in PROBE_SPECS.items()}
+    return {probe: spec[0] for probe, spec in PROBE_SPECS.items()}
 
 
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise LifecycleMatrixError(f"lifecycle matrix has a duplicate field: {key!r}")
-        result[key] = value
-    return result
-
-
-def _canonical_loads(text: str) -> Any:
+def _timestamp(value: Any, label: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise LifecycleMatrixError(f"{label} must be a UTC timestamp")
     try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except json.JSONDecodeError as error:
-        raise LifecycleMatrixError("lifecycle matrix is not canonical JSON") from error
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise LifecycleMatrixError(f"{label} is not ISO-8601") from error
+    if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
+        raise LifecycleMatrixError(f"{label} must use UTC")
+    return parsed
 
 
-def _exact(value: Any, fields: set[str], label: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise LifecycleMatrixError(f"{label} must be a JSON object")
-    actual = set(value)
-    missing = fields - actual
-    unknown = actual - fields
-    if missing:
-        raise LifecycleMatrixError(f"{label} is missing required fields: {sorted(missing)}")
-    if unknown:
-        raise LifecycleMatrixError(f"{label} has unknown fields: {sorted(unknown)}")
-    return value
-
-
-def _sha256(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
-        raise LifecycleMatrixError(f"{label} is not a lowercase SHA-256")
-    return value
-
-
-def _identifier(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not IDENTIFIER_RE.fullmatch(value):
-        raise LifecycleMatrixError(f"{label} is not a canonical identifier")
-    return value
-
-
-def _macos_build(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not MACOS_BUILD_RE.fullmatch(value):
-        raise LifecycleMatrixError(f"{label} is not a macOS build identifier")
-    return value
-
-
-def _non_negative_int(value: Any, label: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise LifecycleMatrixError(f"{label} must be a non-negative integer")
-    return value
-
-
-def _positive_generation(value: Any, label: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise LifecycleMatrixError(f"{label} must be a positive integer")
-    return value
-
-
-def _operation_context(value: Any) -> dict[str, Any]:
-    context = _exact(
-        value,
-        {"operation_id", "installation_id", "epoch", "generation"},
-        "operation_context",
+def _operation_context(value: Any, label: str) -> dict[str, Any]:
+    context = exact_object(value, OPERATION_FIELDS, label)
+    operation_id = require_identifier(context["operation_id"], f"{label}.operation_id")
+    installation_id = require_identifier(
+        context["installation_id"], f"{label}.installation_id"
     )
+    epoch = context["epoch"]
+    generation = context["generation"]
+    if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
+        raise LifecycleMatrixError(f"{label}.epoch must be a non-negative integer")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        raise LifecycleMatrixError(f"{label}.generation must be a positive integer")
     return {
-        "operation_id": _identifier(context["operation_id"], "operation_context.operation_id"),
-        "installation_id": _identifier(
-            context["installation_id"], "operation_context.installation_id"
-        ),
-        "epoch": _non_negative_int(context["epoch"], "operation_context.epoch"),
-        "generation": _positive_generation(context["generation"], "operation_context.generation"),
+        "operation_id": operation_id,
+        "installation_id": installation_id,
+        "epoch": epoch,
+        "generation": generation,
     }
 
 
-def _candidate(value: Any) -> dict[str, Any]:
-    candidate = _exact(
+def _environment(value: Any, label: str = "environment") -> dict[str, Any]:
+    environment = exact_object(value, ENVIRONMENT_FIELDS, label)
+    machine = require_sha256(environment["machine_sha256"], f"{label}.machine_sha256")
+    macos_build = environment["macos_build"]
+    if not isinstance(macos_build, str) or not MACOS_BUILD_RE.fullmatch(macos_build):
+        raise LifecycleMatrixError(f"{label}.macos_build is not a macOS build identifier")
+    if environment["architecture"] != REQUIRED_ARCHITECTURE:
+        raise LifecycleMatrixError(f"{label}.architecture must be arm64")
+    return {
+        "machine_sha256": machine,
+        "macos_build": macos_build,
+        "architecture": REQUIRED_ARCHITECTURE,
+        "operation_context": _operation_context(
+            environment["operation_context"], f"{label}.operation_context"
+        ),
+    }
+
+
+def _attributes(value: Any, probe_id: str, label: str) -> dict[str, Any]:
+    checks = PROBE_SPECS[probe_id][3]
+    attributes = exact_object(value, set(checks), label)
+    for key, check in checks.items():
+        check(attributes[key], f"{label}.{key}")
+    return attributes
+
+
+def _command(value: Any, collector_version: str, probe_id: str, label: str) -> None:
+    expected = [collector_version, "lifecycle", probe_id]
+    if value != expected:
+        raise LifecycleMatrixError(f"{label} does not match the collector probe command")
+
+
+def _event_sequence(value: Any, probe_id: str, observation: str, label: str) -> None:
+    if not isinstance(value, list) or len(value) != 3:
+        raise LifecycleMatrixError(f"{label} must contain start/observation/finish")
+    expected = (
+        (0, "probe-started", ""),
+        (1, "probe-observation", observation),
+        (2, "probe-finished", ""),
+    )
+    for index, (sequence, event_type, expected_observation) in enumerate(expected):
+        event = exact_object(value[index], EVENT_FIELDS, f"{label}[{index}]")
+        if event != {
+            "sequence": sequence,
+            "type": event_type,
+            "probe_id": probe_id,
+            "observation": expected_observation,
+        }:
+            raise LifecycleMatrixError(f"{label}[{index}] differs from the required sequence")
+
+
+def _validate_raw_event(
+    value: Any,
+    *,
+    probe_id: str,
+    proof: dict[str, Any],
+    environment: dict[str, Any],
+    report_attributes: dict[str, Any],
+) -> datetime:
+    raw = exact_object(value, EVENT_DOCUMENT_FIELDS, f"{probe_id}.raw_event")
+    if raw["schema_version"] != 1:
+        raise LifecycleMatrixError(f"{probe_id}.raw_event schema_version must be 1")
+    if parse_proof_binding(raw["proof"], f"{probe_id}.raw_event.proof") != proof:
+        raise LifecycleMatrixError(f"{probe_id}.raw_event proof binding differs from its report")
+    if _environment(raw["environment"], f"{probe_id}.raw_event.environment") != environment:
+        raise LifecycleMatrixError(f"{probe_id}.raw_event environment differs from its report")
+    category, expected_exit, observation, _checks = PROBE_SPECS[probe_id]
+    if raw["probe_id"] != probe_id or raw["category"] != category:
+        raise LifecycleMatrixError(f"{probe_id}.raw_event case/category binding differs")
+    _command(
+        raw["command"], proof["collector"]["version"], probe_id, f"{probe_id}.raw_event.command"
+    )
+    started = _timestamp(raw["started_at"], f"{probe_id}.raw_event.started_at")
+    finished = _timestamp(raw["finished_at"], f"{probe_id}.raw_event.finished_at")
+    duration = (finished - started).total_seconds()
+    if duration <= 0 or duration > 600:
+        raise LifecycleMatrixError(f"{probe_id}.raw_event duration is outside 0..10min")
+    if raw["exit_code"] != expected_exit:
+        raise LifecycleMatrixError(
+            f"{probe_id}.raw_event exit_code differs from the required matrix outcome"
+        )
+    _event_sequence(raw["events"], probe_id, observation, f"{probe_id}.raw_event.events")
+    if _attributes(raw["attributes"], probe_id, f"{probe_id}.raw_event.attributes") != (
+        report_attributes
+    ):
+        raise LifecycleMatrixError(f"{probe_id}.raw_event attributes differ from its report")
+    return started
+
+
+def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
+    document = exact_object(
         value,
         {
-            "signed_app_tree_sha256",
-            "machine_sha256",
-            "macos_build",
-            "architecture",
-            "operation_context",
+            "schema_version",
+            "harness_version",
+            "proof",
+            "environment",
+            "captured_at",
+            "probes",
         },
-        "candidate",
-    )
-    if candidate["architecture"] != REQUIRED_ARCHITECTURE:
-        raise LifecycleMatrixError(
-            f"candidate architecture must be {REQUIRED_ARCHITECTURE!r} (Apple Silicon)"
-        )
-    context = _operation_context(candidate["operation_context"])
-    return {
-        "signed_app_tree_sha256": _sha256(
-            candidate["signed_app_tree_sha256"], "candidate.signed_app_tree_sha256"
-        ),
-        "machine_sha256": _sha256(candidate["machine_sha256"], "candidate.machine_sha256"),
-        "macos_build": _macos_build(candidate["macos_build"], "candidate.macos_build"),
-        "architecture": REQUIRED_ARCHITECTURE,
-        "operation_id": context["operation_id"],
-        "installation_id": context["installation_id"],
-        "epoch": context["epoch"],
-        "generation": context["generation"],
-    }
-
-
-def _validate_bindings(probe_id: str, raw: Any, candidate: dict[str, Any]) -> None:
-    bindings = _exact(raw, set(BINDING_FIELDS), f"{probe_id}.bindings")
-    _sha256(bindings["signed_app_tree_sha256"], f"{probe_id}.bindings.signed_app_tree_sha256")
-    _sha256(bindings["machine_sha256"], f"{probe_id}.bindings.machine_sha256")
-    _macos_build(bindings["macos_build"], f"{probe_id}.bindings.macos_build")
-    _identifier(bindings["operation_id"], f"{probe_id}.bindings.operation_id")
-    _identifier(bindings["installation_id"], f"{probe_id}.bindings.installation_id")
-    _non_negative_int(bindings["epoch"], f"{probe_id}.bindings.epoch")
-    _positive_generation(bindings["generation"], f"{probe_id}.bindings.generation")
-    for field in BINDING_FIELDS:
-        if bindings[field] != candidate[field]:
-            # A stale signed tree, foreign machine, wrong build, or a different
-            # operation context can never bind this raw result to the candidate.
-            raise LifecycleMatrixError(
-                f"{probe_id}.bindings.{field} does not match the candidate identity"
-            )
-
-
-def _validate_attributes(probe_id: str, raw: Any) -> None:
-    checks = PROBE_SPECS[probe_id]["attributes"]
-    attributes = _exact(raw, set(checks), f"{probe_id}.attributes")
-    for key, check in checks.items():
-        check(attributes[key], f"{probe_id}.attributes.{key}")
-
-
-def _validate_probe(
-    raw: Any,
-    index: int,
-    candidate: dict[str, Any],
-    seen: set[str],
-    report_hashes: set[str],
-) -> str:
-    probe = _exact(
-        raw,
-        {"id", "status", "report_sha256", "bindings", "attributes"},
-        f"probes[{index}]",
-    )
-    probe_id = probe["id"]
-    if not isinstance(probe_id, str) or probe_id not in PROBE_SPECS:
-        raise LifecycleMatrixError(f"probes[{index}] has an unknown probe id: {probe_id!r}")
-    if probe_id in seen:
-        raise LifecycleMatrixError(f"lifecycle matrix repeats probe: {probe_id!r}")
-    seen.add(probe_id)
-    status = probe["status"]
-    if status != ACCEPTED_STATUS:
-        # unavailable / skipped / malformed / timeout / failed / masked / ...
-        raise LifecycleMatrixError(
-            f"{probe_id} status is {status!r}; only {ACCEPTED_STATUS!r} evidence is accepted"
-        )
-    report_sha256 = _sha256(probe["report_sha256"], f"{probe_id}.report_sha256")
-    if report_sha256 in report_hashes:
-        # Distinct probes must reference distinct raw reports so one artifact
-        # cannot be replayed to cover multiple lifecycle cases.
-        raise LifecycleMatrixError(f"{probe_id} reuses a raw report hash already bound")
-    report_hashes.add(report_sha256)
-    _validate_bindings(probe_id, probe["bindings"], candidate)
-    _validate_attributes(probe_id, probe["attributes"])
-    return probe_id
-
-
-def validate_lifecycle_matrix(value: Any) -> dict[str, Any]:
-    """Validate a parsed lifecycle matrix result document and return a summary.
-
-    Raises :class:`LifecycleMatrixError` on the first fail-closed condition:
-    a malformed document, an unknown/duplicate probe, a non-``passed`` status,
-    a missing or mismatched binding, or an incomplete matrix.
-    """
-    document = _exact(
-        value,
-        {"schema_version", "harness_version", "candidate", "probes"},
         "lifecycle matrix",
     )
     if document["schema_version"] != SCHEMA_VERSION:
@@ -337,57 +275,85 @@ def validate_lifecycle_matrix(value: Any) -> dict[str, Any]:
         raise LifecycleMatrixError(
             f"lifecycle matrix harness_version must be {HARNESS_VERSION!r}"
         )
-    candidate = _candidate(document["candidate"])
-
+    proof = parse_proof_binding(document["proof"])
+    if proof["candidate"]["version"] != PRODUCT_VERSION:
+        raise LifecycleMatrixError("lifecycle matrix is not for version 0.4.0")
+    environment = _environment(document["environment"])
     probes = document["probes"]
-    if not isinstance(probes, list) or not probes:
-        raise LifecycleMatrixError("lifecycle matrix must declare at least one probe")
-    if len(probes) > len(PROBE_SPECS):
-        raise LifecycleMatrixError("lifecycle matrix declares more probes than the matrix defines")
-
-    seen: set[str] = set()
-    report_hashes: set[str] = set()
-    for index, raw in enumerate(probes):
-        _validate_probe(raw, index, candidate, seen, report_hashes)
-
-    missing = REQUIRED_PROBES - seen
-    if missing:
-        # Absence is never success: an unavailable or skipped probe that never
-        # emitted a result fails the entire Signed_Installed level.
+    if not isinstance(probes, list) or len(probes) != len(REQUIRED_PROBES):
         raise LifecycleMatrixError(
-            f"lifecycle matrix is missing required probes: {sorted(missing)}"
+            "lifecycle matrix must contain every required probe exactly once"
         )
-    return {"candidate": candidate, "probes": sorted(seen)}
+    seen: set[str] = set()
+    bindings: list[dict[str, Any]] = []
+    starts: list[datetime] = []
+    for index, raw_probe in enumerate(probes):
+        probe = exact_object(raw_probe, PROBE_FIELDS, f"probes[{index}]")
+        probe_id = probe["id"]
+        if not isinstance(probe_id, str) or probe_id not in PROBE_SPECS:
+            raise LifecycleMatrixError(f"probes[{index}] has an unknown probe id: {probe_id!r}")
+        if probe_id in seen:
+            raise LifecycleMatrixError(f"lifecycle matrix repeats probe: {probe_id!r}")
+        seen.add(probe_id)
+        report_attributes = _attributes(probe["attributes"], probe_id, f"{probe_id}.attributes")
+        descriptor, raw_event = artifacts.read_json(
+            probe["artifact"],
+            expected_kind="lifecycle-event",
+            label=f"{probe_id}.artifact",
+        )
+        starts.append(
+            _validate_raw_event(
+                raw_event,
+                probe_id=probe_id,
+                proof=proof,
+                environment=environment,
+                report_attributes=report_attributes,
+            )
+        )
+        bindings.append({"subject": probe_id, "descriptor": descriptor.as_dict()})
+    if seen != set(REQUIRED_PROBES):
+        raise LifecycleMatrixError("lifecycle matrix is missing a required probe")
+    if not starts or _timestamp(document["captured_at"], "captured_at") != min(starts):
+        raise LifecycleMatrixError("captured_at differs from the earliest raw probe event")
+    return {
+        "document": document,
+        "proof": proof,
+        "environment": environment,
+        "probes": sorted(seen),
+        "artifacts": bindings,
+    }
 
 
-def load_lifecycle_matrix(path: Path) -> dict[str, Any]:
-    """Load, canonically parse, and validate a lifecycle matrix result file."""
-    if path.is_symlink() or not path.is_file():
-        raise LifecycleMatrixError("lifecycle matrix must be a regular non-symlink file")
-    data = path.read_bytes()
-    if not data or len(data) > MAX_DOCUMENT_BYTES:
-        raise LifecycleMatrixError("lifecycle matrix size is outside the accepted range")
+def validate_lifecycle_matrix(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
     try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise LifecycleMatrixError("lifecycle matrix is not valid UTF-8") from error
-    return validate_lifecycle_matrix(_canonical_loads(text))
+        return _validate(value, artifacts)
+    except RawArtifactError as error:
+        raise LifecycleMatrixError(str(error)) from error
+
+
+def load_lifecycle_matrix(path: Path, *, evidence_root: Path) -> dict[str, Any]:
+    try:
+        value = load_json_file(path, maximum=MAX_REPORT_BYTES, label="lifecycle report")
+        with ArtifactReader(evidence_root) as artifacts:
+            return validate_lifecycle_matrix(value, artifacts)
+    except RawArtifactError as error:
+        raise LifecycleMatrixError(str(error)) from error
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Validate an automated signed-installed lifecycle matrix result set."
-    )
-    parser.add_argument("results", type=Path)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("report", type=Path)
+    parser.add_argument("--evidence-root", required=True, type=Path)
     arguments = parser.parse_args()
     try:
-        summary = load_lifecycle_matrix(arguments.results)
+        summary = load_lifecycle_matrix(
+            arguments.report, evidence_root=arguments.evidence_root
+        )
     except (LifecycleMatrixError, OSError) as error:
         raise SystemExit(f"error: lifecycle matrix validation failed: {error}") from error
     print(
-        "lifecycle matrix verified: "
-        f"{len(summary['probes'])}/{len(REQUIRED_PROBES)} probes bound to "
-        f"{summary['candidate']['signed_app_tree_sha256'][:12]}"
+        "lifecycle raw evidence structurally verified (collector signature not checked): "
+        f"{len(summary['probes'])}/{len(REQUIRED_PROBES)} probes"
     )
 
 

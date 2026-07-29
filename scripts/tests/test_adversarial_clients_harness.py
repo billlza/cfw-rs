@@ -1,196 +1,106 @@
 from __future__ import annotations
 
 import copy
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from scripts.harness.adversarial_clients import (
-    AdversarialMatrixError,
     REQUIRED_CASES,
+    AdversarialMatrixError,
     validate_adversarial_matrix,
 )
-
-
-def fixture() -> dict:
-    cases = []
-    for case_id, (category, client, denial_code, cleanup) in REQUIRED_CASES.items():
-        cases.append(
-            {
-                "id": case_id,
-                "category": category,
-                "client": client,
-                "executed": True,
-                "outcome": "denied",
-                "denial_code": denial_code,
-                "cleanup": cleanup,
-                "secret_observed": False,
-            }
-        )
-    return {
-        "schema_version": 1,
-        "product": {"version": "0.4.0", "build_number": "40000"},
-        "app_manifest_sha256": "a" * 64,
-        "captured_at": "2026-07-22T00:00:00Z",
-        "platform": {
-            "architecture": "arm64",
-            "macos_version": "15.0",
-            "hardware_model": "Mac fixture",
-            "clean_install": True,
-        },
-        "signing": {
-            "team_id": "YKUPL7Z869",
-            "allowed_client": {
-                "signing_id": "com.bill.clashformac",
-                "cdhash": "b" * 40,
-                "designated_requirement_sha256": "c" * 64,
-            },
-            "denied_client": {
-                "signing_id": "com.bill.clashformac.adversary",
-                "cdhash": "d" * 40,
-                "designated_requirement_sha256": "e" * 64,
-            },
-        },
-        "baseline": {"client": "allowed", "executed": True, "authorized": True},
-        "cases": cases,
-    }
+from scripts.harness.raw_artifacts import ArtifactReader
+from scripts.tests.physical_evidence_fixture import PhysicalEvidenceFixture
 
 
 class AdversarialMatrixTests(unittest.TestCase):
-    def test_complete_matrix_of_denials_passes(self) -> None:
-        document = validate_adversarial_matrix(fixture())
-        self.assertEqual(document["schema_version"], 1)
-        self.assertEqual(len(document["cases"]), len(REQUIRED_CASES))
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.fixture = PhysicalEvidenceFixture(self.root)
+        self.document = self.fixture.report_documents[0]["adversarial"]
 
-    def test_matrix_covers_every_required_attack_surface(self) -> None:
-        categories = {meta[0] for meta in REQUIRED_CASES.values()}
-        self.assertEqual(
-            categories,
-            {"identity", "replay", "journal", "protocol", "backpressure", "liveness", "secret"},
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def validate(self) -> dict:
+        with ArtifactReader(self.root) as artifacts:
+            return validate_adversarial_matrix(self.document, artifacts)
+
+    def transcript(self, index: int) -> tuple[dict, dict]:
+        case = self.document["cases"][index]
+        raw = json.loads((self.root / case["artifact"]["path"]).read_text(encoding="utf-8"))
+        return case, raw
+
+    def test_full_matrix_reopens_signature_and_transcript_bytes(self) -> None:
+        result = self.validate()
+        self.assertEqual(len(self.document["cases"]), len(REQUIRED_CASES))
+        self.assertEqual(len(result["artifacts"]), len(REQUIRED_CASES) + 3)
+
+    def test_missing_attack_transcript_fails(self) -> None:
+        self.document["cases"].pop()
+        with self.assertRaisesRegex(AdversarialMatrixError, "every case"):
+            self.validate()
+
+    def test_transcript_authorization_outcome_cannot_be_declared(self) -> None:
+        case, raw = self.transcript(0)
+        raw["events"][1]["outcome"] = "authorized"
+        self.fixture.rewrite_json(case["artifact"], raw)
+        with self.assertRaisesRegex(AdversarialMatrixError, "required outcome"):
+            self.validate()
+
+    def test_transcript_exit_code_must_correspond_to_denial(self) -> None:
+        case, raw = self.transcript(0)
+        raw["exit_code"] = 0
+        self.fixture.rewrite_json(case["artifact"], raw)
+        with self.assertRaisesRegex(AdversarialMatrixError, "exit_code differs"):
+            self.validate()
+
+    def test_case_must_use_expected_client_signature(self) -> None:
+        self.document["cases"][0]["client"] = (
+            "denied" if self.document["cases"][0]["client"] == "allowed" else "allowed"
         )
-        # Every secret-extraction surface named by Requirement 6.4 must be present.
-        for surface in (
-            "logs",
-            "preferences",
-            "journal",
-            "crash-records",
-            "snapshots",
-            "evidence",
-        ):
-            self.assertIn(f"secret-extraction-{surface}", REQUIRED_CASES)
+        with self.assertRaisesRegex(AdversarialMatrixError, "category/client binding"):
+            self.validate()
 
-    def test_missing_case_fails_closed(self) -> None:
-        value = copy.deepcopy(fixture())
-        value["cases"] = value["cases"][:-1]
-        with self.assertRaisesRegex(AdversarialMatrixError, "missing required cases"):
-            validate_adversarial_matrix(value)
+    def test_client_signature_evidence_must_match_binary(self) -> None:
+        identity = self.document["signing"]["allowed_client"]
+        path = self.root / identity["evidence_artifact"]["path"]
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["binary_sha256"] = "f" * 64
+        self.fixture.rewrite_json(identity["evidence_artifact"], raw)
+        with self.assertRaisesRegex(AdversarialMatrixError, "binary_sha256 differs"):
+            self.validate()
 
-    def test_unexecuted_attack_fails_closed(self) -> None:
-        value = copy.deepcopy(fixture())
-        value["cases"][0]["executed"] = False
-        with self.assertRaisesRegex(AdversarialMatrixError, "was not executed"):
-            validate_adversarial_matrix(value)
+    def test_reused_request_nonce_fails(self) -> None:
+        first_case, first = self.transcript(0)
+        second_case, second = self.transcript(1)
+        self.assertNotEqual(first_case["id"], second_case["id"])
+        second["request_nonce"] = first["request_nonce"]
+        self.fixture.rewrite_json(second_case["artifact"], second)
+        with self.assertRaisesRegex(AdversarialMatrixError, "nonce is reused"):
+            self.validate()
 
-    def test_attack_that_was_not_denied_fails_closed(self) -> None:
-        value = copy.deepcopy(fixture())
-        value["cases"][0]["outcome"] = "allowed"
-        with self.assertRaisesRegex(AdversarialMatrixError, "attack succeeded"):
-            validate_adversarial_matrix(value)
+    def test_transcript_candidate_binding_mismatch_fails(self) -> None:
+        case, raw = self.transcript(0)
+        raw["proof"]["candidate"]["app_manifest_sha256"] = "e" * 64
+        self.fixture.rewrite_json(case["artifact"], raw)
+        with self.assertRaisesRegex(AdversarialMatrixError, "proof differs"):
+            self.validate()
 
-    def test_wrong_signature_binding_fails_closed(self) -> None:
-        # Rebind an identity forgery to the allowed client rather than the denied one.
-        value = copy.deepcopy(fixture())
-        for case in value["cases"]:
-            if case["id"] == "wrong-team-id":
-                case["client"] = "allowed"
-        with self.assertRaisesRegex(AdversarialMatrixError, "wrong client signature"):
-            validate_adversarial_matrix(value)
+    def test_replayed_transcript_artifact_fails(self) -> None:
+        self.document["cases"][1]["artifact"] = copy.deepcopy(
+            self.document["cases"][0]["artifact"]
+        )
+        with self.assertRaisesRegex(AdversarialMatrixError, "reuses artifact"):
+            self.validate()
 
-    def test_observed_secret_fails_closed(self) -> None:
-        value = copy.deepcopy(fixture())
-        for case in value["cases"]:
-            if case["id"] == "secret-extraction-logs":
-                case["secret_observed"] = True
-        with self.assertRaisesRegex(AdversarialMatrixError, "observed secret material"):
-            validate_adversarial_matrix(value)
-
-    def test_wrong_denial_code_fails_closed(self) -> None:
-        value = copy.deepcopy(fixture())
-        value["cases"][0]["denial_code"] = "somethingElse"
-        with self.assertRaisesRegex(AdversarialMatrixError, "denial_code differs"):
-            validate_adversarial_matrix(value)
-
-    def test_wrong_cleanup_outcome_fails_closed(self) -> None:
-        value = copy.deepcopy(fixture())
-        for case in value["cases"]:
-            if case["id"] == "authority-journal-truncation":
-                case["cleanup"] = "off"
-        with self.assertRaisesRegex(AdversarialMatrixError, "cleanup differs"):
-            validate_adversarial_matrix(value)
-
-    def test_baseline_positive_control_must_authorize(self) -> None:
-        value = copy.deepcopy(fixture())
-        value["baseline"]["authorized"] = False
-        with self.assertRaisesRegex(AdversarialMatrixError, "was not authorized"):
-            validate_adversarial_matrix(value)
-
-    def test_clients_must_be_separately_signed(self) -> None:
-        value = copy.deepcopy(fixture())
-        value["signing"]["denied_client"]["cdhash"] = value["signing"]["allowed_client"]["cdhash"]
-        with self.assertRaisesRegex(AdversarialMatrixError, "separately signed"):
-            validate_adversarial_matrix(value)
-
-    def test_denied_client_must_be_distinct_bundle(self) -> None:
-        value = copy.deepcopy(fixture())
-        value["signing"]["denied_client"]["signing_id"] = "com.bill.clashformac"
-        with self.assertRaisesRegex(AdversarialMatrixError, "distinct same-Team bundle"):
-            validate_adversarial_matrix(value)
-
-    def test_wrong_team_id_fails_closed(self) -> None:
-        value = copy.deepcopy(fixture())
-        value["signing"]["team_id"] = "AAAAAAAAAA"
-        with self.assertRaisesRegex(AdversarialMatrixError, "team_id"):
-            validate_adversarial_matrix(value)
-
-    def test_non_clean_or_non_arm64_machine_fails_closed(self) -> None:
-        value = copy.deepcopy(fixture())
-        value["platform"]["clean_install"] = False
-        with self.assertRaisesRegex(AdversarialMatrixError, "clean Apple Silicon"):
-            validate_adversarial_matrix(value)
-        value = copy.deepcopy(fixture())
-        value["platform"]["architecture"] = "x86_64"
-        with self.assertRaisesRegex(AdversarialMatrixError, "clean Apple Silicon"):
-            validate_adversarial_matrix(value)
-
-    def test_duplicate_case_fails_closed(self) -> None:
-        value = copy.deepcopy(fixture())
-        value["cases"].append(copy.deepcopy(value["cases"][0]))
-        with self.assertRaisesRegex(AdversarialMatrixError, "duplicate adversarial case"):
-            validate_adversarial_matrix(value)
-
-    def test_unknown_case_fails_closed(self) -> None:
-        value = copy.deepcopy(fixture())
-        rogue = copy.deepcopy(value["cases"][0])
-        rogue["id"] = "not-a-real-attack"
-        value["cases"].append(rogue)
-        with self.assertRaisesRegex(AdversarialMatrixError, "unknown adversarial case"):
-            validate_adversarial_matrix(value)
-
-    def test_symlink_matrix_file_fails_closed(self) -> None:
-        import json
-        import os
-        import tempfile
-
-        from scripts.harness.adversarial_clients import load_adversarial_matrix
-
-        with tempfile.TemporaryDirectory() as tmp:
-            real = os.path.join(tmp, "matrix.json")
-            with open(real, "w", encoding="utf-8") as handle:
-                json.dump(fixture(), handle)
-            link = os.path.join(tmp, "link.json")
-            os.symlink(real, link)
-            from pathlib import Path
-
-            with self.assertRaisesRegex(AdversarialMatrixError, "non-symlink"):
-                load_adversarial_matrix(Path(link))
+    def test_handwritten_executed_field_is_rejected(self) -> None:
+        self.document["cases"][0]["executed"] = True
+        with self.assertRaisesRegex(AdversarialMatrixError, "unknown fields"):
+            self.validate()
 
 
 if __name__ == "__main__":

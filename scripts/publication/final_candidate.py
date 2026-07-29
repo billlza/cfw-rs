@@ -77,7 +77,14 @@ try:  # pragma: no cover - import shim exercised by both invocation styles
     from scripts.harness.physical_evidence_aggregator import (
         REQUIRED_OS,
         PhysicalEvidenceError,
-        validate_physical_evidence,
+        load_physical_evidence_artifact,
+    )
+    from scripts.harness.raw_artifacts import (
+        CollectorTrustNotConfiguredError,
+        CollectorTrustPolicy,
+        RawArtifactError,
+        load_release_trust_policy,
+        parse_descriptor,
     )
     from scripts.release_build_identity import canonical_build_version
     from scripts.updater_key_release_blocker import (
@@ -91,7 +98,14 @@ except ImportError:  # pragma: no cover - CLI invocation style
     from scripts.harness.physical_evidence_aggregator import (
         REQUIRED_OS,
         PhysicalEvidenceError,
-        validate_physical_evidence,
+        load_physical_evidence_artifact,
+    )
+    from scripts.harness.raw_artifacts import (
+        CollectorTrustNotConfiguredError,
+        CollectorTrustPolicy,
+        RawArtifactError,
+        load_release_trust_policy,
+        parse_descriptor,
     )
     from scripts.release_build_identity import canonical_build_version
     from scripts.updater_key_release_blocker import (
@@ -503,19 +517,34 @@ def _gatekeeper(value: object, signed_app_tree: str, built_at: datetime) -> dict
     return gatekeeper
 
 
-def _physical_evidence(value: object, final: dict[str, Any]) -> dict[str, Any]:
-    """Validate the physical aggregate and bind it to the final candidate.
+def _physical_evidence(
+    value: object,
+    final: dict[str, Any],
+    *,
+    evidence_root: Path,
+    trust_policy: CollectorTrustPolicy,
+    fixture: bool,
+) -> dict[str, Any]:
+    """Reopen the private aggregate archive and bind it to the final candidate.
 
     The aggregate carries the installed lifecycle matrix hashes and the
     packet/performance/security/soak reports; it is consumed as a black box and
     then cross-checked against the exact final artifact hashes and product
     identity so a stale or foreign aggregate cannot be smuggled in.
     """
-    if not isinstance(value, dict):
-        raise PublicationError("physical evidence aggregate must be a JSON object")
     try:
-        summary = validate_physical_evidence(value)
-    except PhysicalEvidenceError as error:
+        descriptor = parse_descriptor(
+            value,
+            expected_kinds={"physical-aggregate"},
+            label="physical evidence aggregate artifact",
+        )
+        summary = load_physical_evidence_artifact(
+            descriptor.as_dict(),
+            evidence_root=evidence_root,
+            trust_policy=trust_policy,
+            fixture=fixture,
+        )
+    except (PhysicalEvidenceError, RawArtifactError) as error:
         raise PublicationError(f"physical evidence aggregate is invalid: {error}") from error
     candidate = summary["candidate"]
     if candidate["version"] != final["product"]["version"]:
@@ -525,12 +554,14 @@ def _physical_evidence(value: object, final: dict[str, Any]) -> dict[str, Any]:
     if candidate["signed_app_tree_sha256"] != final["signed_app_tree_sha256"]:
         # A different signed app tree is a post-verification mutation / identity
         # mismatch: the installed evidence does not describe this final tree.
-        raise PublicationError("physical evidence signed app tree does not match the final candidate")
+        raise PublicationError(
+            "physical evidence signed app tree does not match the final candidate"
+        )
     if candidate["app_manifest_sha256"] != final["app_manifest_sha256"]:
         raise PublicationError("physical evidence app manifest does not match the final candidate")
     # The aggregate's own candidate build time must equal the final build time so
     # a stale run set from an earlier build cannot be reused.
-    built_at = value.get("candidate", {}).get("built_at")
+    built_at = candidate["built_at"]
     _timestamp(built_at, "physical_evidence.candidate.built_at")
     if built_at != final["built_at"]:
         raise PublicationError("physical evidence build time does not match the final candidate")
@@ -542,59 +573,58 @@ def _physical_evidence(value: object, final: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def _derive_report_bindings(aggregate: dict[str, Any]) -> dict[str, Any]:
+def _derive_report_bindings(summary: dict[str, Any]) -> dict[str, Any]:
     """Extract the exact raw-report hashes the final candidate must bind.
 
-    Called only after :func:`validate_physical_evidence` has accepted the
-    aggregate, so every run/report field is already canonical. The result is
-    derived, never operator-supplied: the installed lifecycle matrix, packet,
+    Called only after :func:`load_physical_evidence_artifact` has reopened and
+    accepted the aggregate, so every run/report field is already canonical.
+    The result is derived, never operator-supplied: the installed lifecycle matrix, packet,
     performance, security-adversarial, and soak report hashes for *each* required
     macOS run set. A missing family or run set is missing raw evidence.
     """
+    raw_bindings = summary.get("report_bindings")
+    raw_runs = summary.get("installed_runs")
+    if not isinstance(raw_bindings, list) or not isinstance(raw_runs, list):
+        raise PublicationError("physical evidence summary lacks proof-to-byte bindings")
     bindings: list[dict[str, Any]] = []
-    installed_runs: list[dict[str, Any]] = []
-    for run in aggregate["runs"]:
-        os_label = run["os"]
-        reports = run["reports"]
-        run_hashes: list[str] = []
-        for category in REPORT_CATEGORIES:
-            if category == SOAK_CATEGORY:
-                performance = reports["performance"]
-                soak = performance["document"].get("soak")
-                if not isinstance(soak, dict):
-                    raise PublicationError(
-                        f"physical evidence run[{os_label}] carries no soak report"
-                    )
-                # Content-address the soak section itself so a mutated duration or
-                # crash count breaks this binding. Two clean runs can legitimately
-                # produce the same soak section, so this hash is not required to be
-                # unique across runs (the raw report hashes above already are).
-                entry = {
-                    "os": os_label,
-                    "category": category,
-                    "tool_version": performance["tool_version"],
-                    "report_sha256": sha256_bytes(canonical_json(soak)),
-                    "captured_at": performance["captured_at"],
-                }
-            else:
-                report = reports[HARNESS_BY_CATEGORY[category]]
-                entry = {
-                    "os": os_label,
-                    "category": category,
-                    "tool_version": report["tool_version"],
-                    "report_sha256": report["report_sha256"],
-                    "captured_at": report["captured_at"],
-                }
-            bindings.append(entry)
-            run_hashes.append(entry["report_sha256"])
-        installed_runs.append(
+    for index, raw in enumerate(raw_bindings):
+        entry = require_exact_keys(
+            raw,
             {
-                "os": os_label,
-                "macos_build": run["macos_build"],
-                "machine_sha256": run["machine_sha256"],
-                "report_hashes": sorted(set(run_hashes)),
+                "os",
+                "category",
+                "tool_version",
+                "captured_at",
+                "report_sha256",
+                "artifact_path",
+            },
+            f"physical report binding[{index}]",
+        )
+        bindings.append(
+            {
+                "os": entry["os"],
+                "category": entry["category"],
+                "tool_version": entry["tool_version"],
+                "report_sha256": require_sha256(
+                    entry["report_sha256"], f"physical report binding[{index}].sha256"
+                ),
+                "captured_at": entry["captured_at"],
+                "artifact_path": str(
+                    safe_relative(
+                        entry["artifact_path"],
+                        f"physical report binding[{index}].artifact_path",
+                    )
+                ),
             }
         )
+    installed_runs = [
+        require_exact_keys(
+            run,
+            {"os", "macos_build", "machine_sha256", "report_hashes"},
+            f"installed run[{index}]",
+        )
+        for index, run in enumerate(raw_runs)
+    ]
     expected = {(os_label, category) for os_label in REQUIRED_OS for category in REPORT_CATEGORIES}
     actual = {(entry["os"], entry["category"]) for entry in bindings}
     if actual != expected:
@@ -602,6 +632,24 @@ def _derive_report_bindings(aggregate: dict[str, Any]) -> dict[str, Any]:
             "final candidate is missing raw physical reports: "
             f"{sorted(expected - actual)}"
         )
+    if len({entry["report_sha256"] for entry in bindings}) != len(bindings):
+        raise PublicationError("final candidate physical report bytes are reused")
+    expected_run_hashes = {
+        os_label: sorted(
+            entry["report_sha256"] for entry in bindings if entry["os"] == os_label
+        )
+        for os_label in REQUIRED_OS
+    }
+    seen_runs: set[str] = set()
+    for index, run in enumerate(installed_runs):
+        os_label = run["os"]
+        if os_label not in REQUIRED_OS or os_label in seen_runs:
+            raise PublicationError("installed-run summary has an unknown/duplicate OS")
+        seen_runs.add(os_label)
+        safe_identifier(run["macos_build"], f"installed run[{index}].macos_build")
+        require_sha256(run["machine_sha256"], f"installed run[{index}].machine_sha256")
+        if run["report_hashes"] != expected_run_hashes[os_label]:
+            raise PublicationError("installed-run report hashes differ from raw descriptors")
     bindings.sort(key=lambda entry: (entry["os"], entry["category"]))
     installed_runs.sort(key=lambda entry: entry["os"])
     return {"report_bindings": bindings, "installed_runs": installed_runs}
@@ -780,7 +828,13 @@ def _binding_body(document: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_final_candidate_binding(
-    repository: Path, request: object, *, fixture: bool, workspace_root: Path | None = None
+    repository: Path,
+    request: object,
+    *,
+    fixture: bool,
+    workspace_root: Path | None = None,
+    physical_evidence_root: Path | None = None,
+    physical_trust_policy: CollectorTrustPolicy | None = None,
 ) -> dict[str, Any]:
     """Assemble the canonical final-candidate binding from reviewed inputs.
 
@@ -788,6 +842,7 @@ def build_final_candidate_binding(
     it defaults to ``repository``. A present updater-key file always blocks.
     """
     root = repository if workspace_root is None else workspace_root
+    evidence_root = repository if physical_evidence_root is None else physical_evidence_root
     fields = {
         "product",
         "commit",
@@ -826,9 +881,11 @@ def build_final_candidate_binding(
     staple = None
     gatekeeper = None
     physical_evidence = None
+    physical_archive = None
     post_verification = None
     report_bindings: list[dict[str, Any]] = []
     installed_runs: list[dict[str, Any]] = []
+    physical_trust_policy_sha256 = None
     evidence_timestamps: list[datetime] = []
     if payload["notarization"] is None:
         missing.append("notarization")
@@ -848,17 +905,43 @@ def build_final_candidate_binding(
     if payload["physical_evidence"] is None:
         missing.append("physical_evidence")
     else:
-        # Validate the aggregate and bind it to the final candidate, but store
-        # the raw aggregate verbatim so validation is idempotent under rebuild.
-        _physical_evidence(payload["physical_evidence"], final)
-        physical_evidence = payload["physical_evidence"]
-        derived = _derive_report_bindings(physical_evidence)
-        report_bindings = derived["report_bindings"]
-        installed_runs = derived["installed_runs"]
-        evidence_timestamps.extend(
-            _timestamp(entry["captured_at"], f"report[{entry['os']}.{entry['category']}]")
-            for entry in report_bindings
-        )
+        # The publication binding stores only the aggregate descriptor. Raw
+        # aggregate/report/capture bytes remain in the retained private archive.
+        try:
+            physical_evidence = parse_descriptor(
+                payload["physical_evidence"],
+                expected_kinds={"physical-aggregate"},
+                label="physical evidence aggregate artifact",
+            ).as_dict()
+        except RawArtifactError as error:
+            raise PublicationError(f"physical evidence descriptor is invalid: {error}") from error
+        try:
+            policy = (
+                load_release_trust_policy()
+                if physical_trust_policy is None
+                else physical_trust_policy
+            )
+        except CollectorTrustNotConfiguredError:
+            missing.append("collector_trust_policy")
+        except RawArtifactError as error:
+            raise PublicationError(f"collector trust policy is invalid: {error}") from error
+        else:
+            summary = _physical_evidence(
+                physical_evidence,
+                final,
+                evidence_root=evidence_root,
+                trust_policy=policy,
+                fixture=fixture,
+            )
+            derived = _derive_report_bindings(summary)
+            report_bindings = derived["report_bindings"]
+            installed_runs = derived["installed_runs"]
+            physical_archive = summary["private_archive"]
+            physical_trust_policy_sha256 = summary["trust_policy_sha256"]
+            evidence_timestamps.extend(
+                _timestamp(entry["captured_at"], f"report[{entry['os']}.{entry['category']}]")
+                for entry in report_bindings
+            )
 
     # Bind the whole raw-report set to the exact final artifact hashes and reject
     # superseded reports. This is checked whether or not the physical aggregate is
@@ -906,6 +989,8 @@ def build_final_candidate_binding(
         "staple": staple,
         "gatekeeper": gatekeeper,
         "physical_evidence": physical_evidence,
+        "physical_archive": physical_archive,
+        "physical_trust_policy_sha256": physical_trust_policy_sha256,
         "report_bindings": report_bindings,
         "installed_runs": installed_runs,
         "post_verification": post_verification,
@@ -920,6 +1005,8 @@ def validate_final_candidate_binding(
     *,
     fixture: bool,
     workspace_root: Path | None = None,
+    physical_evidence_root: Path | None = None,
+    physical_trust_policy: CollectorTrustPolicy | None = None,
     require_verified: bool = False,
 ) -> dict[str, Any]:
     """Fail-closed validation of a final-candidate binding document.
@@ -947,6 +1034,8 @@ def validate_final_candidate_binding(
         "staple",
         "gatekeeper",
         "physical_evidence",
+        "physical_archive",
+        "physical_trust_policy_sha256",
         "report_bindings",
         "installed_runs",
         "post_verification",
@@ -978,7 +1067,12 @@ def validate_final_candidate_binding(
         "post_verification": parsed["post_verification"],
     }
     rebuilt = build_final_candidate_binding(
-        repository, request, fixture=fixture, workspace_root=root
+        repository,
+        request,
+        fixture=fixture,
+        workspace_root=root,
+        physical_evidence_root=physical_evidence_root,
+        physical_trust_policy=physical_trust_policy,
     )
 
     if sorted(parsed["blocked_inputs"]) != rebuilt["blocked_inputs"]:
@@ -995,6 +1089,12 @@ def validate_final_candidate_binding(
         raise PublicationError(
             "final candidate installed-run summary does not match the raw physical evidence"
         )
+    if parsed["physical_archive"] != rebuilt["physical_archive"]:
+        raise PublicationError(
+            "final candidate private evidence archive does not match reopened bytes"
+        )
+    if parsed["physical_trust_policy_sha256"] != rebuilt["physical_trust_policy_sha256"]:
+        raise PublicationError("final candidate collector trust-policy binding was hand-edited")
     if parsed["binding_sha256"] != rebuilt["binding_sha256"]:
         raise PublicationError("final candidate binding content digest mismatch")
 
@@ -1034,7 +1134,7 @@ def self_check() -> None:
         raise PublicationError("environment-gated input file wiring is inconsistent")
     if len(REQUIRED_OS) != 2:
         raise PublicationError("final candidate must bind both required macOS run sets")
-    if validate_physical_evidence is None or evaluate_workspace is None:
+    if load_physical_evidence_artifact is None or evaluate_workspace is None:
         raise PublicationError("final candidate binder is not wired to its dependencies")
     if derive_supply_chain is None:
         raise PublicationError("final candidate binder is not wired to the sealed closure pins")

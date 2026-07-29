@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import copy
 from dataclasses import replace
 import os
@@ -36,15 +37,21 @@ PHYSICAL_EVIDENCE_ROOT = REPOSITORY
 PHYSICAL_TRUST_POLICY = TEST_POLICY
 _CACHED_FIXTURE: PhysicalEvidenceFixture | None = None
 _CACHED_AGGREGATE_ARTIFACT: dict | None = None
+_CACHED_TEMPORARY: tempfile.TemporaryDirectory | None = None
 
 
 def fixture() -> dict:
     """Private-archive descriptor for publication tests under repository/target."""
 
-    global _CACHED_FIXTURE, _CACHED_AGGREGATE_ARTIFACT
+    global _CACHED_FIXTURE, _CACHED_AGGREGATE_ARTIFACT, _CACHED_TEMPORARY
     if _CACHED_FIXTURE is None:
+        parent = REPOSITORY / "target/test-physical-evidence"
+        parent.mkdir(parents=True, exist_ok=True)
+        _CACHED_TEMPORARY = tempfile.TemporaryDirectory(prefix="v2-", dir=parent)
+        atexit.register(_CACHED_TEMPORARY.cleanup)
+        prefix = Path(_CACHED_TEMPORARY.name).relative_to(REPOSITORY).as_posix()
         _CACHED_FIXTURE = PhysicalEvidenceFixture(
-            REPOSITORY, prefix="target/test-physical-evidence/v2"
+            REPOSITORY, prefix=prefix
         )
         _CACHED_AGGREGATE_ARTIFACT = _CACHED_FIXTURE.write_aggregate_artifact()
     assert _CACHED_AGGREGATE_ARTIFACT is not None

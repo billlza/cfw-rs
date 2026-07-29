@@ -4,7 +4,7 @@
 //!
 //! * The System Proxy and TUN switches are Authority-mediated. They own no
 //!   network state of their own: each one is translated into an engine mode and
-//!   handed to [`crate::engine::apply_engine_mode`], the single transition path
+//!   handed to [`crate::engine::apply_admitted_engine_mode`], the single transition path
 //!   that takes the maintenance lease, the legacy-retirement gate, the
 //!   capability check and the app-owned engine settings. Nothing in this module
 //!   writes a system proxy, a DNS server, a route, or a network preference, and
@@ -18,13 +18,19 @@
 //!   profile mixin are rejected rather than silently dropped.
 
 use cfw_core::{SettingsStore, UiPreferences};
+#[cfg(test)]
+use cfw_engine_api::EngineSnapshot;
 use cfw_engine_api::{EngineMode, EngineState};
 use serde::Serialize;
 use tauri::State;
 
 use super::controller::{controller_client, ipc_error};
 use super::settings::UiSettingsSnapshot;
-use crate::engine::{EngineStatusPayload, ManagedEngine, apply_engine_mode, switch_transition};
+#[cfg(test)]
+use crate::engine::switch_transition;
+use crate::engine::{
+    EngineStatusPayload, ManagedEngine, apply_admitted_engine_mode, serialized_switch_transition,
+};
 use crate::legacy::LegacyRetirementGate;
 use crate::{commands::ManagedProfiles, settings_store};
 
@@ -176,9 +182,20 @@ async fn apply_switch(
     switch: EngineMode,
     enabled: bool,
 ) -> Result<EngineStatusPayload, String> {
-    let desired_mode = engine.coordinator.snapshot().desired_mode;
-    match switch_transition(desired_mode, switch, enabled) {
-        Some(mode) => apply_engine_mode(engine, retirement, profiles, mode).await,
+    let observed = engine.coordinator.snapshot();
+    // Queue every switch intent, including Off, before reading state. The
+    // single-flight permit makes this snapshot current relative to all earlier
+    // retries and stops; maintenance sees the queued registration throughout.
+    let requested_mode = if enabled { switch } else { EngineMode::Off };
+    let mode_lease = engine
+        .begin_mode_change(requested_mode)
+        .await
+        .map_err(|error| error.to_string())?;
+    let snapshot = engine.coordinator.snapshot();
+    match serialized_switch_transition(&observed, &snapshot, switch, enabled)? {
+        Some(mode) => {
+            apply_admitted_engine_mode(engine, retirement, profiles, mode, mode_lease).await
+        }
         None => engine.status_payload(retirement),
     }
 }
@@ -398,40 +415,191 @@ mod tests {
         }
     }
 
+    fn snapshot(desired_mode: EngineMode, state: EngineState) -> EngineSnapshot {
+        EngineSnapshot {
+            desired_mode,
+            state,
+            generation: 3,
+            config_digest: Some("digest".into()),
+        }
+    }
+
     #[test]
-    fn switches_never_stop_the_other_mode_and_never_restart_their_own() {
+    fn switches_never_stop_the_other_mode_or_restart_in_flight_and_active_modes() {
         // Enabling a switch that is not the desired mode is the only case that
         // starts it; disabling one that does not own the desired mode is inert.
         assert_eq!(
-            switch_transition(EngineMode::Off, EngineMode::SystemProxy, true),
+            switch_transition(
+                &snapshot(EngineMode::Off, EngineState::Off),
+                EngineMode::SystemProxy,
+                true,
+            ),
             Some(EngineMode::SystemProxy)
         );
         assert_eq!(
-            switch_transition(EngineMode::Tunnel, EngineMode::SystemProxy, true),
+            switch_transition(
+                &snapshot(
+                    EngineMode::Tunnel,
+                    EngineState::TunnelActive {
+                        runtime: runtime(true),
+                    },
+                ),
+                EngineMode::SystemProxy,
+                true,
+            ),
             Some(EngineMode::SystemProxy)
         );
         assert_eq!(
-            switch_transition(EngineMode::SystemProxy, EngineMode::SystemProxy, false),
+            switch_transition(
+                &snapshot(
+                    EngineMode::SystemProxy,
+                    EngineState::ProxyActive {
+                        runtime: runtime(true),
+                    },
+                ),
+                EngineMode::SystemProxy,
+                false,
+            ),
             Some(EngineMode::Off)
         );
         assert_eq!(
-            switch_transition(EngineMode::Tunnel, EngineMode::SystemProxy, false),
+            switch_transition(
+                &snapshot(
+                    EngineMode::Tunnel,
+                    EngineState::TunnelActive {
+                        runtime: runtime(true),
+                    },
+                ),
+                EngineMode::SystemProxy,
+                false,
+            ),
             None,
             "disabling System Proxy must not stop a running Packet Tunnel"
         );
         assert_eq!(
-            switch_transition(EngineMode::SystemProxy, EngineMode::Tunnel, false),
+            switch_transition(
+                &snapshot(
+                    EngineMode::SystemProxy,
+                    EngineState::ProxyActive {
+                        runtime: runtime(true),
+                    },
+                ),
+                EngineMode::Tunnel,
+                false,
+            ),
             None,
             "disabling TUN must not stop a running System Proxy"
         );
         assert_eq!(
-            switch_transition(EngineMode::Off, EngineMode::Tunnel, false),
+            switch_transition(
+                &snapshot(EngineMode::Off, EngineState::Off),
+                EngineMode::Tunnel,
+                false,
+            ),
             None
         );
         assert_eq!(
-            switch_transition(EngineMode::SystemProxy, EngineMode::SystemProxy, true),
+            switch_transition(
+                &snapshot(
+                    EngineMode::SystemProxy,
+                    EngineState::ProxyActive {
+                        runtime: runtime(true),
+                    },
+                ),
+                EngineMode::SystemProxy,
+                true,
+            ),
             None,
             "an already desired mode must not be restarted by its own switch"
+        );
+        assert_eq!(
+            switch_transition(
+                &snapshot(
+                    EngineMode::Tunnel,
+                    EngineState::TunnelInstalling { generation: 3 },
+                ),
+                EngineMode::Tunnel,
+                true,
+            ),
+            None,
+            "an in-flight mode must not allocate a concurrent generation"
+        );
+    }
+
+    #[test]
+    fn explicit_retry_is_admitted_only_from_the_same_retryable_mode() {
+        for state in [
+            EngineState::Off,
+            EngineState::AwaitingApproval { generation: 3 },
+            EngineState::Failed {
+                generation: 3,
+                target: EngineMode::Tunnel,
+                error: "approval was not complete".into(),
+            },
+        ] {
+            assert_eq!(
+                switch_transition(
+                    &snapshot(EngineMode::Tunnel, state),
+                    EngineMode::Tunnel,
+                    true,
+                ),
+                Some(EngineMode::Tunnel)
+            );
+        }
+        assert_eq!(
+            switch_transition(
+                &snapshot(
+                    EngineMode::Tunnel,
+                    EngineState::Failed {
+                        generation: 3,
+                        target: EngineMode::SystemProxy,
+                        error: "inconsistent target".into(),
+                    },
+                ),
+                EngineMode::Tunnel,
+                true,
+            ),
+            None,
+            "a mismatched failure target must remain fail closed"
+        );
+    }
+
+    #[test]
+    fn queued_enable_is_generation_sensitive_but_owned_off_supersedes_retry() {
+        let observed = snapshot(
+            EngineMode::Tunnel,
+            EngineState::AwaitingApproval { generation: 3 },
+        );
+        let after_prior_retry = snapshot(
+            EngineMode::Tunnel,
+            EngineState::AwaitingApproval { generation: 4 },
+        );
+        assert!(
+            serialized_switch_transition(&observed, &after_prior_retry, EngineMode::Tunnel, true,)
+                .is_err(),
+            "an overlapping retry must not allocate another generation"
+        );
+        assert_eq!(
+            serialized_switch_transition(&observed, &after_prior_retry, EngineMode::Tunnel, false,)
+                .expect("owned Off remains a superseding intent"),
+            Some(EngineMode::Off)
+        );
+
+        let non_owner_observation = snapshot(
+            EngineMode::SystemProxy,
+            EngineState::ProxyActive {
+                runtime: runtime(true),
+            },
+        );
+        assert_eq!(
+            serialized_switch_transition(
+                &non_owner_observation,
+                &after_prior_retry,
+                EngineMode::Tunnel,
+                false,
+            )
+            .expect("a stale non-owner disable is a no-op"),
+            None
         );
     }
 
@@ -664,7 +832,7 @@ mod tests {
     fn switch_commands_reach_the_data_plane_only_through_the_shared_transition() {
         let source = production_source();
         assert!(
-            source.contains("apply_engine_mode"),
+            source.contains("apply_admitted_engine_mode"),
             "the switches must use the shared transition"
         );
         // Neither switch may drive the coordinator, the cutover, or the native

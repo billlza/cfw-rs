@@ -21,17 +21,16 @@ pub(crate) use profiles::{
     select_profile,
 };
 pub(crate) use runtime::{
-    apply_active_profile, geoip_database_status, read_runtime_config_text, reapply_runtime_config,
-    update_geoip_database,
+    apply_active_profile, geoip_database_status, read_runtime_config_text, update_geoip_database,
 };
 pub(crate) use settings::{
-    automatic_updates_enabled, read_settings_snapshot, sanitize_legacy_preferences,
-    set_launch_at_login_enabled, silent_start_enabled, write_settings_snapshot,
+    read_settings_snapshot, sanitize_legacy_preferences, set_launch_at_login_enabled,
+    silent_start_enabled, write_settings_snapshot,
 };
 pub(crate) use shell_ops::{
-    force_quit_app, move_dashboard_to_nearest_monitor, network_diagnostics, open_external_url,
-    open_login_items_settings, open_page, parse_deep_links, refresh_tray_menu,
-    reveal_home_directory, reveal_logs_directory, toggle_devtools,
+    force_quit_app, move_dashboard_to_nearest_monitor, network_diagnostics,
+    open_login_items_settings, open_page, open_trusted_external_url, parse_deep_links,
+    refresh_tray_menu, reveal_home_directory, reveal_logs_directory, toggle_devtools,
 };
 pub(crate) use subscriptions::{
     import_profile_file, import_profile_url, migrate_legacy_cfw_profiles, open_profile_externally,

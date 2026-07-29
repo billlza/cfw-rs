@@ -67,6 +67,9 @@ export const state = {
   // Engine status envelope (`engine_snapshot`), validated against its runtime
   // identity before it is allowed to claim an active data plane.
   engine: { ...defaultEngineStatus },
+  // Renderer-side feedback only. Rust admission remains the correctness
+  // boundary for duplicate shortcuts, direct IPC, and multiple webviews.
+  engineMutationBusy: false,
   // Whether this process is the controlled `--migration-handoff` instance,
   // read from `boot_payload`. The default (main) dashboard offers the restart
   // that enters the handoff; only the handoff instance drives the cutover.

@@ -14,6 +14,9 @@ const rustRoot = path.join(shellRoot, "src");
 /// Commands permanently retired in 0.4.0. No dashboard source file may mention
 /// one, in an invoke, a comment, or a leftover string.
 const RETIRED_COMMANDS = [
+  "open_external_url",
+  "set_engine_mode",
+  "reapply_runtime_config",
   "enable_service_mode",
   "service_mode_status",
   "install_helper_service",
@@ -97,7 +100,7 @@ const listened = dashboardMatches(/listen\("([a-z][a-z0-9:/-]+)"/gu);
 
 test("every command the dashboard invokes exists in generate_handler!", () => {
   const handlers = handlerCommands();
-  assert.equal(handlers.size, 83, "the restored command surface is 83 commands");
+  assert.equal(handlers.size, 79, "the release command surface is 79 commands");
   const missing = [...invoked.keys()].filter((command) => !handlers.has(command));
   assert.deepEqual(missing, [], `dashboard invokes commands that do not exist: ${missing.join(", ")}`);
 });
@@ -108,6 +111,12 @@ test("the invoke allowlist is exactly the set of commands the dashboard invokes"
   assert.deepEqual(notAllowed, [], `invoked without being allowlisted: ${notAllowed.join(", ")}`);
   const unused = [...allowlist].filter((command) => !invoked.has(command)).sort();
   assert.deepEqual(unused, [], `allowlisted but never invoked: ${unused.join(", ")}`);
+});
+
+test("the renderer cannot invoke internal engine transitions or arbitrary URLs", () => {
+  assert.equal(handlerCommands().has("open_external_url"), false);
+  assert.equal(handlerCommands().has("set_engine_mode"), false);
+  assert.equal(handlerCommands().has("reapply_runtime_config"), false);
 });
 
 test("every allowlisted command exists in generate_handler!", () => {

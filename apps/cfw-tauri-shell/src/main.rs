@@ -10,19 +10,18 @@ use cfw_apple_network::NativeFrameworkBridge;
 use cfw_core::SettingsStore;
 use cfw_engine_api::EngineEvent;
 use commands::{
-    LiveStreams, apply_active_profile, apply_restore_dns_servers, automatic_updates_enabled,
-    build_managed_profiles, cancel_credential_gc, close_all_connections, close_connection,
-    commit_credential_gc, controller_snapshot, controller_version, current_platform_design,
-    delete_profile, dns_query, flush_fake_ip_cache, force_quit_app, geoip_database_status,
-    health_check_all_proxy_providers, health_check_proxy_provider, import_profile_file,
-    import_profile_text, import_profile_url, migrate_legacy_cfw_profiles,
-    move_dashboard_to_nearest_monitor, network_diagnostics, open_external_url,
+    LiveStreams, apply_active_profile, apply_restore_dns_servers, build_managed_profiles,
+    cancel_credential_gc, close_all_connections, close_connection, commit_credential_gc,
+    controller_snapshot, controller_version, current_platform_design, delete_profile, dns_query,
+    flush_fake_ip_cache, force_quit_app, geoip_database_status, health_check_all_proxy_providers,
+    health_check_proxy_provider, import_profile_file, import_profile_text, import_profile_url,
+    migrate_legacy_cfw_profiles, move_dashboard_to_nearest_monitor, network_diagnostics,
     open_login_items_settings, open_page, open_profile_externally, parse_deep_links,
     preview_credential_gc, profile_credential_presence, profile_credential_requirements,
     profile_qrcode_svg, profiles_snapshot, providers_snapshot, provision_profile_credentials,
-    read_profile_text, read_runtime_config_text, read_settings_snapshot, reapply_runtime_config,
-    refresh_tray_menu, reset_settings_snapshot, reveal_home_directory, reveal_logs_directory,
-    reveal_profile, rules_snapshot, save_profile_text, select_profile, select_proxy, set_allow_lan,
+    read_profile_text, read_runtime_config_text, read_settings_snapshot, refresh_tray_menu,
+    reset_settings_snapshot, reveal_home_directory, reveal_logs_directory, reveal_profile,
+    rules_snapshot, save_profile_text, select_profile, select_proxy, set_allow_lan,
     set_bind_address, set_launch_at_login_enabled, set_log_level, set_mixin_enabled,
     set_proxy_mode, set_system_proxy_enabled, set_tun_enabled, start_connections_stream,
     start_log_stream, stop_connections_stream, stop_log_stream, system_proxy_state,
@@ -31,7 +30,7 @@ use commands::{
     update_proxy_provider, update_rule_provider, write_settings_snapshot,
 };
 use engine::{
-    boot_payload, build_managed_engine, engine_snapshot, prepare_legacy_cutover, set_engine_mode,
+    boot_payload, build_managed_engine, engine_snapshot, prepare_legacy_cutover,
     start_engine_event_forwarder,
 };
 use legacy::{
@@ -45,9 +44,7 @@ use shell::{
     handle_app_menu_event, prepare_migration_handoff_window,
 };
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
-use updater::{
-    UpdaterSecurityState, cancel_update_install, check_for_updates, install_available_update,
-};
+use updater::{UpdaterSecurityState, check_for_updates, open_available_update};
 
 #[derive(Debug)]
 pub(crate) struct LaunchContext {
@@ -196,7 +193,6 @@ fn main() {
     };
     let invoke_handler: AppInvokeHandler = Box::new(tauri::generate_handler![
         engine_snapshot,
-        set_engine_mode,
         boot_payload,
         quit_app,
         read_settings_snapshot,
@@ -218,8 +214,7 @@ fn main() {
         select_profile,
         delete_profile,
         check_for_updates,
-        install_available_update,
-        cancel_update_install,
+        open_available_update,
         controller_snapshot,
         controller_version,
         providers_snapshot,
@@ -243,7 +238,6 @@ fn main() {
         read_profile_text,
         save_profile_text,
         read_runtime_config_text,
-        reapply_runtime_config,
         apply_active_profile,
         import_profile_url,
         import_profile_file,
@@ -267,7 +261,6 @@ fn main() {
         apply_restore_dns_servers,
         reset_settings_snapshot,
         current_platform_design,
-        open_external_url,
         open_page,
         reveal_home_directory,
         reveal_logs_directory,
@@ -318,21 +311,6 @@ fn main() {
                 if let Err(error) = apply_silent_start(app.handle()) {
                     emit_startup_error(app.handle(), "silent_start_failed", error);
                 }
-
-                let update_app = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    match automatic_updates_enabled() {
-                        Ok(true) => {
-                            if let Err(error) = check_for_updates(update_app.clone()).await {
-                                emit_startup_error(&update_app, "update_check_failed", error);
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            emit_startup_error(&update_app, "update_preference_unreadable", error)
-                        }
-                    }
-                });
             }
             Ok(())
         })
@@ -380,13 +358,13 @@ mod tests {
             assert!(migration_handoff_command_allowed(command), "{command}");
         }
         for command in [
-            "set_engine_mode",
+            "apply_active_profile",
             "write_settings_snapshot",
             "select_profile",
             "set_system_proxy_enabled",
             "set_tun_enabled",
             "check_for_updates",
-            "install_available_update",
+            "open_available_update",
             "refresh_tray_menu",
             "begin_migration_handoff",
         ] {

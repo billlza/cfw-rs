@@ -262,11 +262,11 @@ Proxy restoration after Authorization Services rights expire has not been
 proved. No matching Developer ID provisioning, notarization, Gatekeeper, or
 publication evidence is available in the current candidate. The module-only,
 unfixable `GO-2026-5932` boundary also needs explicit release review. Updater
-metadata, compressed bytes, expanded bytes, entry count, entry type, canonical
-layout, path conflicts, and symlink containment now have project-owned bounds
-in both the publication script and runtime; runtime extraction is
-descriptor-relative and no-follow, and commit requires an exclusive engine-Off
-maintenance barrier. Release scripts must remain fail-closed until the
-remaining persistence, identity, publication, and device gates are satisfied;
+metadata and its signed artifact contract have project-owned bounds in the
+publication script. Runtime revalidates bounded metadata and consumes a one-use
+authorization before opening the canonical GitHub release page; it does not
+download, extract, or replace the application bundle. Release scripts must
+remain fail-closed until the remaining persistence, identity, publication, and
+device gates are satisfied;
 private KVC access, the old root helper, and downloaded alternate cores are
 forbidden fallbacks.

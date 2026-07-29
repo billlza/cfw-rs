@@ -11,6 +11,7 @@ import test from "node:test";
 const listeners = new Map();
 const callbacks = new Map();
 let nextCallbackId = 1;
+let updateListenerWasReady = false;
 
 function element(tag = "div", id = "") {
   return {
@@ -239,6 +240,7 @@ const responses = {
   stop_log_stream: null,
   refresh_tray_menu: null,
   open_page: null,
+  check_for_updates: { available: false, current: "0.4.0" },
 };
 
 const invoked = [];
@@ -259,6 +261,9 @@ globalThis.window.__TAURI_INTERNALS__ = {
       return nextCallbackId;
     }
     if (command === "plugin:event|unlisten") return null;
+    if (command === "check_for_updates") {
+      updateListenerWasReady = listeners.has("cfw://update-available");
+    }
     invoked.push(command);
     invocationDetails.push({ command, args });
     if (command in rejected) throw new Error(rejected[command]);
@@ -290,6 +295,7 @@ test("bootstrap reaches the dashboard instead of the fatal handler", () => {
   assert.ok(listeners.has("cfw://page"), "the page event is subscribed during bootstrap");
   assert.ok(invoked.includes("boot_payload"));
   assert.ok(invoked.includes("engine_snapshot"));
+  assert.equal(updateListenerWasReady, true, "automatic update check must start after its listener");
 });
 
 test("every page renders", async () => {
@@ -357,7 +363,7 @@ test("every glass dialog renders", async () => {
     ["network-services", { kind: "network-services", payload: DIAGNOSTICS.services, unavailable: DIAGNOSTICS.unavailable }, "Network services"],
     ["dns-query", { kind: "dns-query", payload: { name: "a.test", type: "A", result: "" } }, "Resolve through the running engine"],
     ["info", { kind: "info", payload: { title: "System DNS", body: "never written" } }, "System DNS"],
-    ["product-about", { kind: "product-about", payload: { phase: "idle", update: { available: true, version: "0.4.1" } } }, "Download & Install"],
+    ["product-about", { kind: "product-about", payload: { phase: "idle", update: { available: true, version: "0.4.1" } } }, "Open Download"],
     ["credentials", { kind: "credentials", id: PROFILE_ID }, "Reading credential requirements"],
     ["credential-cleanup", { kind: "credential-cleanup" }, "Unused credentials"],
   ];
@@ -437,7 +443,29 @@ test("the General page surfaces approval and capability reasons", async () => {
     snapshot: { desired_mode: "tunnel", generation: 1, config_digest: null, state: { state: "awaiting_approval", generation: 1 } },
     capabilities: { system_proxy: true, tunnel: true },
   });
-  assert.ok((await renderPage("general")).includes("Needs approval"));
+  const awaitingApproval = await renderPage("general");
+  assert.ok(awaitingApproval.includes("Needs approval"));
+  assert.match(awaitingApproval, /data-action="retry-tun-mode">Approve/u);
+  assert.match(awaitingApproval, /data-toggle="tunMode" checked/u);
+
+  state.engineMutationBusy = true;
+  const mutationBusy = await renderPage("general");
+  assert.match(mutationBusy, /data-action="retry-tun-mode" disabled>Approve/u);
+  assert.match(mutationBusy, /data-toggle="tunMode" checked disabled/u);
+  state.engineMutationBusy = false;
+
+  await setEngine({
+    snapshot: {
+      desired_mode: "system_proxy",
+      generation: 2,
+      config_digest: "digest",
+      state: { state: "failed", generation: 2, target: "system_proxy", error: "approval required" },
+    },
+    capabilities: { system_proxy: true, tunnel: true },
+  });
+  const failedProxy = await renderPage("general");
+  assert.match(failedProxy, /data-action="retry-system-proxy">Retry/u);
+  assert.match(failedProxy, /data-toggle="systemProxy" checked/u);
 
   await setEngine({
     snapshot: { desired_mode: "off", generation: 0, config_digest: null, state: { state: "off" } },

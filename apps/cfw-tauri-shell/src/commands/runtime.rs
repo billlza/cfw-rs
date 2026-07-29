@@ -3,10 +3,10 @@
 //! 0.3.5 rendered a mihomo YAML file to disk and asked a child process to reload
 //! it. In 0.4.0 the runtime configuration is a deterministic projection of the
 //! selected profile, and the only way to make a running engine adopt a new one
-//! is an Authority-mediated mode transition. "Apply" and "reapply" therefore
-//! mean: validate the projection, then hand the current mode back to
-//! [`crate::engine::apply_engine_mode`], which is also the path the mode command
-//! and the restored switches use.
+//! is an Authority-mediated mode transition. "Apply" therefore means: acquire
+//! serialized mutation admission, read the then-current desired mode, validate
+//! the projection, and hand that mode to the same admitted path as the restored
+//! switches. A queued Off can never be undone by a stale pre-admission read.
 //!
 //! The projected configuration carries the app-owned controller secret, so the
 //! preview command redacts it and fails closed if the redacted document still
@@ -24,7 +24,7 @@ use serde_json::Value;
 use tauri::State;
 
 use super::ManagedProfiles;
-use crate::engine::{ManagedEngine, apply_engine_mode};
+use crate::engine::{ManagedEngine, apply_admitted_engine_mode};
 use crate::legacy::LegacyRetirementGate;
 use crate::settings_store;
 
@@ -69,12 +69,17 @@ pub(crate) async fn apply_active_profile(
     retirement: State<'_, LegacyRetirementGate>,
     profiles: State<'_, ManagedProfiles>,
 ) -> Result<ProfileApplyResult, String> {
+    let (mode, mode_lease) = engine
+        .begin_current_mode_change()
+        .await
+        .map_err(|error| error.to_string())?;
     let selected = require_selected_profile(&profiles)?;
     let settings = engine.engine_settings().clone();
-    let mode = engine.coordinator.snapshot().desired_mode;
     let projected = project_for_mode(&selected, &settings, mode)?;
     if mode != EngineMode::Off {
-        apply_engine_mode(&engine, &retirement, &profiles, mode).await?;
+        apply_admitted_engine_mode(&engine, &retirement, &profiles, mode, mode_lease).await?;
+    } else {
+        drop(mode_lease);
     }
     Ok(ProfileApplyResult {
         id: selected.record.id,
@@ -84,47 +89,6 @@ pub(crate) async fn apply_active_profile(
         mode,
         applied: mode != EngineMode::Off,
     })
-}
-
-/// Reprojects and restarts the current mode.
-///
-/// There is no partial reconfiguration path: a running engine is restarted onto
-/// the new projection, which is stated in the returned message so the caller
-/// never mistakes it for a hot reload.
-#[tauri::command]
-pub(crate) async fn reapply_runtime_config(
-    engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
-    profiles: State<'_, ManagedProfiles>,
-) -> Result<String, String> {
-    let selected = require_selected_profile(&profiles)?;
-    let settings = engine.engine_settings().clone();
-    let mode = engine.coordinator.snapshot().desired_mode;
-    let bytes = project_for_mode(&selected, &settings, mode)?;
-    if mode == EngineMode::Off {
-        return Ok(format!(
-            "engine is off; {} is staged and validated ({bytes} bytes)",
-            selected.record.name
-        ));
-    }
-    let before = engine.coordinator.snapshot().config_digest;
-    let status = apply_engine_mode(&engine, &retirement, &profiles, mode).await?;
-    let after = engine.coordinator.snapshot().config_digest;
-    // The coordinator restarts only when the projected identity actually
-    // changed, so the message reports what happened rather than assuming it.
-    let outcome = if before == after {
-        "already running this projection, so nothing was restarted"
-    } else {
-        "restarted onto the freshly projected configuration"
-    };
-    Ok(format!(
-        "{mode:?} {outcome} for {} ({bytes} bytes){}",
-        selected.record.name,
-        status
-            .unavailable_reason()
-            .map(|reason| format!("; {reason}"))
-            .unwrap_or_default()
-    ))
 }
 
 /// Returns the engine configuration the selected profile projects, with the
@@ -352,12 +316,21 @@ mod tests {
     }
 
     #[test]
-    fn apply_and_reapply_reach_the_data_plane_only_through_the_shared_transition() {
+    fn apply_reads_current_mode_only_after_serialized_admission() {
         let source = include_str!("runtime.rs")
             .split("#[cfg(test)]")
             .next()
             .expect("module source has a production section");
-        assert!(source.contains("apply_engine_mode"));
+        assert!(source.contains("begin_current_mode_change"));
+        assert!(source.contains("apply_admitted_engine_mode"));
+        let apply_start = source
+            .find("pub(crate) async fn apply_active_profile")
+            .expect("apply command");
+        let apply_end = source[apply_start..]
+            .find("/// Returns the engine configuration")
+            .map(|offset| apply_start + offset)
+            .expect("next runtime command");
+        assert!(!source[apply_start..apply_end].contains("snapshot().desired_mode"));
         for forbidden in [
             concat!("coordinator", ".set_mode"),
             concat!("prepare_", "cutover"),
@@ -367,7 +340,7 @@ mod tests {
         ] {
             assert!(
                 !source.contains(forbidden),
-                "runtime reapply bypasses the shared engine transition via {forbidden}"
+                "runtime apply bypasses the shared engine transition via {forbidden}"
             );
         }
     }

@@ -189,6 +189,42 @@ impl ProfileRepository {
         profile: &ValidatedSingBoxProfile,
         source_url: Option<&str>,
     ) -> Result<ProfileImportResult, ProfileError> {
+        self.replace_with_timestamp(id, name, profile, source_url, None)
+    }
+
+    /// Restores a previously loaded profile after a surrounding transaction
+    /// fails. Unlike a normal replacement, rollback preserves the original
+    /// timestamp as well as identity, name, profile, source URL, credentials,
+    /// and selected digest.
+    pub fn restore(&self, stored: &StoredProfile) -> Result<ProfileImportResult, ProfileError> {
+        if stored.record.digest != stored.profile.digest()
+            || stored.record.bytes != stored.profile.as_json().len()
+        {
+            return Err(ProfileError::DigestMismatch {
+                id: stored.record.id.clone(),
+            });
+        }
+        let normalized_name = normalize_name(&stored.record.name)?;
+        if normalized_name != stored.record.name {
+            return Err(ProfileError::InvalidName);
+        }
+        self.replace_with_timestamp(
+            &stored.record.id,
+            Some(&stored.record.name),
+            &stored.profile,
+            stored.source_url.as_deref(),
+            Some(stored.record.created_epoch_secs),
+        )
+    }
+
+    fn replace_with_timestamp(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        profile: &ValidatedSingBoxProfile,
+        source_url: Option<&str>,
+        created_epoch_secs: Option<u64>,
+    ) -> Result<ProfileImportResult, ProfileError> {
         let id = validate_profile_id(id)?;
         let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
         directory.lock_exclusive()?;
@@ -207,7 +243,10 @@ impl ProfileRepository {
             Some(name) => normalize_name(name)?,
             None => current.record.name.clone(),
         };
-        let bytes = encode(id, &name, profile, source_url)?;
+        let bytes = match created_epoch_secs {
+            Some(timestamp) => encode_with_timestamp(id, &name, profile, source_url, timestamp)?,
+            None => encode(id, &name, profile, source_url)?,
+        };
         ensure_repository_bytes(
             existing.stored_bytes.saturating_sub(replaced_bytes),
             bytes.len(),

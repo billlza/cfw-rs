@@ -359,27 +359,27 @@ The updater command accepts only a strict SemVer equal to the signed app
 version. It emits only the fixed `darwin-aarch64`/`darwin-arm64` targets under
 the repository's HTTPS GitHub Releases origin and immediately verifies the
 new signature with the public key embedded in `tauri.conf.json` before writing
-`latest.json`. Both the packaging verifier and runtime require the authenticated
-minisign trusted comment to name that exact versioned archive; an older valid
-signature cannot be replayed under a newer manifest version or GitHub release
-path. Downloads are streamed through the fixed 192 MiB admission limit and are
-installed only after signature and signed-filename verification succeeds.
-The synchronous macOS install commit is additionally admitted only when the
-running executable is the exact non-symlink
-`/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac`, the bundle and
-executable have trusted ownership and non-writable group/other metadata, and
-the updater's pinned temporary root is a private current-user directory on the
-same volume as the installed app. The project-owned updater accepts at most
-64 KiB of strict metadata and 192 MiB of signed compressed data. Before commit,
-it independently enforces 50,000 entries, 512 MiB per regular file, 1 GiB total
-regular-file payload, canonical bundle layout, explicit directories, unique and
-non-conflicting paths, relative in-bundle symlinks, and safe entry types and
-permissions. Extraction uses directory descriptors with `openat`/`mkdirat` and
-`O_NOFOLLOW`; it never delegates path handling to the tar library. It then
-verifies bundle version, code signature, and Gatekeeper assessment, proves the
-network engine is Off while holding an exclusive maintenance barrier, and uses
-an atomic same-volume swap. The former Tauri updater runtime and its privileged
-AppleScript fallback are not linked.
+`latest.json`. The packaging verifier requires the authenticated minisign
+trusted comment to name that exact versioned archive; an older valid signature
+cannot be replayed under a newer manifest version or GitHub release path.
+
+The v0.4.0 runtime performs a bounded 64 KiB strict-metadata check only. Before
+opening the official release page it re-fetches the fixed feed, requires the
+exact authorization shown to the user, consumes that one-shot authorization,
+and derives the fixed official GitHub Release page from the canonical version.
+Installation is through the signed, notarized DMG; this release does not
+replace its own application bundle in process.
+
+That boundary is intentional because the bundle owns both an `SMAppService`
+Agent and Daemon. Apple requires updated service executables to be re-registered;
+an atomic app-directory swap alone does not update launchd's registered service.
+A future in-app installer must first provide a crash-safe, rollback-aware
+unregister/swap/re-register transaction and wait for each registration result.
+Until that transaction exists, in-app replacement remains absent rather than
+silently leaving old helpers registered. See Apple's
+[`SMAppService.register()`](https://developer.apple.com/documentation/servicemanagement/smappservice/register%28%29)
+documentation and the corresponding
+[Apple DTS guidance](https://developer.apple.com/forums/thread/783539).
 
 ## 7. GPL publication set
 

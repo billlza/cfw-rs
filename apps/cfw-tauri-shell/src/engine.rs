@@ -12,7 +12,7 @@ use cfw_apple_network::{
 };
 use cfw_application::{EngineControllerAccess, EngineModeCoordinator};
 use cfw_engine_api::{
-    CutoverPreflightBackend, EngineBackend, EngineEvent, EngineMode, EngineSnapshot,
+    CutoverPreflightBackend, EngineBackend, EngineEvent, EngineMode, EngineSnapshot, EngineState,
 };
 use cfw_profiles::{ProfileError, ProfileRepository};
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
@@ -24,7 +24,7 @@ use crate::legacy::{LegacyRetirementGate, LegacyRetirementStatus};
 use crate::settings_store;
 use cutover::CutoverPreparationGate;
 pub(crate) use maintenance::{EngineMaintenanceError, EngineMaintenanceLease, ProfileControlError};
-use maintenance::{EngineMaintenanceGate, EngineModeChangeLease};
+use maintenance::{EngineMaintenanceGate, EngineModeChangeIntent, EngineModeChangeLease};
 
 pub(crate) use cutover::{
     CutoverAuthority, prepare_legacy_cutover, run_native_preflight, validate_outcome_binding,
@@ -34,19 +34,58 @@ pub(crate) use cutover::{
 /// 0.4.0 engine modes.
 ///
 /// `None` means "no transition": turning a switch off that does not own the
-/// current desired mode must not stop the other mode's data plane, and turning
-/// on a mode that is already desired must not restart it.
+/// current desired mode must not stop the other mode's data plane, and an
+/// in-flight or proven-active mode must not be restarted. An explicit retry is
+/// admitted only from a terminal/retryable state for that same desired mode.
 pub(crate) fn switch_transition(
-    desired_mode: EngineMode,
+    snapshot: &EngineSnapshot,
     switch: EngineMode,
     enabled: bool,
 ) -> Option<EngineMode> {
     debug_assert_ne!(switch, EngineMode::Off, "a switch owns a real mode");
-    match (enabled, desired_mode == switch) {
-        (true, false) => Some(switch),
-        (false, true) => Some(EngineMode::Off),
+    if !enabled {
+        return (snapshot.desired_mode == switch).then_some(EngineMode::Off);
+    }
+    if snapshot.desired_mode != switch {
+        return Some(switch);
+    }
+    match &snapshot.state {
+        EngineState::Off => Some(switch),
+        EngineState::AwaitingApproval { .. } if switch == EngineMode::Tunnel => Some(switch),
+        EngineState::Failed { target, .. } if *target == switch => Some(switch),
+        EngineState::ProxyActive { runtime }
+            if switch == EngineMode::SystemProxy && !runtime.ready =>
+        {
+            Some(switch)
+        }
+        EngineState::TunnelActive { runtime } if switch == EngineMode::Tunnel && !runtime.ready => {
+            Some(switch)
+        }
         _ => None,
     }
+}
+
+/// Revalidates a switch intent after it reaches the front of the serialized
+/// mutation queue. An enabled intent is generation-sensitive: if an earlier
+/// request changed any part of the observed snapshot, this request must be
+/// retried explicitly instead of allocating another start generation. A
+/// disable intent that originally owned its switch may still supersede an
+/// earlier retry and converge that same desired mode to Off.
+pub(crate) fn serialized_switch_transition(
+    observed: &EngineSnapshot,
+    current: &EngineSnapshot,
+    switch: EngineMode,
+    enabled: bool,
+) -> Result<Option<EngineMode>, &'static str> {
+    if !enabled && observed.desired_mode != switch {
+        return Ok(None);
+    }
+    if enabled && observed != current {
+        return Err(
+            "network mode changed while this enable request was queued; retry against the current state",
+        );
+    }
+    Ok(switch_transition(current, switch, enabled))
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -64,11 +103,14 @@ pub(crate) struct EngineStatusPayload {
     unavailable_reason: Option<String>,
 }
 
-impl EngineStatusPayload {
-    /// Why the replacement network is unavailable, when it is. Callers report
-    /// it verbatim; it never carries an endpoint or a secret.
-    pub(crate) fn unavailable_reason(&self) -> Option<&str> {
-        self.unavailable_reason.as_deref()
+pub(crate) struct EngineShutdownOutcome {
+    result: Result<EngineSnapshot, String>,
+    maintenance: EngineMaintenanceLease,
+}
+
+impl EngineShutdownOutcome {
+    pub(crate) fn into_parts(self) -> (Result<EngineSnapshot, String>, EngineMaintenanceLease) {
+        (self.result, self.maintenance)
     }
 }
 
@@ -99,17 +141,32 @@ impl ManagedEngine {
         &self.controller
     }
 
-    fn begin_mode_change(
+    pub(crate) async fn begin_mode_change(
         &self,
         mode: EngineMode,
-    ) -> Result<Option<EngineModeChangeLease>, EngineMaintenanceError> {
-        self.maintenance.begin_mode_change(mode)
+    ) -> Result<EngineModeChangeLease, EngineMaintenanceError> {
+        self.maintenance
+            .begin_mode_change(EngineModeChangeIntent::Set(mode))
+            .await
+    }
+
+    /// Serializes a "reapply whatever is current" intent before reading the
+    /// desired mode. An Off queued ahead of this call is therefore observed as
+    /// Off and can never be undone by a stale pre-queue snapshot.
+    pub(crate) async fn begin_current_mode_change(
+        &self,
+    ) -> Result<(EngineMode, EngineModeChangeLease), EngineMaintenanceError> {
+        let lease = self
+            .maintenance
+            .begin_mode_change(EngineModeChangeIntent::ReapplyCurrent)
+            .await?;
+        Ok((self.coordinator.snapshot().desired_mode, lease))
     }
 
     pub(crate) fn reserve_maintenance(
         &self,
     ) -> Result<EngineMaintenanceLease, EngineMaintenanceError> {
-        self.maintenance.reserve()
+        self.maintenance.reserve_if_idle()
     }
 
     pub(crate) fn reserve_profile_mutation(
@@ -121,7 +178,7 @@ impl ManagedEngine {
             .map_err(|error| match error {
                 EngineMaintenanceError::AlreadyActive
                 | EngineMaintenanceError::ModeChangeActive => ProfileControlError::MaintenanceBusy,
-                EngineMaintenanceError::StateLock | EngineMaintenanceError::CounterExhausted => {
+                EngineMaintenanceError::StateLock | EngineMaintenanceError::QueueFull => {
                     ProfileControlError::StateUnavailable
                 }
             })?;
@@ -132,6 +189,30 @@ impl ManagedEngine {
             return Err(ProfileControlError::EngineNotOff);
         }
         Ok(lease)
+    }
+
+    /// Converges the engine to Off under an exclusive maintenance reservation.
+    /// No mode intent can queue behind shutdown and restart networking during
+    /// process exit. The returned reservation remains held until lifecycle code
+    /// stores it for the remainder of the process or explicitly abandons exit.
+    pub(crate) async fn shutdown_to_completion(&self) -> Result<EngineShutdownOutcome, String> {
+        let maintenance = self
+            .reserve_maintenance()
+            .map_err(|error| error.to_string())?;
+        let coordinator = self.coordinator.clone();
+        let (result, maintenance) = maintenance
+            .run_to_completion(async move {
+                coordinator
+                    .shutdown()
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|_| "network shutdown task ended without a response".to_owned())?;
+        Ok(EngineShutdownOutcome {
+            result,
+            maintenance,
+        })
     }
 
     pub(crate) fn require_capability(&self, mode: EngineMode) -> Result<(), String> {
@@ -298,44 +379,40 @@ pub(crate) fn engine_snapshot(
     engine.status_payload(&retirement)
 }
 
-#[tauri::command]
-pub(crate) async fn set_engine_mode(
-    engine: State<'_, ManagedEngine>,
-    retirement: State<'_, LegacyRetirementGate>,
-    profiles: State<'_, ManagedProfiles>,
-    mode: EngineMode,
-) -> Result<EngineStatusPayload, String> {
-    apply_engine_mode(&engine, &retirement, &profiles, mode).await
-}
-
-/// The single in-process path to a mode transition.
+/// The single in-process execution path after a caller transfers its
+/// single-flight transition permit.
 ///
-/// Every renderer entry point that changes what the data plane is doing — the
-/// explicit mode command, the restored System Proxy and TUN switches, and the
-/// profile reapply commands — funnels through here, so the maintenance lease,
-/// the legacy-retirement gate, the capability check, the selected-profile
-/// requirement, and the app-owned engine settings are applied exactly once and
-/// cannot be skipped by adding another command later.
-pub(crate) async fn apply_engine_mode(
+/// Every renderer mutation first acquires an exact target or current-mode
+/// admission, then funnels through here so the legacy-retirement gate,
+/// capability check, selected profile, and app-owned settings cannot be
+/// skipped. The permit outlives renderer cancellation until the coordinator
+/// actor responds, so accepted native work cannot escape maintenance.
+pub(crate) async fn apply_admitted_engine_mode(
     engine: &ManagedEngine,
     retirement: &LegacyRetirementGate,
     profiles: &ManagedProfiles,
     mode: EngineMode,
+    mode_lease: EngineModeChangeLease,
 ) -> Result<EngineStatusPayload, String> {
-    let _mode_lease = engine
-        .begin_mode_change(mode)
-        .map_err(|error| error.to_string())?;
     if mode != EngineMode::Off {
         retirement.require_cleared()?;
         engine.require_capability(mode)?;
     }
     let (profile_id, profile) = selected_profile_for_mode(profiles.repository(), mode)
         .map_err(|error| error.to_string())?;
-    engine
-        .coordinator
-        .set_mode(mode, profile_id, profile, engine.engine_settings().clone())
+    let coordinator = engine.coordinator.clone();
+    let settings = engine.engine_settings().clone();
+    let completion = mode_lease.run_to_completion(async move {
+        coordinator
+            .set_mode(mode, profile_id, profile, settings)
+            .await
+            .map_err(|error| error.to_string())
+    });
+    let (result, mode_lease) = completion
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| "network mode coordinator task ended without a response".to_owned())?;
+    drop(mode_lease);
+    result?;
     engine.status_payload(retirement)
 }
 

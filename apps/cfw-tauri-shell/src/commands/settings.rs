@@ -54,13 +54,6 @@ pub(crate) fn silent_start_enabled() -> Result<bool, String> {
         .map_err(|error| error.to_string())
 }
 
-pub(crate) fn automatic_updates_enabled() -> Result<bool, String> {
-    settings_store()?
-        .read_or_default()
-        .map(|preferences| preferences.check_for_updates)
-        .map_err(|error| error.to_string())
-}
-
 #[tauri::command]
 pub(crate) fn read_settings_snapshot() -> Result<UiSettingsSnapshot, String> {
     settings_store()?

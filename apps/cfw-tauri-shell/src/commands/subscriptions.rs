@@ -480,23 +480,24 @@ impl<'a> SubscriptionMutationRollback<'a> {
                 .delete(&self.profile_id)
                 .map(|_| ())
                 .map_err(|error| error.to_string()),
-            SubscriptionRollbackAction::Restore(stored) => self
-                .repository
-                .replace(
-                    &self.profile_id,
-                    None,
-                    &stored.profile,
-                    stored.source_url.as_deref(),
-                )
-                .map(|_| ())
-                .map_err(|error| error.to_string()),
+            SubscriptionRollbackAction::Restore(stored) => {
+                if stored.record.id != self.profile_id {
+                    return Err("subscription rollback profile identity changed".into());
+                }
+                self.repository
+                    .restore(&stored)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
         }
     }
 }
 
 impl Drop for SubscriptionMutationRollback<'_> {
     fn drop(&mut self) {
-        let _ = self.rollback();
+        if let Err(error) = self.rollback() {
+            eprintln!("subscription mutation rollback failed: {error}");
+        }
     }
 }
 

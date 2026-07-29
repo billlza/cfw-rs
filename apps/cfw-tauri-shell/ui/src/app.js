@@ -458,11 +458,25 @@ function applyUpdateInfo(payload) {
     current: payload.current ?? state.payload?.product?.version,
     version: payload.version ?? null,
     notes: payload.notes ?? null,
+    date: payload.date ?? null,
     error: payload.error ?? null,
   };
 }
 
-async function promptInstallUpdate(result) {
+function invalidateUpdateAuthorization(error) {
+  const result = {
+    available: false,
+    current: state.payload?.product?.version ?? null,
+    version: null,
+    notes: null,
+    date: null,
+    error: error ? errorText(error) : null,
+  };
+  applyUpdateInfo(result);
+  return result;
+}
+
+async function promptAvailableUpdate(result) {
   applyUpdateInfo(result);
   openProductAboutDialog({
     autoCheck: true,
@@ -484,41 +498,23 @@ function openProductAboutDialog(options = {}) {
       }
     : state.updateInfo;
   const phase = options.phase
-    ?? (options.checking ? "checking" : options.installing ? "installing" : "idle");
+    ?? (options.checking ? "checking" : "idle");
   state.glassDialog = {
     kind: "product-about",
     payload: {
       phase,
       checking: phase === "checking",
-      installing: phase === "downloading" || phase === "installing",
       autoCheck: Boolean(options.autoCheck),
-      progress: options.progress ?? null,
       update,
     },
   };
   renderGlassOverlays();
 }
 
-function formatUpdateBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes < 0) return "—";
-  if (bytes < 1024) return `${Math.round(bytes)} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function productAboutStatusText(payload) {
   const phase = payload?.phase ?? (payload?.checking ? "checking" : "idle");
   const update = payload?.update;
-  const progress = payload?.progress;
   if (phase === "checking") return "Checking for updates…";
-  if (phase === "downloading") {
-    if (typeof progress?.percent === "number") {
-      const total = progress.total ? ` of ${formatUpdateBytes(progress.total)}` : "";
-      return `Downloading update… ${progress.percent}% (${formatUpdateBytes(progress.downloaded)}${total})`;
-    }
-    return "Downloading update…";
-  }
-  if (phase === "installing") return "Installing update and restarting…";
   if (update?.error) return `Update failed: ${update.error}`;
   if (update?.available && update?.version) {
     return `Update available: v${update.version}`;
@@ -685,6 +681,15 @@ function renderGeneral() {
     : `sing-box · ${engineStateLabel(engine)}`;
   const tunnelReason = engine.tunnelAvailable ? null : (engine.availabilityReason ?? "The signed Packet Tunnel System Extension has not reported capability.");
   const proxyReason = engine.systemProxyAvailable ? null : (engine.availabilityReason ?? "The signed ProxyAgent has not reported capability.");
+  const engineMutationDisabled = state.engineMutationBusy ? " disabled" : "";
+  const tunnelRecoveryAction = engine.state === "AwaitingApproval"
+    ? `<button class="cfw-text-button" data-action="retry-tun-mode"${engineMutationDisabled}>Approve…</button>`
+    : engine.state === "Failed" && engine.desiredMode === "tunnel"
+      ? `<button class="cfw-text-button" data-action="retry-tun-mode"${engineMutationDisabled}>Retry</button>`
+      : "";
+  const proxyRecoveryAction = engine.state === "Failed" && engine.desiredMode === "system-proxy"
+    ? `<button class="cfw-text-button" data-action="retry-system-proxy"${engineMutationDisabled}>Retry</button>`
+    : "";
   return `
     <div class="cfw-general-view">
       <section class="cfw-header">
@@ -783,9 +788,9 @@ function renderGeneral() {
           </div>
           <div class="cfw-row-right">
             <span class="cfw-link-value">${escapeHtml(tunnelValueLabel(engine))}</span>
-            ${engine.state === "AwaitingApproval" ? '<button class="cfw-text-button" data-action="open-login-items">Approve…</button>' : ""}
+            ${tunnelRecoveryAction}
             ${tunnelReason ? renderRowNote("Unavailable", tunnelReason) : ""}
-            ${renderInlineSwitch("tunMode", "TUN Mode", { reason: tunnelReason })}
+            ${renderInlineSwitch("tunMode", "TUN Mode", { reason: tunnelReason, disabled: state.engineMutationBusy })}
           </div>
         </div>
 
@@ -805,8 +810,9 @@ function renderGeneral() {
         <div class="cfw-row">
           <div class="cfw-row-left">System Proxy</div>
           <div class="cfw-row-right">
+            ${proxyRecoveryAction}
             ${proxyReason ? renderRowNote("Unavailable", proxyReason) : ""}
-            ${renderInlineSwitch("systemProxy", "System Proxy", { reason: proxyReason })}
+            ${renderInlineSwitch("systemProxy", "System Proxy", { reason: proxyReason, disabled: state.engineMutationBusy })}
           </div>
         </div>
 
@@ -1376,24 +1382,14 @@ function renderGlassOverlays() {
       const status = productAboutStatusText(dialog.payload);
       const update = dialog.payload?.update;
       const phase = dialog.payload?.phase ?? (dialog.payload?.checking ? "checking" : "idle");
-      const busy = phase === "checking" || phase === "downloading" || phase === "installing";
-      const canInstall = Boolean(update?.available && update?.version && !busy);
-      const percent = typeof dialog.payload?.progress?.percent === "number"
-        ? Math.max(0, Math.min(100, dialog.payload.progress.percent))
-        : null;
+      const busy = phase === "checking";
+      const canOpen = Boolean(update?.available && update?.version && !busy);
       const notes = update?.notes ? `<p class="product-about-notes">${escapeHtml(String(update.notes).slice(0, 280))}</p>` : "";
-      const progressBlock = (phase === "downloading" || phase === "installing")
-        ? `<div class="product-about-progress" aria-hidden="true"><i style="width:${percent == null ? 18 : percent}%"></i></div>`
-        : "";
       const primaryLabel = phase === "checking"
         ? "Checking…"
-        : phase === "downloading"
-          ? (percent == null ? "Downloading…" : `Downloading… ${percent}%`)
-          : phase === "installing"
-            ? "Installing…"
-            : canInstall
-              ? `Download & Install v${escapeHtml(String(update.version))}`
-              : "";
+        : canOpen
+          ? `Open Download v${escapeHtml(String(update.version))}`
+          : "";
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
         <div class="glass-dialog product-about" role="dialog" aria-label="About Clash for Mac">
@@ -1405,11 +1401,10 @@ function renderGlassOverlays() {
             <div>${escapeHtml(String(product.architecture ?? "arm64"))} · macOS ${escapeHtml(String(product.minimum_macos ?? "15.0"))}+</div>
           </div>
           <div class="product-about-status">${escapeHtml(status)}</div>
-          ${progressBlock}
           ${notes}
           <div class="glass-dialog-actions column">
-            ${canInstall ? `<button type="button" class="glass-btn" data-glass-install-update>${primaryLabel}</button>` : ""}
-            ${busy && !canInstall ? `<button type="button" class="glass-btn" disabled>${primaryLabel}</button>` : ""}
+            ${canOpen ? `<button type="button" class="glass-btn" data-glass-open-update>${primaryLabel}</button>` : ""}
+            ${busy && !canOpen ? `<button type="button" class="glass-btn" disabled>${primaryLabel}</button>` : ""}
             <button type="button" class="glass-btn ghost" data-glass-check-update ${busy ? "disabled" : ""}>${phase === "checking" ? "Checking…" : "Check for Update"}</button>
             <button type="button" class="glass-btn ghost" data-glass-dismiss ${busy ? "disabled" : ""}>Close</button>
           </div>
@@ -1660,49 +1655,33 @@ function bindGlassOverlayEvents() {
         openProductAboutDialog({ autoCheck: true, phase: "idle", result });
       } catch (error) {
         appendLog("warning", "updater", `Update check failed: ${errorText(error)}`);
+        const result = invalidateUpdateAuthorization(error);
         openProductAboutDialog({
           autoCheck: true,
           phase: "idle",
-          result: { available: false, error: errorText(error), current: state.payload.product.version },
+          result,
         });
       }
     });
   });
 
-  document.querySelectorAll("[data-glass-install-update]").forEach((button) => {
+  document.querySelectorAll("[data-glass-open-update]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const targetVersion = state.updateInfo?.version ?? "update";
+      const targetVersion = state.updateInfo?.version;
       try {
-        appendLog("info", "updater", `Downloading and installing ${targetVersion}…`);
-        openProductAboutDialog({
-          autoCheck: true,
-          phase: "downloading",
-          progress: { downloaded: 0, total: null, percent: null },
-          result: { ...state.updateInfo, available: true, error: null },
-        });
-        const result = await invoke("install_available_update");
-        if (result && result.installed === false) {
-          const reason = result.reason ?? "no update available";
-          appendLog("warning", "updater", `Install skipped: ${reason}`);
-          openProductAboutDialog({
-            autoCheck: true,
-            phase: "idle",
-            result: { ...state.updateInfo, available: false, error: reason },
-          });
-          return;
-        }
-        openProductAboutDialog({
-          autoCheck: true,
-          phase: "installing",
-          progress: { downloaded: 0, total: null, percent: 100 },
-          result: { ...state.updateInfo, available: true, error: null },
-        });
+        if (!targetVersion) throw new Error("No validated update is available");
+        appendLog("info", "updater", `Opening the official v${targetVersion} download page…`);
+        await invoke("open_available_update", { expectedVersion: targetVersion });
+        appendLog("info", "updater", `Official v${targetVersion} download page opened`);
+        invalidateUpdateAuthorization();
+        closeGlassOverlays();
       } catch (error) {
-        appendLog("warning", "updater", `Install failed: ${errorText(error)}`);
+        appendLog("warning", "updater", `Could not open update: ${errorText(error)}`);
+        const result = invalidateUpdateAuthorization(error);
         openProductAboutDialog({
           autoCheck: true,
           phase: "idle",
-          result: { ...state.updateInfo, error: errorText(error) },
+          result,
         });
       }
     });
@@ -2375,9 +2354,9 @@ function renderSettings() {
       ${renderSettingsGroup("General", [
         renderToggle("startAtLogin", "Start at Login", "Register Clash for Mac as a macOS Login Item."),
         renderToggle("silentStart", "Silent Start", "Start hidden in the menu bar without a Dock icon."),
-        renderToggle("checkForUpdates", "Check for updates", "Check GitHub releases for a newer signed build at launch."),
+        renderToggle("checkForUpdates", "Check for updates", "Check GitHub for a newer official release at launch."),
         renderToggle("retainWindowBounds", "Retain window bounds", "Restore the dashboard window position between launches."),
-        renderSettingAction("Updates", "GitHub Releases", "Check the signed updater feed now.", "check-for-updates", "Check for Updates"),
+        renderSettingAction("Updates", "GitHub Releases", "Check the official release feed now.", "check-for-updates", "Check for Updates"),
       ])}
 
       ${renderSettingsGroup("Appearance", [
@@ -3059,20 +3038,28 @@ function bindGlobalEvents() {
 const SESSION_TOGGLES = new Set(["breakOnProxyChange", "hideUnavailable", "showProcess"]);
 
 async function applyToggle(key, checked, source) {
+  const isEngineMutation = key === "systemProxy" || key === "tunMode";
+  if (isEngineMutation && state.engineMutationBusy) {
+    throw new Error("A network mode change is already in progress");
+  }
   const previous = state.toggles[key];
   state.toggles[key] = checked;
+  if (isEngineMutation) {
+    state.engineMutationBusy = true;
+    renderPage();
+  }
   try {
     if (key === "systemProxy") {
       const status = await invoke("set_system_proxy_enabled", { enabled: checked });
       applyEngineStatus(status);
       await loadNetworkDiagnostics();
       await loadRuntimeProjection();
-      if (checked) await loadControllerSnapshotWithRetry(6, 500);
+      if (state.engine.systemProxyActive) await loadControllerSnapshotWithRetry(6, 500);
     } else if (key === "tunMode") {
       const status = await invoke("set_tun_enabled", { enabled: checked });
       applyEngineStatus(status);
       await loadRuntimeProjection();
-      if (checked) await loadControllerSnapshotWithRetry(12, 500);
+      if (state.engine.tunnelActive) await loadControllerSnapshotWithRetry(12, 500);
     } else if (key === "startAtLogin") {
       const snapshot = await invoke("set_launch_at_login_enabled", { enabled: checked });
       applyPersistedSettings(snapshot);
@@ -3086,10 +3073,19 @@ async function applyToggle(key, checked, source) {
     appendLog("info", source, `${key} changed to ${checked ? "on" : "off"}`);
   } catch (error) {
     state.toggles[key] = previous;
-    if (key === "systemProxy" || key === "tunMode") {
-      await loadEngineStatus().catch(() => null);
+    if (isEngineMutation) {
+      try {
+        await loadEngineStatus();
+      } catch (refreshError) {
+        appendLog("warning", "engine", `Could not refresh mode state after refusal: ${errorText(refreshError)}`);
+      }
     }
     throw error;
+  } finally {
+    if (isEngineMutation) {
+      state.engineMutationBusy = false;
+      renderPage();
+    }
   }
 }
 
@@ -3446,13 +3442,21 @@ export async function handleAction(action) {
       appendLog("warning", "shell", `Open Folder failed: ${errorText(error)}`);
     }
   }
-  if (action === "open-login-items") {
+  if (action === "retry-system-proxy") {
+    await applyToggle("systemProxy", true, "explicit retry");
+    renderPage();
+  }
+  if (action === "retry-tun-mode") {
     try {
-      await invoke("open_login_items_settings");
-      appendLog("info", "shell", "Opened System Settings › General › Login Items & Extensions");
+      await applyToggle("tunMode", true, "explicit retry");
+      if (state.engine.state === "AwaitingApproval") {
+        await invoke("open_login_items_settings");
+        appendLog("info", "shell", "Opened System Settings › General › Login Items & Extensions");
+      }
     } catch (error) {
-      appendLog("warning", "shell", errorText(error));
+      appendLog("warning", "engine", `TUN retry failed: ${errorText(error)}`);
     }
+    renderPage();
   }
   if (action === "tun-restore-dns-info") {
     state.glassDialog = {
@@ -3715,13 +3719,14 @@ export async function handleAction(action) {
     try {
       openProductAboutDialog({ autoCheck: true, phase: "checking" });
       const result = await invoke("check_for_updates");
-      await promptInstallUpdate(result);
+      await promptAvailableUpdate(result);
     } catch (error) {
       appendLog("warning", "updater", `Update check failed: ${errorText(error)}`);
+      const result = invalidateUpdateAuthorization(error);
       openProductAboutDialog({
         autoCheck: true,
         phase: "idle",
-        result: { available: false, error: errorText(error), current: state.payload.product.version },
+        result,
       });
     }
   }
@@ -3829,8 +3834,11 @@ function applyEngineStatus(payload) {
     state.engine = { ...defaultEngineStatus, availabilityReason: errorText(error) };
     appendLog("warning", "engine", `Engine state could not be trusted: ${errorText(error)}`);
   }
-  state.toggles.systemProxy = state.engine.systemProxyActive;
-  state.toggles.tunMode = state.engine.tunnelActive;
+  // Switches express the user's desired mode. Runtime readiness remains a
+  // separate label/status dot; pending and failed requests stay switchable Off
+  // while the adjacent action provides an explicit, state-bound retry.
+  state.toggles.systemProxy = state.engine.desiredMode === "system-proxy";
+  state.toggles.tunMode = state.engine.desiredMode === "tunnel";
   if (state.engine.active) {
     if (!state.engineStartedAt) state.engineStartedAt = Date.now();
     state.traffic.runtimeSeconds = Math.floor((Date.now() - state.engineStartedAt) / 1000);
@@ -4073,56 +4081,9 @@ async function bootstrap() {
     renderPage();
   });
 
-  await listen("cfw://update-progress", (event) => {
-    const payload = event.payload ?? {};
-    if (state.glassDialog?.kind !== "product-about") return;
-    const phase = payload.phase === "installing" ? "installing" : "downloading";
-    const nextProgress = {
-      downloaded: Number(payload.downloaded) || 0,
-      total: payload.total == null ? null : Number(payload.total),
-      percent: payload.percent == null ? null : Number(payload.percent),
-    };
-    const prev = state.glassDialog.payload?.progress;
-    // Avoid full dialog rebuild on every tiny chunk — only when percent/phase changes.
-    if (
-      state.glassDialog.payload?.phase === phase
-      && prev
-      && prev.percent === nextProgress.percent
-      && phase === "downloading"
-    ) {
-      const status = document.querySelector(".product-about-status");
-      const bar = document.querySelector(".product-about-progress > i");
-      if (status) {
-        status.textContent = productAboutStatusText({
-          ...state.glassDialog.payload,
-          phase,
-          progress: nextProgress,
-        });
-      }
-      if (bar && typeof nextProgress.percent === "number") {
-        bar.style.width = `${Math.max(0, Math.min(100, nextProgress.percent))}%`;
-      }
-      state.glassDialog.payload.progress = nextProgress;
-      return;
-    }
-    openProductAboutDialog({
-      autoCheck: true,
-      phase,
-      progress: nextProgress,
-      result: {
-        ...(state.updateInfo ?? {}),
-        available: true,
-        version: payload.version ?? state.updateInfo?.version,
-        error: null,
-      },
-    });
-  });
-
   await listen("cfw://update-available", (event) => {
     applyUpdateInfo(event.payload);
-    const phase = state.glassDialog?.payload?.phase;
-    // Don't clobber an in-flight download/install with a fresh "available" dialog.
-    if (state.glassDialog?.kind === "product-about" && phase !== "downloading" && phase !== "installing") {
+    if (state.glassDialog?.kind === "product-about") {
       openProductAboutDialog({
         autoCheck: true,
         phase: "idle",
@@ -4203,6 +4164,17 @@ async function bootstrap() {
       await importProfileFromPath(path);
     }
   });
+
+  // Register every listener before the automatic check. The setup-time check
+  // used to race this subscription and could lose the only availability event.
+  if (state.toggles.checkForUpdates) {
+    try {
+      applyUpdateInfo(await invoke("check_for_updates"));
+    } catch (error) {
+      appendLog("warning", "updater", `Automatic update check failed: ${errorText(error)}`);
+      invalidateUpdateAuthorization(error);
+    }
+  }
 
   await startLiveStreams();
 

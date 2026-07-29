@@ -1,10 +1,11 @@
 //! Shell, window, and diagnostics helpers restored from 0.3.5.
 //!
-//! Nothing here touches the data plane. Opening a URL or revealing a directory
-//! goes through the operating system's own `open` utility with a fixed absolute
-//! path and separate arguments: no shell is involved, the URL scheme is
-//! restricted to `http`/`https`, and every revealed path is one this
-//! application owns. Diagnostics reads SystemConfiguration only, so the
+//! Nothing here touches the data plane. Opening the updater's internally
+//! authorized release URL or revealing a directory goes through the operating
+//! system's own `open` utility with a fixed absolute path and separate
+//! arguments: no shell is involved, the URL scheme is restricted to
+//! `http`/`https`, and every revealed path is one this application owns.
+//! Diagnostics reads SystemConfiguration only, so the
 //! historical `networksetup`, `scutil`, and `route` invocations are gone along
 //! with the fields they produced.
 
@@ -71,9 +72,11 @@ pub(crate) struct DeepLinkParseOutcome {
     error: Option<String>,
 }
 
-#[tauri::command]
-pub(crate) fn open_external_url(url: String) -> Result<(), String> {
-    let target = validate_external_url(&url)?;
+/// Opens a URL selected by a trusted Rust callsite. This is deliberately not a
+/// Tauri command: renderer IPC must never bypass the updater's one-use metadata
+/// authorization by supplying its own download destination.
+pub(crate) fn open_trusted_external_url(url: &str) -> Result<(), String> {
+    let target = validate_external_url(url)?;
     open_argument(&target)
 }
 

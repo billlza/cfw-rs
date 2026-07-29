@@ -1,62 +1,235 @@
 use std::fs;
-use std::future::Future as _;
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
+use std::time::Duration;
 
 use cfw_engine_api::EngineMode;
 use cfw_profiles::{ProfileError, ProfileRepository};
 use cfw_singbox_config::ValidatedSingBoxProfile;
 
-use super::maintenance::{EngineMaintenanceError, EngineMaintenanceGate};
+use super::maintenance::{
+    EngineMaintenanceError, EngineMaintenanceGate, EngineModeChangeIntent, MAX_PENDING_MODE_CHANGES,
+};
 use super::selected_profile_for_mode;
 
 #[tokio::test]
-async fn maintenance_waits_for_prior_change_and_blocks_every_renderer_mode() {
+async fn maintenance_rejects_queued_off_change_and_blocks_every_renderer_mode() {
     let gate = EngineMaintenanceGate::default();
     let prior_change = gate
-        .begin_mode_change(EngineMode::SystemProxy)
-        .expect("initial admission")
-        .expect("non-Off changes are tracked");
-    let maintenance = gate.reserve().expect("maintenance reservation");
-
-    for mode in [EngineMode::Off, EngineMode::SystemProxy, EngineMode::Tunnel] {
-        assert!(matches!(
-            gate.begin_mode_change(mode),
-            Err(EngineMaintenanceError::AlreadyActive)
-        ));
-    }
-    let mut waiting = Box::pin(maintenance.wait_for_idle());
-    let mut context = Context::from_waker(Waker::noop());
-    assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
-    drop(waiting);
-
-    drop(prior_change);
-    maintenance.wait_for_idle().await.expect("prior released");
-    drop(maintenance);
-    assert!(
-        gate.begin_mode_change(EngineMode::Tunnel)
-            .expect("released")
-            .is_some()
-    );
-}
-
-#[test]
-fn profile_mutation_reservation_rejects_concurrent_mode_changes_without_waiting() {
-    let gate = EngineMaintenanceGate::default();
-    let mode_change = gate
-        .begin_mode_change(EngineMode::Tunnel)
-        .expect("mode change admission")
-        .expect("non-Off mode lease");
+        .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Off))
+        .await
+        .expect("initial admission");
     assert!(matches!(
         gate.reserve_if_idle(),
         Err(EngineMaintenanceError::ModeChangeActive)
     ));
-    drop(mode_change);
-    let mutation = gate.reserve_if_idle().expect("idle admission");
+    drop(prior_change);
+    let maintenance = gate
+        .reserve_if_idle()
+        .expect("idle maintenance reservation");
+
+    for mode in [EngineMode::Off, EngineMode::SystemProxy, EngineMode::Tunnel] {
+        assert!(matches!(
+            gate.begin_mode_change(EngineModeChangeIntent::Set(mode))
+                .await,
+            Err(EngineMaintenanceError::AlreadyActive)
+        ));
+    }
+    drop(maintenance);
+    gate.begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Tunnel))
+        .await
+        .expect("released");
+}
+
+#[tokio::test]
+async fn queued_mode_changes_are_serial_and_visible_to_maintenance() {
+    let gate = EngineMaintenanceGate::default();
+    let first_change = gate
+        .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Tunnel))
+        .await
+        .expect("mode change admission");
+    let second_change = gate.begin_mode_change(EngineModeChangeIntent::ReapplyCurrent);
+    tokio::pin!(second_change);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut second_change)
+            .await
+            .is_err(),
+        "a second mutation must wait for the first response"
+    );
     assert!(matches!(
-        gate.begin_mode_change(EngineMode::SystemProxy),
+        gate.reserve_if_idle(),
+        Err(EngineMaintenanceError::ModeChangeActive)
+    ));
+    drop(first_change);
+    let second_change = tokio::time::timeout(Duration::from_secs(1), &mut second_change)
+        .await
+        .expect("queued mutation must resume")
+        .expect("queued mutation admission");
+    assert!(matches!(
+        gate.reserve_if_idle(),
+        Err(EngineMaintenanceError::ModeChangeActive)
+    ));
+    drop(second_change);
+    let maintenance = gate.reserve_if_idle().expect("idle admission");
+    assert!(matches!(
+        gate.begin_mode_change(EngineModeChangeIntent::Set(EngineMode::SystemProxy))
+            .await,
         Err(EngineMaintenanceError::AlreadyActive)
     ));
-    drop(mutation);
+    drop(maintenance);
+}
+
+#[tokio::test]
+async fn queued_current_reapply_reads_off_only_after_prior_off_releases() {
+    let gate = EngineMaintenanceGate::default();
+    let desired_mode = Arc::new(std::sync::Mutex::new(EngineMode::Tunnel));
+    let off = gate
+        .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Off))
+        .await
+        .expect("Off admission");
+    let current_mode = desired_mode.clone();
+    let queued_reapply = async {
+        let lease = gate
+            .begin_mode_change(EngineModeChangeIntent::ReapplyCurrent)
+            .await
+            .expect("current-mode admission");
+        let observed = *current_mode.lock().expect("desired mode lock");
+        (observed, lease)
+    };
+    tokio::pin!(queued_reapply);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut queued_reapply)
+            .await
+            .is_err(),
+        "reapply must wait behind the prior Off intent"
+    );
+
+    *desired_mode.lock().expect("desired mode lock") = EngineMode::Off;
+    drop(off);
+    let (observed, reapply) = tokio::time::timeout(Duration::from_secs(1), &mut queued_reapply)
+        .await
+        .expect("queued reapply resumes");
+    assert_eq!(observed, EngineMode::Off);
+    drop(reapply);
+}
+
+#[tokio::test]
+async fn mode_change_queue_is_bounded_and_cancelled_waiters_release_capacity() {
+    let gate = EngineMaintenanceGate::default();
+    let first = gate
+        .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Tunnel))
+        .await
+        .expect("first mode mutation");
+    let mut queued = Vec::new();
+    for _ in 1..MAX_PENDING_MODE_CHANGES {
+        let mut pending =
+            Box::pin(gate.begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Tunnel)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), pending.as_mut())
+                .await
+                .is_err(),
+            "a queued mutation cannot bypass the held serial permit"
+        );
+        queued.push(pending);
+    }
+    assert!(matches!(
+        gate.begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Off))
+            .await,
+        Err(EngineMaintenanceError::QueueFull)
+    ));
+
+    drop(queued);
+    drop(first);
+    let maintenance = gate
+        .reserve_if_idle()
+        .expect("cancelled waiters release their registrations");
+    drop(maintenance);
+}
+
+#[tokio::test]
+async fn caller_cancellation_cannot_release_an_accepted_mode_operation() {
+    let gate = EngineMaintenanceGate::default();
+    let lease = gate
+        .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Tunnel))
+        .await
+        .expect("mode mutation");
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let operation_started = started.clone();
+    let operation_release = release.clone();
+    let response = lease.run_to_completion(async move {
+        operation_started.notify_one();
+        operation_release.notified().await;
+    });
+    started.notified().await;
+    drop(response);
+
+    assert!(matches!(
+        gate.reserve_if_idle(),
+        Err(EngineMaintenanceError::ModeChangeActive)
+    ));
+    release.notify_one();
+    let maintenance = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match gate.reserve_if_idle() {
+                Ok(lease) => break lease,
+                Err(EngineMaintenanceError::ModeChangeActive) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("unexpected maintenance error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("accepted operation must eventually release its lease");
+    drop(maintenance);
+}
+
+#[tokio::test]
+async fn shutdown_maintenance_survives_caller_cancellation_and_blocks_all_modes() {
+    let gate = EngineMaintenanceGate::default();
+    let shutdown = gate
+        .reserve_if_idle()
+        .expect("exclusive shutdown admission");
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let operation_started = started.clone();
+    let operation_release = release.clone();
+    let response = shutdown.run_to_completion(async move {
+        operation_started.notify_one();
+        operation_release.notified().await;
+    });
+    started.notified().await;
+    drop(response);
+
+    for mode in [EngineMode::Off, EngineMode::SystemProxy, EngineMode::Tunnel] {
+        assert!(matches!(
+            gate.begin_mode_change(EngineModeChangeIntent::Set(mode))
+                .await,
+            Err(EngineMaintenanceError::AlreadyActive)
+        ));
+    }
+    assert!(matches!(
+        gate.reserve_if_idle(),
+        Err(EngineMaintenanceError::AlreadyActive)
+    ));
+
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match gate
+                .begin_mode_change(EngineModeChangeIntent::Set(EngineMode::Off))
+                .await
+            {
+                Ok(lease) => break lease,
+                Err(EngineMaintenanceError::AlreadyActive) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("unexpected mode admission error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("completed shutdown task releases its dropped response guard");
 }
 
 #[test]

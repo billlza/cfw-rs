@@ -708,6 +708,44 @@ fn replace_keeps_identity_credentials_and_rebinds_the_selection_digest() {
 }
 
 #[test]
+fn rollback_restore_preserves_the_complete_loaded_profile_identity() {
+    let (root, repository) = repository("restore");
+    let imported = repository
+        .import_with_source(
+            Some("Remote"),
+            &credential_profile("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            Some("https://example.com/original"),
+        )
+        .expect("import original profile");
+    repository.select(&imported.id).expect("select profile");
+    let original = repository
+        .load(&imported.id)
+        .expect("load original")
+        .expect("original profile");
+
+    repository
+        .replace(
+            &imported.id,
+            Some("Replacement"),
+            &profile(),
+            Some("https://example.com/replacement"),
+        )
+        .expect("replace before rollback");
+    repository
+        .restore(&original)
+        .expect("restore exact profile");
+
+    assert_eq!(
+        repository
+            .load_selected()
+            .expect("load restored selection")
+            .expect("restored selected profile"),
+        original
+    );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
 fn metadata_updates_change_no_document_digest_or_selection() {
     let (root, repository) = repository("metadata");
     let imported = repository

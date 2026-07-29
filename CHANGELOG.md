@@ -129,10 +129,10 @@
 - Build XcodeGen from checksum-bound source with a digest-pinned
   installed-resource patch, isolated resolved-only SwiftPM state, a real project
   generation probe, debug-path stripping, and a complete tree-v2 manifest.
-- Replace the generic updater runtime with a project-owned, bounded metadata,
-  signed-download, descriptor-relative archive admission, and atomic macOS
-  swap path. Update commit now owns an exclusive engine-Off maintenance lease,
-  and its cancellation boundary is linearized before any network stop.
+- Replace the generic updater runtime with project-owned bounded metadata and a
+  one-use authorization that is revalidated before opening the exact GitHub
+  release page derived from the canonical version. The app does not replace its
+  own bundle: users install the signed and notarized DMG through macOS.
 - Release remains blocked until installed-identity proof for shared-Keychain
   provisioning and authenticated in-memory Tunnel injection, physical packet
   capture of the pinned resolver-failover behavior, exact Developer ID and

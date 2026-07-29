@@ -21,9 +21,7 @@ cfw-profiles = { path = "../../crates/cfw-profiles" }
 cfw-singbox-config = { path = "../../crates/cfw-singbox-config" }
 base64.workspace = true
 futures-util.workspace = true
-flate2.workspace = true
 libc.workspace = true
-minisign-verify.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 plist.workspace = true
@@ -36,7 +34,6 @@ tauri = { version = "=2.11.5", features = ["tray-icon"] }
 tauri-plugin-single-instance = "=2.4.3"
 thiserror.workspace = true
 tempfile.workspace = true
-tar.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tokio-tungstenite.workspace = true
 urlencoding.workspace = true

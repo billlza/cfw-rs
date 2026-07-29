@@ -31,11 +31,11 @@ export const UI_COMMANDS = Object.freeze([
   "import_profile_file",
   "import_profile_text",
   "import_profile_url",
-  "install_available_update",
   "legacy_retirement_status",
   "migrate_legacy_cfw_profiles",
   "network_diagnostics",
   "open_login_items_settings",
+  "open_available_update",
   "open_page",
   "open_profile_externally",
   "preview_credential_gc",
@@ -89,7 +89,6 @@ export const UI_EVENTS = Object.freeze([
   "cfw://settings-changed",
   "cfw://stream-error",
   "cfw://update-available",
-  "cfw://update-progress",
   "tauri://drag-drop",
 ]);
 

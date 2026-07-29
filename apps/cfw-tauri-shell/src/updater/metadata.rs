@@ -8,16 +8,15 @@ use semver::Version;
 use serde_json::Value;
 
 use super::contract::{UpdateAuthorization, validate_update};
-use super::download::{
-    ensure_tls_crypto_provider, sanitized_network_error, validate_release_asset_url,
-};
-use super::error::{DownloadFailureStage, Result, UpdateError};
+use super::error::{DownloadFailureStage, NetworkFailureCategory, Result, UpdateError};
 
 const METADATA_URL: &str = "https://github.com/billlza/cfw-rs/releases/latest/download/latest.json";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const USER_AGENT: &str = concat!("cfw-rs/", env!("CARGO_PKG_VERSION"));
+const RELEASE_ASSET_HOST: &str = "release-assets.githubusercontent.com";
+const RELEASE_ASSET_PATH_PREFIX: &str = "/github-production-release-asset/";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CheckedUpdate {
@@ -160,6 +159,69 @@ fn validate_metadata_redirect(
     }
 }
 
+fn ensure_tls_crypto_provider() -> Result<()> {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // A concurrent initializer may win this process-global one-time race.
+        let _already_installed = rustls::crypto::ring::default_provider().install_default();
+    }
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        return Err(UpdateError::TlsProviderUnavailable);
+    }
+    Ok(())
+}
+
+fn sanitized_network_error(stage: DownloadFailureStage, error: &reqwest::Error) -> UpdateError {
+    let category = if error.is_timeout() {
+        NetworkFailureCategory::Timeout
+    } else if error.is_connect() {
+        NetworkFailureCategory::Connect
+    } else if error.is_status() {
+        NetworkFailureCategory::Status
+    } else if error.is_body() {
+        NetworkFailureCategory::Body
+    } else if error.is_decode() {
+        NetworkFailureCategory::Decode
+    } else if error.is_request() {
+        NetworkFailureCategory::Request
+    } else {
+        NetworkFailureCategory::Other
+    };
+    UpdateError::Network {
+        stage,
+        category,
+        status_code: error.status().map(|status| status.as_u16()),
+    }
+}
+
+fn validate_release_asset_url(url: &Url) -> std::result::Result<(), String> {
+    if url.scheme() != "https"
+        || url.host_str() != Some(RELEASE_ASSET_HOST)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("redirect origin or authority is not allowed".into());
+    }
+    let path_tail = url
+        .path()
+        .strip_prefix(RELEASE_ASSET_PATH_PREFIX)
+        .ok_or_else(|| "redirect path is not a GitHub release-asset path".to_string())?;
+    let segments = path_tail.split('/').collect::<Vec<_>>();
+    if segments.len() != 2
+        || segments
+            .iter()
+            .any(|segment| segment.is_empty() || segment.contains('%'))
+        || !segments[0].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("redirect path has an unexpected release-asset identifier".into());
+    }
+    if url.query().is_none_or(str::is_empty) {
+        return Err("redirect is missing GitHub's signed asset query".into());
+    }
+    Ok(())
+}
+
 fn validate_versioned_metadata_url(url: &Url) -> std::result::Result<(), String> {
     if url.scheme() != "https"
         || url.host_str() != Some("github.com")
@@ -245,6 +307,30 @@ mod tests {
             "https://github.com/billlza/cfw-rs/releases/download/v0.4.0/other.json",
         ] {
             assert!(validate_versioned_metadata_url(&Url::parse(value).expect("URL")).is_err());
+        }
+    }
+
+    #[test]
+    fn release_asset_redirect_is_exact_and_bounded() {
+        assert!(
+            validate_release_asset_url(
+                &Url::parse(
+                    "https://release-assets.githubusercontent.com/github-production-release-asset/12345/asset?sp=read"
+                )
+                .expect("URL")
+            )
+            .is_ok()
+        );
+        for value in [
+            "https://github.com/github-production-release-asset/12345/asset?sp=read",
+            "https://release-assets.githubusercontent.com/github-production-release-asset/not-a-number/asset?sp=read",
+            "https://release-assets.githubusercontent.com/github-production-release-asset/12345/asset",
+            "https://release-assets.githubusercontent.com/github-production-release-asset/12345/asset/extra?sp=read",
+        ] {
+            assert!(
+                validate_release_asset_url(&Url::parse(value).expect("URL")).is_err(),
+                "accepted unsafe redirect {value:?}"
+            );
         }
     }
 }

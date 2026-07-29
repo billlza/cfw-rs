@@ -13,6 +13,12 @@ use crate::updater::check_for_updates;
 
 const PRODUCT_NAME: &str = "Clash for Mac";
 const TRAY_ID: &str = "cfw-tray";
+const APP_MENU_ABOUT_ID: &str = "about";
+const APP_MENU_CHECK_UPDATE_ID: &str = "check-update";
+const APP_MENU_QUIT_ID: &str = "quit";
+const TRAY_DASHBOARD_ID: &str = "dashboard";
+const TRAY_ABOUT_ID: &str = "tray-about";
+const TRAY_QUIT_ID: &str = "tray-quit";
 /// Bounds on what a controller response may add to the menu bar. A hostile or
 /// broken controller cannot grow the tray without limit.
 const MAX_TRAY_GROUPS: usize = 24;
@@ -21,6 +27,60 @@ const MAX_TRAY_LABEL_CHARS: usize = 64;
 /// Prefix of generated proxy menu ids. Group and node names never appear in an
 /// id, so a name cannot be parsed back out of one or smuggle a separator.
 const TRAY_PROXY_ID_PREFIX: &str = "cfw-proxy-";
+
+/// Renderer pages that can be opened by native shell affordances.
+///
+/// Keeping this as a closed type prevents menu and tray handlers from emitting
+/// ad-hoc page ids that the renderer cannot resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainPage {
+    General,
+    Feedback,
+}
+
+impl MainPage {
+    #[cfg(test)]
+    const ALL: [Self; 2] = [Self::General, Self::Feedback];
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Feedback => "feedback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppMenuAction {
+    OpenPage(MainPage),
+    CheckForUpdates(MainPage),
+    Quit,
+}
+
+fn app_menu_action(id: &str) -> Option<AppMenuAction> {
+    match id {
+        APP_MENU_ABOUT_ID => Some(AppMenuAction::OpenPage(MainPage::Feedback)),
+        APP_MENU_CHECK_UPDATE_ID => Some(AppMenuAction::CheckForUpdates(MainPage::Feedback)),
+        APP_MENU_QUIT_ID => Some(AppMenuAction::Quit),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayAction {
+    OpenPage(MainPage),
+    Quit,
+    ProxySelection,
+}
+
+fn tray_action(id: &str) -> TrayAction {
+    match id {
+        TRAY_DASHBOARD_ID => TrayAction::OpenPage(MainPage::General),
+        TRAY_ABOUT_ID => TrayAction::OpenPage(MainPage::Feedback),
+        TRAY_QUIT_ID => TrayAction::Quit,
+        _ => TrayAction::ProxySelection,
+    }
+}
 
 /// Group and node behind each generated proxy menu id.
 #[derive(Default)]
@@ -88,10 +148,27 @@ fn is_tray_label(value: &str) -> bool {
 }
 
 pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
-    let about = MenuItem::with_id(app, "about", "About Clash for Mac", true, None::<&str>)?;
-    let check_update =
-        MenuItem::with_id(app, "check-update", "Check for Update…", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Clash for Mac", true, Some("CmdOrCtrl+Q"))?;
+    let about = MenuItem::with_id(
+        app,
+        APP_MENU_ABOUT_ID,
+        "About Clash for Mac",
+        true,
+        None::<&str>,
+    )?;
+    let check_update = MenuItem::with_id(
+        app,
+        APP_MENU_CHECK_UPDATE_ID,
+        "Check for Update…",
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(
+        app,
+        APP_MENU_QUIT_ID,
+        "Quit Clash for Mac",
+        true,
+        Some("CmdOrCtrl+Q"),
+    )?;
     let app_menu = Submenu::with_items(
         app,
         PRODUCT_NAME,
@@ -135,10 +212,10 @@ pub(crate) fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 }
 
 pub(crate) fn handle_app_menu_event(app: &AppHandle, id: &str) {
-    match id {
-        "about" => show_main_page(app, "about"),
-        "check-update" => {
-            show_main_page(app, "about");
+    match app_menu_action(id) {
+        Some(AppMenuAction::OpenPage(page)) => show_main_page(app, page),
+        Some(AppMenuAction::CheckForUpdates(page)) => {
+            show_main_page(app, page);
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = check_for_updates(app.clone()).await {
@@ -146,8 +223,8 @@ pub(crate) fn handle_app_menu_event(app: &AppHandle, id: &str) {
                 }
             });
         }
-        "quit" => request_shutdown(app.clone(), 0),
-        _ => {}
+        Some(AppMenuAction::Quit) => request_shutdown(app.clone(), 0),
+        None => {}
     }
 }
 
@@ -158,11 +235,10 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .tooltip(PRODUCT_NAME)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "dashboard" => show_main_page(app, "general"),
-            "tray-about" => show_main_page(app, "about"),
-            "tray-quit" => request_shutdown(app.clone(), 0),
-            id => handle_tray_proxy_event(app, id),
+        .on_menu_event(|app, event| match tray_action(event.id.as_ref()) {
+            TrayAction::OpenPage(page) => show_main_page(app, page),
+            TrayAction::Quit => request_shutdown(app.clone(), 0),
+            TrayAction::ProxySelection => handle_tray_proxy_event(app, event.id.as_ref()),
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -171,7 +247,7 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
-                show_main_page(tray.app_handle(), "general");
+                show_main_page(tray.app_handle(), MainPage::General);
             }
         })
         .build(app)?;
@@ -179,9 +255,9 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn build_tray_menu(app: &AppHandle, groups: &[TrayProxyGroup]) -> tauri::Result<Menu<Wry>> {
-    let dashboard = MenuItem::with_id(app, "dashboard", "Dashboard", true, None::<&str>)?;
-    let about = MenuItem::with_id(app, "tray-about", "About", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "tray-quit", "Quit", true, None::<&str>)?;
+    let dashboard = MenuItem::with_id(app, TRAY_DASHBOARD_ID, "Dashboard", true, None::<&str>)?;
+    let about = MenuItem::with_id(app, TRAY_ABOUT_ID, "About", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
 
     let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = vec![Box::new(dashboard)];
@@ -291,10 +367,10 @@ pub(crate) fn apply_silent_start(app: &AppHandle) -> Result<(), String> {
 }
 
 pub(crate) fn focus_main_window(app: &AppHandle) {
-    show_main_page(app, "general");
+    show_main_page(app, MainPage::General);
 }
 
-fn show_main_page(app: &AppHandle, page: &str) {
+fn show_main_page(app: &AppHandle, page: MainPage) {
     let result = (|| -> Result<(), String> {
         app.set_activation_policy(tauri::ActivationPolicy::Regular)
             .map_err(|error| error.to_string())?;
@@ -305,7 +381,7 @@ fn show_main_page(app: &AppHandle, page: &str) {
             .ok_or_else(|| "main window is unavailable".to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
-        app.emit("cfw://page", page)
+        app.emit("cfw://page", page.id())
             .map_err(|error| error.to_string())
     })();
     if let Err(error) = result {
@@ -324,6 +400,10 @@ fn emit_shell_error(app: &AppHandle, kind: &str, message: String) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+    use std::process::Command;
+
     use cfw_controller::{ProxyGroup, ProxyNode};
 
     use super::*;
@@ -343,6 +423,68 @@ mod tests {
             groups,
             proxies: Vec::<ProxyNode>::new(),
         }
+    }
+
+    fn renderer_page_ids() -> BTreeSet<String> {
+        const READ_PAGES_MODULE: &str = r#"
+import { pathToFileURL } from "node:url";
+
+const { PAGES } = await import(pathToFileURL(process.argv[1]).href);
+if (!Array.isArray(PAGES) || PAGES.some((page) => typeof page?.id !== "string")) {
+  throw new TypeError("renderer PAGES must be an array of objects with string ids");
+}
+process.stdout.write(JSON.stringify(PAGES.map((page) => page.id)));
+"#;
+
+        let state_module = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/src/state.js");
+        let output = Command::new("node")
+            .args(["--input-type=module", "--eval", READ_PAGES_MODULE])
+            .arg(&state_module)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to execute renderer page contract: {error}"));
+        assert!(
+            output.status.success(),
+            "renderer page contract failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let pages: Vec<String> = serde_json::from_slice(&output.stdout)
+            .expect("renderer page contract must produce a JSON string array");
+        let unique = pages.iter().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(
+            unique.len(),
+            pages.len(),
+            "renderer page ids must be unique"
+        );
+        unique
+    }
+
+    #[test]
+    fn every_native_page_is_part_of_the_renderer_page_contract() {
+        let renderer_pages = renderer_page_ids();
+
+        for page in MainPage::ALL {
+            assert!(
+                renderer_pages.contains(page.id()),
+                "native page '{}' is absent from renderer PAGES",
+                page.id()
+            );
+        }
+    }
+
+    #[test]
+    fn about_and_update_actions_open_the_feedback_page() {
+        assert_eq!(
+            app_menu_action(APP_MENU_ABOUT_ID),
+            Some(AppMenuAction::OpenPage(MainPage::Feedback))
+        );
+        assert_eq!(
+            app_menu_action(APP_MENU_CHECK_UPDATE_ID),
+            Some(AppMenuAction::CheckForUpdates(MainPage::Feedback))
+        );
+        assert_eq!(
+            tray_action(TRAY_ABOUT_ID),
+            TrayAction::OpenPage(MainPage::Feedback)
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
 # Create a Tauri updater archive only from the fully verified release app.
 # The URL origin, target, identity, and updater public key are not configurable.
 set -euo pipefail
+umask 077
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
@@ -12,7 +13,6 @@ source "$repo_root/scripts/release_toolchain_contract.sh"
 source "$repo_root/scripts/release_publication_gate.sh"
 readonly toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 readonly tauri_bin="$toolchain_root/tauri-cli-$TAURI_CLI_VERSION/bin/cargo-tauri"
-readonly tauri_config="$repo_root/apps/cfw-tauri-shell/tauri.conf.json"
 readonly official_release_origin="https://github.com/billlza/cfw-rs/releases/download"
 readonly maximum_updater_archive_bytes=$((192 * 1024 * 1024))
 
@@ -92,20 +92,24 @@ mkdir -p "$output_directory"
 output_directory="$(cd "$output_directory" && pwd -P)"
 
 archive_name="Clash.for.Mac_${version}_aarch64.app.tar.gz"
-archive_path="$output_directory/$archive_name"
-signature_path="$archive_path.sig"
-latest_json="$output_directory/latest.json"
-for output in "$archive_path" "$signature_path" "$latest_json"; do
-  [[ ! -e "$output" && ! -L "$output" ]] || die "refusing to replace updater output: $output"
+updater_root="$output_directory/updater"
+[[ ! -L "$updater_root" ]] || die "updater release-set directory must not be a symlink"
+mkdir -p "$updater_root"
+updater_root="$(cd "$updater_root" && pwd -P)"
+final_set="$updater_root/v$version"
+[[ ! -e "$final_set" && ! -L "$final_set" ]] ||
+  die "refusing to replace existing updater release set: $final_set"
+for legacy_output in \
+  "$output_directory/$archive_name" \
+  "$output_directory/$archive_name.sig" \
+  "$output_directory/latest.json"; do
+  [[ ! -e "$legacy_output" && ! -L "$legacy_output" ]] ||
+    die "legacy partial updater output must be removed after review: $legacy_output"
 done
 
-staging="$(mktemp -d "$output_directory/updater-stage.XXXXXX")"
-completed=0
+staging="$(mktemp -d "$updater_root/updater-stage.XXXXXX")"
 cleanup() {
   /bin/rm -rf "$staging"
-  if [[ $completed -ne 1 ]]; then
-    /bin/rm -f "$archive_path" "$signature_path" "$latest_json"
-  fi
 }
 trap cleanup EXIT
 
@@ -113,11 +117,18 @@ staged_archive="$staging/$archive_name"
 staged_signature="$staged_archive.sig"
 staged_latest="$staging/latest.json"
 
-echo "==> packing updater archive: $archive_path"
+echo "==> packing updater archive: $final_set/$archive_name"
 export COPYFILE_DISABLE=1
 (
   cd "$app_directory"
-  COPYFILE_DISABLE=1 tar -czf "$staged_archive" --exclude='._*' --exclude='.DS_Store' "$app_name"
+  COPYFILE_DISABLE=1 tar -czf "$staged_archive" \
+    --no-xattrs \
+    --no-mac-metadata \
+    --no-acls \
+    --no-fflags \
+    --exclude='._*' \
+    --exclude='.DS_Store' \
+    "$app_name"
 )
 require_regular_file "$staged_archive"
 archive_size="$(stat -f '%z' "$staged_archive")"
@@ -134,13 +145,6 @@ echo "==> signing updater archive"
 cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
 unset TAURI_SIGNING_PRIVATE_KEY_PASSWORD TAURI_SIGNING_PRIVATE_KEY_PATH
 require_regular_file "$staged_signature"
-
-echo "==> verifying updater signature against the embedded public key"
-(
-  cd "$repo_root"
-  CARGO_NET_OFFLINE=true cargo run --offline --locked --quiet \
-    -p cfw-release-verifier -- "$tauri_config" "$staged_archive" "$staged_signature"
-)
 
 download_url="$official_release_origin/v${version}/${archive_name}"
 notes="${NOTES:-Clash for Mac ${version}}"
@@ -176,40 +180,20 @@ with path.open("x", encoding="utf-8") as handle:
 PY
 require_regular_file "$staged_latest"
 
-python3 - "$staged_latest" "$version" "$download_url" "$staged_signature" <<'PY'
-import json
-from pathlib import Path
-import sys
-
-manifest_path, version, expected_url, signature_path = sys.argv[1:]
-payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-signature = Path(signature_path).read_text(encoding="utf-8").strip()
-if set(payload) != {"version", "notes", "pub_date", "platforms"}:
-    raise SystemExit("error: updater manifest contains an unexpected top-level field set")
-if payload["version"] != version or not isinstance(payload["notes"], str):
-    raise SystemExit("error: updater manifest version or notes mismatch")
-platforms = payload.get("platforms")
-if set(platforms or {}) != {"darwin-aarch64", "darwin-arm64"}:
-    raise SystemExit("error: updater manifest platform set is not the fixed arm64 macOS set")
-for target, item in platforms.items():
-    if set(item) != {"signature", "url"}:
-        raise SystemExit(f"error: updater target {target} contains unexpected fields")
-    if item["signature"] != signature or item["url"] != expected_url:
-        raise SystemExit(f"error: updater target {target} signature or URL mismatch")
-    if not item["url"].startswith("https://github.com/billlza/cfw-rs/releases/download/"):
-        raise SystemExit(f"error: updater target {target} URL is outside the official HTTPS origin")
-PY
-
-/bin/ln "$staged_archive" "$archive_path" || die "cannot publish updater archive exclusively"
-/bin/rm "$staged_archive"
-/bin/ln "$staged_signature" "$signature_path" || die "cannot publish updater signature exclusively"
-/bin/rm "$staged_signature"
-/bin/ln "$staged_latest" "$latest_json" || die "cannot publish updater manifest exclusively"
-/bin/rm "$staged_latest"
-completed=1
+PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  "$repo_root/scripts/release_artifact_set.py" seal-updater \
+  --staging "$staging" \
+  --destination "$final_set" \
+  --version "$version" \
+  --repository "$repo_root"
 
 echo "==> updater artifacts ready:"
-echo "    $archive_path"
-echo "    $signature_path"
-echo "    $latest_json"
-shasum -a 256 "$archive_path" "$signature_path" "$latest_json"
+echo "    $final_set/$archive_name"
+echo "    $final_set/$archive_name.sig"
+echo "    $final_set/latest.json"
+echo "    $final_set/updater-set.seal.json"
+shasum -a 256 \
+  "$final_set/$archive_name" \
+  "$final_set/$archive_name.sig" \
+  "$final_set/latest.json" \
+  "$final_set/updater-set.seal.json"

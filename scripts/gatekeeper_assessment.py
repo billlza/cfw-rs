@@ -36,6 +36,8 @@ POLICY_EVIDENCE_SCHEMA_VERSION = 2
 POLICY_EVIDENCE_DOCUMENT_KIND = "gatekeeper-assessment-evidence-v2"
 EVIDENCE_SCHEMA_VERSION = 3
 EVIDENCE_DOCUMENT_KIND = "gatekeeper-assessment-evidence-v3"
+PUBLIC_PROJECTION_SCHEMA_VERSION = 1
+PUBLIC_PROJECTION_DOCUMENT_KIND = "gatekeeper-assessment-public-projection-v1"
 MAX_OUTPUT_BYTES = 64 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DEVELOPER_ID_RE = re.compile(r"^Developer ID Application: .+ \(([A-Z0-9]{10})\)$")
@@ -632,6 +634,103 @@ def validate_evidence(
         "target_signed_app_tree_sha256": target_identity_sha256,
         "captured_at": _require_utc_timestamp(value["captured_at"]),
     }
+
+
+def build_public_projection(
+    private_evidence: object,
+    private_evidence_bytes: bytes,
+    expected_target: Path | str,
+    expected_team_id: str = EXPECTED_TEAM_ID,
+    *,
+    expected_assessment_type: str,
+    expected_primary_signature_context: bool,
+) -> dict[str, Any]:
+    """Build the path-free public view of one exact private evidence document."""
+    if not isinstance(private_evidence_bytes, bytes) or not private_evidence_bytes:
+        raise GatekeeperEvidenceError(
+            "private Gatekeeper evidence bytes are unavailable"
+        )
+    try:
+        canonical_private_evidence = (
+            json.dumps(
+                private_evidence,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise GatekeeperEvidenceError(
+            "private Gatekeeper evidence cannot be encoded canonically"
+        ) from error
+    if private_evidence_bytes != canonical_private_evidence:
+        raise GatekeeperEvidenceError(
+            "private Gatekeeper evidence is not canonical JSON"
+        )
+    evidence = validate_evidence(
+        private_evidence,
+        expected_team_id,
+        expected_assessment_type=expected_assessment_type,
+        expected_primary_signature_context=expected_primary_signature_context,
+        expected_target=expected_target,
+    )
+    if (
+        evidence["schema_version"] != EVIDENCE_SCHEMA_VERSION
+        or evidence["document"] != EVIDENCE_DOCUMENT_KIND
+    ):
+        raise GatekeeperEvidenceError(
+            "public Gatekeeper projection requires current target-bound evidence"
+        )
+    return {
+        "assessment": evidence["assessment"],
+        "assessment_source": evidence["assessment_source"],
+        "assessment_type": evidence["assessment_type"],
+        "assessments_enabled": evidence["assessments_enabled"],
+        "authority": evidence["authority"],
+        "captured_at": evidence["captured_at"],
+        "document": PUBLIC_PROJECTION_DOCUMENT_KIND,
+        "identity_source": evidence["identity_source"],
+        "origin": evidence["origin"],
+        "origin_status": evidence["origin_status"],
+        "primary_signature_context": evidence["primary_signature_context"],
+        "private_evidence_document": evidence["document"],
+        "private_evidence_schema_version": evidence["schema_version"],
+        "private_evidence_sha256": hashlib.sha256(
+            private_evidence_bytes
+        ).hexdigest(),
+        "schema_version": PUBLIC_PROJECTION_SCHEMA_VERSION,
+        "signing_team_id": evidence["signing_team_id"],
+        "source": evidence["source"],
+        "target_identity_algorithm": evidence["target_identity_algorithm"],
+        "target_sha256": evidence["target_signed_app_tree_sha256"],
+    }
+
+
+def validate_public_projection(
+    value: object,
+    private_evidence: object,
+    private_evidence_bytes: bytes,
+    expected_target: Path | str,
+    expected_team_id: str = EXPECTED_TEAM_ID,
+    *,
+    expected_assessment_type: str,
+    expected_primary_signature_context: bool,
+) -> dict[str, Any]:
+    """Require an exact projection recomputed from fully validated private evidence."""
+    expected = build_public_projection(
+        private_evidence,
+        private_evidence_bytes,
+        expected_target,
+        expected_team_id,
+        expected_assessment_type=expected_assessment_type,
+        expected_primary_signature_context=expected_primary_signature_context,
+    )
+    if not isinstance(value, dict) or value != expected:
+        raise GatekeeperEvidenceError(
+            "public Gatekeeper projection differs from its private evidence"
+        )
+    return expected
 
 
 def _merged_output(completed: subprocess.CompletedProcess[str]) -> str:

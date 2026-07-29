@@ -60,15 +60,41 @@ class ScanByPathAndNameTests(unittest.TestCase):
             for item in detected:
                 self.assertTrue(item.path.endswith(item.name))
 
-    def test_prunes_vendored_and_vcs_directories(self) -> None:
+    def test_prunes_caches_but_scans_generated_release_roots(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            for pruned in (".git", "target", "node_modules", ".build"):
+            for pruned in (".git", "node_modules", ".build"):
                 sub = Path(root) / pruned
                 sub.mkdir()
                 (sub / "buried.key").write_text("PRIVATE", encoding="utf-8")
+            for pruned in ("toolchains", "debug", "sources"):
+                sub = Path(root) / "target" / pruned
+                sub.mkdir(parents=True)
+                (sub / "cache.pem").write_text("UPSTREAM FIXTURE", encoding="utf-8")
+            temporary = Path(root) / "target/tmp"
+            temporary.mkdir()
+            (temporary / "temporary.pem").write_text("PRIVATE", encoding="utf-8")
+            candidates = Path(root) / "target/candidates/0.4.0"
+            candidates.mkdir(parents=True)
+            (candidates / "candidate.key").write_text("PRIVATE", encoding="utf-8")
+            historical_release = Path(root) / "target/release"
+            historical_release.mkdir()
+            (historical_release / "historical.pem").write_text(
+                "PRIVATE", encoding="utf-8"
+            )
+            unexpected = Path(root) / "target/unexpected"
+            unexpected.mkdir()
+            (unexpected / "unexpected.key").write_text("PRIVATE", encoding="utf-8")
 
             detected = scan_workspace(root)
-            self.assertEqual(detected, [])
+            self.assertEqual(
+                [item.name for item in detected],
+                [
+                    "candidate.key",
+                    "historical.pem",
+                    "temporary.pem",
+                    "unexpected.key",
+                ],
+            )
 
     def test_case_insensitive_suffix_match(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -211,6 +237,97 @@ class FailClosedInputTests(unittest.TestCase):
             not_a_dir.write_text("x", encoding="utf-8")
             with self.assertRaises(UpdaterKeyReleaseBlock):
                 scan_workspace(not_a_dir)
+
+    def test_symlinked_generated_release_subtree_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            (root / "target").mkdir()
+            elsewhere = Path(parent).parent / f"{root.name}-external"
+            elsewhere.mkdir()
+            try:
+                (elsewhere / "hidden.key").write_text("PRIVATE", encoding="utf-8")
+                (root / "target/candidates").symlink_to(
+                    elsewhere, target_is_directory=True
+                )
+                with self.assertRaisesRegex(
+                    UpdaterKeyReleaseBlock, "directory symlink escapes"
+                ):
+                    scan_workspace(root)
+            finally:
+                (elsewhere / "hidden.key").unlink(missing_ok=True)
+                elsewhere.rmdir()
+
+    def test_symlinked_managed_target_root_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            (root / "target").mkdir()
+            elsewhere = root / "elsewhere"
+            elsewhere.mkdir()
+            (root / "target/toolchains").symlink_to(
+                elsewhere, target_is_directory=True
+            )
+            with self.assertRaisesRegex(
+                UpdaterKeyReleaseBlock, "managed target root is not a trustworthy"
+            ):
+                scan_workspace(root)
+
+    def test_non_key_symlink_to_regular_file_does_not_hide_path_names(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            source = root / "safe.txt"
+            source.write_text("not inspected", encoding="utf-8")
+            (root / "alias.txt").symlink_to(source)
+            self.assertEqual(scan_workspace(root), [])
+
+            key = root / "real-updater.pem"
+            key.write_text("PRIVATE", encoding="utf-8")
+            (root / "innocent.dat").symlink_to(key)
+            self.assertEqual(
+                [item.name for item in scan_workspace(root)],
+                ["real-updater.pem"],
+            )
+
+    def test_non_key_file_symlink_to_external_key_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "workspace"
+            root.mkdir()
+            outside = Path(parent) / "outside.key"
+            outside.write_text("PRIVATE", encoding="utf-8")
+            (root / "innocent.dat").symlink_to(outside)
+            with self.assertRaisesRegex(
+                UpdaterKeyReleaseBlock, "file symlink escapes"
+            ):
+                scan_workspace(root)
+
+    def test_internal_framework_directory_symlink_is_safe_and_target_is_scanned(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            versions = (
+                root
+                / "target/candidates/0.4.0/signed/Fixture.framework/Versions"
+            )
+            real_version = versions / "A"
+            real_version.mkdir(parents=True)
+            (versions / "Current").symlink_to("A", target_is_directory=True)
+            self.assertEqual(scan_workspace(root), [])
+            (real_version / "embedded.pem").write_text("PRIVATE", encoding="utf-8")
+            self.assertEqual(
+                [item.name for item in scan_workspace(root)], ["embedded.pem"]
+            )
+
+    def test_directory_symlink_cycle_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            (first / "to-second").symlink_to(second, target_is_directory=True)
+            (second / "to-first").symlink_to(first, target_is_directory=True)
+            with self.assertRaisesRegex(UpdaterKeyReleaseBlock, "traversal cycle"):
+                scan_workspace(root)
 
 
 class RealRepositoryTests(unittest.TestCase):

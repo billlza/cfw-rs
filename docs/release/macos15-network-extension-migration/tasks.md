@@ -91,7 +91,17 @@ candidate satisfies them.
   modification notice, licenses, vulnerability reports, SPDX SBOM, and
   CycloneDX SBOM.
 - [ ] Bind all outputs into the final candidate and sealed outer manifest.
-- [ ] Publish only the exact sealed assets and verify their remote hashes.
+- [ ] Build and verify the atomic DMG and updater version-set seals, create the
+  post-packaging distribution seal with
+  `scripts/release_publication_gate.sh --seal-assets 0.4.0`, then reopen it with
+  `scripts/release_publication_gate.sh --upload-assets 0.4.0`.
+- [ ] Confirm the printed upload allowlist contains the deterministic public
+    publication bundle with CCS, both SBOMs, public manifests, GPL license,
+    modifications, reviewed third-party notices, and the path-free Gatekeeper
+    projection, and excludes private legal-review, raw Gatekeeper,
+    final-candidate, sealed outer, and raw physical evidence.
+- [ ] Publish only the exact paths authorized by that upload-asset gate and
+  verify their remote hashes.
 
 ## Physical Apple-silicon evidence
 

@@ -283,7 +283,13 @@ stapling. Gatekeeper assessment is valid only while `spctl --status` reports
 exactly `assessments enabled`; `override=security disabled` is a release
 failure even if the assessment line says `accepted`. The captured
 `gatekeeper.json` preserves the raw status, assessment, and codesign output plus
-their digests, notarized source, Developer ID authority, and origin.
+their digests, notarized source, Developer ID authority, and origin. It is
+private release-operations evidence because its exact target and command fields
+contain local absolute paths; it is never an upload asset. The distribution
+transaction instead derives a canonical path-free public projection only after
+revalidating that private document against the original assessed target and the
+final DMG bytes. The projection binds the exact private-document SHA-256,
+assessment policy/result, target digest, signing identity, and capture time.
 This intentionally advances the outer final-candidate binding to schema v2;
 pre-existing v1 bindings lack the effective Gatekeeper-state proof and must be
 regenerated rather than migrated or accepted through a compatibility wrapper.
@@ -318,6 +324,31 @@ no success override and accepts only:
 
 It never scans or accepts `target/release`, which retains historical 0.3.5
 signed artifacts containing the old core/helper layout.
+
+DMG notarization is a durable single-submission transaction. The DMG is moved
+into a private attempt before `/usr/bin/xcrun notarytool submit --no-wait` is
+called, made read-only, and retained as the immutable pre-staple source. The
+exact filename, pre-staple size/SHA-256, source identity, bounded submit window,
+submission-ID observation, and hash-chained events survive a crash. A normal
+rerun is refused once an attempt exists. Resume only with the same Apple ID:
+
+```bash
+NOTARY_PROFILE=release-profile \
+  scripts/make_dmg.sh --recover-submission-id UUID
+```
+
+If the submit reply was lost before its ID could be persisted, recovery
+requires the operator-supplied ID and proves a unique `notarytool info` plus
+complete `history` match inside the durable submit window. Ambiguity blocks;
+the script never submits another DMG. Recovery then retrieves and validates the
+log, creates a private copy of the immutable source, staples and validates that
+copy, captures Gatekeeper evidence, runs `hdiutil verify` and
+`codesign --verify`, and continues without rebuilding the DMG. Recovery
+discards every unpublished staple-pending or final-set copy and recreates it
+from the immutable submitted bytes, so a valid but unrelated stapled DMG cannot
+be substituted after a crash. Final publication fsyncs the sealed destination
+tree and both rename parents; a `publication_deferred` attempt is recoverable
+only by closing that durability boundary and re-verifying the exact final set.
 
 Run the publication phases after the exact app has been signed, notarized, and
 stapled:
@@ -357,29 +388,105 @@ candidate. A template is never accepted as release evidence.
 
 The updater command accepts only a strict SemVer equal to the signed app
 version. It emits only the fixed `darwin-aarch64`/`darwin-arm64` targets under
-the repository's HTTPS GitHub Releases origin and immediately verifies the
-new signature with the public key embedded in `tauri.conf.json` before writing
-`latest.json`. The packaging verifier requires the authenticated minisign
-trusted comment to name that exact versioned archive; an older valid signature
-cannot be replayed under a newer manifest version or GitHub release path.
+the repository's HTTPS GitHub Releases origin. The artifact-set sealer itself
+builds `cfw-release-verifier` offline with the pinned Rust toolchain and invokes
+that exact executable against the staged archive and signature; it does not
+accept a caller-produced `result=verified` receipt. The seal binds the verifier
+source inputs, Cargo and rustc identities and versions, controlled build and
+verification commands, and executable SHA-256. The build rejects every
+repository, ancestor, or Cargo-home config, clears wrapper and flag injection
+variables, uses a private Cargo home and isolated workspace, and reconstructs
+its vendor tree only from crate archives whose SHA-256 matches the exact
+`Cargo.lock` dependency closure. The declared rustup component file surface is
+independently pinned in both `dependency_pins.env` and
+`pinned_build_inputs.json`. Every updater, distribution, and upload
+verification repeats that isolated build and signature verification, reopens
+the archive, signature, source, dependency, and toolchain inputs, and requires
+the fresh receipt and build binding to equal the stored evidence. The
+packaging verifier requires the authenticated minisign trusted comment to name
+that exact versioned archive; an older valid signature cannot be replayed under
+a newer manifest version or GitHub release path.
 
-The v0.4.0 runtime performs a bounded 64 KiB strict-metadata check only. Before
-opening the official release page it re-fetches the fixed feed, requires the
-exact authorization shown to the user, consumes that one-shot authorization,
-and derives the fixed official GitHub Release page from the canonical version.
-Installation is through the signed, notarized DMG; this release does not
-replace its own application bundle in process.
-
-That boundary is intentional because the bundle owns both an `SMAppService`
-Agent and Daemon. Apple requires updated service executables to be re-registered;
-an atomic app-directory swap alone does not update launchd's registered service.
-A future in-app installer must first provide a crash-safe, rollback-aware
-unregister/swap/re-register transaction and wait for each registration result.
-Until that transaction exists, in-app replacement remains absent rather than
-silently leaving old helpers registered. See Apple's
+The runtime performs only a bounded metadata check against the canonical
+official GitHub release identity and then opens the official DMG release page
+for a user-controlled update. It does not download, extract, or atomically swap
+the installed app and must not report a browser handoff as installation. After
+an external replacement, the `SMAppService` daemon requires an explicit,
+verified re-registration transaction before native services resume. That
+transaction is not implemented in 0.4.0, so in-process replacement is
+intentionally absent and no metadata/browser handoff is reported as a completed
+installation. The former Tauri updater runtime, in-process archive installer,
+and privileged AppleScript fallback are not linked. See Apple's
 [`SMAppService.register()`](https://developer.apple.com/documentation/servicemanagement/smappservice/register%28%29)
 documentation and the corresponding
 [Apple DTS guidance](https://developer.apple.com/forums/thread/783539).
+
+Release assets do not become uploadable as independent files. The updater
+archive, signature, `latest.json`, and the verifier's embedded-public-key
+receipt are sealed and atomically published as
+`target/candidates/0.4.0/release/updater/vVERSION/`. The DMG, accepted result,
+normalized log, private Gatekeeper evidence, submission receipt, and artifact
+manifest are sealed and atomically published for release operations as
+`target/candidates/0.4.0/release/dmg/vVERSION/`. The canonical seals bind exact
+names, sizes, SHA-256 values, version/build/source identity, official URL, and
+verification result. Each component seal also binds the exact
+`Clash for Mac.app.manifest.json` digest and signed-app tree SHA-256. The
+updater verifier reconstructs that v2 tree directly from the compressed tar
+bytes. It accepts exactly one gzip member, requires the two-block tar terminator,
+rejects non-zero data after logical tar EOF, concatenated members, compressed
+suffixes, and unbound PAX metadata. The DMG verifier mounts the final stapled
+image read-only and reconstructs the contained app tree. Both recheck the
+package bytes and candidate binding after reconstruction, closing the
+verify-then-pack race. A partial directory, extra/unknown field, symlink,
+hard-link, digest drift, or conflicting pre-existing destination is rejected
+rather than overwritten. Each normal or reply-loss publication path fsyncs the
+complete sealed destination tree and both rename parents before reporting
+success.
+
+After both packaging commands succeed, create the distinct post-packaging
+distribution seal, then run the read-only upload-asset gate:
+
+```bash
+scripts/release_publication_gate.sh --seal-assets 0.4.0
+scripts/release_publication_gate.sh --upload-assets 0.4.0
+```
+
+The atomic `release/distribution/vVERSION/distribution-set.seal.json` joins the
+same signed app and app manifest to both package seals and every DMG/updater
+asset. It also binds the complete publication-evidence tree and records direct
+digests for the sealed outer Evidence Manifest, machine closure, inventory,
+evidence manifest, legal review, SPDX/CycloneDX SBOMs, and
+corresponding-source manifest; the corresponding source archive and all
+remaining publication files are transitively bound by
+that exact tree digest. The Python `seal-release` operation itself invokes the
+authoritative publication verifier before writing this seal and proves the
+evidence tree did not change across semantic authorization; correctness does
+not depend only on shell call order. The upload gate reruns the semantic publication
+verification and then reopens and recomputes this final seal. Only the paths it
+prints are eligible for upload; the earlier signed-app publication-evidence
+gate or either component seal alone is not upload authorization.
+
+The same atomic distribution directory contains one deterministic public
+publication bundle, its canonical sidecar manifest, and the standalone public
+Gatekeeper projection. The bundle also contains that exact projection together
+with the corresponding-source archive and manifest, SPDX and CycloneDX SBOMs,
+publication inventory and evidence manifest, machine closure, the project GPL
+license, the 0.4.0 changelog as `MODIFICATIONS.md`, and every reviewed
+third-party license/NOTICE file. The upload gate reopens every tar member and
+recomputes its path, mode, size, and digest before printing the bundle. The
+human `legal-review.json`, raw Gatekeeper evidence, final-candidate evidence,
+sealed outer evidence, and raw physical evidence remain required private
+release inputs where applicable, but are deliberately excluded from the public
+bundle. Public-source admission rejects their reserved filenames/source IDs and
+either private visibility marker even if a future change relocates or renames a
+document.
+
+GitHub requires every individual release asset to be under 2 GiB. The bundle
+therefore has a hard maximum of `2 GiB - 1 byte`; its nested corresponding-source
+archive is capped separately at 1.25 GiB, non-CCS inputs at 256 MiB total, and
+the remaining capacity is reserved for the canonical bundle manifest and tar/
+gzip container overhead. The 15-path upload allowlist is also below GitHub's
+1000-asset limit. See [GitHub's release storage and bandwidth quotas](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases#storage-and-bandwidth-quotas).
 
 ## 7. GPL publication set
 

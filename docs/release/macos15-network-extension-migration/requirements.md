@@ -155,6 +155,29 @@ profile mismatch is a release failure.
 7. Missing tools, permissions, profiles, evidence, logs, source cleanliness, or
    external service results shall block the associated level. No override,
    masking, warning suppression, or default-success path is allowed.
+8. DMG notarization shall persist the exact pre-staple file identity and Apple
+   submission ID before waiting, resume only that ID after interruption, and
+   never resubmit an unknown outcome. DMG evidence and updater artifacts shall
+   become uploadable only as complete canonical sealed version sets whose file
+   identities and official URLs recompute exactly.
+9. Each package set shall bind the exact notarized candidate app-tree and app
+   manifest and shall reconstruct that identity from the completed updater
+   archive or read-only-mounted final DMG. Upload authorization shall require a
+   final atomic distribution seal joining both package sets to that candidate
+   and to the complete CCS, SBOM, legal-review, and publication-evidence
+   closure; every bound byte shall be reopened and recomputed before upload.
+10. The upload allowlist shall include one atomically published, deterministic
+    public-evidence bundle containing the exact CCS archive/manifest, both
+    SBOMs, public manifests, GPL license, modification history, and reviewed
+    third-party license/notice tree, plus a canonical path-free Gatekeeper
+    projection bound to the exact private raw evidence and assessed target
+    bytes. Private human legal-review, raw Gatekeeper, final-candidate, sealed
+    outer, and raw physical evidence shall authorize and bind the release where
+    applicable but shall not be published inside the bundle or upload allowlist.
+11. Every printed GitHub release asset shall be strictly smaller than 2 GiB.
+    The nested CCS archive and non-CCS public evidence shall have independent
+    aggregate budgets that leave an explicit bounded reserve for the bundle
+    manifest and deterministic tar/gzip container overhead.
 
 ## 9. User-visible behavior
 

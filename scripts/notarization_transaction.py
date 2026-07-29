@@ -1837,6 +1837,37 @@ def publish_exclusive(source: Path, destination: Path) -> None:
         ) from error
 
 
+def confirm_published_tree_durable(source: Path, destination: Path) -> None:
+    """Close an atomic-rename durability ambiguity without assuming its reply.
+
+    A successful re-read proves bytes, not crash durability.  Confirmation
+    therefore requires the source name to be gone, the complete destination
+    tree to be fsynced, and both directory entries participating in a
+    cross-parent rename to be fsynced before a caller may report success.
+    """
+    if not source.is_absolute() or not destination.is_absolute():
+        raise TransactionError(
+            "unsafe_publish_path", "durability confirmation paths must be absolute"
+        )
+    if os.path.lexists(source) or not os.path.lexists(destination):
+        raise TransactionError(
+            "publish_result_ambiguous",
+            "atomic publication did not leave exactly one destination tree",
+            terminal_state="outcome_unknown",
+        )
+    try:
+        _fsync_tree(destination)
+        _fsync_directory(destination.parent)
+        if source.parent != destination.parent:
+            _fsync_directory(source.parent)
+    except OSError as error:
+        raise TransactionError(
+            "publish_durability_unknown",
+            "published tree or rename directories could not be made durable",
+            terminal_state="outcome_unknown",
+        ) from error
+
+
 def _validate_event_document(
     value: Any,
     data: bytes,

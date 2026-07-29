@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -20,11 +21,13 @@ from scripts.gatekeeper_assessment import (
     LEGACY_EVIDENCE_SCHEMA_VERSION,
     POLICY_EVIDENCE_DOCUMENT_KIND,
     POLICY_EVIDENCE_SCHEMA_VERSION,
+    build_public_projection,
     capture,
     validate_current_assessment_output,
     validate_assessment_output,
     validate_codesign_output,
     validate_evidence,
+    validate_public_projection,
     validate_status_output,
 )
 
@@ -474,6 +477,112 @@ class GatekeeperEvidenceTests(unittest.TestCase):
             ):
                 validate_evidence(value, expected_target=target)
 
+    def test_public_projection_binds_canonical_private_bytes_and_real_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory).resolve() / "Clash for Mac.app"
+            executable = target / "Contents/MacOS/clash-for-mac"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"signed-target")
+            digest = gatekeeper_module.build_manifest(
+                target,
+                algorithm="sha256-tree-v2",
+            )["sha256"]
+            evidence = self._retargeted_evidence(target, digest)
+            evidence_bytes = (
+                json.dumps(
+                    evidence,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+
+            projection = build_public_projection(
+                evidence,
+                evidence_bytes,
+                target,
+                expected_assessment_type="execute",
+                expected_primary_signature_context=False,
+            )
+
+            self.assertEqual(
+                projection["private_evidence_sha256"],
+                hashlib.sha256(evidence_bytes).hexdigest(),
+            )
+            self.assertEqual(projection["target_sha256"], digest)
+            self.assertNotIn(
+                str(target).encode("utf-8"), json.dumps(projection).encode()
+            )
+            self.assertEqual(
+                validate_public_projection(
+                    projection,
+                    evidence,
+                    evidence_bytes,
+                    target,
+                    expected_assessment_type="execute",
+                    expected_primary_signature_context=False,
+                ),
+                projection,
+            )
+
+            tampered_projection = {**projection, "assessed_target": str(target)}
+            with self.assertRaisesRegex(GatekeeperEvidenceError, "differs"):
+                validate_public_projection(
+                    tampered_projection,
+                    evidence,
+                    evidence_bytes,
+                    target,
+                    expected_assessment_type="execute",
+                    expected_primary_signature_context=False,
+                )
+
+    def test_public_projection_rejects_noncanonical_private_bytes_or_target_drift(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory).resolve() / "Clash for Mac.app"
+            executable = target / "Contents/MacOS/clash-for-mac"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"signed-target")
+            digest = gatekeeper_module.build_manifest(
+                target,
+                algorithm="sha256-tree-v2",
+            )["sha256"]
+            evidence = self._retargeted_evidence(target, digest)
+            evidence_bytes = (
+                json.dumps(
+                    evidence,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+
+            with self.assertRaisesRegex(GatekeeperEvidenceError, "canonical JSON"):
+                build_public_projection(
+                    evidence,
+                    b" " + evidence_bytes,
+                    target,
+                    expected_assessment_type="execute",
+                    expected_primary_signature_context=False,
+                )
+
+            executable.write_bytes(b"different-target")
+            with self.assertRaisesRegex(
+                GatekeeperEvidenceError, "exact target identity"
+            ):
+                build_public_projection(
+                    evidence,
+                    evidence_bytes,
+                    target,
+                    expected_assessment_type="execute",
+                    expected_primary_signature_context=False,
+                )
+
     def test_expected_missing_target_cannot_skip_digest_binding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory).resolve() / "Missing.app"
@@ -736,11 +845,19 @@ class GatekeeperEvidenceTests(unittest.TestCase):
 
 class GatekeeperReleaseScriptWiringTests(unittest.TestCase):
     def test_every_release_assessment_uses_the_enabled_state_gate(self) -> None:
-        for relative in ("scripts/verify_release_app.sh", "scripts/make_dmg.sh"):
-            with self.subTest(relative=relative):
-                source = (REPOSITORY / relative).read_text(encoding="utf-8")
-                self.assertIn("scripts/gatekeeper_assessment.py", source)
-                self.assertNotIn("spctl --assess", source)
+        release_app = (REPOSITORY / "scripts/verify_release_app.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("scripts/gatekeeper_assessment.py", release_app)
+        self.assertNotIn("spctl --assess", release_app)
+        dmg_shell = (REPOSITORY / "scripts/make_dmg.sh").read_text(encoding="utf-8")
+        dmg_transaction = (
+            REPOSITORY / "scripts/dmg_notarization_transaction.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("scripts/dmg_notarization_transaction.py", dmg_shell)
+        self.assertIn("capture as capture_gatekeeper", dmg_transaction)
+        self.assertIn("validate_gatekeeper_evidence", dmg_transaction)
+        self.assertNotIn("spctl --assess", dmg_transaction)
         signed = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
             encoding="utf-8"
         )
@@ -765,11 +882,20 @@ class GatekeeperReleaseScriptWiringTests(unittest.TestCase):
         self.assertIn('"notarization-log.json"', transaction)
 
     def test_dmg_retrieves_and_publishes_bound_notarization_evidence(self) -> None:
-        source = (REPOSITORY / "scripts/make_dmg.sh").read_text(encoding="utf-8")
-        self.assertIn("notarytool log", source)
-        self.assertIn("scripts/verify_notary_log.py", source)
-        self.assertIn("--output \"$gatekeeper_evidence\"", source)
-        self.assertIn(".dmg.manifest.json", source)
+        shell = (REPOSITORY / "scripts/make_dmg.sh").read_text(encoding="utf-8")
+        transaction = (
+            REPOSITORY / "scripts/dmg_notarization_transaction.py"
+        ).read_text(encoding="utf-8")
+        artifact_set = (
+            REPOSITORY / "scripts/release_artifact_set.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("scripts/dmg_notarization_transaction.py", shell)
+        self.assertIn('"notarytool",\n            "log"', transaction)
+        self.assertIn("validate_documents", transaction)
+        self.assertIn("production_gatekeeper_capture", transaction)
+        self.assertIn("seal_dmg_set", transaction)
+        self.assertIn("dmg-set.seal.json", artifact_set)
+        self.assertIn("verify_dmg_set", artifact_set)
 
 
 if __name__ == "__main__":

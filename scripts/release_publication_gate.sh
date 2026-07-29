@@ -59,6 +59,58 @@ verify_release_publication_evidence() {
     --app "$app_path"
 }
 
+verify_release_upload_artifacts() {
+  local version="${1:-}"
+  if [[ -z "$version" ]]; then
+    echo "error: upload-artifact gate requires an explicit version" >&2
+    return 1
+  fi
+  # Packaging authorization and upload authorization are separate gates. The
+  # latter first reopens the exact app/publication closure semantically, then
+  # accepts only the final distribution seal after every package, component
+  # seal, candidate manifest, CCS, SBOM, and legal-review byte recomputes.
+  verify_release_publication_evidence "$publication_signed_app"
+  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+    "$publication_repo_root/scripts/release_artifact_set.py" verify-release \
+    --repository "$publication_repo_root" \
+    --release-root "$publication_repo_root/target/candidates/0.4.0/release" \
+    --version "$version"
+}
+
+seal_release_upload_artifacts() {
+  local version="${1:-}"
+  if [[ -z "$version" ]]; then
+    echo "error: distribution-seal gate requires an explicit version" >&2
+    return 1
+  fi
+  # The distribution seal is deliberately post-packaging: it can be created
+  # only after the app/publication lane and both byte-proven package sets pass.
+  verify_release_publication_evidence "$publication_signed_app"
+  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+    "$publication_repo_root/scripts/release_artifact_set.py" seal-release \
+    --repository "$publication_repo_root" \
+    --release-root "$publication_repo_root/target/candidates/0.4.0/release" \
+    --version "$version"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  verify_release_publication_evidence "${1:-}"
+  if [[ "${1:-}" == "--seal-assets" ]]; then
+    [[ $# -eq 2 ]] || {
+      echo "error: usage: release_publication_gate.sh --seal-assets VERSION" >&2
+      exit 1
+    }
+    seal_release_upload_artifacts "$2"
+  elif [[ "${1:-}" == "--upload-assets" ]]; then
+    [[ $# -eq 2 ]] || {
+      echo "error: usage: release_publication_gate.sh --upload-assets VERSION" >&2
+      exit 1
+    }
+    verify_release_upload_artifacts "$2"
+  else
+    [[ $# -eq 1 ]] || {
+      echo "error: usage: release_publication_gate.sh SIGNED_APP" >&2
+      exit 1
+    }
+    verify_release_publication_evidence "$1"
+  fi
 fi

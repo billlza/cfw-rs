@@ -1,9 +1,12 @@
 """Updater-key atomic release blocker (Requirement 8.1).
 
-An ``Updater_Key_File`` is any ignored updater-key-named ``.key`` or ``.pem``
-file located inside the repository workspace (for example
-``.tauri/cfw-rs.key``).  If any such file exists anywhere in the workspace, the
-release gate must execute *one atomic security response* that:
+An ``Updater_Key_File`` is any updater-key-named ``.key`` or ``.pem`` file in
+the reviewable release workspace: repository source files plus every generated
+``target`` subtree except a small allowlist of managed, content-addressed heavy
+roots (for example ``.tauri/cfw-rs.key`` or
+``target/candidates/0.4.0/review/updater.pem``). If key material exists anywhere
+in that bounded surface, the release gate must execute *one atomic security
+response* that:
 
 1. blocks release;
 2. inspects and reports **only** the file path and name, never opening or
@@ -28,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,11 +46,27 @@ class UpdaterKeyReleaseBlock(RuntimeError):
 # a candidate to confirm it.
 KEY_SUFFIXES: frozenset[str] = frozenset({".key", ".pem"})
 
-# Directories that are not part of the reviewable workspace surface.  ``.git``
-# is pruned because updater keys living in workspace *files* are the concern;
-# the presence of ``.git`` is still read (by name only) as an exposure signal.
+# Directories that are not part of the reviewable source surface. ``.git`` is
+# pruned because updater keys living in workspace *files* are the concern; its
+# presence is still read (by name only) as an exposure signal.
 PRUNE_DIR_NAMES: frozenset[str] = frozenset(
-    {".git", "target", "node_modules", ".build"}
+    {".git", "node_modules", ".build"}
+)
+
+# These direct children of ``target`` are large managed caches with independent
+# tree-manifest gates. Every other child -- especially ``candidates``, ``tmp``,
+# ``release``, and an unexpected name -- remains inside this secret scan.
+# A managed child must itself be a real directory; a file or symlink at one of
+# these names fails closed rather than hiding content behind the allowlist.
+MANAGED_TARGET_ROOTS: frozenset[str] = frozenset(
+    {
+        "debug",
+        "native-dependencies",
+        "release-build-cache",
+        "sources",
+        "toolchains",
+        "ui-build",
+    }
 )
 
 # Path segments that make backup/archive/sharing exposure plausible from the
@@ -108,8 +128,44 @@ def has_key_suffix(name: str) -> bool:
     return Path(name).suffix.lower() in KEY_SUFFIXES
 
 
+def _is_pruned_target(root: Path, path: Path) -> bool:
+    """Return whether a canonical in-workspace path is outside scan scope."""
+    relative = path.relative_to(root)
+    if any(part in PRUNE_DIR_NAMES for part in relative.parts):
+        return True
+    return (
+        len(relative.parts) >= 2
+        and relative.parts[0] == "target"
+        and relative.parts[1] in MANAGED_TARGET_ROOTS
+    )
+
+
+def _require_acyclic_symlink_edges(
+    edges: dict[tuple[int, int], set[tuple[int, int]]],
+) -> None:
+    """Reject directory-alias cycles without rejecting ordinary framework aliases."""
+    visiting: set[tuple[int, int]] = set()
+    visited: set[tuple[int, int]] = set()
+
+    def visit(node: tuple[int, int]) -> None:
+        if node in visiting:
+            raise UpdaterKeyReleaseBlock(
+                "workspace directory symlinks form a traversal cycle"
+            )
+        if node in visited:
+            return
+        visiting.add(node)
+        for target in edges.get(node, set()):
+            visit(target)
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in sorted(edges):
+        visit(node)
+
+
 def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdaterKey]:
-    """Scan the workspace for updater-key files by path and name only.
+    """Scan the bounded release workspace by path and name only.
 
     Never opens or reads a candidate.  Fails closed on an unavailable,
     symlinked, or unreadable workspace root and on any traversal error.
@@ -130,11 +186,35 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
             f"workspace root could not be inspected: {root}"
         ) from exc
 
+    try:
+        canonical_root = root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise UpdaterKeyReleaseBlock(
+            f"workspace root could not be resolved: {root}"
+        ) from exc
+
+    target = root / "target"
     detected: list[DetectedUpdaterKey] = []
     stack: list[Path] = [root]
+    visited_directories: set[tuple[int, int]] = set()
+    visited_regular_files: set[tuple[int, int]] = set()
+    directory_symlink_targets: set[tuple[int, int]] = set()
+    file_symlink_targets: set[tuple[int, int]] = set()
+    directory_symlink_edges: dict[
+        tuple[int, int], set[tuple[int, int]]
+    ] = {}
     while stack:
         current = stack.pop()
         try:
+            current_metadata = current.stat(follow_symlinks=False)
+            if not stat.S_ISDIR(current_metadata.st_mode):
+                raise UpdaterKeyReleaseBlock(
+                    f"workspace traversal reached a non-directory: {current}"
+                )
+            current_identity = (current_metadata.st_dev, current_metadata.st_ino)
+            if current_identity in visited_directories:
+                continue
+            visited_directories.add(current_identity)
             with os.scandir(current) as iterator:
                 for entry in iterator:
                     try:
@@ -145,17 +225,131 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                         raise UpdaterKeyReleaseBlock(
                             f"workspace entry could not be classified: {entry.path}"
                         ) from exc
+                    entry_path = Path(entry.path)
+                    if current == target and entry.name in MANAGED_TARGET_ROOTS:
+                        if not is_dir or is_symlink:
+                            raise UpdaterKeyReleaseBlock(
+                                "managed target root is not a trustworthy real "
+                                f"directory: {entry.path}"
+                            )
+                        continue
                     if is_dir:
                         if entry.name in PRUNE_DIR_NAMES:
                             continue
-                        stack.append(Path(entry.path))
+                        stack.append(entry_path)
                         continue
-                    # A regular file, or a symlink that could resolve to a key:
-                    # both are reported by name without following or reading.
-                    if (is_file or is_symlink) and has_key_suffix(entry.name):
-                        detected.append(
-                            DetectedUpdaterKey(path=entry.path, name=entry.name)
+                    # A key-named symlink blocks by identity without reading
+                    # its target. A directory symlink is accepted only when it
+                    # resolves to a real, in-scope directory that is already
+                    # reachable by its canonical workspace path. We never walk
+                    # through the alias; the real path is scanned normally.
+                    if is_symlink:
+                        if has_key_suffix(entry.name):
+                            detected.append(
+                                DetectedUpdaterKey(path=entry.path, name=entry.name)
+                            )
+                            continue
+                        try:
+                            target_metadata = entry.stat(follow_symlinks=True)
+                        except OSError as exc:
+                            raise UpdaterKeyReleaseBlock(
+                                "workspace symlink target could not be classified: "
+                                f"{entry.path}"
+                            ) from exc
+                        if stat.S_ISDIR(target_metadata.st_mode):
+                            try:
+                                resolved_target = entry_path.resolve(strict=True)
+                                resolved_target.relative_to(canonical_root)
+                            except (OSError, RuntimeError, ValueError) as exc:
+                                raise UpdaterKeyReleaseBlock(
+                                    "workspace directory symlink escapes, loops, or "
+                                    f"is unavailable: {entry.path}"
+                                ) from exc
+                            if _is_pruned_target(canonical_root, resolved_target):
+                                raise UpdaterKeyReleaseBlock(
+                                    "workspace directory symlink reaches an excluded "
+                                    f"tree only through an alias: {entry.path}"
+                                )
+                            resolved_metadata = resolved_target.stat(
+                                follow_symlinks=False
+                            )
+                            if (
+                                not stat.S_ISDIR(resolved_metadata.st_mode)
+                                or resolved_target.is_symlink()
+                            ):
+                                raise UpdaterKeyReleaseBlock(
+                                    "workspace directory symlink does not resolve to "
+                                    f"a real directory: {entry.path}"
+                                )
+                            target_identity = (
+                                resolved_metadata.st_dev,
+                                resolved_metadata.st_ino,
+                            )
+                            if target_identity != (
+                                target_metadata.st_dev,
+                                target_metadata.st_ino,
+                            ):
+                                raise UpdaterKeyReleaseBlock(
+                                    "workspace directory symlink changed while resolving: "
+                                    f"{entry.path}"
+                                )
+                            directory_symlink_targets.add(target_identity)
+                            directory_symlink_edges.setdefault(
+                                current_identity, set()
+                            ).add(target_identity)
+                            continue
+                        if not stat.S_ISREG(target_metadata.st_mode):
+                            raise UpdaterKeyReleaseBlock(
+                                "workspace symlink target is not a regular file: "
+                                f"{entry.path}"
+                            )
+                        try:
+                            resolved_target = entry_path.resolve(strict=True)
+                            resolved_target.relative_to(canonical_root)
+                        except (OSError, RuntimeError, ValueError) as exc:
+                            raise UpdaterKeyReleaseBlock(
+                                "workspace file symlink escapes, loops, or is unavailable: "
+                                f"{entry.path}"
+                            ) from exc
+                        if _is_pruned_target(canonical_root, resolved_target):
+                            raise UpdaterKeyReleaseBlock(
+                                "workspace file symlink reaches an excluded tree only "
+                                f"through an alias: {entry.path}"
+                            )
+                        resolved_metadata = resolved_target.stat(
+                            follow_symlinks=False
                         )
+                        target_identity = (
+                            target_metadata.st_dev,
+                            target_metadata.st_ino,
+                        )
+                        if (
+                            not stat.S_ISREG(resolved_metadata.st_mode)
+                            or resolved_target.is_symlink()
+                            or target_identity
+                            != (resolved_metadata.st_dev, resolved_metadata.st_ino)
+                        ):
+                            raise UpdaterKeyReleaseBlock(
+                                "workspace file symlink does not resolve to a stable real "
+                                f"file: {entry.path}"
+                            )
+                        file_symlink_targets.add(target_identity)
+                        continue
+                    if is_file:
+                        file_metadata = entry.stat(follow_symlinks=False)
+                        if not stat.S_ISREG(file_metadata.st_mode):
+                            raise UpdaterKeyReleaseBlock(
+                                f"workspace file changed while scanning: {entry.path}"
+                            )
+                        visited_regular_files.add(
+                            (file_metadata.st_dev, file_metadata.st_ino)
+                        )
+                        if has_key_suffix(entry.name):
+                            detected.append(
+                                DetectedUpdaterKey(
+                                    path=entry.path, name=entry.name
+                                )
+                            )
         except OSError as exc:
             # A directory we cannot traverse means the scan is incomplete; a
             # partial scan must never be reported as "clean".
@@ -163,6 +357,15 @@ def scan_workspace(workspace_root: str | os.PathLike[str]) -> list[DetectedUpdat
                 f"workspace traversal failed under {current}"
             ) from exc
 
+    if not directory_symlink_targets.issubset(visited_directories):
+        raise UpdaterKeyReleaseBlock(
+            "workspace directory symlink target is not reachable by a scanned real path"
+        )
+    if not file_symlink_targets.issubset(visited_regular_files):
+        raise UpdaterKeyReleaseBlock(
+            "workspace file symlink target is not reachable by a scanned real path"
+        )
+    _require_acyclic_symlink_edges(directory_symlink_edges)
     detected.sort(key=lambda item: item.path)
     return detected
 
@@ -304,9 +507,9 @@ def format_response(response: SecurityResponse) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Atomically block release when an updater-key file exists anywhere "
-            "in the repository workspace (path/name scan only; never reads "
-            "file contents)."
+            "Atomically block release when an updater-key file exists in the "
+            "reviewable source/candidate/release workspace (path/name scan "
+            "only; never reads file contents)."
         )
     )
     parser.add_argument(

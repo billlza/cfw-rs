@@ -19,6 +19,33 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_native_product_graph.py
 
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/notarization_transaction.py --self-check
 
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/dmg_notarization_transaction.py self-check
+
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/release_artifact_set.py self-check
+
+# Reject duplicate string keys inside the release-set policy literals. Python
+# accepts them silently, which could otherwise weaken an exact-field contract.
+PYTHONDONTWRITEBYTECODE=1 python3 -B - scripts/release_artifact_set.py <<'PY'
+import ast
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+for node in ast.walk(tree):
+    if isinstance(node, ast.Set):
+        values = [item.value for item in node.elts if isinstance(item, ast.Constant) and isinstance(item.value, str)]
+    elif isinstance(node, ast.Dict):
+        values = [item.value for item in node.keys if isinstance(item, ast.Constant) and isinstance(item.value, str)]
+    else:
+        continue
+    duplicates = sorted({value for value in values if values.count(value) > 1})
+    if duplicates:
+        raise SystemExit(
+            f"error: duplicate release policy literal at line {node.lineno}: {duplicates}"
+        )
+PY
+
 # Confirm the Signed_Installed physical-evidence aggregator is wired to all four
 # v2 proof-to-byte harnesses, the source-pinned collector policy bytes, and the
 # Evidence_Manifest level order. This is a source-boundary contract check only;
@@ -78,6 +105,57 @@ for release_script in scripts/make_dmg.sh scripts/make_updater_manifest.sh; do
   }
   grep -Fq 'verify_release_publication_evidence' "$release_script" || {
     echo "error: $release_script does not enforce the publication gate" >&2
+    exit 1
+  }
+done
+
+grep -Fq 'scripts/dmg_notarization_transaction.py' scripts/make_dmg.sh || {
+  echo "error: DMG packaging bypasses its durable notarization transaction" >&2
+  exit 1
+}
+if grep -Eq 'notarytool[[:space:]]+submit|--wait|/bin/ln' scripts/make_dmg.sh; then
+  echo "error: DMG packaging contains a raw or non-transactional publication path" >&2
+  exit 1
+fi
+grep -Fq 'seal-updater' scripts/make_updater_manifest.sh || {
+  echo "error: updater packaging does not seal its complete versioned set" >&2
+  exit 1
+}
+if grep -Fq '/bin/ln' scripts/make_updater_manifest.sh; then
+  echo "error: updater packaging publishes independent hard links" >&2
+  exit 1
+fi
+for fragment in \
+  '--seal-assets' \
+  'seal_release_upload_artifacts' \
+  'seal-release' \
+  'verify_release_upload_artifacts' \
+  'scripts/release_artifact_set.py' \
+  'verify-release'; do
+  grep -Fq -- "$fragment" scripts/release_publication_gate.sh || {
+    echo "error: upload publication gate is missing $fragment" >&2
+    exit 1
+  }
+done
+
+for fragment in \
+  'cfw-distribution-release-set-seal-v1' \
+  'signed_app_tree_sha256' \
+  'read_updater_app_manifest' \
+  'read_dmg_app_manifest' \
+  'publication_closure' \
+  'verify_publication_semantics' \
+  'cfw-publication-upload-bundle-manifest-v1' \
+  'MODIFICATIONS.md' \
+  'PUBLICATION_BUNDLE_MANIFEST_NAME' \
+  'MAX_PUBLICATION_BUNDLE_BYTES' \
+  'MAX_GITHUB_RELEASE_ASSET_BYTES_EXCLUSIVE' \
+  'MAX_CORRESPONDING_SOURCE_ARCHIVE_BYTES' \
+  '_validate_publication_bundle' \
+  'seal_distribution_set' \
+  'verify_distribution_set'; do
+  grep -Fq "$fragment" scripts/release_artifact_set.py || {
+    echo "error: release artifact set is missing $fragment" >&2
     exit 1
   }
 done

@@ -54,6 +54,7 @@ from publication.sealed_manifest import (
     self_check,
     validate_sealed_evidence_manifest,
 )
+from repository_source_identity import SourceIdentityError, current_identity
 
 # The fixed per-gate wall-clock bound. A gate that exceeds it is recorded as
 # ``timeout`` - a non-passing result - and is never masked into a pass.
@@ -152,9 +153,11 @@ def command_collect_ci_lanes(arguments: argparse.Namespace) -> None:
     can be written as ``passed``.
     """
     repository = _repository()
+    source_identity = current_identity(repository)
     result = collect_ci_lanes(
         repository,
-        commit=_commit(repository),
+        commit=source_identity["repositoryCommit"],
+        release_source_sha256=source_identity["releaseSourceSha256"],
         output=arguments.output,
         journal=(
             arguments.output.parent / "ci-lane-journal"
@@ -330,7 +333,7 @@ def main() -> None:
     arguments = parser().parse_args()
     try:
         arguments.handler(arguments)
-    except (PublicationError, OSError) as error:
+    except (PublicationError, SourceIdentityError, OSError) as error:
         raise SystemExit(f"error: sealed evidence manifest: {error}") from error
 
 

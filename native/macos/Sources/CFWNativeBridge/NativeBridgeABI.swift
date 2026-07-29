@@ -41,6 +41,12 @@ private struct HostSigningIdentity {
         "The host signature does not contain a Team ID."
       )
     }
+    guard teamIdentifier == GlobalAuthorityConnectionContract.teamIdentifier else {
+      throw NativeBridgeExecutionError.failure(
+        .identityRejected,
+        "The host signature does not match the product Team ID."
+      )
+    }
     _ = try CodeIdentityRequirement(
       expectedTeamIdentifier: teamIdentifier,
       expectedBundleIdentifier: "com.bill.clashformac"
@@ -60,14 +66,16 @@ private enum ProductionNativeBridge {
     // One shared, typed, bounded Host Authority client backs both the machine-wide
     // lease inspector and the Tunnel-start preparer. Its connection lifecycle
     // (bounded timeouts, invalidation/interruption) fails closed.
-    let authorityClient = BoundedAuthorityXPCClient(remote: NSXPCGlobalAuthorityRemote())
+    let authorityClient = RegistrationGatedAuthorityClient(
+      authority: BoundedAuthorityXPCClient(
+        remote: NSXPCGlobalAuthorityRemote(role: .host)))
+    let enrollment = AuthorityInstallationEnrollment()
     let tunnel = NetworkExtensionHostBridge(
       providerBundleIdentifier: "com.bill.clashformac.packet-tunnel",
       installer: installer,
-      // Production stays fail-closed until an end-to-end signed Host→Authority
-      // channel is provable; the concrete Authority-backed preparer is wired but
-      // not selected until then.
-      preparer: HostTunnelStartPreparerFactory.production(authority: authorityClient)
+      preparer: AuthorityBackedTunnelStartPreparer(
+        authority: authorityClient,
+        enrollment: enrollment)
     )
     let proxy = try AuthenticatedProxyAgentTransport(
       machServiceName: "com.bill.clashformac.proxy-agent",
@@ -77,13 +85,12 @@ private enum ProductionNativeBridge {
     let credentialVault = try CredentialVault(
       accessGroup: "\(teamIdentifier).com.bill.clashformac.credentials"
     )
-    let configurationStore = try AppGroupConfigurationStore(
-      appGroupIdentifier: "\(teamIdentifier).group.com.bill.clashformac"
-    )
     return NativeBridgeCoordinator(
       proxy: proxy,
+      systemProxyPreparer: AuthorityBackedSystemProxyStartPreparer(
+        authority: authorityClient,
+        enrollment: enrollment),
       tunnel: tunnel,
-      configurationStore: configurationStore,
       engineLease: GlobalAuthorityEngineLeaseInspector(authority: authorityClient),
       credentialVault: credentialVault
     )

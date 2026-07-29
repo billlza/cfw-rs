@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{CredentialKind, CredentialSlotError};
+use crate::{CredentialKind, CredentialSlotError, InvalidCredentialAudience};
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ConfigError {
@@ -30,6 +30,8 @@ pub enum ConfigError {
     ConflictingCredentialReference { id: String },
     #[error("credential slot contract is invalid: {0}")]
     InvalidCredentialSlot(#[from] CredentialSlotError),
+    #[error("credential audience is invalid: {0}")]
+    InvalidCredentialAudience(#[from] InvalidCredentialAudience),
     #[error("unsupported credential-free policy shape at {path}: {reason}")]
     UnsupportedPolicyShape { path: String, reason: String },
     #[error("sing-box profile structure exceeds {maximum} JSON nodes")]

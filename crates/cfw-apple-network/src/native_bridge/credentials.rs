@@ -1,9 +1,9 @@
 use cfw_engine_api::{
-    CredentialGarbageCollectionCommitFuture, CredentialGarbageCollectionCommitRequest,
-    CredentialGarbageCollectionPreviewFuture, CredentialGarbageCollectionRequest,
-    CredentialPresenceRequest, CredentialPresenceWireRequest, CredentialProvisionRequest,
-    CredentialRef, CredentialVaultError, CredentialVaultFuture, CredentialVaultProvisioner,
-    NativeBridgeCommand, NativeBridgeResult,
+    CredentialAudience, CredentialGarbageCollectionCommitFuture,
+    CredentialGarbageCollectionCommitRequest, CredentialGarbageCollectionPreviewFuture,
+    CredentialGarbageCollectionRequest, CredentialPresenceRequest, CredentialPresenceWireRequest,
+    CredentialProvisionRequest, CredentialRef, CredentialVaultError, CredentialVaultFuture,
+    CredentialVaultProvisioner, NativeBridgeCommand, NativeBridgeResult,
 };
 use serde::Serialize;
 use zeroize::Zeroize;
@@ -27,7 +27,7 @@ enum SensitiveCommand {
 
 #[derive(Serialize)]
 struct SensitiveProvisionRequest {
-    profile_id: String,
+    audience: CredentialAudience,
     required_references: Vec<CredentialRef>,
     entries: Vec<SensitiveProvisionEntry>,
 }
@@ -74,7 +74,7 @@ impl CredentialVaultProvisioner for NativeFrameworkBridge {
                 request_id,
                 command: SensitiveCommand::ProvisionCredentials {
                     request: SensitiveProvisionRequest {
-                        profile_id: request.profile_id().to_owned(),
+                        audience: request.audience().clone(),
                         required_references: request.required_references().to_vec(),
                         entries: request
                             .entries()
@@ -157,11 +157,15 @@ fn map_vault_error(error: NativeBridgeError) -> CredentialVaultError {
         NativeBridgeErrorCode::PermissionDenied => CredentialVaultError::AccessDenied,
         NativeBridgeErrorCode::CredentialConflict => CredentialVaultError::ImmutableConflict,
         NativeBridgeErrorCode::CredentialVaultMissing => CredentialVaultError::MissingVault,
+        NativeBridgeErrorCode::CredentialMigrationRequired => {
+            CredentialVaultError::MigrationRequired
+        }
         NativeBridgeErrorCode::CredentialGcConflict => CredentialVaultError::ConcurrentModification,
         NativeBridgeErrorCode::ConfigurationRejected => CredentialVaultError::InvalidMaterial,
         NativeBridgeErrorCode::IdentityRejected => CredentialVaultError::Corrupt,
         NativeBridgeErrorCode::Busy
         | NativeBridgeErrorCode::ResourceExhausted
+        | NativeBridgeErrorCode::JournalCapacityExhausted
         | NativeBridgeErrorCode::ApprovalDenied
         | NativeBridgeErrorCode::CredentialsUnavailable
         | NativeBridgeErrorCode::GlobalAuthorityUnavailable

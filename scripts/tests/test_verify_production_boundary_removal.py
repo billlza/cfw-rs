@@ -46,6 +46,13 @@ class ForbiddenPatternDetectionTests(unittest.TestCase):
             "provider-local acceptance authority", _categories(PRODUCTION_SWIFT, source)
         )
 
+    def test_durable_runtime_configuration_store_is_detected(self) -> None:
+        source = 'let store = AppGroupConfigurationStore(appGroupIdentifier: "group")\n'
+        self.assertIn(
+            "durable runtime configuration fallback",
+            _categories(PRODUCTION_SWIFT, source),
+        )
+
     def test_retired_helper_startup_detected(self) -> None:
         source = "SMJobBless(kSMDomainSystemLaunchd, label, auth, &error)\n"
         self.assertIn(
@@ -86,12 +93,59 @@ class ForbiddenPatternDetectionTests(unittest.TestCase):
                     "insecure Authority override", _categories(relative_path, snippet)
                 )
 
+    def test_fail_closed_owner_composition_is_release_blocking(self) -> None:
+        for type_name in (
+            "FailClosedProxyOwnerAuthorityClient",
+            "FailClosedProxyOwnerCapabilitySource",
+            "FailClosedEffectiveSystemProxyObserver",
+            "FailClosedEngineOwnerAuthorityClient",
+        ):
+            with self.subTest(type_name=type_name):
+                self.assertIn(
+                    "fail-closed production composition",
+                    _categories(PRODUCTION_SWIFT, f"let value = {type_name}()\n"),
+                )
+
+    def test_unproven_signed_channel_default_and_call_are_release_blocking(self) -> None:
+        for snippet in (
+            "let value = production(authority: client, signedChannelProven: false)\n",
+            "func production(signedChannelProven: Bool = false) {}\n",
+            "let signedChannelProven = false\n",
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(
+                    "unproven signed Authority channel",
+                    _categories(PRODUCTION_SWIFT, snippet),
+                )
+
+    def test_permanently_unavailable_release_gate_is_detected(self) -> None:
+        source = "try validate(.availabilityUnproven)\n"
+        self.assertIn(
+            "permanently unavailable Authority release gate",
+            _categories(PRODUCTION_SWIFT, source),
+        )
+
+    def test_private_xpc_audit_token_access_is_detected(self) -> None:
+        for snippet in (
+            'let selector = NSSelectorFromString("auditToken")\n',
+            (
+                "let accessor = unsafeBitCast(connection, "
+                "to: CFWXPCAuditTokenProviding.self)\n"
+            ),
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(
+                    "private NSXPCConnection audit-token access",
+                    _categories(PRODUCTION_SWIFT, snippet),
+                )
+
 
 class AllowedContextTests(unittest.TestCase):
     def test_comment_reference_to_forbidden_construct_is_allowed(self) -> None:
         source = (
             "// The Provider must never construct CrossProcessEngineLeaseStore(port)\n"
             "/// It also never calls TunnelStartPayloadCodec.decode in a start path.\n"
+            '// It never uses NSSelectorFromString("auditToken") either.\n'
             "let owner = UnleasedEngineOwnership()\n"
         )
         self.assertEqual(scan_source(PRODUCTION_SWIFT, source), [])
@@ -117,7 +171,13 @@ class AllowedContextTests(unittest.TestCase):
         self.assertEqual(scan_source(PRODUCTION_RUST, source), [])
 
     def test_forbidden_construct_allowed_in_named_test_fixture(self) -> None:
-        source = "let store = CrossProcessEngineLeaseStore(testingPort: 0)\n"
+        source = """
+        let store = CrossProcessEngineLeaseStore(testingPort: 0)
+        let owner = FailClosedEngineOwnerAuthorityClient()
+        let selector = NSSelectorFromString("auditToken")
+        let accessor = unsafeBitCast(connection, to: CFWXPCAuditTokenProviding.self)
+        try validate(.availabilityUnproven)
+        """
         self.assertEqual(scan_source(TEST_FIXTURE, source), [])
 
 

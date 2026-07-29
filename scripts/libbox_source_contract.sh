@@ -108,7 +108,9 @@ libbox_validate_upstream_source() {
   security_patch_path="$(libbox_security_patch_path "$repo_root")" || return 1
   raw_packet_patch_path="$(libbox_raw_packet_patch_path "$repo_root")" || return 1
   dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")" || return 1
-  if ! git -C "$source_root" apply --check \
+  # Zero-context scalar replacements are admitted only after the exact upstream
+  # commit and go.mod/go.sum digests above have been verified.
+  if ! git -C "$source_root" apply --unidiff-zero --check \
     "$security_patch_path" \
     "$raw_packet_patch_path" \
     "$dns_failover_patch_path"; then
@@ -183,8 +185,56 @@ libbox_validate_patched_source() {
     echo "error: pinned raw packet patch cannot be reversed cleanly" >&2
     return 1
   fi
-  if ! git -C "$source_root" apply --reverse --check "$security_patch_path"; then
+  if ! git -C "$source_root" apply --unidiff-zero --reverse --check \
+    "$security_patch_path"; then
     echo "error: pinned security patch cannot be reversed cleanly" >&2
     return 1
   fi
+}
+
+# Verify the exact XCFramework tree and every provenance field emitted by
+# build_libbox.sh. The three toolchain digests must already come from the
+# managed tree verifiers; accepting caller-provided paths or a metadata subset
+# would allow a stale but internally consistent Libbox artifact to be signed.
+libbox_verify_xcframework_artifact() {
+  if [[ $# -ne 6 ]]; then
+    echo "error: libbox_verify_xcframework_artifact requires repository, artifact, manifest, and three verified Go tree digests" >&2
+    return 1
+  fi
+  local repository="$1"
+  local artifact="$2"
+  local manifest="$3"
+  local go_toolchain_tree_sha256="$4"
+  local go_tools_tree_sha256="$5"
+  local go_module_cache_tree_sha256="$6"
+
+  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+    "$repository/scripts/verify_artifact_manifest.py" \
+    "$artifact" \
+    "$manifest" \
+    --algorithm sha256-tree-v1 \
+    --exact-metadata \
+    --print-tree-sha256 \
+    --metadata "sourceTag=$SING_BOX_VERSION" \
+    --metadata "sourceCommit=$SING_BOX_COMMIT" \
+    --metadata "goVersion=$GO_VERSION" \
+    --metadata "goToolchainTreeSha256=$go_toolchain_tree_sha256" \
+    --metadata "goToolsTreeSha256=$go_tools_tree_sha256" \
+    --metadata "goModuleCacheTreeSha256=$go_module_cache_tree_sha256" \
+    --metadata "gomobileVersion=$GOMOBILE_VERSION" \
+    --metadata "gomobileCommit=$GOMOBILE_COMMIT" \
+    --metadata "gomobileModuleSum=$GOMOBILE_MODULE_SUM" \
+    --metadata "headerNormalization=angleBracketFrameworkImports-v1" \
+    --metadata "platform=$LIBBOX_APPLE_PLATFORM" \
+    --metadata "buildTags=$LIBBOX_BUILD_TAGS" \
+    --metadata "nonMacOsTags=$LIBBOX_NON_MACOS_TAGS" \
+    --metadata "upstreamGoModSha256=$SING_BOX_UPSTREAM_GO_MOD_SHA256" \
+    --metadata "upstreamGoSumSha256=$SING_BOX_UPSTREAM_GO_SUM_SHA256" \
+    --metadata "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256" \
+    --metadata "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256" \
+    --metadata "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256" \
+    --metadata "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256" \
+    --metadata "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256" \
+    --metadata "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256" \
+    --metadata "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256"
 }

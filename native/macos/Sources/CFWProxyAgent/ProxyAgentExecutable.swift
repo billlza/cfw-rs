@@ -35,21 +35,10 @@ public enum ProxyAgentExecutable {
     else {
       throw CodeIdentityError.missingBundleSetting("CFWCredentialKeychainAccessGroup")
     }
-    guard
-      let appGroupIdentifier = Bundle.main.object(
-        forInfoDictionaryKey: "CFWAppGroupIdentifier"
-      ) as? String,
-      !appGroupIdentifier.isEmpty
-    else {
-      throw CodeIdentityError.missingBundleSetting("CFWAppGroupIdentifier")
-    }
-
-    let configurationStore = try AppGroupConfigurationStore(
-      appGroupIdentifier: appGroupIdentifier
-    )
     let journalStore = try KeychainProxyOwnershipJournalStore(
       keychainAccessGroup: journalKeychainAccessGroup
     )
+    let preferences = SCPreferencesSystemProxyPreferences()
     let credentialVault = try CredentialVault(accessGroup: credentialKeychainAccessGroup)
     // Machine-wide Proxy/Tunnel/multi-user exclusion is owned by the Global Authority
     // lease, not a provider-local rendezvous: the data-plane lifecycle holds only an
@@ -57,14 +46,15 @@ public enum ProxyAgentExecutable {
     // the ProxyAgent Release path.
     let lifecycle = ProxySessionLifecycle(
       dependencies: ProxySessionDependencies(
-        prepareConfiguration: { descriptor in
-          PreparedProxyConfiguration(
-            configuration: try configurationStore.load(descriptor),
-            lease: UnleasedProxyOwnership()
-          )
+        prepareOwnership: { descriptor in
+          _ = descriptor
+          return PreparedProxyOwnership(lease: UnleasedProxyOwnership())
         },
         resolveConfiguration: { template, descriptor in
-          var material = try credentialVault.resolve(slots: descriptor.credentialSlots)
+          var material = try credentialVault.resolve(
+            audience: descriptor.credentialAudience,
+            slots: descriptor.credentialSlots
+          )
           defer { material.erase() }
           return try CredentialInjector.inject(
             template: template,
@@ -74,7 +64,7 @@ public enum ProxyAgentExecutable {
         },
         recoverCleanupLease: { _ in UnleasedProxyOwnership() },
         engineFactory: LibboxProxyEngineFactory(),
-        preferences: SCPreferencesSystemProxyPreferences(),
+        preferences: preferences,
         journalStore: journalStore,
         readinessTimeout: 10
       )
@@ -82,14 +72,25 @@ public enum ProxyAgentExecutable {
     // The Authority owner coordinator binds an Authority owner capability before any
     // libbox or System Proxy mutation, attests exact ready/stopped state with the
     // exact operation context and effective proxy observation, and forces a stop on
-    // revocation. It fails closed with a typed Authority error until the authenticated
-    // Host→ProxyAgent capability channel and Authority owner XPC client are wired.
+    // revocation. The authenticated Host→ProxyAgent capability channel and the
+    // role-scoped Authority owner XPC client are the only production start path.
+    let revocation = ProxyRevocationChannel()
+    let authorityRemote = NSXPCGlobalAuthorityRemote(
+      role: .proxyAgent,
+      onEvent: { event in
+        switch event {
+        case .revoke, .stop: revocation.revoke()
+        case .snapshot: break
+        }
+      },
+      onDisconnect: { revocation.revoke() })
     let owner = ProxySystemProxyOwnerCoordinator(
-      authority: FailClosedProxyOwnerAuthorityClient(),
-      capabilitySource: FailClosedProxyOwnerCapabilitySource(),
-      observer: FailClosedEffectiveSystemProxyObserver(),
+      authority: BoundedAuthorityXPCClient(remote: authorityRemote),
+      observer: JournalBackedEffectiveSystemProxyObserver(
+        preferences: preferences,
+        journalStore: journalStore),
       lifecycle: lifecycle,
-      revocation: ProxyRevocationChannel()
+      revocation: revocation
     )
     let service = ProxyAgentService(
       lifecycle: owner,

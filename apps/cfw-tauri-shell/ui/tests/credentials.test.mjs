@@ -93,6 +93,16 @@ test("a cleanup preview must be internally consistent before it is shown", () =>
   assert.throws(() => normalizeGcReceipt({ removed_count: 2 }, 1), /does not match/u);
 });
 
+test("cleanup keeps same-reference entries from distinct profile audiences", () => {
+  const preview = normalizeCredentialGcPreview({
+    preview_id: "8f14e45f-ceea-4670-a91e-2f0f1d5e6a7b",
+    orphan_count: 2,
+    orphan_references: [FIRST, FIRST],
+  });
+  assert.equal(preview.orphanCount, 2);
+  assert.deepEqual(preview.orphanReferences, [FIRST, FIRST]);
+});
+
 test("credential kinds are labelled for a person, not for a schema", () => {
   assert.equal(credentialLabel("hysteria2_obfs_password"), "Hysteria2 Obfs Password");
   assert.equal(credentialLabel("vmess_uuid"), "Vmess Uuid");

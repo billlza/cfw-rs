@@ -95,6 +95,7 @@ private func tunnelDescriptor(
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+    credentialAudience: try appleCredentialAudience(),
     installationID: UUID(),
     epoch: 1,
     generation: 1,
@@ -162,6 +163,7 @@ struct TicketOnlyTunnelStartTests {
     let allowedKeys: Set<String> = [
       "schemaVersion", "slot", "installationID", "epoch", "generation",
       "byteCount", "sha256", "identitySha256", "credentialSlots",
+      "credentialProfileID", "credentialProfileDigest",
       "ipv6Enabled", "bypassPrivateNetworks", "mtu",
     ]
     #expect(Set(providerConfig.keys).isSubset(of: allowedKeys))

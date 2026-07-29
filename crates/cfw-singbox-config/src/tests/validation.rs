@@ -177,6 +177,55 @@ fn reality_requires_enabled_canonical_x25519_public_material() {
 }
 
 #[test]
+fn vless_vision_and_active_tls_options_require_enabled_tls() {
+    for tls in [
+        "",
+        r#","tls":{"enabled":false,"server_name":"example.com"}"#,
+    ] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"flow":"xtls-rprx-vision"{tls}}}]}}"#
+        );
+        assert!(matches!(
+            ValidatedSingBoxProfile::parse(&input),
+            Err(ConfigError::UnsupportedPolicyShape { path, .. })
+                if path == "$.outbounds[0].tls.enabled"
+        ));
+    }
+
+    let disabled_alpn = format!(
+        r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"tls":{{"enabled":false,"server_name":"example.com","alpn":["h2"]}}}}]}}"#
+    );
+    assert!(matches!(
+        ValidatedSingBoxProfile::parse(&disabled_alpn),
+        Err(ConfigError::UnsupportedPolicyShape { path, .. })
+            if path == "$.outbounds[0].tls.enabled"
+    ));
+}
+
+#[test]
+fn websocket_host_accepts_modern_authorities_but_rejects_non_authorities() {
+    for host in ["cdn.example.com:8443", "[2606:4700:4700::1111]:8443"] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"transport":{{"type":"ws","path":"/ws","headers":{{"Host":"{host}"}}}}}}]}}"#
+        );
+        ValidatedSingBoxProfile::parse(&input).expect("valid WebSocket Host authority");
+    }
+
+    for host in [
+        "cdn.example.com:0",
+        "cdn.example.com:65536",
+        "user@cdn.example.com:443",
+        "cdn.example.com/path",
+        "[2606:4700:4700::1111",
+    ] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"transport":{{"type":"ws","path":"/ws","headers":{{"Host":"{host}"}}}}}}]}}"#
+        );
+        assert!(ValidatedSingBoxProfile::parse(&input).is_err(), "{host}");
+    }
+}
+
+#[test]
 fn one_credential_id_cannot_cross_protocol_kinds() {
     let input = format!(
         r#"{{"outbounds":[

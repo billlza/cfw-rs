@@ -14,38 +14,66 @@ test items do not imply a signed physical-device release.
 - [x] deterministic validated sing-box Proxy/Tunnel projections for the
       closed direct/block/Shadowsocks/VMess/VLESS-Reality/Trojan/Hysteria2
       schema, with secret-free credential slots
-- [x] Rust Apple-network adapter boundary with explicit missing-native failure
-- [x] Swift 6 Host Bridge, shared protocol, Agent, System Extension, and public
-      bounded packet-pump foundation
-- [x] transactional SCPreferences apply, effective-state verification, and
-      conflict-aware restore
-- [x] old Clash YAML, REST/WS, scripts, PAC, core installer, external runtime,
-      and controller removed from the product graph
+- [x] Rust `NativeFrameworkBridge` C ABI wired into the production application
+- [x] source-built sing-box `v1.13.14` plus digest-pinned security, raw-packet,
+      and DNS patches linked into ProxyAgent and Packet Tunnel
+- [x] Swift 6 Host Bridge, `SMAppService` registration, System Extension and
+      Network Extension control paths, and public bounded packet pump
+- [x] root-context Global Authority with one durable global lease, hash-chained
+      recovery journal, exact Host/ProxyAgent/Provider role-scoped XPC,
+      heartbeat/revocation events, and truthful stop/Off reconciliation
+- [x] bounded Authority journal generation compaction with hash-chained
+      checkpoints, a seven-record lifecycle finish reserve, active/previous
+      generation retention, and fault-injected commit/cleanup crash recovery
+- [x] transactional authorized SCPreferences apply, effective-state
+      verification, conflict-aware restore, and typed authorization failures
+- [x] ticket-only Tunnel configuration/secret redemption and capability-only
+      System Proxy ownership, with no App Group cross-context fallback
+- [x] deterministic/unit coverage for Global Authority recovery, liveness,
+      fast-user-switch revocation, owner interruption, replay, secret erasure,
+      and lifecycle races
+- [x] old Clash YAML runtime configuration, REST/WS, scripts, PAC, core
+      installer, external runtime, and controller removed from the product
+      graph; Clash Meta YAML survives only as a converted subscription import
+      syntax at the validation boundary
 - [x] strict Tauri CSP and no global Tauri JavaScript injection
-- [x] source/build dependency pins and offline libbox build gate
+- [x] source/build dependency pins, offline libbox build, native-product graph,
+      production-boundary, Authority-ordering, notary-log, Gatekeeper-state,
+      and final-candidate schema v2 fail-closed gates
+- [x] controller snapshots, proxy selection/delay, rules, connection/log streams,
+      connection close, DNS query, and cache flush use real typed commands;
+      pinned-engine provider management is explicitly unsupported rather than
+      represented by fabricated empty success
 - [x] GPL-3.0-or-later workspace license
 
 ## Must be completed before release
 
 - [ ] verify old job/root process/ports/routes/DNS are absent after migration
-- [ ] link the pinned source-built libbox into ProxyAgent and Packet Tunnel
-- [ ] replace the system extension's blocked state transport with authenticated
-      global XPC, root-owned replay state, and multi-user engine arbitration
-- [ ] prove the public packet contract; no private file-descriptor access
-- [ ] connect the Rust coordinator to the signed Swift Host Bridge
+- [ ] build the exact candidate with matching Host, ProxyAgent, Packet Tunnel,
+      App Group, Keychain, Network Extension, and System Extension Developer ID
+      provisioning; prove every nested identity and entitlement after install
+- [ ] prove role-scoped Global Authority XPC admission/rejection and real
+      Host/ProxyAgent/Provider liveness under the installed signed identities
 - [ ] prove immutable shared-Keychain entry, missing-only provisioning,
-      in-memory slot injection, and revision-bound cleanup under the installed
-      dedicated Host/ProxyAgent entitlement
-- [ ] complete signed installation/approval/upgrade/downgrade/multi-user/uninstall
-      tests on macOS 15 and current macOS
+      in-memory slot injection, and revision-bound cleanup under those installed
+      Host/ProxyAgent entitlements
+- [ ] complete signed installation, approval/denial, upgrade/replacement,
+      downgrade, fast-user-switch, reboot, and uninstall tests on macOS 15 and
+      current macOS
+- [ ] prove Host, Global Authority, ProxyAgent, and Provider crash/connection-loss
+      recovery reaches exact Off or explicit Quarantined without stale ownership
+- [ ] prove non-interactive System Proxy restore after Authorization Services
+      rights expire, or introduce and validate a narrowly scoped privileged
+      SystemConfiguration boundary
 - [ ] pass IPv4/IPv6/TCP/UDP/QUIC/DNS/route packet evidence
 - [ ] pass weak-network, resource, 100-switch, and 24-hour soak gates
 - [ ] pass nested signing, entitlement, provisioning, notarization, staple, and
-      Gatekeeper gates
+      Gatekeeper gates with assessments enabled for the unchanged candidate
 - [ ] publish complete corresponding source, modification notice, SBOM, and
       source/binary hashes with the release
-- [ ] generate and validate the merged release SBOM and third-party license
-      report against the signed bundle
+- [ ] regenerate and legally approve the merged release SBOM, third-party
+      notices, blocker report, and corresponding-source closure for the exact
+      signed bundle, then verify the public artifacts and URLs
 
 No unchecked release item may be replaced by a VPN status, interface-presence,
 CI-green, unsigned build, simulator, or locally generated artifact claim.

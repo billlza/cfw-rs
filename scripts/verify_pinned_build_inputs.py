@@ -4,8 +4,14 @@
 This static verifier binds the pinned-input manifest (scripts/pinned_build_inputs.json)
 to the tracked release configuration without invoking any toolchain or the network:
 
-* every pinned tool version and the sing-box upstream commit in
+* every pinned tool version and the sing-box/gomobile upstream commits in
   scripts/dependency_pins.env match the manifest exactly;
+* cargo-deny's CI install consumes the release pin with ``--locked`` and the
+  release gate checks the exact Apple Silicon target graph;
+* the XcodeGen installed-resource patch and patched source digest are bound to
+    the isolated bootstrap and its installed-resource probe;
+* the official Tauri CLI crate, its published lock, the narrow yanked-spin lock
+  update, and the resulting lock are checksum-bound to one installer entrypoint;
 * the three design-pinned patch files exist as regular files and their computed
   SHA-256 digests match both the manifest and dependency_pins.env;
 * the combined diff SHA-256 is pinned and is distinct from any single patch digest;
@@ -119,18 +125,214 @@ def _verify_tools(manifest: dict, env: dict[str, str]) -> None:
             )
 
 
-def _verify_commit(manifest: dict, env: dict[str, str]) -> None:
-    key = manifest.get("singBoxCommitKey")
-    expected = manifest.get("singBoxCommit")
-    if not isinstance(key, str) or not isinstance(expected, str):
-        raise PinnedInputError("pinned-input manifest has no sing-box commit binding")
-    if not re.fullmatch(r"[0-9a-f]{40}", expected):
-        raise PinnedInputError("pinned sing-box commit is not a 40-hex commit hash")
-    actual = _require_env(env, key)
-    if actual != expected:
+def _verify_cargo_deny(manifest: dict, repository: Path) -> None:
+    spec = manifest.get("cargoDeny")
+    if not isinstance(spec, dict):
+        raise PinnedInputError("pinned-input manifest has no cargo-deny CI binding")
+    workflow_relative = spec.get("ciWorkflowPath")
+    fragments = spec.get("requiredCiFragments")
+    if (
+        not isinstance(workflow_relative, str)
+        or not isinstance(fragments, list)
+        or not fragments
+    ):
+        raise PinnedInputError("cargo-deny CI binding is incomplete")
+    workflow = _read_text(
+        _safe_repository_path(repository, workflow_relative, "cargo-deny CI workflow"),
+        "cargo-deny CI workflow",
+    )
+    for fragment in fragments:
+        if not isinstance(fragment, str) or not fragment or fragment not in workflow:
+            raise PinnedInputError(
+                f"cargo-deny CI workflow lacks required pinned fragment {fragment!r}"
+            )
+    if re.search(
+        r"cargo\s+install\s+cargo-deny\s+--version\s+['\"]?[0-9]", workflow
+    ):
         raise PinnedInputError(
-            f"pinned sing-box commit must be {expected} but dependency_pins.env has {actual}"
+            "cargo-deny CI install hard-codes a version outside release pins"
         )
+
+
+def _verify_xcodegen(manifest: dict, env: dict[str, str], repository: Path) -> None:
+    spec = manifest.get("xcodegen")
+    if not isinstance(spec, dict):
+        raise PinnedInputError("pinned-input manifest has no XcodeGen patch binding")
+
+    patch_path_key = spec.get("patchPathKey")
+    patch_sha_key = spec.get("patchSha256Key")
+    patched_source_sha_key = spec.get("patchedSettingsBuilderSha256Key")
+    if not all(
+        isinstance(value, str)
+        for value in (patch_path_key, patch_sha_key, patched_source_sha_key)
+    ):
+        raise PinnedInputError("XcodeGen patch binding has incomplete pin keys")
+    expected_patch_sha = spec.get("patchSha256")
+    expected_patched_source_sha = spec.get("patchedSettingsBuilderSha256")
+    if not isinstance(expected_patch_sha, str) or not isinstance(
+        expected_patched_source_sha, str
+    ):
+        raise PinnedInputError("XcodeGen patch binding has incomplete digests")
+    _require_sha256(expected_patch_sha, "manifest XcodeGen patch digest")
+    _require_sha256(
+        expected_patched_source_sha, "manifest patched SettingsBuilder digest"
+    )
+    if _require_env(env, patch_sha_key) != expected_patch_sha:
+        raise PinnedInputError("XcodeGen patch digest differs from the manifest")
+    if _require_env(env, patched_source_sha_key) != expected_patched_source_sha:
+        raise PinnedInputError(
+            "XcodeGen patched SettingsBuilder digest differs from the manifest"
+        )
+
+    patch_relative = _require_env(env, patch_path_key)
+    patch_path = _safe_repository_path(repository, patch_relative, "XcodeGen patch")
+    if patch_path.is_symlink() or not patch_path.is_file():
+        raise PinnedInputError(
+            f"XcodeGen patch is missing or not a regular file: {patch_relative}"
+        )
+    try:
+        actual_patch_sha = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise PinnedInputError(f"XcodeGen patch cannot be read: {error}") from error
+    if actual_patch_sha != expected_patch_sha:
+        raise PinnedInputError(
+            f"XcodeGen patch file digest {actual_patch_sha} differs from the pinned "
+            f"{expected_patch_sha}"
+        )
+
+    bootstrap_relative = spec.get("bootstrapPath")
+    fragments = spec.get("requiredBootstrapFragments")
+    if (
+        not isinstance(bootstrap_relative, str)
+        or not isinstance(fragments, list)
+        or not fragments
+    ):
+        raise PinnedInputError("XcodeGen bootstrap binding is incomplete")
+    bootstrap = _read_text(
+        _safe_repository_path(repository, bootstrap_relative, "XcodeGen bootstrap"),
+        "XcodeGen bootstrap",
+    )
+    for fragment in fragments:
+        if not isinstance(fragment, str) or not fragment or fragment not in bootstrap:
+            raise PinnedInputError(
+                f"XcodeGen bootstrap lacks required pinned fragment {fragment!r}"
+            )
+
+
+def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> None:
+    spec = manifest.get("tauriCli")
+    if not isinstance(spec, dict):
+        raise PinnedInputError("pinned-input manifest has no Tauri CLI source binding")
+
+    digest_pairs = (
+        ("crateSha256Key", "crateSha256", "Tauri CLI crate"),
+        (
+            "upstreamCargoLockSha256Key",
+            "upstreamCargoLockSha256",
+            "Tauri CLI upstream Cargo.lock",
+        ),
+        ("lockPatchSha256Key", "lockPatchSha256", "Tauri CLI lock patch"),
+        (
+            "patchedCargoLockSha256Key",
+            "patchedCargoLockSha256",
+            "Tauri CLI patched Cargo.lock",
+        ),
+        ("spinCrateSha256Key", "spinCrateSha256", "Tauri CLI spin crate"),
+    )
+    for key_field, value_field, description in digest_pairs:
+        key = spec.get(key_field)
+        expected = spec.get(value_field)
+        if not isinstance(key, str) or not isinstance(expected, str):
+            raise PinnedInputError(f"{description} has no complete digest binding")
+        _require_sha256(expected, f"manifest digest for {description}")
+        actual = _require_env(env, key)
+        _require_sha256(actual, f"dependency_pins.env value {key}")
+        if actual != expected:
+            raise PinnedInputError(
+                f"{description} digest {key} is {actual} but must be {expected}"
+            )
+
+    spin_version_key = spec.get("spinVersionKey")
+    spin_version = spec.get("spinVersion")
+    if not isinstance(spin_version_key, str) or not isinstance(spin_version, str):
+        raise PinnedInputError("Tauri CLI spin replacement has no version binding")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", spin_version):
+        raise PinnedInputError("Tauri CLI spin replacement version is malformed")
+    if _require_env(env, spin_version_key) != spin_version:
+        raise PinnedInputError("Tauri CLI spin replacement version differs from the manifest")
+
+    patch_path_key = spec.get("lockPatchPathKey")
+    if not isinstance(patch_path_key, str):
+        raise PinnedInputError("Tauri CLI lock patch has no path binding")
+    patch_relative = _require_env(env, patch_path_key)
+    patch_path = _safe_repository_path(repository, patch_relative, "Tauri CLI lock patch")
+    if patch_path.is_symlink() or not patch_path.is_file():
+        raise PinnedInputError(
+            f"Tauri CLI lock patch is missing or not a regular file: {patch_relative}"
+        )
+    try:
+        computed_patch_sha = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise PinnedInputError(f"Tauri CLI lock patch cannot be read: {error}") from error
+    if computed_patch_sha != spec["lockPatchSha256"]:
+        raise PinnedInputError(
+            f"Tauri CLI lock patch digest {computed_patch_sha} differs from the pinned "
+            f"{spec['lockPatchSha256']}"
+        )
+
+    installer_relative = spec.get("installerPath")
+    fragments = spec.get("requiredInstallerFragments")
+    if not isinstance(installer_relative, str) or not isinstance(fragments, list) or not fragments:
+        raise PinnedInputError("Tauri CLI installer binding is incomplete")
+    installer = _read_text(
+        _safe_repository_path(repository, installer_relative, "Tauri CLI installer"),
+        "Tauri CLI installer",
+    )
+    for fragment in fragments:
+        if not isinstance(fragment, str) or not fragment or fragment not in installer:
+            raise PinnedInputError(
+                f"Tauri CLI installer does not contain required pinned fragment {fragment!r}"
+            )
+    if re.search(r"cargo\s+install\s+tauri-cli", installer):
+        raise PinnedInputError(
+            "Tauri CLI installer bypasses the checksum-bound local --path source"
+        )
+
+    workflow_relative = spec.get("ciWorkflowPath")
+    required_ci_fragment = spec.get("requiredCiFragment")
+    if not isinstance(workflow_relative, str) or not isinstance(required_ci_fragment, str):
+        raise PinnedInputError("Tauri CLI CI binding is incomplete")
+    workflow = _read_text(
+        _safe_repository_path(repository, workflow_relative, "CI workflow"),
+        "CI workflow",
+    )
+    if required_ci_fragment not in workflow:
+        raise PinnedInputError("CI does not use the checksum-bound Tauri CLI installer")
+    if re.search(r"cargo\s+install\s+tauri-cli", workflow):
+        raise PinnedInputError("CI still contains a floating direct Tauri CLI installation")
+
+
+def _verify_commits(manifest: dict, env: dict[str, str]) -> None:
+    for prefix, description in (
+        ("singBox", "sing-box"),
+        ("gomobile", "gomobile"),
+    ):
+        key = manifest.get(f"{prefix}CommitKey")
+        expected = manifest.get(f"{prefix}Commit")
+        if not isinstance(key, str) or not isinstance(expected, str):
+            raise PinnedInputError(
+                f"pinned-input manifest has no {description} commit binding"
+            )
+        if not re.fullmatch(r"[0-9a-f]{40}", expected):
+            raise PinnedInputError(
+                f"pinned {description} commit is not a 40-hex commit hash"
+            )
+        actual = _require_env(env, key)
+        if actual != expected:
+            raise PinnedInputError(
+                f"pinned {description} commit must be {expected} but "
+                f"dependency_pins.env has {actual}"
+            )
 
 
 def _verify_patches(manifest: dict, env: dict[str, str], repository: Path) -> list[str]:
@@ -204,6 +406,24 @@ def _verify_combined_diff(
         raise PinnedInputError(
             "combined diff digest equals the partial go.mod/go.sum diff digest"
         )
+
+
+def _verify_source_contract(manifest: dict, env: dict[str, str]) -> None:
+    contract = manifest.get("sourceContract")
+    if not isinstance(contract, dict):
+        raise PinnedInputError("pinned-input manifest has no source contract binding")
+    for name in ("patchedDiffSha256", "patchedGoModSha256", "patchedGoSumSha256"):
+        key = contract.get(f"{name}Key")
+        expected = contract.get(name)
+        if not isinstance(key, str) or not isinstance(expected, str):
+            raise PinnedInputError(f"source contract is missing {name} binding")
+        _require_sha256(expected, f"manifest source contract {name}")
+        actual = _require_env(env, key)
+        _require_sha256(actual, f"dependency_pins.env value {key}")
+        if actual != expected:
+            raise PinnedInputError(
+                f"source contract {name} must be {expected} but dependency_pins.env has {actual}"
+            )
 
 
 def _verify_go_module_inputs(manifest: dict, env: dict[str, str]) -> None:
@@ -338,6 +558,18 @@ def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -
             raise PinnedInputError(f"native dependency lock has no {lock_key} entry")
         _expect(entry.get("path"), _require_env(env, path_key), f"singBox.{lock_key}.path")
         _expect(entry.get("sha256"), _require_env(env, sha_key), f"singBox.{lock_key}.sha256")
+    security_patch = sing_box.get("securityPatch")
+    assert isinstance(security_patch, dict)
+    for lock_key, env_key in (
+        ("patchedDiffSha256", "SING_BOX_PATCHED_DIFF_SHA256"),
+        ("patchedGoModSha256", "SING_BOX_PATCHED_GO_MOD_SHA256"),
+        ("patchedGoSumSha256", "SING_BOX_PATCHED_GO_SUM_SHA256"),
+    ):
+        _expect(
+            security_patch.get(lock_key),
+            _require_env(env, env_key),
+            f"singBox.securityPatch.{lock_key}",
+        )
 
 
 def _verify_build_scripts(manifest: dict, repository: Path) -> None:
@@ -386,9 +618,13 @@ def verify(repository: Path) -> None:
         )
     )
     _verify_tools(manifest, env)
-    _verify_commit(manifest, env)
+    _verify_cargo_deny(manifest, repository)
+    _verify_xcodegen(manifest, env, repository)
+    _verify_tauri_cli(manifest, env, repository)
+    _verify_commits(manifest, env)
     patch_digests = _verify_patches(manifest, env, repository)
     _verify_combined_diff(manifest, env, patch_digests)
+    _verify_source_contract(manifest, env)
     _verify_go_module_inputs(manifest, env)
     _verify_libbox_build_tags(manifest, env, repository)
     _verify_native_lock(manifest, env, repository)
@@ -403,8 +639,10 @@ def main() -> int:
         print(f"error: pinned build inputs failed: {error}", file=sys.stderr)
         return 1
     print(
-        "pinned build inputs verified: Rust/Node/Go/gomobile/govulncheck/sing-box "
-        "versions, commit, three patch digests, combined diff, Go module inputs, "
+        "pinned build inputs verified: Rust/cargo-deny/Node/Go/gomobile/govulncheck/"
+        "Tauri CLI/sing-box versions, checksum-bound Tauri CLI local-source installation, "
+        "XcodeGen patch/source binding, sing-box and gomobile commits, three libbox patch "
+        "digests, combined diff, Go module inputs, "
         "libbox build tags required by the engine start path, native lock binding, "
         "and offline artifact-hash build-script references"
     )

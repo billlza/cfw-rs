@@ -4,12 +4,22 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=scripts/dependency_pins.env
+source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/libbox_source_contract.sh
+source "$repo_root/scripts/libbox_source_contract.sh"
+# shellcheck source=scripts/release_toolchain_contract.sh
+source "$repo_root/scripts/release_toolchain_contract.sh"
+readonly toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 
 readonly expected_team_id="YKUPL7Z869"
 readonly expected_version="0.4.0"
 readonly expected_app_id="com.bill.clashformac"
 readonly expected_extension_id="com.bill.clashformac.packet-tunnel"
+readonly expected_extension_wrapper="$expected_extension_id.systemextension"
+readonly expected_extension_executable="CFWPacketTunnel"
 readonly expected_agent_id="com.bill.clashformac.proxy-agent"
+readonly expected_authority_id="com.bill.clashformac.global-authority"
 readonly expected_app_group="YKUPL7Z869.group.com.bill.clashformac"
 readonly expected_agent_keychain_access_group="YKUPL7Z869.com.bill.clashformac.proxy-agent"
 readonly expected_credential_keychain_access_group="YKUPL7Z869.com.bill.clashformac.credentials"
@@ -185,17 +195,20 @@ elif kind == "packet-tunnel":
     allowed_keys.update({
         "com.apple.developer.networking.networkextension",
         "com.apple.security.app-sandbox",
+        "com.apple.security.application-groups",
         "com.apple.security.network.client",
         "com.apple.security.network.server",
     })
     require("com.apple.developer.networking.networkextension", packet_tunnel)
     require("com.apple.security.app-sandbox", True)
+    require("com.apple.security.application-groups", [app_group])
     require("com.apple.security.network.client", True)
     require("com.apple.security.network.server", True)
-    if "com.apple.security.application-groups" in entitlements:
-        raise SystemExit("error: packet-tunnel must not claim an App Group entitlement")
 elif kind == "proxy-agent":
-    allowed_keys.update({"com.apple.security.application-groups", KEYCHAIN_ACCESS_GROUPS})
+    allowed_keys.update({
+        "com.apple.security.application-groups",
+        KEYCHAIN_ACCESS_GROUPS,
+    })
     require("com.apple.security.application-groups", [app_group])
 unexpected = set(entitlements) - allowed_keys
 if unexpected:
@@ -242,6 +255,7 @@ import sys
 ) = sys.argv[1:]
 sys.path.insert(0, str(Path(repo_root) / "scripts"))
 from release_entitlement_contract import EntitlementContractError
+from release_entitlement_contract import verify_profile_capability_authorizations
 from release_entitlement_contract import verify_profile_keychain_access_group
 
 with open(profile_path, "rb") as handle:
@@ -284,14 +298,6 @@ if profile_app_id is None:
     profile_app_id = profile_entitlements.get("application-identifier")
 if profile_app_id != f"{team_id}.{bundle_id}":
     raise SystemExit(f"error: {kind} provisioning profile application identifier mismatch")
-profile_app_groups = profile_entitlements.get("com.apple.security.application-groups")
-if kind == "packet-tunnel":
-    if profile_app_groups not in (None, [app_group]):
-        raise SystemExit(
-            "error: packet-tunnel provisioning profile App Group authorization is unexpected"
-        )
-elif profile_app_groups != [app_group]:
-    raise SystemExit(f"error: {kind} provisioning profile App Group mismatch")
 try:
     verify_profile_keychain_access_group(
         profile_entitlements,
@@ -300,28 +306,17 @@ try:
         extension_keychain_group,
         team_id,
     )
+    verify_profile_capability_authorizations(
+        profile_entitlements,
+        signed,
+        kind,
+        team_id,
+        app_group,
+    )
 except EntitlementContractError as error:
     raise SystemExit(f"error: {kind} provisioning profile {error}") from error
-if kind == "packet-tunnel":
-    if profile_app_groups == [app_group]:
-        print("packet-tunnel profile has an unused exact App Group authorization", file=sys.stderr)
-    if profile_entitlements.get("keychain-access-groups") == [f"{team_id}.*"]:
-        print("packet-tunnel profile has an unused exact Team Keychain wildcard", file=sys.stderr)
 if profile_entitlements.get("get-task-allow") or profile_entitlements.get("com.apple.security.get-task-allow"):
     raise SystemExit(f"error: {kind} provisioning profile permits debugging")
-
-for key, actual in signed.items():
-    if key in {
-        "com.apple.developer.team-identifier",
-        "com.apple.security.application-groups",
-        "com.apple.developer.networking.networkextension",
-        "com.apple.developer.system-extension.install",
-    }:
-        allowed = profile_entitlements.get(key)
-        if allowed != actual:
-            raise SystemExit(
-                f"error: {kind} signed entitlement {key!r} is not authorized by the provisioning profile"
-            )
 PY
 }
 
@@ -461,16 +456,56 @@ case "$native_products_root" in
   *) die "native products root is not the immutable root for app build $build_number" ;;
 esac
 
+native_source_sha256="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  "$repo_root/scripts/hash_native_build_inputs.py")" ||
+  die "cannot hash current native build inputs"
+source_identity="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  "$repo_root/scripts/repository_source_identity.py")" ||
+  die "cannot derive current release source identity"
+read -r repository_commit release_source_sha256 <<<"$source_identity"
+[[ -n "$repository_commit" && -n "$release_source_sha256" ]] ||
+  die "current release source identity is incomplete"
+libbox_manifest="$repo_root/target/native-dependencies/Libbox.xcframework.manifest.json"
+require_regular_file "$libbox_manifest"
+go_toolchain_tree_sha256="$(
+  cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"
+)" || die "cannot verify the pinned Go toolchain tree"
+go_tools_tree_sha256="$(
+  cfw_verify_go_release_tools_tree "$repo_root" "$toolchain_root"
+)" || die "cannot verify the pinned Go release-tools tree"
+go_module_cache_tree_sha256="$(
+  cfw_verify_go_module_cache_tree "$repo_root" "$toolchain_root"
+)" || die "cannot verify the pinned Go module-cache tree"
+libbox_manifest_sha256="$(shasum -a 256 "$libbox_manifest" | awk '{print $1}')"
+libbox_tree_sha256="$(libbox_verify_xcframework_artifact \
+  "$repo_root" \
+  "$repo_root/target/native-dependencies/Libbox.xcframework" \
+  "$libbox_manifest" \
+  "$go_toolchain_tree_sha256" \
+  "$go_tools_tree_sha256" \
+  "$go_module_cache_tree_sha256")" || die "Libbox artifact does not match the current release contract"
+
 for product in \
+  CFWGlobalAuthority \
   CFWNativeBridge.framework \
   CFWProxyAgent.app \
-  CFWPacketTunnel.systemextension; do
+  "$expected_extension_wrapper"; do
   PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
     "$native_products_root/$product" \
     "$native_products_root/$product.manifest.json" \
     --metadata "buildNumber=$build_number" \
+    --metadata "libboxManifestSha256=$libbox_manifest_sha256" \
+    --metadata "libboxTreeSha256=$libbox_tree_sha256" \
+    --metadata "nativeSourceSha256=$native_source_sha256" \
+    --metadata "releaseSourceSha256=$release_source_sha256" \
+    --metadata "repositoryCommit=$repository_commit" \
     --metadata "signingMode=developer-id"
 done
+
+PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  "$repo_root/scripts/verify_candidate_bundle.py" \
+  "$app_path" \
+  --native-products-root "$native_products_root"
 
 python3 - "$app_path" <<'PY'
 import os
@@ -507,9 +542,11 @@ trap '/bin/rm -rf "$temporary_root"' EXIT
 
 assert_bundle_info "$app_path" "$expected_app_id" APPL
 
-extension_path="$app_path/Contents/Library/SystemExtensions/CFWPacketTunnel.systemextension"
+extension_path="$app_path/Contents/Library/SystemExtensions/$expected_extension_wrapper"
 agent_path="$app_path/Contents/Library/LoginItems/CFWProxyAgent.app"
+authority_path="$app_path/Contents/Library/HelperTools/CFWGlobalAuthority"
 tombstone_path="$app_path/Contents/Library/HelperTools/cfw-helper-tombstone"
+authority_plist="$app_path/Contents/Library/LaunchDaemons/com.bill.clashformac.global-authority.plist"
 tombstone_plist="$app_path/Contents/Library/LaunchDaemons/com.bill.clashformac.helper.plist"
 proxy_agent_plist="$app_path/Contents/Library/LaunchAgents/com.bill.clashformac.proxy-agent.plist"
 [[ -d "$extension_path" && ! -L "$extension_path" ]] || die "Packet Tunnel bundle is missing or is a symlink"
@@ -548,17 +585,64 @@ helper_entries_file="$temporary_root/helper-entries"
 /usr/bin/find "$app_path/Contents/Library/HelperTools" -mindepth 1 -maxdepth 1 -print0 >"$helper_entries_file" ||
   die "cannot enumerate release HelperTools"
 while IFS= read -r -d '' entry; do helper_entries+=("$entry"); done <"$helper_entries_file"
-[[ ${#helper_entries[@]} == 1 && "${helper_entries[0]}" == "$tombstone_path" ]] ||
-  die "only the exact one-way legacy tombstone is allowed under HelperTools"
+[[ ${#helper_entries[@]} == 2 ]] || die "HelperTools must contain exactly the Authority and tombstone"
+authority_seen=0
+tombstone_seen=0
+for entry in "${helper_entries[@]}"; do
+  case "$entry" in
+    "$authority_path") authority_seen=$((authority_seen + 1)) ;;
+    "$tombstone_path") tombstone_seen=$((tombstone_seen + 1)) ;;
+    *) die "unexpected HelperTools entry: $entry" ;;
+  esac
+done
+[[ $authority_seen -eq 1 && $tombstone_seen -eq 1 ]] ||
+  die "HelperTools does not match the closed release layout"
 launch_daemon_entries=()
 launch_daemon_entries_file="$temporary_root/launch-daemon-entries"
 /usr/bin/find "$app_path/Contents/Library/LaunchDaemons" -mindepth 1 -maxdepth 1 -print0 >"$launch_daemon_entries_file" ||
   die "cannot enumerate release LaunchDaemons"
 while IFS= read -r -d '' entry; do launch_daemon_entries+=("$entry"); done <"$launch_daemon_entries_file"
-[[ ${#launch_daemon_entries[@]} == 1 && "${launch_daemon_entries[0]}" == "$tombstone_plist" ]] ||
-  die "only the exact one-way legacy tombstone plist is allowed under LaunchDaemons"
+[[ ${#launch_daemon_entries[@]} == 2 ]] || die "LaunchDaemons must contain exactly the Authority and tombstone plists"
+authority_plist_seen=0
+tombstone_plist_seen=0
+for entry in "${launch_daemon_entries[@]}"; do
+  case "$entry" in
+    "$authority_plist") authority_plist_seen=$((authority_plist_seen + 1)) ;;
+    "$tombstone_plist") tombstone_plist_seen=$((tombstone_plist_seen + 1)) ;;
+    *) die "unexpected LaunchDaemons entry: $entry" ;;
+  esac
+done
+[[ $authority_plist_seen -eq 1 && $tombstone_plist_seen -eq 1 ]] ||
+  die "LaunchDaemons does not match the closed release layout"
+require_regular_file "$authority_path"
+require_regular_file "$authority_plist"
 require_regular_file "$tombstone_path"
 require_regular_file "$tombstone_plist"
+cmp -s "$authority_plist" "$repo_root/native/macos/Config/com.bill.clashformac.global-authority.plist" ||
+  die "embedded Global Authority plist differs from the reviewed source plist"
+[[ "$(plist_value "$authority_plist" Label)" == "$expected_authority_id" ]] ||
+  die "Global Authority launchd label mismatch"
+[[ "$(plist_value "$authority_plist" BundleProgram)" == "Contents/Library/HelperTools/CFWGlobalAuthority" ]] ||
+  die "Global Authority launchd BundleProgram mismatch"
+[[ "$(plist_value "$authority_plist" UserName)" == "root" ]] ||
+  die "Global Authority must run as root"
+python3 - "$authority_plist" "$expected_team_id" "$expected_app_id" <<'PY'
+import plistlib
+import sys
+
+path, team_id, app_id = sys.argv[1:]
+with open(path, "rb") as handle:
+    plist = plistlib.load(handle)
+expected = {
+    f"{team_id}.group.com.bill.clashformac.global-authority.host": True,
+    f"{team_id}.group.com.bill.clashformac.global-authority.proxy-agent": True,
+    f"{team_id}.group.com.bill.clashformac.global-authority.provider": True,
+}
+if plist.get("MachServices") != expected:
+    raise SystemExit("error: Global Authority launchd MachServices contract mismatch")
+if plist.get("AssociatedBundleIdentifiers") != [app_id]:
+    raise SystemExit("error: Global Authority associated bundle identifier mismatch")
+PY
 cmp -s "$tombstone_plist" "$repo_root/apps/cfw-tauri-shell/macos/legacy-tombstone/com.bill.clashformac.helper.plist" ||
   die "embedded legacy tombstone plist differs from the reviewed source plist"
 launch_agent_entries=()
@@ -578,6 +662,7 @@ cmp -s "$proxy_agent_plist" "$repo_root/native/macos/Config/com.bill.clashformac
 [[ "$(plist_value "$proxy_agent_plist" MachServices:$expected_agent_id)" == "true" ]] ||
   die "ProxyAgent launchd MachServices contract mismatch"
 verify_tombstone_provenance "$tombstone_path"
+assert_developer_id_signature "$authority_path" "$expected_authority_id"
 
 for retired_path in \
   "$app_path/Contents/Resources/resources/cores" \
@@ -594,6 +679,9 @@ if [[ -s "$retired_entries" ]]; then
 fi
 
 assert_bundle_info "$extension_path" "$expected_extension_id" SYSX
+[[ "$(plist_value "$extension_path/Contents/Info.plist" CFBundleExecutable)" == "$expected_extension_executable" ]] ||
+  die "Packet Tunnel executable identity mismatch"
+require_regular_file "$extension_path/Contents/MacOS/$expected_extension_executable"
 assert_bundle_info "$agent_path" "$expected_agent_id" APPL
 
 app_version="$(plist_value "$app_path/Contents/Info.plist" CFBundleShortVersionString)"
@@ -647,7 +735,10 @@ done <"$macho_candidates"
 codesign --verify --deep --strict --verbose=4 "$app_path"
 if [[ $pre_notary -eq 0 ]]; then
   xcrun stapler validate "$app_path"
-  spctl --assess --type execute --verbose=4 "$app_path"
+  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+    "$repo_root/scripts/gatekeeper_assessment.py" \
+    --target "$app_path" \
+    --assessment-type execute
 fi
 
 echo "release app verified: $app_path"

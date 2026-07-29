@@ -1,16 +1,16 @@
 {
   "go": "1.26.5",
-  "gomobile": "v0.1.12",
+  "gomobile": "v0.1.13",
   "singBox": {
     "commit": "25a600db24f7680ad9806ce5427bd0ab8afe1114",
     "tag": "v1.13.14",
     "androidReferenceCommit": "aa686b2f1ac4ca9e888d4d068ce79ee1abd309fc",
     "securityPatch": {
       "path": "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch",
-      "sha256": "ca751c4ec4b82a60d4dd8716627dc2665b154901a988603108bb5e4e718cf439",
-      "patchedDiffSha256": "ca751c4ec4b82a60d4dd8716627dc2665b154901a988603108bb5e4e718cf439",
-      "patchedGoModSha256": "55a83789ebfe7b34cdc2b404cfc2f4df66b87d12f72ba3de5b79a1941aa9a8b1",
-      "patchedGoSumSha256": "10085cc9db015b5b4fbc62f513ea0bd210d0a91e9b372c7d5c68d4892f2c62b8"
+      "sha256": "30a6e0a4d45920dda21e5970230150afc56bb046062bdc006884bccaab539857",
+      "patchedDiffSha256": "6184cea23bf8b259be140671f2a45279919e6c5180c6d7a17e6026a29834e142",
+      "patchedGoModSha256": "d2127319e0e5f80c6c1012653c9a728cb1a4ae8041f42ead3e942544dda34847",
+      "patchedGoSumSha256": "277474ed2eed49697578b671a856e810659fcbaf7955a013b540cba404f69472"
     },
     "rawPacketPatch": {
       "path": "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
@@ -20,7 +20,7 @@
       "path": "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",
       "sha256": "d52fc83c28b5baa919a4d1590a90f7353daaa3120b6ac39aa8e4476133c602d3"
     },
-    "combinedDiffSha256": "f3d84e99e7832495975e4d78fd73744f63c1d0f79393b7276cce2f6e3e80c233"
+    "combinedDiffSha256": "019f283e86222aed9aec2de94efa3166165af85d6828fbc876a689daa28c384a"
   },
   "singBoxForAppleReference": {
     "commit": "794eb1741f91765a91f1513e5639296503f072b2"

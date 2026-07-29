@@ -6,17 +6,30 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import hashlib
-import json
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
 if __package__:
+    from .candidate_artifact_binding import (
+        CandidateBindingError,
+        load_strict_json,
+        validate_candidate_app_manifest,
+        validate_ci_toolchain_evidence,
+    )
     from .release_build_identity import canonical_build_version, require_newer_build
     from .release_runtime_evidence import load_runtime_evidence
+    from .repository_source_identity import SourceIdentityError, current_identity
 else:
+    from candidate_artifact_binding import (
+        CandidateBindingError,
+        load_strict_json,
+        validate_candidate_app_manifest,
+        validate_ci_toolchain_evidence,
+    )
     from release_build_identity import canonical_build_version, require_newer_build
     from release_runtime_evidence import load_runtime_evidence
+    from repository_source_identity import SourceIdentityError, current_identity
 
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -71,16 +84,20 @@ def _reviewed_at(value: Any) -> str:
 
 
 def validate_candidate_review(
-    repository: Path, review_path: Path, final_build_number: str | None = None
+    repository: Path,
+    review_path: Path,
+    final_build_number: str | None = None,
+    *,
+    expected_source_identity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     repository = repository.resolve(strict=True)
     expected_review = repository / "target/candidates/0.4.0/review/validated-candidate.json"
     if review_path.is_symlink() or review_path.resolve(strict=True) != expected_review:
         raise ValidatedCandidateError("validated-candidate review path is not fixed")
     try:
-        document = json.loads(review_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValidatedCandidateError("validated-candidate review is not valid JSON") from error
+        document = load_strict_json(review_path, "validated-candidate review")
+    except CandidateBindingError as error:
+        raise ValidatedCandidateError(str(error)) from error
     document = _exact(
         document,
         {
@@ -109,10 +126,14 @@ def validate_candidate_review(
         {
             "app_manifest_path",
             "app_manifest_sha256",
+            "ci_evidence_path",
+            "ci_evidence_sha256",
             "notarization_result_path",
             "notarization_result_sha256",
             "runtime_evidence_path",
             "runtime_evidence_sha256",
+            "toolchain_binding_path",
+            "toolchain_binding_sha256",
         },
         "candidate",
     )
@@ -135,28 +156,54 @@ def validate_candidate_review(
         prefix / "evidence/runtime-recovery.json",
         "candidate runtime evidence",
     )
+    ci_evidence = _relative_file(
+        repository,
+        candidate["ci_evidence_path"],
+        prefix / "evidence/unsigned-ci-lanes.json",
+        "candidate unsigned CI evidence",
+    )
+    toolchain_binding = _relative_file(
+        repository,
+        candidate["toolchain_binding_path"],
+        prefix / "evidence/toolchain-binding.json",
+        "candidate toolchain binding",
+    )
     for path, field, label in (
         (app_manifest, "app_manifest_sha256", "candidate app manifest"),
+        (ci_evidence, "ci_evidence_sha256", "candidate unsigned CI evidence"),
         (notarization, "notarization_result_sha256", "candidate notarization result"),
         (runtime, "runtime_evidence_sha256", "candidate runtime evidence"),
+        (toolchain_binding, "toolchain_binding_sha256", "candidate toolchain binding"),
     ):
         if _digest(path) != _sha(candidate[field], field):
             raise ValidatedCandidateError(f"{label} digest differs from review")
+    source_identity = expected_source_identity
+    if source_identity is None:
+        try:
+            source_identity = current_identity(repository)
+        except (OSError, SourceIdentityError) as error:
+            raise ValidatedCandidateError(
+                f"cannot derive current release source identity: {error}"
+            ) from error
     try:
-        app_document = json.loads(app_manifest.read_text(encoding="utf-8"))
-        notary_document = json.loads(notarization.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValidatedCandidateError("candidate manifest/notarization evidence is invalid") from error
-    metadata = app_document.get("metadata") if isinstance(app_document, dict) else None
-    if not isinstance(metadata, dict) or any(
-        metadata.get(key) != expected
-        for key, expected in {
-            "artifactKind": "notarized-validation-candidate-v1",
-            "buildNumber": build,
-            "version": "0.4.0",
-        }.items()
-    ):
-        raise ValidatedCandidateError("candidate app manifest identity is not the validated build")
+        toolchain_metadata = validate_ci_toolchain_evidence(
+            ci_evidence,
+            toolchain_binding,
+            source_identity["repositoryCommit"],
+            source_identity["releaseSourceSha256"],
+        )
+        validate_candidate_app_manifest(
+            app_manifest,
+            app_manifest.parent / "Clash for Mac.app",
+            artifact_kind="notarized-validation-candidate-v1",
+            build_number=build,
+            source_identity=source_identity,
+            toolchain_metadata=toolchain_metadata,
+            team_id="YKUPL7Z869",
+        )
+        notary_document = load_strict_json(notarization, "candidate notarization evidence")
+    except (CandidateBindingError, KeyError) as error:
+        raise ValidatedCandidateError(f"candidate source/toolchain binding failed: {error}") from error
     if (
         not isinstance(notary_document, dict)
         or notary_document.get("status") != "Accepted"

@@ -261,7 +261,12 @@ async fn cancel_after_acceptance(
         let coordinator = coordinator.clone();
         tokio::spawn(async move {
             let _dropped = coordinator
-                .set_mode(mode, direct(), EngineSettings::default())
+                .set_mode(
+                    mode,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                    direct(),
+                    EngineSettings::default(),
+                )
                 .await;
         })
     };
@@ -308,7 +313,12 @@ async fn run_permutation(perm: &[Step]) -> Result<(), String> {
             cancel_after_acceptance(&coordinator, &backend, target_mode).await;
         } else {
             let _dropped = coordinator
-                .set_mode(target_mode, direct(), EngineSettings::default())
+                .set_mode(
+                    target_mode,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                    direct(),
+                    EngineSettings::default(),
+                )
                 .await;
         }
 
@@ -553,7 +563,12 @@ async fn run_stale_callback(cancel_pending: bool, extra_yields: u64) -> Result<(
         cancel_after_acceptance(&coordinator, &backend, EngineMode::Tunnel).await;
     } else {
         let pending = coordinator
-            .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+            .set_mode(
+                EngineMode::Tunnel,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                direct(),
+                EngineSettings::default(),
+            )
             .await
             .map_err(|error| format!("pending install failed: {error:?}"))?;
         if !matches!(pending.state, EngineState::AwaitingApproval { .. }) {
@@ -586,7 +601,12 @@ async fn run_stale_callback(cancel_pending: bool, extra_yields: u64) -> Result<(
     // The approval callback arrives; the retry activates on a newer generation.
     *backend.awaiting_approval.lock().expect("approval lock") = false;
     let active = coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .map_err(|error| format!("approved retry failed: {error:?}"))?;
     if !matches!(active.state, EngineState::TunnelActive { .. }) {

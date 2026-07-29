@@ -101,7 +101,7 @@ fn import_list_load_and_delete_round_trip_is_private_and_atomic() {
 }
 
 #[test]
-fn credential_snapshot_is_stable_unique_and_tracks_shared_refs_rotation_and_selection() {
+fn credential_snapshot_is_stable_and_preserves_cross_profile_reference_ownership() {
     const SHARED: &str = "11111111-1111-4111-8111-111111111111";
     const ROTATED: &str = "22222222-2222-4222-8222-222222222222";
     let (root, repository) = repository("credential-snapshot");
@@ -109,7 +109,7 @@ fn credential_snapshot_is_stable_unique_and_tracks_shared_refs_rotation_and_sele
         .credential_snapshot()
         .expect("empty credential snapshot");
     assert_eq!(empty.profile_count, 0);
-    assert!(empty.live_references.is_empty());
+    assert!(empty.catalog.is_empty());
     assert_eq!(empty.snapshot_digest.len(), 64);
 
     let first = repository
@@ -122,8 +122,14 @@ fn credential_snapshot_is_stable_unique_and_tracks_shared_refs_rotation_and_sele
         .credential_snapshot()
         .expect("shared credential snapshot");
     assert_eq!(shared.profile_count, 2);
-    assert_eq!(shared.live_references.len(), 1);
-    assert_eq!(shared.live_references[0].id(), SHARED);
+    assert_eq!(shared.catalog.len(), 2);
+    assert!(
+        shared
+            .catalog
+            .iter()
+            .all(|entry| entry.references.len() == 1 && entry.references[0].id() == SHARED)
+    );
+    assert_ne!(shared.catalog[0].audience, shared.catalog[1].audience);
     assert_eq!(
         repository
             .credential_snapshot()
@@ -152,8 +158,8 @@ fn credential_snapshot_is_stable_unique_and_tracks_shared_refs_rotation_and_sele
     let retained = repository
         .credential_snapshot()
         .expect("shared reference retained");
-    assert_eq!(retained.live_references.len(), 1);
-    assert_eq!(retained.live_references[0].id(), SHARED);
+    assert_eq!(retained.catalog.len(), 1);
+    assert_eq!(retained.catalog[0].references[0].id(), SHARED);
 
     let rotated = repository
         .import(Some("Rotated"), &credential_profile(ROTATED))
@@ -162,14 +168,16 @@ fn credential_snapshot_is_stable_unique_and_tracks_shared_refs_rotation_and_sele
         .credential_snapshot()
         .expect("unselected rotation is live");
     assert_eq!(pending_rotation.profile_count, 2);
-    assert_eq!(
-        pending_rotation
-            .live_references
-            .iter()
-            .map(|reference| reference.id())
-            .collect::<Vec<_>>(),
-        vec![SHARED, ROTATED]
-    );
+    // Catalog order is canonical by audience (randomly generated profile
+    // ids), so compare reference sets instead of positions.
+    let mut pending_reference_ids = pending_rotation
+        .catalog
+        .iter()
+        .flat_map(|entry| entry.references.iter())
+        .map(|reference| reference.id())
+        .collect::<Vec<_>>();
+    pending_reference_ids.sort_unstable();
+    assert_eq!(pending_reference_ids, vec![SHARED, ROTATED]);
 
     repository
         .select(&rotated.id)
@@ -183,8 +191,8 @@ fn credential_snapshot_is_stable_unique_and_tracks_shared_refs_rotation_and_sele
         .credential_snapshot()
         .expect("completed rotation snapshot");
     assert_eq!(completed_rotation.profile_count, 1);
-    assert_eq!(completed_rotation.live_references.len(), 1);
-    assert_eq!(completed_rotation.live_references[0].id(), ROTATED);
+    assert_eq!(completed_rotation.catalog.len(), 1);
+    assert_eq!(completed_rotation.catalog[0].references[0].id(), ROTATED);
     assert_ne!(
         completed_rotation.snapshot_digest,
         pending_rotation.snapshot_digest
@@ -667,7 +675,10 @@ fn replace_keeps_identity_credentials_and_rebinds_the_selection_digest() {
         repository
             .credential_snapshot()
             .expect("credential snapshot")
-            .live_references,
+            .catalog
+            .into_iter()
+            .flat_map(|entry| entry.references)
+            .collect::<Vec<_>>(),
         replacement.credential_references(),
         "the replaced document's credential references are no longer live"
     );

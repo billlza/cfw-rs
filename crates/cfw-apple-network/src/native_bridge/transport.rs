@@ -102,6 +102,7 @@ fn validate_result(result: &NativeBridgeResult) -> Result<(), NativeBridgeError>
             context,
             system_proxy_config_digest,
             tunnel_config_digest,
+            ..
         }) => (*target != EngineMode::Off
             && canonical_uuid(&context.installation_id)
             && context.config_epoch > 0
@@ -281,7 +282,7 @@ mod tests {
         let request_id =
             uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("request UUID");
         let response = format!(
-            "{{\"schema_version\":3,\"request_id\":\"{request_id}\",\"result\":null,\"failure\":{{\"code\":\"future_authority_code\",\"message\":\"/private/path secret identity\"}}}}"
+            "{{\"schema_version\":4,\"request_id\":\"{request_id}\",\"result\":null,\"failure\":{{\"code\":\"future_authority_code\",\"message\":\"/private/path secret identity\"}}}}"
         );
         let error = parse_response(request_id, response.as_bytes()).expect_err("unknown code");
         assert_eq!(error.code, NativeBridgeErrorCode::Internal);
@@ -316,7 +317,7 @@ mod tests {
             uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("request UUID");
         let result = parse_response(
             request_id,
-            include_bytes!("../../../../contracts/native-bridge-v3/gc-preview-response.json"),
+            include_bytes!("../../../../contracts/native-bridge-v4/gc-preview-response.json"),
         )
         .expect("cross-language response");
         let NativeBridgeResult::CredentialGarbageCollectionPreview(preview) = result else {
@@ -331,7 +332,7 @@ mod tests {
             uuid::Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee").expect("request UUID");
         let error = parse_response(
             expected,
-            include_bytes!("../../../../contracts/native-bridge-v3/gc-preview-response.json"),
+            include_bytes!("../../../../contracts/native-bridge-v4/gc-preview-response.json"),
         )
         .expect_err("mismatched response must fail");
         assert_eq!(error.code, NativeBridgeErrorCode::IdentityRejected);

@@ -27,7 +27,7 @@ import {
   formatBytes,
   formatRate,
   formatRelativeUpdated,
-  emptyProviderBatch,
+  delayFailureLabel,
   providerActionKey,
   providerBatchSummary,
   providerBatchSucceeded,
@@ -148,6 +148,7 @@ function applyControllerSnapshot(snapshot) {
       return {
         name,
         delay,
+        delayFailure: null,
         dead: false,
         kind: node?.kind ?? node?.type ?? nestedGroup?.kind ?? group.kind ?? "Proxy",
         udp: node?.udp ?? null,
@@ -228,6 +229,7 @@ function applyProvidersSnapshot(snapshot) {
     updated: provider.updated_at ?? "unknown",
     rules: provider.rules?.length ?? 0,
   }));
+  state.providerCapabilityError = null;
   return true;
 }
 
@@ -536,6 +538,90 @@ function renderRowNote(short, reason) {
   return `<small class="cfw-row-note" title="${escapeHtml(reason)}">${escapeHtml(short)}</small>`;
 }
 
+/// The migration affordance shown while the fresh-install one-way cutover has
+/// not been confirmed. Without it a clean install sits forever on a disabled
+/// network with only a reason string.
+///
+/// The default dashboard cannot run the destructive cutover; it offers the
+/// controlled restart into the `--migration-handoff` instance. That instance
+/// renders the explicit prepare → confirm flow. No control here mutates the
+/// network on its own: prepare only stages and preflights, and confirm requires
+/// an explicit checkbox that maps to the backend's `cutover_confirmed` gate.
+function renderMigrationBanner() {
+  const retirement = state.retirement;
+  if (!retirement || typeof retirement.state !== "string") return "";
+  const stateTag = retirement.state;
+  const needsMigration = ["awaiting_confirmation", "manual_cleanup_required", "recovery_start_required"].includes(stateTag);
+  if (!needsMigration) return "";
+  const cutover = state.cutover;
+
+  if (!state.migrationHandoff) {
+    const detail = stateTag === "recovery_start_required"
+      ? "A previous one-way cutover was interrupted. Recovery runs in a separate, signed migration session."
+      : "This install has not retired the legacy network yet. The network stays disabled until you complete the one-way cutover, which runs in a separate, signed migration session while the old app keeps running.";
+    return `
+      <div class="cfw-migration-banner" role="status">
+        <div class="cfw-migration-copy">
+          <strong>Finish setup: migrate to the 0.4.0 network</strong>
+          <small>${escapeHtml(detail)}</small>
+        </div>
+        <button type="button" class="cfw-big-button" data-action="begin-migration-handoff">Start Migration…</button>
+      </div>
+    `;
+  }
+
+  if (stateTag === "recovery_start_required") {
+    return `
+      <div class="cfw-migration-banner" role="status">
+        <div class="cfw-migration-copy">
+          <strong>Recover the interrupted cutover</strong>
+          <small>${escapeHtml(retirement.message ?? "An interrupted cutover must be recovered before networking is available.")}</small>
+          ${cutover.message ? `<small>${escapeHtml(cutover.message)}</small>` : ""}
+        </div>
+        <button type="button" class="cfw-big-button" data-action="recover-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Recovering…" : "Recover Replacement"}</button>
+      </div>
+    `;
+  }
+
+  const target = cutover.target ?? (engineTunnelPreferred() ? "tunnel" : "system_proxy");
+  const targetLabel = target === "tunnel" ? "TUN" : "System Proxy";
+  const ready = Boolean(cutover.receiptId);
+  const step = ready
+    ? `
+        <label class="cfw-migration-confirm">
+          <input type="checkbox" data-cutover-confirm ${cutover.confirmChecked ? "checked" : ""} />
+          <span>I understand this one-way cutover retires the legacy network and cannot be undone.</span>
+        </label>
+        <label class="cfw-migration-confirm">
+          <input type="checkbox" data-cutover-dns-review ${cutover.dnsReviewChecked ? "checked" : ""} />
+          <span>I have reviewed DNS for every active service in System Settings.</span>
+        </label>
+        <button type="button" class="cfw-big-button danger" data-action="confirm-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Migrating…" : `Confirm one-way cutover to ${escapeHtml(targetLabel)}`}</button>
+      `
+    : `
+        <button type="button" class="cfw-big-button" data-action="prepare-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Preparing…" : `Prepare cutover to ${escapeHtml(targetLabel)}`}</button>
+      `;
+  const approvalNote = cutover.awaitingApproval
+    ? `<small>System Extension approval is required in System Settings. Approve it, then Prepare again.</small>`
+    : "";
+  return `
+    <div class="cfw-migration-banner" role="status">
+      <div class="cfw-migration-copy">
+        <strong>Migration session — retire the legacy network</strong>
+        <small>The old app keeps running until you confirm. Prepare stages and validates the replacement; nothing on the network changes until you explicitly confirm.</small>
+        ${retirement.message ? `<small>${escapeHtml(retirement.message)}</small>` : ""}
+        ${cutover.message ? `<small>${escapeHtml(cutover.message)}</small>` : ""}
+        ${approvalNote}
+      </div>
+      ${step}
+    </div>
+  `;
+}
+
+function engineTunnelPreferred() {
+  return state.engine.desiredMode === "tunnel";
+}
+
 function renderGeneral() {
   const product = state.payload.product;
   const appVersion = product.version ?? "—";
@@ -567,6 +653,7 @@ function renderGeneral() {
       </section>
 
       <section class="cfw-content">
+        ${renderMigrationBanner()}
         ${engine.availabilityReason ? renderRowReason(engine.availabilityReason) : ""}
         <div class="cfw-row">
           <div class="cfw-row-left">
@@ -689,19 +776,19 @@ function renderGeneral() {
   `;
 }
 
-function delayClass(delay) {
+function delayClass(delay, failure = null) {
+  if (failure) return "dead";
   if (delay === null || delay === undefined) return "pending";
-  // The clash-compatible controller reports a timeout as delay 0; a missing
-  // delay is normalized to 0 as well. Both render as Timeout.
   if (delay <= 0) return "dead";
   if (delay < 80) return "fast";
   if (delay < 180) return "mid";
   return "slow";
 }
 
-function delayLabel(delay) {
+function delayLabel(delay, failure = null) {
+  if (failure) return delayFailureLabel(failure);
   if (delay === null || delay === undefined) return "Pending";
-  if (delay <= 0) return "Timeout";
+  if (delay <= 0) return "Probe failed";
   return `${delay} ms`;
 }
 
@@ -714,6 +801,14 @@ function delayConcurrency() {
 function cancelDelayTest() {
   runtime.delayTestGeneration = (runtime.delayTestGeneration ?? 0) + 1;
   state.toggles.testingDelays = false;
+}
+
+function setConnectionsStreamRunning(running) {
+  return running ? invoke("start_connections_stream") : invoke("stop_connections_stream");
+}
+
+function setLogStreamRunning(running) {
+  return running ? invoke("start_log_stream") : invoke("stop_log_stream");
 }
 
 function visibleProxyNodeNames() {
@@ -742,13 +837,14 @@ function orderNamesVisibleFirst(names) {
   return head.length ? [...head, ...tail] : names;
 }
 
-function applyDelayToProxyNodes(name, delay) {
-  const value = typeof delay === "number" && Number.isFinite(delay) ? delay : 0;
+function applyDelayToProxyNodes(name, delay, failure = null) {
+  const value = typeof delay === "number" && Number.isFinite(delay) ? delay : null;
   state.proxyGroups.forEach((group) => {
     group.options.forEach((node) => {
       if (node.name === name) {
         node.delay = value;
-        node.dead = value <= 0;
+        node.delayFailure = failure;
+        node.dead = Boolean(failure) || (typeof value === "number" && value <= 0);
       }
     });
   });
@@ -760,15 +856,17 @@ function patchProxyDelayLabels(names) {
     const name = el.getAttribute("data-proxy-delay");
     if (!name || (nameSet && !nameSet.has(name))) return;
     let delay = null;
+    let failure = null;
     for (const group of state.proxyGroups) {
       const node = group.options.find((item) => item.name === name);
       if (node) {
         delay = node.delay;
+        failure = node.delayFailure;
         break;
       }
     }
-    el.className = delayClass(delay);
-    el.textContent = delayLabel(delay);
+    el.className = delayClass(delay, failure);
+    el.textContent = delayLabel(delay, failure);
   });
   const tool = document.querySelector('[data-action="delay-test"]');
   if (tool) {
@@ -787,8 +885,8 @@ function finalizeDelayTestNames(names) {
         break;
       }
     }
-    if (found && (found.delay === null || found.delay === undefined)) {
-      applyDelayToProxyNodes(name, 0);
+    if (found && (found.delay === null || found.delay === undefined) && !found.delayFailure) {
+      applyDelayToProxyNodes(name, null, "invalid_response");
     }
   });
   patchProxyDelayLabels(names);
@@ -833,7 +931,7 @@ function proxyToolIcon(kind) {
 function isTimedOutProxy(node) {
   if (!node) return false;
   if (node.dead) return true;
-  // A timeout arrives as delay 0, and a failed probe is normalized to 0.
+  if (node.delayFailure) return true;
   return typeof node.delay === "number" && node.delay <= 0;
 }
 
@@ -900,7 +998,7 @@ function renderProxies() {
                     <strong>${nodePrefix(node.name)}${escapeHtml(node.name)}</strong>
                     <small>${escapeHtml(node.kind ?? "Proxy")} ${node.udp === false ? "" : "<em>UDP</em>"}</small>
                   </span>
-                  <b class="${delayClass(node.delay)}" data-proxy-delay="${escapeHtml(node.name)}">${delayLabel(node.delay)}</b>
+                  <b class="${delayClass(node.delay, node.delayFailure)}" data-proxy-delay="${escapeHtml(node.name)}">${delayLabel(node.delay, node.delayFailure)}</b>
                 </button>
               `).join("")}
             </div>
@@ -1784,17 +1882,18 @@ function renderProfileInspector() {
 function renderProviders() {
   const updatingAll = state.providerBulkActions.has("update-all-providers");
   const healthAll = state.providerBulkActions.has("health-check-all");
+  const providerUnavailable = Boolean(state.providerCapabilityError);
   return `
     <div class="providers-layout">
       <section class="panel toolbar-panel">
         <div>
           <p class="label">Providers</p>
           <h3>Proxy Providers</h3>
-          <p class="muted">Matches the original Proxy Providers / Rule Providers split and keeps Update All / Health Check All visible.</p>
+          <p class="muted">${providerUnavailable ? escapeHtml(state.providerCapabilityError) : "Live provider capabilities reported by the running engine controller."}</p>
         </div>
         <div class="toolbar-actions">
-          <button class="button" data-action="update-all-providers" ${updatingAll ? "disabled" : ""}>${updatingAll ? "Updating..." : "Update All"}</button>
-          <button class="button ghost" data-action="health-check-all" ${healthAll ? "disabled" : ""}>${healthAll ? "Checking..." : "Health Check All"}</button>
+          <button class="button" data-action="update-all-providers" ${updatingAll || providerUnavailable ? "disabled" : ""}>${updatingAll ? "Updating..." : "Update All"}</button>
+          <button class="button ghost" data-action="health-check-all" ${healthAll || providerUnavailable ? "disabled" : ""}>${healthAll ? "Checking..." : "Health Check All"}</button>
           <button class="button ghost" data-action="open-rules">Rules</button>
         </div>
       </section>
@@ -1823,8 +1922,8 @@ function renderProviders() {
           <article class="panel provider-row empty-state">
             <div>
               <p class="label">Controller</p>
-              <h3>No proxy providers loaded</h3>
-              <p class="muted">Driven by the engine controller; no provider rows are invented when the running configuration has none.</p>
+              <h3>${providerUnavailable ? "Proxy provider management unavailable" : "No proxy providers loaded"}</h3>
+              <p class="muted">${providerUnavailable ? escapeHtml(state.providerCapabilityError) : "Driven by the engine controller; no provider rows are invented when the running configuration has none."}</p>
             </div>
           </article>
         `}
@@ -1851,8 +1950,8 @@ function renderProviders() {
           <article class="panel provider-row empty-state">
             <div>
               <p class="label">Controller</p>
-              <h3>No rule providers loaded</h3>
-              <p class="muted">Live from the engine controller; it stays empty when the running configuration has no rule providers.</p>
+              <h3>${providerUnavailable ? "Rule provider management unavailable" : "No rule providers loaded"}</h3>
+              <p class="muted">${providerUnavailable ? escapeHtml(state.providerCapabilityError) : "Live from the engine controller; it stays empty when the running configuration has no rule providers."}</p>
             </div>
           </article>
         `}
@@ -2256,7 +2355,7 @@ function renderSettings() {
 
       ${renderSettingsGroup("Proxies", [
         renderToggle("hideUnavailable", "Hide timed-out proxies", "Hide nodes that failed the latency test. Session only: this build persists no view options."),
-        renderSettingValue("Delay test target", "chosen by the engine", "No delay-test URL preference exists in this build; the engine uses its own target."),
+        renderSettingValue("Delay test target", "controlled HTTPS", "No delay-test URL preference exists in this build; probes use the fixed HTTPS connectivity target."),
       ])}
 
       ${renderSettingsGroup("Connections", [
@@ -2741,6 +2840,19 @@ function bindPageEvents() {
     });
   }
 
+  const cutoverConfirm = document.querySelector("[data-cutover-confirm]");
+  if (cutoverConfirm) {
+    cutoverConfirm.addEventListener("change", (event) => {
+      state.cutover.confirmChecked = event.currentTarget.checked === true;
+    });
+  }
+  const cutoverDnsReview = document.querySelector("[data-cutover-dns-review]");
+  if (cutoverDnsReview) {
+    cutoverDnsReview.addEventListener("change", (event) => {
+      state.cutover.dnsReviewChecked = event.currentTarget.checked === true;
+    });
+  }
+
   document.querySelectorAll("[data-connection-sort]").forEach((button) => {
     button.addEventListener("click", (event) => {
       const sort = event.currentTarget.dataset.connectionSort;
@@ -2929,6 +3041,89 @@ async function handleAction(action) {
   if (action === "open-settings") {
     state.activePage = "settings";
   }
+  if (action === "begin-migration-handoff") {
+    try {
+      await invoke("begin_migration_handoff");
+      appendLog("info", "migration", "Launching the signed migration session…");
+      state.cutover.message = "A separate migration window is opening. Complete the cutover there; this window stays available.";
+    } catch (error) {
+      state.cutover.message = errorText(error);
+      appendLog("error", "migration", `Could not start the migration session: ${errorText(error)}`);
+    }
+  }
+  if (action === "prepare-cutover") {
+    state.cutover.busy = true;
+    state.cutover.message = null;
+    renderPage();
+    try {
+      const target = state.engine.desiredMode === "tunnel" ? "tunnel" : "system_proxy";
+      const preparation = await invoke("prepare_legacy_cutover", { target });
+      if (preparation?.status === "ready") {
+        state.cutover.receiptId = preparation.receipt_id;
+        state.cutover.target = preparation.target;
+        state.cutover.awaitingApproval = false;
+        state.cutover.message = "Replacement staged and validated. Confirm the one-way cutover to proceed.";
+      } else {
+        state.cutover.receiptId = null;
+        state.cutover.target = preparation?.target ?? target;
+        state.cutover.awaitingApproval = true;
+        state.cutover.message = "System Extension approval is pending.";
+      }
+    } catch (error) {
+      state.cutover.receiptId = null;
+      state.cutover.message = errorText(error);
+      appendLog("error", "migration", `Prepare cutover failed: ${errorText(error)}`);
+    } finally {
+      state.cutover.busy = false;
+    }
+  }
+  if (action === "confirm-cutover") {
+    if (!state.cutover.receiptId) {
+      state.cutover.message = "Prepare the cutover before confirming.";
+    } else if (!state.cutover.confirmChecked) {
+      state.cutover.message = "Tick the one-way cutover confirmation to proceed.";
+    } else {
+      state.cutover.busy = true;
+      state.cutover.message = null;
+      renderPage();
+      try {
+        await invoke("disable_service_mode", {
+          receiptId: state.cutover.receiptId,
+          cutoverConfirmed: true,
+          dnsReviewConfirmed: Boolean(state.cutover.dnsReviewChecked),
+        });
+        state.cutover = { busy: false, receiptId: null, target: null, awaitingApproval: false, message: "Cutover complete. Replacement networking is active." };
+        appendLog("info", "migration", "Legacy network retired; replacement is active.");
+        await loadEngineStatus();
+        await loadRetirementStatus();
+      } catch (error) {
+        state.cutover.receiptId = null;
+        state.cutover.message = errorText(error);
+        appendLog("error", "migration", `Cutover failed: ${errorText(error)}`);
+        await loadRetirementStatus();
+      } finally {
+        state.cutover.busy = false;
+      }
+    }
+  }
+  if (action === "recover-cutover") {
+    state.cutover.busy = true;
+    state.cutover.message = null;
+    renderPage();
+    try {
+      await invoke("recover_legacy_cutover");
+      state.cutover.message = "Recovery complete.";
+      appendLog("info", "migration", "Interrupted cutover recovered.");
+      await loadEngineStatus();
+      await loadRetirementStatus();
+    } catch (error) {
+      state.cutover.message = errorText(error);
+      appendLog("error", "migration", `Recovery failed: ${errorText(error)}`);
+      await loadRetirementStatus();
+    } finally {
+      state.cutover.busy = false;
+    }
+  }
   if (action === "scroll-to-selected-proxy") {
     const group = state.proxyGroups.find((item) => item.name === state.activeProxyGroup)
       ?? state.proxyGroups[0];
@@ -3018,15 +3213,17 @@ async function handleAction(action) {
         activeGroup.options.forEach((node) => {
           if (names.includes(node.name)) {
             node.delay = null;
+            node.delayFailure = null;
             node.dead = false;
           }
         });
       }
       patchProxyDelayLabels(names);
       try {
-        // No delay-test URL preference exists in 0.4.0; the engine picks its
-        // own bounded target when none is supplied.
+        // No delay-test URL preference exists in 0.4.0; the command supplies
+        // the pinned engine's fixed HTTPS connectivity target.
         const delayByName = new Map();
+        const failureByName = new Map();
         let offset = 0;
         while (offset < names.length) {
           if (generation !== runtime.delayTestGeneration) break;
@@ -3046,28 +3243,35 @@ async function handleAction(action) {
               delayByName.set(item.name, item.delay);
               applyDelayToProxyNodes(item.name, item.delay);
             } else {
-              // timeout (0), missing delay, or error → Timeout
-              delayByName.set(item.name, 0);
-              applyDelayToProxyNodes(item.name, 0);
+              const failure = item.error_kind ?? "invalid_response";
+              failureByName.set(item.name, failure);
+              applyDelayToProxyNodes(item.name, null, failure);
             }
           }
           for (const name of chunk) {
-            if (!seen.has(name) && !delayByName.has(name)) {
-              delayByName.set(name, 0);
-              applyDelayToProxyNodes(name, 0);
+            if (!seen.has(name) && !delayByName.has(name) && !failureByName.has(name)) {
+              failureByName.set(name, "invalid_response");
+              applyDelayToProxyNodes(name, null, "invalid_response");
             }
           }
           patchProxyDelayLabels(chunk);
         }
         if (generation === runtime.delayTestGeneration) {
           finalizeDelayTestNames(names);
-          const failed = [...delayByName.values()].filter((delay) => delay <= 0).length
-            + names.filter((name) => !delayByName.has(name)).length;
-          const ok = [...delayByName.values()].filter((delay) => delay > 0).length;
+          const failed = failureByName.size
+            + names.filter((name) => !delayByName.has(name) && !failureByName.has(name)).length;
+          const ok = delayByName.size;
+          const failures = new Map();
+          for (const kind of failureByName.values()) {
+            failures.set(kind, (failures.get(kind) ?? 0) + 1);
+          }
+          const failureSummary = [...failures.entries()]
+            .map(([kind, count]) => `${count} ${delayFailureLabel(kind).toLowerCase()}`)
+            .join(", ");
           appendLog(
             failed ? "warning" : "info",
             "proxy",
-            `Delay test (${activeGroup?.name ?? "group"}): ${ok} ok${failed ? `, ${failed} timed out` : ""} · concurrency ${delayConcurrency()}`,
+            `Delay test (${activeGroup?.name ?? "group"}): ${ok} ok${failed ? `, ${failed} failed${failureSummary ? ` (${failureSummary})` : ""}` : ""} · concurrency ${delayConcurrency()}`,
           );
         }
       } catch (error) {
@@ -3339,15 +3543,17 @@ async function handleAction(action) {
         invoke("update_all_proxy_providers"),
         invoke("update_all_rule_providers"),
       ]);
-      const proxyProviders = proxyOutcome.status === "fulfilled" ? proxyOutcome.value : emptyProviderBatch("update-proxy");
-      const ruleProviders = ruleOutcome.status === "fulfilled" ? ruleOutcome.value : emptyProviderBatch("update-rule");
       if (proxyOutcome.status === "rejected") appendLog("warning", "provider", `Proxy provider list failed: ${errorText(proxyOutcome.reason)}`);
       if (ruleOutcome.status === "rejected") appendLog("warning", "provider", `Rule provider list failed: ${errorText(ruleOutcome.reason)}`);
       await loadProvidersSnapshot();
-      const proxySummary = providerBatchSummary("Proxy providers", proxyProviders);
-      const ruleSummary = providerBatchSummary("Rule providers", ruleProviders);
-      const level = providerBatchSucceeded(proxyProviders) && providerBatchSucceeded(ruleProviders) && proxyOutcome.status === "fulfilled" && ruleOutcome.status === "fulfilled" ? "info" : "warning";
-      appendLog(level, "provider", `Update All completed · ${proxySummary} · ${ruleSummary}`);
+      if (proxyOutcome.status === "fulfilled" && ruleOutcome.status === "fulfilled") {
+        const proxySummary = providerBatchSummary("Proxy providers", proxyOutcome.value);
+        const ruleSummary = providerBatchSummary("Rule providers", ruleOutcome.value);
+        const level = providerBatchSucceeded(proxyOutcome.value) && providerBatchSucceeded(ruleOutcome.value) ? "info" : "warning";
+        appendLog(level, "provider", `Update All completed · ${proxySummary} · ${ruleSummary}`);
+      } else {
+        appendLog("warning", "provider", "Update All unavailable; the controller rejected the provider capability");
+      }
     } catch (error) {
       state.controllerStatus = "controller offline";
       appendLog("warning", "provider", `Update All failed: ${errorText(error)}`);
@@ -3385,8 +3591,14 @@ async function handleAction(action) {
     appendLog(loaded ? "info" : "warning", "rules", loaded ? `Loaded ${state.rules.length} controller rules` : "Rules controller endpoint unavailable");
   }
   if (action === "toggle-log-stream") {
-    state.logsPaused = !state.logsPaused;
-    appendLog("info", "logs", `Request logs ${state.logsPaused ? "paused" : "resumed"}`);
+    const pause = !state.logsPaused;
+    try {
+      await setLogStreamRunning(!pause);
+      state.logsPaused = pause;
+      appendLog("info", "logs", `Request logs ${pause ? "stopped" : "started"}`);
+    } catch (error) {
+      appendLog("warning", "logs", `Log stream change failed: ${errorText(error)}`);
+    }
   }
   if (action === "clear-logs") {
     state.logs = [];
@@ -3414,8 +3626,14 @@ async function handleAction(action) {
     }
   }
   if (action === "toggle-connection-stream") {
-    state.connectionPaused = !state.connectionPaused;
-    appendLog("info", "connections", `Connection view ${state.connectionPaused ? "frozen" : "unfrozen"}`);
+    const pause = !state.connectionPaused;
+    try {
+      await setConnectionsStreamRunning(!pause);
+      state.connectionPaused = pause;
+      appendLog("info", "connections", `Connection stream ${pause ? "stopped" : "started"}`);
+    } catch (error) {
+      appendLog("warning", "connections", `Connection stream change failed: ${errorText(error)}`);
+    }
   }
   if (action === "close-connection-detail") {
     state.connectionDetailId = null;
@@ -3527,6 +3745,7 @@ async function reloadPayload() {
   await loadSettingsSnapshot();
   await loadPlatformDesign();
   await loadEngineStatus();
+  await loadRetirementStatus();
   await loadNetworkDiagnostics();
   await loadProfilesSnapshot();
   renderPage();
@@ -3578,6 +3797,18 @@ async function loadEngineStatus() {
     }
   } else {
     state.controllerVersion = null;
+  }
+}
+
+/// Reads the legacy-retirement state machine so the dashboard can surface the
+/// fresh-install AwaitingConfirmation lock and offer the migration path. A read
+/// failure is non-fatal: it leaves the previous value and logs a warning.
+async function loadRetirementStatus() {
+  try {
+    state.retirement = await invoke("legacy_retirement_status");
+  } catch (error) {
+    state.retirement = null;
+    appendLog("warning", "engine", `Unable to read the legacy retirement state: ${errorText(error)}`);
   }
 }
 
@@ -3675,7 +3906,8 @@ async function loadProvidersSnapshot() {
   } catch (error) {
     state.providers = [];
     state.ruleProviders = [];
-    appendLog("warning", "provider", errorText(error));
+    state.providerCapabilityError = errorText(error);
+    appendLog("warning", "provider", state.providerCapabilityError);
     return false;
   }
 }
@@ -3685,13 +3917,13 @@ async function loadRulesSnapshot() {
     const snapshot = await invoke("rules_snapshot");
     const rules = Array.isArray(snapshot?.rules) ? snapshot.rules : [];
     state.rules = rules.map((rule) => ({
-      index: String(rule.index ?? ""),
+      index: rule.index == null ? "unavailable" : String(rule.index),
       type: rule.kind ?? rule.type ?? "",
       payload: rule.payload ?? "",
       proxy: rule.proxy ?? "",
       provider: rule.provider ?? "",
-      hits: String(rule.extra?.hitCount ?? rule.extra?.hit_count ?? 0),
-      size: rule.size ?? -1,
+      hits: rule.hits == null ? "unavailable" : String(rule.hits),
+      size: rule.size ?? "unavailable",
       extra: rule.extra ?? {},
     }));
     return true;
@@ -3734,25 +3966,28 @@ async function loadProfilesSnapshot() {
 }
 
 async function startLiveStreams() {
-  try {
-    await invoke("start_connections_stream");
-  } catch (error) {
-    appendLog("warning", "connections", `Live stream unavailable: ${errorText(error)}`);
-  }
-
-  try {
-    await invoke("start_log_stream");
-  } catch (error) {
-    appendLog("warning", "logs", `Log stream unavailable: ${errorText(error)}`);
+  const running = Boolean(state.engine.active);
+  const streams = [
+    ["connections", () => setConnectionsStreamRunning(running && !state.connectionPaused)],
+    ["logs", () => setLogStreamRunning(running && !state.logsPaused)],
+  ];
+  for (const [name, apply] of streams) {
+    try {
+      await apply();
+    } catch (error) {
+      appendLog("warning", name, `Live stream unavailable: ${errorText(error)}`);
+    }
   }
 }
 
 async function bootstrap() {
   bindGlobalEvents();
   state.payload = await invoke("boot_payload");
+  state.migrationHandoff = state.payload?.migration_handoff === true;
   await loadSettingsSnapshot();
   await loadPlatformDesign();
   await loadEngineStatus();
+  await loadRetirementStatus();
   await loadRuntimeProjection();
   await loadNetworkDiagnostics();
   await loadProfilesSnapshot();
@@ -3850,6 +4085,8 @@ async function bootstrap() {
   // instead of going stale.
   await listen("cfw://engine-snapshot", async () => {
     await loadEngineStatus();
+    await loadRetirementStatus();
+    await startLiveStreams();
     renderPage();
   });
 
@@ -3859,6 +4096,7 @@ async function bootstrap() {
       await loadEngineStatus();
       await loadRuntimeProjection();
       if (state.engine.active) await loadControllerSnapshotWithRetry(2, 400);
+      await startLiveStreams();
       renderPage();
       return;
     }

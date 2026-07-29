@@ -1,7 +1,9 @@
 //! Canonical, bounded Authority protocol v1 wire models shared with Swift fixtures.
 //! Secret-bearing capability and material types deliberately implement neither serde nor Debug.
 
-use crate::{BackendErrorKind, CredentialRef, CredentialSlot, TunnelNetworkOptions};
+use crate::{
+    BackendErrorKind, CredentialAudience, CredentialRef, CredentialSlot, TunnelNetworkOptions,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, fmt};
@@ -14,7 +16,7 @@ pub const SUPPORTED_FEATURE_BITS: u64 = 0;
 pub const MAX_ENVELOPE_BYTES: usize = 1_048_576;
 pub const MAX_CONFIGURATION_BYTES: u32 = 768 * 1_024;
 pub const MAX_TOTAL_SECRET_BYTES: usize = 256 * 1_024;
-pub const MAX_CREDENTIAL_SLOTS: usize = 128;
+pub const MAX_CREDENTIAL_SLOTS: usize = 256;
 pub const MAX_INDIVIDUAL_SECRET_BYTES: usize = 16 * 1_024;
 pub const MAX_READ_ONLY_REQUESTS: u16 = 64;
 pub const MAX_MUTATING_TRANSACTIONS: u8 = 1;
@@ -316,6 +318,7 @@ impl WireValidate for ReplayCursor {
 pub struct ConfigurationDescriptor {
     pub byte_count: u32,
     pub config_sha256: String,
+    pub credential_audience: CredentialAudience,
     pub credential_slots: Vec<CredentialSlot>,
     pub identity_sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1276,7 +1279,7 @@ mod tests {
         assert_eq!(MAX_ENVELOPE_BYTES, 1_048_576);
         assert_eq!(MAX_CONFIGURATION_BYTES, 768 * 1_024);
         assert_eq!(MAX_TOTAL_SECRET_BYTES, 256 * 1_024);
-        assert_eq!(MAX_CREDENTIAL_SLOTS, 128);
+        assert_eq!(MAX_CREDENTIAL_SLOTS, 256);
         assert_eq!(MAX_INDIVIDUAL_SECRET_BYTES, 16 * 1_024);
         assert_eq!(MAX_READ_ONLY_REQUESTS, 64);
         assert_eq!(MAX_MUTATING_TRANSACTIONS, 1);

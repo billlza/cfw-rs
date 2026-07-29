@@ -34,6 +34,9 @@ private func descriptor(
   try ConfigurationDescriptor(
     slot: slot,
     tunnelOptions: slot == .tunnel ? TunnelNetworkOptions(ipv6Enabled: true) : nil,
+    credentialAudience: CredentialAudience(
+      profileID: installationID,
+      profileDigest: digest("ee")),
     installationID: installationID,
     epoch: epoch,
     generation: generation,
@@ -69,6 +72,14 @@ private struct StubLease: NativeEngineLeaseInspecting {
   let observation: AuthorityOwnershipObservation
   func isAvailable() async throws -> Bool { observation.state == .off }
   func authorityOwnership() async throws -> AuthorityOwnershipObservation { observation }
+  func beginStop(
+    for descriptor: ConfigurationDescriptor
+  ) async throws -> NativeAuthorityStopContext {
+    throw NativeBridgeExecutionError.failure(.unavailable, "unused stop boundary")
+  }
+  func completeStop(_ context: NativeAuthorityStopContext) async throws {
+    throw NativeBridgeExecutionError.failure(.unavailable, "unused stop boundary")
+  }
 }
 
 private actor StubProxyAgent: ProxyAgentTransporting {
@@ -76,7 +87,16 @@ private actor StubProxyAgent: ProxyAgentTransporting {
   init(_ observed: EngineSnapshot) { self.observed = observed }
   func registrationStatus() -> ProxyAgentRegistrationStatus { .notRegistered }
   func ensureRegistered() throws {}
-  func start(configuration: ConfigurationDescriptor) throws {}
+  func start(
+    configuration: Data,
+    descriptor: ConfigurationDescriptor,
+    authorization: HostPreparedSystemProxyStart
+  ) throws {
+    _ = configuration
+    _ = descriptor
+    authorization.erase()
+    throw UnusedSystemProxyStartPreparerError.unexpectedInvocation
+  }
   func stop(configuration: ConfigurationDescriptor) throws {}
   func snapshot() -> EngineSnapshot { observed }
   func validateConfiguration(_ configuration: Data, descriptor: ConfigurationDescriptor) throws {}
@@ -98,22 +118,22 @@ private actor StubTunnelHost: TunnelHostBridging {
   func managedTunnelConfiguration() -> ConfigurationDescriptor? { nil }
 }
 
-private struct StubConfigurationStore: NativeConfigurationStoring {
-  func persist(_ configuration: Data, descriptor: ConfigurationDescriptor) throws {}
-}
-
 private final class StubCredentialVault: NativeCredentialVaulting, @unchecked Sendable {
   func provision(
-    profileID: String,
+    audience: CredentialAudience,
     requiredReferences: [CredentialReference],
     material: CredentialMaterial
   ) throws -> CFWCredentialVault.CredentialVaultReceipt {
     throw CredentialVaultError.missingVault
   }
   func presence(
+    audience: CredentialAudience,
     of references: [CredentialReference]
   ) throws -> [CFWCredentialVault.CredentialPresence] { [] }
-  func resolve(slots: [CredentialSlot]) throws -> CredentialMaterial { .empty }
+  func resolve(
+    audience: CredentialAudience,
+    slots: [CredentialSlot]
+  ) throws -> CredentialMaterial { .empty }
   func previewGarbageCollection(
     _ request: CredentialGarbageCollectionRequest
   ) throws -> CredentialGarbageCollectionPreview {
@@ -133,8 +153,8 @@ private func coordinator(
 ) -> NativeBridgeCoordinator {
   NativeBridgeCoordinator(
     proxy: StubProxyAgent(proxy),
+    systemProxyPreparer: UnusedSystemProxyStartPreparer(),
     tunnel: StubTunnelHost(tunnel),
-    configurationStore: StubConfigurationStore(),
     engineLease: StubLease(observation: observation),
     credentialVault: StubCredentialVault()
   )

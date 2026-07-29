@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    ConfigError, CredentialSlot, ValidatedSingBoxProfile,
+    ConfigError, CredentialAudience, CredentialSlot, ValidatedSingBoxProfile,
     controller::{ClashApiEndpoint, DEFAULT_CLASH_API_PORT},
     credentials::validate_slots,
     profile_projection::DomainResolverTags,
@@ -114,6 +114,7 @@ pub enum ProjectionMode {
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProjectedConfig {
     mode: ProjectionMode,
+    credential_audience: CredentialAudience,
     json: String,
     credential_slots: Vec<CredentialSlot>,
     clash_api: ClashApiEndpoint,
@@ -126,6 +127,7 @@ impl fmt::Debug for ProjectedConfig {
         formatter
             .debug_struct("ProjectedConfig")
             .field("mode", &self.mode)
+            .field("credential_audience", &self.credential_audience)
             .field("credential_slots", &self.credential_slots)
             .field("clash_api", &self.clash_api)
             .field("configuration_digest", &self.configuration_digest)
@@ -138,6 +140,10 @@ impl fmt::Debug for ProjectedConfig {
 impl ProjectedConfig {
     pub fn mode(&self) -> ProjectionMode {
         self.mode
+    }
+
+    pub fn credential_audience(&self) -> &CredentialAudience {
+        &self.credential_audience
     }
 
     pub fn as_json(&self) -> &str {
@@ -165,9 +171,11 @@ impl ProjectedConfig {
 impl ValidatedSingBoxProfile {
     pub fn project(
         &self,
+        profile_id: &str,
         mode: ProjectionMode,
         settings: &EngineSettings,
     ) -> Result<ProjectedConfig, ConfigError> {
+        let credential_audience = CredentialAudience::new(profile_id, self.digest())?;
         if !(1_280..=9_000).contains(&settings.tunnel_mtu) {
             return Err(ConfigError::InvalidTunnelMtu(settings.tunnel_mtu));
         }
@@ -321,17 +329,19 @@ impl ValidatedSingBoxProfile {
         };
         let identity = canonicalize(json!({
             "configuration_sha256": configuration_digest,
+            "credential_audience": credential_audience,
             "credential_slots": credential_slots,
             "mode": match mode {
                 ProjectionMode::SystemProxy => "system_proxy",
                 ProjectionMode::Tunnel => "tunnel",
             },
             "network_options": network_options,
-            "schema_version": 3,
+            "schema_version": 4,
         }));
         let digest = sha256_hex(serde_json::to_string(&identity)?.as_bytes());
         Ok(ProjectedConfig {
             mode,
+            credential_audience,
             json,
             credential_slots,
             clash_api,

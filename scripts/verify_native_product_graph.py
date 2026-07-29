@@ -8,10 +8,8 @@ product graph the macOS 15 Network Extension migration requires:
   the Global Authority launchd daemon are all present as XcodeGen targets, are
   reflected in the generated Xcode project, are built by the candidate build
   script, and are embedded by the Tauri bundle configuration;
-* every product uses the macOS 15 arm64 release settings and the
-  ``CFW_GLOBAL_AUTHORITY_REQUIRED=1`` Release gate is defined in the XcodeGen
-  spec, the SwiftPM manifest, the generated Xcode project, and the candidate
-  build script;
+* every product uses the macOS 15 arm64 release settings and every Global
+  Authority role is bound to a separate code-signing-pinned Mach service;
 * the launchd daemon plist embeds under ``Contents/Library/LaunchDaemons`` and
   the daemon executable embeds under ``Contents/Library/HelperTools``, exports
   exactly the fixed root-context Mach service, and declares no data-plane or
@@ -46,11 +44,16 @@ class NativeProductGraphError(RuntimeError):
 
 TEAM_ID = "YKUPL7Z869"
 APP_GROUP = "group.com.bill.clashformac"
-MACH_SERVICE = f"{TEAM_ID}.{APP_GROUP}.global-authority"
+MACH_SERVICES = tuple(
+    f"{TEAM_ID}.{APP_GROUP}.global-authority.{suffix}"
+    for suffix in ("host", "proxy-agent", "provider")
+)
 HOST_ID = "com.bill.clashformac"
 BRIDGE_ID = "com.bill.clashformac.native-bridge"
 AGENT_ID = "com.bill.clashformac.proxy-agent"
 EXTENSION_ID = "com.bill.clashformac.packet-tunnel"
+EXTENSION_EXECUTABLE = "CFWPacketTunnel"
+EXTENSION_WRAPPER = f"{EXTENSION_ID}.systemextension"
 AUTHORITY_ID = "com.bill.clashformac.global-authority"
 DEPLOYMENT_TARGET = "15.0"
 
@@ -58,7 +61,7 @@ DAEMON_EMBED = "Library/HelperTools/CFWGlobalAuthority"
 DAEMON_PLIST_EMBED = "Library/LaunchDaemons/com.bill.clashformac.global-authority.plist"
 BRIDGE_EMBED = "Frameworks/CFWNativeBridge.framework"
 AGENT_EMBED = "Library/LoginItems/CFWProxyAgent.app"
-EXTENSION_EMBED = "Library/SystemExtensions/CFWPacketTunnel.systemextension"
+EXTENSION_EMBED = f"Library/SystemExtensions/{EXTENSION_WRAPPER}"
 
 
 # ---------------------------------------------------------------------------
@@ -120,15 +123,23 @@ def verify_xcodegen_spec(project: str) -> None:
     require_text(project, "ARCHS: arm64", "XcodeGen base settings")
     require_text(
         project,
-        "CFW_GLOBAL_AUTHORITY_REQUIRED=1",
-        "XcodeGen Release configuration",
+        "CODE_SIGN_INJECT_BASE_ENTITLEMENTS: false",
+        "Xcode release entitlement injection boundary",
     )
     require_text(
         project,
-        "SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) CFW_GLOBAL_AUTHORITY_REQUIRED",
-        "XcodeGen Release configuration",
+        "SWIFT_INSTALL_OBJC_HEADER: false",
+        "XcodeGen Swift-to-Objective-C header boundary",
     )
-
+    require_text(
+        project,
+        "LM_FORCE_LINK_GENERATION: true",
+        "Xcode App Intents empty-extraction configuration",
+    )
+    if "LM_FILTER_WARNINGS" in project:
+        raise NativeProductGraphError(
+            "Xcode App Intents diagnostics must not be filtered"
+        )
     # Each of the four products must be a declared target.
     for target in (
         "CFWGlobalAuthorityDaemon:",
@@ -148,10 +159,35 @@ def verify_xcodegen_spec(project: str) -> None:
         project, "productName: CFWGlobalAuthority", "Global Authority daemon target"
     )
     require_text(
+        project,
+        "path: Config/GlobalAuthority-Info.plist",
+        "Global Authority embedded Info.plist",
+    )
+    require_text(
+        project,
+        "CREATE_INFOPLIST_SECTION_IN_BINARY: true",
+        "Global Authority embedded Info.plist",
+    )
+    require_text(
         project, f"PRODUCT_BUNDLE_IDENTIFIER: {AGENT_ID}", "ProxyAgent target"
     )
     require_text(
         project, f"PRODUCT_BUNDLE_IDENTIFIER: {EXTENSION_ID}", "Packet Tunnel target"
+    )
+    require_text(
+        project,
+        f"productName: {EXTENSION_ID}",
+        "Packet Tunnel declared product name",
+    )
+    require_text(
+        project,
+        f"PRODUCT_NAME: {EXTENSION_ID}",
+        "Packet Tunnel wrapper product name",
+    )
+    require_text(
+        project,
+        f"EXECUTABLE_NAME: {EXTENSION_EXECUTABLE}",
+        "Packet Tunnel executable name",
     )
     require_text(
         project, f"PRODUCT_BUNDLE_IDENTIFIER: {BRIDGE_ID}", "Native Bridge target"
@@ -175,15 +211,20 @@ def verify_xcodegen_spec(project: str) -> None:
 
     # Manual signing so provisioning is applied per product at signing time.
     require_text(project, "CODE_SIGN_STYLE: Manual", "XcodeGen signed target settings")
+    require_text(
+        project,
+        "PROVISIONING_PROFILE_SPECIFIER: $(CFW_PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER)",
+        "ProxyAgent target-local provisioning",
+    )
+    require_text(
+        project,
+        "PROVISIONING_PROFILE_SPECIFIER: $(CFW_PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER)",
+        "Packet Tunnel target-local provisioning",
+    )
 
 
 def verify_swiftpm_manifest(package: str) -> None:
     require_text(package, ".macOS(.v15)", "SwiftPM platform")
-    require_text(
-        package,
-        '.define("CFW_GLOBAL_AUTHORITY_REQUIRED", .when(configuration: .release))',
-        "SwiftPM Release configuration",
-    )
     require_text(
         package,
         'name: "CFWGlobalAuthorityDaemon"',
@@ -198,12 +239,65 @@ def verify_swiftpm_manifest(package: str) -> None:
 
 
 def verify_generated_project(pbx: str) -> None:
-    require_text(pbx, "CFW_GLOBAL_AUTHORITY_REQUIRED=1", "generated Xcode project")
+    require_text(
+        pbx,
+        "SWIFT_INSTALL_OBJC_HEADER = NO;",
+        "generated Xcode project Swift-to-Objective-C header boundary",
+    )
+    require_text(
+        pbx,
+        "CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;",
+        "generated Xcode release entitlement injection boundary",
+    )
+    if "Copy Swift Objective-C Interface Header" in pbx:
+        raise NativeProductGraphError(
+            "generated project must not contain XcodeGen's sandbox-incompatible "
+            "Swift Objective-C header copy phase"
+        )
+    require_text(
+        pbx,
+        "LM_FORCE_LINK_GENERATION = YES;",
+        "generated Xcode App Intents empty-extraction configuration",
+    )
+    require_text(
+        pbx,
+        "INFOPLIST_FILE = \"Config/GlobalAuthority-Info.plist\";",
+        "generated Global Authority embedded Info.plist",
+    )
+    require_text(
+        pbx,
+        "CREATE_INFOPLIST_SECTION_IN_BINARY = YES;",
+        "generated Global Authority embedded Info.plist",
+    )
     for identifier in (AUTHORITY_ID, AGENT_ID, EXTENSION_ID):
         require_text(pbx, identifier, "generated Xcode project bundle identifiers")
+    require_text(
+        pbx,
+        f'path = "{EXTENSION_WRAPPER}";',
+        "generated Packet Tunnel wrapper product",
+    )
+    require_text(
+        pbx,
+        f"EXECUTABLE_NAME = {EXTENSION_EXECUTABLE};",
+        "generated Packet Tunnel executable name",
+    )
+    require_text(
+        pbx,
+        f'PRODUCT_NAME = "{EXTENSION_ID}";',
+        "generated Packet Tunnel product name",
+    )
+    for setting in (
+        "PROVISIONING_PROFILE_SPECIFIER = \"$(CFW_PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER)\";",
+        "PROVISIONING_PROFILE_SPECIFIER = \"$(CFW_PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER)\";",
+    ):
+        require_text(pbx, setting, "generated target-local provisioning")
 
 
 def verify_packet_tunnel_info(info: dict[str, Any]) -> None:
+    if info.get("CFBundleExecutable") != "$(EXECUTABLE_NAME)":
+        raise NativeProductGraphError(
+            "generated Packet Tunnel Info.plist must bind CFBundleExecutable to EXECUTABLE_NAME"
+        )
     network = info.get("NetworkExtension")
     if not isinstance(network, dict):
         raise NativeProductGraphError(
@@ -227,13 +321,35 @@ def verify_packet_tunnel_info(info: dict[str, Any]) -> None:
         )
 
 
+def verify_global_authority_info(info: dict[str, Any]) -> None:
+    expected = {
+        "CFBundleDevelopmentRegion": "$(DEVELOPMENT_LANGUAGE)",
+        "CFBundleExecutable": "$(EXECUTABLE_NAME)",
+        "CFBundleIdentifier": "$(PRODUCT_BUNDLE_IDENTIFIER)",
+        "CFBundleInfoDictionaryVersion": "6.0",
+        "CFBundleName": "$(PRODUCT_NAME)",
+        "CFBundleShortVersionString": "$(MARKETING_VERSION)",
+        "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
+        "LSMinimumSystemVersion": "$(MACOSX_DEPLOYMENT_TARGET)",
+    }
+    if info != expected:
+        raise NativeProductGraphError(
+            "Global Authority embedded Info.plist must be the exact fixed "
+            "identity and version contract"
+        )
+
+
 def verify_native_build_script(build: str) -> None:
-    require_text(build, "CFW_GLOBAL_AUTHORITY_REQUIRED=1", "candidate native build")
+    require_text(
+        build,
+        "verify_native_product_graph.py",
+        "candidate native build product-graph gate",
+    )
     for product in (
         "CFWGlobalAuthority",
         "CFWNativeBridge.framework",
         "CFWProxyAgent.app",
-        "CFWPacketTunnel.systemextension",
+        EXTENSION_WRAPPER,
     ):
         require_text(build, product, "candidate native build products")
     for scheme in (
@@ -254,7 +370,33 @@ def verify_native_build_script(build: str) -> None:
         "PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER",
         "candidate native build provisioning",
     )
+    require_text(
+        build,
+        "CFW_PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER=",
+        "candidate target-local ProxyAgent provisioning",
+    )
+    require_text(
+        build,
+        "CFW_PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER=",
+        "candidate target-local Packet Tunnel provisioning",
+    )
+    if '    PROVISIONING_PROFILE_SPECIFIER="' in build:
+        raise NativeProductGraphError(
+            "candidate native build must not propagate a provisioning profile "
+            "specifier to dependency targets"
+        )
     require_text(build, "ARCHS=arm64", "candidate native build architecture")
+    for signing_contract in (
+        "authority_designated_requirement=",
+        '-r="$authority_designated_requirement"',
+        'csreq -r="$authority_designated_requirement"',
+        "Global Authority designated requirement mismatch",
+    ):
+        require_text(
+            build,
+            signing_contract,
+            "candidate Global Authority exact signing requirement",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -321,9 +463,10 @@ def verify_daemon_plist(plist: dict[str, Any]) -> None:
             "Global Authority launchd daemon must run as root"
         )
     services = plist.get("MachServices")
-    if services != {MACH_SERVICE: True}:
+    expected_services = {service: True for service in MACH_SERVICES}
+    if services != expected_services:
         raise NativeProductGraphError(
-            f"Global Authority launchd MachServices must be exactly {{{MACH_SERVICE!r}: true}}"
+            f"Global Authority launchd MachServices must be exactly {expected_services!r}"
         )
     for forbidden in ("ProgramArguments", "Sockets", "WatchPaths", "QueueDirectories"):
         if forbidden in plist:
@@ -333,6 +476,17 @@ def verify_daemon_plist(plist: dict[str, Any]) -> None:
 
 
 def verify_entitlements(root: Path) -> None:
+    def require_exact_keys(
+        entitlements: dict[str, Any], expected: set[str], label: str
+    ) -> None:
+        actual = set(entitlements)
+        if actual != expected:
+            raise NativeProductGraphError(
+                f"{label} entitlement keys must be exact; "
+                f"missing={sorted(expected - actual)!r}, "
+                f"unexpected={sorted(actual - expected)!r}"
+            )
+
     authority = read_plist(root, "native/macos/Config/GlobalAuthority.entitlements")
     if authority:
         raise NativeProductGraphError(
@@ -340,6 +494,17 @@ def verify_entitlements(root: Path) -> None:
         )
 
     packet = read_plist(root, "native/macos/Config/PacketTunnel.entitlements")
+    require_exact_keys(
+        packet,
+        {
+            "com.apple.developer.networking.networkextension",
+            "com.apple.security.app-sandbox",
+            "com.apple.security.application-groups",
+            "com.apple.security.network.client",
+            "com.apple.security.network.server",
+        },
+        "Packet Tunnel",
+    )
     if packet.get("com.apple.developer.networking.networkextension") != [
         "packet-tunnel-provider-systemextension"
     ]:
@@ -355,26 +520,47 @@ def verify_entitlements(root: Path) -> None:
             raise NativeProductGraphError(
                 f"Packet Tunnel entitlements must set {key} to true"
             )
-    if "com.apple.security.application-groups" in packet:
+    if packet.get("com.apple.security.application-groups") != [
+        "$(TeamIdentifierPrefix)group.com.bill.clashformac"
+    ]:
         raise NativeProductGraphError(
-            "Packet Tunnel entitlements must not claim an App Group"
+            "Packet Tunnel entitlements must declare the Authority Mach-service App Group"
         )
 
     agent = read_plist(root, "native/macos/Config/ProxyAgent.entitlements")
+    require_exact_keys(
+        agent,
+        {
+            "com.apple.security.application-groups",
+            "keychain-access-groups",
+        },
+        "ProxyAgent",
+    )
     if agent.get("com.apple.security.application-groups") != [
         "$(TeamIdentifierPrefix)group.com.bill.clashformac"
     ]:
         raise NativeProductGraphError(
             "ProxyAgent entitlements must declare the shared App Group"
         )
-    if not isinstance(agent.get("keychain-access-groups"), list) or not agent[
-        "keychain-access-groups"
+    if agent.get("keychain-access-groups") != [
+        "$(AppIdentifierPrefix)com.bill.clashformac.proxy-agent",
+        "$(AppIdentifierPrefix)com.bill.clashformac.credentials",
     ]:
         raise NativeProductGraphError(
-            "ProxyAgent entitlements must declare keychain access groups"
+            "ProxyAgent entitlements must declare its exact private and shared Keychain groups"
         )
 
     host = read_plist(root, "native/macos/Config/Host.entitlements")
+    require_exact_keys(
+        host,
+        {
+            "com.apple.developer.networking.networkextension",
+            "com.apple.developer.system-extension.install",
+            "com.apple.security.application-groups",
+            "keychain-access-groups",
+        },
+        "Host",
+    )
     if host.get("com.apple.developer.system-extension.install") is not True:
         raise NativeProductGraphError(
             "Host entitlements must permit System Extension installation"
@@ -390,6 +576,13 @@ def verify_entitlements(root: Path) -> None:
     ]:
         raise NativeProductGraphError(
             "Host entitlements must declare the shared App Group"
+        )
+    if host.get("keychain-access-groups") != [
+        "$(AppIdentifierPrefix)com.bill.clashformac",
+        "$(AppIdentifierPrefix)com.bill.clashformac.credentials",
+    ]:
+        raise NativeProductGraphError(
+            "Host entitlements must declare its exact private and shared Keychain groups"
         )
 
 
@@ -450,9 +643,9 @@ def verify_signing_order(
         raise NativeProductGraphError(
             "signing-order daemon stage must bind the LaunchDaemons plist"
         )
-    if daemon.get("machService") != MACH_SERVICE:
+    if daemon.get("machServices") != list(MACH_SERVICES):
         raise NativeProductGraphError(
-            "signing-order daemon stage must bind the fixed root Mach service"
+            "signing-order daemon stage must bind every role-scoped root Mach service"
         )
 
     # Every nested destination under Contents/ must map to a Tauri embedding.
@@ -505,6 +698,40 @@ def verify_repository(root: Path) -> None:
     pbx = read_text(root, "native/macos/CFWNative.xcodeproj/project.pbxproj")
     native_build = read_text(root, "scripts/build_native_products.sh")
     signing_script = read_text(root, "scripts/build_signed_candidate.sh")
+    authority_contract = read_text(
+        root,
+        "native/macos/Sources/CFWSharedProtocol/GlobalAuthorityConnectionContract.swift",
+    )
+    authority_runtime = read_text(
+        root, "native/macos/Sources/CFWGlobalAuthority/GlobalAuthorityDaemon.swift"
+    )
+
+    for service in MACH_SERVICES:
+        require_text(
+            authority_contract,
+            service.rsplit(".", 1)[-1],
+            "role-scoped Authority connection contract",
+        )
+    for signing_identifier in (HOST_ID, AGENT_ID, EXTENSION_ID):
+        require_text(
+            authority_contract,
+            signing_identifier,
+            "role-scoped Authority signing-identity contract",
+        )
+    for forbidden_custom_entitlement in (
+        "com.bill.clashformac.global-authority.client",
+        "com.bill.clashformac.global-authority.engine-owner",
+    ):
+        if forbidden_custom_entitlement in authority_contract:
+            raise NativeProductGraphError(
+                "Authority admission must not depend on a custom entitlement that "
+                "Apple provisioning profiles cannot authorize"
+            )
+    require_text(
+        authority_runtime,
+        "setConnectionCodeSigningRequirement",
+        "Global Authority listener code-signing admission",
+    )
 
     verify_xcodegen_spec(project)
     verify_swiftpm_manifest(package)
@@ -521,6 +748,10 @@ def verify_repository(root: Path) -> None:
     verify_daemon_plist(daemon_plist)
     packet_info = read_plist(root, "native/macos/Config/PacketTunnel-Info.plist")
     verify_packet_tunnel_info(packet_info)
+    authority_info = read_plist(
+        root, "native/macos/Config/GlobalAuthority-Info.plist"
+    )
+    verify_global_authority_info(authority_info)
     verify_entitlements(root)
 
     manifest = read_json(root, "native/macos/Config/signing-order.json")

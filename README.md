@@ -36,8 +36,13 @@ Trojan, or Hysteria2 outbounds, plus an optional `route.final` naming a
 declared tag. Persistent JSON contains canonical `credential_ref` objects,
 never passwords, UUID values, private keys, or other secrets. Projection emits
 only empty credential placeholders and closed injection slots. User-defined
-DNS/services, subscriptions and other remote resources, scripts, executable
-paths, raw credentials, and unknown fields are rejected. Credential entry
+DNS/services, remote resources inside profiles, scripts, executable paths, raw
+credentials, and unknown fields are rejected. Subscription import is a
+boundary conversion into that schema: typed profile JSON passes through, and
+Clash Meta YAML `proxies` lists and node-URI bundles (`ss://`, `vmess://`,
+`vless://`, `trojan://`, `hysteria2://`) are converted with bounded parsers
+whose secrets go straight to the credential vault, never into the stored
+profile. Credential entry
 queries only missing references and submits them as one bounded, zeroized
 batch to the immutable shared-Keychain vault. Existing UUIDs are not
 re-prompted; same-value retries are idempotent and rotation requires a new UUID
@@ -107,7 +112,8 @@ Release inputs are recorded in
 - Rust 1.97.1
 - Node.js 24.18.0 LTS
 - Go 1.26.5
-- SagerNet gomobile v0.1.12
+- SagerNet gomobile v0.1.13
+- cargo-deny 0.20.2
 - sing-box/libbox v1.13.14 at
   `25a600db24f7680ad9806ce5427bd0ab8afe1114`
 - Apple provider reference at
@@ -118,6 +124,11 @@ particular, code that obtains a packet-flow file descriptor through KVC is not
 used.
 
 ## Development
+
+Every change follows the standards in
+[`docs/engineering-standards.md`](./docs/engineering-standards.md): fail-fast
+error handling, no silent fallbacks, zero warnings, and CI-parity verification
+before delivery.
 
 On macOS 15+ Apple Silicon:
 
@@ -132,7 +143,7 @@ npm ci
 npm run build
 
 cd ../../native/macos
-swift test
+swift test -Xswiftc -warnings-as-errors
 ```
 
 The UI build writes only generated files under
@@ -163,7 +174,7 @@ SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
   ./scripts/build_libbox.sh
 ```
 
-The build refuses a different commit, any diff beyond the exact two-patch
+The build refuses a different commit, any diff beyond the exact three-patch
 series, a wrong Go/gomobile toolchain, changed module files, existing output,
 or missing offline module cache. It records a path-independent SHA-256 tree
 manifest for the produced XCFramework. See

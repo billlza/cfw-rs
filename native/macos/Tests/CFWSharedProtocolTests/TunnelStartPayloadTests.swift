@@ -22,6 +22,7 @@ private func payloadDescriptor(
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true),
+    credentialAudience: try testCredentialAudience(),
     installationID: #require(UUID(uuidString: "11111111-1111-4111-8111-111111111111")),
     epoch: 1,
     generation: 1,

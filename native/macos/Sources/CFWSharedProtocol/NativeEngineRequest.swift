@@ -2,13 +2,14 @@ import CryptoKit
 import Foundation
 
 public enum NativeBridgeProtocolConstants {
-  public static let schemaVersion: UInt16 = 3
+  public static let schemaVersion: UInt16 = 4
   public static let maximumRequestBytes = 1_048_576
   public static let maximumResponseBytes = 1_048_576
   public static let maximumFailureMessageBytes = 1_024
   public static let maximumCredentialSlots = 256
   public static let maximumCredentialOutbounds = 128
   public static let maximumCredentialVaultReferences = 512
+  public static let maximumCredentialCatalogProfiles = 4_096
 }
 
 public enum NativeBridgeProtocolError: Error, Equatable, Sendable {
@@ -70,6 +71,45 @@ public struct EngineCommandContext: Codable, Equatable, Sendable {
     try container.encode(installationID.uuidString.lowercased(), forKey: .installationID)
     try container.encode(configEpoch, forKey: .configEpoch)
     try container.encode(generation, forKey: .generation)
+  }
+}
+
+/// Exact validated profile identity authorized to use credential material.
+/// Both fields are secret-free and are included in every runtime identity
+/// digest; neither may be inferred from a credential UUID.
+public struct CredentialAudience: Codable, Equatable, Hashable, Sendable {
+  public let profileID: UUID
+  public let profileDigest: SHA256Digest
+
+  public init(profileID: UUID, profileDigest: SHA256Digest) {
+    self.profileID = profileID
+    self.profileDigest = profileDigest
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case profileID = "profile_id"
+    case profileDigest = "profile_digest"
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let profileIDText = try container.decode(String.self, forKey: .profileID)
+    guard profileIDText == profileIDText.lowercased(),
+      let profileID = UUID(uuidString: profileIDText),
+      profileID.uuidString.lowercased() == profileIDText
+    else {
+      throw NativeBridgeProtocolError.invalidContext
+    }
+    self.init(
+      profileID: profileID,
+      profileDigest: try container.decode(SHA256Digest.self, forKey: .profileDigest)
+    )
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(profileID.uuidString.lowercased(), forKey: .profileID)
+    try container.encode(profileDigest, forKey: .profileDigest)
   }
 }
 
@@ -147,6 +187,80 @@ public struct CredentialReference: Codable, Equatable, Hashable, Sendable {
   }
 }
 
+extension CredentialReference {
+  public static func canonicalPrecedes(
+    _ left: CredentialReference,
+    _ right: CredentialReference
+  ) -> Bool {
+    let leftID = left.id.uuidString.lowercased()
+    let rightID = right.id.uuidString.lowercased()
+    if leftID != rightID {
+      return leftID < rightID
+    }
+    return left.kind.rawValue < right.kind.rawValue
+  }
+}
+
+public struct CredentialBinding: Codable, Equatable, Hashable, Sendable {
+  public let audience: CredentialAudience
+  public let reference: CredentialReference
+
+  public init(audience: CredentialAudience, reference: CredentialReference) {
+    self.audience = audience
+    self.reference = reference
+  }
+
+  public static func canonicalPrecedes(
+    _ left: CredentialBinding,
+    _ right: CredentialBinding
+  ) -> Bool {
+    let leftProfileID = left.audience.profileID.uuidString.lowercased()
+    let rightProfileID = right.audience.profileID.uuidString.lowercased()
+    if leftProfileID != rightProfileID {
+      return leftProfileID < rightProfileID
+    }
+    if left.audience.profileDigest.hex != right.audience.profileDigest.hex {
+      return left.audience.profileDigest.hex < right.audience.profileDigest.hex
+    }
+    return CredentialReference.canonicalPrecedes(left.reference, right.reference)
+  }
+}
+
+public struct CredentialProfileCatalogEntry: Codable, Equatable, Sendable {
+  public let audience: CredentialAudience
+  public let references: [CredentialReference]
+
+  public init(
+    audience: CredentialAudience,
+    references: [CredentialReference]
+  ) throws {
+    guard references.count <= NativeBridgeProtocolConstants.maximumCredentialSlots,
+      references.sorted(by: CredentialReference.canonicalPrecedes) == references
+    else {
+      throw NativeBridgeProtocolError.invalidCredentialSlot
+    }
+    var identifiers = Set<UUID>()
+    guard references.allSatisfy({ identifiers.insert($0.id).inserted }) else {
+      throw NativeBridgeProtocolError.duplicateCredentialPointer
+    }
+    self.audience = audience
+    self.references = references
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case audience
+    case references
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    try self.init(
+      audience: container.decode(CredentialAudience.self, forKey: .audience),
+      references: container.decode([CredentialReference].self, forKey: .references)
+    )
+  }
+}
+
 public struct CredentialSlot: Codable, Equatable, Sendable {
   public let reference: CredentialReference
   public let target: CredentialTarget
@@ -191,6 +305,7 @@ public struct CredentialSlot: Codable, Equatable, Sendable {
 
 public struct EngineStartRequest: Codable, Equatable, Sendable {
   public let context: EngineCommandContext
+  public let credentialAudience: CredentialAudience
   public let configJSON: String
   public let configContentDigest: SHA256Digest
   public let configDigest: SHA256Digest
@@ -199,6 +314,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
 
   public init(
     context: EngineCommandContext,
+    credentialAudience: CredentialAudience,
     configJSON: String,
     configContentDigest: SHA256Digest,
     configDigest: SHA256Digest,
@@ -219,6 +335,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     try Self.validateCredentialSlots(credentialSlots, root: root)
     let expectedIdentity = try Self.identityDigest(
       configurationDigest: configContentDigest,
+      credentialAudience: credentialAudience,
       credentialSlots: credentialSlots,
       mode: tunnelOptions == nil ? .systemProxy : .tunnel,
       tunnelOptions: tunnelOptions
@@ -227,6 +344,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
       throw NativeBridgeProtocolError.configurationIdentityMismatch
     }
     self.context = context
+    self.credentialAudience = credentialAudience
     self.configJSON = configJSON
     self.configContentDigest = configContentDigest
     self.configDigest = configDigest
@@ -236,6 +354,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
 
   private enum CodingKeys: String, CodingKey {
     case context
+    case credentialAudience = "credential_audience"
     case configJSON = "config_json"
     case configContentDigest = "config_content_digest"
     case configDigest = "config_digest"
@@ -247,6 +366,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     try self.init(
       context: container.decode(EngineCommandContext.self, forKey: .context),
+      credentialAudience: container.decode(CredentialAudience.self, forKey: .credentialAudience),
       configJSON: container.decode(String.self, forKey: .configJSON),
       configContentDigest: SHA256Digest(
         hex: container.decode(String.self, forKey: .configContentDigest)
@@ -260,6 +380,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
   public func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(context, forKey: .context)
+    try container.encode(credentialAudience, forKey: .credentialAudience)
     try container.encode(configJSON, forKey: .configJSON)
     try container.encode(configContentDigest.hex, forKey: .configContentDigest)
     try container.encode(configDigest.hex, forKey: .configDigest)
@@ -272,6 +393,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     return try ConfigurationDescriptor(
       slot: slot,
       tunnelOptions: tunnelOptions,
+      credentialAudience: credentialAudience,
       installationID: context.descriptorInstallationID,
       epoch: context.configEpoch,
       generation: context.generation,
@@ -326,6 +448,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
 
   private struct IdentityDocument: Encodable {
     let configurationSHA256: String
+    let credentialAudience: CredentialAudience
     let credentialSlots: [CredentialSlot]
     let mode: String
     let networkOptions: TunnelNetworkOptions?
@@ -333,6 +456,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
       case configurationSHA256 = "configuration_sha256"
+      case credentialAudience = "credential_audience"
       case credentialSlots = "credential_slots"
       case mode
       case networkOptions = "network_options"
@@ -342,6 +466,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     func encode(to encoder: Encoder) throws {
       var container = encoder.container(keyedBy: CodingKeys.self)
       try container.encode(configurationSHA256, forKey: .configurationSHA256)
+      try container.encode(credentialAudience, forKey: .credentialAudience)
       try container.encode(credentialSlots, forKey: .credentialSlots)
       try container.encode(mode, forKey: .mode)
       if let networkOptions {
@@ -355,6 +480,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
 
   private static func identityDigest(
     configurationDigest: SHA256Digest,
+    credentialAudience: CredentialAudience,
     credentialSlots: [CredentialSlot],
     mode: EngineMode,
     tunnelOptions: TunnelNetworkOptions?
@@ -364,6 +490,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     let data = try encoder.encode(
       IdentityDocument(
         configurationSHA256: configurationDigest.hex,
+        credentialAudience: credentialAudience,
         credentialSlots: credentialSlots,
         mode: mode == .systemProxy ? "system_proxy" : "tunnel",
         networkOptions: tunnelOptions,

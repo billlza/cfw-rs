@@ -38,7 +38,7 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # which cannot be recomputed from the patch files alone. A pinned literal is
 # therefore the only form of this assertion that still fails when a pin drifts.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "f3d84e99e7832495975e4d78fd73744f63c1d0f79393b7276cce2f6e3e80c233"
+    "019f283e86222aed9aec2de94efa3166165af85d6828fbc876a689daa28c384a"
 )
 
 

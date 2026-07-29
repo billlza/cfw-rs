@@ -20,7 +20,7 @@ use crate::{
 
 #[derive(Clone, Copy)]
 pub(crate) enum StartupReconciliation {
-    RecoverKnownLineage,
+    CleanupKnownLineage,
     CleanupWithoutLineage,
 }
 
@@ -34,6 +34,7 @@ pub(crate) struct CoordinatorRuntime {
 
 pub(crate) struct SetModeCommand {
     pub(crate) target: EngineMode,
+    pub(crate) profile_id: String,
     pub(crate) profile: ValidatedSingBoxProfile,
     pub(crate) settings: EngineSettings,
     pub(crate) response: oneshot::Sender<Result<EngineSnapshot, EngineCoordinatorError>>,
@@ -41,6 +42,7 @@ pub(crate) struct SetModeCommand {
 
 pub(crate) struct PrepareCutoverCommand {
     pub(crate) target: EngineMode,
+    pub(crate) profile_id: String,
     pub(crate) profile: ValidatedSingBoxProfile,
     pub(crate) settings: EngineSettings,
     pub(crate) response: oneshot::Sender<Result<CutoverPreflightRequest, EngineCoordinatorError>>,
@@ -134,6 +136,7 @@ pub(crate) async fn run_coordinator(
                     Command::SetMode(command) => {
                         let SetModeCommand {
                             target,
+                            profile_id,
                             profile,
                             settings,
                             response,
@@ -146,12 +149,20 @@ pub(crate) async fn run_coordinator(
                             operation_timeout: options.operation_timeout,
                             status_query_timeout: options.status_query_timeout,
                         };
-                        let result = transition(context, &mut state, target, &profile, &settings).await;
+                        let result = transition(
+                            context,
+                            &mut state,
+                            target,
+                            &profile_id,
+                            &profile,
+                            &settings,
+                        ).await;
                         let _response_dropped = response.send(result);
                     }
                     Command::PrepareCutover(command) => {
                         let PrepareCutoverCommand {
                             target,
+                            profile_id,
                             profile,
                             settings,
                             response,
@@ -160,6 +171,7 @@ pub(crate) async fn run_coordinator(
                             &state,
                             &session,
                             target,
+                            &profile_id,
                             &profile,
                             &settings,
                         );

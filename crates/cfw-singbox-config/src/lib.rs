@@ -16,10 +16,12 @@ pub use controller::{
     CLASH_API_ADDRESS, ClashApiEndpoint, DEFAULT_CLASH_API_PORT, MIN_CLASH_API_PORT,
 };
 pub use credentials::{
-    CredentialKind, CredentialRef, CredentialSecret, CredentialSlot, CredentialSlotError,
-    CredentialTarget, InvalidCredentialRef, InvalidCredentialSecret, MAX_CREDENTIAL_SLOTS,
+    CredentialAudience, CredentialBinding, CredentialKind, CredentialRef, CredentialSecret,
+    CredentialSlot, CredentialSlotError, CredentialTarget, InvalidCredentialAudience,
+    InvalidCredentialRef, InvalidCredentialSecret, MAX_CREDENTIAL_SLOTS,
 };
 pub use error::ConfigError;
+pub use profile::MAX_OUTBOUNDS;
 pub use projection::{
     AuthenticatedDnsServer, EngineSettings, ProjectedConfig, ProjectionMode, TUNNEL_ADDRESS_PLAN,
     TunnelAddressPlan,

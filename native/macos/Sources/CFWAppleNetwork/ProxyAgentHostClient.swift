@@ -93,7 +93,11 @@ public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Senda
 public protocol ProxyAgentTransporting: Sendable {
   func registrationStatus() async -> ProxyAgentRegistrationStatus
   func ensureRegistered() async throws
-  func start(configuration: ConfigurationDescriptor) async throws
+  func start(
+    configuration: Data,
+    descriptor: ConfigurationDescriptor,
+    authorization: HostPreparedSystemProxyStart
+  ) async throws
   func stop(configuration: ConfigurationDescriptor) async throws
   func snapshot() async throws -> EngineSnapshot
   func validateConfiguration(
@@ -163,12 +167,89 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
     try serviceController.ensureRegistered()
   }
 
-  public func start(configuration: ConfigurationDescriptor) async throws {
-    let command = try NativeCommand(kind: .startSystemProxy, configuration: configuration)
-    let result = try await execute(command)
+  public func start(
+    configuration: Data,
+    descriptor: ConfigurationDescriptor,
+    authorization: HostPreparedSystemProxyStart
+  ) async throws {
+    try descriptor.validateConfigurationBytes(configuration)
+    let command = try NativeCommand(kind: .startSystemProxy, configuration: descriptor)
+    let request = RequestEnvelope(command: command)
+    let requestData = try ProtocolCodec.encode(request)
+    let contextData = try AuthorityV1Codec.encodeCanonical(authorization.context)
+    var capabilityData = try authorization.consumeCapabilityData()
+    defer {
+      capabilityData.resetBytes(
+        in: capabilityData.startIndex..<capabilityData.endIndex)
+      capabilityData.removeAll(keepingCapacity: false)
+    }
+    let result = try await awaitAuthorizedStart(
+      capabilityData: capabilityData,
+      contextData: contextData,
+      configurationData: configuration,
+      requestData: requestData,
+      requestID: request.requestID)
     guard result.kind == .accepted, result.snapshot == nil else {
       throw ProxyAgentHostError.malformedResponse
     }
+  }
+
+  private func awaitAuthorizedStart(
+    capabilityData: Data,
+    contextData: Data,
+    configurationData: Data,
+    requestData: Data,
+    requestID: RequestID
+  ) async throws -> CommandResult {
+    let connection = try connectedSession().connection
+    let responseData: Data = try await withCheckedThrowingContinuation { continuation in
+      let gate = ProxyAgentReplyGate(continuation)
+      guard
+        let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+        }) as? CFWProxyAgentXPCProtocol
+      else {
+        gate.finish(
+          .failure(ProxyAgentHostError.transportUnavailable("remote interface is unavailable")))
+        return
+      }
+      proxy.startSystemProxy(
+        capabilityData,
+        context: contextData,
+        configuration: configurationData,
+        request: requestData
+      ) { data, error in
+        if error != nil {
+          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+        } else if let data {
+          gate.finish(.success(data))
+        } else {
+          gate.finish(.failure(ProxyAgentHostError.malformedResponse))
+        }
+      }
+      let timeout = replyTimeout
+      Task {
+        do {
+          try await Task.sleep(for: timeout)
+          gate.finish(.failure(ProxyAgentHostError.transportTimedOut))
+        } catch is CancellationError {
+          return
+        } catch {
+          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("sleep-error")))
+        }
+      }
+    }
+    let response = try ProtocolCodec.decodeResponse(responseData)
+    guard response.requestID == requestID else {
+      throw ProxyAgentHostError.responseMismatch
+    }
+    if let failure = response.failure {
+      throw ProxyAgentHostError.agentFailure(failure)
+    }
+    guard let result = response.result else {
+      throw ProxyAgentHostError.malformedResponse
+    }
+    return result
   }
 
   public func stop(configuration: ConfigurationDescriptor) async throws {
@@ -181,8 +262,13 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
   }
 
   public func snapshot() async throws -> EngineSnapshot {
-    guard serviceController.registrationStatus() == .enabled else {
-      return .off
+    switch serviceController.registrationStatus() {
+    case .enabled:
+      break
+    case .requiresApproval:
+      throw ProxyAgentHostError.registrationRequiresApproval
+    case .notRegistered, .notFound:
+      throw ProxyAgentHostError.registrationUnavailable
     }
     let result = try await execute(NativeCommand(kind: .snapshot))
     guard result.kind == .snapshot, let snapshot = result.snapshot else {

@@ -27,6 +27,7 @@ async fn dropped_request_waiter_does_not_cancel_native_transition() {
             coordinator
                 .set_mode(
                     EngineMode::SystemProxy,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
                     ValidatedSingBoxProfile::direct(),
                     EngineSettings::default(),
                 )
@@ -63,6 +64,7 @@ async fn shutdown_stops_runtime_and_closes_coordinator() {
     coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -75,6 +77,7 @@ async fn shutdown_stops_runtime_and_closes_coordinator() {
     let error = coordinator
         .set_mode(
             EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -99,6 +102,7 @@ async fn initial_generation_is_never_reused() {
     let snapshot = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -120,6 +124,7 @@ async fn persisted_generation_survives_coordinator_restart() {
     let active = first
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -136,6 +141,7 @@ async fn persisted_generation_survives_coordinator_restart() {
     let restarted = second
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -157,6 +163,7 @@ async fn shutdown_stops_exact_runtime_before_reporting_generation_failure() {
     let active = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -180,6 +187,7 @@ async fn shutdown_stops_exact_runtime_before_reporting_generation_failure() {
         coordinator
             .set_mode(
                 EngineMode::Off,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
                 ValidatedSingBoxProfile::direct(),
                 EngineSettings::default(),
             )
@@ -201,6 +209,7 @@ async fn explicit_off_stops_exact_runtime_before_reporting_generation_failure() 
     let active = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -215,6 +224,7 @@ async fn explicit_off_stops_exact_runtime_before_reporting_generation_failure() 
     let error = coordinator
         .set_mode(
             EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -228,6 +238,7 @@ async fn explicit_off_stops_exact_runtime_before_reporting_generation_failure() 
     let repeated = coordinator
         .set_mode(
             EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -251,6 +262,7 @@ async fn unavailable_lineage_starts_off_only_and_still_allows_safe_shutdown() {
     let error = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -309,7 +321,7 @@ async fn unavailable_lineage_stops_reported_runtimes_instead_of_adopting_them() 
             .expect("untrusted active runtime is stopped");
         assert_eq!(reconciled.state, EngineState::Off);
         assert_eq!(backend.operations(), vec![expected_stop]);
-        assert_eq!(backend.query_count(), 1);
+        assert_eq!(backend.query_count(), 2);
         match expected_stop {
             "stop_proxy" => assert_eq!(backend.proxy_stop_contexts(), vec![expected_context]),
             "stop_tunnel" => assert_eq!(backend.tunnel_stop_contexts(), vec![expected_context]),
@@ -320,6 +332,7 @@ async fn unavailable_lineage_stops_reported_runtimes_instead_of_adopting_them() 
             coordinator
                 .set_mode(
                     EngineMode::SystemProxy,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
                     ValidatedSingBoxProfile::direct(),
                     EngineSettings::default(),
                 )
@@ -328,6 +341,46 @@ async fn unavailable_lineage_stops_reported_runtimes_instead_of_adopting_them() 
         ));
         coordinator.shutdown().await.expect("safe shutdown barrier");
     }
+}
+
+#[tokio::test]
+async fn host_restart_never_equates_stop_acknowledgement_with_global_off() {
+    let backend = Arc::new(FakeBackend::default());
+    backend.set_native_status(NativeEngineStatus::SystemProxy {
+        runtime: recovered_runtime(EngineOwner::ProxyAgent, 7),
+    });
+    *backend
+        .stop_leaves_owner_present
+        .lock()
+        .expect("stop observation lock") = true;
+    let coordinator = EngineModeCoordinator::spawn_persisted(
+        backend.clone(),
+        Arc::new(MemoryGenerationStore::new(7)),
+        Duration::from_millis(100),
+    )
+    .expect("persisted coordinator");
+
+    assert!(matches!(
+        coordinator.wait_for_reconciliation().await,
+        Err(EngineCoordinatorError::GlobalOffUnproven { .. })
+    ));
+    assert_eq!(backend.operations(), vec!["stop_proxy"]);
+    assert_eq!(backend.query_count(), 2);
+    assert!(matches!(
+        coordinator.snapshot().state,
+        EngineState::Failed { .. }
+    ));
+    assert!(
+        coordinator
+            .set_mode(
+                EngineMode::SystemProxy,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                ValidatedSingBoxProfile::direct(),
+                EngineSettings::default(),
+            )
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -442,6 +495,7 @@ async fn sender_drop_publishes_post_stop_lineage_failure() {
     coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -492,21 +546,21 @@ fn cleanup_only_runtime(owner: EngineOwner, generation: u64) -> RuntimeIdentity 
 }
 
 #[tokio::test]
-async fn host_restart_recovers_active_proxy_and_tunnel_exact_stop_leases() {
-    for (status, expected_state, expected_stop) in [
+async fn host_restart_stops_active_owner_before_accepting_a_fresh_controller_session() {
+    for (status, target, expected_operations) in [
         (
             NativeEngineStatus::SystemProxy {
                 runtime: recovered_runtime(EngineOwner::ProxyAgent, 7),
             },
             EngineMode::SystemProxy,
-            "stop_proxy",
+            vec!["stop_proxy", "start_proxy"],
         ),
         (
             NativeEngineStatus::Tunnel {
                 runtime: recovered_runtime(EngineOwner::PacketTunnelSystemExtension, 7),
             },
             EngineMode::Tunnel,
-            "stop_tunnel",
+            vec!["stop_tunnel", "install_tunnel", "start_tunnel"],
         ),
     ] {
         let backend = Arc::new(FakeBackend::default());
@@ -518,17 +572,29 @@ async fn host_restart_recovers_active_proxy_and_tunnel_exact_stop_leases() {
             Duration::from_millis(100),
         )
         .expect("persisted coordinator");
-        let recovered = coordinator
+        let reconciled = coordinator
             .wait_for_reconciliation()
             .await
-            .expect("recovered native runtime");
-        assert_eq!(recovered.state.active_mode(), expected_state);
-        assert_eq!(backend.query_count(), 1);
+            .expect("stale controller owner is stopped exactly");
+        assert_eq!(reconciled.state, EngineState::Off);
+        assert_eq!(backend.query_count(), 2);
 
-        let stopped = coordinator.shutdown().await.expect("exact stop barrier");
-        assert_eq!(stopped.state, EngineState::Off);
-        assert_eq!(stopped.generation, 8);
-        assert_eq!(backend.operations(), vec![expected_stop]);
+        let restarted = coordinator
+            .set_mode(
+                target,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                ValidatedSingBoxProfile::direct(),
+                EngineSettings::default(),
+            )
+            .await
+            .expect("fresh Host process starts a new controller generation");
+        assert_eq!(restarted.state.active_mode(), target);
+        assert_eq!(restarted.generation, 8);
+        assert_eq!(backend.operations(), expected_operations);
+        coordinator
+            .shutdown()
+            .await
+            .expect("fresh exact stop barrier");
     }
 }
 
@@ -558,6 +624,7 @@ async fn recovered_owner_mismatch_stops_exact_endpoint_and_blocks_new_starts() {
         coordinator
             .set_mode(
                 EngineMode::Tunnel,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
                 ValidatedSingBoxProfile::direct(),
                 EngineSettings::default(),
             )
@@ -568,6 +635,36 @@ async fn recovered_owner_mismatch_stops_exact_endpoint_and_blocks_new_starts() {
         .shutdown()
         .await
         .expect("cleaned mismatch permits safe shutdown");
+}
+
+#[tokio::test]
+async fn recovered_owner_mismatch_requires_independent_global_off_proof_after_stop() {
+    let backend = Arc::new(FakeBackend::default());
+    backend.set_native_status(NativeEngineStatus::SystemProxy {
+        runtime: recovered_runtime(EngineOwner::PacketTunnelSystemExtension, 7),
+    });
+    *backend
+        .stop_leaves_owner_present
+        .lock()
+        .expect("stop observation lock") = true;
+    let coordinator = EngineModeCoordinator::spawn_persisted(
+        backend.clone(),
+        Arc::new(MemoryGenerationStore::new(7)),
+        Duration::from_millis(100),
+    )
+    .expect("persisted coordinator");
+
+    assert!(matches!(
+        coordinator.wait_for_reconciliation().await,
+        Err(EngineCoordinatorError::ValidationAndOffProofFailed { .. })
+    ));
+    assert_eq!(backend.operations(), vec!["stop_proxy"]);
+    assert_eq!(backend.query_count(), 2);
+    assert!(matches!(
+        coordinator.snapshot().state,
+        EngineState::Failed { .. }
+    ));
+    assert!(coordinator.shutdown().await.is_err());
 }
 
 #[tokio::test]
@@ -583,6 +680,7 @@ async fn bounded_command_queue_reports_backpressure() {
             coordinator
                 .set_mode(
                     EngineMode::SystemProxy,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
                     ValidatedSingBoxProfile::direct(),
                     EngineSettings::default(),
                 )
@@ -620,6 +718,7 @@ async fn concurrent_requests_are_executed_serially() {
             coordinator
                 .set_mode(
                     EngineMode::SystemProxy,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
                     ValidatedSingBoxProfile::direct(),
                     EngineSettings::default(),
                 )
@@ -632,6 +731,7 @@ async fn concurrent_requests_are_executed_serially() {
             coordinator
                 .set_mode(
                     EngineMode::Tunnel,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
                     ValidatedSingBoxProfile::direct(),
                     EngineSettings::default(),
                 )
@@ -704,6 +804,7 @@ async fn backend_errors_do_not_fallback_to_another_mode() {
     let error = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )

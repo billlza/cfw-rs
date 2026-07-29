@@ -59,6 +59,9 @@ private func descriptor(
       bypassPrivateNetworks: bypassPrivateNetworks,
       mtu: 1_500
     ),
+    credentialAudience: CredentialAudience(
+      profileID: UUID(),
+      profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
     installationID: UUID(),
     epoch: 1,
     generation: 1,

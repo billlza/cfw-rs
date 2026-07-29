@@ -2,10 +2,6 @@
 
 import PackageDescription
 
-let releaseAuthoritySwiftSettings: [SwiftSetting] = [
-  .define("CFW_GLOBAL_AUTHORITY_REQUIRED", .when(configuration: .release))
-]
-
 let package = Package(
   name: "CFWNative",
   platforms: [
@@ -27,7 +23,6 @@ let package = Package(
   targets: [
     .target(
       name: "CFWSharedProtocol",
-      swiftSettings: releaseAuthoritySwiftSettings,
       linkerSettings: [
         .linkedFramework("CryptoKit"),
         .linkedFramework("Security"),
@@ -109,8 +104,7 @@ let package = Package(
     ),
     .testTarget(
       name: "CFWSharedProtocolTests",
-      dependencies: ["CFWSharedProtocol"],
-      swiftSettings: releaseAuthoritySwiftSettings
+      dependencies: ["CFWSharedProtocol"]
     ),
     .testTarget(
       name: "CFWGlobalAuthorityTests",

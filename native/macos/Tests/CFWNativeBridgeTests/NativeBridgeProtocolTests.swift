@@ -68,7 +68,7 @@ private func contractFixture(_ name: String) throws -> Data {
   return try Data(
     contentsOf:
       root
-      .appendingPathComponent("contracts/native-bridge-v3", isDirectory: true)
+      .appendingPathComponent("contracts/native-bridge-v4", isDirectory: true)
       .appendingPathComponent(name)
   )
 }
@@ -76,7 +76,7 @@ private func contractFixture(_ name: String) throws -> Data {
 @Test func validMinimalQueryRequestIsAccepted() throws {
   let request = try decode(
     """
-    {"schema_version":3,"request_id":"\(requestID)","command":{"opcode":"query_status"}}
+    {"schema_version":4,"request_id":"\(requestID)","command":{"opcode":"query_status"}}
     """
   )
   #expect(request.requestID.uuidString.lowercased() == requestID)
@@ -86,34 +86,34 @@ private func contractFixture(_ name: String) throws -> Data {
   #expect(throws: (any Error).self) {
     try decode(
       """
-      {"schema_version":3,"request_id":"\(requestID)","command":{"opcode":"query_status"},"unexpected":true}
+      {"schema_version":4,"request_id":"\(requestID)","command":{"opcode":"query_status"},"unexpected":true}
       """
     )
   }
   #expect(throws: (any Error).self) {
     try decode(
       """
-      {"schema_version":3,"request_id":"\(requestID)","command":{"opcode":"query_status","unexpected":true}}
+      {"schema_version":4,"request_id":"\(requestID)","command":{"opcode":"query_status","unexpected":true}}
       """
     )
   }
   #expect(throws: (any Error).self) {
     try decode(
       """
-      {"schema_version":3,"request_id":"\(requestID)","command":{"opcode":"stop_system_proxy","payload":{"context":{"installation_id":"\(installationID)","config_epoch":1,"generation":1,"unexpected":true}}}}
+      {"schema_version":4,"request_id":"\(requestID)","command":{"opcode":"stop_system_proxy","payload":{"context":{"installation_id":"\(installationID)","config_epoch":1,"generation":1,"unexpected":true}}}}
       """
     )
   }
   #expect(throws: (any Error).self) {
     try decode(
       """
-      {"schema_version":3,"request_id":"\(requestID)","command":{"opcode":"preview_credential_garbage_collection","payload":{"request":{"snapshot_digest":"\(String(repeating: "ab", count: 32))","live_references":[{"id":"\(credentialID)","kind":"trojan_password","unexpected":true}]}}}}
+      {"schema_version":4,"request_id":"\(requestID)","command":{"opcode":"preview_credential_garbage_collection","payload":{"request":{"snapshot_digest":"\(String(repeating: "ab", count: 32))","catalog":[{"audience":{"profile_id":"\(requestID)","profile_digest":"\(String(repeating: "ee", count: 32))"},"references":[{"id":"\(credentialID)","kind":"trojan_password","unexpected":true}]}]}}}}
       """
     )
   }
 }
 
-@Test func nativeBridgeV3ContractFixturesDecodeInSwift() throws {
+@Test func nativeBridgeV4ContractFixturesDecodeInSwift() throws {
   let query = try NativeBridgeProtocolCodec.decodeRequest(
     contractFixture("query-request.json")
   )
@@ -130,7 +130,8 @@ private func contractFixture(_ name: String) throws -> Data {
     return
   }
   #expect(preview.snapshotDigest.hex == String(repeating: "ab", count: 32))
-  #expect(preview.liveReferences.count == 1)
+  #expect(preview.catalog.count == 1)
+  #expect(preview.catalog[0].references.count == 1)
 
   let response = try JSONDecoder().decode(
     NativeResponseEnvelope.self,

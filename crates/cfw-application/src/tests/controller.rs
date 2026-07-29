@@ -17,7 +17,11 @@ fn controller_access_carries_the_loopback_endpoint_of_the_projection_it_starts()
     let profile = ValidatedSingBoxProfile::direct();
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
         let projected = profile
-            .project(mode, access.settings())
+            .project(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                mode,
+                access.settings(),
+            )
             .expect("projection");
         assert!(access.matches_projection(&projected));
         assert!(projected.as_json().contains(&format!(

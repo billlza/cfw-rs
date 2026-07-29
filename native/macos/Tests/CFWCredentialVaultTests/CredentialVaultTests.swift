@@ -40,6 +40,32 @@ private let firstID = UUID(uuidString: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")!
 private let secondID = UUID(uuidString: "cccccccc-cccc-4ccc-8ccc-cccccccccccc")!
 private let thirdID = UUID(uuidString: "dddddddd-dddd-4ddd-8ddd-dddddddddddd")!
 
+private func audience(
+  profileID: String = profileID,
+  digest: String = String(repeating: "11", count: 32)
+) throws -> CredentialAudience {
+  CredentialAudience(
+    profileID: UUID(uuidString: profileID)!,
+    profileDigest: try SHA256Digest(hex: digest)
+  )
+}
+
+private func catalog(
+  _ references: [CredentialReference],
+  audience: CredentialAudience? = nil
+) throws -> [CredentialProfileCatalogEntry] {
+  [
+    try CredentialProfileCatalogEntry(
+      audience: audience ?? (try selfAudience()),
+      references: references
+    )
+  ]
+}
+
+private func selfAudience() throws -> CredentialAudience {
+  try audience()
+}
+
 private func reference(
   _ id: UUID,
   kind: CredentialKind = .shadowsocksPassword
@@ -71,7 +97,7 @@ private func material(
   var initial = try material([(first, "first-secret")])
   defer { initial.erase() }
   _ = try vault.provision(
-    profileID: profileID,
+    audience: try audience(),
     requiredReferences: [first],
     material: initial
   )
@@ -79,13 +105,13 @@ private func material(
   var missingOnly = try material([(second, "second-secret")])
   defer { missingOnly.erase() }
   _ = try vault.provision(
-    profileID: profileID,
+    audience: try audience(),
     requiredReferences: [first, second],
     material: missingOnly
   )
 
   #expect(
-    try vault.presence(of: [first, second])
+    try vault.presence(audience: audience(), of: [first, second])
       == [
         CredentialPresence(reference: first, present: true),
         CredentialPresence(reference: second, present: true),
@@ -103,7 +129,7 @@ private func material(
 
   #expect(throws: CredentialVaultError.missingCredential(secondID)) {
     try vault.provision(
-      profileID: profileID,
+      audience: try audience(),
       requiredReferences: [first, second],
       material: supplied
     )
@@ -118,7 +144,7 @@ private func material(
   var original = try material([(first, "original-secret")])
   defer { original.erase() }
   _ = try vault.provision(
-    profileID: profileID,
+    audience: try audience(),
     requiredReferences: [first],
     material: original
   )
@@ -128,7 +154,7 @@ private func material(
   defer { changed.erase() }
   #expect(throws: CredentialVaultError.immutableConflict(firstID)) {
     try vault.provision(
-      profileID: profileID,
+      audience: try audience(),
       requiredReferences: [first],
       material: changed
     )
@@ -147,7 +173,7 @@ private func material(
         var value = try material([(reference, secret)])
         defer { value.erase() }
         _ = try vault.provision(
-          profileID: profileID,
+          audience: try audience(),
           requiredReferences: [reference],
           material: value
         )
@@ -156,7 +182,7 @@ private func material(
     try await group.waitForAll()
   }
   let vault = CredentialVault(testingStore: store)
-  #expect(try vault.presence(of: [first, second]).allSatisfy(\.present))
+  #expect(try vault.presence(audience: audience(), of: [first, second]).allSatisfy(\.present))
 }
 
 @Test func timingSafeComparisonRetainsLengthDifferencesAboveOneByte() {
@@ -170,6 +196,7 @@ private func material(
 
 @Test func persistedControlCharacterSecretIsCorruptNotPresent() throws {
   struct Entry: Codable {
+    let audience: CredentialAudience
     let reference: CredentialReference
     let secret: Data
   }
@@ -185,7 +212,13 @@ private func material(
     Document(
       schemaVersion: CredentialVaultConstants.schemaVersion,
       revision: revision,
-      entries: [Entry(reference: reference(firstID), secret: Data([0]))]
+      entries: [
+        Entry(
+          audience: try audience(),
+          reference: reference(firstID),
+          secret: Data([0])
+        )
+      ]
     )
   )
   let store = InMemoryVaultStore(
@@ -193,7 +226,7 @@ private func material(
   )
   let vault = CredentialVault(testingStore: store)
   #expect(throws: CredentialVaultError.corrupt) {
-    try vault.presence(of: [reference(firstID)])
+    try vault.presence(audience: audience(), of: [reference(firstID)])
   }
 }
 
@@ -205,7 +238,7 @@ private func material(
   var initial = try material([(shared, "shared-secret"), (orphan, "orphan-secret")])
   defer { initial.erase() }
   _ = try vault.provision(
-    profileID: profileID,
+    audience: try audience(),
     requiredReferences: [shared, orphan],
     material: initial
   )
@@ -213,24 +246,27 @@ private func material(
   let preview = try vault.previewGarbageCollection(
     CredentialGarbageCollectionRequest(
       snapshotDigest: digest,
-      liveReferences: [shared]
+      catalog: try catalog([shared])
     )
   )
-  #expect(preview.orphanReferences == [orphan])
+  #expect(
+    preview.orphanBindings
+      == [CredentialBinding(audience: try audience(), reference: orphan)]
+  )
   #expect(preview.orphanCount == 1)
 
   let receipt = try vault.commitGarbageCollection(
     CredentialGarbageCollectionCommitRequest(
       snapshotDigest: digest,
-      liveReferences: [shared],
+      catalog: try catalog([shared]),
       expectedVaultRevision: preview.vaultRevision,
-      expectedOrphanReferences: preview.orphanReferences
+      expectedOrphanBindings: preview.orphanBindings
     )
   )
   #expect(receipt.deletedCount == 1)
   #expect(receipt.vaultRevision != preview.vaultRevision)
   #expect(
-    try vault.presence(of: [shared, orphan])
+    try vault.presence(audience: audience(), of: [shared, orphan])
       == [
         CredentialPresence(reference: shared, present: true),
         CredentialPresence(reference: orphan, present: false),
@@ -247,19 +283,19 @@ private func material(
   var initial = try material([(live, "live-secret"), (orphan, "orphan-secret")])
   defer { initial.erase() }
   _ = try vault.provision(
-    profileID: profileID,
+    audience: try audience(),
     requiredReferences: [live, orphan],
     material: initial
   )
   let digest = try SHA256Digest(hex: String(repeating: "cd", count: 32))
   let preview = try vault.previewGarbageCollection(
-    CredentialGarbageCollectionRequest(snapshotDigest: digest, liveReferences: [live])
+    CredentialGarbageCollectionRequest(snapshotDigest: digest, catalog: try catalog([live]))
   )
 
   var added = try material([(concurrent, "concurrent-secret")])
   defer { added.erase() }
   _ = try vault.provision(
-    profileID: profileID,
+    audience: try audience(),
     requiredReferences: [concurrent],
     material: added
   )
@@ -268,14 +304,17 @@ private func material(
     try vault.commitGarbageCollection(
       CredentialGarbageCollectionCommitRequest(
         snapshotDigest: digest,
-        liveReferences: [live],
+        catalog: try catalog([live]),
         expectedVaultRevision: preview.vaultRevision,
-        expectedOrphanReferences: preview.orphanReferences
+        expectedOrphanBindings: preview.orphanBindings
       )
     )
   }
   #expect(store.snapshot() == beforeCommit)
-  #expect(try vault.presence(of: [orphan, concurrent]).allSatisfy { $0.present })
+  #expect(
+    try vault.presence(audience: audience(), of: [orphan, concurrent])
+      .allSatisfy { $0.present }
+  )
 }
 
 @Test func changedOrphanConfirmationAndMissingLiveReferenceDeleteNothing() throws {
@@ -287,22 +326,22 @@ private func material(
   var initial = try material([(live, "live-secret"), (orphan, "orphan-secret")])
   defer { initial.erase() }
   _ = try vault.provision(
-    profileID: profileID,
+    audience: try audience(),
     requiredReferences: [live, orphan],
     material: initial
   )
   let digest = try SHA256Digest(hex: String(repeating: "ef", count: 32))
   let preview = try vault.previewGarbageCollection(
-    CredentialGarbageCollectionRequest(snapshotDigest: digest, liveReferences: [live])
+    CredentialGarbageCollectionRequest(snapshotDigest: digest, catalog: try catalog([live]))
   )
   let beforeCommit = store.snapshot()
   #expect(throws: CredentialVaultError.garbageCollectionConfirmationExpired) {
     try vault.commitGarbageCollection(
       CredentialGarbageCollectionCommitRequest(
         snapshotDigest: digest,
-        liveReferences: [live],
+        catalog: try catalog([live]),
         expectedVaultRevision: preview.vaultRevision,
-        expectedOrphanReferences: []
+        expectedOrphanBindings: []
       )
     )
   }
@@ -311,7 +350,7 @@ private func material(
     try vault.previewGarbageCollection(
       CredentialGarbageCollectionRequest(
         snapshotDigest: digest,
-        liveReferences: [live, missing]
+        catalog: try catalog([live, missing])
       )
     )
   }
@@ -323,7 +362,7 @@ private func material(
   let digest = try SHA256Digest(hex: String(repeating: "01", count: 32))
   #expect(throws: CredentialVaultError.missingVault) {
     try vault.previewGarbageCollection(
-      CredentialGarbageCollectionRequest(snapshotDigest: digest, liveReferences: [])
+      CredentialGarbageCollectionRequest(snapshotDigest: digest, catalog: [])
     )
   }
 }

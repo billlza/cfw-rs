@@ -47,6 +47,7 @@ from scripts.publication.final_candidate import (
     validate_final_candidate_binding,
 )
 from scripts.publication.sealed_closure import derive_supply_chain
+from scripts.repository_source_identity import repository_commit
 from scripts.tests.test_physical_evidence_aggregator import (
     APP_MANIFEST,
     BUILD_NUMBER,
@@ -54,8 +55,10 @@ from scripts.tests.test_physical_evidence_aggregator import (
     SIGNED_TREE,
     fixture as physical_fixture,
 )
+from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
+REPOSITORY_COMMIT = repository_commit(REPOSITORY)
 ACCEPT_CASES = 120
 REJECT_CASES = 200
 PHYSICAL = PHYSICAL_INPUTS
@@ -129,7 +132,7 @@ def _request(rng: random.Random, drop_physical: str | None = None) -> dict:
     manifest = _artifact_manifest(rng)
     request = {
         "product": {"version": "0.4.0", "build_number": BUILD_NUMBER},
-        "commit": _sha(rng)[:40],
+        "commit": REPOSITORY_COMMIT,
         "final_artifacts": {
             "signed_app_tree_sha256": SIGNED_TREE,
             "app_manifest_sha256": APP_MANIFEST,
@@ -155,12 +158,7 @@ def _request(rng: random.Random, drop_physical: str | None = None) -> dict:
             "target_signed_app_tree_sha256": SIGNED_TREE,
             "captured_at": captured,
         },
-        "gatekeeper": {
-            "assessment": "accepted",
-            "source": "spctl",
-            "target_signed_app_tree_sha256": SIGNED_TREE,
-            "captured_at": captured,
-        },
+        "gatekeeper": gatekeeper_fixture(SIGNED_TREE, captured),
         "physical_evidence": physical_fixture(),
     }
     if drop_physical is not None:
@@ -198,6 +196,16 @@ def mutate_unstapled(request, rng):
 def mutate_gatekeeper_rejected(request, rng):
     request["gatekeeper"]["assessment"] = "rejected"
     return request, "gatekeeper-rejected"
+
+
+def mutate_gatekeeper_disabled(request, rng):
+    request["gatekeeper"]["assessments_enabled"] = False
+    return request, "gatekeeper-disabled"
+
+
+def mutate_gatekeeper_output_digest(request, rng):
+    request["gatekeeper"]["assessment_output_sha256"] = _sha(rng)
+    return request, "gatekeeper-output-digest"
 
 
 def mutate_foreign_target(request, rng):
@@ -278,6 +286,8 @@ MUTATORS = (
     mutate_notarization_unaccepted,
     mutate_unstapled,
     mutate_gatekeeper_rejected,
+    mutate_gatekeeper_disabled,
+    mutate_gatekeeper_output_digest,
     mutate_foreign_target,
     mutate_stale_report,
     mutate_unbound_tree,

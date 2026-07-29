@@ -90,7 +90,7 @@ impl EngineModeCoordinator {
                 initial_generation: lineage.generation,
             },
             Some(generation_store),
-            StartupReconciliation::RecoverKnownLineage,
+            StartupReconciliation::CleanupKnownLineage,
         );
         spawn(task);
         Ok(coordinator)
@@ -152,7 +152,7 @@ impl EngineModeCoordinator {
             session,
             options,
             generation_store,
-            StartupReconciliation::RecoverKnownLineage,
+            StartupReconciliation::CleanupKnownLineage,
         );
         tokio::spawn(task);
         coordinator
@@ -213,6 +213,7 @@ impl EngineModeCoordinator {
     pub async fn set_mode(
         &self,
         target: EngineMode,
+        profile_id: String,
         profile: ValidatedSingBoxProfile,
         settings: EngineSettings,
     ) -> Result<EngineSnapshot, EngineCoordinatorError> {
@@ -220,6 +221,7 @@ impl EngineModeCoordinator {
         self.commands
             .try_send(Command::SetMode(Box::new(SetModeCommand {
                 target,
+                profile_id,
                 profile,
                 settings,
                 response: response_tx,
@@ -236,6 +238,7 @@ impl EngineModeCoordinator {
     pub async fn prepare_cutover(
         &self,
         target: EngineMode,
+        profile_id: String,
         profile: ValidatedSingBoxProfile,
         settings: EngineSettings,
     ) -> Result<CutoverPreflightRequest, EngineCoordinatorError> {
@@ -244,6 +247,7 @@ impl EngineModeCoordinator {
             .try_send(Command::PrepareCutover(Box::new(
                 crate::coordinator_actor::PrepareCutoverCommand {
                     target,
+                    profile_id,
                     profile,
                     settings,
                     response: response_tx,

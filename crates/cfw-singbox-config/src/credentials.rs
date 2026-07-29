@@ -9,6 +9,109 @@ pub const MAX_CREDENTIAL_SLOTS: usize = 256;
 const MAX_CREDENTIAL_OUTBOUNDS: usize = 128;
 const MAX_CREDENTIAL_SECRET_BYTES: usize = 16 * 1024;
 
+/// Exact, secret-free profile identity authorized to use a credential.
+///
+/// The repository-owned UUID prevents two profiles that reuse a credential
+/// reference from sharing material. The validated profile digest prevents a
+/// stale runtime projection from silently adopting credentials after the
+/// profile document changes.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialAudience {
+    profile_id: String,
+    profile_digest: String,
+}
+
+impl CredentialAudience {
+    pub fn new(
+        profile_id: impl Into<String>,
+        profile_digest: impl Into<String>,
+    ) -> Result<Self, InvalidCredentialAudience> {
+        let profile_id = profile_id.into();
+        let parsed = Uuid::parse_str(&profile_id).map_err(|_| InvalidCredentialAudience)?;
+        let profile_digest = profile_digest.into();
+        if parsed.hyphenated().to_string() != profile_id || !is_lowercase_sha256(&profile_digest) {
+            return Err(InvalidCredentialAudience);
+        }
+        Ok(Self {
+            profile_id,
+            profile_digest,
+        })
+    }
+
+    pub fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    pub fn profile_digest(&self) -> &str {
+        &self.profile_digest
+    }
+}
+
+impl fmt::Debug for CredentialAudience {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialAudience")
+            .field("profile_id", &self.profile_id)
+            .field("profile_digest", &self.profile_digest)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CredentialAudienceWire {
+    profile_id: String,
+    profile_digest: String,
+}
+
+impl<'de> Deserialize<'de> for CredentialAudience {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = CredentialAudienceWire::deserialize(deserializer)?;
+        Self::new(wire.profile_id, wire.profile_digest).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("credential audience requires a canonical profile UUID and lowercase SHA-256 digest")]
+pub struct InvalidCredentialAudience;
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// One exact non-secret vault identity. Sorting is the canonical wire and
+/// garbage-collection order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialBinding {
+    audience: CredentialAudience,
+    reference: CredentialRef,
+}
+
+impl CredentialBinding {
+    pub fn new(audience: CredentialAudience, reference: CredentialRef) -> Self {
+        Self {
+            audience,
+            reference,
+        }
+    }
+
+    pub fn audience(&self) -> &CredentialAudience {
+        &self.audience
+    }
+
+    pub fn reference(&self) -> &CredentialRef {
+        &self.reference
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialKind {

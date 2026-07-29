@@ -4,8 +4,14 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=scripts/dependency_pins.env
+source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_toolchain_contract.sh
+source "$repo_root/scripts/release_toolchain_contract.sh"
 # shellcheck source=scripts/release_publication_gate.sh
 source "$repo_root/scripts/release_publication_gate.sh"
+readonly toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
+readonly tauri_bin="$toolchain_root/tauri-cli-$TAURI_CLI_VERSION/bin/cargo-tauri"
 readonly tauri_config="$repo_root/apps/cfw-tauri-shell/tauri.conf.json"
 readonly official_release_origin="https://github.com/billlza/cfw-rs/releases/download"
 readonly maximum_updater_archive_bytes=$((192 * 1024 * 1024))
@@ -29,6 +35,7 @@ require_regular_file() {
 
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "updater release creation requires Apple Silicon macOS"
+cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
 
 app_path="${1:-$repo_root/target/candidates/0.4.0/signed/Clash for Mac.app}"
 [[ "$app_path" == /* ]] || die "application path must be absolute"
@@ -120,8 +127,9 @@ python3 "$repo_root/scripts/validate_updater_archive.py" "$staged_archive" "$app
 echo "==> signing updater archive"
 (
   cd "$repo_root"
-  cargo tauri signer sign -f "$key_path" "$staged_archive"
+  "$tauri_bin" signer sign -f "$key_path" "$staged_archive"
 )
+cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
 unset TAURI_SIGNING_PRIVATE_KEY_PASSWORD TAURI_SIGNING_PRIVATE_KEY_PATH
 require_regular_file "$staged_signature"
 

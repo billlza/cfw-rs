@@ -50,6 +50,7 @@ from scripts.publication.sealed_manifest import (
     validate_sealed_evidence_manifest,
 )
 from scripts.tests.test_sealed_manifest import (
+    COMMIT,
     REPOSITORY,
     ci_lanes,
     inner_manifest,
@@ -87,7 +88,7 @@ def _accept_request(rng: random.Random, workspace: Path, depth: int) -> dict:
     return request(
         depth,
         workspace,
-        commit=_commit(rng),
+        commit=COMMIT,
         capabilities=_capabilities(rng),
     )
 
@@ -146,6 +147,11 @@ def mutate_stale_lane_commit(payload, rng, workspace):
 def mutate_stale_lane_toolchain(payload, rng, workspace):
     rng.choice(payload["unsigned_ci"]["lanes"])["toolchain_sha256"] = _sha(rng)
     return "stale-lane-toolchain"
+
+
+def mutate_stale_lane_release_source(payload, rng, workspace):
+    rng.choice(payload["unsigned_ci"]["lanes"])["release_source_sha256"] = _sha(rng)
+    return "stale-lane-release-source"
 
 
 def mutate_stale_source_gate_commit(payload, rng, workspace):
@@ -230,6 +236,7 @@ REQUEST_MUTATORS = (
     mutate_masked_inner_report,
     mutate_stale_lane_commit,
     mutate_stale_lane_toolchain,
+    mutate_stale_lane_release_source,
     mutate_stale_source_gate_commit,
     mutate_stale_inner_toolchain,
     mutate_stale_inner_signed_app,
@@ -453,7 +460,7 @@ class SealedManifestFailClosedProperty(_CleanWorkspace):
             rng = random.Random(seed)
             key = f"{kind}:{'updater-key' if mutator is None else mutator.__name__}"
             if kind == "request":
-                payload = request(3, self.workspace, commit=_commit(rng))
+                payload = request(3, self.workspace, commit=COMMIT)
                 pristine = copy.deepcopy(payload)
                 label = mutator(payload, rng, self.workspace)
                 if payload == pristine:
@@ -504,7 +511,7 @@ class SealedManifestFailClosedProperty(_CleanWorkspace):
                     target = workspace / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text("never-read", encoding="utf-8")
-                    payload = request(3, workspace, commit=_commit(rng))
+                    payload = request(3, workspace, commit=COMMIT)
                     try:
                         document = build_sealed_evidence_manifest(
                             REPOSITORY, payload, fixture=True, workspace_root=workspace

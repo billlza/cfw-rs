@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
@@ -11,6 +10,7 @@ from urllib.parse import quote
 from .cargo_collector import CollectorResult
 from .common import PublicationError
 from .graph_model import ComponentSeed, RELEASE_VERSION, run, run_json, seed
+from .release_toolchains import verified_release_toolchain_trees
 
 
 def _normalize_native_graph(value: Any, native_root: Path, path: str = "$") -> Any:
@@ -102,16 +102,18 @@ def collect_native(repository: Path, pins: dict[str, str]) -> CollectorResult:
 
 
 def _checked_versions(repository: Path, pins: dict[str, str]) -> tuple[dict[str, str], Path]:
-    toolchain_root = Path(os.environ.get("CFW_TOOLCHAIN_ROOT", repository / "target/toolchains"))
+    toolchain_root, _tree_digests = verified_release_toolchain_trees(repository, pins)
     node_bin = toolchain_root / f"node-{pins['NODE_VERSION']}" / "bin/node"
     go_bin = toolchain_root / f"go-{pins['GO_VERSION']}" / "bin/go"
     xcodegen_bin = toolchain_root / f"xcodegen-{pins['XCODEGEN_VERSION']}" / "bin/xcodegen"
     gomobile_bin = toolchain_root / "go-workspace/bin/gomobile"
+    tauri_bin = toolchain_root / f"tauri-cli-{pins['TAURI_CLI_VERSION']}" / "bin/cargo-tauri"
     for path, label in (
         (node_bin, "Node.js"),
         (go_bin, "Go"),
         (xcodegen_bin, "XcodeGen"),
         (gomobile_bin, "gomobile"),
+        (tauri_bin, "tauri-cli"),
     ):
         if not path.is_file() or path.is_symlink() or not os.access(path, os.X_OK):
             raise PublicationError(f"pinned {label} tool is unavailable: {path}")
@@ -122,7 +124,7 @@ def _checked_versions(repository: Path, pins: dict[str, str]) -> tuple[dict[str,
         "node": run([str(node_bin), "--version"], repository).decode().strip(),
         "go": run([str(go_bin), "version"], repository).decode().strip(),
         "xcodegen": run([str(xcodegen_bin), "--version"], repository).decode().strip(),
-        "tauri-cli": run(["cargo", "tauri", "--version"], repository).decode().strip(),
+        "tauri-cli": run([str(tauri_bin), "--version"], repository).decode().strip(),
     }
     expected = {
         "rust": f"rustc {pins['RUST_VERSION']} ",
@@ -157,6 +159,7 @@ def _checked_versions(repository: Path, pins: dict[str, str]) -> tuple[dict[str,
         "xcodegen": pins["XCODEGEN_VERSION"],
         "tauri-cli": pins["TAURI_CLI_VERSION"],
     }
+    verified_release_toolchain_trees(repository, pins)
     return versions, toolchain_root
 
 
@@ -169,6 +172,7 @@ def collect_toolchains(
     )
     node_root = toolchain_root / f"node-{pins['NODE_VERSION']}"
     go_root = toolchain_root / f"go-{pins['GO_VERSION']}"
+    tauri_root = toolchain_root / f"tauri-cli-{pins['TAURI_CLI_VERSION']}"
     node_bin = (node_root / "bin/node").resolve(strict=True)
     go_bin = (go_root / "bin/go").resolve(strict=True)
     gomobile_bin = (toolchain_root / "go-workspace/bin/gomobile").resolve(strict=True)
@@ -189,10 +193,8 @@ def collect_toolchains(
     xcode_binary = Path(
         "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
     ).resolve(strict=True)
-    tauri_binary_value = shutil.which("cargo-tauri")
-    if tauri_binary_value is None:
-        raise PublicationError("pinned tauri-cli executable is unavailable")
-    tauri_binary = Path(tauri_binary_value).resolve(strict=True)
+    tauri_binary = (tauri_root / "bin/cargo-tauri").resolve(strict=True)
+    tauri_source = (tauri_root / "source").resolve(strict=True)
     details: dict[str, tuple[Path | None, Path | None, str | None]] = {
         "rust": (
             None,
@@ -221,7 +223,7 @@ def collect_toolchains(
         "xcodegen": (None, xcodegen_source, "MIT"),
         "tauri-cli": (
             None,
-            repository / "apps/cfw-tauri-shell/node_modules/esbuild",
+            tauri_source,
             "Apache-2.0 OR MIT",
         ),
     }
@@ -247,7 +249,11 @@ def collect_toolchains(
             purl,
             source_root,
             license_root=license_root,
-            metadata_path=repository / "scripts/dependency_pins.env",
+            metadata_path=(
+                tauri_source / "Cargo.toml"
+                if name == "tauri-cli"
+                else repository / "scripts/dependency_pins.env"
+            ),
             declared_license=declared_license,
             external_build_tool=True,
             provenance_paths=provenance_paths[name],

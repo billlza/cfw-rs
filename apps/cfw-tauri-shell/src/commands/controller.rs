@@ -19,31 +19,39 @@ use std::time::Duration;
 use cfw_controller::{
     ConnectionsSnapshot, ControllerClient, ControllerEndpoint, ControllerError, ControllerSnapshot,
     ControllerVersion, ProviderBatchResult, ProvidersSnapshot, ProxyDelayResult, RulesSnapshot,
-    StructuredLogEntry,
+    StructuredLogEntry, require_provider_management,
 };
 use cfw_engine_api::{EngineSnapshot, EngineState};
 use futures_util::StreamExt;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use thiserror::Error;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::engine::ManagedEngine;
 
-/// Delay probe target used when the caller passes none. 0.3.5 kept this in its
-/// settings file; the 0.4.0 preference model carries no controller-facing
-/// fields, so the renderer either passes a URL or gets this default.
-const DEFAULT_DELAY_TEST_URL: &str = "http://www.gstatic.com/generate_204";
+/// HTTPS-only probe target owned by a stable connectivity-check service. The
+/// renderer has no arbitrary URL preference, and the command rejects any other
+/// target so a compromised webview cannot turn the engine probe into SSRF.
+const DEFAULT_DELAY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 const DEFAULT_DELAY_TIMEOUT_MS: u16 = 5_000;
 const DEFAULT_DELAY_CONCURRENCY: usize = 8;
 const MAX_DELAY_CONCURRENCY: usize = 32;
+const MAX_DELAY_PROXIES: usize = 4_096;
+const MAX_CONTROLLER_NAME_BYTES: usize = 512;
 
 /// Level the controller log stream subscribes with. The controller filters
 /// server-side, and no preference selects a level in this release.
 const LOG_STREAM_LEVEL: &str = "info";
 /// Reconnect pause of the stream supervisors, matching 0.3.5.
 const STREAM_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const STREAM_READ_BUFFER_BYTES: usize = 64 * 1024;
+const STREAM_WRITE_BUFFER_BYTES: usize = 16 * 1024;
+const STREAM_MAX_WRITE_BUFFER_BYTES: usize = 64 * 1024;
+const STREAM_MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+const STREAM_MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// Event names the restored UI subscribes to. They are part of the product
 /// contract and must not change.
@@ -75,6 +83,12 @@ pub(crate) enum ControllerCommandError {
     /// unavailable. The detail never carries endpoint data.
     #[error("controller client is unavailable: {0}")]
     ClientUnavailable(String),
+    #[error(
+        "delay test target is not allowed; this build permits only https://www.gstatic.com/generate_204"
+    )]
+    DelayTargetNotAllowed,
+    #[error("controller command input is invalid: {0}")]
+    InvalidInput(&'static str),
     #[error(transparent)]
     Controller(#[from] ControllerError),
 }
@@ -213,6 +227,7 @@ pub(crate) async fn controller_version(
 pub(crate) async fn providers_snapshot(
     engine: State<'_, ManagedEngine>,
 ) -> Result<ProvidersSnapshot, String> {
+    require_provider_management().map_err(ipc_error)?;
     controller_client(&engine)
         .map_err(|error| error.to_ipc())?
         .providers()
@@ -252,11 +267,19 @@ pub(crate) async fn test_proxy_delays(
     timeout_ms: Option<u16>,
     concurrency: Option<usize>,
 ) -> Result<Vec<ProxyDelayResult>, String> {
+    if proxies.is_empty()
+        || proxies.len() > MAX_DELAY_PROXIES
+        || proxies
+            .iter()
+            .any(|name| name.is_empty() || name.len() > MAX_CONTROLLER_NAME_BYTES)
+    {
+        return Err(ControllerCommandError::InvalidInput(
+            "proxy delay target set is outside its bounds",
+        )
+        .to_ipc());
+    }
     let client = controller_client(&engine).map_err(|error| error.to_ipc())?;
-    let target_url = url
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_DELAY_TEST_URL.to_owned());
+    let target_url = resolve_delay_test_url(url).map_err(|error| error.to_ipc())?;
     let timeout = timeout_ms.unwrap_or(DEFAULT_DELAY_TIMEOUT_MS);
     let limit = concurrency
         .unwrap_or(DEFAULT_DELAY_CONCURRENCY)
@@ -266,11 +289,23 @@ pub(crate) async fn test_proxy_delays(
         .await)
 }
 
+fn resolve_delay_test_url(url: Option<String>) -> Result<String, ControllerCommandError> {
+    match url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None | Some(DEFAULT_DELAY_TEST_URL) => Ok(DEFAULT_DELAY_TEST_URL.to_owned()),
+        Some(_) => Err(ControllerCommandError::DelayTargetNotAllowed),
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn health_check_proxy_provider(
     engine: State<'_, ManagedEngine>,
     name: String,
 ) -> Result<(), String> {
+    require_provider_management().map_err(ipc_error)?;
     controller_client(&engine)
         .map_err(|error| error.to_ipc())?
         .health_check_proxy_provider(&name)
@@ -282,6 +317,7 @@ pub(crate) async fn health_check_proxy_provider(
 pub(crate) async fn health_check_all_proxy_providers(
     engine: State<'_, ManagedEngine>,
 ) -> Result<ProviderBatchResult, String> {
+    require_provider_management().map_err(ipc_error)?;
     controller_client(&engine)
         .map_err(|error| error.to_ipc())?
         .health_check_all_proxy_providers()
@@ -294,6 +330,7 @@ pub(crate) async fn update_proxy_provider(
     engine: State<'_, ManagedEngine>,
     name: String,
 ) -> Result<(), String> {
+    require_provider_management().map_err(ipc_error)?;
     controller_client(&engine)
         .map_err(|error| error.to_ipc())?
         .update_proxy_provider(&name)
@@ -305,6 +342,7 @@ pub(crate) async fn update_proxy_provider(
 pub(crate) async fn update_all_proxy_providers(
     engine: State<'_, ManagedEngine>,
 ) -> Result<ProviderBatchResult, String> {
+    require_provider_management().map_err(ipc_error)?;
     controller_client(&engine)
         .map_err(|error| error.to_ipc())?
         .update_all_proxy_providers()
@@ -317,6 +355,7 @@ pub(crate) async fn update_rule_provider(
     engine: State<'_, ManagedEngine>,
     name: String,
 ) -> Result<(), String> {
+    require_provider_management().map_err(ipc_error)?;
     controller_client(&engine)
         .map_err(|error| error.to_ipc())?
         .update_rule_provider(&name)
@@ -328,6 +367,7 @@ pub(crate) async fn update_rule_provider(
 pub(crate) async fn update_all_rule_providers(
     engine: State<'_, ManagedEngine>,
 ) -> Result<ProviderBatchResult, String> {
+    require_provider_management().map_err(ipc_error)?;
     controller_client(&engine)
         .map_err(|error| error.to_ipc())?
         .update_all_rule_providers()
@@ -388,25 +428,135 @@ pub(crate) async fn flush_fake_ip_cache(engine: State<'_, ManagedEngine>) -> Res
         .map_err(ipc_error)
 }
 
-/// One-shot ownership flags for the two controller event streams, so repeated
-/// renderer calls cannot spawn duplicate supervisors.
+/// Cancellable ownership for the two controller event streams. A reservation
+/// closes the race between task creation and task completion, so stop/restart
+/// cannot leave a stale "started" flag behind.
 #[derive(Default)]
 pub(crate) struct LiveStreams {
-    connections_started: Mutex<bool>,
-    logs_started: Mutex<bool>,
+    connections: Mutex<StreamSlot>,
+    logs: Mutex<StreamSlot>,
 }
 
-/// Claims a stream for the caller, returning `false` when a supervisor already
-/// owns it.
-fn claim_stream(flag: &Mutex<bool>) -> Result<bool, String> {
-    let mut started = flag
-        .lock()
-        .map_err(|error| ControllerCommandError::ClientUnavailable(error.to_string()).to_ipc())?;
-    if *started {
-        return Ok(false);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamKind {
+    Connections,
+    Logs,
+}
+
+#[derive(Default)]
+struct StreamSlot {
+    next_id: u64,
+    task: Option<StreamTask>,
+}
+
+enum StreamTask {
+    Starting {
+        id: u64,
+    },
+    Running {
+        id: u64,
+        handle: tauri::async_runtime::JoinHandle<()>,
+    },
+}
+
+impl LiveStreams {
+    fn slot(&self, kind: StreamKind) -> &Mutex<StreamSlot> {
+        match kind {
+            StreamKind::Connections => &self.connections,
+            StreamKind::Logs => &self.logs,
+        }
     }
-    *started = true;
-    Ok(true)
+
+    pub(crate) fn stop_all(&self) {
+        stop_stream_silently(&self.connections);
+        stop_stream_silently(&self.logs);
+    }
+}
+
+impl Drop for LiveStreams {
+    fn drop(&mut self) {
+        self.stop_all();
+    }
+}
+
+fn lock_stream_slot(
+    slot: &Mutex<StreamSlot>,
+) -> Result<std::sync::MutexGuard<'_, StreamSlot>, String> {
+    slot.lock()
+        .map_err(|error| ControllerCommandError::ClientUnavailable(error.to_string()).to_ipc())
+}
+
+/// Reserves a stream for a task that has not yet been attached. `None` means a
+/// live or starting supervisor already owns the stream.
+fn reserve_stream(slot: &Mutex<StreamSlot>) -> Result<Option<u64>, String> {
+    let mut slot = lock_stream_slot(slot)?;
+    if slot.task.is_some() {
+        return Ok(None);
+    }
+    slot.next_id = slot.next_id.wrapping_add(1).max(1);
+    let id = slot.next_id;
+    slot.task = Some(StreamTask::Starting { id });
+    Ok(Some(id))
+}
+
+fn attach_stream(
+    slot: &Mutex<StreamSlot>,
+    id: u64,
+    handle: tauri::async_runtime::JoinHandle<()>,
+) -> Result<(), String> {
+    let mut slot = match lock_stream_slot(slot) {
+        Ok(slot) => slot,
+        Err(error) => {
+            handle.abort();
+            return Err(error);
+        }
+    };
+    if matches!(slot.task, Some(StreamTask::Starting { id: current }) if current == id) {
+        slot.task = Some(StreamTask::Running { id, handle });
+    } else {
+        // Stop or task completion won the race while spawn was being attached.
+        handle.abort();
+    }
+    Ok(())
+}
+
+fn release_stream(slot: &Mutex<StreamSlot>, id: u64) {
+    let mut slot = match slot.lock() {
+        Ok(slot) => slot,
+        Err(error) => {
+            eprintln!("controller stream ownership release failed: {error}");
+            return;
+        }
+    };
+    let owned = match slot.task.as_ref() {
+        Some(StreamTask::Starting { id: current }) => *current == id,
+        Some(StreamTask::Running { id: current, .. }) => *current == id,
+        None => false,
+    };
+    if owned {
+        slot.task = None;
+    }
+}
+
+fn stop_stream(slot: &Mutex<StreamSlot>) -> Result<(), String> {
+    let task = lock_stream_slot(slot)?.task.take();
+    if let Some(StreamTask::Running { handle, .. }) = task {
+        handle.abort();
+    }
+    Ok(())
+}
+
+fn stop_stream_silently(slot: &Mutex<StreamSlot>) {
+    let mut slot = match slot.lock() {
+        Ok(slot) => slot,
+        Err(error) => {
+            eprintln!("controller stream shutdown failed: {error}");
+            return;
+        }
+    };
+    if let Some(StreamTask::Running { handle, .. }) = slot.task.take() {
+        handle.abort();
+    }
 }
 
 /// `cfw://stream-error` payload.
@@ -439,26 +589,7 @@ pub(crate) fn start_connections_stream(
     app: AppHandle,
     streams: State<'_, LiveStreams>,
 ) -> Result<(), String> {
-    if !claim_stream(&streams.connections_started)? {
-        return Ok(());
-    }
-
-    tauri::async_runtime::spawn(async move {
-        let mut last_error: Option<String> = None;
-        loop {
-            match run_connections_stream(&app).await {
-                // Clean close: the controller ended the subscription, so
-                // reconnect quietly.
-                Ok(()) => last_error = None,
-                Err(error) => {
-                    emit_unique_stream_error(&app, CONNECTIONS_STREAM, &mut last_error, error);
-                }
-            }
-            tokio::time::sleep(STREAM_RETRY_INTERVAL).await;
-        }
-    });
-
-    Ok(())
+    start_stream(app, &streams, StreamKind::Connections)
 }
 
 #[tauri::command]
@@ -466,38 +597,96 @@ pub(crate) fn start_log_stream(
     app: AppHandle,
     streams: State<'_, LiveStreams>,
 ) -> Result<(), String> {
-    if !claim_stream(&streams.logs_started)? {
+    start_stream(app, &streams, StreamKind::Logs)
+}
+
+#[tauri::command]
+pub(crate) fn stop_connections_stream(streams: State<'_, LiveStreams>) -> Result<(), String> {
+    stop_stream(streams.slot(StreamKind::Connections))
+}
+
+#[tauri::command]
+pub(crate) fn stop_log_stream(streams: State<'_, LiveStreams>) -> Result<(), String> {
+    stop_stream(streams.slot(StreamKind::Logs))
+}
+
+fn start_stream(app: AppHandle, streams: &LiveStreams, kind: StreamKind) -> Result<(), String> {
+    require_running_controller(&app.state::<ManagedEngine>().coordinator.snapshot())
+        .map_err(|error| error.to_ipc())?;
+    let Some(id) = reserve_stream(streams.slot(kind))? else {
         return Ok(());
-    }
-
-    tauri::async_runtime::spawn(async move {
-        let mut last_error: Option<String> = None;
-        loop {
-            match run_log_stream(&app).await {
-                Ok(()) => last_error = None,
-                Err(error) => {
-                    emit_unique_stream_error(&app, REQUEST_LOG_STREAM, &mut last_error, error);
-                }
-            }
-            tokio::time::sleep(STREAM_RETRY_INTERVAL).await;
-        }
+    };
+    let task_app = app.clone();
+    let handle = tauri::async_runtime::spawn(async move {
+        supervise_stream(&task_app, kind).await;
+        release_stream(task_app.state::<LiveStreams>().slot(kind), id);
     });
+    attach_stream(streams.slot(kind), id, handle)
+}
 
-    Ok(())
+async fn supervise_stream(app: &AppHandle, kind: StreamKind) {
+    let mut last_error: Option<String> = None;
+    loop {
+        if !running_controller_available(app) {
+            return;
+        }
+        let result = match kind {
+            StreamKind::Connections => run_connections_stream(app).await,
+            StreamKind::Logs => run_log_stream(app).await,
+        };
+        if !running_controller_available(app) {
+            return;
+        }
+        match result {
+            // A clean close while the engine remains active is reconnectable.
+            Ok(()) => last_error = None,
+            Err(error) => emit_unique_stream_error(
+                app,
+                match kind {
+                    StreamKind::Connections => CONNECTIONS_STREAM,
+                    StreamKind::Logs => REQUEST_LOG_STREAM,
+                },
+                &mut last_error,
+                error,
+            ),
+        }
+        tokio::time::sleep(STREAM_RETRY_INTERVAL).await;
+    }
+}
+
+fn running_controller_available(app: &AppHandle) -> bool {
+    require_running_controller(&app.state::<ManagedEngine>().coordinator.snapshot()).is_ok()
 }
 
 async fn run_connections_stream(app: &AppHandle) -> Result<(), String> {
     let client = client_from_app(app)?;
     let url = client.connections_stream_url().map_err(ipc_error)?;
-    let (socket, _response) = connect_async(url).await.map_err(transport_error)?;
+    let (socket, _response) =
+        connect_async_with_config(url, Some(controller_websocket_config()), false)
+            .await
+            .map_err(transport_error)?;
     let (_write, mut read) = socket.split();
-    while let Some(message) = read.next().await {
-        let message = message.map_err(transport_error)?;
-        if let Some(snapshot) = decode_connections_message(&message)? {
-            let _ = app.emit(CONNECTIONS_SNAPSHOT_EVENT, snapshot);
+    let mut engine_check = tokio::time::interval(Duration::from_millis(250));
+    engine_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            message = read.next() => {
+                let Some(message) = message else {
+                    return Ok(());
+                };
+                let message = message.map_err(transport_error)?;
+                if let Some(snapshot) = decode_connections_message(&message)? {
+                    app.emit(CONNECTIONS_SNAPSHOT_EVENT, snapshot)
+                        .map_err(|error| format!("failed to publish connections snapshot: {error}"))?;
+                }
+            }
+            _ = engine_check.tick() => {
+                if !running_controller_available(app) {
+                    return Ok(());
+                }
+            }
         }
     }
-    Ok(())
 }
 
 async fn run_log_stream(app: &AppHandle) -> Result<(), String> {
@@ -505,15 +694,41 @@ async fn run_log_stream(app: &AppHandle) -> Result<(), String> {
     let url = client
         .logs_stream_url(LOG_STREAM_LEVEL)
         .map_err(ipc_error)?;
-    let (socket, _response) = connect_async(url).await.map_err(transport_error)?;
+    let (socket, _response) =
+        connect_async_with_config(url, Some(controller_websocket_config()), false)
+            .await
+            .map_err(transport_error)?;
     let (_write, mut read) = socket.split();
-    while let Some(message) = read.next().await {
-        let message = message.map_err(transport_error)?;
-        if let Some(entry) = decode_log_message(&message)? {
-            let _ = app.emit(LOG_LINES_EVENT, vec![log_line_from_structured(entry)]);
+    let mut engine_check = tokio::time::interval(Duration::from_millis(250));
+    engine_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            message = read.next() => {
+                let Some(message) = message else {
+                    return Ok(());
+                };
+                let message = message.map_err(transport_error)?;
+                if let Some(entry) = decode_log_message(&message)? {
+                    app.emit(LOG_LINES_EVENT, vec![log_line_from_structured(entry)])
+                        .map_err(|error| format!("failed to publish log line: {error}"))?;
+                }
+            }
+            _ = engine_check.tick() => {
+                if !running_controller_available(app) {
+                    return Ok(());
+                }
+            }
         }
     }
-    Ok(())
+}
+
+fn controller_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .read_buffer_size(STREAM_READ_BUFFER_BYTES)
+        .write_buffer_size(STREAM_WRITE_BUFFER_BYTES)
+        .max_write_buffer_size(STREAM_MAX_WRITE_BUFFER_BYTES)
+        .max_message_size(Some(STREAM_MAX_MESSAGE_BYTES))
+        .max_frame_size(Some(STREAM_MAX_FRAME_BYTES))
 }
 
 /// Websocket transport failures can quote the handshake URL, which carries the
@@ -766,6 +981,17 @@ mod tests {
     }
 
     #[test]
+    fn controller_websocket_buffers_and_messages_are_bounded() {
+        let config = controller_websocket_config();
+        assert_eq!(config.read_buffer_size, STREAM_READ_BUFFER_BYTES);
+        assert_eq!(config.write_buffer_size, STREAM_WRITE_BUFFER_BYTES);
+        assert_eq!(config.max_write_buffer_size, STREAM_MAX_WRITE_BUFFER_BYTES);
+        assert_eq!(config.max_message_size, Some(STREAM_MAX_MESSAGE_BYTES));
+        assert_eq!(config.max_frame_size, Some(STREAM_MAX_FRAME_BYTES));
+        assert!(!config.accept_unmasked_frames);
+    }
+
+    #[test]
     fn engine_not_running_keeps_the_unreachable_controller_error_shape() {
         let rendered = ControllerCommandError::EngineNotRunning.to_ipc();
         assert!(
@@ -890,11 +1116,66 @@ mod tests {
     }
 
     #[test]
-    fn each_stream_is_claimed_once() {
+    fn each_stream_can_be_stopped_and_started_again() {
         let streams = LiveStreams::default();
-        assert!(claim_stream(&streams.connections_started).expect("first claim"));
-        assert!(!claim_stream(&streams.connections_started).expect("second claim"));
-        assert!(claim_stream(&streams.logs_started).expect("independent claim"));
+        let connections = streams.slot(StreamKind::Connections);
+        let logs = streams.slot(StreamKind::Logs);
+
+        assert!(reserve_stream(connections).expect("first claim").is_some());
+        assert!(
+            reserve_stream(connections)
+                .expect("duplicate claim")
+                .is_none()
+        );
+        assert!(reserve_stream(logs).expect("independent claim").is_some());
+
+        stop_stream(connections).expect("stop connections reservation");
+        assert!(
+            reserve_stream(connections)
+                .expect("restart after stop")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn stale_stream_completion_cannot_release_a_new_owner() {
+        let streams = LiveStreams::default();
+        let slot = streams.slot(StreamKind::Connections);
+        let stale_id = reserve_stream(slot).expect("stale reservation").unwrap();
+        stop_stream(slot).expect("cancel stale reservation");
+        let current_id = reserve_stream(slot).expect("current reservation").unwrap();
+        assert_ne!(stale_id, current_id);
+
+        release_stream(slot, stale_id);
+        assert!(
+            reserve_stream(slot)
+                .expect("current ownership check")
+                .is_none(),
+            "a stale completion must not clear the current reservation"
+        );
+    }
+
+    #[test]
+    fn delay_test_target_is_https_and_fixed() {
+        assert_eq!(
+            resolve_delay_test_url(None).expect("default target"),
+            DEFAULT_DELAY_TEST_URL
+        );
+        assert_eq!(
+            resolve_delay_test_url(Some(DEFAULT_DELAY_TEST_URL.into()))
+                .expect("explicit pinned target"),
+            DEFAULT_DELAY_TEST_URL
+        );
+        for rejected in [
+            "http://www.gstatic.com/generate_204",
+            "https://127.0.0.1/private",
+            "https://example.com/",
+        ] {
+            assert!(matches!(
+                resolve_delay_test_url(Some(rejected.into())),
+                Err(ControllerCommandError::DelayTargetNotAllowed)
+            ));
+        }
     }
 
     #[test]

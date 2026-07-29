@@ -8,10 +8,15 @@ public enum AuthorityJournalLimits {
   public static let maximumRecords = 4_096
   public static let maximumJournalBytes = 32 * 1_024 * 1_024
   public static let maximumHeadBytes = 1_024
+  /// A prepared start can still require claim/bind, ready, stop, owner-stopped,
+  /// Off, and recovery bookkeeping. Compaction happens before a prepare would
+  /// consume this reserve.
+  public static let minimumLifecycleFinishRecords = 7
 }
 
 public enum AuthorityJournalTransition: String, Codable, CaseIterable, Sendable {
-  case enrollAndPrepare = "enroll_and_prepare"
+  case enrollOff = "enroll_off"
+  case checkpoint
   case prepare
   case bindOwner = "bind_owner"
   case ready
@@ -53,7 +58,7 @@ public struct AuthorityCommittedState: Codable, Equatable, Sendable {
     leaseID: AuthorityIdentifier?,
     ownerUID: UInt32?
   ) throws {
-    guard epoch > 0, generation > 0, revision > 0 else {
+    guard revision > 0 else {
       throw AuthorityJournalValidationError.invalidState
     }
     let hasOperation =
@@ -68,7 +73,16 @@ public struct AuthorityCommittedState: Codable, Equatable, Sendable {
     guard state == .off ? hasNoOperation : true else {
       throw AuthorityJournalValidationError.invalidState
     }
-    schemaVersion = 1
+    if transition == .enrollOff {
+      guard epoch == 0, generation == 0, state == .off, hasNoOperation else {
+        throw AuthorityJournalValidationError.invalidState
+      }
+    } else {
+      guard epoch > 0, generation > 0 else {
+        throw AuthorityJournalValidationError.invalidState
+      }
+    }
+    schemaVersion = 2
     self.installationID = installationID
     self.epoch = epoch
     self.generation = generation
@@ -95,7 +109,7 @@ public struct AuthorityCommittedState: Codable, Equatable, Sendable {
 
   public init(from decoder: Decoder) throws {
     let value = try decoder.container(keyedBy: CodingKeys.self)
-    guard try value.decode(UInt16.self, forKey: .schemaVersion) == 1 else {
+    guard try value.decode(UInt16.self, forKey: .schemaVersion) == 2 else {
       throw AuthorityJournalValidationError.unsupportedSchema
     }
     try self.init(
@@ -124,7 +138,7 @@ public struct AuthorityJournalHead: Codable, Equatable, Sendable {
     guard sequence > 0, committedLength > 0 else {
       throw AuthorityJournalValidationError.invalidHead
     }
-    schemaVersion = 1
+    schemaVersion = 2
     self.sequence = sequence
     self.committedLength = committedLength
     self.recordSHA256 = recordSHA256
@@ -139,7 +153,7 @@ public struct AuthorityJournalHead: Codable, Equatable, Sendable {
 
   public init(from decoder: Decoder) throws {
     let value = try decoder.container(keyedBy: CodingKeys.self)
-    guard try value.decode(UInt16.self, forKey: .schemaVersion) == 1 else {
+    guard try value.decode(UInt16.self, forKey: .schemaVersion) == 2 else {
       throw AuthorityJournalValidationError.unsupportedSchema
     }
     try self.init(
@@ -169,12 +183,19 @@ public enum AuthorityJournalValidationError: Error, Equatable, Sendable {
   case reordered
   case rollback
   case invalidState
+  case anchorMissing
+  case anchorMismatch
+  case orphanedGenerationState
+  case invalidGenerationEntry
+  case generationCleanupFailed
+  case legacyStateRequiresMigration
 }
 
 public enum AuthorityRecoveryAction: Equatable, Sendable {
   case verifyOff
   case stopOwner
   case reattestOwner
+  case restoreAnchorAccess
 }
 
 public enum AuthorityRecoveryPosture: Equatable, Sendable {
@@ -320,7 +341,7 @@ struct AuthorityJournalDecodedRecord: Equatable {
 /// digest, CRC-32, then canonical JSON payload. The SHA-256 of the complete
 /// frame is the next record's chain value and the durable head value.
 enum AuthorityJournalCodec {
-  static let magic = Data("CFWAJR01".utf8)
+  static let magic = Data("CFWAJR02".utf8)
   static let headerBytes = 8 + 4 + 8 + 32 + 32 + 4
   static let zeroDigest = try! SHA256Digest(hex: String(repeating: "0", count: 64))
 

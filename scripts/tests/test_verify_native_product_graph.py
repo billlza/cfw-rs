@@ -11,12 +11,14 @@ from scripts.verify_native_product_graph import (
     DAEMON_EMBED,
     DAEMON_PLIST_EMBED,
     EXTENSION_EMBED,
-    MACH_SERVICE,
+    MACH_SERVICES,
     NativeProductGraphError,
     verify_daemon_plist,
+    verify_generated_project,
     verify_repository,
     verify_signing_order,
     verify_tauri_embedding,
+    verify_xcodegen_spec,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -28,7 +30,7 @@ def _valid_embedding() -> dict[str, str]:
         DAEMON_EMBED: "../../target/native-products/CFWGlobalAuthority",
         DAEMON_PLIST_EMBED: "../../native/macos/Config/com.bill.clashformac.global-authority.plist",
         AGENT_EMBED: "../../target/native-products/CFWProxyAgent.app",
-        EXTENSION_EMBED: "../../target/native-products/CFWPacketTunnel.systemextension",
+        EXTENSION_EMBED: "../../target/native-products/com.bill.clashformac.packet-tunnel.systemextension",
     }
 
 
@@ -37,7 +39,7 @@ def _valid_daemon_plist() -> dict[str, object]:
         "Label": "com.bill.clashformac.global-authority",
         "BundleProgram": f"Contents/{DAEMON_EMBED}",
         "UserName": "root",
-        "MachServices": {MACH_SERVICE: True},
+        "MachServices": {service: True for service in MACH_SERVICES},
     }
 
 
@@ -54,7 +56,7 @@ def _valid_manifest() -> dict[str, object]:
                 "name": "CFWGlobalAuthority",
                 "destination": f"Contents/{DAEMON_EMBED}",
                 "launchdPlist": f"Contents/{DAEMON_PLIST_EMBED}",
-                "machService": MACH_SERVICE,
+                "machServices": list(MACH_SERVICES),
             },
             {"name": "CFWProxyAgent", "destination": f"Contents/{AGENT_EMBED}"},
             {"name": "CFWPacketTunnel", "destination": f"Contents/{EXTENSION_EMBED}"},
@@ -79,6 +81,58 @@ _SIGNING_SCRIPT = "\n".join(
 class RepositoryContractTests(unittest.TestCase):
     def test_current_repository_satisfies_the_contract(self) -> None:
         verify_repository(REPO_ROOT)
+
+    def test_xcodegen_requires_bundle_identifier_wrapper_and_fixed_executable(self) -> None:
+        project = (REPO_ROOT / "native/macos/project.yml").read_text(encoding="utf-8")
+        with self.assertRaisesRegex(NativeProductGraphError, "wrapper product name"):
+            verify_xcodegen_spec(
+                project.replace(
+                    "PRODUCT_NAME: com.bill.clashformac.packet-tunnel",
+                    "PRODUCT_NAME: CFWPacketTunnel",
+                )
+            )
+        with self.assertRaisesRegex(NativeProductGraphError, "executable name"):
+            verify_xcodegen_spec(
+                project.replace(
+                    "EXECUTABLE_NAME: CFWPacketTunnel",
+                    "EXECUTABLE_NAME: com.bill.clashformac.packet-tunnel",
+                )
+            )
+
+    def test_generated_project_requires_canonical_wrapper_and_executable(self) -> None:
+        pbx = (REPO_ROOT / "native/macos/CFWNative.xcodeproj/project.pbxproj").read_text(
+            encoding="utf-8"
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "wrapper product"):
+            verify_generated_project(
+                pbx.replace(
+                    'path = "com.bill.clashformac.packet-tunnel.systemextension";',
+                    'path = "CFWPacketTunnel.systemextension";',
+                )
+            )
+        with self.assertRaisesRegex(NativeProductGraphError, "executable name"):
+            verify_generated_project(
+                pbx.replace(
+                    "EXECUTABLE_NAME = CFWPacketTunnel;",
+                    "EXECUTABLE_NAME = com.bill.clashformac.packet-tunnel;",
+                )
+            )
+
+    def test_generated_project_rejects_sandbox_incompatible_header_copy_phase(self) -> None:
+        pbx = (REPO_ROOT / "native/macos/CFWNative.xcodeproj/project.pbxproj").read_text(
+            encoding="utf-8"
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "header boundary"):
+            verify_generated_project(
+                pbx.replace(
+                    "SWIFT_INSTALL_OBJC_HEADER = NO;",
+                    "SWIFT_INSTALL_OBJC_HEADER = YES;",
+                )
+            )
+        with self.assertRaisesRegex(NativeProductGraphError, "sandbox-incompatible"):
+            verify_generated_project(
+                pbx + "\nCopy Swift Objective-C Interface Header\n"
+            )
 
 
 class TauriEmbeddingTests(unittest.TestCase):
@@ -122,7 +176,10 @@ class DaemonPlistTests(unittest.TestCase):
 
     def test_extra_mach_service_fails_closed(self) -> None:
         plist = _valid_daemon_plist()
-        plist["MachServices"] = {MACH_SERVICE: True, "com.example.other": True}
+        plist["MachServices"] = {
+            **{service: True for service in MACH_SERVICES},
+            "com.example.other": True,
+        }
         with self.assertRaisesRegex(NativeProductGraphError, "MachServices"):
             verify_daemon_plist(plist)
 

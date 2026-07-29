@@ -15,9 +15,14 @@ This checker enforces the *structural* half of that guarantee against
   fails instead of blocking forever;
 * the Rust, Node, and Xcode toolchains referenced by the workflow each resolve
   to exactly one version, and that version equals the pinned value in
-  ``scripts/dependency_pins.env`` (single-toolchain binding);
+  ``scripts/dependency_pins.env`` (single-toolchain binding); the Node lane must
+  use the repository's checksum-bound bootstrap rather than ``setup-node``;
+* UI installation, test, build, and audit steps must use the sealed dependency
+  preparation and pinned-Node wrappers; a raw workflow ``npm`` command is
+  rejected because it can replace or bypass the sealed tree; and
 * the warning-as-error gates stay armed - ``cargo clippy`` keeps ``-D warnings``,
-  ``cargo fmt`` keeps ``--check``, and ``swift format lint`` keeps ``--strict``.
+  ``cargo fmt`` keeps ``--check``, ``swift format lint`` keeps ``--strict``, and
+  the Swift package test keeps ``-Xswiftc -warnings-as-errors``.
 
 The audit is fail-closed: any violation, an unreadable workflow, or a missing
 pinned input aborts with a nonzero exit and a specific message. It never edits
@@ -57,6 +62,10 @@ REQUIRED_GATES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"cargo clippy[^\n]*-D warnings"), "cargo clippy must keep '-D warnings'"),
     (re.compile(r"cargo fmt[^\n]*--check"), "cargo fmt must keep '--check'"),
     (re.compile(r"swift format lint[^\n]*--strict"), "swift format lint must keep '--strict'"),
+    (
+        re.compile(r"swift test[^\n]*-Xswiftc -warnings-as-errors"),
+        "swift test must keep '-Xswiftc -warnings-as-errors'",
+    ),
 )
 
 
@@ -128,6 +137,31 @@ def _check_gates(text: str) -> list[str]:
     return findings
 
 
+def _check_ui_boundary(text: str) -> list[str]:
+    findings: list[str] = []
+    required = (
+        "./scripts/bootstrap_release_toolchain.sh --node-only",
+        "./scripts/prepare_ui_dependencies.sh",
+        "./scripts/build_ui_with_pinned_node.sh --test",
+        "./scripts/build_ui_with_pinned_node.sh --audit",
+    )
+    for command in required:
+        if command not in text:
+            findings.append(f"workflow lacks required pinned UI command {command!r}")
+    if not re.search(
+        r"^\s*run:\s*\./scripts/build_ui_with_pinned_node\.sh\s*$",
+        text,
+        re.MULTILINE,
+    ):
+        findings.append("workflow lacks the pinned offline UI build command")
+    for number, line in enumerate(text.splitlines(), start=1):
+        if re.match(r"^\s*run:\s*npm(?:\s|$)", line):
+            findings.append(
+                f"line {number}: raw npm command bypasses the sealed UI boundary: {line.strip()!r}"
+            )
+    return findings
+
+
 def _check_job_bounds(jobs: dict[str, str]) -> list[str]:
     findings: list[str] = []
     for name, body in jobs.items():
@@ -161,6 +195,8 @@ def _check_single_toolchain(text: str, pins: dict[str, str]) -> list[str]:
 
     node = set(re.findall(r'node-version:\s*"([0-9][0-9A-Za-z.\-]*)"', text))
     node |= set(re.findall(r"node-(\d+\.\d+\.\d+)/bin", text))
+    if "./scripts/bootstrap_release_toolchain.sh --node-only" in text:
+        node.add(pins["NODE_VERSION"])
     _single(node, "Node.js", pins["NODE_VERSION"], findings)
 
     xcode = set(re.findall(r"Xcode_([0-9][0-9A-Za-z.]*)\.app", text))
@@ -185,6 +221,7 @@ def audit_workflow(workflow_path: Path, pins_path: Path) -> None:
     findings: list[str] = []
     findings += _check_masking(text)
     findings += _check_gates(text)
+    findings += _check_ui_boundary(text)
     findings += _check_job_bounds(_split_jobs(text))
     findings += _check_single_toolchain(text, pins)
 

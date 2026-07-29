@@ -262,6 +262,7 @@ private func makeValues(
   let descriptor = try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: ipv6, mtu: 1_500),
+    credentialAudience: try appleCredentialAudience(),
     installationID: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
     epoch: 1,
     generation: UInt64(gen),

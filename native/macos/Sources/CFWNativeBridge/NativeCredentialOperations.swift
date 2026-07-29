@@ -6,7 +6,10 @@ import Foundation
 extension NativeBridgeCoordinator {
   func preflightCredentials(_ request: EngineStartRequest) throws {
     do {
-      var material = try credentialVault.resolve(slots: request.credentialSlots)
+      var material = try credentialVault.resolve(
+        audience: request.credentialAudience,
+        slots: request.credentialSlots
+      )
       material.erase()
     } catch {
       throw Self.map(error)
@@ -35,11 +38,16 @@ extension NativeBridgeCoordinator {
     defer { material.erase() }
     do {
       let receipt = try credentialVault.provision(
-        profileID: request.profileID.uuidString.lowercased(),
+        audience: request.audience,
         requiredReferences: request.requiredReferences,
         material: material
       )
-      return NativeCredentialReceipt(profileID: receipt.profileID)
+      return NativeCredentialReceipt(
+        audience: CredentialAudience(
+          profileID: receipt.profileID,
+          profileDigest: receipt.profileDigest
+        )
+      )
     } catch {
       throw Self.map(error)
     }
@@ -49,7 +57,10 @@ extension NativeBridgeCoordinator {
     _ request: CredentialPresenceRequest
   ) throws -> [NativeCredentialPresence] {
     do {
-      return try credentialVault.presence(of: request.references).map {
+      return try credentialVault.presence(
+        audience: request.audience,
+        of: request.references
+      ).map {
         NativeCredentialPresence(reference: $0.reference, present: $0.present)
       }
     } catch {
@@ -62,14 +73,14 @@ extension NativeBridgeCoordinator {
   ) async throws -> CredentialGarbageCollectionPreview {
     try beginMutation()
     defer { endMutation() }
-    let references = try await protectedCredentialReferences(
-      repositoryReferences: request.liveReferences
+    let catalog = try await protectedCredentialCatalog(
+      repositoryCatalog: request.catalog
     )
     do {
       return try credentialVault.previewGarbageCollection(
         CredentialGarbageCollectionRequest(
           snapshotDigest: request.snapshotDigest,
-          liveReferences: references
+          catalog: catalog
         )
       )
     } catch {
@@ -120,7 +131,8 @@ extension NativeBridgeCoordinator {
           target: request.target,
           context: request.tunnelRequest.context,
           systemProxyConfigDigest: request.systemProxyRequest.configDigest,
-          tunnelConfigDigest: request.tunnelRequest.configDigest
+          tunnelConfigDigest: request.tunnelRequest.configDigest,
+          credentialAudience: request.tunnelRequest.credentialAudience
         )
       case .requiresRestart:
         throw NativeBridgeExecutionError.failure(
@@ -147,6 +159,7 @@ extension NativeBridgeCoordinator {
         context: request.tunnelRequest.context,
         systemProxyConfigDigest: request.systemProxyRequest.configDigest,
         tunnelConfigDigest: request.tunnelRequest.configDigest,
+        credentialAudience: request.tunnelRequest.credentialAudience,
         credentialReferences: references,
         validForMillis: CutoverPreflightAttestation.maximumValidityMilliseconds
       )
@@ -156,7 +169,10 @@ extension NativeBridgeCoordinator {
   func checkConfiguration(_ request: EngineStartRequest) async throws {
     var material: CredentialMaterial
     do {
-      material = try credentialVault.resolve(slots: request.credentialSlots)
+      material = try credentialVault.resolve(
+        audience: request.credentialAudience,
+        slots: request.credentialSlots
+      )
     } catch {
       throw Self.map(error)
     }
@@ -195,16 +211,16 @@ extension NativeBridgeCoordinator {
   ) async throws -> CredentialGarbageCollectionReceipt {
     try beginMutation()
     defer { endMutation() }
-    let references = try await protectedCredentialReferences(
-      repositoryReferences: request.liveReferences
+    let catalog = try await protectedCredentialCatalog(
+      repositoryCatalog: request.catalog
     )
     do {
       return try credentialVault.commitGarbageCollection(
         CredentialGarbageCollectionCommitRequest(
           snapshotDigest: request.snapshotDigest,
-          liveReferences: references,
+          catalog: catalog,
           expectedVaultRevision: request.expectedVaultRevision,
-          expectedOrphanReferences: request.expectedOrphanReferences
+          expectedOrphanBindings: request.expectedOrphanBindings
         )
       )
     } catch {
@@ -212,12 +228,12 @@ extension NativeBridgeCoordinator {
     }
   }
 
-  /// Unions repository references with every descriptor still observed by an
+  /// Unions the repository catalog with every descriptor still observed by an
   /// endpoint or persisted Tunnel manager. If any native state cannot be
   /// observed safely, GC fails closed without deleting Keychain material.
-  func protectedCredentialReferences(
-    repositoryReferences: [CredentialReference]
-  ) async throws -> [CredentialReference] {
+  func protectedCredentialCatalog(
+    repositoryCatalog: [CredentialProfileCatalogEntry]
+  ) async throws -> [CredentialProfileCatalogEntry] {
     async let proxyObservation = Self.observe { try await self.proxy.snapshot() }
     async let tunnelObservation = Self.observe { try await self.tunnel.snapshot() }
     async let tunnelManagerConfiguration = Self.observe {
@@ -234,18 +250,26 @@ extension NativeBridgeCoordinator {
       managerConfigurationValue,
       component: "Tunnel manager configuration"
     )
-    var referencesByID: [UUID: CredentialReference] = [:]
-    func preserve(_ reference: CredentialReference) throws {
-      if let existing = referencesByID[reference.id], existing.kind != reference.kind {
+    var referencesByAudience: [CredentialAudience: [UUID: CredentialReference]] = [:]
+    func preserve(
+      _ reference: CredentialReference,
+      audience: CredentialAudience
+    ) throws {
+      var references = referencesByAudience[audience, default: [:]]
+      if let existing = references[reference.id], existing.kind != reference.kind {
         throw NativeBridgeExecutionError.failure(
           .configurationRejected,
           "Credential reference kind conflicts across protected native state."
         )
       }
-      referencesByID[reference.id] = reference
+      references[reference.id] = reference
+      referencesByAudience[audience] = references
     }
-    for reference in repositoryReferences {
-      try preserve(reference)
+    for entry in repositoryCatalog {
+      referencesByAudience[entry.audience] = [:]
+      for reference in entry.references {
+        try preserve(reference, audience: entry.audience)
+      }
     }
     for descriptor in [
       proxySnapshot.configuration,
@@ -253,16 +277,14 @@ extension NativeBridgeCoordinator {
       managerConfiguration,
     ].compactMap({ $0 }) {
       for slot in descriptor.credentialSlots {
-        try preserve(slot.reference)
+        try preserve(slot.reference, audience: descriptor.credentialAudience)
       }
     }
-    return referencesByID.values.sorted {
-      let leftID = $0.id.uuidString.lowercased()
-      let rightID = $1.id.uuidString.lowercased()
-      if leftID != rightID {
-        return leftID < rightID
-      }
-      return $0.kind.rawValue < $1.kind.rawValue
-    }
+    return try referencesByAudience.map { audience, references in
+      try CredentialProfileCatalogEntry(
+        audience: audience,
+        references: references.values.sorted(by: CredentialReference.canonicalPrecedes)
+      )
+    }.sorted(by: CredentialGarbageCollectionRequest.catalogEntryPrecedes)
   }
 }

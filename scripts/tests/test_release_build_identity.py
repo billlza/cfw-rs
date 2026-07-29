@@ -22,7 +22,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             app / "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/Resources/Info.plist",
             app / "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/Info.plist",
             app
-            / "Contents/Library/SystemExtensions/CFWPacketTunnel.systemextension/Contents/Info.plist",
+            / "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/Info.plist",
         )
         for path, build in zip(paths, builds, strict=True):
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -27,6 +27,7 @@ from publication.sealed_manifest import REQUIRED_CI_LANES  # noqa: E402
 
 COMMIT = "a" * 40
 TOOLCHAIN = "b" * 64
+SOURCE = "c" * 64
 IDENTITY = {"document": ci_lanes.TOOLCHAIN_BINDING_KIND, "fixture": True}
 
 
@@ -65,7 +66,15 @@ class RecordingTests(unittest.TestCase):
 
     def record(self, exit_code, timed_out) -> dict:
         return ci_lanes.record_lane(
-            self.lane(), COMMIT, TOOLCHAIN, b"log", exit_code, timed_out, 2.0, 1700000000
+            self.lane(),
+            COMMIT,
+            SOURCE,
+            TOOLCHAIN,
+            b"log",
+            exit_code,
+            timed_out,
+            2.0,
+            1700000000,
         )
 
     def test_zero_exit_is_the_only_pass(self) -> None:
@@ -98,6 +107,7 @@ class CollectionTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.addCleanup(self.directory.cleanup)
         (self.root / "evidence").mkdir()
+        (self.root / "target/toolchains").mkdir(parents=True)
         # The collector resolves the pinned toolchain paths from the real pins
         # file; the injected runner means no lane is ever executed.
         (self.root / "scripts").mkdir()
@@ -109,6 +119,7 @@ class CollectionTests(unittest.TestCase):
     def collect(self, results=None, **overrides):
         arguments = {
             "commit": COMMIT,
+            "release_source_sha256": SOURCE,
             "output": self.root / "evidence" / "unsigned-ci-lanes.json",
             "journal": self.root / "evidence" / "journal",
             "runner": _runner(results or {}),
@@ -122,11 +133,15 @@ class CollectionTests(unittest.TestCase):
         result = self.collect()
         document = result["document"]
         self.assertEqual(result["failures"], [])
+        self.assertEqual(document["schema_version"], 2)
+        self.assertEqual(document["document"], ci_lanes.LANE_DOCUMENT_KIND)
         self.assertEqual(document["toolchain_sha256"], TOOLCHAIN)
+        self.assertEqual(document["release_source_sha256"], SOURCE)
         self.assertEqual(len(document["lanes"]), len(REQUIRED_CI_LANES))
         for lane in document["lanes"]:
             self.assertEqual(set(lane), set(ci_lanes.DOCUMENT_LANE_FIELDS))
             self.assertEqual(lane["commit"], COMMIT)
+            self.assertEqual(lane["release_source_sha256"], SOURCE)
             self.assertEqual(lane["toolchain_sha256"], TOOLCHAIN)
             self.assertEqual(lane["status"], "passed")
 
@@ -167,6 +182,18 @@ class CollectionTests(unittest.TestCase):
         journal = self.root / "evidence" / "journal"
         record = json.loads((journal / "rust-fmt.json").read_text(encoding="utf-8"))
         record["commit"] = "c" * 40
+        (journal / "rust-fmt.json").write_text(
+            canonical_json(record).decode("utf-8"), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(PublicationError, "missing"):
+            self.collect(assemble_only=True)
+
+    def test_a_foreign_release_source_journal_record_is_not_replayed(self) -> None:
+        self.collect()
+        (self.root / "evidence" / "unsigned-ci-lanes.json").unlink()
+        journal = self.root / "evidence" / "journal"
+        record = json.loads((journal / "rust-fmt.json").read_text(encoding="utf-8"))
+        record["release_source_sha256"] = "d" * 64
         (journal / "rust-fmt.json").write_text(
             canonical_json(record).decode("utf-8"), encoding="utf-8"
         )
@@ -218,6 +245,7 @@ class AssemblyTests(unittest.TestCase):
                 "exit_code": 0,
                 "log_sha256": hashlib.sha256(lane.encode()).hexdigest(),
                 "commit": COMMIT,
+                "release_source_sha256": SOURCE,
                 "toolchain_sha256": TOOLCHAIN,
             }
             for lane in REQUIRED_CI_LANES
@@ -227,25 +255,31 @@ class AssemblyTests(unittest.TestCase):
         records = self.records()
         records["rust-test"]["exit_code"] = 1
         with self.assertRaisesRegex(PublicationError, "masks a nonzero exit status"):
-            ci_lanes.assemble_document(records, COMMIT, TOOLCHAIN)
+            ci_lanes.assemble_document(records, COMMIT, SOURCE, TOOLCHAIN)
 
     def test_foreign_commit_is_rejected(self) -> None:
         records = self.records()
         records["rust-test"]["commit"] = "d" * 40
         with self.assertRaisesRegex(PublicationError, "different commit"):
-            ci_lanes.assemble_document(records, COMMIT, TOOLCHAIN)
+            ci_lanes.assemble_document(records, COMMIT, SOURCE, TOOLCHAIN)
 
     def test_foreign_toolchain_is_rejected(self) -> None:
         records = self.records()
         records["rust-test"]["toolchain_sha256"] = "e" * 64
         with self.assertRaisesRegex(PublicationError, "different toolchain"):
-            ci_lanes.assemble_document(records, COMMIT, TOOLCHAIN)
+            ci_lanes.assemble_document(records, COMMIT, SOURCE, TOOLCHAIN)
+
+    def test_foreign_release_source_is_rejected(self) -> None:
+        records = self.records()
+        records["rust-test"]["release_source_sha256"] = "e" * 64
+        with self.assertRaisesRegex(PublicationError, "release source"):
+            ci_lanes.assemble_document(records, COMMIT, SOURCE, TOOLCHAIN)
 
     def test_missing_lane_is_rejected(self) -> None:
         records = self.records()
         del records["shellcheck"]
         with self.assertRaisesRegex(PublicationError, "missing"):
-            ci_lanes.assemble_document(records, COMMIT, TOOLCHAIN)
+            ci_lanes.assemble_document(records, COMMIT, SOURCE, TOOLCHAIN)
 
 
 if __name__ == "__main__":

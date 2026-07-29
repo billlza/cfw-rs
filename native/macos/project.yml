@@ -10,23 +10,34 @@ settings:
   base:
     ARCHS: arm64
     CFW_BUILD_NUMBER: 40000
+    # Release products provide a reviewed entitlement file (or none). Never let
+    # Xcode inject development-only grants such as get-task-allow into a
+    # Developer ID build driven by the `build` action.
+    CODE_SIGN_INJECT_BASE_ENTITLEMENTS: false
     CURRENT_PROJECT_VERSION: $(CFW_BUILD_NUMBER)
     DEAD_CODE_STRIPPING: true
     ENABLE_HARDENED_RUNTIME: true
     ENABLE_USER_SCRIPT_SANDBOXING: true
+    # No native product declares App Intents. Xcode 26.5 still schedules its
+    # metadata processor for Swift products and otherwise warns solely because
+    # AppIntents.framework is absent. Force the processor to complete its empty
+    # extraction instead of adding an unused runtime framework or filtering the
+    # diagnostic.
+    LM_FORCE_LINK_GENERATION: true
     GCC_TREAT_WARNINGS_AS_ERRORS: true
     MACOSX_DEPLOYMENT_TARGET: "15.0"
     MARKETING_VERSION: 0.4.0
     ONLY_ACTIVE_ARCH: false
     SUPPORTS_MACCATALYST: false
     SWIFT_STRICT_CONCURRENCY: complete
+    # Native modules communicate through Swift/XPC internally; the only public
+    # C boundary is the reviewed Headers/CFWNativeBridge.h.  Do not ask XcodeGen
+    # to install generated Swift-to-Objective-C headers for static libraries:
+    # its generated `ditto` phase performs undeclared directory metadata writes
+    # that Xcode's required User Script Sandbox correctly rejects.
+    SWIFT_INSTALL_OBJC_HEADER: false
     SWIFT_TREAT_WARNINGS_AS_ERRORS: true
     SWIFT_VERSION: "6.0"
-  configs:
-    Release:
-      GCC_PREPROCESSOR_DEFINITIONS: $(inherited) CFW_GLOBAL_AUTHORITY_REQUIRED=1
-      SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) CFW_GLOBAL_AUTHORITY_REQUIRED
-
 targets:
   CFWSharedProtocol:
     type: library.static
@@ -38,7 +49,6 @@ targets:
       - sdk: Security.framework
     settings:
       base:
-        ENABLE_USER_SCRIPT_SANDBOXING: false
         PRODUCT_MODULE_NAME: CFWSharedProtocol
 
   CFWGlobalAuthority:
@@ -53,7 +63,6 @@ targets:
       - sdk: SystemConfiguration.framework
     settings:
       base:
-        ENABLE_USER_SCRIPT_SANDBOXING: false
         PRODUCT_MODULE_NAME: CFWGlobalAuthority
 
   CFWGlobalAuthorityDaemon:
@@ -72,9 +81,18 @@ targets:
       - sdk: SystemConfiguration.framework
     entitlements:
       path: Config/GlobalAuthority.entitlements
+    info:
+      path: Config/GlobalAuthority-Info.plist
+      properties:
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
     settings:
       base:
-        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: false
         CODE_SIGN_STYLE: Manual
         CREATE_INFOPLIST_SECTION_IN_BINARY: true
         PRODUCT_BUNDLE_IDENTIFIER: com.bill.clashformac.global-authority
@@ -91,7 +109,6 @@ targets:
       - target: CFWSharedProtocol
     settings:
       base:
-        ENABLE_USER_SCRIPT_SANDBOXING: false
         PRODUCT_MODULE_NAME: CFWPacketTransport
 
   CFWAppleNetwork:
@@ -103,7 +120,6 @@ targets:
       - target: CFWSharedProtocol
     settings:
       base:
-        ENABLE_USER_SCRIPT_SANDBOXING: false
         PRODUCT_MODULE_NAME: CFWAppleNetwork
 
   CFWNativeBridge:
@@ -150,7 +166,6 @@ targets:
       - target: CFWSharedProtocol
     settings:
       base:
-        ENABLE_USER_SCRIPT_SANDBOXING: false
         PRODUCT_MODULE_NAME: CFWCredentialTransport
 
   CFWCredentialVault:
@@ -164,7 +179,6 @@ targets:
       - sdk: Security.framework
     settings:
       base:
-        ENABLE_USER_SCRIPT_SANDBOXING: false
         PRODUCT_MODULE_NAME: CFWCredentialVault
 
   CFWLibboxRuntime:
@@ -181,7 +195,6 @@ targets:
       - sdk: Network.framework
     settings:
       base:
-        ENABLE_USER_SCRIPT_SANDBOXING: false
         # The pinned single-slice libbox XCFramework is also named directly: the
         # `analyze` action does not materialize an XCFramework slice into
         # BUILT_PRODUCTS_DIR, so `import Libbox` must resolve from the source
@@ -230,12 +243,12 @@ targets:
       - sdk: Security.framework
     settings:
       base:
-        ENABLE_USER_SCRIPT_SANDBOXING: false
         PRODUCT_MODULE_NAME: CFWPacketTunnel
 
   CFWPacketTunnelExtension:
     type: system-extension
     platform: macOS
+    productName: com.bill.clashformac.packet-tunnel
     sources:
       - SystemExtension
     dependencies:
@@ -247,7 +260,6 @@ targets:
       - target: CFWLibboxObjC
       - framework: ../../target/native-dependencies/Libbox.xcframework
         embed: false
-      - sdk: AppIntents.framework
       - sdk: libresolv.tbd
     entitlements:
       path: Config/PacketTunnel.entitlements
@@ -255,6 +267,8 @@ targets:
         com.apple.developer.networking.networkextension:
           - packet-tunnel-provider-systemextension
         com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - $(TeamIdentifierPrefix)group.com.bill.clashformac
         com.apple.security.network.client: true
         com.apple.security.network.server: true
     info:
@@ -275,9 +289,11 @@ targets:
     settings:
       base:
         CODE_SIGN_STYLE: Manual
+        EXECUTABLE_NAME: CFWPacketTunnel
         PRODUCT_BUNDLE_IDENTIFIER: com.bill.clashformac.packet-tunnel
         PRODUCT_MODULE_NAME: CFWPacketTunnelExtension
-        PRODUCT_NAME: CFWPacketTunnel
+        PRODUCT_NAME: com.bill.clashformac.packet-tunnel
+        PROVISIONING_PROFILE_SPECIFIER: $(CFW_PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER)
         SKIP_INSTALL: true
 
   CFWProxyAgentCore:
@@ -295,7 +311,6 @@ targets:
       - sdk: SystemConfiguration.framework
     settings:
       base:
-        ENABLE_USER_SCRIPT_SANDBOXING: false
         PRODUCT_MODULE_NAME: CFWProxyAgentCore
 
   CFWProxyAgent:
@@ -312,7 +327,6 @@ targets:
       - target: CFWLibboxObjC
       - framework: ../../target/native-dependencies/Libbox.xcframework
         embed: false
-      - sdk: AppIntents.framework
       - sdk: libresolv.tbd
       - sdk: CryptoKit.framework
       - sdk: Security.framework
@@ -348,6 +362,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.bill.clashformac.proxy-agent
         PRODUCT_MODULE_NAME: CFWProxyAgent
         PRODUCT_NAME: CFWProxyAgent
+        PROVISIONING_PROFILE_SPECIFIER: $(CFW_PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER)
         SKIP_INSTALL: true
 
   CFWSharedProtocolTests:
@@ -357,7 +372,6 @@ targets:
       - Tests/CFWSharedProtocolTests
     dependencies:
       - target: CFWSharedProtocol
-      - sdk: AppIntents.framework
     settings:
       base:
         CODE_SIGNING_ALLOWED: false
@@ -370,7 +384,6 @@ targets:
     dependencies:
       - target: CFWGlobalAuthority
       - target: CFWSharedProtocol
-      - sdk: AppIntents.framework
       - sdk: CryptoKit.framework
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
@@ -389,7 +402,6 @@ targets:
       # (TunnelNetworkOptions MTU bounds); a static library dependency is not
       # transitively linked into the test bundle, so it is named explicitly.
       - target: CFWSharedProtocol
-      - sdk: AppIntents.framework
     settings:
       base:
         CODE_SIGNING_ALLOWED: false
@@ -408,7 +420,6 @@ targets:
       - target: CFWLibboxObjC
       - framework: ../../target/native-dependencies/Libbox.xcframework
         embed: false
-      - sdk: AppIntents.framework
       - sdk: CryptoKit.framework
       - sdk: Network.framework
       - sdk: Security.framework
@@ -428,7 +439,6 @@ targets:
       - target: CFWLibboxObjC
       - framework: ../../target/native-dependencies/Libbox.xcframework
         embed: false
-      - sdk: AppIntents.framework
       - sdk: Network.framework
       - sdk: libresolv.tbd
     settings:
@@ -443,7 +453,6 @@ targets:
     dependencies:
       - target: CFWAppleNetwork
       - target: CFWSharedProtocol
-      - sdk: AppIntents.framework
     settings:
       base:
         CODE_SIGNING_ALLOWED: false
@@ -469,7 +478,6 @@ targets:
         link: false
       - target: CFWSharedProtocol
         link: false
-      - sdk: AppIntents.framework
       - sdk: Security.framework
       - sdk: ServiceManagement.framework
     settings:
@@ -484,7 +492,6 @@ targets:
     dependencies:
       - target: CFWCredentialTransport
       - target: CFWSharedProtocol
-      - sdk: AppIntents.framework
     settings:
       base:
         CODE_SIGNING_ALLOWED: false
@@ -498,7 +505,6 @@ targets:
       - target: CFWCredentialTransport
       - target: CFWCredentialVault
       - target: CFWSharedProtocol
-      - sdk: AppIntents.framework
       - sdk: Security.framework
     settings:
       base:
@@ -518,7 +524,6 @@ targets:
       - target: CFWLibboxObjC
       - framework: ../../target/native-dependencies/Libbox.xcframework
         embed: false
-      - sdk: AppIntents.framework
       - sdk: CryptoKit.framework
       - sdk: Network.framework
       - sdk: Security.framework

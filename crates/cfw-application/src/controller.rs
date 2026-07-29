@@ -11,9 +11,9 @@ use cfw_singbox_config::{ClashApiEndpoint, ConfigError, EngineSettings, Projecte
 /// application resolves it once, keeps it in memory beside its engine state, and
 /// builds a client endpoint from it when it needs to drive the running engine.
 ///
-/// The per-run secret lives only in process memory. It is never serialized,
-/// never written to settings, never logged, and never part of an engine
-/// snapshot; `Debug` redacts it.
+/// The per-run secret lives only in bounded process/XPC memory. It appears in
+/// the exact runtime start configuration but is never persisted, written to
+/// settings, logged, or included in an engine snapshot; `Debug` redacts it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EngineControllerAccess {
     settings: EngineSettings,

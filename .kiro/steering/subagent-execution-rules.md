@@ -8,7 +8,7 @@ inclusion: always
 
 ## 1. 模型与推理强度
 
-- 子代理必须使用当前可用的最强模型：**Claude Opus 5 (max)**。
+- 子代理必须使用当前可用的最强模型：**GPT-5.6 Sol (max)**。
 - 推理强度使用**可选的最高档 (highest / max reasoning effort)**。
 - 禁止为了省时间或省额度降级到更弱模型或更低推理强度；宁可拆小任务，也不降档。
 - 若调度层未暴露显式的模型/推理强度参数，则在派发 prompt 中明确声明
@@ -16,7 +16,7 @@ inclusion: always
 
 ## 2. 并行派发 (Parallel Dispatch)
 
-- 默认**并行**派发：同一轮 (same turn) 内最多 **5** 个 `invoke_sub_agent` 调用。
+- 默认**并行**派发：同一轮 (same turn) 内最多 **4** 个 `invoke_sub_agent` 调用。
 - 并行的前提是**目标互不相交**：
   - 不同 crate / Swift target / 脚本包 / 测试目标；
   - 不得有两个子代理写同一个文件、同一个 `mod.rs`、同一个测试目标。

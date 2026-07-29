@@ -514,6 +514,7 @@ mod tests {
     #[tokio::test]
     async fn reqwest_errors_never_expose_the_request_url_or_query() {
         let secret = "must-not-reach-diagnostics";
+        let host = "malformed host";
         ensure_tls_crypto_provider().expect("test TLS provider");
         let client = Client::builder()
             .timeout(Duration::from_secs(1))
@@ -521,14 +522,14 @@ mod tests {
             .expect("test client");
         let error = client
             .get(format!(
-                "http://127.0.0.1:0/archive?X-Amz-Signature={secret}&sig={secret}"
+                "http://{host}/archive?X-Amz-Signature={secret}&sig={secret}"
             ))
             .send()
             .await
-            .expect_err("port zero must reject the request");
+            .expect_err("malformed URL must reject the request");
         let diagnostic = sanitized_network_error(DownloadFailureStage::Request, &error).to_string();
         assert!(!diagnostic.contains(secret));
-        assert!(!diagnostic.contains("127.0.0.1"));
+        assert!(!diagnostic.contains(host));
         assert!(!diagnostic.contains("X-Amz"));
         assert!(diagnostic.contains("during request"));
         assert!(diagnostic.contains("category:"));

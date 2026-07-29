@@ -155,7 +155,9 @@ const responses = {
       minimum_macos: "15.0",
       architecture: "arm64",
     },
+    migration_handoff: false,
   },
+  legacy_retirement_status: { state: "cleared" },
   read_settings_snapshot: {
     persisted: true,
     settings: {
@@ -228,38 +230,21 @@ const responses = {
       }],
     },
   },
-  providers_snapshot: {
-    proxy_providers: [{
-      name: "P",
-      kind: "Http",
-      vehicle_type: "HTTP",
-      behavior: null,
-      updated_at: "now",
-      proxies: ["HK"],
-      rules: [],
-      extra: { healthCheck: { lastResult: "ok" } },
-    }],
-    rule_providers: [{
-      name: "R",
-      kind: "Http",
-      vehicle_type: "HTTP",
-      behavior: "domain",
-      updated_at: "now",
-      proxies: [],
-      rules: ["a"],
-      extra: {},
-    }],
-  },
   rules_snapshot: {
-    rules: [{ index: 0, type: "DOMAIN", payload: "example.test", proxy: "Proxy", size: -1, provider: null, extra: { hitCount: 3 } }],
+    rules: [{ index: null, type: "DOMAIN", payload: "example.test", proxy: "Proxy", size: null, hits: null, provider: null, extra: {} }],
   },
   start_connections_stream: null,
   start_log_stream: null,
+  stop_connections_stream: null,
+  stop_log_stream: null,
   refresh_tray_menu: null,
   open_page: null,
 };
 
 const invoked = [];
+const rejected = {
+  providers_snapshot: "controller capability `provider management` is unsupported by pinned engine sing-box 1.13.14",
+};
 globalThis.window.__TAURI_INTERNALS__ = {
   transformCallback(callback) {
     const id = nextCallbackId;
@@ -274,6 +259,7 @@ globalThis.window.__TAURI_INTERNALS__ = {
     }
     if (command === "plugin:event|unlisten") return null;
     invoked.push(command);
+    if (command in rejected) throw new Error(rejected[command]);
     if (!(command in responses)) throw new Error(`no canned response for ${command}`);
     return responses[command];
   },
@@ -309,6 +295,24 @@ test("every page renders", async () => {
     const html = await renderPage(id);
     assert.ok(html.length > 200, `page ${id} rendered ${html.length} characters`);
   }
+});
+
+test("missing rule metadata and unsupported providers render as unavailable", async () => {
+  state.rules = [{
+    index: "unavailable",
+    type: "Default",
+    payload: "final",
+    proxy: "route(proxy)",
+    hits: "unavailable",
+    size: "unavailable",
+  }];
+  const rules = await renderPage("rules");
+  assert.equal((rules.match(/unavailable/gu) ?? []).length >= 2, true);
+
+  const providers = await renderPage("providers");
+  assert.ok(providers.includes("Proxy provider management unavailable"));
+  assert.ok(providers.includes("Rule provider management unavailable"));
+  assert.ok(providers.includes("unsupported by pinned engine"));
 });
 
 test("the General page shows the projected inbound and every refused control's reason", async () => {

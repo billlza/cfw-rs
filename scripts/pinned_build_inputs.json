@@ -5,11 +5,110 @@
   "nativeLockPath": "native/macos/Dependencies.lock.json",
   "tools": {
     "RUST_VERSION": "1.97.1",
+    "CARGO_DENY_VERSION": "0.20.2",
+    "XCODEGEN_VERSION": "2.46.0",
+    "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
+    "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
+    "XCODEGEN_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
     "NODE_VERSION": "24.18.0",
     "GO_VERSION": "1.26.5",
-    "GOMOBILE_VERSION": "v0.1.12",
+    "GOMOBILE_VERSION": "v0.1.13",
     "GOVULNCHECK_VERSION": "v1.6.0",
+    "TAURI_CLI_VERSION": "2.11.4",
     "SING_BOX_VERSION": "v1.13.14"
+  },
+  "xcodegen": {
+    "patchPathKey": "XCODEGEN_PATCH_PATH",
+    "patchSha256Key": "XCODEGEN_PATCH_SHA256",
+    "patchSha256": "bf307dea2cbbbfe2df1cd66b98b684a6497d4321d0b4115402dc200a06fb762e",
+    "patchedSettingsBuilderSha256Key": "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
+    "patchedSettingsBuilderSha256": "33169eab011775361f0e8fd8f9a51f4f2199916eabe033961467734b8624e482",
+    "bootstrapPath": "scripts/bootstrap_release_toolchain.sh",
+    "requiredBootstrapFragments": [
+      "$XCODEGEN_PATCH_PATH",
+      "$XCODEGEN_PATCH_SHA256",
+      "$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
+      "GIT_CEILING_DIRECTORIES=\"$toolchain_root\"",
+      "/usr/bin/git -C \"$payload/source\" apply --check \"$xcodegen_patch\"",
+      "/usr/bin/git -C \"$payload/source\" apply --reverse --check \"$xcodegen_patch\"",
+      "USER=cfw-release",
+      "LOGNAME=cfw-release",
+      "/usr/bin/strip -S \"$build_root/release/xcodegen\"",
+      "patchSha256=$XCODEGEN_PATCH_SHA256",
+      "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
+      "XcodeGenResourceProbe.xcodeproj/project.pbxproj"
+    ]
+  },
+  "gomobileCommitKey": "GOMOBILE_COMMIT",
+  "gomobileCommit": "9f03b8f25789099c5c8abef4a02085da783ba923",
+  "cargoDeny": {
+    "ciWorkflowPath": ".github/workflows/ci.yml",
+    "requiredCiFragments": [
+      "cargo install cargo-deny --version \"$CARGO_DENY_VERSION\" --locked",
+      "cargo deny --locked --target aarch64-apple-darwin check"
+    ]
+  },
+  "tauriCli": {
+    "crateSha256Key": "TAURI_CLI_CRATE_SHA256",
+    "crateSha256": "fedac57c0291926f6c46e17a4ddd84711d026725e4becbd73573cb8cd924ba75",
+    "upstreamCargoLockSha256Key": "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256",
+    "upstreamCargoLockSha256": "2ff3db9b36027ca10712cbebdb326f2b299f95093672eb66d7cab6a406619cc5",
+    "lockPatchPathKey": "TAURI_CLI_LOCK_PATCH_PATH",
+    "lockPatchSha256Key": "TAURI_CLI_LOCK_PATCH_SHA256",
+    "lockPatchSha256": "965269f4cb086d1347c436e77f9aa4033c168fe1c26e66898bc26fe1a2eeb532",
+    "patchedCargoLockSha256Key": "TAURI_CLI_PATCHED_CARGO_LOCK_SHA256",
+    "patchedCargoLockSha256": "ceb5a88c860e4238175e6ac4fe3f598c5c9e8f3e37c5d9928ac866a4be199b1b",
+    "spinVersionKey": "TAURI_CLI_SPIN_VERSION",
+    "spinVersion": "0.9.9",
+    "spinCrateSha256Key": "TAURI_CLI_SPIN_CRATE_SHA256",
+    "spinCrateSha256": "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e",
+    "ciWorkflowPath": ".github/workflows/ci.yml",
+    "requiredCiFragment": "./scripts/install_pinned_tauri_cli.sh",
+    "installerPath": "scripts/install_pinned_tauri_cli.sh",
+    "requiredInstallerFragments": [
+      "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate",
+      "$TAURI_CLI_CRATE_SHA256",
+      "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256",
+      "$TAURI_CLI_LOCK_PATCH_SHA256",
+      "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256",
+      "$TAURI_CLI_SPIN_VERSION",
+      "$TAURI_CLI_SPIN_CRATE_SHA256",
+      "which --toolchain \"$rust_toolchain\"",
+      "/usr/bin/env -i",
+      "CARGO_HOME=\"$prepared_cargo_home\"",
+      "CARGO_HOME=\"$offline_cargo_home\"",
+      "CARGO_TARGET_DIR=\"$cargo_target\"",
+      "CARGO_HTTP_LOW_SPEED_LIMIT=1",
+      "CARGO_HTTP_MULTIPLEXING=true",
+      "CARGO_HTTP_TIMEOUT=600",
+      "CARGO_NET_RETRY=3",
+      "CARGO_NET_RETRY=0",
+      "CARGO_NET_OFFLINE=true",
+      "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse",
+      "RUSTC=\"$rustc_bin\"",
+      "--unidiff-zero",
+      "fetch",
+      "--manifest-path",
+      "install",
+      "--path",
+      "--offline",
+      "--locked",
+      "--target aarch64-apple-darwin",
+      "tauri-cli-$TAURI_CLI_VERSION",
+      "payload=\"$staging/payload/tauri-cli-$TAURI_CLI_VERSION\"",
+      "/usr/bin/ditto --noqtn \"$prepared_cargo_home\" \"$offline_cargo_home\"",
+      "/bin/mv \"$source_root\" \"$payload/source\"",
+      "/usr/bin/lipo -archs",
+      "--algorithm sha256-tree-v2",
+      "artifactKind=pinned-tauri-cli-v2",
+      "dependencyMode=isolated-fetch-offline-locked-v1",
+      "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET",
+      "payloadLayout=bin-and-patched-source-v1",
+      "xcodeBuild=$XCODE_BUILD_VERSION",
+      "xcodeVersion=$XCODE_VERSION",
+      "cfw_verify_release_toolchain_manifest",
+      "cfw_verify_tauri_toolchain_tree"
+    ]
   },
   "singBoxCommitKey": "SING_BOX_COMMIT",
   "singBoxCommit": "25a600db24f7680ad9806ce5427bd0ab8afe1114",
@@ -18,7 +117,7 @@
       "name": "sing-box security dependencies patch",
       "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
       "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-      "sha256": "ca751c4ec4b82a60d4dd8716627dc2665b154901a988603108bb5e4e718cf439"
+      "sha256": "30a6e0a4d45920dda21e5970230150afc56bb046062bdc006884bccaab539857"
     },
     {
       "name": "sing-box raw packet tun patch",
@@ -34,7 +133,15 @@
     }
   ],
   "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-  "combinedDiffSha256": "f3d84e99e7832495975e4d78fd73744f63c1d0f79393b7276cce2f6e3e80c233",
+  "combinedDiffSha256": "019f283e86222aed9aec2de94efa3166165af85d6828fbc876a689daa28c384a",
+  "sourceContract": {
+    "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
+    "patchedDiffSha256": "6184cea23bf8b259be140671f2a45279919e6c5180c6d7a17e6026a29834e142",
+    "patchedGoModSha256Key": "SING_BOX_PATCHED_GO_MOD_SHA256",
+    "patchedGoModSha256": "d2127319e0e5f80c6c1012653c9a728cb1a4ae8041f42ead3e942544dda34847",
+    "patchedGoSumSha256Key": "SING_BOX_PATCHED_GO_SUM_SHA256",
+    "patchedGoSumSha256": "277474ed2eed49697578b671a856e810659fcbaf7955a013b540cba404f69472"
+  },
   "verifiedGoModuleInputKeys": [
     "GOMOBILE_MODULE_SUM",
     "GOVULNCHECK_MODULE_SUM",
@@ -44,7 +151,9 @@
     "SING_BOX_PATCHED_GO_SUM_SHA256"
   ],
   "rejectedPatchDigests": [
-    "66128ca96ff613b0803cc92b3269b4e7822cd2532c43597e9e283acc6d9f4dde"
+    "66128ca96ff613b0803cc92b3269b4e7822cd2532c43597e9e283acc6d9f4dde",
+    "ca751c4ec4b82a60d4dd8716627dc2665b154901a988603108bb5e4e718cf439",
+    "c618b69baa770e0afc3239f78acfeaaf354e3dc8105e2e61b149d4ede00a93b7"
   ],
   "libboxBuildTags": {
     "pinKey": "LIBBOX_BUILD_TAGS",
@@ -97,6 +206,8 @@
       "requirePinReferences": [
         "$GO_VERSION",
         "$GOMOBILE_VERSION",
+        "$GOMOBILE_COMMIT",
+        "$GOMOBILE_MODULE_SUM",
         "$SING_BOX_VERSION",
         "$SING_BOX_COMMIT",
         "$LIBBOX_BUILD_TAGS",
@@ -109,8 +220,37 @@
     }
   },
   "artifactBindings": {
+    "scripts/libbox_source_contract.sh": [
+      "sourceTag=$SING_BOX_VERSION",
+      "sourceCommit=$SING_BOX_COMMIT",
+      "goVersion=$GO_VERSION",
+      "goToolchainTreeSha256=$go_toolchain_tree_sha256",
+      "goToolsTreeSha256=$go_tools_tree_sha256",
+      "goModuleCacheTreeSha256=$go_module_cache_tree_sha256",
+      "gomobileVersion=$GOMOBILE_VERSION",
+      "gomobileCommit=$GOMOBILE_COMMIT",
+      "gomobileModuleSum=$GOMOBILE_MODULE_SUM",
+      "headerNormalization=angleBracketFrameworkImports-v1",
+      "platform=$LIBBOX_APPLE_PLATFORM",
+      "buildTags=$LIBBOX_BUILD_TAGS",
+      "nonMacOsTags=$LIBBOX_NON_MACOS_TAGS",
+      "upstreamGoModSha256=$SING_BOX_UPSTREAM_GO_MOD_SHA256",
+      "upstreamGoSumSha256=$SING_BOX_UPSTREAM_GO_SUM_SHA256",
+      "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256",
+      "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
+      "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+      "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256",
+      "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
+      "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256",
+      "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256"
+    ],
     "scripts/build_libbox.sh": [
       "sourceCommit=$SING_BOX_COMMIT",
+      "gomobileCommit=$GOMOBILE_COMMIT",
+      "gomobileModuleSum=$GOMOBILE_MODULE_SUM",
+      "goToolchainTreeSha256=$go_toolchain_tree_sha256",
+      "goToolsTreeSha256=$go_tools_tree_sha256",
+      "goModuleCacheTreeSha256=$go_module_cache_tree_sha256",
       "buildTags=$LIBBOX_BUILD_TAGS",
       "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256",
       "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
@@ -118,11 +258,68 @@
       "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
     ],
     "scripts/build_native_products.sh": [
-      "singBoxCommit=$SING_BOX_COMMIT"
+      "singBoxCommit=$SING_BOX_COMMIT",
+      "libbox_verify_xcframework_artifact"
     ],
     "scripts/build_unsigned_candidate.sh": [
-      "sourceCommit=$SING_BOX_COMMIT",
-      "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
+      "libbox_verify_xcframework_artifact",
+      "cfw_build_tauri_host_skeleton",
+      "--require-unsigned-host",
+      "app_manifest_sha256",
+      "goModuleCacheTreeSha256=$go_module_cache_tree_sha256",
+      "goToolchainTreeSha256=$go_toolchain_tree_sha256",
+      "goToolsTreeSha256=$go_tools_tree_sha256",
+      "nodeToolchainTreeSha256=$node_toolchain_tree_sha256",
+      "tauriToolchainTreeSha256=$tauri_toolchain_tree_sha256",
+      "toolchainSha256=$toolchain_sha256",
+      "uiDependenciesTreeSha256=$ui_dependencies_tree_sha256",
+      "xcodegenToolchainTreeSha256=$xcodegen_toolchain_tree_sha256"
+    ],
+    "scripts/build_signed_candidate.sh": [
+      "libbox_verify_xcframework_artifact",
+      "cfw_build_tauri_host_skeleton",
+      "--require-unsigned-host",
+      "pre_sign_manifest_sha256",
+      "host_executable_sha256",
+      "Contents/embedded.provisionprofile=$host_profile_sha256:$host_profile_size",
+      "goModuleCacheTreeSha256=$go_module_cache_tree_sha256",
+      "goToolchainTreeSha256=$go_toolchain_tree_sha256",
+      "goToolsTreeSha256=$go_tools_tree_sha256",
+      "nodeToolchainTreeSha256=$node_toolchain_tree_sha256",
+      "tauriToolchainTreeSha256=$tauri_toolchain_tree_sha256",
+      "toolchainSha256=$toolchain_sha256",
+      "uiDependenciesTreeSha256=$ui_dependencies_tree_sha256",
+      "xcodegenToolchainTreeSha256=$xcodegen_toolchain_tree_sha256"
+    ],
+    "scripts/tauri_host_skeleton.sh": [
+      "cfw_build_tauri_host_skeleton()",
+      "APPLE_CERTIFICATE",
+      "APPLE_CERTIFICATE_PASSWORD",
+      "APPLE_SIGNING_IDENTITY",
+      "tauri.macos.conf.json",
+      "tauri.macos.conf.json5",
+      "Tauri.macos.toml",
+      "signingIdentity",
+      "build --bundles app --ci --config"
+    ],
+    "scripts/verify_candidate_bundle.py": [
+      "--require-unsigned-host",
+      "--ignore-resources",
+      "Signature=adhoc",
+      "TeamIdentifier=not set",
+      "Info.plist=not bound",
+      "Sealed Resources=none"
+    ],
+    "scripts/verify_candidate_bundle.sh": [
+      "--require-unsigned-host"
+    ],
+    "scripts/verify_artifact_manifest.py": [
+      "--added-file",
+      "added-file transforms require sha256-tree-v1",
+      "added-file path is not canonical and relative"
+    ],
+    "scripts/verify_release_app.sh": [
+      "libbox_verify_xcframework_artifact"
     ]
   }
 }

@@ -54,6 +54,8 @@ export const defaultEngineStatus = {
   systemProxyAvailable: false,
   tunnelAvailable: false,
   availabilityReason: null,
+  cutoverReady: false,
+  cutoverReason: null,
   generation: 0,
   configDigest: null,
 };
@@ -65,6 +67,16 @@ export const state = {
   // Engine status envelope (`engine_snapshot`), validated against its runtime
   // identity before it is allowed to claim an active data plane.
   engine: { ...defaultEngineStatus },
+  // Whether this process is the controlled `--migration-handoff` instance,
+  // read from `boot_payload`. The default (main) dashboard offers the restart
+  // that enters the handoff; only the handoff instance drives the cutover.
+  migrationHandoff: false,
+  // Latest `legacy_retirement_status` (`{ state, ... }`) or null when unread.
+  // Surfaces the fresh-install AwaitingConfirmation lock so the dashboard is
+  // never permanently stuck on a disabled network with no path forward.
+  retirement: null,
+  // In-flight cutover progress within the handoff instance.
+  cutover: { busy: false, receiptId: null, target: null, awaitingApproval: false, message: null },
   // Values read out of the projected engine configuration. Null means the
   // projection could not be read, never a placeholder port or endpoint.
   projection: { mixedPort: null, controller: null, logLevel: null, error: null },
@@ -142,6 +154,7 @@ export const state = {
   connections: [],
   providers: [],
   ruleProviders: [],
+  providerCapabilityError: null,
   rules: [],
   providerActions: new Set(),
   providerBulkActions: new Set(),

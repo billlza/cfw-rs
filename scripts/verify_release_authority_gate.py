@@ -9,12 +9,12 @@ class AuthorityGateContractError(RuntimeError):
     pass
 
 
-GUARD = "GlobalAuthorityReleaseGate.requireStartAuthorization()"
 MUTATION_PATTERN = (
     r"TunnelStartPayloadCodec|CrossProcessEngineLeaseStore|startVPNTunnel|"
     r"saveToPreferences|configurationStore\.persist|credentialVault\.resolve|"
-    r"lifecycle\.start|engine\.start|preferences\.apply|setTunnelNetworkSettings|"
-    r"Process\(|NSTask|clashformac\.helper|downloaded.?core|alternate.?core"
+    r"lifecycle\.start|sessionLifecycle\.start|engine\.start|preferences\.apply|"
+    r"setTunnelNetworkSettings|Process\(|NSTask|clashformac\.helper|"
+    r"downloaded.?core|alternate.?core"
 )
 MUTATION_RE = re.compile(MUTATION_PATTERN, re.IGNORECASE)
 
@@ -40,17 +40,21 @@ def _block_contains_mutation(text: str, opening: int) -> bool:
     return MUTATION_RE.search(text[opening + 1 : _matching_brace(text, opening)]) is not None
 
 
-def require_guard_before(
-    text: str, anchor: str, mutation: str, label: str
+def require_authority_before(
+    text: str,
+    anchor: str,
+    authority_proof: str,
+    mutation: str,
+    label: str,
 ) -> None:
     start = text.find(anchor)
     if start < 0:
         raise AuthorityGateContractError(f"{label} start seam is missing")
-    guard = text.find(GUARD, start)
+    proof = text.find(authority_proof, start)
     change = text.find(mutation, start)
-    if guard < 0 or change < 0 or guard > change:
+    if proof < 0 or change < 0 or proof > change:
         raise AuthorityGateContractError(
-            f"{label} must require Global Authority before {mutation}"
+            f"{label} must establish {authority_proof} before {mutation}"
         )
 
 
@@ -67,14 +71,20 @@ def reject_insecure_or_fallback(text: str, label: str) -> None:
 
     catch_pattern = re.compile(r"\bcatch\b[^\{]*\{")
     do_pattern = re.compile(r"\bdo\s*\{")
+    authority_call = re.compile(
+        r"(?:GlobalAuthority|globalAuthority|\bauthority\.|AuthorityBacked|"
+        r"systemProxyPreparer\.prepare|preparer\.prepareTunnelStart)"
+    )
     for catch in catch_pattern.finditer(text):
         opening = catch.end() - 1
         header = catch.group(0)
-        preceding = text[max(0, catch.start() - 1_200) : catch.start()]
+        preceding = text[max(0, catch.start() - 1_500) : catch.start()]
         preceding_do = list(do_pattern.finditer(preceding))
-        catches_authority = "GlobalAuthority" in header or "globalAuthority" in header
+        catches_authority = "Authority" in header or "authority" in header
         if preceding_do:
-            catches_authority = catches_authority or GUARD in preceding[preceding_do[-1].start() :]
+            catches_authority = catches_authority or bool(
+                authority_call.search(preceding[preceding_do[-1].start() :])
+            )
         if catches_authority and _block_contains_mutation(text, opening):
             raise AuthorityGateContractError(
                 f"{label} contains an Authority-error data-plane fallback"
@@ -101,75 +111,67 @@ def reject_insecure_or_fallback(text: str, label: str) -> None:
 
 
 def verify_repository(root: Path) -> None:
-    project = (root / "native/macos/project.yml").read_text()
-    package = (root / "native/macos/Package.swift").read_text()
-    pbx = (root / "native/macos/CFWNative.xcodeproj/project.pbxproj").read_text()
-    build = (root / "scripts/build_native_products.sh").read_text()
-
-    require_text(
-        project,
-        "CFW_GLOBAL_AUTHORITY_REQUIRED=1",
-        "XcodeGen Release configuration",
-    )
-    require_text(
-        project,
-        "SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) CFW_GLOBAL_AUTHORITY_REQUIRED",
-        "XcodeGen Release configuration",
-    )
-    require_text(
-        package,
-        '.define("CFW_GLOBAL_AUTHORITY_REQUIRED", .when(configuration: .release))',
-        "SwiftPM Release configuration",
-    )
-    require_text(
-        pbx,
-        'CFW_GLOBAL_AUTHORITY_REQUIRED=1',
-        "generated Xcode Release configuration",
-    )
-    require_text(
-        build,
-        'CFW_GLOBAL_AUTHORITY_REQUIRED=1',
-        "candidate Release build",
-    )
-
     seams = [
         (
             "native/macos/Sources/CFWNativeBridge/NativeEngineOperations.swift",
             "func startSystemProxy(",
+            "systemProxyPreparer.prepareSystemProxyStart(",
             "preflightCredentials(request)",
             "Host System Proxy",
         ),
         (
-            "native/macos/Sources/CFWNativeBridge/NativeEngineOperations.swift",
-            "func startTunnel(",
-            "credentialVault.resolve",
-            "Host Tunnel coordinator",
-        ),
-        (
             "native/macos/Sources/CFWAppleNetwork/HostBridge.swift",
-            "public func startTunnel(",
-            "save(manager)",
+            "enum TicketOnlyTunnelStartFlow",
+            "preparer.prepareTunnelStart(",
+            "manager.saveDescriptorOnly(",
             "Host Tunnel preferences",
         ),
         (
-            "native/macos/Sources/CFWProxyAgent/ProxyAgentService.swift",
-            "case .startSystemProxy:",
-            "lifecycle.start",
-            "ProxyAgent",
+            "native/macos/Sources/CFWProxyAgent/ProxyAuthorityOwnership.swift",
+            "private func performStart(",
+            "authority.bind(",
+            "lifecycle.start(",
+            "ProxyAgent owner",
         ),
         (
-            "native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift",
-            "public override func startTunnel(",
-            "startCoordinator.start",
-            "Packet Tunnel Provider",
+            "native/macos/Sources/CFWPacketTunnel/TunnelTicketStartCoordinator.swift",
+            "private func performStart(",
+            "authority.redeem(",
+            "sessionLifecycle.start(",
+            "Packet Tunnel owner",
         ),
     ]
-    for relative, anchor, mutation, label in seams:
-        require_guard_before((root / relative).read_text(), anchor, mutation, label)
+    for relative, anchor, proof, mutation, label in seams:
+        require_authority_before(
+            (root / relative).read_text(encoding="utf-8"),
+            anchor,
+            proof,
+            mutation,
+            label,
+        )
 
-    gate = (root / "native/macos/Sources/CFWSharedProtocol/GlobalAuthorityReleaseGate.swift").read_text()
-    require_text(gate, "#if CFW_GLOBAL_AUTHORITY_REQUIRED", "Release gate")
-    require_text(gate, "throw GlobalAuthorityGateError.proofMissing", "Release gate")
+    compositions = {
+        "native/macos/Sources/CFWNativeBridge/NativeBridgeABI.swift": (
+            "RegistrationGatedAuthorityClient(",
+            "NSXPCGlobalAuthorityRemote(role: .host)",
+            "AuthorityBackedTunnelStartPreparer(",
+            "AuthorityBackedSystemProxyStartPreparer(",
+        ),
+        "native/macos/Sources/CFWProxyAgent/ProxyAgentExecutable.swift": (
+            "NSXPCGlobalAuthorityRemote(",
+            "role: .proxyAgent",
+            "ProxySystemProxyOwnerCoordinator(",
+        ),
+        "native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift": (
+            "NSXPCGlobalAuthorityRemote(",
+            "role: .provider",
+            "TunnelTicketStartCoordinator(",
+        ),
+    }
+    for relative, required in compositions.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        for expected in required:
+            require_text(text, expected, relative)
 
     source_roots = [
         root / "native/macos/Sources",
@@ -179,18 +181,24 @@ def verify_repository(root: Path) -> None:
     ]
     candidates: list[Path] = []
     for source_root in source_roots:
-        candidates.extend(path for path in source_root.rglob("*") if path.suffix in {".swift", ".rs"})
+        candidates.extend(
+            path for path in source_root.rglob("*") if path.suffix in {".swift", ".rs"}
+        )
     candidates.extend(
         [
             root / "native/macos/Package.swift",
             root / "native/macos/project.yml",
-            root / "native/macos/CFWNative.xcodeproj/project.pbxproj",
             root / "scripts/build_native_products.sh",
             root / "apps/cfw-tauri-shell/build.rs",
         ]
     )
     for path in candidates:
-        reject_insecure_or_fallback(path.read_text(), str(path.relative_to(root)))
+        text = path.read_text(encoding="utf-8")
+        if "GlobalAuthorityReleaseGate.requireStartAuthorization" in text:
+            raise AuthorityGateContractError(
+                f"{path.relative_to(root)} contains the retired static Authority gate"
+            )
+        reject_insecure_or_fallback(text, str(path.relative_to(root)))
 
 
 def main() -> int:
@@ -200,7 +208,7 @@ def main() -> int:
     except (AuthorityGateContractError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    print("Release Global Authority gate contract verified")
+    print("Release Global Authority proof ordering verified")
     return 0
 
 

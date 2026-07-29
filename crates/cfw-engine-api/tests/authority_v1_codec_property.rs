@@ -19,7 +19,8 @@
 
 use cfw_engine_api::authority_v1::*;
 use cfw_engine_api::{
-    CredentialKind, CredentialRef, CredentialSlot, CredentialTarget, TunnelNetworkOptions,
+    CredentialAudience, CredentialKind, CredentialRef, CredentialSlot, CredentialTarget,
+    TunnelNetworkOptions,
 };
 use uuid::Uuid;
 
@@ -183,6 +184,11 @@ fn configuration_of(
     ConfigurationDescriptor {
         byte_count: choices.byte_count as u32,
         config_sha256: operation.config_sha256.clone(),
+        credential_audience: CredentialAudience::new(
+            operation.root.installation_id.hyphenated().to_string(),
+            operation.identity_sha256.clone(),
+        )
+        .expect("canonical credential audience"),
         credential_slots: credential_slots(choices),
         identity_sha256: operation.identity_sha256.clone(),
         tunnel_options,

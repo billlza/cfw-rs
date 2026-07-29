@@ -17,7 +17,11 @@
       "stagedArtifact": "CFWGlobalAuthority",
       "bundleIdentifier": "com.bill.clashformac.global-authority",
       "launchdPlist": "Contents/Library/LaunchDaemons/com.bill.clashformac.global-authority.plist",
-      "machService": "YKUPL7Z869.group.com.bill.clashformac.global-authority"
+      "machServices": [
+        "YKUPL7Z869.group.com.bill.clashformac.global-authority.host",
+        "YKUPL7Z869.group.com.bill.clashformac.global-authority.proxy-agent",
+        "YKUPL7Z869.group.com.bill.clashformac.global-authority.provider"
+      ]
     },
     {
       "name": "CFWProxyAgent",
@@ -29,8 +33,8 @@
     {
       "name": "CFWPacketTunnel",
       "kind": "system-extension",
-      "destination": "Contents/Library/SystemExtensions/CFWPacketTunnel.systemextension",
-      "stagedArtifact": "CFWPacketTunnel.systemextension",
+      "destination": "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension",
+      "stagedArtifact": "com.bill.clashformac.packet-tunnel.systemextension",
       "bundleIdentifier": "com.bill.clashformac.packet-tunnel"
     },
     {

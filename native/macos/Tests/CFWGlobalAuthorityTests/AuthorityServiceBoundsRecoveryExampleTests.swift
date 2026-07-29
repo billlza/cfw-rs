@@ -68,12 +68,9 @@ private func boundsDigest(_ data: Data) throws -> CFWSharedProtocol.SHA256Digest
 
 private func boundsPeer(_ role: AuthorityRole, ownerUID: UInt32 = 501) throws -> PeerIdentity {
   PeerIdentity(
-    auditTokenDigest: try boundsDigest(Data("audit".utf8)),
+    connectionIdentityDigest: try boundsDigest(Data("connection".utf8)),
     pid: 42, euid: role == .provider ? 0 : ownerUID,
     auditSessionID: role == .provider ? 0 : 7,
-    teamID: "YKUPL7Z869", signingID: role.rawValue,
-    designatedRequirementDigest: try boundsDigest(Data("requirement".utf8)),
-    entitlementDigest: try boundsDigest(Data("entitlements".utf8)),
     role: role, consoleUID: 501)
 }
 
@@ -118,7 +115,9 @@ private func tunnelRequest(
     identitySHA256: identityDigest, ownerUID: ownerUID, authorityRevision: revision)
   let descriptor = try AuthorityConfigurationDescriptor(
     byteCount: UInt32(configuration.count), configSHA256: configDigest,
-    identitySHA256: identityDigest, credentialSlots: [slot],
+    identitySHA256: identityDigest,
+    credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: identityDigest),
+    credentialSlots: [slot],
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true))
   let request = try PrepareStartRequest(
     operation: operation, expectedRevision: revision, configuration: descriptor)
@@ -139,7 +138,9 @@ private func systemProxyRequest(
     identitySHA256: identityDigest, ownerUID: ownerUID, authorityRevision: revision)
   let descriptor = try AuthorityConfigurationDescriptor(
     byteCount: UInt32(configuration.count), configSHA256: configDigest,
-    identitySHA256: identityDigest, credentialSlots: [], tunnelOptions: nil)
+    identitySHA256: identityDigest,
+    credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: identityDigest),
+    credentialSlots: [], tunnelOptions: nil)
   let request = try PrepareStartRequest(
     operation: operation, expectedRevision: revision, configuration: descriptor)
   return (request, configuration)
@@ -227,18 +228,28 @@ private func boundsCursor() throws -> ReplayCursor {
 
 // MARK: - Startup recovery and quarantine gating through the service
 
-@Test func snapshotOnUnenrolledStoreReportsRecoveringWithoutInventingReplayState() throws {
-  // An un-enrolled store has no durable replay cursor; the service must report
-  // Recovering rather than fabricate a cursor or disclose an empty snapshot.
+@Test func snapshotOnUnenrolledStoreReportsStrictOffWithoutInventingReplayState() throws {
+  // An un-enrolled store has no durable replay cursor. It reports the exact Off
+  // posture and current revision so the first prepare can enroll atomically.
   let objects = makeCore(reducer: try .unEnrolledOff())
   let host = try service(for: objects.core)
   let envelope = try AuthorityV1Codec.encode(
     try AuthorityRequestEnvelope(
       requestID: AuthorityIdentifier(UUID()), command: .snapshot(SnapshotRequest())))
 
+  var response: Data?
   var observed: AuthorityErrorCode?
-  host.snapshot(envelope) { _, error in observed = authorityError(error) }
-  #expect(observed == .globalAuthorityRecovering)
+  host.snapshot(envelope) { data, error in
+    response = data
+    observed = authorityError(error)
+  }
+  #expect(observed == nil)
+  let decoded = try AuthorityV1Codec.decodeResponse(
+    AuthoritySnapshot.self, from: try #require(response))
+  #expect(decoded.result.state == .off)
+  #expect(decoded.result.replayCursor == nil)
+  #expect(decoded.result.leaseView == nil)
+  #expect(decoded.result.revision == 1)
 }
 
 @Test func recoveringAuthorityRejectsNewStartsThroughService() throws {
@@ -307,7 +318,7 @@ private func boundsCursor() throws -> ReplayCursor {
   owner.prepareStart(prepareEnvelope, configuration: configuration, secretPayload: nil) {
     _, error in #expect(error == nil)
   }
-  #expect(objects.journal.count == 1)
+  #expect(objects.journal.count == 2)
 
   // A Host peer belonging to a different user (UID 999) is refused any snapshot of
   // the current owner's lease; state is never disclosed across users.

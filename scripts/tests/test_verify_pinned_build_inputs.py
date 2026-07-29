@@ -28,13 +28,25 @@ PATCH_BODIES = {
     "dns": b"synthetic dns failover patch body\n",
 }
 LEGACY_BODY = b"synthetic legacy partial digest body\n"
+TAURI_LOCK_PATCH_BODY = b"synthetic tauri-cli spin lock patch body\n"
+XCODEGEN_PATCH_BODY = b"synthetic XcodeGen installed-resource patch body\n"
 
 SECURITY_SHA = _sha(PATCH_BODIES["security"])
 RAW_SHA = _sha(PATCH_BODIES["raw"])
 DNS_SHA = _sha(PATCH_BODIES["dns"])
 COMBINED_SHA = _sha(b"synthetic combined diff body\n")
 LEGACY_SHA = _sha(LEGACY_BODY)
+TAURI_CRATE_SHA = _sha(b"synthetic official tauri-cli crate archive")
+TAURI_UPSTREAM_LOCK_SHA = _sha(b"synthetic upstream tauri-cli Cargo.lock")
+TAURI_LOCK_PATCH_SHA = _sha(TAURI_LOCK_PATCH_BODY)
+TAURI_PATCHED_LOCK_SHA = _sha(b"synthetic patched tauri-cli Cargo.lock")
+TAURI_SPIN_SHA = _sha(b"synthetic spin crate")
+XCODEGEN_PATCH_SHA = _sha(XCODEGEN_PATCH_BODY)
+XCODEGEN_PATCHED_SETTINGS_SHA = _sha(b"synthetic patched SettingsBuilder.swift")
 COMMIT = "25a600db24f7680ad9806ce5427bd0ab8afe1114"
+GOMOBILE_COMMIT = "9f03b8f25789099c5c8abef4a02085da783ba923"
+TAURI_PATCH_PATH = "scripts/tauri-cli-spin.patch"
+XCODEGEN_PATCH_PATH = "scripts/xcodegen-installed-resources.patch"
 
 PATCH_PATHS = {
     "security": "native/macos/patches/security.patch",
@@ -45,15 +57,45 @@ PATCH_PATHS = {
 BUILD_LIBBOX = """\
 #!/usr/bin/env bash
 set -euo pipefail
-echo "$GO_VERSION $GOMOBILE_VERSION $SING_BOX_VERSION $SING_BOX_COMMIT"
+echo "$GO_VERSION $GOMOBILE_VERSION $GOMOBILE_COMMIT $GOMOBILE_MODULE_SUM $SING_BOX_VERSION $SING_BOX_COMMIT"
 python3 hash_artifact.py "$out" \\
   --metadata "sourceCommit=$SING_BOX_COMMIT" \\
+  --metadata "gomobileCommit=$GOMOBILE_COMMIT" \\
+  --metadata "gomobileModuleSum=$GOMOBILE_MODULE_SUM" \\
   --metadata "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256" \\
   --metadata "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256" \\
   --metadata "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256" \\
   --metadata "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
 """
-BUILD_NATIVE = '#!/usr/bin/env bash\necho "--metadata singBoxCommit=$SING_BOX_COMMIT"\n'
+LIBBOX_ARTIFACT_BINDINGS = [
+    "sourceTag=$SING_BOX_VERSION",
+    "sourceCommit=$SING_BOX_COMMIT",
+    "goVersion=$GO_VERSION",
+    "goToolchainTreeSha256=$go_toolchain_tree_sha256",
+    "goToolsTreeSha256=$go_tools_tree_sha256",
+    "goModuleCacheTreeSha256=$go_module_cache_tree_sha256",
+    "gomobileVersion=$GOMOBILE_VERSION",
+    "gomobileCommit=$GOMOBILE_COMMIT",
+    "gomobileModuleSum=$GOMOBILE_MODULE_SUM",
+    "headerNormalization=angleBracketFrameworkImports-v1",
+    "platform=$LIBBOX_APPLE_PLATFORM",
+    "buildTags=$LIBBOX_BUILD_TAGS",
+    "nonMacOsTags=$LIBBOX_NON_MACOS_TAGS",
+    "upstreamGoModSha256=$SING_BOX_UPSTREAM_GO_MOD_SHA256",
+    "upstreamGoSumSha256=$SING_BOX_UPSTREAM_GO_SUM_SHA256",
+    "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256",
+    "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
+    "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+    "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256",
+    "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
+    "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256",
+    "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256",
+]
+LIBBOX_CONTRACT = "#!/usr/bin/env bash\n" + "\n".join(LIBBOX_ARTIFACT_BINDINGS) + "\n"
+BUILD_NATIVE = (
+    '#!/usr/bin/env bash\necho "--metadata singBoxCommit=$SING_BOX_COMMIT"\n'
+    "libbox_verify_xcframework_artifact\n"
+)
 BUILD_TAGS = "with_quic,with_clash_api,grpcnotrace"
 CONTROLLER_RELATIVE_PATH = "crates/cfw-singbox-config/src/controller.rs"
 CONTROLLER_TRIGGER = '"clash_api": {'
@@ -67,9 +109,65 @@ CONTROLLER_SOURCE = (
 )
 BUILD_UNSIGNED = (
     "#!/usr/bin/env bash\n"
-    'echo "sourceCommit=$SING_BOX_COMMIT"\n'
-    'echo "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"\n'
+    "libbox_verify_xcframework_artifact\n"
 )
+TAURI_INSTALLER = """\
+#!/usr/bin/env bash
+echo "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate"
+echo "$TAURI_CLI_CRATE_SHA256"
+echo "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256"
+echo "$TAURI_CLI_LOCK_PATCH_SHA256"
+echo "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256"
+echo "$TAURI_CLI_SPIN_VERSION"
+echo "$TAURI_CLI_SPIN_CRATE_SHA256"
+git apply --unidiff-zero "$TAURI_CLI_LOCK_PATCH_PATH"
+rustup which --toolchain "$rust_toolchain" cargo
+/usr/bin/env -i CARGO_HOME="$prepared_cargo_home" \
+  CARGO_HTTP_LOW_SPEED_LIMIT=1 CARGO_HTTP_MULTIPLEXING=true \
+  CARGO_HTTP_TIMEOUT=600 CARGO_NET_RETRY=3 \
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse RUSTC="$rustc_bin" \
+  cargo fetch --manifest-path "$cargo_manifest" --locked \
+  --target aarch64-apple-darwin
+/usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"
+cfw_verify_release_toolchain_manifest
+/usr/bin/env -i CARGO_HOME="$offline_cargo_home" CARGO_TARGET_DIR="$cargo_target" \
+  CARGO_NET_OFFLINE=true CARGO_NET_RETRY=0 \
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse RUSTC="$rustc_bin" \
+  cargo install --path "$source_root" --offline --locked \
+  --target aarch64-apple-darwin
+echo "tauri-cli-$TAURI_CLI_VERSION"
+readonly payload="$staging/payload/tauri-cli-$TAURI_CLI_VERSION"
+/bin/mv "$source_root" "$payload/source"
+/usr/bin/lipo -archs "$payload/bin/cargo-tauri"
+echo "--algorithm sha256-tree-v2"
+echo "artifactKind=pinned-tauri-cli-v2"
+echo "dependencyMode=isolated-fetch-offline-locked-v1"
+echo "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET"
+echo "payloadLayout=bin-and-patched-source-v1"
+echo "xcodeBuild=$XCODE_BUILD_VERSION"
+echo "xcodeVersion=$XCODE_VERSION"
+echo "cfw_verify_tauri_toolchain_tree"
+"""
+CI_WORKFLOW = """\
+run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+run: cargo deny --locked --target aarch64-apple-darwin check
+run: ./scripts/install_pinned_tauri_cli.sh
+"""
+XCODEGEN_BOOTSTRAP = """\
+#!/usr/bin/env bash
+xcodegen_patch="$repo_root/$XCODEGEN_PATCH_PATH"
+echo "$XCODEGEN_PATCH_SHA256"
+echo "$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256"
+GIT_CEILING_DIRECTORIES="$toolchain_root"
+/usr/bin/git -C "$payload/source" apply --check "$xcodegen_patch"
+/usr/bin/git -C "$payload/source" apply --reverse --check "$xcodegen_patch"
+USER=cfw-release
+LOGNAME=cfw-release
+/usr/bin/strip -S "$build_root/release/xcodegen"
+echo "patchSha256=$XCODEGEN_PATCH_SHA256"
+echo "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256"
+echo "XcodeGenResourceProbe.xcodeproj/project.pbxproj"
+"""
 
 
 class Fixture:
@@ -78,10 +176,27 @@ class Fixture:
     def __init__(self) -> None:
         self.env: dict[str, str] = {
             "RUST_VERSION": "1.97.1",
+            "CARGO_DENY_VERSION": "0.20.2",
+            "XCODEGEN_VERSION": "2.46.0",
+            "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
+            "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
+            "XCODEGEN_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
+            "XCODEGEN_PATCH_PATH": XCODEGEN_PATCH_PATH,
+            "XCODEGEN_PATCH_SHA256": XCODEGEN_PATCH_SHA,
+            "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256": XCODEGEN_PATCHED_SETTINGS_SHA,
             "NODE_VERSION": "24.18.0",
             "GO_VERSION": "1.26.5",
-            "GOMOBILE_VERSION": "v0.1.12",
-            "GOMOBILE_MODULE_SUM": "h1:XwzjZaclFF96deLqwAgK8gU3w0M2A8qxgDmhV+A0wjg=",
+            "TAURI_CLI_VERSION": "2.11.4",
+            "TAURI_CLI_CRATE_SHA256": TAURI_CRATE_SHA,
+            "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256": TAURI_UPSTREAM_LOCK_SHA,
+            "TAURI_CLI_LOCK_PATCH_PATH": TAURI_PATCH_PATH,
+            "TAURI_CLI_LOCK_PATCH_SHA256": TAURI_LOCK_PATCH_SHA,
+            "TAURI_CLI_PATCHED_CARGO_LOCK_SHA256": TAURI_PATCHED_LOCK_SHA,
+            "TAURI_CLI_SPIN_VERSION": "0.9.9",
+            "TAURI_CLI_SPIN_CRATE_SHA256": TAURI_SPIN_SHA,
+            "GOMOBILE_VERSION": "v0.1.13",
+            "GOMOBILE_COMMIT": GOMOBILE_COMMIT,
+            "GOMOBILE_MODULE_SUM": "h1:foTOGKJetah9VwaJl1XJx5TswIAVg8NfYmHOhrOc95I=",
             "GOVULNCHECK_VERSION": "v1.6.0",
             "GOVULNCHECK_MODULE_SUM": "h1:FeMO9Rm/HwyduOztbvKcOw+zvDEPr4I4aQNSfevFcKY=",
             "SING_BOX_VERSION": "v1.13.14",
@@ -108,11 +223,110 @@ class Fixture:
             "nativeLockPath": "native/macos/Dependencies.lock.json",
             "tools": {
                 "RUST_VERSION": "1.97.1",
+                "CARGO_DENY_VERSION": "0.20.2",
+                "XCODEGEN_VERSION": "2.46.0",
+                "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
+                "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
+                "XCODEGEN_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
                 "NODE_VERSION": "24.18.0",
                 "GO_VERSION": "1.26.5",
-                "GOMOBILE_VERSION": "v0.1.12",
+                "GOMOBILE_VERSION": "v0.1.13",
                 "GOVULNCHECK_VERSION": "v1.6.0",
+                "TAURI_CLI_VERSION": "2.11.4",
                 "SING_BOX_VERSION": "v1.13.14",
+            },
+            "xcodegen": {
+                "patchPathKey": "XCODEGEN_PATCH_PATH",
+                "patchSha256Key": "XCODEGEN_PATCH_SHA256",
+                "patchSha256": XCODEGEN_PATCH_SHA,
+                "patchedSettingsBuilderSha256Key": "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
+                "patchedSettingsBuilderSha256": XCODEGEN_PATCHED_SETTINGS_SHA,
+                "bootstrapPath": "scripts/bootstrap_release_toolchain.sh",
+                "requiredBootstrapFragments": [
+                    "$XCODEGEN_PATCH_PATH",
+                    "$XCODEGEN_PATCH_SHA256",
+                    "$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
+                    'GIT_CEILING_DIRECTORIES="$toolchain_root"',
+                    '/usr/bin/git -C "$payload/source" apply --check "$xcodegen_patch"',
+                    '/usr/bin/git -C "$payload/source" apply --reverse --check "$xcodegen_patch"',
+                    "USER=cfw-release",
+                    "LOGNAME=cfw-release",
+                    '/usr/bin/strip -S "$build_root/release/xcodegen"',
+                    "patchSha256=$XCODEGEN_PATCH_SHA256",
+                    "patchedSettingsBuilderSha256=$XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256",
+                    "XcodeGenResourceProbe.xcodeproj/project.pbxproj",
+                ],
+            },
+            "gomobileCommitKey": "GOMOBILE_COMMIT",
+            "gomobileCommit": GOMOBILE_COMMIT,
+            "cargoDeny": {
+                "ciWorkflowPath": ".github/workflows/ci.yml",
+                "requiredCiFragments": [
+                    'cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked',
+                    "cargo deny --locked --target aarch64-apple-darwin check",
+                ],
+            },
+            "tauriCli": {
+                "crateSha256Key": "TAURI_CLI_CRATE_SHA256",
+                "crateSha256": TAURI_CRATE_SHA,
+                "upstreamCargoLockSha256Key": "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256",
+                "upstreamCargoLockSha256": TAURI_UPSTREAM_LOCK_SHA,
+                "lockPatchPathKey": "TAURI_CLI_LOCK_PATCH_PATH",
+                "lockPatchSha256Key": "TAURI_CLI_LOCK_PATCH_SHA256",
+                "lockPatchSha256": TAURI_LOCK_PATCH_SHA,
+                "patchedCargoLockSha256Key": "TAURI_CLI_PATCHED_CARGO_LOCK_SHA256",
+                "patchedCargoLockSha256": TAURI_PATCHED_LOCK_SHA,
+                "spinVersionKey": "TAURI_CLI_SPIN_VERSION",
+                "spinVersion": "0.9.9",
+                "spinCrateSha256Key": "TAURI_CLI_SPIN_CRATE_SHA256",
+                "spinCrateSha256": TAURI_SPIN_SHA,
+                "ciWorkflowPath": ".github/workflows/ci.yml",
+                "requiredCiFragment": "./scripts/install_pinned_tauri_cli.sh",
+                "installerPath": "scripts/install_pinned_tauri_cli.sh",
+                "requiredInstallerFragments": [
+                    "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate",
+                    "$TAURI_CLI_CRATE_SHA256",
+                    "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256",
+                    "$TAURI_CLI_LOCK_PATCH_SHA256",
+                    "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256",
+                    "$TAURI_CLI_SPIN_VERSION",
+                    "$TAURI_CLI_SPIN_CRATE_SHA256",
+                    'which --toolchain "$rust_toolchain"',
+                    "/usr/bin/env -i",
+                    'CARGO_HOME="$prepared_cargo_home"',
+                    'CARGO_HOME="$offline_cargo_home"',
+                    'CARGO_TARGET_DIR="$cargo_target"',
+                    "CARGO_HTTP_LOW_SPEED_LIMIT=1",
+                    "CARGO_HTTP_MULTIPLEXING=true",
+                    "CARGO_HTTP_TIMEOUT=600",
+                    "CARGO_NET_RETRY=3",
+                    "CARGO_NET_RETRY=0",
+                    "CARGO_NET_OFFLINE=true",
+                    "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse",
+                    'RUSTC="$rustc_bin"',
+                    "--unidiff-zero",
+                    "fetch",
+                    "--manifest-path",
+                    "install",
+                    "--path",
+                    "--offline",
+                    "--locked",
+                    "--target aarch64-apple-darwin",
+                    "tauri-cli-$TAURI_CLI_VERSION",
+                    'payload="$staging/payload/tauri-cli-$TAURI_CLI_VERSION"',
+                    '/usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"',
+                    '/bin/mv "$source_root" "$payload/source"',
+                    "/usr/bin/lipo -archs",
+                    "--algorithm sha256-tree-v2",
+                    "artifactKind=pinned-tauri-cli-v2",
+                    "dependencyMode=isolated-fetch-offline-locked-v1",
+                    "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET",
+                    "payloadLayout=bin-and-patched-source-v1",
+                    "xcodeBuild=$XCODE_BUILD_VERSION",
+                    "xcodeVersion=$XCODE_VERSION",
+                    "cfw_verify_release_toolchain_manifest",
+                    "cfw_verify_tauri_toolchain_tree",
+                ],
             },
             "singBoxCommitKey": "SING_BOX_COMMIT",
             "singBoxCommit": COMMIT,
@@ -138,6 +352,14 @@ class Fixture:
             ],
             "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
             "combinedDiffSha256": COMBINED_SHA,
+            "sourceContract": {
+                "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
+                "patchedDiffSha256": SECURITY_SHA,
+                "patchedGoModSha256Key": "SING_BOX_PATCHED_GO_MOD_SHA256",
+                "patchedGoModSha256": self.env["SING_BOX_PATCHED_GO_MOD_SHA256"],
+                "patchedGoSumSha256Key": "SING_BOX_PATCHED_GO_SUM_SHA256",
+                "patchedGoSumSha256": self.env["SING_BOX_PATCHED_GO_SUM_SHA256"],
+            },
             "verifiedGoModuleInputKeys": [
                 "GOMOBILE_MODULE_SUM",
                 "GOVULNCHECK_MODULE_SUM",
@@ -170,6 +392,8 @@ class Fixture:
                     "requirePinReferences": [
                         "$GO_VERSION",
                         "$GOMOBILE_VERSION",
+                        "$GOMOBILE_COMMIT",
+                        "$GOMOBILE_MODULE_SUM",
                         "$SING_BOX_VERSION",
                         "$SING_BOX_COMMIT",
                         "$SING_BOX_COMBINED_DIFF_SHA256",
@@ -181,32 +405,49 @@ class Fixture:
                 }
             },
             "artifactBindings": {
+                "scripts/libbox_source_contract.sh": list(LIBBOX_ARTIFACT_BINDINGS),
                 "scripts/build_libbox.sh": [
                     "sourceCommit=$SING_BOX_COMMIT",
+                    "gomobileCommit=$GOMOBILE_COMMIT",
+                    "gomobileModuleSum=$GOMOBILE_MODULE_SUM",
                     "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
                 ],
-                "scripts/build_native_products.sh": ["singBoxCommit=$SING_BOX_COMMIT"],
+                "scripts/build_native_products.sh": [
+                    "singBoxCommit=$SING_BOX_COMMIT",
+                    "libbox_verify_xcframework_artifact",
+                ],
                 "scripts/build_unsigned_candidate.sh": [
-                    "sourceCommit=$SING_BOX_COMMIT",
-                    "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
+                    "libbox_verify_xcframework_artifact",
                 ],
             },
         }
         self.lock = {
             "go": "1.26.5",
-            "gomobile": "v0.1.12",
+            "gomobile": "v0.1.13",
             "singBox": {
                 "commit": COMMIT,
                 "tag": "v1.13.14",
-                "securityPatch": {"path": PATCH_PATHS["security"], "sha256": SECURITY_SHA},
+                "securityPatch": {
+                    "path": PATCH_PATHS["security"],
+                    "sha256": SECURITY_SHA,
+                    "patchedDiffSha256": SECURITY_SHA,
+                    "patchedGoModSha256": self.env["SING_BOX_PATCHED_GO_MOD_SHA256"],
+                    "patchedGoSumSha256": self.env["SING_BOX_PATCHED_GO_SUM_SHA256"],
+                },
                 "rawPacketPatch": {"path": PATCH_PATHS["raw"], "sha256": RAW_SHA},
                 "dnsFailoverPatch": {"path": PATCH_PATHS["dns"], "sha256": DNS_SHA},
                 "combinedDiffSha256": COMBINED_SHA,
             },
         }
         self.build_libbox = BUILD_LIBBOX
+        self.libbox_contract = LIBBOX_CONTRACT
         self.build_native = BUILD_NATIVE
         self.build_unsigned = BUILD_UNSIGNED
+        self.tauri_lock_patch = TAURI_LOCK_PATCH_BODY
+        self.xcodegen_patch = XCODEGEN_PATCH_BODY
+        self.xcodegen_bootstrap = XCODEGEN_BOOTSTRAP
+        self.tauri_installer = TAURI_INSTALLER
+        self.ci_workflow = CI_WORKFLOW
         self._extra_env_text = ""
 
     def env_text(self) -> str:
@@ -231,10 +472,23 @@ class Fixture:
             json.dumps(self.lock), encoding="utf-8"
         )
         (root / "scripts/build_libbox.sh").write_text(self.build_libbox, encoding="utf-8")
+        (root / "scripts/libbox_source_contract.sh").write_text(
+            self.libbox_contract, encoding="utf-8"
+        )
         (root / "scripts/build_native_products.sh").write_text(self.build_native, encoding="utf-8")
         (root / "scripts/build_unsigned_candidate.sh").write_text(
             self.build_unsigned, encoding="utf-8"
         )
+        (root / TAURI_PATCH_PATH).write_bytes(self.tauri_lock_patch)
+        (root / XCODEGEN_PATCH_PATH).write_bytes(self.xcodegen_patch)
+        (root / "scripts/bootstrap_release_toolchain.sh").write_text(
+            self.xcodegen_bootstrap, encoding="utf-8"
+        )
+        (root / "scripts/install_pinned_tauri_cli.sh").write_text(
+            self.tauri_installer, encoding="utf-8"
+        )
+        (root / ".github/workflows").mkdir(parents=True, exist_ok=True)
+        (root / ".github/workflows/ci.yml").write_text(self.ci_workflow, encoding="utf-8")
         return root
 
 
@@ -276,10 +530,101 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture.env["SING_BOX_COMMIT"] = "0" * 40
         self._assert_fails(fixture, "commit")
 
+    def test_wrong_gomobile_commit_fails(self) -> None:
+        fixture = Fixture()
+        fixture.env["GOMOBILE_COMMIT"] = "0" * 40
+        self._assert_fails(fixture, "gomobile commit")
+
     def test_missing_go_module_input_fails(self) -> None:
         fixture = Fixture()
         del fixture.env["GOMOBILE_MODULE_SUM"]
         self._assert_fails(fixture, "GOMOBILE_MODULE_SUM")
+
+    def test_source_contract_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.env["SING_BOX_PATCHED_GO_MOD_SHA256"] = "a" * 64
+        self._assert_fails(fixture, "source contract patchedGoModSha256")
+
+    def test_native_lock_source_contract_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.lock["singBox"]["securityPatch"]["patchedGoSumSha256"] = "a" * 64
+        self._assert_fails(fixture, "securityPatch.patchedGoSumSha256")
+
+    def test_cargo_deny_ci_hard_coded_version_fails(self) -> None:
+        fixture = Fixture()
+        fixture.ci_workflow = fixture.ci_workflow.replace(
+            '"$CARGO_DENY_VERSION"', "0.20.2"
+        )
+        self._assert_fails(fixture, "cargo-deny CI")
+
+    # --- Tauri CLI source and lock bindings --------------------------------
+
+    def test_xcodegen_patch_content_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.xcodegen_patch = b"tampered XcodeGen patch\n"
+        self._assert_fails(fixture, "XcodeGen patch file digest")
+
+    def test_xcodegen_bootstrap_must_apply_pinned_patch(self) -> None:
+        fixture = Fixture()
+        fixture.xcodegen_bootstrap = fixture.xcodegen_bootstrap.replace(
+            '/usr/bin/git -C "$payload/source" apply --check "$xcodegen_patch"',
+            "true",
+        )
+        self._assert_fails(fixture, "XcodeGen bootstrap lacks required pinned fragment")
+
+    def test_tauri_cli_crate_digest_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.env["TAURI_CLI_CRATE_SHA256"] = "a" * 64
+        self._assert_fails(fixture, "Tauri CLI crate digest")
+
+    def test_tauri_cli_lock_patch_content_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_lock_patch = b"tampered tauri-cli lock patch\n"
+        self._assert_fails(fixture, "lock patch digest")
+
+    def test_tauri_cli_installer_must_keep_locked_path_install(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace("--locked", "--offline")
+        self._assert_fails(fixture, "required pinned fragment '--locked'")
+
+    def test_tauri_cli_installer_must_isolate_cargo_home(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            'CARGO_HOME="$offline_cargo_home"', 'CARGO_HOME="$HOME/.cargo"'
+        )
+        self._assert_fails(fixture, "required pinned fragment 'CARGO_HOME")
+
+    def test_tauri_cli_installer_must_isolate_network_preparation(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            'CARGO_HOME="$prepared_cargo_home"', 'CARGO_HOME="$HOME/.cargo"'
+        )
+        self._assert_fails(fixture, "required pinned fragment 'CARGO_HOME")
+
+    def test_tauri_cli_installer_must_compile_offline(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace("--offline", "--frozen")
+        self._assert_fails(fixture, "required pinned fragment '--offline'")
+
+    def test_tauri_cli_installer_must_fail_fast_on_network_drift(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            "CARGO_NET_RETRY=0", "CARGO_NET_RETRY=10"
+        )
+        self._assert_fails(fixture, "required pinned fragment 'CARGO_NET_RETRY=0'")
+
+    def test_tauri_cli_installer_must_separate_payload_from_source(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            'payload="$staging/payload/tauri-cli-$TAURI_CLI_VERSION"',
+            'payload="$source_root"',
+        )
+        self._assert_fails(fixture, "required pinned fragment 'payload=")
+
+    def test_ci_direct_tauri_cli_install_fails(self) -> None:
+        fixture = Fixture()
+        fixture.ci_workflow += "run: cargo install tauri-cli --version 2.11.4\n"
+        self._assert_fails(fixture, "floating direct Tauri CLI installation")
 
     # --- patch digest failures ----------------------------------------------
 
@@ -421,6 +766,13 @@ class PinnedBuildInputsTests(unittest.TestCase):
     def test_missing_artifact_binding_fails(self) -> None:
         fixture = Fixture()
         fixture.build_native = '#!/usr/bin/env bash\necho "no binding"\n'
+        self._assert_fails(fixture, "artifact-hash binding")
+
+    def test_libbox_exact_contract_missing_metadata_binding_fails(self) -> None:
+        fixture = Fixture()
+        fixture.libbox_contract = fixture.libbox_contract.replace(
+            "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256", "missing-binding"
+        )
         self._assert_fails(fixture, "artifact-hash binding")
 
 

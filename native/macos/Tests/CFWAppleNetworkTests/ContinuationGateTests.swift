@@ -4,6 +4,13 @@ import Testing
 
 @testable import CFWAppleNetwork
 
+func appleCredentialAudience() throws -> CredentialAudience {
+  CredentialAudience(
+    profileID: UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!,
+    profileDigest: try SHA256Digest(hex: String(repeating: "ab", count: 32))
+  )
+}
+
 private enum GateTestError: Error {
   case busy
 }
@@ -19,6 +26,7 @@ private func tunnelDescriptor() throws -> ConfigurationDescriptor {
   return try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: tunnelOptions,
+    credentialAudience: try appleCredentialAudience(),
     installationID: UUID(),
     epoch: 1,
     generation: 1,

@@ -34,9 +34,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "24.18.0"
+      - name: Bootstrap Node
+        run: ./scripts/bootstrap_release_toolchain.sh --node-only
       - name: Assert toolchain
         run: test "$(xcodebuild -version)" = $'Xcode 26.6\\nBuild version 17F113'
       - name: Check formatting
@@ -45,6 +44,16 @@ jobs:
         run: cargo clippy --locked --workspace -- -D warnings
       - name: Swift lint
         run: swift format lint --recursive --strict native/macos/Sources
+      - name: Swift test
+        run: swift test --package-path native/macos -Xswiftc -warnings-as-errors
+      - name: Prepare UI
+        run: ./scripts/prepare_ui_dependencies.sh
+      - name: Test UI
+        run: ./scripts/build_ui_with_pinned_node.sh --test
+      - name: Build UI
+        run: ./scripts/build_ui_with_pinned_node.sh
+      - name: Audit UI
+        run: ./scripts/build_ui_with_pinned_node.sh --audit
 """
 
 
@@ -122,10 +131,10 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
     def test_multiple_node_toolchains_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
-                '        with:\n          node-version: "24.18.0"',
-                '        with:\n          node-version: "24.18.0"\n'
+                "      - name: Bootstrap Node",
                 "      - name: Second node\n"
-                "        run: use node-20.0.0/bin/npm",
+                "        run: use node-20.0.0/bin/npm\n"
+                "      - name: Bootstrap Node",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "multiple Node.js toolchains"):
@@ -139,6 +148,26 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "-D warnings"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_dropped_swift_warnings_as_errors_gate_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "swift test --package-path native/macos -Xswiftc -warnings-as-errors",
+                "swift test --package-path native/macos",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "warnings-as-errors"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_raw_npm_install_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "run: ./scripts/prepare_ui_dependencies.sh",
+                "run: npm ci",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "raw npm command"):
                 audit_workflow(workflow_path, pins_path)
 
     def test_missing_workflow_fails_closed(self) -> None:

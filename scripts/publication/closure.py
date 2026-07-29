@@ -65,12 +65,14 @@ REQUIRED_ARTIFACT_KINDS = {
     "validated-candidate-notarization",
     "validated-candidate-review",
     "validated-candidate-runtime-recovery",
+    "validated-candidate-toolchain-binding",
+    "validated-candidate-unsigned-ci",
 }
 ALLOWED_CODE_PATHS = {
     "Contents/MacOS/clash-for-mac",
     "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/CFWNativeBridge",
     "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/MacOS/CFWProxyAgent",
-    "Contents/Library/SystemExtensions/CFWPacketTunnel.systemextension/Contents/MacOS/CFWPacketTunnel",
+    "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/MacOS/CFWPacketTunnel",
     "Contents/Library/HelperTools/cfw-helper-tombstone",
 }
 MACHO_MAGICS = {

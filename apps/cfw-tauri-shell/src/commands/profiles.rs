@@ -7,11 +7,12 @@ use cfw_apple_network::NativeFrameworkBridge;
 use cfw_engine_api::{
     CredentialGarbageCollectionCommitRequest, CredentialGarbageCollectionPreview,
     CredentialGarbageCollectionRequest, CredentialPresence, CredentialPresenceRequest,
-    CredentialProvision, CredentialProvisionRequest, CredentialVaultProvisioner,
-    CredentialVaultReceipt,
+    CredentialProfileCatalogEntry, CredentialProvision, CredentialProvisionRequest,
+    CredentialVaultProvisioner, CredentialVaultReceipt,
 };
 use cfw_profiles::{
-    ProfileImportResult, ProfileRecord, ProfileRepository, ProfileRepositorySnapshot,
+    ProfileCredentialSnapshot, ProfileImportResult, ProfileRecord, ProfileRepository,
+    ProfileRepositorySnapshot,
 };
 use cfw_singbox_config::{CredentialRef, CredentialSecret, ValidatedSingBoxProfile};
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,7 @@ pub(crate) struct ManagedProfiles {
 }
 
 const CREDENTIAL_GC_PREVIEW_TTL: Duration = Duration::from_secs(5 * 60);
+const PROJECTION_VALIDATION_PROFILE_ID: &str = "00000000-0000-4000-8000-000000000000";
 
 #[derive(Debug)]
 struct CredentialGcAuthority {
@@ -103,6 +105,10 @@ impl ManagedProfiles {
     pub(crate) fn repository(&self) -> &ProfileRepository {
         &self.repository
     }
+
+    pub(crate) fn credential_vault(&self) -> &NativeFrameworkBridge {
+        &self.credential_vault
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -141,10 +147,18 @@ pub(crate) fn import_profile_text(
     let profile = ValidatedSingBoxProfile::parse(&body).map_err(|error| error.to_string())?;
     let settings = engine.engine_settings().clone();
     profile
-        .project(cfw_singbox_config::ProjectionMode::SystemProxy, &settings)
+        .project(
+            PROJECTION_VALIDATION_PROFILE_ID,
+            cfw_singbox_config::ProjectionMode::SystemProxy,
+            &settings,
+        )
         .map_err(|error| error.to_string())?;
     profile
-        .project(cfw_singbox_config::ProjectionMode::Tunnel, &settings)
+        .project(
+            PROJECTION_VALIDATION_PROFILE_ID,
+            cfw_singbox_config::ProjectionMode::Tunnel,
+            &settings,
+        )
         .map_err(|error| error.to_string())?;
     profiles
         .repository
@@ -181,8 +195,8 @@ pub(crate) async fn profile_credential_presence(
         .load(&id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("profile does not exist: {id}"))?;
-    let request = CredentialPresenceRequest::new(&id, stored.profile.credential_references())
-        .map_err(|error| error.to_string())?;
+    let request =
+        CredentialPresenceRequest::new(&id, &stored.profile).map_err(|error| error.to_string())?;
     let vault = profiles.credential_vault.clone();
     vault
         .query_profile_credentials(request)
@@ -243,7 +257,7 @@ pub(crate) async fn provision_profile_credentials(
         .provision_profile_credentials(request)
         .await
         .map_err(|error| error.to_string())?;
-    if receipt.profile_id != profile_id {
+    if receipt.profile_id != profile_id || receipt.profile_digest != stored.record.digest {
         return Err("credential vault receipt does not match the requested profile".into());
     }
     Ok(receipt)
@@ -261,14 +275,12 @@ pub(crate) async fn preview_credential_gc(
         .repository
         .credential_snapshot()
         .map_err(|error| error.to_string())?;
-    let live = snapshot
-        .live_references
+    let request = credential_gc_request(snapshot)?;
+    let live = request
+        .catalog()
         .iter()
-        .cloned()
+        .flat_map(CredentialProfileCatalogEntry::bindings)
         .collect::<BTreeSet<_>>();
-    let request =
-        CredentialGarbageCollectionRequest::new(snapshot.snapshot_digest, snapshot.live_references)
-            .map_err(|error| error.to_string())?;
     let preview = profiles
         .credential_vault
         .preview_credential_garbage_collection(request.clone())
@@ -279,9 +291,9 @@ pub(crate) async fn preview_credential_gc(
     CredentialGarbageCollectionCommitRequest::new(request, &preview)
         .map_err(|error| error.to_string())?;
     if preview
-        .orphan_references
+        .orphan_bindings
         .iter()
-        .any(|reference| live.contains(reference))
+        .any(|binding| live.contains(binding))
     {
         return Err(
             "credential garbage-collection preview marks a live reference as orphaned".into(),
@@ -290,7 +302,11 @@ pub(crate) async fn preview_credential_gc(
     let preview_id = uuid::Uuid::new_v4().hyphenated().to_string();
     let response = UiCredentialGcPreview {
         preview_id: preview_id.clone(),
-        orphan_references: preview.orphan_references.clone(),
+        orphan_references: preview
+            .orphan_bindings
+            .iter()
+            .map(|binding| binding.reference().clone())
+            .collect(),
         orphan_count: preview.orphan_count,
     };
     let mut authority = profiles
@@ -341,11 +357,7 @@ pub(crate) async fn commit_credential_gc(
         .lock_credential_snapshot()
         .map_err(|error| error.to_string())?;
     let current = locked.snapshot();
-    let request = CredentialGarbageCollectionRequest::new(
-        current.snapshot_digest.clone(),
-        current.live_references.clone(),
-    )
-    .map_err(|error| error.to_string())?;
+    let request = credential_gc_request(current.clone())?;
     let commit = CredentialGarbageCollectionCommitRequest::new(request, &authority.preview)
         .map_err(|error| error.to_string())?;
     let receipt = profiles
@@ -359,6 +371,19 @@ pub(crate) async fn commit_credential_gc(
     Ok(UiCredentialGcReceipt {
         removed_count: receipt.deleted_count,
     })
+}
+
+fn credential_gc_request(
+    snapshot: ProfileCredentialSnapshot,
+) -> Result<CredentialGarbageCollectionRequest, String> {
+    let catalog = snapshot
+        .catalog
+        .into_iter()
+        .map(|entry| CredentialProfileCatalogEntry::new(entry.audience, entry.references))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    CredentialGarbageCollectionRequest::new(snapshot.snapshot_digest, catalog)
+        .map_err(|error| error.to_string())
 }
 
 fn credential_requirements(
@@ -532,7 +557,7 @@ mod tests {
             preview: CredentialGarbageCollectionPreview {
                 snapshot_digest: "01".repeat(32),
                 vault_revision: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
-                orphan_references: Vec::new(),
+                orphan_bindings: Vec::new(),
                 orphan_count: 0,
             },
         }

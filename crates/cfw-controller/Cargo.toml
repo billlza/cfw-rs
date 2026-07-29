@@ -8,8 +8,12 @@ license.workspace = true
 futures-util.workspace = true
 # The clash-compatible controller speaks JSON over loopback HTTP only; the
 # workspace TLS feature set is inherited unchanged.
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 urlencoding.workspace = true
+
+[dev-dependencies]
+rustls.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }

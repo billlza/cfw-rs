@@ -144,7 +144,7 @@ pub(crate) fn read_runtime_config_text(
     };
     let projected = selected
         .profile
-        .project(mode, &settings)
+        .project(&selected.record.id, mode, &settings)
         .map_err(|error| error.to_string())?;
     let secret = engine
         .controller_access()
@@ -199,7 +199,7 @@ fn project_for_mode(
     for mode in modes {
         let projected = selected
             .profile
-            .project(*mode, settings)
+            .project(&selected.record.id, *mode, settings)
             .map_err(|error| error.to_string())?;
         bytes = bytes.max(projected.as_json().len());
     }
@@ -301,7 +301,11 @@ mod tests {
             .expect("the app-owned controller is authenticated");
         let projected = stored()
             .profile
-            .project(ProjectionMode::SystemProxy, access.settings())
+            .project(
+                "34db18b6-9903-4e9f-8854-15648e19e4f3",
+                ProjectionMode::SystemProxy,
+                access.settings(),
+            )
             .expect("projection");
         assert!(
             projected.as_json().contains(&secret),

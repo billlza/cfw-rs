@@ -53,12 +53,9 @@ private func exampleDigest(_ data: Data) throws -> CFWSharedProtocol.SHA256Diges
 
 private func examplePeer(_ role: AuthorityRole, ownerUID: UInt32 = 501) throws -> PeerIdentity {
   PeerIdentity(
-    auditTokenDigest: try exampleDigest(Data("audit".utf8)),
+    connectionIdentityDigest: try exampleDigest(Data("connection".utf8)),
     pid: 42, euid: role == .provider ? 0 : ownerUID,
     auditSessionID: role == .provider ? 0 : 7,
-    teamID: "YKUPL7Z869", signingID: role.rawValue,
-    designatedRequirementDigest: try exampleDigest(Data("requirement".utf8)),
-    entitlementDigest: try exampleDigest(Data("entitlements".utf8)),
     role: role, consoleUID: 501)
 }
 
@@ -94,7 +91,9 @@ private func tunnelFixture(ownerUID: UInt32 = 501) throws -> TunnelFixture {
     identitySHA256: identityDigest, ownerUID: ownerUID, authorityRevision: 1)
   let descriptor = try AuthorityConfigurationDescriptor(
     byteCount: UInt32(configuration.count), configSHA256: configDigest,
-    identitySHA256: identityDigest, credentialSlots: [slot],
+    identitySHA256: identityDigest,
+    credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: identityDigest),
+    credentialSlots: [slot],
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true))
   let request = try PrepareStartRequest(
     operation: operation, expectedRevision: 1, configuration: descriptor)
@@ -141,19 +140,13 @@ private func canonicalEnvelope(_ object: [String: Any]) throws -> Data {
 }
 
 private func redeemEnvelope(
-  operation: OperationContext, leaseID: AuthorityIdentifier,
   ticket: Data, requestID: AuthorityIdentifier
 ) throws -> Data {
-  let encoder = JSONEncoder()
-  encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-  let operationObject = try JSONSerialization.jsonObject(with: encoder.encode(operation))
   return try canonicalEnvelope([
     "command": [
       "kind": "redeem_tunnel_ticket",
       "payload": [
-        "lease_id": leaseID.rawValue.uuidString.lowercased(),
-        "operation": operationObject,
-        "ticket": ticket.map(Int.init),
+        "ticket": ticket.map(Int.init)
       ],
     ],
     "major": AuthorityV1Limits.major,
@@ -316,7 +309,6 @@ private func redeemEnvelope(
   var responseContainsMarker = true
   provider.redeemTunnelTicket(
     try redeemEnvelope(
-      operation: fixture.request.operation, leaseID: prepared.leaseID,
       ticket: ticketBytes, requestID: AuthorityIdentifier(UUID()))
   ) { response, configuration, secret, error in
     redeemError = error
@@ -345,7 +337,6 @@ private func redeemEnvelope(
   var duplicateReturnedMaterial = false
   provider.redeemTunnelTicket(
     try redeemEnvelope(
-      operation: fixture.request.operation, leaseID: prepared.leaseID,
       ticket: ticketBytes, requestID: AuthorityIdentifier(UUID()))
   ) { _, configuration, secret, error in
     duplicateError = authorityError(error)
@@ -383,7 +374,6 @@ private func redeemEnvelope(
   var returnedMaterial = false
   provider.redeemTunnelTicket(
     try redeemEnvelope(
-      operation: fixture.request.operation, leaseID: prepared.leaseID,
       ticket: ticketBytes, requestID: AuthorityIdentifier(UUID()))
   ) { _, configuration, secret, error in
     expiryError = authorityError(error)

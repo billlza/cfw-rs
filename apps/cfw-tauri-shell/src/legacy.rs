@@ -37,6 +37,33 @@ pub(crate) fn legacy_retirement_status(
     retirement.status()
 }
 
+/// Launches the controlled `--migration-handoff` instance that owns the
+/// prepare/confirm/recover cutover path.
+///
+/// The default dashboard cannot drive the destructive cutover (every cutover
+/// command rejects a non-handoff launch). This is the one renderer entry point
+/// that starts the handoff: it refuses to run inside a handoff instance, proves
+/// the running app is the installed, signed, notarized release before spawning,
+/// and starts a detached sibling process that acquires the exclusive handoff
+/// lease itself. It never stops the current instance, mutates the network, or
+/// touches proxy/DNS/route state.
+#[tauri::command]
+pub(crate) fn begin_migration_handoff(
+    launch: State<'_, crate::LaunchContext>,
+) -> Result<(), String> {
+    if launch.migration_handoff {
+        return Err("this instance is already the migration handoff".into());
+    }
+    admission::require_canonical_handoff_candidate()?;
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("cannot resolve the running executable: {error}"))?;
+    std::process::Command::new(executable)
+        .arg("--migration-handoff")
+        .spawn()
+        .map(std::mem::drop)
+        .map_err(|error| format!("failed to launch the migration handoff instance: {error}"))
+}
+
 // Tauri commands receive each renderer argument as a separate parameter, so the
 // injected handles plus the explicit confirmation flags exceed the default
 // argument threshold without any of them being removable.
@@ -96,6 +123,7 @@ pub(crate) async fn disable_service_mode(
         .coordinator
         .prepare_cutover(
             authority.target(),
+            selected.record.id.clone(),
             selected.profile.clone(),
             authority.settings().clone(),
         )
@@ -123,6 +151,7 @@ pub(crate) async fn disable_service_mode(
         .coordinator
         .prepare_cutover(
             authority.target(),
+            selected.record.id.clone(),
             selected.profile.clone(),
             authority.settings().clone(),
         )
@@ -199,6 +228,7 @@ pub(crate) async fn disable_service_mode(
         .coordinator
         .set_mode(
             authority.target(),
+            selected.record.id.clone(),
             selected.profile.clone(),
             authority.settings().clone(),
         )
@@ -327,10 +357,16 @@ pub(crate) async fn recover_legacy_cutover(
     .is_ok();
 
     if !replacement_active {
-        normalize_recovery_engine_off(&engine, &selected.profile, &settings).await?;
+        normalize_recovery_engine_off(&engine, &selected.record.id, &selected.profile, &settings)
+            .await?;
         let request = engine
             .coordinator
-            .prepare_cutover(journal.target, selected.profile.clone(), settings.clone())
+            .prepare_cutover(
+                journal.target,
+                selected.record.id.clone(),
+                selected.profile.clone(),
+                settings.clone(),
+            )
             .await
             .map_err(|error| format!("replacement recovery projection failed: {error}"))?;
         journal = journal_store.rebind_recovery_request(
@@ -363,7 +399,12 @@ pub(crate) async fn recover_legacy_cutover(
         }
         let snapshot = engine
             .coordinator
-            .set_mode(journal.target, selected.profile.clone(), settings.clone())
+            .set_mode(
+                journal.target,
+                selected.record.id.clone(),
+                selected.profile.clone(),
+                settings.clone(),
+            )
             .await
             .map_err(|error| format!("replacement recovery start failed: {error}"))?;
         require_replacement_active(
@@ -414,6 +455,7 @@ pub(crate) async fn recover_legacy_cutover(
 
 async fn normalize_recovery_engine_off(
     engine: &ManagedEngine,
+    profile_id: &str,
     profile: &cfw_singbox_config::ValidatedSingBoxProfile,
     settings: &cfw_singbox_config::EngineSettings,
 ) -> Result<(), String> {
@@ -429,7 +471,12 @@ async fn normalize_recovery_engine_off(
     }
     let off = engine
         .coordinator
-        .set_mode(EngineMode::Off, profile.clone(), settings.clone())
+        .set_mode(
+            EngineMode::Off,
+            profile_id.to_owned(),
+            profile.clone(),
+            settings.clone(),
+        )
         .await
         .map_err(|error| format!("failed to normalize replacement recovery to Off: {error}"))?;
     if off.desired_mode == EngineMode::Off && off.state == EngineState::Off {

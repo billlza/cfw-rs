@@ -28,6 +28,7 @@ reqwest.workspace = true
 rustls.workspace = true
 plist.workspace = true
 qrcode.workspace = true
+saphyr-parser.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -36,8 +37,9 @@ tauri-plugin-single-instance = "=2.4.3"
 thiserror.workspace = true
 tempfile.workspace = true
 tar.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
 tokio-tungstenite.workspace = true
+urlencoding.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 

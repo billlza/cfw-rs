@@ -73,7 +73,7 @@ fn non_off_mode_uses_the_digest_bound_selected_profile() {
     repository.select(&imported.id).expect("select");
     assert_eq!(
         selected_profile_for_mode(&repository, EngineMode::SystemProxy).expect("selected"),
-        expected
+        (imported.id.clone(), expected)
     );
 }
 
@@ -101,6 +101,9 @@ fn non_off_mode_rejects_absent_or_stale_selection_but_off_remains_available() {
     ));
     assert_eq!(
         selected_profile_for_mode(&repository, EngineMode::Off).expect("Off profile"),
-        ValidatedSingBoxProfile::direct()
+        (
+            "00000000-0000-4000-8000-000000000000".to_owned(),
+            ValidatedSingBoxProfile::direct(),
+        )
     );
 }

@@ -112,11 +112,24 @@ pub enum EngineCoordinatorError {
         cleanup_operation: EngineOperation,
         cleanup_error: BackendError,
     },
+    #[error(
+        "native start {start_operation} failed: {start_error}; independent global Off proof also failed: {proof_error}"
+    )]
+    StartAndOffProofFailed {
+        start_operation: EngineOperation,
+        start_error: BackendError,
+        proof_error: Box<EngineCoordinatorError>,
+    },
     #[error("{validation_error}; cleanup {cleanup_operation} also failed: {cleanup_error}")]
     ValidationAndCleanupFailed {
         validation_error: Box<EngineCoordinatorError>,
         cleanup_operation: EngineOperation,
         cleanup_error: BackendError,
+    },
+    #[error("{validation_error}; independent global Off proof also failed: {proof_error}")]
+    ValidationAndOffProofFailed {
+        validation_error: Box<EngineCoordinatorError>,
+        proof_error: Box<EngineCoordinatorError>,
     },
     #[error("engine generation counter is exhausted")]
     GenerationExhausted,

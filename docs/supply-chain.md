@@ -15,17 +15,35 @@ The machine-readable values live in
 | Rust | `1.97.1` | `rust-toolchain.toml` and `rustc --version` |
 | Node.js | `24.18.0` LTS | official darwin-arm64 archive SHA-256 |
 | Go | `1.26.5` | official darwin-arm64 archive SHA-256 |
-| gomobile/gobind | `v0.1.12` | embedded Go module identity and source tag commit |
+| XcodeGen | `2.46.0` (`8445e778451c7e44237b90281bde622d764b0084`) | official source and `Package.resolved` SHA-256 values, digest-pinned installed-resource patch, isolated resolved-only SwiftPM build, resource-generation probe, temporary-path rejection, and complete installed-tree manifest |
+| Tauri CLI | `2.11.4` | official crate SHA-256, published and patched lock digests, isolated dependency fetch, offline locked install, and complete clean-payload manifest |
+| gomobile/gobind | `v0.1.13` (`9f03b8f25789099c5c8abef4a02085da783ba923`) | embedded Go module identity, module checksum, source tag commit, patched sing-box module graph, and source helper-install pins |
 | govulncheck | `v1.6.0` | embedded Go module identity and module checksum |
+| cargo-deny | `0.20.2` | Rust `1.97.1` locked source install, version identity, and target-aware policy run |
 | sing-box/libbox | `v1.13.14`, `25a600db24f7680ad9806ce5427bd0ab8afe1114` | clean Git checkout plus the repository-owned dependency-security and raw-packet patches, with individual and combined SHA-256 values |
 | Apple provider reference | `794eb1741f91765a91f1513e5639296503f072b2` | Git commit identity; reference only |
 | deployment | macOS `15.0`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
 
 The pins were verified against the crates.io registry, npm registry, official
-Go and Node.js release indexes, and the upstream SagerNet Git repositories on
-2026-07-22. The exact sing-box tag resolves to the recorded commit. The Apple
+Go and Node.js release indexes, and the upstream XcodeGen and SagerNet Git
+repositories on 2026-07-26. The gomobile v0.1.13 graph alignment, regenerated
+security patch, and source/tool/cache bindings were reviewed on 2026-07-28. The
+exact XcodeGen, sing-box, and gomobile tags resolve to their recorded commits. The Apple
 reference commit resolves to upstream `main`; it is not compiled or copied into
 the product.
+
+Every candidate also carries a repository identity pair: the canonical Git
+`HEAD` commit and a SHA-256 closure over all tracked or non-ignored release
+inputs under the Rust workspace, Tauri/UI application, native products,
+contracts, fixtures, tests, packaging scripts, documentation, and CI policy.
+Generated output, dependency caches, local credentials, and ignored workspace
+data are never read into that digest. Native product manifests and the app
+manifest carry both values; verification recomputes them from the current
+checkout. The unsigned validation lane permits a dirty working tree but proves
+that its exact release-input digest did not change during the build. A signed
+candidate additionally requires a clean repository before the build, after the
+application build, and immediately before final artifact sealing, with the same
+`HEAD` and source digest at every observation.
 
 ## Networked preparation versus offline build
 
@@ -33,16 +51,30 @@ Network access is isolated to explicit preparation:
 
 1. `scripts/bootstrap_release_toolchain.sh` downloads only the pinned official
    Go and Node.js archives, verifies their SHA-256 digests, and installs the
-   pinned SagerNet gomobile and gobind tools into `target/toolchains`.
-2. `scripts/materialize_libbox_source.sh` accepts only a clean checkout at the
-   pinned commit, clones it locally without hard links, applies the two
+   pinned SagerNet gomobile, gobind, and govulncheck tools into
+   `target/toolchains`. Each completed tree is sealed before its first cached
+   execution.
+2. `scripts/install_pinned_tauri_cli.sh` builds the checksum-bound Tauri source
+   with an isolated Cargo home and target directory. Its sealed payload retains
+   only the thin arm64 executable and clean patched crate source (including the
+   exact lock and licenses) under `target/toolchains/tauri-cli-2.11.4`; release
+   scripts call that exact binary and never resolve `cargo tauri` from an
+   ambient Cargo home.
+3. `scripts/prepare_ui_dependencies.sh` runs the pinned npm `ci` operation in
+   an isolated networked workspace, copies regular files into a self-contained
+   tree without npm cache hard links, and seals the complete `node_modules`
+   content, modes, and internal relative symlinks against the package-lock and
+   verified Node tree. UI builds verify this tree before and after execution.
+4. `scripts/materialize_libbox_source.sh` accepts only a clean checkout at the
+   pinned commit, clones it locally without hard links, applies the three
    digest-pinned patches in a fixed order, and verifies both the dependency-only
    module diff and the complete source diff.
-3. `scripts/prepare_libbox_modules.sh` accepts only that materialized source,
-   fills the isolated Go module cache, and runs `go mod verify`.
-4. `scripts/scan_libbox_vulnerabilities.sh` runs the pinned govulncheck against
+5. `scripts/prepare_libbox_modules.sh` accepts only that materialized source,
+   fills the isolated Go module cache, runs `go mod verify`, and seals the
+   completed module-cache tree.
+6. `scripts/scan_libbox_vulnerabilities.sh` runs the pinned govulncheck against
    the exact patched macOS package graph and the official Go vulnerability DB.
-5. `scripts/build_libbox.sh` sets `GOPROXY=off` and `GOTOOLCHAIN=local`. It
+7. `scripts/build_libbox.sh` sets `GOPROXY=off` and `GOTOOLCHAIN=local`. It
    refuses a different or unexpectedly modified checkout and invokes the pinned
    gomobile binder for `macos/arm64` only.
 
@@ -55,17 +87,13 @@ same symbol scan reports zero reachable vulnerabilities. It still reports
 `GO-2026-5932` at module scope because `golang.org/x/crypto/openpgp` has no fixed
 version; that package is absent from the scanned import graph.
 
-Adding the required `with_clash_api` tag enlarged the scanned import graph, so
-the 2026-07-26 rescan additionally reports `GO-2026-5774`, `GO-2026-5775`, and
-`GO-2026-5777` in the imported `github.com/go-chi/chi/v5@v5.2.5` router
-(`middleware.RealIP` header spoofing, fixed in `v5.3.0`). The scan finds no call
-path to them: sing-box's clash API router does not install `RealIP`, and the
-controller this product injects binds `127.0.0.1` only with a per-run secret, so
-no forwarded-header input reaches that middleware. Raising chi is a source
-change to the pinned tree and therefore a new patch with new digests, not a
-silent bump. These exact no-call-path boundaries remain release review items
-rather than suppressed advisories. The upstream commit, both patch
-byte streams, the combined source diff, and the patched module files are
+Adding the required `with_clash_api` tag enlarged the scanned import graph. An
+earlier 2026-07-26 rescan exposed `GO-2026-5774`, `GO-2026-5775`, and
+`GO-2026-5777` in `github.com/go-chi/chi/v5@v5.2.5`; the pinned dependency patch
+now raises that router to `v5.3.0`. The current symbol and imported-package scan
+reports zero vulnerabilities without an ignore or suppression. The upstream
+commit, all three patch byte streams, the combined source diff, and the patched
+module files are
 independently hashed so a release cannot silently substitute either the tag or
 a downstream modification. The raw-packet patch is confined to
 `experimental/libbox`: it adds the libbox side of the public
@@ -113,19 +141,39 @@ that block exists without the tag.
 
 ## Artifact identity
 
-`scripts/hash_artifact.py` generates a path-independent SHA-256 tree manifest
-for `Libbox.xcframework`. The release evidence must additionally include:
+`scripts/hash_artifact.py` generates path-independent SHA-256 tree manifests.
+Release-managed Go, Node.js, XcodeGen, Tauri, Go-tool, and Go-module trees use the strict
+`sha256-tree-v2` contract, which binds the root and every relative member's
+content, type, symlink target, and POSIX mode; hard-linked files, missing or
+extra metadata, duplicate/unknown JSON fields, and algorithm downgrade are
+rejected. A manifest is verified before the corresponding cached binary runs
+and again after build use. The release evidence must additionally include:
+
+The source-built XcodeGen payload applies one digest-pinned patch that removes
+its source-tree `#file` fallback for `SettingPresets`; the installed
+`share/xcodegen/SettingPresets` path is the release layout. Bootstrap verifies
+the patch and patched source digests, generates a probe project from that
+installed layout, strips debug symbols, and rejects any binary that still
+contains its temporary staging root.
 
 - the complete source commit and source archive hash;
 - the original source files, every downstream patch, patched `go.mod` and
   `go.sum`, individual and combined diff digests, and `go mod verify` output;
-- Go, gomobile, Xcode, Swift, Rust, Node.js, and npm identities;
+- Go, gomobile, Xcode, Swift, Rust, Node.js, npm, and Tauri identities, plus the
+  verified Go/Node/Tauri/tool/module tree digests;
 - the complete libbox tags and linker flags;
 - every XCFramework file digest and the root tree digest;
 - arm64 slice inspection output;
 - final app, System Extension, Agent, updater, and source archive digests.
 
 A locally present or downloaded XCFramework without this provenance is rejected.
+The signed/unsigned application manifests bind the canonical toolchain identity
+and every constituent release tree: Go, Go release tools, Go module cache,
+Node.js, the sealed UI dependencies, XcodeGen, and Tauri. The libbox manifest
+independently binds its Go inputs. These local manifests detect drift after a
+clean bootstrap; they do not turn a same-user-compromised machine into a trusted
+builder, so release generation still requires a clean ephemeral runner whose
+downloads are observed against the repository pins.
 
 ## SBOM and license evidence
 
@@ -201,18 +249,24 @@ blocks release.
 
 ## Current hard blockers
 
-The repository does not yet link the source-built libbox adapter into the
-Packet Tunnel and ProxyAgent targets. The public packet-pump contract and its
-performance gate remain unproven. The system extension's authenticated
-global-context configuration, replay, and lease transport is also not linked;
-user App Group files and the Data Protection Keychain are forbidden substitutes.
-No Developer ID/provisioning/notarization evidence is available in source
-control. The module-only, unfixable
-`GO-2026-5932` boundary also needs explicit release review. Updater metadata,
-compressed bytes, expanded bytes, entry count, entry type, canonical layout,
-path conflicts, and symlink containment now have project-owned bounds in both
-the publication script and runtime; runtime extraction is descriptor-relative
-and no-follow, and commit requires an exclusive engine-Off maintenance barrier.
-Release scripts must remain fail-closed until the remaining native, identity,
-publication, and device gates are satisfied; private KVC access, the old root
-helper, and downloaded alternate cores are forbidden fallbacks.
+The source-built libbox adapter, public packet pump, and role-scoped Global
+Authority transport are linked into the Packet Tunnel and ProxyAgent product
+graph. Their source/unit and unsigned-bundle evidence is not a physical
+data-plane verdict: the exact signed and installed candidate must still prove
+traffic, performance, cancellation, revocation, crash/reboot recovery, and
+fast-user switching on clean physical machines.
+
+The durable Authority journal remains bounded without a crash-safe compaction
+protocol, Quarantined has no product repair workflow, and unattended System
+Proxy restoration after Authorization Services rights expire has not been
+proved. No matching Developer ID provisioning, notarization, Gatekeeper, or
+publication evidence is available in the current candidate. The module-only,
+unfixable `GO-2026-5932` boundary also needs explicit release review. Updater
+metadata, compressed bytes, expanded bytes, entry count, entry type, canonical
+layout, path conflicts, and symlink containment now have project-owned bounds
+in both the publication script and runtime; runtime extraction is
+descriptor-relative and no-follow, and commit requires an exclusive engine-Off
+maintenance barrier. Release scripts must remain fail-closed until the
+remaining persistence, identity, publication, and device gates are satisfied;
+private KVC access, the old root helper, and downloaded alternate cores are
+forbidden fallbacks.

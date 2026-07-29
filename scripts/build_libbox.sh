@@ -10,6 +10,8 @@ source "$repo_root/scripts/dependency_pins.env"
 source "$repo_root/scripts/go_release_environment.sh"
 # shellcheck source=scripts/libbox_source_contract.sh
 source "$repo_root/scripts/libbox_source_contract.sh"
+# shellcheck source=scripts/release_toolchain_contract.sh
+source "$repo_root/scripts/release_toolchain_contract.sh"
 
 source_input="${SING_BOX_SOURCE:-}"
 if [[ -z "$source_input" ]]; then
@@ -32,6 +34,9 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 libbox_validate_patched_source "$repo_root" "$source_root"
+cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_release_tools_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_module_cache_tree "$repo_root" "$toolchain_root"
 if [[ -d "$(dirname "$source_root")/sing-box-for-apple" ]]; then
   echo "error: place the build checkout away from a sing-box-for-apple sibling; upstream would move the artifact" >&2
   exit 1
@@ -62,13 +67,36 @@ fi
 export GOBIN="$gobin"
 export GOPATH="$gopath"
 export GOMODCACHE="$gopath/pkg/mod"
-export GOCACHE="$toolchain_root/go-build-cache"
+mkdir -p "$repo_root/target/release-build-cache"
+go_build_cache="$(mktemp -d "$repo_root/target/release-build-cache/libbox.XXXXXX")"
+trap '/bin/rm -rf -- "$go_build_cache"' EXIT
+export GOCACHE="$go_build_cache"
 export PATH="$gobin:$toolchain_root/go-$GO_VERSION/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 configure_offline_go_environment
 export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
 
 (
   cd "$source_root"
+  expected_gomobile_dir="$GOMODCACHE/github.com/sagernet/gomobile@$GOMOBILE_VERSION"
+  expected_gomobile_module="github.com/sagernet/gomobile $GOMOBILE_VERSION $GOMOBILE_MODULE_SUM $expected_gomobile_dir"
+  if ! observed_gomobile_module="$(
+    "$go_bin" list -m -mod=readonly \
+      -f '{{.Path}} {{.Version}} {{.Sum}} {{.Dir}}' \
+      github.com/sagernet/gomobile
+  )"; then
+    echo "error: pinned gomobile module is not resolvable from the sealed cache" >&2
+    exit 1
+  fi
+  if [[ "$observed_gomobile_module" != "$expected_gomobile_module" ]]; then
+    echo "error: sing-box gomobile graph mismatch: expected '$expected_gomobile_module', got '$observed_gomobile_module'" >&2
+    exit 1
+  fi
+  "$go_bin" list -mod=readonly \
+    github.com/sagernet/gomobile/bind \
+    github.com/sagernet/gomobile/bind/objc >/dev/null || {
+    echo "error: sealed cache lacks the exact pinned gomobile bind package closure" >&2
+    exit 1
+  }
   "$go_bin" mod verify
   version_without_prefix="${SING_BOX_VERSION#v}"
   libbox_ldflags="-X github.com/sagernet/sing-box/constant.Version=$version_without_prefix -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0"
@@ -111,12 +139,25 @@ fi
 mkdir -p "$(dirname "$output_root")"
 /bin/mv "$built_framework" "$output_root"
 libbox_validate_patched_source "$repo_root" "$source_root"
+cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_release_tools_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_module_cache_tree "$repo_root" "$toolchain_root"
+go_toolchain_tree_sha256="$(cfw_release_toolchain_tree_sha256 \
+  "$toolchain_root/go-$GO_VERSION.manifest.json")"
+go_tools_tree_sha256="$(cfw_release_toolchain_tree_sha256 \
+  "$toolchain_root/go-workspace-bin.manifest.json")"
+go_module_cache_tree_sha256="$(cfw_release_toolchain_tree_sha256 \
+  "$toolchain_root/go-module-cache.manifest.json")"
+output_manifest="$(dirname "$output_root")/$(basename "$output_root").manifest.json"
 python3 "$repo_root/scripts/hash_artifact.py" \
   "$output_root" \
-  --output "$(dirname "$output_root")/Libbox.xcframework.manifest.json" \
+  --output "$output_manifest" \
   --metadata "sourceTag=$SING_BOX_VERSION" \
   --metadata "sourceCommit=$SING_BOX_COMMIT" \
   --metadata "goVersion=$GO_VERSION" \
+  --metadata "goToolchainTreeSha256=$go_toolchain_tree_sha256" \
+  --metadata "goToolsTreeSha256=$go_tools_tree_sha256" \
+  --metadata "goModuleCacheTreeSha256=$go_module_cache_tree_sha256" \
   --metadata "gomobileVersion=$GOMOBILE_VERSION" \
   --metadata "gomobileCommit=$GOMOBILE_COMMIT" \
   --metadata "gomobileModuleSum=$GOMOBILE_MODULE_SUM" \
@@ -133,6 +174,13 @@ python3 "$repo_root/scripts/hash_artifact.py" \
   --metadata "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256" \
   --metadata "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256" \
   --metadata "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256"
+libbox_verify_xcframework_artifact \
+  "$repo_root" \
+  "$output_root" \
+  "$output_manifest" \
+  "$go_toolchain_tree_sha256" \
+  "$go_tools_tree_sha256" \
+  "$go_module_cache_tree_sha256" >/dev/null
 
 echo "libbox source: $SING_BOX_COMMIT"
 echo "libbox tags: $LIBBOX_BUILD_TAGS"

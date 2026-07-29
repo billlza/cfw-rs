@@ -4,17 +4,49 @@ This project releases only an arm64 application for macOS 15 or newer. A green
 Rust, JavaScript, or Swift unit-test lane is necessary but does not establish a
 releasable Network Extension product.
 
-## Release-blocking boundary
+## Current source composition and release boundary
 
-Do not produce or publish a release while either native target uses
-`MissingLibboxEngineFactory`, while the Rust-to-Swift Host Bridge is absent, or
-while the public packet-pump/libbox contract has not passed correctness and
-performance tests. The Packet Tunnel must also replace
-`systemExtensionStateTransportNotLinked` with authenticated global-context XPC,
-provider-owned replay state, and a cross-user/cross-mode global lease. A user
-App Group file or Data Protection Keychain item cannot cross the root system
-extension boundary. The previous helper, mihomo, clash-rs, downloaded core, and
-private packet-flow file-descriptor access are not fallbacks.
+The v0.4.0 Release source graph now composes the real native path rather than
+the earlier missing-link placeholders:
+
+- the Rust application uses `NativeFrameworkBridge` and the fixed
+  `CFWNativeBridge.framework` ABI;
+- the Host registers the root-context Global Authority with `SMAppService`,
+  registers the user `CFWProxyAgent`, and drives `SystemExtensions` plus
+  `NETunnelProviderManager` through public APIs;
+- ProxyAgent and `com.bill.clashformac.packet-tunnel.systemextension` both
+  construct the pinned,
+  source-built libbox runtime;
+- the Packet Tunnel moves packets through bounded public
+  `NEPacketTunnelFlow` reads/writes and a connected `AF_UNIX/SOCK_DGRAM` pump;
+  and
+- one Global Authority process owns the durable machine-wide lease, recovery
+  journal, liveness supervision, and three role-scoped XPC services for Host,
+  ProxyAgent, and Provider. Each direction applies an exact public code-signing
+  requirement before exporting its typed protocol.
+
+The libbox input is upstream sing-box `v1.13.14` at commit
+`25a600db24f7680ad9806ce5427bd0ab8afe1114` plus three digest-pinned repository
+patches: security dependency updates, the public raw-packet adapter, and bounded
+DNS failover. The exact combined diff and patched `go.mod`/`go.sum` digests are
+release inputs in `scripts/dependency_pins.env` and
+`native/macos/Dependencies.lock.json`. The previous helper, mihomo, clash-rs,
+downloaded core, and private packet-flow file-descriptor access are not
+fallbacks.
+
+These are source-composition and deterministic-test claims. An unsigned
+candidate proves that the four native products and outer application can be
+built and structurally bundled; it cannot prove signing identity, XPC
+admission, System Extension approval, Network Extension traffic, notarization,
+Gatekeeper, or publication. Do not promote or publish v0.4.0 until the exact
+unchanged candidate also passes all signed-installed, physical-machine,
+notarization, final-candidate, and publication gates below.
+
+The shipped composition must not construct any `FailClosed*Owner*` Authority or
+effective-state placeholder, default `signedChannelProven` to false, permanently
+validate `.availabilityUnproven`, or reach `NSXPCConnection.auditToken` through
+a private selector or `unsafeBitCast`. Test fixtures may model those failures;
+production composition may not ship them.
 
 The current closed application profile schema supports typed `direct`,
 `block`, Shadowsocks, VMess, VLESS/Reality, Trojan, and Hysteria2 outbounds; it
@@ -26,6 +58,16 @@ orphan cleanup. Release remains blocked until those paths pass under installed
 signed Host/ProxyAgent/System Extension identities on physical machines.
 Legacy proxy or DNS cleanup requiring manual review is a visible migration
 gate, not a condition a release build may silently clear.
+
+Each durable Authority journal generation is bounded to 4,096 records and
+32 MiB. Before a prepare would consume the seven-record lifecycle finish
+reserve, the store commits a hash-chained checkpoint into the next anchored
+generation and retains only the active and previous generations. Recovery
+fails closed on rollback, malformed generation state, an insecure cleanup
+target, or cleanup failure. Deterministic fault-injection tests cover every
+checkpoint commit and obsolete-generation cleanup crash boundary; those source
+and unit-test claims do not replace the physical-machine longevity and soak
+gates below.
 
 Launching the app must never stop or mutate the legacy VPN, System Proxy,
 routes, or DNS. A release candidate must prove that replacement profiles can be
@@ -54,37 +96,54 @@ or hardware-backed workflow. If a workspace copy may have escaped through a
 backup or shared archive, rotate the key and publish an explicit updater trust
 migration before release.
 
-## 1. Verify source and toolchain
+## 1. Prepare and seal networked release inputs
 
 ```sh
-./scripts/verify_release_environment.sh
-./scripts/verify_build_boundaries.sh
-cargo metadata --locked --format-version 1 >/dev/null
+./scripts/bootstrap_release_toolchain.sh
+./scripts/install_pinned_tauri_cli.sh
+./scripts/prepare_ui_dependencies.sh
+SING_BOX_SOURCE=/absolute/path/to/clean-upstream-sing-box \
+LIBBOX_PATCHED_SOURCE_OUTPUT=/absolute/path/to/patched-sing-box \
+  ./scripts/materialize_libbox_source.sh
+SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
+  ./scripts/prepare_libbox_modules.sh
 ```
 
 Review [`docs/supply-chain.md`](./docs/supply-chain.md). Verify that the release
 commit, submodule/reference state, version, changelog, and complete
 corresponding-source candidate are immutable and have recorded SHA-256 hashes.
 
-## 2. Build libbox from source
+## 2. Verify the sealed inputs and build libbox offline
 
 Preparation is explicit and networked; the release build is offline:
 
 ```sh
-./scripts/bootstrap_release_toolchain.sh
-SING_BOX_SOURCE=/absolute/path/to/clean-upstream-sing-box \
-LIBBOX_PATCHED_SOURCE_OUTPUT=/absolute/path/to/patched-sing-box \
-  ./scripts/materialize_libbox_source.sh
-SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
-  ./scripts/prepare_libbox_modules.sh
+./scripts/verify_release_environment.sh
+./scripts/verify_build_boundaries.sh
+cargo metadata --locked --format-version 1 >/dev/null
 SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
   ./scripts/scan_libbox_vulnerabilities.sh
 SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
   ./scripts/build_libbox.sh
 ```
 
+The Tauri installer verifies the official 2.11.4 crate and its published lock,
+applies the digest-pinned `spin` 0.9.9 lock update, verifies the resulting lock,
+and installs only from that local source with `--locked` using isolated Cargo
+home and target directories. The sealed payload contains only its thin arm64
+binary and clean patched crate source, lock, and licenses under
+`target/toolchains/tauri-cli-2.11.4`. Release scripts invoke that absolute
+binary; an ambient Cargo home cannot substitute it. Go, Node.js, XcodeGen,
+Tauri, the Go release tools, and the prepared Go module cache must each have a verified
+`sha256-tree-v2` manifest before use. A directory without its matching manifest,
+or any content/type/mode/symlink/metadata drift, requires an explicit clean
+bootstrap and is never accepted from `--version` output alone.
+The XcodeGen source build also verifies and applies the pinned installed-resource
+patch, proves `SettingPresets` loading by generating a probe project, strips
+debug paths, and rejects a binary containing its temporary bootstrap root.
+
 Archive the emitted XCFramework tree manifest, Go module verification output,
-upstream identity, both downstream patches, the combined source-diff digest,
+upstream identity, all three downstream patches, the combined source-diff digest,
 patched module digests, vulnerability scan, build tags, and tool identities.
 Reject any unproven binary.
 
@@ -96,12 +155,15 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-targets
 cargo deny --locked --target aarch64-apple-darwin check
 
-target/toolchains/node-24.18.0/bin/npm --prefix apps/cfw-tauri-shell ci
+pinned_node_bin="$PWD/target/toolchains/node-24.18.0/bin"
+PATH="$pinned_node_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  "$pinned_node_bin/npm" --prefix apps/cfw-tauri-shell test
 ./scripts/build_ui_with_pinned_node.sh
-target/toolchains/node-24.18.0/bin/npm --prefix apps/cfw-tauri-shell audit --audit-level=high
+PATH="$pinned_node_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  "$pinned_node_bin/npm" --prefix apps/cfw-tauri-shell audit --audit-level=high
 
-cd ../../native/macos
-swift test
+cd native/macos
+swift test -Xswiftc -warnings-as-errors
 xcodebuild test \
   -project CFWNative.xcodeproj \
   -scheme CFWNativeTests \
@@ -109,12 +171,18 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO
 xcodebuild analyze \
   -project CFWNative.xcodeproj \
-  -scheme CFWPacketTunnel \
-  -destination 'platform=macOS,arch=arm64'
+  -scheme CFWPacketTunnelExtension \
+  -configuration Release \
+  -destination 'generic/platform=macOS' \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
 xcodebuild analyze \
   -project CFWNative.xcodeproj \
   -scheme CFWProxyAgent \
-  -destination 'platform=macOS,arch=arm64'
+  -configuration Release \
+  -destination 'generic/platform=macOS' \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
 ```
 
 Every command must complete without project-owned errors or warnings. Upstream
@@ -143,8 +211,20 @@ Required network conditions:
 
 Required product cases include approval, denial, pending approval, upgrade and
 replacement, restart-required, downgrade refusal, multiple users, sleep/wake,
-provider crash, ProxyAgent crash, concurrent mode requests, cancellation, and
-uninstall cleanup.
+fast-user switching, Host/Global Authority/Provider/ProxyAgent crashes,
+concurrent mode requests, cancellation, reboot recovery, and uninstall cleanup.
+The run must prove the role-scoped XPC identity policy with the installed
+Developer ID identities and prove that revocation or connection loss reaches a
+truthful Off or Quarantined terminal state. Unit tests of those state machines
+do not replace the installed-process run.
+
+System Proxy apply/restore uses
+`SCPreferencesCreateWithAuthorization` from the non-root ProxyAgent. The signed
+physical matrix must include recovery after the Authorization Services right
+has expired and while no interactive prompt can be serviced. If unattended
+restore cannot be proven with that public boundary, release requires a narrow,
+code-identity-checked privileged SystemConfiguration service; it must never
+become a core launcher or a general command/file interface.
 
 The performance and resource limits are those in
 [`docs/performance-stability-targets.md`](./docs/performance-stability-targets.md).
@@ -162,15 +242,28 @@ The fixed order is:
 6. distribution image and updater archive.
 
 The System Extension belongs under
-`Contents/Library/SystemExtensions`. Verify each nested code object before
-signing its parent. At every layer record:
+`Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension`;
+the wrapper basename must remain the exact Packet Tunnel bundle identifier.
+Its `CFBundleExecutable` is `CFWPacketTunnel`. Verify each nested code object
+before signing its parent.
+
+The pinned Tauri CLI only assembles the Host skeleton. Candidate builds reject
+every Tauri signing identity or certificate input, reject platform-specific
+configuration overlays, and then prove that the outer app has only the
+linker-generated ad-hoc CodeDirectory with no resource seal, Team ID,
+certificate authority, timestamp, or entitlements. The signed lane repeats
+that proof after staging before it installs the Host profile and applies the
+reviewed Developer ID signature. This avoids Tauri's `--no-sign` diagnostic
+without allowing it to select or apply a signature.
+
+At every layer record:
 
 ```sh
 file PATH
 lipo -archs PATH
 codesign --verify --strict --verbose=4 PATH
 codesign -d --verbose=4 PATH
-codesign -d --entitlements :- PATH
+codesign -d --entitlements - --xml PATH
 ```
 
 The evidence must prove arm64-only slices, Team ID, bundle identifiers,
@@ -182,6 +275,26 @@ macOS 15 deployment target. Any mismatch blocks the outer signature.
 Submit the signed app, wait for an accepted result, staple the ticket, and
 verify both stapler and Gatekeeper before creating the DMG. Then run the same
 notarization and staple validation for the DMG.
+
+An accepted submission summary alone is insufficient. The signed-candidate
+builder retrieves and preserves `notarization-log.json`, binds its job ID and
+archive SHA-256 to the submitted ZIP, and rejects every issue or warning before
+stapling. Gatekeeper assessment is valid only while `spctl --status` reports
+exactly `assessments enabled`; `override=security disabled` is a release
+failure even if the assessment line says `accepted`. The captured
+`gatekeeper.json` preserves the raw status, assessment, and codesign output plus
+their digests, notarized source, Developer ID authority, and origin.
+This intentionally advances the outer final-candidate binding to schema v2;
+pre-existing v1 bindings lack the effective Gatekeeper-state proof and must be
+regenerated rather than migrated or accepted through a compatibility wrapper.
+
+The signed-candidate builder also requires a clean repository and records the
+real Git `HEAD` together with the complete release-source digest in every native
+manifest and final app/archive manifest. It rechecks both identities after the
+application build and again before sealing the final artifacts. The final
+candidate binder rejects a merely well-formed 40-hex value unless it equals the
+repository's current `HEAD`; no caller-supplied commit can stand in for source
+identity.
 
 `scripts/make_dmg.sh` and `scripts/make_updater_manifest.sh` are post-signing
 steps. They must not modify nested code or rescue a failed signature.
@@ -235,13 +348,12 @@ scripts/release_publication_gate.sh \
   "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
 ```
 
-The current 371-component closure has 27 explicit license-review blockers and
-8 missing corresponding-source roots. All 371 package copyright attributions
-also require human confirmation; standard license boilerplate is not accepted
-as package attribution. The exact IDs and reasons are in
-`target/candidates/0.4.0/review/publication-blockers.json`; those ignored review
-outputs must be regenerated after any lock, source, tag, toolchain, or bundle
-change. A template is never accepted as release evidence.
+Do not copy component or blocker counts from an older review into a release
+claim. `component-review.json`, `publication-blockers.json`, the SBOM, and every
+corresponding-source root must be regenerated after any lock, source, patch,
+tag, toolchain, or bundle change. Every package attribution and every reported
+license/source blocker requires human legal disposition for the exact
+candidate. A template is never accepted as release evidence.
 
 The updater command accepts only a strict SemVer equal to the signed app
 version. It emits only the fixed `darwin-aarch64`/`darwin-arm64` targets under

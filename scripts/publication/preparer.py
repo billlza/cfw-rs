@@ -341,7 +341,7 @@ _SOURCE_CLOSURE_PLANS = {
     "go": {
         "classification": "external-build-tool-pinned-binary",
         "upstream": "https://go.dev/dl/",
-        "reference": "go1.24.7.darwin-arm64",
+        "reference": "go1.26.5.darwin-arm64",
         "closure_action": (
             "retain version, executable SHA-256, module verification, and the official release "
             "archive checksum as build provenance; do not add the compiler to corresponding source"
@@ -351,7 +351,7 @@ _SOURCE_CLOSURE_PLANS = {
     "gomobile": {
         "classification": "external-build-tool-pinned-module",
         "upstream": "https://github.com/sagernet/gomobile",
-        "reference": "v0.1.12",
+        "reference": "v0.1.13",
         "closure_action": (
             "retain the pinned Go module sum, executable SHA-256, and version -m identity as build "
             "provenance; do not add the tool binary to corresponding source"
@@ -385,14 +385,16 @@ _SOURCE_CLOSURE_PLANS = {
     },
     "tauri-cli": {
         "classification": "official-registry-source-archive",
-        "upstream": "https://crates.io/crates/tauri-cli/2.10.1",
-        "reference": "tauri-cli-2.10.1.crate",
+        "upstream": "https://crates.io/crates/tauri-cli/2.11.4",
+        "reference": "tauri-cli-2.11.4.crate",
         "closure_action": (
-            "bind the crates.io checksum, cargo-install record, executable SHA-256, and version as "
-            "external build-tool provenance"
+            "bind the crates.io checksum, published Cargo.lock checksum, digest-pinned spin lock "
+            "update, patched Cargo.lock checksum, cargo-install record, executable SHA-256, and "
+            "version as external build-tool provenance"
         ),
         "acceptance": (
-            "bind crate checksum, extracted tree digest, cargo-install identity, and binary version"
+            "bind crate checksum, extracted tree digest, both lock checksums, lock-patch checksum, "
+            "cargo-install identity, and binary version"
         ),
     },
     "xcode": {
@@ -411,9 +413,9 @@ _SOURCE_CLOSURE_PLANS = {
     "xcodegen": {
         "classification": "prepared-official-tag-needs-safe-dereference",
         "upstream": "https://github.com/yonaskolb/XcodeGen",
-        "reference": "2.45.4",
+        "reference": "2.46.0",
         "closure_action": (
-            "bind v2.45.4 tag/commit, executable SHA-256, and version output as external "
+            "bind v2.46.0 tag/commit, executable SHA-256, and version output as external "
             "build-tool provenance; its upstream source symlink is not copied into app source"
         ),
         "acceptance": "bind upstream commit, tag, original tree digest, and dereferenced tree digest",

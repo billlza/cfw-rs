@@ -28,6 +28,7 @@ from scripts.publication.final_candidate import (
     build_final_candidate_binding,
 )
 from scripts.publication.sealed_closure import build_sealed_closure, derive_supply_chain
+from scripts.repository_source_identity import repository_commit
 from scripts.publication.sealed_manifest import (
     BLOCKED,
     DOCUMENT_KIND,
@@ -56,12 +57,14 @@ from scripts.tests.test_physical_evidence_aggregator import (
     SIGNED_TREE,
     fixture as physical_fixture,
 )
+from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 from scripts.tests.test_sealed_closure import _request as _closure_request
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 
-COMMIT = "3" * 40
+COMMIT = repository_commit(REPOSITORY)
 TOOLCHAIN = "4" * 64
+RELEASE_SOURCE = "5" * 64
 XCFRAMEWORK_SHA = "1" * 64
 XCFRAMEWORK_MANIFEST_SHA = "2" * 64
 CAPTURED_AT = "2026-07-22T00:00:00Z"
@@ -144,8 +147,16 @@ def source_gates(*, commit: str = COMMIT) -> dict:
     }
 
 
-def ci_lanes(*, commit: str = COMMIT, toolchain: str = TOOLCHAIN) -> dict:
+def ci_lanes(
+    *,
+    commit: str = COMMIT,
+    release_source: str = RELEASE_SOURCE,
+    toolchain: str = TOOLCHAIN,
+) -> dict:
     return {
+        "schema_version": 2,
+        "document": "unsigned-ci-lanes-v2",
+        "release_source_sha256": release_source,
         "toolchain_sha256": toolchain,
         "lanes": [
             {
@@ -155,6 +166,7 @@ def ci_lanes(*, commit: str = COMMIT, toolchain: str = TOOLCHAIN) -> dict:
                 "exit_code": 0,
                 "log_sha256": digest(f"ci-lane-log-{lane}"),
                 "commit": commit,
+                "release_source_sha256": release_source,
                 "toolchain_sha256": toolchain,
             }
             for lane in REQUIRED_CI_LANES
@@ -238,12 +250,7 @@ def final_candidate_document(
             "target_signed_app_tree_sha256": SIGNED_TREE,
             "captured_at": CAPTURED_AT,
         },
-        "gatekeeper": {
-            "assessment": "accepted",
-            "source": "spctl",
-            "target_signed_app_tree_sha256": SIGNED_TREE,
-            "captured_at": CAPTURED_AT,
-        },
+        "gatekeeper": gatekeeper_fixture(SIGNED_TREE, CAPTURED_AT),
         "physical_evidence": physical_fixture() if aggregate is None else aggregate,
         "post_verification": {"app_tree_sha256": SIGNED_TREE, "observed_at": OBSERVED_AT},
     }
@@ -367,6 +374,7 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
         manifest = self.build(request(3, self.workspace))
         bindings = manifest["bindings"]
         self.assertEqual(bindings["commit"], COMMIT)
+        self.assertEqual(bindings["release_source_sha256"], RELEASE_SOURCE)
         self.assertEqual(bindings["product"], {"version": "0.4.0", "build_number": BUILD_NUMBER})
         self.assertEqual(bindings["signed_app_tree_sha256"], SIGNED_TREE)
         self.assertEqual(bindings["app_manifest_sha256"], APP_MANIFEST)
@@ -384,6 +392,26 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
         self.assertIn("spdx-sbom", identifiers)
         self.assertIn("cyclonedx-sbom", identifiers)
         self.assertIn("corresponding-source-archive", identifiers)
+
+    def test_required_feature_documents_use_neutral_current_contracts(self) -> None:
+        self.assertEqual(
+            REQUIRED_DOCUMENTS,
+            {
+                "requirements": "docs/release/macos15-network-extension-migration/requirements.md",
+                "design": "docs/release/macos15-network-extension-migration/design.md",
+                "tasks": "docs/release/macos15-network-extension-migration/tasks.md",
+            },
+        )
+        stale_claims = (
+            "current source does not include the mandatory Global Authority",
+            "Global Authority is below level 1",
+        )
+        for relative in REQUIRED_DOCUMENTS.values():
+            with self.subTest(document=relative):
+                self.assertEqual(Path(relative).parts[:2], ("docs", "release"))
+                contents = (REPOSITORY / relative).read_text(encoding="utf-8")
+                for claim in stale_claims:
+                    self.assertNotIn(claim, contents)
 
     def test_fixture_mode_mismatch_is_rejected(self) -> None:
         manifest = self.build(request(0, self.workspace))
@@ -495,6 +523,22 @@ class SealedManifestBindingTests(_CleanWorkspace):
         payload = request(1, self.workspace)
         payload["unsigned_ci"]["lanes"][0]["toolchain_sha256"] = "e" * 64
         with self.assertRaisesRegex(PublicationError, "different toolchain"):
+            self.build(payload)
+
+    def test_stale_ci_release_source_is_rejected(self) -> None:
+        payload = request(1, self.workspace)
+        payload["unsigned_ci"]["lanes"][0]["release_source_sha256"] = "e" * 64
+        with self.assertRaisesRegex(PublicationError, "release source"):
+            self.build(payload)
+
+    def test_legacy_ci_schema_without_source_binding_is_rejected(self) -> None:
+        payload = request(1, self.workspace)
+        payload["unsigned_ci"]["schema_version"] = 1
+        payload["unsigned_ci"]["document"] = "unsigned-ci-lanes-v1"
+        payload["unsigned_ci"].pop("release_source_sha256")
+        for lane in payload["unsigned_ci"]["lanes"]:
+            lane.pop("release_source_sha256")
+        with self.assertRaisesRegex(PublicationError, "field set|schema"):
             self.build(payload)
 
     def test_inner_manifest_toolchain_must_match_ci(self) -> None:

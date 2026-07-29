@@ -78,7 +78,7 @@ LEGACY_CONSTRUCTS: dict[str, str] = {
     "provider-local lease authority": "let s = CrossProcessEngineLeaseStore(productionPort: 49_373)\n",
     "insecure authority override": "if allowInsecureAuthority { engine.start() }\n",
     "authority-error data-plane fallback": (
-        "do { GlobalAuthorityReleaseGate.requireStartAuthorization() } "
+        "do { authority.redeem(ticket) } "
         "catch { engine.start() }\n"
     ),
 }
@@ -136,10 +136,14 @@ _AUTHORITY_GATE_INPUTS = (
     "native/macos/Package.swift",
     "native/macos/CFWNative.xcodeproj/project.pbxproj",
     "scripts/build_native_products.sh",
+    "native/macos/Sources/CFWNativeBridge/NativeBridgeABI.swift",
     "native/macos/Sources/CFWNativeBridge/NativeEngineOperations.swift",
     "native/macos/Sources/CFWAppleNetwork/HostBridge.swift",
+    "native/macos/Sources/CFWProxyAgent/ProxyAgentExecutable.swift",
+    "native/macos/Sources/CFWProxyAgent/ProxyAuthorityOwnership.swift",
     "native/macos/Sources/CFWProxyAgent/ProxyAgentService.swift",
     "native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift",
+    "native/macos/Sources/CFWPacketTunnel/TunnelTicketStartCoordinator.swift",
     "native/macos/Sources/CFWSharedProtocol/GlobalAuthorityReleaseGate.swift",
     "apps/cfw-tauri-shell/build.rs",
 )
@@ -166,7 +170,7 @@ class AuthorityGateWholeTreeIntegration(unittest.TestCase):
             provider.write_text(
                 provider.read_text(encoding="utf-8")
                 + "\nfunc cfwInjectedFallback() {\n"
-                "  do { GlobalAuthorityReleaseGate.requireStartAuthorization() }\n"
+                "  do { authority.redeem(ticket) }\n"
                 "  catch { engine.start() }\n"
                 "}\n",
                 encoding="utf-8",
@@ -195,8 +199,20 @@ _PINNED_INPUTS = (
     "scripts/dependency_pins.env",
     "native/macos/Dependencies.lock.json",
     "scripts/build_libbox.sh",
+    "scripts/libbox_source_contract.sh",
     "scripts/build_native_products.sh",
     "scripts/build_unsigned_candidate.sh",
+    "scripts/build_signed_candidate.sh",
+    "scripts/tauri_host_skeleton.sh",
+    "scripts/verify_artifact_manifest.py",
+    "scripts/verify_candidate_bundle.py",
+    "scripts/verify_candidate_bundle.sh",
+    "scripts/verify_release_app.sh",
+    "scripts/bootstrap_release_toolchain.sh",
+    "scripts/install_pinned_tauri_cli.sh",
+    "scripts/tauri-cli-2.11.4-spin-0.9.9.patch",
+    "scripts/xcodegen-2.46.0-installed-resources.patch",
+    ".github/workflows/ci.yml",
     "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch",
     "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
     "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",

@@ -55,12 +55,26 @@ staging="$(mktemp -d "$output_root/dmg-stage.XXXXXX")"
 payload_directory="$staging/payload"
 mkdir "$payload_directory"
 notary_result="$staging/notary-result.json"
+notary_log="$staging/notarization-log.json"
+gatekeeper_evidence="$staging/gatekeeper.json"
 staged_dmg="$staging/Clash.for.Mac_${version}_arm64.dmg"
+notary_result_final="$output_root/Clash.for.Mac_${version}_arm64.notarization.json"
+notary_log_final="$output_root/Clash.for.Mac_${version}_arm64.notarization-log.json"
+gatekeeper_final="$output_root/Clash.for.Mac_${version}_arm64.gatekeeper.json"
+dmg_manifest="$output_root/Clash.for.Mac_${version}_arm64.dmg.manifest.json"
+for output in "$notary_result_final" "$notary_log_final" "$gatekeeper_final" "$dmg_manifest"; do
+  [[ ! -e "$output" && ! -L "$output" ]] || die "refusing to replace DMG evidence: $output"
+done
 completed=0
 cleanup() {
   /bin/rm -rf "$staging"
   if [[ $completed -ne 1 ]]; then
-    /bin/rm -f "$dmg_path"
+    /bin/rm -f \
+      "$dmg_path" \
+      "$notary_result_final" \
+      "$notary_log_final" \
+      "$gatekeeper_final" \
+      "$dmg_manifest"
   fi
 }
 trap cleanup EXIT
@@ -94,7 +108,7 @@ xcrun notarytool submit "$staged_dmg" \
   --wait \
   --keychain-profile "$notary_profile" \
   --output-format json >"$notary_result"
-python3 - "$notary_result" <<'PY'
+notary_submission_id="$(python3 - "$notary_result" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -106,14 +120,43 @@ if result.get("status") != "Accepted":
     )
 if not result.get("id"):
     raise SystemExit("error: Apple notarization result has no submission ID")
-print(f"notarization accepted: {result['id']}")
+print(result["id"])
 PY
+)"
+echo "notarization accepted: $notary_submission_id"
+xcrun notarytool log \
+  "$notary_submission_id" \
+  "$notary_log" \
+  --keychain-profile "$notary_profile"
+PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  "$repo_root/scripts/verify_notary_log.py" \
+  "$notary_result" \
+  "$notary_log" \
+  "$staged_dmg"
 
 xcrun stapler staple "$staged_dmg"
 xcrun stapler validate "$staged_dmg"
-spctl --assess --type open --context context:primary-signature --verbose=4 "$staged_dmg"
+dmg_sha256="$(shasum -a 256 "$staged_dmg" | awk '{print $1}')"
+PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  "$repo_root/scripts/gatekeeper_assessment.py" \
+  --target "$staged_dmg" \
+  --assessment-type open \
+  --primary-signature-context \
+  --target-signed-app-tree-sha256 "$dmg_sha256" \
+  --output "$gatekeeper_evidence"
 codesign --verify --strict --verbose=4 "$staged_dmg"
 /bin/ln "$staged_dmg" "$dmg_path" || die "cannot publish DMG exclusively"
 /bin/rm "$staged_dmg"
+/bin/ln "$notary_result" "$notary_result_final" || die "cannot publish notarization result"
+/bin/ln "$notary_log" "$notary_log_final" || die "cannot publish notarization log"
+/bin/ln "$gatekeeper_evidence" "$gatekeeper_final" || die "cannot publish Gatekeeper evidence"
+/bin/rm "$notary_result" "$notary_log" "$gatekeeper_evidence"
+python3 "$repo_root/scripts/hash_artifact.py" \
+  "$dmg_path" \
+  --output "$dmg_manifest" \
+  --metadata "artifactKind=notarized-dmg-v1" \
+  --metadata "architecture=arm64" \
+  --metadata "teamID=$expected_team_id" \
+  --metadata "version=$version"
 completed=1
 shasum -a 256 "$dmg_path"

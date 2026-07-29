@@ -1,8 +1,7 @@
-use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::PathBuf;
 
-use cfw_singbox_config::{CredentialRef, ValidatedSingBoxProfile, sha256_hex};
+use cfw_singbox_config::{CredentialAudience, CredentialRef, ValidatedSingBoxProfile, sha256_hex};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -55,9 +54,18 @@ pub struct ProfileRepositorySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProfileCredentialSnapshot {
     pub snapshot_digest: String,
-    pub live_references: Vec<CredentialRef>,
+    pub catalog: Vec<ProfileCredentialCatalogEntry>,
     pub selected_profile_id: Option<String>,
     pub profile_count: usize,
+}
+
+/// One complete, secret-free repository profile identity for native credential
+/// garbage collection. Entries with no references are retained so the
+/// snapshot digest still covers the full profile catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProfileCredentialCatalogEntry {
+    pub audience: CredentialAudience,
+    pub references: Vec<CredentialRef>,
 }
 
 /// Holds the repository's cross-process exclusive lock for a credential GC
@@ -92,28 +100,21 @@ struct RepositorySnapshot {
     records: Vec<ProfileRecord>,
     stored_bytes: u64,
     selection: Option<ProfileSelection>,
-    live_references: BTreeSet<CredentialRef>,
+    credential_catalog: Vec<ProfileCredentialCatalogEntry>,
 }
 
 struct RepositoryProfiles {
     records: Vec<ProfileRecord>,
     stored_bytes: u64,
     has_selection: bool,
-    live_references: BTreeSet<CredentialRef>,
+    credential_catalog: Vec<ProfileCredentialCatalogEntry>,
 }
 
 #[derive(Serialize)]
 struct CredentialSnapshotIdentity<'a> {
     schema_version: u16,
-    profiles: Vec<CredentialSnapshotProfile<'a>>,
+    catalog: &'a [ProfileCredentialCatalogEntry],
     selected_profile_id: Option<&'a str>,
-    live_references: &'a [CredentialRef],
-}
-
-#[derive(Serialize)]
-struct CredentialSnapshotProfile<'a> {
-    id: &'a str,
-    digest: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -152,9 +153,10 @@ impl ProfileRepository {
         // Do not add new state alongside a corrupt, legacy, or interrupted
         // entry. The one-way migration API is the only path that clears those.
         let existing = self.read_all(&directory)?;
-        let mut prospective_references = existing.live_references.clone();
-        prospective_references.extend(profile.credential_references());
-        ensure_credential_reference_capacity(prospective_references.len())?;
+        let prospective_bindings = credential_binding_count(&existing.credential_catalog)?
+            .checked_add(profile.credential_references().len())
+            .ok_or(ProfileError::TooManyCredentialReferences)?;
+        ensure_credential_reference_capacity(prospective_bindings)?;
         // A successful read proves the repository contains at most the
         // documented limit. Import must still reject the next write when it
         // is already full; otherwise the 4,097th entry would be committed and
@@ -195,12 +197,12 @@ impl ProfileRepository {
         let file = directory.open_profile_file(id)?;
         let replaced_bytes = file.metadata()?.len();
         let current = self.decode(id, file)?;
-        let mut prospective_references = existing.live_references.clone();
-        for reference in current.profile.credential_references() {
-            prospective_references.remove(&reference);
-        }
-        prospective_references.extend(profile.credential_references());
-        ensure_credential_reference_capacity(prospective_references.len())?;
+        let existing_bindings = credential_binding_count(&existing.credential_catalog)?;
+        let prospective_bindings = existing_bindings
+            .checked_sub(current.profile.credential_references().len())
+            .and_then(|count| count.checked_add(profile.credential_references().len()))
+            .ok_or(ProfileError::TooManyCredentialReferences)?;
+        ensure_credential_reference_capacity(prospective_bindings)?;
         let name = match name {
             Some(name) => normalize_name(name)?,
             None => current.record.name.clone(),
@@ -314,16 +316,12 @@ impl ProfileRepository {
     /// references, including selected and newly imported unselected profiles.
     pub fn credential_snapshot(&self) -> Result<ProfileCredentialSnapshot, ProfileError> {
         let Some(directory) = RepositoryDirectory::open_if_present(&self.profiles_dir)? else {
-            return build_credential_snapshot(&[], None, BTreeSet::new());
+            return build_credential_snapshot(&[], None);
         };
         directory.lock_exclusive()?;
         directory.recover_owned_temporaries()?;
         let snapshot = self.read_all(&directory)?;
-        build_credential_snapshot(
-            &snapshot.records,
-            snapshot.selection.as_ref(),
-            snapshot.live_references,
-        )
+        build_credential_snapshot(&snapshot.credential_catalog, snapshot.selection.as_ref())
     }
 
     pub fn lock_credential_snapshot(
@@ -333,11 +331,8 @@ impl ProfileRepository {
         directory.lock_exclusive()?;
         directory.recover_owned_temporaries()?;
         let snapshot = self.read_all(&directory)?;
-        let snapshot = build_credential_snapshot(
-            &snapshot.records,
-            snapshot.selection.as_ref(),
-            snapshot.live_references,
-        )?;
+        let snapshot =
+            build_credential_snapshot(&snapshot.credential_catalog, snapshot.selection.as_ref())?;
         Ok(LockedProfileCredentialSnapshot {
             snapshot,
             _directory: directory,
@@ -386,7 +381,7 @@ impl ProfileRepository {
             records: profiles.records,
             stored_bytes,
             selection,
-            live_references: profiles.live_references,
+            credential_catalog: profiles.credential_catalog,
         })
     }
 
@@ -409,7 +404,8 @@ impl ProfileRepository {
         ids.sort_unstable();
 
         let mut records = Vec::with_capacity(ids.len());
-        let mut live_references = BTreeSet::new();
+        let mut credential_catalog = Vec::with_capacity(ids.len());
+        let mut credential_binding_count = 0_usize;
         let mut stored_bytes = 0_u64;
         for id in ids {
             let file = directory.open_profile_file(&id)?;
@@ -423,8 +419,18 @@ impl ProfileRepository {
                 });
             }
             let stored = self.decode(&id, file)?;
-            live_references.extend(stored.profile.credential_references());
-            ensure_credential_reference_capacity(live_references.len())?;
+            let mut references = stored.profile.credential_references();
+            references.sort();
+            credential_binding_count = credential_binding_count
+                .checked_add(references.len())
+                .ok_or(ProfileError::TooManyCredentialReferences)?;
+            ensure_credential_reference_capacity(credential_binding_count)?;
+            let audience = CredentialAudience::new(&stored.record.id, &stored.record.digest)
+                .map_err(|_| ProfileError::InvalidCredentialAudience(stored.record.id.clone()))?;
+            credential_catalog.push(ProfileCredentialCatalogEntry {
+                audience,
+                references,
+            });
             records.push(stored.record);
         }
         records.sort_by(|left, right| {
@@ -432,11 +438,12 @@ impl ProfileRepository {
                 .cmp(&right.name)
                 .then_with(|| left.id.cmp(&right.id))
         });
+        credential_catalog.sort_by(|left, right| left.audience.cmp(&right.audience));
         Ok(RepositoryProfiles {
             records,
             stored_bytes,
             has_selection,
-            live_references,
+            credential_catalog,
         })
     }
 
@@ -596,32 +603,31 @@ impl ProfileRepository {
 }
 
 fn build_credential_snapshot(
-    records: &[ProfileRecord],
+    catalog: &[ProfileCredentialCatalogEntry],
     selection: Option<&ProfileSelection>,
-    live_references: BTreeSet<CredentialRef>,
 ) -> Result<ProfileCredentialSnapshot, ProfileError> {
-    let live_references = live_references.into_iter().collect::<Vec<_>>();
-    let mut profiles = records
-        .iter()
-        .map(|record| CredentialSnapshotProfile {
-            id: &record.id,
-            digest: &record.digest,
-        })
-        .collect::<Vec<_>>();
-    profiles.sort_unstable_by(|left, right| left.id.cmp(right.id));
     let selected_profile_id = selection.map(ProfileSelection::profile_id);
     let identity = CredentialSnapshotIdentity {
-        schema_version: 1,
-        profiles,
+        schema_version: 2,
+        catalog,
         selected_profile_id,
-        live_references: &live_references,
     };
     let bytes = serde_json::to_vec(&identity)?;
     Ok(ProfileCredentialSnapshot {
         snapshot_digest: sha256_hex(&bytes),
-        live_references,
+        catalog: catalog.to_vec(),
         selected_profile_id: selected_profile_id.map(ToOwned::to_owned),
-        profile_count: records.len(),
+        profile_count: catalog.len(),
+    })
+}
+
+fn credential_binding_count(
+    catalog: &[ProfileCredentialCatalogEntry],
+) -> Result<usize, ProfileError> {
+    catalog.iter().try_fold(0_usize, |total, entry| {
+        total
+            .checked_add(entry.references.len())
+            .ok_or(ProfileError::TooManyCredentialReferences)
     })
 }
 

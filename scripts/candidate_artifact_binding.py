@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""Bind candidate application trees to source and unsigned-CI toolchain evidence.
+
+The canonical toolchain identity remains owned by ``publication.ci_lanes``.
+This module only projects its release-tree digests into artifact-manifest
+metadata and verifies that a concrete application tree, its manifest, the CI
+lane document, and the saved toolchain identity all describe one build.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import stat
+from pathlib import Path
+from typing import Any
+
+if __package__:
+    from .hash_artifact import SUPPORTED_ALGORITHMS, build_manifest
+    from .publication.ci_lanes import (
+        TOOLCHAIN_BINDING_KIND,
+        derive_toolchain_binding,
+        toolchain_sha256,
+    )
+    from .publication.common import PublicationError
+    from .publication.sealed_manifest import _ci_lane_document
+else:
+    from hash_artifact import SUPPORTED_ALGORITHMS, build_manifest
+    from publication.ci_lanes import (
+        TOOLCHAIN_BINDING_KIND,
+        derive_toolchain_binding,
+        toolchain_sha256,
+    )
+    from publication.common import PublicationError
+    from publication.sealed_manifest import _ci_lane_document
+
+
+MAX_BINDING_DOCUMENT_BYTES = 64 * 1024 * 1024
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# The names on the left are the canonical constituent keys in
+# ``derive_toolchain_identity()['release_tree_sha256']``.  The names on the
+# right are the stable artifact-manifest metadata contract.
+RELEASE_TREE_METADATA = {
+    "go": "goToolchainTreeSha256",
+    "go-module-cache": "goModuleCacheTreeSha256",
+    "go-release-tools": "goToolsTreeSha256",
+    "node": "nodeToolchainTreeSha256",
+    "tauri-cli": "tauriToolchainTreeSha256",
+    "ui-dependencies": "uiDependenciesTreeSha256",
+    "xcodegen": "xcodegenToolchainTreeSha256",
+}
+TOOLCHAIN_METADATA_ORDER = (
+    "toolchainSha256",
+    *(RELEASE_TREE_METADATA[key] for key in sorted(RELEASE_TREE_METADATA)),
+)
+
+
+class CandidateBindingError(ValueError):
+    """A candidate artifact is not bound to its source and CI evidence."""
+
+
+class _DuplicateFieldError(ValueError):
+    pass
+
+
+def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateFieldError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _read_regular(path: Path, label: str) -> bytes:
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise CandidateBindingError(f"cannot inspect {label}: {error}") from error
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise CandidateBindingError(f"{label} must be a single-link regular file")
+    if before.st_size <= 0 or before.st_size > MAX_BINDING_DOCUMENT_BYTES:
+        raise CandidateBindingError(f"{label} size is outside the accepted range")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise CandidateBindingError(f"cannot open {label}: {error}") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise CandidateBindingError(f"{label} changed while opening")
+        data = bytearray()
+        while len(data) <= MAX_BINDING_DOCUMENT_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, MAX_BINDING_DOCUMENT_BYTES + 1 - len(data)),
+            )
+            if not chunk:
+                break
+            data.extend(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or len(data) != opened.st_size
+    ):
+        raise CandidateBindingError(f"{label} changed while reading")
+    if len(data) > MAX_BINDING_DOCUMENT_BYTES:
+        raise CandidateBindingError(f"{label} exceeds the accepted size")
+    return bytes(data)
+
+
+def load_strict_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            _read_regular(path, label).decode("utf-8"),
+            object_pairs_hook=_strict_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, _DuplicateFieldError) as error:
+        raise CandidateBindingError(f"{label} is not strict JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise CandidateBindingError(f"{label} must be a JSON object")
+    return value
+
+
+def _sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+        raise CandidateBindingError(f"{label} is not a lowercase SHA-256")
+    return value
+
+
+def _commit(value: object, label: str) -> str:
+    if not isinstance(value, str) or not COMMIT_RE.fullmatch(value):
+        raise CandidateBindingError(f"{label} is not a lowercase 40-hex commit")
+    return value
+
+
+def toolchain_manifest_metadata(
+    digest: object, identity: dict[str, Any]
+) -> dict[str, str]:
+    canonical_digest = _sha256(digest, "toolchain_sha256")
+    if identity.get("document") != TOOLCHAIN_BINDING_KIND:
+        raise CandidateBindingError("toolchain binding has the wrong document kind")
+    if toolchain_sha256(identity) != canonical_digest:
+        raise CandidateBindingError("toolchain binding digest does not match its identity")
+    trees = identity.get("release_tree_sha256")
+    if not isinstance(trees, dict) or set(trees) != set(RELEASE_TREE_METADATA):
+        raise CandidateBindingError("toolchain binding has an unexpected release-tree set")
+    metadata = {"toolchainSha256": canonical_digest}
+    for constituent, metadata_key in RELEASE_TREE_METADATA.items():
+        metadata[metadata_key] = _sha256(
+            trees[constituent], f"release_tree_sha256.{constituent}"
+        )
+    return metadata
+
+
+def validate_ci_toolchain_evidence(
+    ci_evidence: Path,
+    toolchain_binding: Path,
+    expected_commit: str,
+    expected_release_source_sha256: str,
+) -> dict[str, str]:
+    commit = _commit(expected_commit, "repositoryCommit")
+    release_source_sha256 = _sha256(
+        expected_release_source_sha256, "releaseSourceSha256"
+    )
+    ci_document = load_strict_json(ci_evidence, "unsigned CI evidence")
+    try:
+        validated_ci, failures = _ci_lane_document(
+            ci_document, commit, release_source_sha256
+        )
+    except PublicationError as error:
+        # The gate owns the detailed schema; expose one stable candidate boundary.
+        raise CandidateBindingError(f"unsigned CI evidence is invalid: {error}") from error
+    if failures:
+        raise CandidateBindingError(f"unsigned CI evidence has non-passing lanes: {failures}")
+    identity = load_strict_json(toolchain_binding, "CI toolchain binding")
+    metadata = toolchain_manifest_metadata(validated_ci["toolchain_sha256"], identity)
+    if metadata["toolchainSha256"] != validated_ci["toolchain_sha256"]:
+        raise CandidateBindingError("CI lanes and toolchain binding use different digests")
+    return metadata
+
+
+def validate_candidate_app_manifest(
+    manifest_path: Path,
+    app: Path,
+    *,
+    artifact_kind: str,
+    build_number: str,
+    source_identity: dict[str, str],
+    toolchain_metadata: dict[str, str],
+    team_id: str,
+) -> dict[str, Any]:
+    if not app.is_dir() or app.is_symlink():
+        raise CandidateBindingError("candidate app must be a real directory")
+    document = load_strict_json(manifest_path, "candidate app manifest")
+    algorithm = document.get("algorithm")
+    if algorithm not in SUPPORTED_ALGORITHMS:
+        raise CandidateBindingError("candidate app manifest uses an unsupported algorithm")
+    top_level = {"algorithm", "root", "sha256", "entries", "metadata"}
+    if algorithm == "sha256-tree-v2":
+        top_level.add("rootMode")
+    if set(document) != top_level:
+        raise CandidateBindingError("candidate app manifest has an unexpected field set")
+    actual = build_manifest(app, algorithm=algorithm)
+    compared = {"root", "sha256", "entries"}
+    if algorithm == "sha256-tree-v2":
+        compared.add("rootMode")
+    if any(document.get(key) != actual.get(key) for key in compared):
+        raise CandidateBindingError("candidate app manifest does not match the actual app tree")
+
+    expected_source = {
+        "repositoryCommit": _commit(
+            source_identity.get("repositoryCommit"), "source repositoryCommit"
+        ),
+        "releaseSourceSha256": _sha256(
+            source_identity.get("releaseSourceSha256"), "source releaseSourceSha256"
+        ),
+    }
+    if set(toolchain_metadata) != set(TOOLCHAIN_METADATA_ORDER):
+        raise CandidateBindingError("candidate toolchain metadata has an unexpected field set")
+    expected_metadata = {
+        "artifactKind": artifact_kind,
+        "architecture": "arm64",
+        "buildNumber": build_number,
+        "deploymentTarget": "15.0",
+        **expected_source,
+        **toolchain_metadata,
+        "teamID": team_id,
+        "version": "0.4.0",
+    }
+    if document.get("metadata") != dict(sorted(expected_metadata.items())):
+        raise CandidateBindingError(
+            "candidate app manifest metadata is not the exact source/toolchain/build binding"
+        )
+    return document
+
+
+def derive_candidate_toolchain_metadata(repository: Path) -> dict[str, str]:
+    digest, identity = derive_toolchain_binding(repository.resolve(strict=True))
+    return toolchain_manifest_metadata(digest, identity)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--repository",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent,
+    )
+    arguments = parser.parse_args()
+    try:
+        metadata = derive_candidate_toolchain_metadata(arguments.repository)
+    except (CandidateBindingError, OSError, ValueError) as error:
+        raise SystemExit(f"error: candidate toolchain binding failed: {error}") from error
+    # Every value is a validated lowercase SHA-256.  The fixed positional form
+    # is consumed by bash without eval or generated shell source.
+    print(" ".join(metadata[key] for key in TOOLCHAIN_METADATA_ORDER))
+
+
+if __name__ == "__main__":
+    main()

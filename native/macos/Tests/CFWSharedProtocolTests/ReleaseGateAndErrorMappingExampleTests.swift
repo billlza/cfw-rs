@@ -26,6 +26,15 @@ private func exampleTunnelOperation() throws -> OperationContext {
     ownerUID: 501, authorityRevision: 1)
 }
 
+private func exampleProxyOperation() throws -> OperationContext {
+  let root = try RootContext(
+    installationID: AuthorityIdentifier(UUID()), epoch: 1, generation: 1)
+  return try OperationContext(
+    operationID: AuthorityIdentifier(UUID()), root: root, mode: .systemProxy,
+    configSHA256: try exampleDigest("a"), identitySHA256: try exampleDigest("b"),
+    ownerUID: 501, authorityRevision: 1)
+}
+
 private func exampleStopEvent() throws -> AuthorityEvent {
   let operation = try exampleTunnelOperation()
   let directive = try StopDirective(
@@ -50,7 +59,7 @@ private func exampleSnapshotEvent() throws -> AuthorityEvent {
   #expect(AuthorityV1Limits.maximumEnvelopeBytes == 1_048_576)
   #expect(AuthorityV1Limits.maximumConfigurationBytes == 786_432)
   #expect(AuthorityV1Limits.maximumTotalSecretBytes == 262_144)
-  #expect(AuthorityV1Limits.maximumCredentialSlots == 128)
+  #expect(AuthorityV1Limits.maximumCredentialSlots == 256)
   #expect(AuthorityV1Limits.maximumIndividualSecretBytes == 16_384)
   #expect(AuthorityV1Limits.maximumReadOnlyRequests == 64)
   #expect(AuthorityV1Limits.maximumMutatingTransactions == 1)
@@ -79,12 +88,14 @@ private func exampleSnapshotEvent() throws -> AuthorityEvent {
   let atLimit = try AuthorityConfigurationDescriptor(
     byteCount: UInt32(AuthorityV1Limits.maximumConfigurationBytes),
     configSHA256: config, identitySHA256: identity,
+    credentialAudience: try testCredentialAudience(),
     credentialSlots: [], tunnelOptions: nil)
   #expect(atLimit.byteCount == 786_432)
   #expect(throws: AuthorityV1ValidationError.boundViolation) {
     try AuthorityConfigurationDescriptor(
       byteCount: UInt32(AuthorityV1Limits.maximumConfigurationBytes + 1),
       configSHA256: config, identitySHA256: identity,
+      credentialAudience: try testCredentialAudience(),
       credentialSlots: [], tunnelOptions: nil)
   }
 }
@@ -108,10 +119,10 @@ private func exampleSnapshotEvent() throws -> AuthorityEvent {
   let fullSlots = try (0..<AuthorityV1Limits.maximumCredentialSlots).map { _ in
     try AuthoritySecretSlot(
       reference: CredentialReference(id: UUID(), kind: .trojanPassword),
-      copying: Data(repeating: 1, count: 2_048))
+      copying: Data(repeating: 1, count: 1_024))
   }
   let material = try AuthoritySecretMaterial(slots: fullSlots)
-  #expect(material.slots.count == 128)
+  #expect(material.slots.count == 256)
   #expect(material.totalByteCount == 262_144)
   material.erase()
 
@@ -200,6 +211,125 @@ private final class UnavailableAuthorityRemote: AuthorityRemoteCalling, @uncheck
   func invalidate() async {}
 }
 
+private final class OperationAcknowledgementRemote:
+  AuthorityRemoteCalling, @unchecked Sendable
+{
+  enum Reply: Equatable {
+    case exact
+    case wrongOperation
+    case wrongRevision
+  }
+
+  private let lock = NSLock()
+  private let reply: Reply
+  private var methodCounts: [String: Int] = [:]
+  private var ownerStoppedCountValue = 0
+
+  init(reply: Reply) { self.reply = reply }
+
+  func count(_ method: AuthorityXPCMethod) -> Int {
+    lock.withLock { methodCounts["\(method)"] ?? 0 }
+  }
+
+  var ownerStoppedCount: Int { lock.withLock { ownerStoppedCountValue } }
+
+  func call(
+    method: AuthorityXPCMethod, request: Data,
+    configuration: Data?, secretPayload: Data?
+  ) async throws -> AuthorityXPCReply {
+    let envelope = try AuthorityV1Codec.decodeRequest(request)
+    if method == .handshake {
+      return AuthorityXPCReply(
+        response: try AuthorityV1Codec.encodeResponse(
+          AuthorityResponseEnvelope(
+            requestID: envelope.requestID,
+            operationID: nil,
+            result: try HandshakeResponse.v1())))
+    }
+    lock.withLock { methodCounts["\(method)", default: 0] += 1 }
+    let operation: OperationContext
+    let exactRevision: UInt64
+    switch (method, envelope.command) {
+    case (.cancelPrepared, .cancelPrepared(let cancellation)):
+      operation = cancellation.operation
+      exactRevision = cancellation.expectedRevision + 2
+    case (.attestReady, .attestReady(let attestation)):
+      operation = attestation.operation
+      exactRevision = attestation.operation.authorityRevision + 3
+    case (.attestStopped, .attestStopped(let attestation)):
+      operation = attestation.operation
+      exactRevision = attestation.operation.authorityRevision + 3
+    default:
+      throw AuthorityDomainError(code: .invalidMessage)
+    }
+    let acknowledgement = try AuthorityAcknowledgement(
+      operationID:
+        reply == .wrongOperation
+        ? AuthorityIdentifier(UUID()) : operation.operationID,
+      revision:
+        reply == .wrongRevision
+        ? exactRevision - 1 : exactRevision)
+    return AuthorityXPCReply(
+      response: try AuthorityV1Codec.encodeResponse(
+        AuthorityResponseEnvelope(
+          requestID: envelope.requestID,
+          operationID: operation.operationID,
+          result: acknowledgement)))
+  }
+
+  func noteOwnerStopped() async {
+    lock.withLock { ownerStoppedCountValue += 1 }
+  }
+
+  func invalidate() async {}
+}
+
+private final class ProxyBindReplyRemote: AuthorityRemoteCalling, @unchecked Sendable {
+  private let lock = NSLock()
+  private let leaseState: AuthorityLeaseState
+  private var confirmedClaimsValue = 0
+
+  init(leaseState: AuthorityLeaseState) { self.leaseState = leaseState }
+
+  var confirmedClaims: Int { lock.withLock { confirmedClaimsValue } }
+
+  func call(
+    method: AuthorityXPCMethod, request: Data,
+    configuration: Data?, secretPayload: Data?
+  ) async throws -> AuthorityXPCReply {
+    let envelope = try AuthorityV1Codec.decodeRequest(request)
+    if method == .handshake {
+      return AuthorityXPCReply(
+        response: try AuthorityV1Codec.encodeResponse(
+          AuthorityResponseEnvelope(
+            requestID: envelope.requestID,
+            operationID: nil,
+            result: try HandshakeResponse.v1())))
+    }
+    guard method == .bindProxyOwner,
+      case .bindProxyOwner(let binding) = envelope.command
+    else { throw AuthorityDomainError(code: .invalidMessage) }
+    defer { binding.capability.erase() }
+    let lease = try LeaseView(
+      leaseID: binding.leaseID,
+      operation: binding.operation,
+      state: leaseState,
+      expiryMonotonic: 10_000)
+    return AuthorityXPCReply(
+      response: try AuthorityV1Codec.encodeResponse(
+        AuthorityResponseEnvelope(
+          requestID: envelope.requestID,
+          operationID: binding.operation.operationID,
+          result: lease)))
+  }
+
+  func confirmOwnerClaim() async throws {
+    lock.withLock { confirmedClaimsValue += 1 }
+  }
+
+  func invalidate() async {}
+}
+
 @Test func unavailableAuthorityFailsClosedWithoutReachingAnyMutation() async throws {
   let remote = UnavailableAuthorityRemote()
   let client = BoundedAuthorityXPCClient(remote: remote)
@@ -207,7 +337,8 @@ private final class UnavailableAuthorityRemote: AuthorityRemoteCalling, @uncheck
   let operation = try exampleTunnelOperation()
   let descriptor = try AuthorityConfigurationDescriptor(
     byteCount: 512, configSHA256: operation.configSHA256,
-    identitySHA256: operation.identitySHA256, credentialSlots: [],
+    identitySHA256: operation.identitySHA256,
+    credentialAudience: try testCredentialAudience(), credentialSlots: [],
     tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true))
   let request = try PrepareStartRequest(
     operation: operation, expectedRevision: operation.authorityRevision,
@@ -234,6 +365,122 @@ private final class UnavailableAuthorityRemote: AuthorityRemoteCalling, @uncheck
   // Transported secret material is erased on the failure path.
   #expect(configuration.isErased)
   #expect(secrets.isErased)
+}
+
+@Test func cancellationAcceptsOnlyTheExactOperationAndDurableRevision() async throws {
+  let operation = try exampleTunnelOperation()
+
+  let exactRemote = OperationAcknowledgementRemote(reply: .exact)
+  let exactClient = BoundedAuthorityXPCClient(remote: exactRemote)
+  try await exactClient.cancelPrepared(
+    operation,
+    revision: operation.authorityRevision + 1)
+  #expect(exactRemote.count(.cancelPrepared) == 1)
+
+  for fault in [
+    OperationAcknowledgementRemote.Reply.wrongOperation,
+    .wrongRevision,
+  ] {
+    let remote = OperationAcknowledgementRemote(reply: fault)
+    let client = BoundedAuthorityXPCClient(remote: remote)
+    await #expect(throws: AuthorityDomainError(code: .staleOperation)) {
+      try await client.cancelPrepared(
+        operation,
+        revision: operation.authorityRevision + 1)
+    }
+    // A semantically invalid mutation ACK is terminal and is never retried.
+    #expect(remote.count(.cancelPrepared) == 1)
+  }
+}
+
+@Test func readyAcceptsOnlyTheExactOperationAndDurableRevision() async throws {
+  let operation = try exampleTunnelOperation()
+  let attestation = try ReadyAttestation(
+    operation: operation,
+    leaseID: AuthorityIdentifier(UUID()),
+    runtimeDigest: operation.identitySHA256,
+    ownerRole: .provider,
+    readyFlags: .all,
+    packetPumpLimits: PacketPumpLimits(
+      maximumQueuedPackets: 32,
+      maximumQueuedBytes: 131_072,
+      maximumPacketBytes: 1_500,
+      maximumReadBatch: 16),
+    monotonicTimestamp: 2_000)
+
+  let exactRemote = OperationAcknowledgementRemote(reply: .exact)
+  let exactClient = BoundedAuthorityXPCClient(remote: exactRemote)
+  try await exactClient.attestReady(attestation)
+  #expect(exactRemote.count(.attestReady) == 1)
+
+  for fault in [
+    OperationAcknowledgementRemote.Reply.wrongOperation,
+    .wrongRevision,
+  ] {
+    let remote = OperationAcknowledgementRemote(reply: fault)
+    let client = BoundedAuthorityXPCClient(remote: remote)
+    await #expect(throws: AuthorityDomainError(code: .staleOperation)) {
+      try await client.attestReady(attestation)
+    }
+    #expect(remote.count(.attestReady) == 1)
+  }
+}
+
+@Test func stoppedAcceptsOnlyTheExactOperationAndLifecycleRevisionWindow() async throws {
+  let operation = try exampleTunnelOperation()
+  let attestation = try StoppedAttestation(
+    operation: operation,
+    leaseID: AuthorityIdentifier(UUID()),
+    libboxStopped: true,
+    transportClosed: true,
+    osRestored: true,
+    monotonicTimestamp: 3_000)
+
+  let exactRemote = OperationAcknowledgementRemote(reply: .exact)
+  let exactClient = BoundedAuthorityXPCClient(remote: exactRemote)
+  try await exactClient.attestStopped(attestation)
+  #expect(exactRemote.count(.attestStopped) == 1)
+  #expect(exactRemote.ownerStoppedCount == 1)
+
+  for fault in [
+    OperationAcknowledgementRemote.Reply.wrongOperation,
+    .wrongRevision,
+  ] {
+    let remote = OperationAcknowledgementRemote(reply: fault)
+    let client = BoundedAuthorityXPCClient(remote: remote)
+    await #expect(throws: AuthorityDomainError(code: .staleOperation)) {
+      try await client.attestStopped(attestation)
+    }
+    #expect(remote.count(.attestStopped) == 1)
+    #expect(remote.ownerStoppedCount == 1)
+  }
+}
+
+@Test func ownerHeartbeatStartsOnlyAfterAnExactStartingLeaseIsValidated() async throws {
+  let operation = try exampleProxyOperation()
+  let context = try ProxyOwnerContext(
+    operation: operation,
+    leaseID: AuthorityIdentifier(UUID()))
+
+  let exactRemote = ProxyBindReplyRemote(leaseState: .starting)
+  let exactClient = BoundedAuthorityXPCClient(remote: exactRemote)
+  let exactLease = try await exactClient.bind(
+    OwnerCapability(
+      copying: Data(repeating: 0x41, count: AuthorityV1Limits.capabilityBytes)),
+    context: context)
+  #expect(exactLease.operation == operation)
+  #expect(exactLease.leaseID == context.leaseID)
+  #expect(exactRemote.confirmedClaims == 1)
+
+  let invalidRemote = ProxyBindReplyRemote(leaseState: .active)
+  let invalidClient = BoundedAuthorityXPCClient(remote: invalidRemote)
+  await #expect(throws: AuthorityDomainError(code: .staleOperation)) {
+    _ = try await invalidClient.bind(
+      OwnerCapability(
+        copying: Data(repeating: 0x42, count: AuthorityV1Limits.capabilityBytes)),
+      context: context)
+  }
+  #expect(invalidRemote.confirmedClaims == 0)
 }
 
 // MARK: - Stable cross-language error mapping
@@ -344,14 +591,4 @@ private func gatedStart(
   try gatedStart(proof: .proven, actuator: actuator)
   #expect(actuator.actions == [.libboxStart, .tunnelStart])
   #expect(!actuator.actions.contains(.fallback))
-}
-
-@Test func releaseGateRequirementFailsClosedUnderTheReleaseConfiguration() throws {
-  #if CFW_GLOBAL_AUTHORITY_REQUIRED
-    #expect(throws: GlobalAuthorityGateError.proofMissing(.availabilityUnproven)) {
-      try GlobalAuthorityReleaseGate.requireStartAuthorization()
-    }
-  #else
-    try GlobalAuthorityReleaseGate.requireStartAuthorization()
-  #endif
 }

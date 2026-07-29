@@ -8,7 +8,7 @@ public enum AuthorityV1Limits {
   public static let maximumEnvelopeBytes = 1_048_576
   public static let maximumConfigurationBytes = 768 * 1_024
   public static let maximumTotalSecretBytes = 256 * 1_024
-  public static let maximumCredentialSlots = 128
+  public static let maximumCredentialSlots = 256
   public static let maximumIndividualSecretBytes = 16 * 1_024
   public static let maximumReadOnlyRequests = 64
   public static let maximumMutatingTransactions = 1
@@ -122,7 +122,7 @@ public enum AuthorityMode: String, Codable, CaseIterable, Sendable {
   case tunnel
 }
 
-public enum AuthorityRole: String, Codable, CaseIterable, Sendable {
+public enum AuthorityRole: String, Codable, CaseIterable, Hashable, Sendable {
   case host
   case proxyAgent = "proxy_agent"
   case provider
@@ -192,33 +192,26 @@ public struct OperationContext: Codable, Equatable, Sendable {
   }
 }
 
-/// Connection identity is derived from the audit token and is never a caller-supplied wire type.
+/// Connection identity is derived from public, kernel-populated Foundation XPC
+/// attributes after the role-specific listener has accepted the peer's exact
+/// code-signing requirement. It is never a caller-supplied wire type.
 public struct PeerIdentity: Equatable, Sendable {
-  public let auditTokenDigest: SHA256Digest
+  public let connectionIdentityDigest: SHA256Digest
   public let pid: Int32
   public let euid: UInt32
   public let auditSessionID: UInt32
-  public let teamID: String
-  public let signingID: String
-  public let designatedRequirementDigest: SHA256Digest
-  public let entitlementDigest: SHA256Digest
   public let role: AuthorityRole
   public let consoleUID: UInt32?
 
   public init(
-    auditTokenDigest: SHA256Digest, pid: Int32, euid: UInt32,
-    auditSessionID: UInt32, teamID: String, signingID: String,
-    designatedRequirementDigest: SHA256Digest, entitlementDigest: SHA256Digest,
+    connectionIdentityDigest: SHA256Digest, pid: Int32, euid: UInt32,
+    auditSessionID: UInt32,
     role: AuthorityRole, consoleUID: UInt32?
   ) {
-    self.auditTokenDigest = auditTokenDigest
+    self.connectionIdentityDigest = connectionIdentityDigest
     self.pid = pid
     self.euid = euid
     self.auditSessionID = auditSessionID
-    self.teamID = teamID
-    self.signingID = signingID
-    self.designatedRequirementDigest = designatedRequirementDigest
-    self.entitlementDigest = entitlementDigest
     self.role = role
     self.consoleUID = consoleUID
   }
@@ -309,11 +302,13 @@ public struct AuthorityConfigurationDescriptor: Codable, Equatable, Sendable {
   public let byteCount: UInt32
   public let configSHA256: SHA256Digest
   public let identitySHA256: SHA256Digest
+  public let credentialAudience: CredentialAudience
   public let credentialSlots: [CredentialSlot]
   public let tunnelOptions: TunnelNetworkOptions?
 
   public init(
     byteCount: UInt32, configSHA256: SHA256Digest, identitySHA256: SHA256Digest,
+    credentialAudience: CredentialAudience,
     credentialSlots: [CredentialSlot], tunnelOptions: TunnelNetworkOptions?
   ) throws {
     guard byteCount > 0, byteCount <= AuthorityV1Limits.maximumConfigurationBytes,
@@ -326,6 +321,7 @@ public struct AuthorityConfigurationDescriptor: Codable, Equatable, Sendable {
     self.byteCount = byteCount
     self.configSHA256 = configSHA256
     self.identitySHA256 = identitySHA256
+    self.credentialAudience = credentialAudience
     self.credentialSlots = credentialSlots
     self.tunnelOptions = tunnelOptions
   }
@@ -334,6 +330,7 @@ public struct AuthorityConfigurationDescriptor: Codable, Equatable, Sendable {
     case byteCount = "byte_count"
     case configSHA256 = "config_sha256"
     case identitySHA256 = "identity_sha256"
+    case credentialAudience = "credential_audience"
     case credentialSlots = "credential_slots"
     case tunnelOptions = "tunnel_options"
   }
@@ -378,19 +375,25 @@ public struct AuthoritySnapshot: Codable, Equatable, Sendable {
   public let protocolVersion: AuthorityProtocolVersion
   public let state: AuthorityState
   public let revision: UInt64
-  public let replayCursor: ReplayCursor
+  /// The durable installation lineage. A freshly installed Authority has no
+  /// cursor yet and reports a strict global Off snapshot at its current
+  /// revision; the first successful prepare atomically enrolls the lineage.
+  public let replayCursor: ReplayCursor?
   public let leaseView: LeaseView?
   public let lastFailure: AuthorityFailureSummary?
   public let consoleUID: UInt32?
 
   public init(
     protocolVersion: AuthorityProtocolVersion, state: AuthorityState, revision: UInt64,
-    replayCursor: ReplayCursor, leaseView: LeaseView?,
+    replayCursor: ReplayCursor?, leaseView: LeaseView?,
     lastFailure: AuthorityFailureSummary?, consoleUID: UInt32?
   ) throws {
-    guard revision > 0, replayCursor.revision <= revision,
+    guard revision > 0, replayCursor?.revision ?? 0 <= revision,
       (state == .off || state == .recovering || state == .quarantined) == (leaseView == nil)
     else { throw AuthorityV1ValidationError.invalidState }
+    guard replayCursor != nil || (state == .off && leaseView == nil) else {
+      throw AuthorityV1ValidationError.invalidState
+    }
     self.protocolVersion = protocolVersion
     self.state = state
     self.revision = revision
@@ -676,7 +679,8 @@ public final class PreparedStart: @unchecked Sendable {
   ) throws {
     guard (operation.mode == .tunnel) == (ticket != nil),
       (operation.mode == .systemProxy) == (ownerCapability != nil),
-      (ticket != nil) != (ownerCapability != nil), expiresMonotonic > 0
+      (ticket != nil) != (ownerCapability != nil), expiresMonotonic > 0,
+      preferenceDescriptorSHA256 == operation.identitySHA256
     else { throw AuthorityV1ValidationError.invalidState }
     self.operation = operation
     self.leaseID = leaseID
@@ -700,10 +704,33 @@ public struct BindProxyOwnerRequest: Sendable {
   public let capability: OwnerCapability
 }
 
-public struct RedeemTunnelTicketRequest: Sendable {
+/// Non-secret operation metadata transported alongside (never inside) a
+/// one-use Proxy owner capability on the authenticated Host→ProxyAgent XPC
+/// method. The Authority verifies the exact pair again when binding.
+public struct ProxyOwnerContext: Codable, Equatable, Sendable {
   public let operation: OperationContext
   public let leaseID: AuthorityIdentifier
+
+  public init(operation: OperationContext, leaseID: AuthorityIdentifier) throws {
+    guard operation.mode == .systemProxy else {
+      throw AuthorityV1ValidationError.invalidContext
+    }
+    self.operation = operation
+    self.leaseID = leaseID
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case operation
+    case leaseID = "lease_id"
+  }
+}
+
+public struct RedeemTunnelTicketRequest: Sendable {
   public let ticket: StartTicket
+
+  public init(ticket: StartTicket) {
+    self.ticket = ticket
+  }
 }
 
 public final class RedeemedTunnelStart: @unchecked Sendable {
@@ -747,6 +774,151 @@ public struct BeginStopRequest: Codable, Equatable, Sendable {
     case operation
     case leaseID = "lease_id"
     case expectedRevision = "expected_revision"
+  }
+}
+
+public struct CompleteStopRequest: Codable, Equatable, Sendable {
+  public let operation: OperationContext
+  public let leaseID: AuthorityIdentifier
+  public let expectedRevision: UInt64
+
+  public init(
+    operation: OperationContext,
+    leaseID: AuthorityIdentifier,
+    expectedRevision: UInt64
+  ) throws {
+    guard expectedRevision >= operation.authorityRevision else {
+      throw AuthorityV1ValidationError.invalidContext
+    }
+    self.operation = operation
+    self.leaseID = leaseID
+    self.expectedRevision = expectedRevision
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case operation
+    case leaseID = "lease_id"
+    case expectedRevision = "expected_revision"
+  }
+}
+
+/// Host-observed System Proxy recovery evidence. Every field is explicit so a
+/// missing observation cannot be decoded as a successful default. The
+/// Authority still derives all of its own transient-state evidence internally.
+public struct RecoveryProxyOffEvidence: Codable, Equatable, Sendable {
+  public let ownershipCleared: Bool
+  public let listenerClosed: Bool
+  public let effectiveSystemConfigurationRestored: Bool
+
+  public init(
+    ownershipCleared: Bool,
+    listenerClosed: Bool,
+    effectiveSystemConfigurationRestored: Bool
+  ) {
+    self.ownershipCleared = ownershipCleared
+    self.listenerClosed = listenerClosed
+    self.effectiveSystemConfigurationRestored = effectiveSystemConfigurationRestored
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case ownershipCleared = "ownership_cleared"
+    case listenerClosed = "listener_closed"
+    case effectiveSystemConfigurationRestored =
+      "effective_system_configuration_restored"
+  }
+}
+
+/// Host-observed Packet Tunnel provider recovery evidence. `ownershipCleared`
+/// means no provider endpoint still claims the recovered Authority generation;
+/// libbox and packet-pump teardown remain separate mandatory observations.
+public struct RecoveryProviderOffEvidence: Codable, Equatable, Sendable {
+  public let ownershipCleared: Bool
+  public let libboxStopped: Bool
+  public let packetPumpClosed: Bool
+
+  public init(
+    ownershipCleared: Bool,
+    libboxStopped: Bool,
+    packetPumpClosed: Bool
+  ) {
+    self.ownershipCleared = ownershipCleared
+    self.libboxStopped = libboxStopped
+    self.packetPumpClosed = packetPumpClosed
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case ownershipCleared = "ownership_cleared"
+    case libboxStopped = "libbox_stopped"
+    case packetPumpClosed = "packet_pump_closed"
+  }
+}
+
+/// Public NetworkExtension manager observation made by the authenticated Host.
+/// Only `disconnected` and `invalid` are acceptable Off barriers; the remaining
+/// values exist so an uncertain observation is represented and rejected rather
+/// than omitted or coerced to success.
+public enum RecoveryManagedTunnelStatus: String, Codable, CaseIterable, Sendable {
+  case disconnected
+  case invalid
+  case connecting
+  case connected
+  case unknown
+}
+
+/// Exact compare-and-swap request for recovering a restarted Authority to Off.
+/// The complete replay cursor binds the request to the durable journal head,
+/// while `expectedRevision` prevents a stale Host observation from committing.
+public struct ReconcileOffRequest: Codable, Equatable, Sendable {
+  public let expectedRevision: UInt64
+  public let replayCursor: ReplayCursor
+  public let proxy: RecoveryProxyOffEvidence
+  public let provider: RecoveryProviderOffEvidence
+  public let managedTunnel: RecoveryManagedTunnelStatus
+
+  public init(
+    expectedRevision: UInt64,
+    replayCursor: ReplayCursor,
+    proxy: RecoveryProxyOffEvidence,
+    provider: RecoveryProviderOffEvidence,
+    managedTunnel: RecoveryManagedTunnelStatus
+  ) throws {
+    guard expectedRevision == replayCursor.revision else {
+      throw AuthorityV1ValidationError.invalidContext
+    }
+    self.expectedRevision = expectedRevision
+    self.replayCursor = replayCursor
+    self.proxy = proxy
+    self.provider = provider
+    self.managedTunnel = managedTunnel
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case expectedRevision = "expected_revision"
+    case replayCursor = "replay_cursor"
+    case proxy, provider
+    case managedTunnel = "managed_tunnel"
+  }
+}
+
+/// Durable acknowledgement of the exact recovery cursor accepted by the
+/// Authority. A successful reconciliation always consumes exactly one journal
+/// revision.
+public struct ReconcileOffReceipt: Codable, Equatable, Sendable {
+  public let revision: UInt64
+  public let replayCursor: ReplayCursor
+
+  public init(revision: UInt64, replayCursor: ReplayCursor) throws {
+    let (expected, overflow) = replayCursor.revision.addingReportingOverflow(1)
+    guard !overflow, revision == expected else {
+      throw AuthorityV1ValidationError.invalidContext
+    }
+    self.revision = revision
+    self.replayCursor = replayCursor
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case revision
+    case replayCursor = "replay_cursor"
   }
 }
 
@@ -822,6 +994,8 @@ public enum AuthorityCommand: Sendable {
   case redeemTunnelTicket(RedeemTunnelTicketRequest)
   case attestReady(ReadyAttestation)
   case beginStop(BeginStopRequest)
+  case completeStop(CompleteStopRequest)
+  case reconcileOff(ReconcileOffRequest)
   case attestStopped(StoppedAttestation)
   case cancelPrepared(CancelPreparedRequest)
   case snapshot(SnapshotRequest)
@@ -971,7 +1145,8 @@ extension AuthorityConfigurationDescriptor: AuthorityV1WireModel {
   public func validateAuthorityV1() throws {
     _ = try AuthorityConfigurationDescriptor(
       byteCount: byteCount, configSHA256: configSHA256,
-      identitySHA256: identitySHA256, credentialSlots: credentialSlots,
+      identitySHA256: identitySHA256, credentialAudience: credentialAudience,
+      credentialSlots: credentialSlots,
       tunnelOptions: tunnelOptions)
   }
 }
@@ -989,7 +1164,7 @@ extension AuthorityFailureSummary: AuthorityV1WireModel {
 extension AuthoritySnapshot: AuthorityV1WireModel {
   public func validateAuthorityV1() throws {
     try protocolVersion.validateAuthorityV1()
-    try replayCursor.validateAuthorityV1()
+    try replayCursor?.validateAuthorityV1()
     try leaseView?.validateAuthorityV1()
     try lastFailure?.validateAuthorityV1()
     _ = try AuthoritySnapshot(
@@ -1061,11 +1236,62 @@ extension PrepareStartRequest: AuthorityV1WireModel {
       configuration: configuration)
   }
 }
+extension ProxyOwnerContext: AuthorityV1WireModel {
+  public func validateAuthorityV1() throws {
+    try operation.validateAuthorityV1()
+    _ = try ProxyOwnerContext(operation: operation, leaseID: leaseID)
+  }
+}
 extension BeginStopRequest: AuthorityV1WireModel {
   public func validateAuthorityV1() throws {
     try operation.validateAuthorityV1()
     _ = try BeginStopRequest(
       operation: operation, leaseID: leaseID, expectedRevision: expectedRevision)
+  }
+}
+extension CompleteStopRequest: AuthorityV1WireModel {
+  public func validateAuthorityV1() throws {
+    try operation.validateAuthorityV1()
+    _ = try CompleteStopRequest(
+      operation: operation, leaseID: leaseID,
+      expectedRevision: expectedRevision)
+  }
+}
+extension RecoveryProxyOffEvidence: AuthorityV1WireModel {
+  public func validateAuthorityV1() throws {
+    _ = RecoveryProxyOffEvidence(
+      ownershipCleared: ownershipCleared,
+      listenerClosed: listenerClosed,
+      effectiveSystemConfigurationRestored: effectiveSystemConfigurationRestored)
+  }
+}
+extension RecoveryProviderOffEvidence: AuthorityV1WireModel {
+  public func validateAuthorityV1() throws {
+    _ = RecoveryProviderOffEvidence(
+      ownershipCleared: ownershipCleared,
+      libboxStopped: libboxStopped,
+      packetPumpClosed: packetPumpClosed)
+  }
+}
+extension ReconcileOffRequest: AuthorityV1WireModel {
+  public func validateAuthorityV1() throws {
+    try replayCursor.validateAuthorityV1()
+    try proxy.validateAuthorityV1()
+    try provider.validateAuthorityV1()
+    _ = try ReconcileOffRequest(
+      expectedRevision: expectedRevision,
+      replayCursor: replayCursor,
+      proxy: proxy,
+      provider: provider,
+      managedTunnel: managedTunnel)
+  }
+}
+extension ReconcileOffReceipt: AuthorityV1WireModel {
+  public func validateAuthorityV1() throws {
+    try replayCursor.validateAuthorityV1()
+    _ = try ReconcileOffReceipt(
+      revision: revision,
+      replayCursor: replayCursor)
   }
 }
 extension StopDirective: AuthorityV1WireModel {
@@ -1121,6 +1347,7 @@ public enum AuthorityRetryDirective: String, Codable, Equatable, Sendable {
   case freshContext = "fresh_context"
   case freshGenerationAfterOff = "fresh_generation_after_off"
   case explicitReconciliation = "explicit_reconciliation"
+  case maintenanceRequired = "maintenance_required"
 }
 
 public enum AuthorityOperationClass: Equatable, Sendable {
@@ -1139,6 +1366,7 @@ public enum AuthorityErrorCode: String, Codable, CaseIterable, Sendable {
   case globalAuthorityInterrupted = "global_authority_interrupted"
   case busy
   case resourceExhausted = "resource_exhausted"
+  case journalCapacityExhausted = "journal_capacity_exhausted"
   case staleOperation = "stale_operation"
   case replayRejected = "replay_rejected"
   case globalLeaseConflict = "global_lease_conflict"
@@ -1166,6 +1394,7 @@ public enum AuthorityErrorCode: String, Codable, CaseIterable, Sendable {
     case .globalAuthorityInterrupted: .globalAuthorityInterrupted
     case .busy: .busy
     case .resourceExhausted: .resourceExhausted
+    case .journalCapacityExhausted: .journalCapacityExhausted
     case .staleOperation: .staleOperation
     case .replayRejected: .replayRejected
     case .globalLeaseConflict: .globalLeaseConflict
@@ -1188,6 +1417,8 @@ public enum AuthorityErrorCode: String, Codable, CaseIterable, Sendable {
     case .resourceExhausted, .ownerUnresponsive, .globalAuthorityTimeout,
       .globalAuthorityInterrupted:
       .idempotentReadOnly
+    case .journalCapacityExhausted:
+      .maintenanceRequired
     case .globalAuthorityUnavailable, .globalAuthorityRegistrationRequired,
       .globalAuthorityApprovalRequired:
       .registrationStatusChange
@@ -1224,6 +1455,8 @@ public enum AuthorityErrorCode: String, Codable, CaseIterable, Sendable {
     case .globalAuthorityInterrupted: "The Authority connection was interrupted."
     case .busy: "Global Authority mutation is busy."
     case .resourceExhausted: "Global Authority read capacity is exhausted."
+    case .journalCapacityExhausted:
+      "The Global Authority journal reached its fixed capacity and requires maintenance."
     case .staleOperation: "Authority operation context is stale."
     case .replayRejected: "Authority replay protection rejected the context."
     case .globalLeaseConflict: "A conflicting Global Authority lease exists."

@@ -85,7 +85,10 @@ export function normalizeCredentialGcPreview(payload) {
   return {
     previewId: payload.preview_id,
     orphanCount: payload.orphan_count,
-    orphanReferences: normalizeCredentialReferences(payload.orphan_references, MAX_VAULT_REFERENCES),
+    // Two profile audiences may intentionally own the same public UUID. GC is
+    // binding-scoped, so repeated references in this display-only projection
+    // are valid and must not make an otherwise exact preview unusable.
+    orphanReferences: payload.orphan_references.map(normalizeCredentialReference),
   };
 }
 

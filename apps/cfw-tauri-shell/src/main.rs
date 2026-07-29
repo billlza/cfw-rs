@@ -3,6 +3,7 @@ mod engine;
 mod legacy;
 mod lifecycle;
 mod shell;
+mod subscription_import;
 mod updater;
 
 use cfw_apple_network::NativeFrameworkBridge;
@@ -24,17 +25,18 @@ use commands::{
     reveal_profile, rules_snapshot, save_profile_text, select_profile, select_proxy, set_allow_lan,
     set_bind_address, set_launch_at_login_enabled, set_log_level, set_mixin_enabled,
     set_proxy_mode, set_system_proxy_enabled, set_tun_enabled, start_connections_stream,
-    start_log_stream, system_proxy_state, test_proxy_delays, toggle_devtools, tun_runtime_state,
-    update_all_proxy_providers, update_all_rule_providers, update_geoip_database, update_profile,
-    update_profile_info, update_proxy_provider, update_rule_provider, write_settings_snapshot,
+    start_log_stream, stop_connections_stream, stop_log_stream, system_proxy_state,
+    test_proxy_delays, toggle_devtools, tun_runtime_state, update_all_proxy_providers,
+    update_all_rule_providers, update_geoip_database, update_profile, update_profile_info,
+    update_proxy_provider, update_rule_provider, write_settings_snapshot,
 };
 use engine::{
     boot_payload, build_managed_engine, engine_snapshot, prepare_legacy_cutover, set_engine_mode,
     start_engine_event_forwarder,
 };
 use legacy::{
-    LegacyRetirementGate, MigrationHandoffLease, disable_service_mode, legacy_retirement_status,
-    recover_legacy_cutover, run_launch_preflight,
+    LegacyRetirementGate, MigrationHandoffLease, begin_migration_handoff, disable_service_mode,
+    legacy_retirement_status, recover_legacy_cutover, run_launch_preflight,
 };
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
 use shell::{
@@ -116,6 +118,7 @@ fn main() {
             read_settings_snapshot,
             write_settings_snapshot,
             legacy_retirement_status,
+            begin_migration_handoff,
             prepare_legacy_cutover,
             disable_service_mode,
             recover_legacy_cutover,
@@ -147,6 +150,8 @@ fn main() {
             update_all_rule_providers,
             start_log_stream,
             start_connections_stream,
+            stop_log_stream,
+            stop_connections_stream,
             close_connection,
             close_all_connections,
             dns_query,

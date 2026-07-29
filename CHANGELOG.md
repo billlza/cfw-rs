@@ -23,11 +23,16 @@
   Apple-network adapter crates with Off-mediated Proxy/Tunnel switching.
 - Add the macOS 15+, arm64 Swift protocol, ProxyAgent, Packet Tunnel System
   Extension, and bounded public `NEPacketTunnelFlow` packet-pump foundation.
-- Keep the missing libbox factories and missing Rust-to-Swift production bridge
-  fail-closed. Packet Tunnel also fails explicitly until authenticated
-  global-context state transport replaces the invalid user App Group and Data
-  Protection Keychain assumptions. The old helper, a downloaded core, and
-  private packet-flow APIs are not fallbacks.
+- Wire the production Rust `NativeFrameworkBridge`, source-built libbox
+  factories in ProxyAgent and Packet Tunnel, and root-context Global Authority
+  through exact role-scoped XPC admission. Missing identity, capability,
+  ticket, profile, or readiness evidence fails closed; the old helper, a
+  downloaded core, private packet-flow APIs, user App Group state, and Data
+  Protection Keychain access from the System Extension are not fallbacks.
+- Compact the bounded Authority journal before a prepare consumes its
+  seven-record finish reserve. Compaction commits a hash-chained checkpoint to
+  the next anchored generation, retains only active and previous generations,
+  detects rollback, and is fault-tested at every commit and cleanup boundary.
 
 ### Configuration and interface
 
@@ -82,16 +87,26 @@
   fetched over bounded HTTPS only, validated into the closed profile schema, and
   projected for both modes before they can be stored; the subscription URL lives
   inside the integrity-checked profile envelope and never appears in a profile
-  listing. The runtime-configuration preview redacts the app-owned controller
-  secret and fails closed if it survives redaction.
+  listing. Subscription import converts Clash Meta YAML `proxies` lists and
+  node-URI bundles (`ss://`, `vmess://`, `vless://` including Reality,
+  `trojan://`, `hysteria2://`) into that schema at the boundary with bounded,
+  alias-rejecting parsers; extracted secrets go to the credential vault, never
+  into the stored profile, and import errors identify positions and keys
+  instead of echoing document content. The subscription request advertises a
+  Clash Meta client so panels serve the modern protocol set. Requests the
+  schema cannot honour — unsupported proxy types, disabled certificate
+  verification, plugins, chaining, port hopping — fail the import instead of
+  being dropped. The runtime-configuration preview redacts the app-owned
+  controller secret and fails closed if it survives redaction.
 - Express the System Proxy and TUN switches as engine-mode transitions through
   the single Authority-mediated transition path, so neither switch can write a
   system proxy, a DNS server, a route, or a network preference, and neither can
   stop the other mode's data plane. Switches that the projection cannot honour
   (LAN exposure, non-loopback bind address, engine log level, profile mixin) and
   requests to write host DNS or fetch a GeoIP database now fail closed with an
-  explicit reason instead of being accepted and ignored. Legacy Clash YAML
-  profiles are reported, never converted.
+  explicit reason instead of being accepted and ignored. Legacy on-disk Clash
+  for Windows profiles are reported, never bulk-converted; their subscriptions
+  are re-imported from the live URL instead.
 - Restore tray proxy-group switching, window, deep-link, and diagnostics
   helpers. Tray labels and menu ids are bounded and generated, so a controller
   response cannot inject a menu entry, and diagnostics reads
@@ -111,16 +126,18 @@
 - Add fail-closed release documentation for nested signing, provisioning,
   notarization, SBOM/license evidence, real packet evidence, weak-network
   recovery, resource limits, and physical-device testing.
+- Build XcodeGen from checksum-bound source with a digest-pinned
+  installed-resource patch, isolated resolved-only SwiftPM state, a real project
+  generation probe, debug-path stripping, and a complete tree-v2 manifest.
 - Replace the generic updater runtime with a project-owned, bounded metadata,
   signed-download, descriptor-relative archive admission, and atomic macOS
   swap path. Update commit now owns an exclusive engine-Off maintenance lease,
   and its cancellation boundary is linearized before any network stop.
-- Release remains blocked until libbox linkage, the production Host Bridge,
-  installed-identity proof for shared-Keychain provisioning and authenticated
-  in-memory Tunnel injection, the pinned resolver-failover patch is present in
-  the source-built libbox and verified by physical packet capture, exact
-  Developer ID/provisioning, signed physical-device data-plane tests, and the
-  complete publication evidence set have passed.
+- Release remains blocked until installed-identity proof for shared-Keychain
+  provisioning and authenticated in-memory Tunnel injection, physical packet
+  capture of the pinned resolver-failover behavior, exact Developer ID and
+  provisioning, signed physical-device data-plane and recovery tests, and the
+  complete legal/publication evidence set have passed.
 
 ## 0.3.5 — 2026-07-21
 

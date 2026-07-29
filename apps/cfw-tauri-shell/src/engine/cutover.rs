@@ -196,10 +196,12 @@ pub(crate) fn validate_outcome_binding(
             context,
             system_proxy_config_digest,
             tunnel_config_digest,
+            credential_audience,
         } if *target == request.target()
             && *context == request.system_proxy_request().context
             && system_proxy_config_digest == &request.system_proxy_request().config_digest
-            && tunnel_config_digest == &request.tunnel_request().config_digest =>
+            && tunnel_config_digest == &request.tunnel_request().config_digest
+            && credential_audience == &request.system_proxy_request().credential_audience =>
         {
             Ok(())
         }
@@ -226,6 +228,7 @@ fn validate_ready_binding(
         && attestation.context == request.system_proxy_request().context
         && attestation.system_proxy_config_digest == request.system_proxy_request().config_digest
         && attestation.tunnel_config_digest == request.tunnel_request().config_digest
+        && attestation.credential_audience == request.system_proxy_request().credential_audience
         && attestation.credential_references == references
     {
         Ok(())
@@ -270,7 +273,12 @@ pub(crate) async fn prepare_legacy_cutover(
     let settings = engine.engine_settings().clone();
     let request = engine
         .coordinator
-        .prepare_cutover(target, selected.profile.clone(), settings.clone())
+        .prepare_cutover(
+            target,
+            selected.record.id.clone(),
+            selected.profile.clone(),
+            settings.clone(),
+        )
         .await
         .map_err(|error| error.to_string())?;
     let outcome = run_native_preflight(engine.preflight_backend.as_ref(), request.clone()).await?;
@@ -302,8 +310,14 @@ mod tests {
             config_epoch: 1,
             generation: 4,
         };
+        let credential_audience = cfw_engine_api::CredentialAudience::new(
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "33".repeat(32),
+        )
+        .expect("audience");
         let proxy = EngineStartRequest {
             context: context.clone(),
+            credential_audience: credential_audience.clone(),
             config_json: "{}".into(),
             config_content_digest: "10".repeat(32),
             config_digest: "11".repeat(32),
@@ -312,6 +326,7 @@ mod tests {
         };
         let tunnel = EngineStartRequest {
             context,
+            credential_audience,
             config_json: "{}".into(),
             config_content_digest: "20".repeat(32),
             config_digest: "22".repeat(32),
@@ -335,6 +350,7 @@ mod tests {
             context: request.system_proxy_request().context.clone(),
             system_proxy_config_digest: request.system_proxy_request().config_digest.clone(),
             tunnel_config_digest: request.tunnel_request().config_digest.clone(),
+            credential_audience: request.system_proxy_request().credential_audience.clone(),
             credential_references: Vec::new(),
             valid_for_millis: validity,
         }

@@ -145,7 +145,10 @@ private struct GlobalLeaseExclusivityProperty {
       revision: revision)
     let descriptor = try AuthorityConfigurationDescriptor(
       byteCount: 3, configSHA256: leaseConfigDigest,
-      identitySHA256: leaseIdentityDigest, credentialSlots: [],
+      identitySHA256: leaseIdentityDigest,
+      credentialAudience: CredentialAudience(
+        profileID: UUID(), profileDigest: leaseIdentityDigest),
+      credentialSlots: [],
       tunnelOptions: mode == .tunnel ? TunnelNetworkOptions(ipv6Enabled: true) : nil)
     let request = try PrepareStartRequest(
       operation: operation, expectedRevision: revision, configuration: descriptor)
@@ -159,7 +162,7 @@ private struct GlobalLeaseExclusivityProperty {
     _ operation: OperationContext, leaseID: AuthorityIdentifier
   ) throws -> ReadyAttestation {
     try ReadyAttestation(
-      operation: operation, leaseID: leaseID, runtimeDigest: leaseConfigDigest,
+      operation: operation, leaseID: leaseID, runtimeDigest: leaseIdentityDigest,
       ownerRole: operation.mode == .tunnel ? .provider : .proxyAgent,
       readyFlags: .all,
       packetPumpLimits: operation.mode == .tunnel
@@ -168,14 +171,6 @@ private struct GlobalLeaseExclusivityProperty {
           maximumPacketBytes: 1_500, maximumReadBatch: 8)
         : nil,
       monotonicTimestamp: 2_000)
-  }
-
-  private func readyObservation(
-    _ operation: OperationContext
-  ) -> AuthorityOSReadyObservation {
-    AuthorityOSReadyObservation(
-      operation: operation, configSHA256: leaseConfigDigest,
-      state: operation.mode == .tunnel ? .managedTunnelConnected : .systemProxyEffective)
   }
 
   private func stoppedAttestation(
@@ -279,7 +274,6 @@ private struct GlobalLeaseExclusivityProperty {
           _ = attempt {
             try reducer.attestReady(
               readyAttestation(lease.operation, leaseID: lease.leaseID),
-              osObservation: readyObservation(lease.operation),
               ownerUID: lease.operation.ownerUID, connectionNonce: leaseNonce)
           }
 

@@ -49,23 +49,38 @@ private final class FakeProxyOwnerAuthorityClient: EngineOwnerAuthorityClient, @
   private let lock = NSLock()
   private let orderLog: OrderLog
   private let makeLease: @Sendable () throws -> LeaseView
+  private let onBind: @Sendable () -> Void
   private var bindCountValue = 0
+  private var bindContextsValue: [ProxyOwnerContext] = []
   private var readyValue: [ReadyAttestation] = []
   private var stoppedValue: [StoppedAttestation] = []
 
-  init(orderLog: OrderLog, makeLease: @escaping @Sendable () throws -> LeaseView) {
+  init(
+    orderLog: OrderLog,
+    onBind: @escaping @Sendable () -> Void = {},
+    makeLease: @escaping @Sendable () throws -> LeaseView
+  ) {
     self.orderLog = orderLog
+    self.onBind = onBind
     self.makeLease = makeLease
   }
 
   var bindCount: Int { lock.withLock { bindCountValue } }
+  var bindContexts: [ProxyOwnerContext] { lock.withLock { bindContextsValue } }
   var readyAttestations: [ReadyAttestation] { lock.withLock { readyValue } }
   var stoppedAttestations: [StoppedAttestation] { lock.withLock { stoppedValue } }
 
-  func bind(_ capability: OwnerCapability) async throws -> LeaseView {
+  func bind(
+    _ capability: OwnerCapability,
+    context: ProxyOwnerContext
+  ) async throws -> LeaseView {
     capability.erase()
     orderLog.record("bind")
-    lock.withLock { bindCountValue += 1 }
+    lock.withLock {
+      bindCountValue += 1
+      bindContextsValue.append(context)
+    }
+    onBind()
     return try makeLease()
   }
 
@@ -80,12 +95,6 @@ private final class FakeProxyOwnerAuthorityClient: EngineOwnerAuthorityClient, @
 
   func attestStopped(_ attestation: StoppedAttestation) async throws {
     lock.withLock { stoppedValue.append(attestation) }
-  }
-}
-
-private struct FakeProxyOwnerCapabilitySource: ProxyOwnerCapabilitySource {
-  func capability(for descriptor: ConfigurationDescriptor) throws -> OwnerCapability {
-    try OwnerCapability(copying: Data(repeating: 0x5, count: AuthorityV1Limits.capabilityBytes))
   }
 }
 
@@ -237,6 +246,9 @@ private func proxyDescriptor() throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .systemProxy,
     tunnelOptions: nil,
+    credentialAudience: CredentialAudience(
+      profileID: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+      profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
     installationID: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
     epoch: 1,
     generation: 1,
@@ -258,7 +270,7 @@ private func matchingLease(_ descriptor: ConfigurationDescriptor) throws -> Leas
     authorityRevision: 1)
   return try LeaseView(
     leaseID: AuthorityIdentifier(UUID()), operation: operation,
-    state: .active, expiryMonotonic: 10_000)
+    state: .starting, expiryMonotonic: 10_000)
 }
 
 private func readyEndpoint() throws -> MixedListenerEndpoint {
@@ -271,24 +283,35 @@ private struct CoordinatorFixture {
   let engine: FakeProxyEngine
   let preferences: FakeSystemProxyPreferences
   let descriptor: ConfigurationDescriptor
+  let lease: LeaseView
+
+  func authorization() throws -> ProxyOwnerAuthorization {
+    ProxyOwnerAuthorization(
+      context: try ProxyOwnerContext(
+        operation: lease.operation,
+        leaseID: lease.leaseID),
+      capability: try OwnerCapability(
+        copying: Data(repeating: 0x5, count: AuthorityV1Limits.capabilityBytes)))
+  }
 }
 
 private func makeFixture(
-  observer: any EffectiveSystemProxyObserving
+  observer: any EffectiveSystemProxyObserving,
+  revocation: ProxyRevocationChannel = ProxyRevocationChannel(),
+  onBind: @escaping @Sendable () -> Void = {}
 ) throws -> CoordinatorFixture {
   let orderLog = OrderLog()
   let descriptor = try proxyDescriptor()
   let engine = FakeProxyEngine(orderLog: orderLog)
   let preferences = FakeSystemProxyPreferences()
-  let captured = descriptor
-  let authority = FakeProxyOwnerAuthorityClient(orderLog: orderLog) {
-    try matchingLease(captured)
-  }
+  let lease = try matchingLease(descriptor)
+  let authority = FakeProxyOwnerAuthorityClient(
+    orderLog: orderLog, onBind: onBind
+  ) { lease }
   let lifecycle = ProxySessionLifecycle(
     dependencies: ProxySessionDependencies(
-      prepareConfiguration: { _ in
-        PreparedProxyConfiguration(
-          configuration: Data("{}".utf8), lease: UnleasedProxyOwnership())
+      prepareOwnership: { _ in
+        PreparedProxyOwnership(lease: UnleasedProxyOwnership())
       },
       recoverCleanupLease: { _ in UnleasedProxyOwnership() },
       engineFactory: FakeProxyEngineFactory(engine: engine),
@@ -297,25 +320,55 @@ private func makeFixture(
       readinessTimeout: 60))
   let coordinator = ProxySystemProxyOwnerCoordinator(
     authority: authority,
-    capabilitySource: FakeProxyOwnerCapabilitySource(),
     observer: observer,
     lifecycle: lifecycle,
-    revocation: ProxyRevocationChannel(),
+    revocation: revocation,
     clock: FakeClock(value: 555))
   return CoordinatorFixture(
     coordinator: coordinator, authority: authority,
-    engine: engine, preferences: preferences, descriptor: descriptor)
+    engine: engine, preferences: preferences, descriptor: descriptor,
+    lease: lease)
 }
 
 @Suite(.serialized)
 struct ProxyOwnerBindingIntegrationTests {
+  @Test func revocationLatchedAfterBindPreventsProxyDataPlaneStart() throws {
+    let revocation = ProxyRevocationChannel()
+    let fixture = try makeFixture(
+      observer: PartialEffectiveSystemProxyObserver(
+        http: true, https: true, socks: true),
+      revocation: revocation,
+      onBind: { revocation.revoke() })
+    let start = CoordinatorRecorder()
+
+    fixture.coordinator.start(
+      configuration: fixture.descriptor,
+      authorization: try fixture.authorization()
+    ) { start.record($0) }
+
+    #expect(start.wait())
+    guard case .failure(.engineLease) = start.values[0] else {
+      Issue.record(
+        "Expected a latched Authority revocation to refuse activation, got \(start.values)")
+      return
+    }
+    #expect(fixture.authority.bindCount == 1)
+    #expect(fixture.engine.startCount == 0)
+    #expect(fixture.preferences.applyCount == 0)
+    #expect(fixture.authority.readyAttestations.isEmpty)
+    #expect(fixture.authority.stoppedAttestations.count == 1)
+  }
+
   @Test func partialEffectiveApplicationRefusesReadinessAndTearsDown() throws {
     // HTTP and HTTPS applied, but SOCKS is not: `isFullyApplied` is false, so
     // readiness must be refused and the owned runtime/System Proxy torn down.
     let fixture = try makeFixture(
       observer: PartialEffectiveSystemProxyObserver(http: true, https: true, socks: false))
     let start = CoordinatorRecorder()
-    fixture.coordinator.start(configuration: fixture.descriptor) { start.record($0) }
+    fixture.coordinator.start(
+      configuration: fixture.descriptor,
+      authorization: try fixture.authorization()
+    ) { start.record($0) }
     #expect(fixture.engine.waitUntilStarted())
     fixture.engine.emit(.mixedListenerReady(try readyEndpoint()))
     #expect(start.wait())
@@ -326,6 +379,12 @@ struct ProxyOwnerBindingIntegrationTests {
     }
     // No ready attestation was ever sent, and the owned state is torn down.
     #expect(fixture.authority.readyAttestations.isEmpty)
+    #expect(
+      fixture.authority.bindContexts == [
+        try ProxyOwnerContext(
+          operation: fixture.lease.operation,
+          leaseID: fixture.lease.leaseID)
+      ])
     #expect(fixture.engine.stopCount == 1)
     #expect(fixture.preferences.restoreCount == 1)
   }

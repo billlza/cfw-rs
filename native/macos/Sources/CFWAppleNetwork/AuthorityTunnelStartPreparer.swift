@@ -91,9 +91,15 @@ public struct AuthorityBackedTunnelStartPreparer: TunnelStartPreparing {
     // (2) Read the current durable Authority revision to compare-and-swap
     // against. This bounded read fails closed on timeout/interruption/recovery.
     let snapshot = try await authority.snapshot()
-    guard snapshot.replayCursor.installationID.rawValue == descriptor.installationID else {
-      // The durable root store is enrolled to a different installation lineage.
-      throw AuthorityDomainError(code: .replayRejected)
+    if let cursor = snapshot.replayCursor {
+      guard cursor.installationID.rawValue == descriptor.installationID else {
+        // The durable root store is enrolled to a different installation lineage.
+        throw AuthorityDomainError(code: .replayRejected)
+      }
+    } else {
+      guard snapshot.state == .off, snapshot.leaseView == nil else {
+        throw AuthorityDomainError(code: .globalAuthorityRecovering)
+      }
     }
 
     // (3) Build the typed, bounded prepare request from the non-secret descriptor.
@@ -113,6 +119,7 @@ public struct AuthorityBackedTunnelStartPreparer: TunnelStartPreparing {
       byteCount: UInt32(descriptor.byteCount),
       configSHA256: descriptor.sha256,
       identitySHA256: descriptor.identitySHA256,
+      credentialAudience: descriptor.credentialAudience,
       credentialSlots: descriptor.credentialSlots,
       tunnelOptions: tunnelOptions)
     let request = try PrepareStartRequest(
@@ -163,25 +170,5 @@ public struct AuthorityBackedTunnelStartPreparer: TunnelStartPreparing {
       return AuthorityDomainError(code: .invalidMessage)
     }
     return AuthorityDomainError(code: .globalAuthorityUnavailable)
-  }
-}
-
-/// Selects the Host's Tunnel-start preparer. Production stays fail-closed until an
-/// end-to-end signed Host→Authority XPC channel is provable; only then is the
-/// Authority-backed preparer used. This keeps production defaults fail-closed
-/// while wiring the concrete preparer the Host previously left unavailable.
-public enum HostTunnelStartPreparerFactory {
-  public static func production(
-    authority: any AuthorityClient,
-    enrollment: AuthorityInstallationEnrollment = AuthorityInstallationEnrollment(),
-    signedChannelProven: Bool = false
-  ) -> any TunnelStartPreparing {
-    guard signedChannelProven else {
-      // No provable end-to-end signed channel yet: fail closed so no Tunnel start
-      // can proceed without a real Authority preparation and single-use ticket.
-      return FailClosedTunnelStartPreparer()
-    }
-    return AuthorityBackedTunnelStartPreparer(
-      authority: authority, enrollment: enrollment)
   }
 }

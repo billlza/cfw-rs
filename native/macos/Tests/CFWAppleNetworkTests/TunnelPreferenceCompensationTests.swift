@@ -120,6 +120,7 @@ private func descriptor(
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+    credentialAudience: try appleCredentialAudience(),
     installationID: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
     epoch: epoch,
     generation: generation,

@@ -418,8 +418,17 @@ public protocol TunnelHostBridging: Sendable {
   ) async throws
   func stopTunnel(expectedConfiguration: ConfigurationDescriptor) async throws
   func snapshot() async throws -> EngineSnapshot
+  /// Public NetworkExtension state used only by the Global Authority restart
+  /// reconciliation barrier. Unknown or transitional values must not prove Off.
+  func recoveryManagedTunnelStatus() async throws -> RecoveryManagedTunnelStatus
   func hasManagedTunnelConfiguration() async throws -> Bool
   func managedTunnelConfiguration() async throws -> ConfigurationDescriptor?
+}
+
+extension TunnelHostBridging {
+  public func recoveryManagedTunnelStatus() async throws -> RecoveryManagedTunnelStatus {
+    .unknown
+  }
 }
 
 /// Serializes all NETunnelProviderManager mutations in one actor. It never
@@ -463,11 +472,6 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     descriptor: ConfigurationDescriptor,
     credentialPayload: Data?
   ) async throws {
-    do {
-      try GlobalAuthorityReleaseGate.requireStartAuthorization()
-    } catch {
-      throw AppleNetworkError.globalAuthorityUnavailable
-    }
     // Prepare with the Global Authority before any preference mutation, persist only
     // the descriptor-only manager, verify the exact reloaded descriptor, and start
     // with only the single-use ticket. There is no direct configuration/credential
@@ -578,6 +582,28 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
         configuration: try manager.configurationDescriptor(),
         sequence: 0
       )
+    }
+  }
+
+  public func recoveryManagedTunnelStatus() async throws -> RecoveryManagedTunnelStatus {
+    try Task.checkCancellation()
+    guard let manager = try await matchingManager() else {
+      return .invalid
+    }
+    try Task.checkCancellation()
+    switch manager.connection.status {
+    case .disconnected:
+      return .disconnected
+    case .invalid:
+      return .invalid
+    case .connecting, .reasserting:
+      return .connecting
+    case .connected:
+      return .connected
+    case .disconnecting:
+      return .unknown
+    @unknown default:
+      return .unknown
     }
   }
 
@@ -708,7 +734,9 @@ extension ConfigurationDescriptor {
     return [
       "schemaVersion": String(NativeProtocolConstants.schemaVersion),
       "slot": slot.rawValue,
-      "installationID": installationID.uuidString,
+      "installationID": installationID.uuidString.lowercased(),
+      "credentialProfileID": credentialAudience.profileID.uuidString.lowercased(),
+      "credentialProfileDigest": credentialAudience.profileDigest.hex,
       "epoch": String(epoch),
       "generation": String(generation),
       "byteCount": String(byteCount),
@@ -746,6 +774,11 @@ extension NETunnelProviderManager {
       ),
       let installationIDValue = configuration["installationID"] as? String,
       let installationID = UUID(uuidString: installationIDValue),
+      installationIDValue == installationID.uuidString.lowercased(),
+      let credentialProfileIDValue = configuration["credentialProfileID"] as? String,
+      let credentialProfileID = UUID(uuidString: credentialProfileIDValue),
+      credentialProfileIDValue == credentialProfileID.uuidString.lowercased(),
+      let credentialProfileDigest = configuration["credentialProfileDigest"] as? String,
       let epochValue = configuration["epoch"] as? String,
       let epoch = UInt64(epochValue),
       let generationValue = configuration["generation"] as? String,
@@ -765,6 +798,10 @@ extension NETunnelProviderManager {
     return try ConfigurationDescriptor(
       slot: slot,
       tunnelOptions: tunnelOptions,
+      credentialAudience: CredentialAudience(
+        profileID: credentialProfileID,
+        profileDigest: try SHA256Digest(hex: credentialProfileDigest)
+      ),
       installationID: installationID,
       epoch: epoch,
       generation: generation,

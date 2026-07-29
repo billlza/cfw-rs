@@ -210,7 +210,7 @@ private struct FailClosedAuthorityProperty {
     // the peer (Host role bound to the owner UID) before any owner capability or
     // ticket is issued; an unauthorized peer fails closed.
     let fixture = try makeFixture(modeIsTunnel: choices.modeIsTunnel)
-    let peer = makePeer(choices: choices, operation: fixture.request.operation)
+    let peer = try makePeer(choices: choices, operation: fixture.request.operation)
     guard
       let prepared = try? core.prepare(
         fixture.request, configuration: fixture.configuration,
@@ -266,15 +266,14 @@ private struct FailClosedAuthorityProperty {
     return nil
   }
 
-  private func makePeer(choices: CaseChoices, operation: OperationContext) -> PeerIdentity {
+  private func makePeer(
+    choices: CaseChoices, operation: OperationContext
+  ) throws -> PeerIdentity {
     let role = AuthorityRole.allCases[choices.peerRoleIndex]
     let euid: uid_t = choices.euidMatchesOwner ? Self.ownerUID : Self.ownerUID &+ 1
     return PeerIdentity(
-      auditTokenDigest: (try? digestHex(Data("audit".utf8)))!,
+      connectionIdentityDigest: try digestHex(Data("connection".utf8)),
       pid: 42, euid: euid, auditSessionID: role == .provider ? 0 : 7,
-      teamID: GlobalAuthorityPeerPolicy.teamID, signingID: role.rawValue,
-      designatedRequirementDigest: (try? digestHex(Data("requirement".utf8)))!,
-      entitlementDigest: (try? digestHex(Data("entitlements".utf8)))!,
       role: role, consoleUID: Self.ownerUID)
   }
 
@@ -298,7 +297,9 @@ private struct FailClosedAuthorityProperty {
         outboundIndex: 0, jsonPointer: "/outbounds/0/password")
       let descriptor = try AuthorityConfigurationDescriptor(
         byteCount: UInt32(configuration.count), configSHA256: configDigest,
-        identitySHA256: identityDigest, credentialSlots: [slot],
+        identitySHA256: identityDigest,
+        credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: identityDigest),
+        credentialSlots: [slot],
         tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true))
       let operation = try OperationContext(
         operationID: AuthorityIdentifier(UUID()), root: root, mode: .tunnel,
@@ -318,7 +319,9 @@ private struct FailClosedAuthorityProperty {
 
     let descriptor = try AuthorityConfigurationDescriptor(
       byteCount: UInt32(configuration.count), configSHA256: configDigest,
-      identitySHA256: identityDigest, credentialSlots: [], tunnelOptions: nil)
+      identitySHA256: identityDigest,
+      credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: identityDigest),
+      credentialSlots: [], tunnelOptions: nil)
     let operation = try OperationContext(
       operationID: AuthorityIdentifier(UUID()), root: root, mode: .systemProxy,
       configSHA256: configDigest, identitySHA256: identityDigest,

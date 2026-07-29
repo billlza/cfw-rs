@@ -9,6 +9,7 @@ import { MAX_LOG_ROWS, PAGES, state } from "./state.js";
 /// surface against `generate_handler!` mechanically.
 export const UI_COMMANDS = Object.freeze([
   "apply_active_profile",
+  "begin_migration_handoff",
   "boot_payload",
   "cancel_credential_gc",
   "check_for_updates",
@@ -19,6 +20,7 @@ export const UI_COMMANDS = Object.freeze([
   "controller_version",
   "current_platform_design",
   "delete_profile",
+  "disable_service_mode",
   "dns_query",
   "engine_snapshot",
   "flush_fake_ip_cache",
@@ -30,12 +32,14 @@ export const UI_COMMANDS = Object.freeze([
   "import_profile_text",
   "import_profile_url",
   "install_available_update",
+  "legacy_retirement_status",
   "migrate_legacy_cfw_profiles",
   "network_diagnostics",
   "open_login_items_settings",
   "open_page",
   "open_profile_externally",
   "preview_credential_gc",
+  "prepare_legacy_cutover",
   "profile_credential_presence",
   "profile_credential_requirements",
   "profile_qrcode_svg",
@@ -46,6 +50,7 @@ export const UI_COMMANDS = Object.freeze([
   "read_profile_text",
   "read_runtime_config_text",
   "read_settings_snapshot",
+  "recover_legacy_cutover",
   "refresh_tray_menu",
   "reset_settings_snapshot",
   "reveal_home_directory",
@@ -61,6 +66,8 @@ export const UI_COMMANDS = Object.freeze([
   "set_tun_enabled",
   "start_connections_stream",
   "start_log_stream",
+  "stop_connections_stream",
+  "stop_log_stream",
   "test_proxy_delays",
   "update_all_proxy_providers",
   "update_all_rule_providers",
@@ -217,6 +224,9 @@ export function normalizeEngineStatus(value) {
   }
 
   const capabilities = value.capabilities && typeof value.capabilities === "object" ? value.capabilities : {};
+  const cutoverReason = typeof value.cutover_unavailable_reason === "string" && value.cutover_unavailable_reason.trim()
+    ? redactDiagnosticText(value.cutover_unavailable_reason.trim()).slice(0, 512)
+    : null;
   return {
     desiredMode,
     mode,
@@ -227,6 +237,8 @@ export function normalizeEngineStatus(value) {
     systemProxyAvailable: capabilities.system_proxy === true,
     tunnelAvailable: capabilities.tunnel === true,
     availabilityReason: reason,
+    cutoverReady: value.cutover_ready === true,
+    cutoverReason,
     generation: snapshot.generation,
     configDigest,
   };
@@ -294,10 +306,6 @@ export function formatRelativeUpdated(epochSecs) {
   return new Date(epochSecs * 1000).toLocaleString();
 }
 
-export function emptyProviderBatch(action) {
-  return { action, requested: 0, succeeded: [], failed: [] };
-}
-
 export function providerActionKey(scope, name) {
   return `${scope}:${name}`;
 }
@@ -311,7 +319,24 @@ export function providerBatchSummary(label, result) {
 }
 
 export function providerBatchSucceeded(result) {
-  return (result?.failed?.length ?? 0) === 0;
+  const requested = Number(result?.requested);
+  return Number.isInteger(requested)
+    && requested >= 0
+    && (result?.failed?.length ?? 0) === 0
+    && (result?.succeeded?.length ?? 0) === requested;
+}
+
+export function delayFailureLabel(kind) {
+  return {
+    timeout: "Timeout",
+    not_found: "Not found",
+    probe_failed: "Probe failed",
+    rejected: "Rejected",
+    transport: "Network error",
+    invalid_response: "Invalid response",
+    invalid_request: "Invalid target",
+    unsupported: "Unsupported",
+  }[kind] ?? "Probe failed";
 }
 
 export function latestDelay(history = []) {

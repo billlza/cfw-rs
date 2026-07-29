@@ -61,7 +61,7 @@ def bundle_build_identity(app: Path) -> BundleBuildIdentity:
         ),
         "packet-tunnel": (
             app
-            / "Contents/Library/SystemExtensions/CFWPacketTunnel.systemextension/Contents/Info.plist"
+            / "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/Info.plist"
         ),
     }
     identities = {}

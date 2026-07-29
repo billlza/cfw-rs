@@ -29,11 +29,6 @@ jobs:
           toolchain: "1.97.1"
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: "24.18.0"
-          cache: npm
-          cache-dependency-path: apps/cfw-tauri-shell/package-lock.json
       - name: Assert pinned Apple toolchain
         run: |
           ./scripts/assert_apple_silicon.sh
@@ -54,18 +49,16 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Test Rust workspace
         run: cargo test --locked --workspace --all-targets
-      - name: Install UI dependencies
-        working-directory: apps/cfw-tauri-shell
-        run: npm ci
+      - name: Bootstrap verified Node toolchain
+        run: ./scripts/bootstrap_release_toolchain.sh --node-only
+      - name: Prepare and seal UI dependencies
+        run: ./scripts/prepare_ui_dependencies.sh
       - name: Test UI
-        working-directory: apps/cfw-tauri-shell
-        run: npm test
+        run: ./scripts/build_ui_with_pinned_node.sh --test
       - name: Build UI
-        working-directory: apps/cfw-tauri-shell
-        run: npm run build
+        run: ./scripts/build_ui_with_pinned_node.sh
       - name: Audit UI dependencies
-        working-directory: apps/cfw-tauri-shell
-        run: npm audit --audit-level=high
+        run: ./scripts/build_ui_with_pinned_node.sh --audit
       - name: Test release tooling
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover \
@@ -121,6 +114,10 @@ jobs:
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: Install pinned CI toolchain identity tool
+        run: |
+          source scripts/dependency_pins.env
+          cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
       - name: Assert pinned Apple toolchain
         run: |
           ./scripts/assert_apple_silicon.sh
@@ -146,29 +143,7 @@ jobs:
             ./scripts/materialize_libbox_source.sh
           echo "SING_BOX_SOURCE=$patched" >>"$GITHUB_ENV"
       - name: Prepare and verify Go module graph
-        run: |
-          SING_BOX_SOURCE="$SING_BOX_SOURCE" ./scripts/prepare_libbox_modules.sh
-          source scripts/dependency_pins.env
-          source scripts/go_release_environment.sh
-          toolchain_root="$PWD/target/toolchains"
-          go_bin="$toolchain_root/go-$GO_VERSION/bin/go"
-          export GOPATH="$toolchain_root/go-workspace"
-          export GOMODCACHE="$GOPATH/pkg/mod"
-          export GOCACHE="$toolchain_root/go-build-cache"
-          configure_offline_go_environment
-          (
-            cd "$SING_BOX_SOURCE"
-            "$go_bin" mod verify
-            "$go_bin" test -count=1 -race -ldflags=-checklinkname=0 \
-              -tags "$LIBBOX_BUILD_TAGS" ./dns ./option
-            "$go_bin" test -count=1 -ldflags=-checklinkname=0 \
-              -tags "$LIBBOX_BUILD_TAGS" \
-              ./dns ./option ./common/dialer ./daemon ./experimental/libbox
-            "$go_bin" test -run '^$' -ldflags=-checklinkname=0 \
-              -tags "$LIBBOX_BUILD_TAGS" ./common/dialer ./route
-            "$go_bin" vet -tags "$LIBBOX_BUILD_TAGS" \
-              ./dns ./option ./common/dialer ./daemon ./experimental/libbox
-          )
+        run: SING_BOX_SOURCE="$SING_BOX_SOURCE" ./scripts/test_libbox_source.sh
       - name: Scan linked libbox graph
         run: SING_BOX_SOURCE="$SING_BOX_SOURCE" ./scripts/scan_libbox_vulnerabilities.sh
       - name: Build source-bound libbox
@@ -176,7 +151,7 @@ jobs:
       - name: Check Swift formatting
         run: swift format lint --recursive --strict native/macos/Sources native/macos/SystemExtension native/macos/Tests
       - name: Test Swift package
-        run: swift test --package-path native/macos
+        run: swift test --package-path native/macos -Xswiftc -warnings-as-errors
       - name: Test Xcode targets
         run: >-
           xcodebuild test
@@ -193,11 +168,9 @@ jobs:
               -destination 'platform=macOS,arch=arm64' \
               CODE_SIGNING_ALLOWED=NO
           done
-      - name: Install UI dependencies with pinned Node
-        run: target/toolchains/node-24.18.0/bin/npm --prefix apps/cfw-tauri-shell ci
+      - name: Prepare and seal UI dependencies
+        run: ./scripts/prepare_ui_dependencies.sh
       - name: Install pinned Tauri CLI
-        run: |
-          source scripts/dependency_pins.env
-          cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+        run: ./scripts/install_pinned_tauri_cli.sh
       - name: Build and verify unsigned application skeleton
         run: ./scripts/build_unsigned_candidate.sh

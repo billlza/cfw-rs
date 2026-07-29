@@ -104,10 +104,19 @@ except ImportError:  # pragma: no cover - CLI invocation style
 # candidate's XCFramework identity can never drift from the pinned build inputs
 # and so this task adds no competing supply-chain logic.
 from scripts.publication.sealed_closure import derive_supply_chain  # noqa: E402
+from scripts.gatekeeper_assessment import (  # noqa: E402
+    GatekeeperEvidenceError,
+    validate_evidence as validate_gatekeeper_evidence,
+)
+from scripts.repository_source_identity import (  # noqa: E402
+    SourceIdentityError,
+    repository_commit,
+    require_clean_repository,
+)
 
 
-SCHEMA_VERSION = 1
-DOCUMENT_KIND = "final-candidate-notarization-installed-binding-v1"
+SCHEMA_VERSION = 2
+DOCUMENT_KIND = "final-candidate-notarization-installed-binding-v2"
 VERIFIED = "verified"
 BLOCKED = "blocked"
 STATUSES = {VERIFIED, BLOCKED}
@@ -181,6 +190,19 @@ def _require_commit(value: object, label: str) -> str:
     if not isinstance(value, str) or not COMMIT_RE.fullmatch(value):
         raise PublicationError(f"{label} is not a 40-hex commit hash")
     return value
+
+
+def _require_current_repository_commit(
+    repository: Path, declared_commit: str, *, require_clean: bool
+) -> None:
+    try:
+        current_commit = repository_commit(repository)
+        if require_clean:
+            require_clean_repository(repository)
+    except SourceIdentityError as error:
+        raise PublicationError(f"cannot verify the final-candidate repository: {error}") from error
+    if declared_commit != current_commit:
+        raise PublicationError("final candidate repository commit does not match current HEAD")
 
 
 def _require_cdhash(value: object, label: str) -> str:
@@ -464,23 +486,17 @@ def _staple(value: object, signed_app_tree: str, built_at: datetime) -> dict[str
 
 
 def _gatekeeper(value: object, signed_app_tree: str, built_at: datetime) -> dict[str, Any]:
-    gatekeeper = require_exact_keys(
-        value,
-        {"assessment", "source", "target_signed_app_tree_sha256", "captured_at"},
-        "gatekeeper",
+    try:
+        gatekeeper = validate_gatekeeper_evidence(value)
+    except GatekeeperEvidenceError as error:
+        raise PublicationError(f"Gatekeeper evidence is invalid: {error}") from error
+    gatekeeper["target_signed_app_tree_sha256"] = _check_target(
+        gatekeeper["target_signed_app_tree_sha256"], signed_app_tree, "gatekeeper"
     )
-    if gatekeeper["assessment"] != "accepted":
-        raise PublicationError("Gatekeeper assessment did not accept the candidate")
-    if gatekeeper["source"] != "spctl":
-        raise PublicationError("Gatekeeper assessment source is not a spctl assessment")
-    return {
-        "assessment": "accepted",
-        "source": "spctl",
-        "target_signed_app_tree_sha256": _check_target(
-            gatekeeper["target_signed_app_tree_sha256"], signed_app_tree, "gatekeeper"
-        ),
-        "captured_at": _check_not_stale(gatekeeper["captured_at"], built_at, "gatekeeper"),
-    }
+    gatekeeper["captured_at"] = _check_not_stale(
+        gatekeeper["captured_at"], built_at, "gatekeeper"
+    )
+    return gatekeeper
 
 
 def _physical_evidence(value: object, final: dict[str, Any]) -> dict[str, Any]:
@@ -784,6 +800,7 @@ def build_final_candidate_binding(
     payload = require_exact_keys(request, fields, "final candidate binding request")
     product = _product(payload["product"])
     commit = _require_commit(payload["commit"], "repository commit")
+    _require_current_repository_commit(repository, commit, require_clean=not fixture)
     final_artifacts = _final_artifacts(payload["final_artifacts"])
     exact_hashes = {
         entry["sha256"] for entry in final_artifacts["artifact_hash_manifest"]["entries"]

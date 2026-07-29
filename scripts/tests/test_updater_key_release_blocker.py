@@ -214,15 +214,17 @@ class FailClosedInputTests(unittest.TestCase):
 
 
 class RealRepositoryTests(unittest.TestCase):
-    def test_real_repo_blocks_on_tauri_key_without_reading_it(self) -> None:
+    def test_real_repo_updater_key_state_is_explicit_without_reading_it(self) -> None:
         tauri_key = REPO_ROOT / ".tauri" / "cfw-rs.key"
-        if not tauri_key.exists():
-            self.skipTest("real workspace no longer contains .tauri/cfw-rs.key")
-
         with _NoFileReads():
             responses = evaluate_workspace(REPO_ROOT)
 
         paths = {response.detected_path for response in responses}
+        if not tauri_key.exists():
+            self.assertNotIn(str(tauri_key), paths)
+            self.assertEqual(responses, [], "any other workspace updater key must block release")
+            return
+
         self.assertIn(str(tauri_key), paths)
 
         blocker_response = next(

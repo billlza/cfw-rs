@@ -14,9 +14,9 @@ mod storage_tests;
 
 pub use cfw_singbox_config::ValidatedSingBoxProfile;
 pub use repository::{
-    LockedProfileCredentialSnapshot, LockedSelectedProfile, ProfileCredentialSnapshot,
-    ProfileImportResult, ProfileRecord, ProfileRepository, ProfileRepositorySnapshot,
-    StoredProfile,
+    LockedProfileCredentialSnapshot, LockedSelectedProfile, ProfileCredentialCatalogEntry,
+    ProfileCredentialSnapshot, ProfileImportResult, ProfileRecord, ProfileRepository,
+    ProfileRepositorySnapshot, StoredProfile,
 };
 
 use cfw_singbox_config::{ConfigError, MAX_PROFILE_BYTES};
@@ -73,6 +73,8 @@ pub enum ProfileError {
         "profile repository exceeds the {MAX_REPOSITORY_CREDENTIAL_REFERENCES}-reference credential vault capacity"
     )]
     TooManyCredentialReferences,
+    #[error("stored profile has an invalid credential audience: {0}")]
+    InvalidCredentialAudience(String),
     #[error(
         "profile repository would exceed the {MAX_REPOSITORY_BYTES}-byte aggregate limit: {actual} bytes"
     )]

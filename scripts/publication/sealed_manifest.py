@@ -239,9 +239,9 @@ REQUIRED_CI_LANES: tuple[str, ...] = (
 # Feature documents bound by content digest. The manifest records the exact
 # reviewed specification it was sealed against, so a later edit invalidates it.
 REQUIRED_DOCUMENTS: dict[str, str] = {
-    "requirements": ".kiro/specs/macos15-network-extension-migration/requirements.md",
-    "design": ".kiro/specs/macos15-network-extension-migration/design.md",
-    "tasks": ".kiro/specs/macos15-network-extension-migration/tasks.md",
+    "requirements": "docs/release/macos15-network-extension-migration/requirements.md",
+    "design": "docs/release/macos15-network-extension-migration/design.md",
+    "tasks": "docs/release/macos15-network-extension-migration/tasks.md",
 }
 
 # Publication documents bound by content digest from the sealed closure. Each
@@ -334,6 +334,7 @@ def _result_entry(
     fields: set[str],
     commit: str,
     toolchain_sha256: str | None,
+    release_source_sha256: str | None,
 ) -> dict[str, Any]:
     """Normalize one recorded command result and reject every masking shape."""
     entry = require_exact_keys(raw, fields, f"{label}[{index}]")
@@ -387,6 +388,16 @@ def _result_entry(
                 f"{label} {identifier!r} is bound to a different toolchain than the manifest"
             )
         normalized["toolchain_sha256"] = bound
+    if release_source_sha256 is not None:
+        source_bound = require_sha256(
+            entry["release_source_sha256"],
+            f"{label} {identifier!r} release_source_sha256",
+        )
+        if source_bound != release_source_sha256:
+            raise PublicationError(
+                f"{label} {identifier!r} is bound to different release source bytes"
+            )
+        normalized["release_source_sha256"] = source_bound
     return normalized
 
 
@@ -397,6 +408,7 @@ def _result_set(
     required: tuple[str, ...],
     commit: str,
     toolchain_sha256: str | None,
+    release_source_sha256: str | None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if not isinstance(raw, list) or not raw:
         raise PublicationError(f"{label} must be a non-empty list of recorded results")
@@ -405,7 +417,15 @@ def _result_set(
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, item in enumerate(raw):
-        entry = _result_entry(item, index, label, fields, commit, toolchain_sha256)
+        entry = _result_entry(
+            item,
+            index,
+            label,
+            fields,
+            commit,
+            toolchain_sha256,
+            release_source_sha256,
+        )
         if entry["id"] in seen:
             raise PublicationError(f"{label} repeats the {entry['id']!r} result")
         seen.add(entry["id"])
@@ -433,6 +453,7 @@ def _source_gate_document(
         tuple(REQUIRED_SOURCE_GATES),
         commit,
         None,
+        None,
     )
     for gate in gates:
         expected = REQUIRED_SOURCE_GATES[gate["id"]]
@@ -447,18 +468,58 @@ def _source_gate_document(
     return {"gates": gates}, failures
 
 
-def _ci_lane_document(value: object, commit: str) -> tuple[dict[str, Any], list[str]]:
-    payload = require_exact_keys(value, {"toolchain_sha256", "lanes"}, "unsigned CI lane document")
+def _ci_lane_document(
+    value: object,
+    commit: str,
+    expected_release_source_sha256: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    payload = require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "document",
+            "release_source_sha256",
+            "toolchain_sha256",
+            "lanes",
+        },
+        "unsigned CI lane document",
+    )
+    if payload["schema_version"] != 2 or payload["document"] != "unsigned-ci-lanes-v2":
+        raise PublicationError("unsigned CI lane document has an unsupported schema")
+    release_source_sha256 = require_sha256(
+        payload["release_source_sha256"], "unsigned CI release_source_sha256"
+    )
+    if (
+        expected_release_source_sha256 is not None
+        and release_source_sha256 != expected_release_source_sha256
+    ):
+        raise PublicationError("unsigned CI evidence is bound to different release source bytes")
     toolchain = require_sha256(payload["toolchain_sha256"], "unsigned CI toolchain_sha256")
     lanes, failures = _result_set(
         payload["lanes"],
         "unsigned CI lane",
-        {"id", "command", "status", "exit_code", "log_sha256", "commit", "toolchain_sha256"},
+        {
+            "id",
+            "command",
+            "status",
+            "exit_code",
+            "log_sha256",
+            "commit",
+            "release_source_sha256",
+            "toolchain_sha256",
+        },
         REQUIRED_CI_LANES,
         commit,
         toolchain,
+        release_source_sha256,
     )
-    return {"toolchain_sha256": toolchain, "lanes": lanes}, failures
+    return {
+        "schema_version": 2,
+        "document": "unsigned-ci-lanes-v2",
+        "release_source_sha256": release_source_sha256,
+        "toolchain_sha256": toolchain,
+        "lanes": lanes,
+    }, failures
 
 
 # --------------------------------------------------------------------------
@@ -878,6 +939,7 @@ def build_sealed_evidence_manifest(
         gates["unsigned_ci"] = _gate(
             PASSED if not failures else FAILED,
             {
+                "release_source_sha256": ci_document["release_source_sha256"],
                 "toolchain_sha256": ci_document["toolchain_sha256"],
                 "lanes": len(ci_document["lanes"]),
                 "failed": failures,
@@ -917,6 +979,9 @@ def build_sealed_evidence_manifest(
 
     bindings = {
         "commit": commit,
+        "release_source_sha256": (
+            None if ci_document is None else ci_document["release_source_sha256"]
+        ),
         "product": product,
         "identity": identity,
         "documents_sha256": sha256_bytes(canonical_json(documents)),

@@ -329,11 +329,11 @@ pub(crate) async fn apply_engine_mode(
         retirement.require_cleared()?;
         engine.require_capability(mode)?;
     }
-    let profile = selected_profile_for_mode(profiles.repository(), mode)
+    let (profile_id, profile) = selected_profile_for_mode(profiles.repository(), mode)
         .map_err(|error| error.to_string())?;
     engine
         .coordinator
-        .set_mode(mode, profile, engine.engine_settings().clone())
+        .set_mode(mode, profile_id, profile, engine.engine_settings().clone())
         .await
         .map_err(|error| error.to_string())?;
     engine.status_payload(retirement)
@@ -342,11 +342,16 @@ pub(crate) async fn apply_engine_mode(
 fn selected_profile_for_mode(
     repository: &ProfileRepository,
     mode: EngineMode,
-) -> Result<ValidatedSingBoxProfile, ProfileError> {
+) -> Result<(String, ValidatedSingBoxProfile), ProfileError> {
     if mode == EngineMode::Off {
-        Ok(ValidatedSingBoxProfile::direct())
+        Ok((
+            "00000000-0000-4000-8000-000000000000".to_owned(),
+            ValidatedSingBoxProfile::direct(),
+        ))
     } else {
-        repository.require_selected().map(|stored| stored.profile)
+        repository
+            .require_selected()
+            .map(|stored| (stored.record.id, stored.profile))
     }
 }
 
@@ -362,10 +367,15 @@ struct ProductInfo {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct BootPayload {
     product: ProductInfo,
+    /// Whether this process is the explicit `--migration-handoff` instance. The
+    /// dashboard uses it to decide whether to offer the controlled restart that
+    /// enters the handoff, or the prepare/confirm/recover cutover controls that
+    /// only the handoff instance may drive.
+    migration_handoff: bool,
 }
 
 #[tauri::command]
-pub(crate) fn boot_payload() -> BootPayload {
+pub(crate) fn boot_payload(launch: State<'_, crate::LaunchContext>) -> BootPayload {
     BootPayload {
         product: ProductInfo {
             name: "Clash for Mac",
@@ -374,5 +384,6 @@ pub(crate) fn boot_payload() -> BootPayload {
             minimum_macos: "15.0",
             architecture: "arm64",
         },
+        migration_handoff: launch.migration_handoff,
     }
 }

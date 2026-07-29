@@ -23,6 +23,7 @@ from scripts.publication.final_candidate import (
 )
 from scripts.harness.physical_evidence_aggregator import _canonical_report_hash
 from scripts.publication.sealed_closure import derive_supply_chain
+from scripts.repository_source_identity import repository_commit
 from scripts.tests.test_physical_evidence_aggregator import (
     APP_MANIFEST,
     BUILD_NUMBER,
@@ -30,8 +31,10 @@ from scripts.tests.test_physical_evidence_aggregator import (
     SIGNED_TREE,
     fixture as physical_fixture,
 )
+from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
+REPOSITORY_COMMIT = repository_commit(REPOSITORY)
 CAPTURED_AT = "2026-07-25T00:00:00Z"
 OBSERVED_AT = "2026-07-26T00:00:00Z"
 
@@ -101,7 +104,7 @@ def _request(**overrides) -> dict:
     manifest = _artifact_manifest()
     request = {
         "product": {"version": "0.4.0", "build_number": BUILD_NUMBER},
-        "commit": _sha("commit")[:40],
+        "commit": REPOSITORY_COMMIT,
         "final_artifacts": {
             "signed_app_tree_sha256": SIGNED_TREE,
             "app_manifest_sha256": APP_MANIFEST,
@@ -127,12 +130,7 @@ def _request(**overrides) -> dict:
             "target_signed_app_tree_sha256": SIGNED_TREE,
             "captured_at": CAPTURED_AT,
         },
-        "gatekeeper": {
-            "assessment": "accepted",
-            "source": "spctl",
-            "target_signed_app_tree_sha256": SIGNED_TREE,
-            "captured_at": CAPTURED_AT,
-        },
+        "gatekeeper": gatekeeper_fixture(SIGNED_TREE, CAPTURED_AT),
         "physical_evidence": physical_fixture(),
     }
     request.update(overrides)
@@ -187,6 +185,13 @@ class FinalCandidateRoundTripTests(_CleanWorkspaceMixin):
             validate_final_candidate_binding(
                 REPOSITORY, binding, fixture=False, workspace_root=self.workspace
             )
+
+    def test_legacy_v1_binding_is_rejected_after_gatekeeper_schema_hardening(self) -> None:
+        binding = self.build()
+        binding["schema_version"] = 1
+        binding["document"] = "final-candidate-notarization-installed-binding-v1"
+        with self.assertRaisesRegex(PublicationError, "unsupported schema/document"):
+            self.validate(binding)
 
 
 class FinalCandidateUpdaterKeyTests(_CleanWorkspaceMixin):
@@ -243,7 +248,37 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
     def test_gatekeeper_not_accepted_rejected(self) -> None:
         request = _request()
         request["gatekeeper"]["assessment"] = "rejected"
-        with self.assertRaisesRegex(PublicationError, "Gatekeeper assessment did not accept"):
+        with self.assertRaisesRegex(PublicationError, "not an accepted spctl assessment"):
+            build_final_candidate_binding(
+                REPOSITORY, request, fixture=True, workspace_root=self.workspace
+            )
+
+    def test_gatekeeper_disabled_status_rejected(self) -> None:
+        request = _request()
+        request["gatekeeper"]["status_output"] = "assessments disabled\n"
+        request["gatekeeper"]["status_output_sha256"] = _sha(
+            request["gatekeeper"]["status_output"]
+        )
+        with self.assertRaisesRegex(PublicationError, "not provably enabled"):
+            build_final_candidate_binding(
+                REPOSITORY, request, fixture=True, workspace_root=self.workspace
+            )
+
+    def test_gatekeeper_security_disabled_override_rejected(self) -> None:
+        request = _request()
+        output = request["gatekeeper"]["assessment_output"]
+        output += "override=security disabled\n"
+        request["gatekeeper"]["assessment_output"] = output
+        request["gatekeeper"]["assessment_output_sha256"] = _sha(output)
+        with self.assertRaisesRegex(PublicationError, "security override"):
+            build_final_candidate_binding(
+                REPOSITORY, request, fixture=True, workspace_root=self.workspace
+            )
+
+    def test_gatekeeper_assessment_output_digest_mismatch_rejected(self) -> None:
+        request = _request()
+        request["gatekeeper"]["assessment_output_sha256"] = _sha("foreign output")
+        with self.assertRaisesRegex(PublicationError, "assessment output digest mismatch"):
             build_final_candidate_binding(
                 REPOSITORY, request, fixture=True, workspace_root=self.workspace
             )
@@ -457,8 +492,16 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
     def test_content_digest_tamper_rejected(self) -> None:
         binding = self.build()
         binding["commit"] = _sha("different-commit")[:40]
-        with self.assertRaisesRegex(PublicationError, "content digest mismatch"):
+        with self.assertRaisesRegex(PublicationError, "does not match current HEAD"):
             self.validate(binding)
+
+    def test_arbitrary_well_formed_commit_is_rejected_before_binding(self) -> None:
+        request = _request()
+        request["commit"] = "f" * 40
+        with self.assertRaisesRegex(PublicationError, "does not match current HEAD"):
+            build_final_candidate_binding(
+                REPOSITORY, request, fixture=True, workspace_root=self.workspace
+            )
 
     def test_blocked_input_set_must_be_consistent(self) -> None:
         binding = self.build()

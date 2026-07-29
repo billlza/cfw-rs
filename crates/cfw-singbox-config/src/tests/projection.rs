@@ -13,6 +13,7 @@ const VLESS_ID: &str = "33333333-3333-4333-8333-333333333333";
 const TROJAN_ID: &str = "44444444-4444-4444-8444-444444444444";
 const HYSTERIA_ID: &str = "55555555-5555-4555-8555-555555555555";
 const HYSTERIA_OBFS_ID: &str = "66666666-6666-4666-8666-666666666666";
+const PROFILE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -30,10 +31,18 @@ struct TunnelAddressPlanContract {
 fn projections_have_exactly_one_application_owned_inbound() {
     let profile = ValidatedSingBoxProfile::direct();
     let proxy = profile
-        .project(ProjectionMode::SystemProxy, &EngineSettings::default())
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
         .expect("proxy config");
     let tunnel = profile
-        .project(ProjectionMode::Tunnel, &EngineSettings::default())
+        .project(
+            PROFILE_ID,
+            ProjectionMode::Tunnel,
+            &EngineSettings::default(),
+        )
         .expect("tunnel config");
 
     assert!(proxy.as_json().contains("cfw-system-proxy"));
@@ -133,7 +142,9 @@ fn application_injects_the_loopback_controller_that_profiles_may_never_supply() 
     let endpoint = settings.clash_api_endpoint().expect("default endpoint");
     let profile = ValidatedSingBoxProfile::direct();
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
-        let projected = profile.project(mode, &settings).expect("projection");
+        let projected = profile
+            .project(PROFILE_ID, mode, &settings)
+            .expect("projection");
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected config");
         let clash_api = &config["experimental"]["clash_api"];
@@ -164,14 +175,18 @@ fn application_injects_the_loopback_controller_that_profiles_may_never_supply() 
 fn controller_port_is_taken_from_settings_and_stays_bounded() {
     let profile = ValidatedSingBoxProfile::direct();
     let baseline = profile
-        .project(ProjectionMode::Tunnel, &EngineSettings::default())
+        .project(
+            PROFILE_ID,
+            ProjectionMode::Tunnel,
+            &EngineSettings::default(),
+        )
         .expect("baseline tunnel");
     let moved_settings = EngineSettings {
         controller_port: 19_090,
         ..EngineSettings::default()
     };
     let moved = profile
-        .project(ProjectionMode::Tunnel, &moved_settings)
+        .project(PROFILE_ID, ProjectionMode::Tunnel, &moved_settings)
         .expect("relocated controller tunnel");
     assert_eq!(
         moved.clash_api().external_controller(),
@@ -201,7 +216,7 @@ fn controller_port_is_taken_from_settings_and_stays_bounded() {
         for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
             assert_eq!(
                 profile
-                    .project(mode, &settings)
+                    .project(PROFILE_ID, mode, &settings)
                     .expect_err("projection refuses an unusable controller port"),
                 ConfigError::InvalidControllerPort(port)
             );
@@ -231,7 +246,7 @@ fn engine_dns_rejects_duplicate_virtual_local_and_disabled_ipv6_endpoints_in_bot
             ..EngineSettings::default()
         };
         for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
-            assert!(profile.project(mode, &settings).is_err());
+            assert!(profile.project(PROFILE_ID, mode, &settings).is_err());
         }
     }
 
@@ -244,7 +259,7 @@ fn engine_dns_rejects_duplicate_virtual_local_and_disabled_ipv6_endpoints_in_bot
         ..EngineSettings::default()
     };
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
-        assert!(profile.project(mode, &settings).is_err());
+        assert!(profile.project(PROFILE_ID, mode, &settings).is_err());
     }
 
     let duplicate_authenticated = EngineSettings {
@@ -261,7 +276,11 @@ fn engine_dns_rejects_duplicate_virtual_local_and_disabled_ipv6_endpoints_in_bot
         ..EngineSettings::default()
     };
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
-        assert!(profile.project(mode, &duplicate_authenticated).is_err());
+        assert!(
+            profile
+                .project(PROFILE_ID, mode, &duplicate_authenticated)
+                .is_err()
+        );
     }
 
     let invalid_tls_name = EngineSettings {
@@ -275,7 +294,11 @@ fn engine_dns_rejects_duplicate_virtual_local_and_disabled_ipv6_endpoints_in_bot
         ..EngineSettings::default()
     };
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
-        assert!(profile.project(mode, &invalid_tls_name).is_err());
+        assert!(
+            profile
+                .project(PROFILE_ID, mode, &invalid_tls_name)
+                .is_err()
+        );
     }
 }
 
@@ -284,7 +307,7 @@ fn ordinary_dns_is_authenticated_and_detoured_in_both_modes_while_bootstrap_is_e
     let profile = shadowsocks_profile(SS_ID);
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
         let projected = profile
-            .project(mode, &EngineSettings::default())
+            .project(PROFILE_ID, mode, &EngineSettings::default())
             .expect("remote projection");
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected config");
@@ -334,7 +357,7 @@ fn domain_named_proxy_endpoint_uses_the_bounded_bootstrap_pair_in_both_modes() {
     let profile = shadowsocks_profile(SS_ID);
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
         let projected = profile
-            .project(mode, &EngineSettings::default())
+            .project(PROFILE_ID, mode, &EngineSettings::default())
             .expect("remote projection");
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected config");
@@ -367,7 +390,7 @@ fn numeric_proxy_endpoint_does_not_consume_direct_bootstrap_dns() {
     .expect("numeric endpoint profile");
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
         let projected = profile
-            .project(mode, &EngineSettings::default())
+            .project(PROFILE_ID, mode, &EngineSettings::default())
             .expect("numeric endpoint projection");
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected config");
@@ -383,7 +406,7 @@ fn ipv6_literal_proxy_endpoint_does_not_consume_direct_bootstrap_dns() {
     .expect("IPv6 endpoint profile");
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
         let projected = profile
-            .project(mode, &EngineSettings::default())
+            .project(PROFILE_ID, mode, &EngineSettings::default())
             .expect("IPv6 endpoint projection");
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected config");
@@ -400,7 +423,7 @@ fn every_supported_remote_protocol_uses_the_same_bounded_bootstrap_pair() {
     });
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
         let projected = profile
-            .project(mode, &EngineSettings::default())
+            .project(PROFILE_ID, mode, &EngineSettings::default())
             .expect("remote protocol matrix projection");
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected config");
@@ -416,10 +439,15 @@ fn every_supported_remote_protocol_uses_the_same_bounded_bootstrap_pair() {
 fn tunnel_identity_binds_configured_numeric_bootstrap_dns() {
     let profile = ValidatedSingBoxProfile::direct();
     let baseline = profile
-        .project(ProjectionMode::Tunnel, &EngineSettings::default())
+        .project(
+            PROFILE_ID,
+            ProjectionMode::Tunnel,
+            &EngineSettings::default(),
+        )
         .expect("baseline tunnel");
     let changed = profile
         .project(
+            PROFILE_ID,
             ProjectionMode::Tunnel,
             &EngineSettings {
                 bootstrap_dns_servers: [
@@ -439,6 +467,7 @@ fn tunnel_identity_binds_configured_numeric_bootstrap_dns() {
 
     let authenticated_changed = profile
         .project(
+            PROFILE_ID,
             ProjectionMode::Tunnel,
             &EngineSettings {
                 authenticated_dns_servers: [
@@ -463,7 +492,11 @@ fn tunnel_identity_binds_configured_numeric_bootstrap_dns() {
 fn remote_projection_contains_only_empty_placeholders_and_closed_slots() {
     let profile = shadowsocks_profile(SS_ID);
     let projected = profile
-        .project(ProjectionMode::Tunnel, &EngineSettings::default())
+        .project(
+            PROFILE_ID,
+            ProjectionMode::Tunnel,
+            &EngineSettings::default(),
+        )
         .expect("Shadowsocks tunnel template");
     let template: serde_json::Value =
         serde_json::from_str(projected.as_json()).expect("template JSON");
@@ -486,10 +519,18 @@ fn remote_projection_contains_only_empty_placeholders_and_closed_slots() {
 #[test]
 fn credential_reference_changes_runtime_identity_without_changing_template_bytes() {
     let first = shadowsocks_profile(SS_ID)
-        .project(ProjectionMode::SystemProxy, &EngineSettings::default())
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
         .expect("first template");
     let second = shadowsocks_profile(SS_ID_2)
-        .project(ProjectionMode::SystemProxy, &EngineSettings::default())
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
         .expect("second template");
     assert_eq!(first.as_json(), second.as_json());
     assert_eq!(first.configuration_digest(), second.configuration_digest());
@@ -500,7 +541,11 @@ fn credential_reference_changes_runtime_identity_without_changing_template_bytes
 #[test]
 fn slot_deserialization_rejects_pointer_kind_and_unknown_field_tampering() {
     let projected = shadowsocks_profile(SS_ID)
-        .project(ProjectionMode::SystemProxy, &EngineSettings::default())
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
         .expect("template");
     let slot = &projected.credential_slots()[0];
     let mut pointer = serde_json::to_value(slot).expect("slot");
@@ -521,7 +566,7 @@ fn tunnel_identity_binds_os_network_options_beyond_config_json() {
     let profile = ValidatedSingBoxProfile::direct();
     let baseline_settings = EngineSettings::default();
     let baseline = profile
-        .project(ProjectionMode::Tunnel, &baseline_settings)
+        .project(PROFILE_ID, ProjectionMode::Tunnel, &baseline_settings)
         .expect("baseline tunnel");
 
     let mtu_settings = EngineSettings {
@@ -529,7 +574,7 @@ fn tunnel_identity_binds_os_network_options_beyond_config_json() {
         ..baseline_settings.clone()
     };
     let mtu_changed = profile
-        .project(ProjectionMode::Tunnel, &mtu_settings)
+        .project(PROFILE_ID, ProjectionMode::Tunnel, &mtu_settings)
         .expect("MTU tunnel");
     assert_ne!(baseline.as_json(), mtu_changed.as_json());
     assert_ne!(
@@ -543,7 +588,7 @@ fn tunnel_identity_binds_os_network_options_beyond_config_json() {
         ..baseline_settings
     };
     let bypass_changed = profile
-        .project(ProjectionMode::Tunnel, &bypass_settings)
+        .project(PROFILE_ID, ProjectionMode::Tunnel, &bypass_settings)
         .expect("captured private networks tunnel");
     assert_eq!(baseline.as_json(), bypass_changed.as_json());
     assert_eq!(

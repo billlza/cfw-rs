@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum NativeProtocolConstants {
@@ -24,6 +25,14 @@ public enum ProtocolValidationError: Error, Equatable, Sendable {
   case invalidCommand
   case invalidResponse
   case messageTooLarge(actual: Int, maximum: Int)
+}
+
+public enum ConfigurationBytesValidationError: Error, Equatable, Sendable {
+  case empty
+  case tooLarge(actual: UInt64, maximum: UInt64)
+  case byteCountMismatch(expected: UInt64, actual: UInt64)
+  case digestMismatch(expected: String, actual: String)
+  case invalidJSON
 }
 
 public struct RequestID: Codable, Hashable, Sendable {
@@ -194,15 +203,14 @@ public struct SHA256Digest: Codable, Hashable, Sendable {
   public let hex: String
 
   public init(hex: String) throws {
-    let normalized = hex.lowercased()
-    guard normalized.utf8.count == 64,
-      normalized.utf8.allSatisfy({ byte in
+    guard hex == hex.lowercased(), hex.utf8.count == 64,
+      hex.utf8.allSatisfy({ byte in
         (48...57).contains(byte) || (97...102).contains(byte)
       })
     else {
       throw ProtocolValidationError.invalidDigest
     }
-    self.hex = normalized
+    self.hex = hex
   }
 
   init(validatedHex: String) {
@@ -223,15 +231,16 @@ public struct SHA256Digest: Codable, Hashable, Sendable {
 public struct ConfigurationDescriptor: Codable, Equatable, Sendable {
   public let slot: ConfigurationSlot
   public let tunnelOptions: TunnelNetworkOptions?
+  public let credentialAudience: CredentialAudience
   public let installationID: UUID
   public let epoch: UInt64
   public let generation: UInt64
   public let byteCount: UInt64
   public let sha256: SHA256Digest
-  /// Product identity digest covering the secret-free configuration template,
+  /// Product identity digest covering the exact bounded runtime configuration,
   /// credential-slot references, mode, and mode-specific network options.
   /// This is intentionally distinct from `sha256`, which authenticates the
-  /// exact staged configuration bytes.
+  /// exact in-memory runtime configuration bytes.
   public let identitySHA256: SHA256Digest
   /// Secret-free, closed injection instructions bound by identitySHA256.
   public let credentialSlots: [CredentialSlot]
@@ -239,6 +248,7 @@ public struct ConfigurationDescriptor: Codable, Equatable, Sendable {
   public init(
     slot: ConfigurationSlot,
     tunnelOptions: TunnelNetworkOptions?,
+    credentialAudience: CredentialAudience,
     installationID: UUID,
     epoch: UInt64,
     generation: UInt64,
@@ -261,6 +271,7 @@ public struct ConfigurationDescriptor: Codable, Equatable, Sendable {
     }
     self.slot = slot
     self.tunnelOptions = tunnelOptions
+    self.credentialAudience = credentialAudience
     self.installationID = installationID
     self.epoch = epoch
     self.generation = generation
@@ -276,6 +287,7 @@ public struct ConfigurationDescriptor: Codable, Equatable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case slot
     case tunnelOptions
+    case credentialAudience
     case installationID
     case epoch
     case generation
@@ -293,6 +305,10 @@ public struct ConfigurationDescriptor: Codable, Equatable, Sendable {
         TunnelNetworkOptions.self,
         forKey: .tunnelOptions
       ),
+      credentialAudience: container.decode(
+        CredentialAudience.self,
+        forKey: .credentialAudience
+      ),
       installationID: container.decode(UUID.self, forKey: .installationID),
       epoch: container.decode(UInt64.self, forKey: .epoch),
       generation: container.decode(UInt64.self, forKey: .generation),
@@ -301,6 +317,48 @@ public struct ConfigurationDescriptor: Codable, Equatable, Sendable {
       identitySHA256: container.decode(SHA256Digest.self, forKey: .identitySHA256),
       credentialSlots: container.decode([CredentialSlot].self, forKey: .credentialSlots)
     )
+  }
+}
+
+extension ConfigurationDescriptor {
+  /// Validates one bounded in-memory configuration against the exact descriptor
+  /// before it crosses an engine-owner boundary. This function performs no I/O
+  /// and never logs or returns the configuration bytes.
+  public func validateConfigurationBytes(_ configuration: Data) throws {
+    guard !configuration.isEmpty else {
+      throw ConfigurationBytesValidationError.empty
+    }
+    guard UInt64(configuration.count) <= NativeProtocolConstants.maximumConfigurationBytes else {
+      throw ConfigurationBytesValidationError.tooLarge(
+        actual: UInt64(configuration.count),
+        maximum: NativeProtocolConstants.maximumConfigurationBytes
+      )
+    }
+    let actualByteCount = UInt64(configuration.count)
+    guard byteCount == actualByteCount else {
+      throw ConfigurationBytesValidationError.byteCountMismatch(
+        expected: byteCount,
+        actual: actualByteCount
+      )
+    }
+    let actualDigest = SHA256.hash(data: configuration)
+      .map { String(format: "%02x", $0) }
+      .joined()
+    guard sha256.hex == actualDigest else {
+      throw ConfigurationBytesValidationError.digestMismatch(
+        expected: sha256.hex,
+        actual: actualDigest
+      )
+    }
+    let value: Any
+    do {
+      value = try JSONSerialization.jsonObject(with: configuration, options: [])
+    } catch {
+      throw ConfigurationBytesValidationError.invalidJSON
+    }
+    guard value is [String: Any] else {
+      throw ConfigurationBytesValidationError.invalidJSON
+    }
   }
 }
 

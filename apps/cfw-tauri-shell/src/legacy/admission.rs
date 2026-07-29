@@ -14,7 +14,7 @@ const SIGNED_COMPONENTS: &[&str] = &[
     "Contents/MacOS/clash-for-mac",
     "Contents/Frameworks/CFWNativeBridge.framework",
     "Contents/Library/LoginItems/CFWProxyAgent.app",
-    "Contents/Library/SystemExtensions/CFWPacketTunnel.systemextension",
+    "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension",
     "Contents/Library/HelperTools/cfw-helper-tombstone",
 ];
 

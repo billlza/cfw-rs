@@ -56,28 +56,48 @@ async fn full_mode_cycle_is_off_mediated_with_strictly_increasing_generations() 
 
     // Off -> Proxy
     let proxy = coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("start proxy from Off");
     let proxy_generation = active_generation(&proxy.state);
 
     // Proxy -> Tunnel (stops proxy, proves Off, then installs/starts tunnel)
     let tunnel = coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("switch proxy -> tunnel");
     let tunnel_generation = active_generation(&tunnel.state);
 
     // Tunnel -> Proxy (stops tunnel, proves Off, then starts proxy)
     let proxy_again = coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("switch tunnel -> proxy");
     let proxy_again_generation = active_generation(&proxy_again.state);
 
     // Proxy -> Off
     let off = coordinator
-        .set_mode(EngineMode::Off, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("stop to Off");
     assert_eq!(off.state, EngineState::Off);
@@ -115,7 +135,12 @@ async fn registration_denied_on_install_surfaces_typed_error_without_fallback() 
     let coordinator = quiet_coordinator(backend.clone());
 
     let error = coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect_err("registration-denied install must fail closed");
     match &error {

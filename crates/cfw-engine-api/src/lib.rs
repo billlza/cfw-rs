@@ -11,14 +11,15 @@ use thiserror::Error;
 pub mod authority_v1;
 
 pub use cfw_singbox_config::{
-    AuthenticatedDnsServer, CredentialKind, CredentialRef, CredentialSecret, CredentialSlot,
-    CredentialTarget, EngineSettings, MAX_CREDENTIAL_SLOTS, ValidatedSingBoxProfile,
+    AuthenticatedDnsServer, CredentialAudience, CredentialBinding, CredentialKind, CredentialRef,
+    CredentialSecret, CredentialSlot, CredentialTarget, EngineSettings, MAX_CREDENTIAL_SLOTS,
+    ValidatedSingBoxProfile,
 };
 
 // Version 3 adds the closed credential-slot contract. A version 2 native
 // bridge would ignore those slots and could otherwise attempt to start libbox
 // with the deliberately empty credential placeholders.
-pub const ENGINE_PROTOCOL_VERSION: u16 = 3;
+pub const ENGINE_PROTOCOL_VERSION: u16 = 4;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -180,8 +181,12 @@ impl EngineEvent {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineStartRequest {
     pub context: EngineCommandContext,
+    /// Exact validated profile identity authorized to resolve every credential
+    /// slot in this request. It is included in `config_digest`.
+    pub credential_audience: CredentialAudience,
     pub config_json: String,
-    /// SHA-256 of config_json, used to verify persisted configuration bytes.
+    /// SHA-256 of config_json, used to verify exact in-memory runtime bytes at
+    /// every native owner boundary.
     pub config_content_digest: String,
     /// Identity digest covering configuration content and mode-specific OS
     /// network options. Runtime readiness and idempotence bind to this value.
@@ -198,6 +203,7 @@ impl fmt::Debug for EngineStartRequest {
         formatter
             .debug_struct("EngineStartRequest")
             .field("context", &self.context)
+            .field("credential_audience", &self.credential_audience)
             .field("config_json", &"[REDACTED CONFIG TEMPLATE]")
             .field("config_content_digest", &self.config_content_digest)
             .field("config_digest", &self.config_digest)
@@ -252,7 +258,7 @@ impl fmt::Debug for CredentialProvision<'_> {
 /// omitted reference only when the immutable vault already contains it with
 /// the same kind; every missing reference must be supplied in this batch.
 pub struct CredentialProvisionRequest<'a> {
-    profile_id: String,
+    audience: CredentialAudience,
     required_references: Vec<CredentialRef>,
     entries: Vec<CredentialProvision<'a>>,
 }
@@ -263,12 +269,8 @@ impl<'a> CredentialProvisionRequest<'a> {
         profile: &ValidatedSingBoxProfile,
         entries: Vec<CredentialProvision<'a>>,
     ) -> Result<Self, CredentialProvisionRequestError> {
-        let profile_id = profile_id.into();
-        let parsed = uuid::Uuid::parse_str(&profile_id)
-            .map_err(|_| CredentialProvisionRequestError::InvalidProfileId)?;
-        if parsed.hyphenated().to_string() != profile_id {
-            return Err(CredentialProvisionRequestError::InvalidProfileId);
-        }
+        let audience = CredentialAudience::new(profile_id, profile.digest())
+            .map_err(|_| CredentialProvisionRequestError::InvalidAudience)?;
         if entries.len() > MAX_CREDENTIAL_SLOTS {
             return Err(CredentialProvisionRequestError::TooManyEntries);
         }
@@ -286,14 +288,18 @@ impl<'a> CredentialProvisionRequest<'a> {
             }
         }
         Ok(Self {
-            profile_id,
+            audience,
             required_references: required.into_iter().collect(),
             entries,
         })
     }
 
     pub fn profile_id(&self) -> &str {
-        &self.profile_id
+        self.audience.profile_id()
+    }
+
+    pub fn audience(&self) -> &CredentialAudience {
+        &self.audience
     }
 
     pub fn entries(&self) -> &[CredentialProvision<'a>] {
@@ -309,7 +315,7 @@ impl fmt::Debug for CredentialProvisionRequest<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CredentialProvisionRequest")
-            .field("profile_id", &self.profile_id)
+            .field("audience", &self.audience)
             .field("required_references", &self.required_references)
             .field("entries", &self.entries)
             .finish()
@@ -318,8 +324,8 @@ impl fmt::Debug for CredentialProvisionRequest<'_> {
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum CredentialProvisionRequestError {
-    #[error("credential provisioning profile id must be a canonical UUID")]
-    InvalidProfileId,
+    #[error("credential request audience must contain a canonical profile UUID and digest")]
+    InvalidAudience,
     #[error("credential provisioning request exceeds the entry limit")]
     TooManyEntries,
     #[error("credential provisioning request contains a duplicate reference")]
@@ -331,6 +337,7 @@ pub enum CredentialProvisionRequestError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialVaultReceipt {
     pub profile_id: String,
+    pub profile_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,32 +348,70 @@ pub struct CredentialPresence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialPresenceRequest {
-    profile_id: String,
+    audience: CredentialAudience,
     references: Vec<CredentialRef>,
 }
 
-/// Maximum number of immutable entries admitted by the native credential
-/// vault. Garbage-collection snapshots are bounded to the same value so a
-/// caller cannot turn maintenance into an unbounded bridge allocation.
-pub const MAX_CREDENTIAL_VAULT_REFERENCES: usize = 512;
+/// Maximum number of exact audience/reference bindings admitted by the native
+/// credential vault. Reusing one UUID in two profiles consumes two entries.
+pub const MAX_CREDENTIAL_VAULT_BINDINGS: usize = 512;
+/// Mirrors the bounded profile repository catalog. Profiles without
+/// credentials remain in the catalog so its digest describes the complete
+/// canonical repository rather than only the currently interesting subset.
+pub const MAX_CREDENTIAL_CATALOG_PROFILES: usize = 4_096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialProfileCatalogEntry {
+    audience: CredentialAudience,
+    references: Vec<CredentialRef>,
+}
+
+impl CredentialProfileCatalogEntry {
+    pub fn new(
+        audience: CredentialAudience,
+        mut references: Vec<CredentialRef>,
+    ) -> Result<Self, CredentialGarbageCollectionRequestError> {
+        validate_and_sort_profile_references(&mut references)?;
+        Ok(Self {
+            audience,
+            references,
+        })
+    }
+
+    pub fn audience(&self) -> &CredentialAudience {
+        &self.audience
+    }
+
+    pub fn references(&self) -> &[CredentialRef] {
+        &self.references
+    }
+
+    pub fn bindings(&self) -> impl Iterator<Item = CredentialBinding> + '_ {
+        self.references
+            .iter()
+            .cloned()
+            .map(|reference| CredentialBinding::new(self.audience.clone(), reference))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialGarbageCollectionRequest {
     snapshot_digest: String,
-    live_references: Vec<CredentialRef>,
+    catalog: Vec<CredentialProfileCatalogEntry>,
 }
 
 impl CredentialGarbageCollectionRequest {
     pub fn new(
         snapshot_digest: impl Into<String>,
-        mut live_references: Vec<CredentialRef>,
+        mut catalog: Vec<CredentialProfileCatalogEntry>,
     ) -> Result<Self, CredentialGarbageCollectionRequestError> {
         let snapshot_digest = snapshot_digest.into();
         validate_snapshot_digest(&snapshot_digest)?;
-        validate_and_sort_references(&mut live_references)?;
+        validate_and_sort_catalog(&mut catalog)?;
         Ok(Self {
             snapshot_digest,
-            live_references,
+            catalog,
         })
     }
 
@@ -374,8 +419,8 @@ impl CredentialGarbageCollectionRequest {
         &self.snapshot_digest
     }
 
-    pub fn live_references(&self) -> &[CredentialRef] {
-        &self.live_references
+    pub fn catalog(&self) -> &[CredentialProfileCatalogEntry] {
+        &self.catalog
     }
 }
 
@@ -383,7 +428,7 @@ impl CredentialGarbageCollectionRequest {
 pub struct CredentialGarbageCollectionPreview {
     pub snapshot_digest: String,
     pub vault_revision: String,
-    pub orphan_references: Vec<CredentialRef>,
+    pub orphan_bindings: Vec<CredentialBinding>,
     pub orphan_count: u32,
 }
 
@@ -393,9 +438,9 @@ impl CredentialGarbageCollectionPreview {
         if !is_canonical_uuid(&self.vault_revision) {
             return Err(CredentialGarbageCollectionRequestError::InvalidVaultRevision);
         }
-        let mut canonical = self.orphan_references.clone();
-        validate_and_sort_references(&mut canonical)?;
-        if canonical != self.orphan_references
+        let mut canonical = self.orphan_bindings.clone();
+        validate_and_sort_bindings(&mut canonical)?;
+        if canonical != self.orphan_bindings
             || usize::try_from(self.orphan_count).ok() != Some(canonical.len())
         {
             return Err(CredentialGarbageCollectionRequestError::InvalidPreview);
@@ -407,9 +452,9 @@ impl CredentialGarbageCollectionPreview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialGarbageCollectionCommitRequest {
     snapshot_digest: String,
-    live_references: Vec<CredentialRef>,
+    catalog: Vec<CredentialProfileCatalogEntry>,
     expected_vault_revision: String,
-    expected_orphan_references: Vec<CredentialRef>,
+    expected_orphan_bindings: Vec<CredentialBinding>,
 }
 
 impl CredentialGarbageCollectionCommitRequest {
@@ -425,18 +470,18 @@ impl CredentialGarbageCollectionCommitRequest {
         if !is_canonical_uuid(&preview.vault_revision) {
             return Err(CredentialGarbageCollectionRequestError::InvalidVaultRevision);
         }
-        let mut expected_orphan_references = preview.orphan_references.clone();
-        validate_and_sort_references(&mut expected_orphan_references)?;
-        if expected_orphan_references != preview.orphan_references
-            || usize::try_from(preview.orphan_count).ok() != Some(expected_orphan_references.len())
+        let mut expected_orphan_bindings = preview.orphan_bindings.clone();
+        validate_and_sort_bindings(&mut expected_orphan_bindings)?;
+        if expected_orphan_bindings != preview.orphan_bindings
+            || usize::try_from(preview.orphan_count).ok() != Some(expected_orphan_bindings.len())
         {
             return Err(CredentialGarbageCollectionRequestError::InvalidPreview);
         }
         Ok(Self {
             snapshot_digest: repository.snapshot_digest,
-            live_references: repository.live_references,
+            catalog: repository.catalog,
             expected_vault_revision: preview.vault_revision.clone(),
-            expected_orphan_references,
+            expected_orphan_bindings,
         })
     }
 
@@ -444,16 +489,16 @@ impl CredentialGarbageCollectionCommitRequest {
         &self.snapshot_digest
     }
 
-    pub fn live_references(&self) -> &[CredentialRef] {
-        &self.live_references
+    pub fn catalog(&self) -> &[CredentialProfileCatalogEntry] {
+        &self.catalog
     }
 
     pub fn expected_vault_revision(&self) -> &str {
         &self.expected_vault_revision
     }
 
-    pub fn expected_orphan_references(&self) -> &[CredentialRef] {
-        &self.expected_orphan_references
+    pub fn expected_orphan_bindings(&self) -> &[CredentialBinding] {
+        &self.expected_orphan_bindings
     }
 }
 
@@ -477,10 +522,16 @@ impl CredentialGarbageCollectionReceipt {
 pub enum CredentialGarbageCollectionRequestError {
     #[error("credential repository snapshot digest must be lowercase SHA-256")]
     InvalidSnapshotDigest,
-    #[error("credential garbage-collection reference set exceeds the vault limit")]
-    TooManyReferences,
-    #[error("credential garbage-collection reference set contains a duplicate UUID")]
+    #[error("credential garbage-collection catalog exceeds the profile limit")]
+    TooManyProfiles,
+    #[error("credential garbage-collection catalog exceeds the vault binding limit")]
+    TooManyBindings,
+    #[error("credential garbage-collection catalog contains a duplicate profile id")]
+    DuplicateProfile,
+    #[error("one profile catalog entry contains a duplicate credential UUID")]
     DuplicateReference,
+    #[error("credential garbage-collection binding set contains a duplicate entry")]
+    DuplicateBinding,
     #[error("credential garbage-collection preview contains an invalid vault revision")]
     InvalidVaultRevision,
     #[error("credential garbage-collection preview is not canonical")]
@@ -505,11 +556,11 @@ fn is_canonical_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
 }
 
-fn validate_and_sort_references(
+fn validate_and_sort_profile_references(
     references: &mut [CredentialRef],
 ) -> Result<(), CredentialGarbageCollectionRequestError> {
-    if references.len() > MAX_CREDENTIAL_VAULT_REFERENCES {
-        return Err(CredentialGarbageCollectionRequestError::TooManyReferences);
+    if references.len() > MAX_CREDENTIAL_SLOTS {
+        return Err(CredentialGarbageCollectionRequestError::TooManyBindings);
     }
     references.sort();
     let mut ids = BTreeSet::new();
@@ -522,17 +573,57 @@ fn validate_and_sort_references(
     Ok(())
 }
 
+fn validate_and_sort_catalog(
+    catalog: &mut [CredentialProfileCatalogEntry],
+) -> Result<(), CredentialGarbageCollectionRequestError> {
+    if catalog.len() > MAX_CREDENTIAL_CATALOG_PROFILES {
+        return Err(CredentialGarbageCollectionRequestError::TooManyProfiles);
+    }
+    catalog.sort_by(|left, right| left.audience.cmp(&right.audience));
+    let mut profile_ids = BTreeSet::new();
+    let mut binding_count = 0_usize;
+    for entry in catalog {
+        if !profile_ids.insert(entry.audience.profile_id()) {
+            return Err(CredentialGarbageCollectionRequestError::DuplicateProfile);
+        }
+        validate_and_sort_profile_references(&mut entry.references)?;
+        binding_count = binding_count
+            .checked_add(entry.references.len())
+            .ok_or(CredentialGarbageCollectionRequestError::TooManyBindings)?;
+        if binding_count > MAX_CREDENTIAL_VAULT_BINDINGS {
+            return Err(CredentialGarbageCollectionRequestError::TooManyBindings);
+        }
+    }
+    Ok(())
+}
+
+fn validate_and_sort_bindings(
+    bindings: &mut [CredentialBinding],
+) -> Result<(), CredentialGarbageCollectionRequestError> {
+    if bindings.len() > MAX_CREDENTIAL_VAULT_BINDINGS {
+        return Err(CredentialGarbageCollectionRequestError::TooManyBindings);
+    }
+    bindings.sort();
+    if bindings.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(CredentialGarbageCollectionRequestError::DuplicateBinding);
+    }
+    Ok(())
+}
+
+fn validate_and_sort_references(
+    references: &mut [CredentialRef],
+) -> Result<(), CredentialGarbageCollectionRequestError> {
+    validate_and_sort_profile_references(references)
+}
+
 impl CredentialPresenceRequest {
     pub fn new(
         profile_id: impl Into<String>,
-        references: Vec<CredentialRef>,
+        profile: &ValidatedSingBoxProfile,
     ) -> Result<Self, CredentialProvisionRequestError> {
-        let profile_id = profile_id.into();
-        let parsed = uuid::Uuid::parse_str(&profile_id)
-            .map_err(|_| CredentialProvisionRequestError::InvalidProfileId)?;
-        if parsed.hyphenated().to_string() != profile_id {
-            return Err(CredentialProvisionRequestError::InvalidProfileId);
-        }
+        let audience = CredentialAudience::new(profile_id, profile.digest())
+            .map_err(|_| CredentialProvisionRequestError::InvalidAudience)?;
+        let references = profile.credential_references();
         if references.len() > MAX_CREDENTIAL_SLOTS {
             return Err(CredentialProvisionRequestError::TooManyEntries);
         }
@@ -543,13 +634,17 @@ impl CredentialPresenceRequest {
             }
         }
         Ok(Self {
-            profile_id,
+            audience,
             references,
         })
     }
 
     pub fn profile_id(&self) -> &str {
-        &self.profile_id
+        self.audience.profile_id()
+    }
+
+    pub fn audience(&self) -> &CredentialAudience {
+        &self.audience
     }
 
     pub fn references(&self) -> &[CredentialRef] {
@@ -571,6 +666,8 @@ pub enum CredentialVaultError {
     Corrupt,
     #[error("credential vault does not exist")]
     MissingVault,
+    #[error("credential vault schema requires explicit migration")]
+    MigrationRequired,
     #[error("credential vault changed after maintenance preview")]
     ConcurrentModification,
     #[error("credential vault failed internally")]
@@ -655,6 +752,9 @@ impl CutoverPreflightRequest {
         {
             return Err(CutoverPreflightRequestError::InvalidContext);
         }
+        if system_proxy_request.credential_audience != tunnel_request.credential_audience {
+            return Err(CutoverPreflightRequestError::CredentialAudienceMismatch);
+        }
         let system_references = system_proxy_request
             .credential_slots
             .iter()
@@ -709,6 +809,8 @@ pub enum CutoverPreflightRequestError {
     InvalidContext,
     #[error("cutover preflight projections do not reference the same credentials")]
     CredentialReferenceMismatch,
+    #[error("cutover preflight projections do not have the same credential audience")]
+    CredentialAudienceMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -718,6 +820,7 @@ pub struct CutoverPreflightAttestation {
     pub context: EngineCommandContext,
     pub system_proxy_config_digest: String,
     pub tunnel_config_digest: String,
+    pub credential_audience: CredentialAudience,
     pub credential_references: Vec<CredentialRef>,
     pub valid_for_millis: u32,
 }
@@ -751,6 +854,7 @@ pub enum CutoverPreflightOutcome {
         context: EngineCommandContext,
         system_proxy_config_digest: String,
         tunnel_config_digest: String,
+        credential_audience: CredentialAudience,
     },
     Ready {
         attestation: CutoverPreflightAttestation,
@@ -780,12 +884,14 @@ pub enum TunnelInstallOutcome {
 pub enum BackendErrorKind {
     Busy,
     ResourceExhausted,
+    JournalCapacityExhausted,
     PermissionDenied,
     ApprovalDenied,
     ConfigurationRejected,
     CredentialsUnavailable,
     CredentialConflict,
     CredentialVaultMissing,
+    CredentialMigrationRequired,
     CredentialGcConflict,
     GlobalAuthorityUnavailable,
     GlobalAuthorityRegistrationRequired,
@@ -827,10 +933,11 @@ pub enum RetryDirective {
     FreshContext,
     FreshGenerationAfterOff,
     ExplicitReconciliation,
+    MaintenanceRequired,
 }
 
 impl BackendErrorKind {
-    pub const AUTHORITY_KINDS: [Self; 24] = [
+    pub const AUTHORITY_KINDS: [Self; 25] = [
         Self::GlobalAuthorityUnavailable,
         Self::GlobalAuthorityRegistrationRequired,
         Self::GlobalAuthorityApprovalRequired,
@@ -841,6 +948,7 @@ impl BackendErrorKind {
         Self::GlobalAuthorityInterrupted,
         Self::Busy,
         Self::ResourceExhausted,
+        Self::JournalCapacityExhausted,
         Self::GlobalLeaseConflict,
         Self::ReplayRejected,
         Self::StaleOperation,
@@ -865,6 +973,8 @@ impl BackendErrorKind {
             | Self::GlobalAuthorityInterrupted
             | Self::Timeout
             | Self::Unavailable => RetryDirective::IdempotentReadOnly,
+            Self::JournalCapacityExhausted => RetryDirective::MaintenanceRequired,
+            Self::CredentialMigrationRequired => RetryDirective::Never,
             Self::GlobalAuthorityUnavailable
             | Self::GlobalAuthorityRegistrationRequired
             | Self::GlobalAuthorityApprovalRequired => RetryDirective::RegistrationStatusChange,
@@ -905,12 +1015,18 @@ impl BackendErrorKind {
         match self {
             Self::Busy => "Global Authority mutation is busy.",
             Self::ResourceExhausted => "Global Authority read capacity is exhausted.",
+            Self::JournalCapacityExhausted => {
+                "The Global Authority journal reached its fixed capacity and requires maintenance."
+            }
             Self::PermissionDenied => "The native operation was denied.",
             Self::ApprovalDenied => "Required operating-system approval was denied.",
             Self::ConfigurationRejected => "The native configuration was rejected.",
             Self::CredentialsUnavailable => "Required credentials are unavailable.",
             Self::CredentialConflict => "Credential material conflicts with an immutable entry.",
             Self::CredentialVaultMissing => "The credential vault is unavailable.",
+            Self::CredentialMigrationRequired => {
+                "The credential vault uses an unsupported schema and must be cleared and reprovisioned."
+            }
             Self::CredentialGcConflict => "Credential cleanup requires a fresh preview.",
             Self::GlobalAuthorityUnavailable => "Global Authority is unavailable.",
             Self::GlobalAuthorityRegistrationRequired => {
@@ -1120,14 +1236,14 @@ pub enum NativeBridgeResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialPresenceWireRequest {
-    pub profile_id: String,
+    pub audience: CredentialAudience,
     pub references: Vec<CredentialRef>,
 }
 
 impl From<CredentialPresenceRequest> for CredentialPresenceWireRequest {
     fn from(request: CredentialPresenceRequest) -> Self {
         Self {
-            profile_id: request.profile_id,
+            audience: request.audience,
             references: request.references,
         }
     }
@@ -1162,6 +1278,8 @@ mod tests {
                 config_epoch: 1,
                 generation: 2,
             },
+            credential_audience: CredentialAudience::new(PROFILE_ID, "03".repeat(32))
+                .expect("audience"),
             config_json: "never-print-this-config".into(),
             config_content_digest: "01".repeat(32),
             config_digest: "02".repeat(32),
@@ -1233,16 +1351,16 @@ mod tests {
     }
 
     #[test]
-    fn native_bridge_v3_contract_fixtures_decode_in_rust() {
+    fn native_bridge_v4_contract_fixtures_decode_in_rust() {
         let query: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v3/query-request.json"
+            "../../../contracts/native-bridge-v4/query-request.json"
         ))
         .expect("query fixture");
         assert_eq!(query.schema_version, ENGINE_PROTOCOL_VERSION);
         assert!(matches!(query.command, NativeBridgeCommand::QueryStatus));
 
         let preview: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v3/gc-preview-request.json"
+            "../../../contracts/native-bridge-v4/gc-preview-request.json"
         ))
         .expect("GC preview fixture");
         let NativeBridgeCommand::PreviewCredentialGarbageCollection { request } = preview.command
@@ -1250,10 +1368,11 @@ mod tests {
             panic!("fixture command kind");
         };
         assert_eq!(request.snapshot_digest(), "ab".repeat(32));
-        assert_eq!(request.live_references().len(), 1);
+        assert_eq!(request.catalog().len(), 1);
+        assert_eq!(request.catalog()[0].references().len(), 1);
 
         let response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v3/gc-preview-response.json"
+            "../../../contracts/native-bridge-v4/gc-preview-response.json"
         ))
         .expect("GC preview response fixture");
         let Some(NativeBridgeResult::CredentialGarbageCollectionPreview(preview)) = response.result
@@ -1324,7 +1443,7 @@ mod tests {
 
     #[test]
     fn native_public_query_json_contract_is_unchanged() {
-        let bytes = include_bytes!("../../../contracts/native-bridge-v3/query-request.json");
+        let bytes = include_bytes!("../../../contracts/native-bridge-v4/query-request.json");
         let request: NativeRequestEnvelope =
             serde_json::from_slice(bytes).expect("public query request fixture");
         assert_eq!(
@@ -1337,19 +1456,22 @@ mod tests {
     fn garbage_collection_commit_is_bound_to_the_exact_preview_snapshot() {
         let live = CredentialRef::new(CREDENTIAL_ID, CredentialKind::TrojanPassword)
             .expect("canonical reference");
-        let repository =
-            CredentialGarbageCollectionRequest::new("ab".repeat(32), vec![live.clone()])
-                .expect("repository snapshot");
+        let audience = CredentialAudience::new(PROFILE_ID, "ef".repeat(32)).expect("audience");
+        let catalog = CredentialProfileCatalogEntry::new(audience.clone(), vec![live.clone()])
+            .expect("catalog entry");
+        let repository = CredentialGarbageCollectionRequest::new("ab".repeat(32), vec![catalog])
+            .expect("repository snapshot");
         let preview = CredentialGarbageCollectionPreview {
             snapshot_digest: "ab".repeat(32),
             vault_revision: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into(),
-            orphan_references: Vec::new(),
+            orphan_bindings: Vec::new(),
             orphan_count: 0,
         };
         let commit = CredentialGarbageCollectionCommitRequest::new(repository, &preview)
             .expect("bound commit");
         assert_eq!(commit.snapshot_digest(), preview.snapshot_digest);
-        assert_eq!(commit.live_references(), &[live]);
+        assert_eq!(commit.catalog()[0].audience(), &audience);
+        assert_eq!(commit.catalog()[0].references(), &[live]);
 
         let changed = CredentialGarbageCollectionRequest::new("cd".repeat(32), Vec::new())
             .expect("changed repository snapshot");

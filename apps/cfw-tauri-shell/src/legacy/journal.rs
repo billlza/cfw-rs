@@ -578,8 +578,14 @@ mod tests {
             config_epoch: 1,
             generation: 9,
         };
+        let credential_audience = cfw_engine_api::CredentialAudience::new(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "33".repeat(32),
+        )
+        .expect("audience");
         let proxy = EngineStartRequest {
             context: context.clone(),
+            credential_audience: credential_audience.clone(),
             config_json: "{}".into(),
             config_content_digest: "10".repeat(32),
             config_digest: "11".repeat(32),
@@ -588,6 +594,7 @@ mod tests {
         };
         let tunnel = EngineStartRequest {
             context,
+            credential_audience,
             config_json: "{}".into(),
             config_content_digest: "20".repeat(32),
             config_digest: "22".repeat(32),

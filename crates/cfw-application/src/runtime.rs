@@ -44,7 +44,7 @@ pub(crate) struct CoordinatorState {
 pub(crate) fn requires_explicit_reconciliation(kind: BackendErrorKind) -> bool {
     matches!(
         kind.retry_directive(),
-        RetryDirective::ExplicitReconciliation
+        RetryDirective::ExplicitReconciliation | RetryDirective::MaintenanceRequired
     )
 }
 

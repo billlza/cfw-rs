@@ -91,6 +91,7 @@ impl ProfileOutbound {
                 server,
                 server_port,
                 credential_ref,
+                flow,
                 tls,
                 transport,
                 ..
@@ -98,6 +99,12 @@ impl ProfileOutbound {
                 validate_remote_endpoint(server, *server_port, path)?;
                 validate_reference_kind(credential_ref, CredentialKind::VlessUuid, path)?;
                 validate_optional_tls(tls.as_ref(), path)?;
+                if flow.is_some() && !tls.as_ref().is_some_and(|tls| tls.enabled) {
+                    return Err(unsupported_shape(
+                        format!("{path}.tls.enabled"),
+                        "VLESS Vision requires enabled TLS",
+                    ));
+                }
                 if tls.as_ref().is_some_and(|tls| tls.reality.is_some())
                     && !tls.as_ref().is_some_and(|tls| tls.enabled)
                 {
@@ -289,10 +296,11 @@ impl OutboundTls {
                 "ALPN list is oversized or contains an invalid token",
             ));
         }
-        if !self.enabled && (self.utls.is_some() || self.reality.is_some()) {
+        if !self.enabled && (!self.alpn.is_empty() || self.utls.is_some() || self.reality.is_some())
+        {
             return Err(unsupported_shape(
                 format!("{path}.tls.enabled"),
-                "uTLS and Reality require enabled TLS",
+                "ALPN, uTLS, and Reality require enabled TLS",
             ));
         }
         if self.utls.as_ref().is_some_and(|utls| !utls.enabled) {
@@ -347,7 +355,10 @@ fn validate_optional_transport(
                 ));
             }
             if let Some(headers) = headers {
-                validate_server_name(&headers.host, &format!("{path}.transport.headers.Host"))?;
+                validate_websocket_host_authority(
+                    &headers.host,
+                    &format!("{path}.transport.headers.Host"),
+                )?;
             }
         }
         V2RayTransport::Grpc { service_name } => {
@@ -363,6 +374,50 @@ fn validate_optional_transport(
         }
     }
     Ok(())
+}
+
+fn validate_websocket_host_authority(authority: &str, path: &str) -> Result<(), ConfigError> {
+    let invalid = || {
+        unsupported_shape(
+            path,
+            "WebSocket Host must be a bounded DNS name or IP address with an optional nonzero port",
+        )
+    };
+    if authority.is_empty()
+        || authority.len() > MAX_SERVER_BYTES + 8
+        || authority.trim() != authority
+        || authority.chars().any(char::is_control)
+        || authority.contains(['/', '\\', '@'])
+    {
+        return Err(invalid());
+    }
+
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((host, suffix)) = bracketed.split_once(']') else {
+            return Err(invalid());
+        };
+        let port = match suffix.strip_prefix(':') {
+            Some(value) => Some(value),
+            None if suffix.is_empty() => None,
+            None => return Err(invalid()),
+        };
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(invalid());
+        }
+        (host, port)
+    } else if authority.matches(':').count() == 1 {
+        let (host, port) = authority.rsplit_once(':').ok_or_else(invalid)?;
+        (host, Some(port))
+    } else {
+        (authority, None)
+    };
+
+    if let Some(port) = port
+        && !matches!(port.parse::<u16>(), Ok(port) if port != 0)
+    {
+        return Err(invalid());
+    }
+    validate_server_name(host, path)
 }
 
 fn unsupported_shape(path: impl Into<String>, reason: impl Into<String>) -> ConfigError {

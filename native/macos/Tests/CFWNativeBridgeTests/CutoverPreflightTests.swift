@@ -26,9 +26,15 @@ private actor RecordingProxyAgent: ProxyAgentTransporting {
   func registrationStatus() -> ProxyAgentRegistrationStatus { .notRegistered }
   func ensureRegistered() throws {}
 
-  func start(configuration: ConfigurationDescriptor) throws {
+  func start(
+    configuration: Data,
+    descriptor: ConfigurationDescriptor,
+    authorization: HostPreparedSystemProxyStart
+  ) throws {
     _ = configuration
-    startCalls += 1
+    _ = descriptor
+    authorization.erase()
+    throw UnusedSystemProxyStartPreparerError.unexpectedInvocation
   }
 
   func stop(configuration: ConfigurationDescriptor) throws {
@@ -116,15 +122,16 @@ private actor RecordingTunnelHost: TunnelHostBridging {
   }
 }
 
-private struct NoopConfigurationStore: NativeConfigurationStoring {
-  func persist(_ configuration: Data, descriptor: ConfigurationDescriptor) throws {
-    _ = configuration
-    _ = descriptor
-  }
-}
-
 private struct AvailableEngineLease: NativeEngineLeaseInspecting {
   func isAvailable() async throws -> Bool { true }
+  func beginStop(
+    for descriptor: ConfigurationDescriptor
+  ) async throws -> NativeAuthorityStopContext {
+    throw NativeBridgeExecutionError.failure(.unavailable, "unused stop boundary")
+  }
+  func completeStop(_ context: NativeAuthorityStopContext) async throws {
+    throw NativeBridgeExecutionError.failure(.unavailable, "unused stop boundary")
+  }
 }
 
 private final class RecordingGarbageCollectionVault:
@@ -134,25 +141,26 @@ private final class RecordingGarbageCollectionVault:
   private var previewReferences: [CredentialReference] = []
 
   func provision(
-    profileID: String,
+    audience: CredentialAudience,
     requiredReferences: [CredentialReference],
     material: CredentialMaterial
   ) throws -> CFWCredentialVault.CredentialVaultReceipt {
     _ = requiredReferences
     _ = material
-    guard let identifier = UUID(uuidString: profileID) else {
-      throw CredentialVaultError.invalidProfileIdentifier
-    }
-    return CFWCredentialVault.CredentialVaultReceipt(profileID: identifier)
+    return CFWCredentialVault.CredentialVaultReceipt(audience: audience)
   }
 
   func presence(
+    audience: CredentialAudience,
     of references: [CredentialReference]
   ) throws -> [CFWCredentialVault.CredentialPresence] {
     references.map { CFWCredentialVault.CredentialPresence(reference: $0, present: true) }
   }
 
-  func resolve(slots: [CredentialSlot]) throws -> CredentialMaterial {
+  func resolve(
+    audience: CredentialAudience,
+    slots: [CredentialSlot]
+  ) throws -> CredentialMaterial {
     _ = slots
     return .empty
   }
@@ -160,13 +168,13 @@ private final class RecordingGarbageCollectionVault:
   func previewGarbageCollection(
     _ request: CredentialGarbageCollectionRequest
   ) throws -> CredentialGarbageCollectionPreview {
-    lock.withLock { previewReferences = request.liveReferences }
+    lock.withLock { previewReferences = request.catalog.flatMap(\.references) }
     return try CredentialGarbageCollectionPreview(
       snapshotDigest: request.snapshotDigest,
       vaultRevision: #require(
         UUID(uuidString: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
       ),
-      orphanReferences: []
+      orphanBindings: []
     )
   }
 
@@ -184,19 +192,17 @@ private final class RecordingGarbageCollectionVault:
 
 private final class EmptyCredentialVault: NativeCredentialVaulting, @unchecked Sendable {
   func provision(
-    profileID: String,
+    audience: CredentialAudience,
     requiredReferences: [CredentialReference],
     material: CredentialMaterial
   ) throws -> CFWCredentialVault.CredentialVaultReceipt {
     _ = requiredReferences
     _ = material
-    guard let profileID = UUID(uuidString: profileID) else {
-      throw CredentialVaultError.invalidProfileIdentifier
-    }
-    return CFWCredentialVault.CredentialVaultReceipt(profileID: profileID)
+    return CFWCredentialVault.CredentialVaultReceipt(audience: audience)
   }
 
   func presence(
+    audience: CredentialAudience,
     of references: [CredentialReference]
   ) throws -> [CFWCredentialVault.CredentialPresence] {
     references.map {
@@ -204,7 +210,10 @@ private final class EmptyCredentialVault: NativeCredentialVaulting, @unchecked S
     }
   }
 
-  func resolve(slots: [CredentialSlot]) throws -> CredentialMaterial {
+  func resolve(
+    audience: CredentialAudience,
+    slots: [CredentialSlot]
+  ) throws -> CredentialMaterial {
     guard slots.isEmpty else {
       throw CredentialMaterialError.missingReference(slots[0].reference.id)
     }
@@ -233,8 +242,8 @@ private func makeCoordinator(
 ) -> NativeBridgeCoordinator {
   NativeBridgeCoordinator(
     proxy: proxy,
+    systemProxyPreparer: UnusedSystemProxyStartPreparer(),
     tunnel: tunnel,
-    configurationStore: NoopConfigurationStore(),
     engineLease: AvailableEngineLease(),
     credentialVault: credentialVault
   )
@@ -242,6 +251,7 @@ private func makeCoordinator(
 
 private struct PreflightIdentityDocument: Encodable {
   let configurationSHA256: String
+  let credentialAudience: CredentialAudience
   let credentialSlots: [CredentialSlot]
   let mode: String
   let networkOptions: TunnelNetworkOptions?
@@ -249,6 +259,7 @@ private struct PreflightIdentityDocument: Encodable {
 
   private enum CodingKeys: String, CodingKey {
     case configurationSHA256 = "configuration_sha256"
+    case credentialAudience = "credential_audience"
     case credentialSlots = "credential_slots"
     case mode
     case networkOptions = "network_options"
@@ -258,6 +269,7 @@ private struct PreflightIdentityDocument: Encodable {
   func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(configurationSHA256, forKey: .configurationSHA256)
+    try container.encode(credentialAudience, forKey: .credentialAudience)
     try container.encode(credentialSlots, forKey: .credentialSlots)
     try container.encode(mode, forKey: .mode)
     if let networkOptions {
@@ -281,6 +293,10 @@ private func preflightRequest(target: EngineMode = .tunnel) throws -> CutoverPre
     configEpoch: 2,
     generation: 7
   )
+  let audience = CredentialAudience(
+    profileID: try #require(UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")),
+    profileDigest: try CFWSharedProtocol.SHA256Digest(hex: String(repeating: "ab", count: 32))
+  )
   let configuration = Data(
     #"{"outbounds":[{"tag":"direct","type":"direct"}],"route":{"final":"direct"}}"#.utf8
   )
@@ -290,6 +306,7 @@ private func preflightRequest(target: EngineMode = .tunnel) throws -> CutoverPre
   func request(options: TunnelNetworkOptions?) throws -> EngineStartRequest {
     let identity = PreflightIdentityDocument(
       configurationSHA256: contentDigest.hex,
+      credentialAudience: audience,
       credentialSlots: [],
       mode: options == nil ? "system_proxy" : "tunnel",
       networkOptions: options,
@@ -299,6 +316,7 @@ private func preflightRequest(target: EngineMode = .tunnel) throws -> CutoverPre
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     return try EngineStartRequest(
       context: context,
+      credentialAudience: audience,
       configJSON: String(decoding: configuration, as: UTF8.self),
       configContentDigest: contentDigest,
       configDigest: sha256(encoder.encode(identity)),
@@ -438,6 +456,9 @@ private func descriptor(
   return try ConfigurationDescriptor(
     slot: slot,
     tunnelOptions: slot == .tunnel ? TunnelNetworkOptions(ipv6Enabled: true) : nil,
+    credentialAudience: CredentialAudience(
+      profileID: #require(UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")),
+      profileDigest: CFWSharedProtocol.SHA256Digest(hex: String(repeating: "ab", count: 32))),
     installationID: #require(UUID(uuidString: "11111111-1111-4111-8111-111111111111")),
     epoch: 2,
     generation: 7,
@@ -473,7 +494,7 @@ private func descriptor(
   )
   let request = try CredentialGarbageCollectionRequest(
     snapshotDigest: CFWSharedProtocol.SHA256Digest(hex: String(repeating: "ab", count: 32)),
-    liveReferences: []
+    catalog: []
   )
 
   _ = try await coordinator.execute(.previewCredentialGarbageCollection(request))

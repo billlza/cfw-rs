@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use cfw_engine_api::EngineEvent;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::commands::LiveStreams;
 use crate::engine::ManagedEngine;
 
 #[derive(Default)]
@@ -45,6 +46,7 @@ pub(crate) fn request_shutdown(app: AppHandle, exit_code: i32) {
         let coordinator = app.state::<ManagedEngine>().coordinator.clone();
         match coordinator.shutdown().await {
             Ok(_) => {
+                app.state::<LiveStreams>().stop_all();
                 app.state::<AppLifecycle>().mark_exit_ready();
                 app.exit(exit_code);
             }
@@ -57,6 +59,7 @@ pub(crate) fn request_shutdown(app: AppHandle, exit_code: i32) {
                     eprintln!("failed to publish shutdown error: {emit_error}");
                 }
                 if safely_off {
+                    app.state::<LiveStreams>().stop_all();
                     app.state::<AppLifecycle>().mark_exit_ready();
                     app.exit(exit_code);
                 } else {
@@ -76,6 +79,7 @@ pub(crate) async fn quit_app(app: AppHandle) -> Result<(), String> {
     let coordinator = app.state::<ManagedEngine>().coordinator.clone();
     match coordinator.shutdown().await {
         Ok(_) => {
+            app.state::<LiveStreams>().stop_all();
             lifecycle.mark_exit_ready();
             app.exit(0);
             Ok(())
@@ -88,6 +92,7 @@ pub(crate) async fn quit_app(app: AppHandle) -> Result<(), String> {
                 ) {
                     eprintln!("failed to publish shutdown error: {emit_error}");
                 }
+                app.state::<LiveStreams>().stop_all();
                 lifecycle.mark_exit_ready();
                 app.exit(0);
                 Ok(())

@@ -267,13 +267,11 @@ extension AuthorityV1Codec {
       }
       return ["kind": "bind_proxy_owner", "payload": try capabilityPayload(value)]
     case .redeemTunnelTicket(let value):
-      try value.operation.validateAuthorityV1()
-      guard value.operation.mode == .tunnel else {
-        throw AuthorityV1ValidationError.invalidTicket
-      }
       return ["kind": "redeem_tunnel_ticket", "payload": try ticketPayload(value)]
     case .attestReady(let value): return try tagged("attest_ready", value)
     case .beginStop(let value): return try tagged("begin_stop", value)
+    case .completeStop(let value): return try tagged("complete_stop", value)
+    case .reconcileOff(let value): return try tagged("reconcile_off", value)
     case .attestStopped(let value): return try tagged("attest_stopped", value)
     case .cancelPrepared(let value): return try tagged("cancel_prepared", value)
     case .snapshot(let value): return try tagged("snapshot", value)
@@ -293,6 +291,10 @@ extension AuthorityV1Codec {
     case "redeem_tunnel_ticket": return .redeemTunnelTicket(try decodeTicketPayload(payload))
     case "attest_ready": return .attestReady(try decodeObject(ReadyAttestation.self, payload))
     case "begin_stop": return .beginStop(try decodeObject(BeginStopRequest.self, payload))
+    case "complete_stop":
+      return .completeStop(try decodeObject(CompleteStopRequest.self, payload))
+    case "reconcile_off":
+      return .reconcileOff(try decodeObject(ReconcileOffRequest.self, payload))
     case "attest_stopped": return .attestStopped(try decodeObject(StoppedAttestation.self, payload))
     case "cancel_prepared":
       return .cancelPrepared(try decodeObject(CancelPreparedRequest.self, payload))
@@ -319,9 +321,7 @@ extension AuthorityV1Codec {
   fileprivate static func ticketPayload(_ value: RedeemTunnelTicketRequest) throws -> [String: Any]
   {
     [
-      "lease_id": value.leaseID.rawValue.uuidString.lowercased(),
-      "operation": try encodedObject(value.operation),
-      "ticket": byteArray(try value.ticket.transportCopy()),
+      "ticket": byteArray(try value.ticket.transportCopy())
     ]
   }
 
@@ -344,12 +344,8 @@ extension AuthorityV1Codec {
   fileprivate static func decodeTicketPayload(_ payload: [String: Any]) throws
     -> RedeemTunnelTicketRequest
   {
-    try exactKeys(payload, ["lease_id", "operation", "ticket"])
-    let operation = try decodeObject(OperationContext.self, payload["operation"] as Any)
-    guard operation.mode == .tunnel else { throw AuthorityV1ValidationError.invalidTicket }
+    try exactKeys(payload, ["ticket"])
     return RedeemTunnelTicketRequest(
-      operation: operation,
-      leaseID: try identifier(payload["lease_id"]),
       ticket: try StartTicket(
         copying: bytes(payload["ticket"], exactCount: AuthorityV1Limits.ticketBytes))
     )

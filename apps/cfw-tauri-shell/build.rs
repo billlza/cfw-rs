@@ -11,6 +11,36 @@ use sha2::{Digest, Sha256};
 /// A release build of this crate reads the root from this variable only: there
 /// is no shared directory, no implicit default, and no stale-directory recovery.
 const NATIVE_PRODUCTS_OUTPUT_ENV: &str = "CFW_NATIVE_PRODUCTS_OUTPUT";
+const REPOSITORY_COMMIT_ENV: &str = "CFW_REPOSITORY_COMMIT";
+const RELEASE_SOURCE_SHA256_ENV: &str = "CFW_RELEASE_SOURCE_SHA256";
+const GO_TOOLCHAIN_TREE_SHA256_ENV: &str = "CFW_GO_TOOLCHAIN_TREE_SHA256";
+const GO_TOOLS_TREE_SHA256_ENV: &str = "CFW_GO_TOOLS_TREE_SHA256";
+const GO_MODULE_CACHE_TREE_SHA256_ENV: &str = "CFW_GO_MODULE_CACHE_TREE_SHA256";
+
+const LIBBOX_METADATA_KEYS: [&str; 22] = [
+    "sourceTag",
+    "sourceCommit",
+    "goVersion",
+    "goToolchainTreeSha256",
+    "goToolsTreeSha256",
+    "goModuleCacheTreeSha256",
+    "gomobileVersion",
+    "gomobileCommit",
+    "gomobileModuleSum",
+    "headerNormalization",
+    "platform",
+    "buildTags",
+    "nonMacOsTags",
+    "upstreamGoModSha256",
+    "upstreamGoSumSha256",
+    "securityPatchSha256",
+    "rawPacketPatchSha256",
+    "dnsFailoverPatchSha256",
+    "patchedDiffSha256",
+    "combinedDiffSha256",
+    "patchedGoModSha256",
+    "patchedGoSumSha256",
+];
 
 /// Every native product the release bundle embeds, with its required artifact
 /// kind. The full set must be present in the candidate root; a partial set is a
@@ -19,7 +49,10 @@ const NATIVE_PRODUCTS: [(&str, &str); 4] = [
     ("CFWGlobalAuthority", "native-global-authority-v1"),
     ("CFWNativeBridge.framework", "native-host-bridge-v1"),
     ("CFWProxyAgent.app", "native-proxy-agent-v1"),
-    ("CFWPacketTunnel.systemextension", "native-packet-tunnel-v1"),
+    (
+        "com.bill.clashformac.packet-tunnel.systemextension",
+        "native-packet-tunnel-v1",
+    ),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +161,11 @@ fn main() {
             .display()
     );
     println!("cargo:rerun-if-env-changed={NATIVE_PRODUCTS_OUTPUT_ENV}");
+    println!("cargo:rerun-if-env-changed={REPOSITORY_COMMIT_ENV}");
+    println!("cargo:rerun-if-env-changed={RELEASE_SOURCE_SHA256_ENV}");
+    println!("cargo:rerun-if-env-changed={GO_TOOLCHAIN_TREE_SHA256_ENV}");
+    println!("cargo:rerun-if-env-changed={GO_TOOLS_TREE_SHA256_ENV}");
+    println!("cargo:rerun-if-env-changed={GO_MODULE_CACHE_TREE_SHA256_ENV}");
 
     if std::env::var("PROFILE").as_deref() == Ok("release") {
         verify_release_native_artifacts(repository_root)
@@ -329,8 +367,24 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
             .ok_or_else(|| format!("required pin {pin_key} is missing"))?;
         require_metadata(&manifest, metadata_key, expected)?;
     }
+    for (metadata_key, environment_key) in [
+        ("goToolchainTreeSha256", GO_TOOLCHAIN_TREE_SHA256_ENV),
+        ("goToolsTreeSha256", GO_TOOLS_TREE_SHA256_ENV),
+        ("goModuleCacheTreeSha256", GO_MODULE_CACHE_TREE_SHA256_ENV),
+    ] {
+        let expected = required_lower_hex_environment(environment_key, 64)?;
+        require_metadata(&manifest, metadata_key, &expected)?;
+    }
+    let expected_metadata_keys: BTreeSet<&str> = LIBBOX_METADATA_KEYS.into_iter().collect();
+    let actual_metadata_keys: BTreeSet<&str> =
+        manifest.metadata.keys().map(String::as_str).collect();
+    if actual_metadata_keys != expected_metadata_keys {
+        return Err("Libbox artifact metadata field set differs from the release contract".into());
+    }
 
     let native_source_sha256 = native_build_inputs_digest(repository_root)?;
+    let repository_commit = required_lower_hex_environment(REPOSITORY_COMMIT_ENV, 40)?;
+    let release_source_sha256 = required_lower_hex_environment(RELEASE_SOURCE_SHA256_ENV, 64)?;
     let xcode_version = pins
         .get("XCODE_VERSION")
         .ok_or_else(|| "required pin XCODE_VERSION is missing".to_string())?;
@@ -366,6 +420,12 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
             "nativeSourceSha256",
             &native_source_sha256,
         )?;
+        require_metadata(
+            &product_manifest,
+            "releaseSourceSha256",
+            &release_source_sha256,
+        )?;
+        require_metadata(&product_manifest, "repositoryCommit", &repository_commit)?;
         require_metadata(&product_manifest, "xcodeVersion", xcode_version)?;
         require_metadata(&product_manifest, "xcodeBuild", xcode_build)?;
         match product_manifest
@@ -541,6 +601,22 @@ fn require_metadata(manifest: &ArtifactManifest, key: &str, expected: &str) -> R
         )),
         None => Err(format!("artifact metadata {key} is missing")),
     }
+}
+
+fn required_lower_hex_environment(name: &str, length: usize) -> Result<String, String> {
+    let value =
+        std::env::var(name).map_err(|_| format!("required release identity {name} is missing"))?;
+    if value.len() != length
+        || !value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err(format!(
+            "release identity {name} is not canonical lower hex"
+        ));
+    }
+    Ok(value)
 }
 
 fn require_file_digest_metadata(

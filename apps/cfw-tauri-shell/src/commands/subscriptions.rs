@@ -3,25 +3,36 @@
 //! Every document that reaches the repository is a validated sing-box profile:
 //! remote and local imports parse into [`ValidatedSingBoxProfile`] and are
 //! projected for both modes before they are stored, exactly like the existing
-//! text import. There is no Clash YAML conversion, no parser script, and no
-//! mixin, because the projection owns listeners, logging, the experimental
-//! controller, and DNS.
+//! text import. Subscription bodies in other syntaxes (Clash Meta YAML
+//! `proxies`, node-URI bundles) are converted into that closed schema at the
+//! import boundary by [`import_subscription_document`]; only the node list is
+//! converted, because the projection owns listeners, logging, the
+//! experimental controller, and DNS. There is no template engine and no
+//! mixin.
 //!
 //! A subscription URL is stored inside the profile envelope, so it is deleted
 //! with the profile and cannot drift. Because it can carry an access token it is
 //! never part of a profile list: only an explicit single-profile read returns
 //! it.
 
+use std::error::Error as StdError;
+use std::fmt;
+use std::fs::{File, OpenOptions};
+use std::io::Read as _;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use cfw_engine_api::{CredentialProvision, CredentialProvisionRequest, CredentialVaultProvisioner};
 use cfw_profiles::{ProfileImportResult, ProfileRepository, StoredProfile};
 use cfw_singbox_config::{
-    EngineSettings, MAX_PROFILE_BYTES, ProjectionMode, ValidatedSingBoxProfile,
+    CredentialSecret, EngineSettings, MAX_PROFILE_BYTES, ProjectionMode, ValidatedSingBoxProfile,
 };
 use futures_util::StreamExt as _;
 use qrcode::QrCode;
 use qrcode::render::svg;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
 use serde::Serialize;
@@ -31,11 +42,32 @@ use super::ManagedProfiles;
 use super::shell_ops::{open_path, owned_profile_path};
 use crate::engine::ManagedEngine;
 use crate::settings_store;
+use crate::subscription_import::{ImportedCredential, import_subscription_document};
 
 const SUBSCRIPTION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SUBSCRIPTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const SUBSCRIPTION_USER_AGENT: &str = concat!("cfw-rs/", env!("CARGO_PKG_VERSION"), " (sing-box)");
+/// Subscription panels negotiate the response format on this header. The
+/// `clash.meta` product token makes them serve Clash Meta YAML with the full
+/// modern protocol set (VLESS/Reality, Hysteria2), which the importer
+/// converts into the closed schema. It must not contain `sing-box`: panels
+/// answer that token with raw sing-box JSON whose inline secrets the closed
+/// schema deliberately rejects.
+const SUBSCRIPTION_USER_AGENT: &str = concat!("clash.meta cfw-rs/", env!("CARGO_PKG_VERSION"));
 const MAX_SUBSCRIPTION_REDIRECTS: usize = 5;
+/// Subscription URLs may carry credentials in their query string. Never let
+/// reqwest synthesize a Referer header while following a redirect, including
+/// redirects between otherwise-valid public HTTPS origins.
+const FORWARD_SUBSCRIPTION_REFERER: bool = false;
+const MAX_SUBSCRIPTION_DNS_ADDRESSES: usize = 64;
+const IANA_IPV4_PROTOCOL_ASSIGNMENTS: ([u8; 4], u8) = ([192, 0, 0, 0], 24);
+const IANA_IPV6_GLOBAL_UNICAST: ([u8; 16], u8) =
+    ([0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 3);
+const IANA_IPV6_PROTOCOL_ASSIGNMENTS: ([u8; 16], u8) =
+    ([0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 23);
+const WELL_KNOWN_NAT64_PREFIX: ([u8; 16], u8) = (
+    [0, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    96,
+);
 /// Legacy Clash for Windows profile directory, read only to explain why its
 /// documents cannot be imported.
 const LEGACY_CFW_PROFILES_DIR: &str = ".config/clash/profiles";
@@ -76,16 +108,29 @@ pub(crate) async fn import_profile_url(
     let target = validate_subscription_url(&url)?;
     let body = fetch_subscription(&target).await?;
     let settings = engine.engine_settings().clone();
-    let profile = validated_profile(&body, &settings)?;
+    let imported = validated_subscription_import(&body, &settings)?;
     let _maintenance = engine
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
-    let imported = profiles
+    let imported_record = profiles
         .repository()
-        .import_with_source(name.as_deref(), &profile, Some(target.as_str()))
+        .import_with_source(name.as_deref(), &imported.profile, Some(target.as_str()))
         .map_err(|error| error.to_string())?;
-    activate_if_requested(profiles.repository(), &imported.id, activate)?;
-    Ok(imported)
+    let mut rollback =
+        SubscriptionMutationRollback::delete(profiles.repository(), imported_record.id.clone());
+    if let Err(error) = provision_imported_credentials(
+        &profiles,
+        &imported_record.id,
+        &imported.profile,
+        &imported.credentials,
+    )
+    .await
+    {
+        return Err(rollback.rollback_import(error));
+    }
+    activate_if_requested(profiles.repository(), &imported_record.id, activate)?;
+    rollback.disarm();
+    Ok(imported_record)
 }
 
 #[tauri::command]
@@ -129,14 +174,24 @@ pub(crate) async fn update_profile(
     let target = validate_subscription_url(source_url)?;
     let body = fetch_subscription(&target).await?;
     let settings = engine.engine_settings().clone();
-    let profile = validated_profile(&body, &settings)?;
+    let imported = validated_subscription_import(&body, &settings)?;
     let _maintenance = engine
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
-    profiles
+    let updated = profiles
         .repository()
-        .replace(&id, None, &profile, Some(target.as_str()))
-        .map_err(|error| error.to_string())
+        .replace(&id, None, &imported.profile, Some(target.as_str()))
+        .map_err(|error| error.to_string())?;
+    let mut rollback =
+        SubscriptionMutationRollback::restore(profiles.repository(), id.clone(), stored);
+    if let Err(error) =
+        provision_imported_credentials(&profiles, &id, &imported.profile, &imported.credentials)
+            .await
+    {
+        return Err(rollback.rollback_update(error));
+    }
+    rollback.disarm();
+    Ok(updated)
 }
 
 /// Renames a profile and rebinds its subscription URL. The validated document
@@ -252,14 +307,14 @@ pub(crate) fn open_profile_externally(
 }
 
 /// Reports the legacy Clash for Windows profile documents that were found and
-/// refuses to convert them.
+/// refuses to convert them in place.
 ///
-/// Those documents are Clash YAML. This product imports only validated sing-box
-/// profiles, and its migration path deliberately deletes legacy managed
-/// profiles instead of interpreting them, so converting them here would
-/// reintroduce exactly the input surface the migration removed. 0.3.5 also
-/// returned an error when nothing could be imported, so the failure shape is
-/// unchanged.
+/// Subscription import converts Clash Meta YAML fetched from a live URL, so
+/// re-importing is lossless and yields fresh credentials. Bulk-converting
+/// stale on-disk documents here would silently resurrect dead nodes and
+/// expired secrets without their subscription URL, so the migration path
+/// deliberately reports instead of writing. 0.3.5 also returned an error when
+/// nothing could be imported, so the failure shape is unchanged.
 #[tauri::command]
 pub(crate) fn migrate_legacy_cfw_profiles() -> Result<Vec<ProfileImportResult>, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is not available")?;
@@ -272,7 +327,7 @@ pub(crate) fn migrate_legacy_cfw_profiles() -> Result<Vec<ProfileImportResult>, 
         ));
     }
     Err(format!(
-        "found {found} legacy Clash for Windows profile document(s) in {}; they are Clash YAML and this release imports only validated sing-box profiles, so nothing was converted or written. Re-import each subscription with Import from URL",
+        "found {found} legacy Clash for Windows profile document(s) in {}; these on-disk copies carry no subscription URL and may hold stale nodes, so nothing was converted or written. Re-import each subscription with Import from URL",
         legacy_dir.display()
     ))
 }
@@ -306,10 +361,143 @@ fn validated_profile(
     let profile = ValidatedSingBoxProfile::parse(body).map_err(|error| error.to_string())?;
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
         profile
-            .project(mode, settings)
+            .project("00000000-0000-4000-8000-000000000000", mode, settings)
             .map_err(|error| error.to_string())?;
     }
     Ok(profile)
+}
+
+fn validated_subscription_import(
+    body: &str,
+    settings: &EngineSettings,
+) -> Result<crate::subscription_import::ImportedSubscription, String> {
+    let imported = import_subscription_document(body)?;
+    for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
+        imported
+            .profile
+            .project("00000000-0000-4000-8000-000000000000", mode, settings)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(imported)
+}
+
+async fn provision_imported_credentials(
+    profiles: &ManagedProfiles,
+    profile_id: &str,
+    profile: &ValidatedSingBoxProfile,
+    credentials: &[ImportedCredential],
+) -> Result<(), String> {
+    if credentials.is_empty() {
+        return Ok(());
+    }
+    let entries = credentials
+        .iter()
+        .map(|credential| {
+            CredentialSecret::new(&credential.secret)
+                .map(|secret| CredentialProvision::new(&credential.reference, secret))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let request = CredentialProvisionRequest::new(profile_id, profile, entries)
+        .map_err(|error| error.to_string())?;
+    let receipt = profiles
+        .credential_vault()
+        .clone()
+        .provision_profile_credentials(request)
+        .await
+        .map_err(|error| error.to_string())?;
+    if receipt.profile_id != profile_id || receipt.profile_digest != profile.digest() {
+        return Err(
+            "credential vault receipt does not match the imported subscription profile".into(),
+        );
+    }
+    Ok(())
+}
+
+enum SubscriptionRollbackAction {
+    Delete,
+    Restore(Box<StoredProfile>),
+}
+
+struct SubscriptionMutationRollback<'a> {
+    repository: &'a ProfileRepository,
+    profile_id: String,
+    action: Option<SubscriptionRollbackAction>,
+}
+
+impl<'a> SubscriptionMutationRollback<'a> {
+    fn delete(repository: &'a ProfileRepository, profile_id: String) -> Self {
+        Self {
+            repository,
+            profile_id,
+            action: Some(SubscriptionRollbackAction::Delete),
+        }
+    }
+
+    fn restore(
+        repository: &'a ProfileRepository,
+        profile_id: String,
+        stored: StoredProfile,
+    ) -> Self {
+        Self {
+            repository,
+            profile_id,
+            action: Some(SubscriptionRollbackAction::Restore(Box::new(stored))),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.action = None;
+    }
+
+    fn rollback_import(&mut self, error: String) -> String {
+        match self.rollback() {
+            Ok(()) => format!("subscription import failed: {error}"),
+            Err(rollback_error) => {
+                format!(
+                    "subscription import failed: {error}; cleanup also failed: {rollback_error}"
+                )
+            }
+        }
+    }
+
+    fn rollback_update(&mut self, error: String) -> String {
+        match self.rollback() {
+            Ok(()) => format!("subscription update failed and was rolled back: {error}"),
+            Err(rollback_error) => format!(
+                "subscription update failed: {error}; rollback also failed: {rollback_error}"
+            ),
+        }
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        let Some(action) = self.action.take() else {
+            return Ok(());
+        };
+        match action {
+            SubscriptionRollbackAction::Delete => self
+                .repository
+                .delete(&self.profile_id)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            SubscriptionRollbackAction::Restore(stored) => self
+                .repository
+                .replace(
+                    &self.profile_id,
+                    None,
+                    &stored.profile,
+                    stored.source_url.as_deref(),
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+        }
+    }
+}
+
+impl Drop for SubscriptionMutationRollback<'_> {
+    fn drop(&mut self) {
+        let _ = self.rollback();
+    }
 }
 
 fn activate_if_requested(
@@ -399,8 +587,7 @@ fn host_is_public(host: &str) -> bool {
         .and_then(|host| host.strip_suffix(']'))
         .unwrap_or(host);
     match literal.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(address)) => is_public_ipv4(address),
-        Ok(std::net::IpAddr::V6(address)) => is_public_ipv6(address),
+        Ok(address) => is_public_ip(address),
         Err(_) => {
             !host.eq_ignore_ascii_case("localhost")
                 && !host.to_ascii_lowercase().ends_with(".localhost")
@@ -417,21 +604,223 @@ fn host_is_public(host: &str) -> bool {
     }
 }
 
-fn is_public_ipv4(address: std::net::Ipv4Addr) -> bool {
-    !(address.is_unspecified()
-        || address.is_loopback()
-        || address.is_private()
-        || address.is_link_local()
-        || address.is_multicast()
-        || address.is_broadcast()
-        || address.is_documentation())
+fn is_public_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_public_ipv4(address),
+        IpAddr::V6(address) => is_public_ipv6(address),
+    }
 }
 
-fn is_public_ipv6(address: std::net::Ipv6Addr) -> bool {
-    !(address.is_unspecified()
-        || address.is_loopback()
-        || address.is_unicast_link_local()
-        || address.is_multicast())
+/// Public subscription endpoints are restricted to globally reachable unicast
+/// addresses. This table follows the IANA IPv4 Special-Purpose Address Registry
+/// and additionally excludes multicast, which is never a valid HTTPS origin for
+/// this product. Keep it aligned with
+/// <https://www.iana.org/assignments/iana-ipv4-special-registry/>.
+fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    if matches!(address.octets(), [192, 0, 0, 9 | 10]) {
+        return true;
+    }
+    const NON_PUBLIC: &[([u8; 4], u8)] = &[
+        ([0, 0, 0, 0], 8),
+        ([10, 0, 0, 0], 8),
+        ([100, 64, 0, 0], 10),
+        ([127, 0, 0, 0], 8),
+        ([169, 254, 0, 0], 16),
+        ([172, 16, 0, 0], 12),
+        IANA_IPV4_PROTOCOL_ASSIGNMENTS,
+        ([192, 0, 2, 0], 24),
+        // Deprecated 6to4 relay space has no generally reachable assignment;
+        // the sole specific 192.88.99.2 registration is explicitly non-global.
+        ([192, 88, 99, 0], 24),
+        ([192, 168, 0, 0], 16),
+        ([198, 18, 0, 0], 15),
+        ([198, 51, 100, 0], 24),
+        ([203, 0, 113, 0], 24),
+        ([224, 0, 0, 0], 4),
+        ([240, 0, 0, 0], 4),
+    ];
+    !NON_PUBLIC
+        .iter()
+        .any(|(network, prefix)| ipv4_has_prefix(address, *network, *prefix))
+}
+
+/// IPv4-mapped and well-known NAT64 addresses inherit the classification of
+/// their embedded IPv4 address. Native IPv6 is admitted only from IANA's global
+/// unicast 2000::/3 allocation and then has every non-global special-purpose
+/// subrange removed. Everything else fails closed, including multicast, ULA,
+/// link-local, site-local, discard-only and future-reserved ranges. Keep the
+/// exceptions aligned with
+/// <https://www.iana.org/assignments/iana-ipv6-special-registry/>.
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    if let Some(mapped) = address.to_ipv4_mapped() {
+        return is_public_ipv4(mapped);
+    }
+    if ipv6_has_prefix(
+        address,
+        WELL_KNOWN_NAT64_PREFIX.0,
+        WELL_KNOWN_NAT64_PREFIX.1,
+    ) {
+        let octets = address.octets();
+        return is_public_ipv4(Ipv4Addr::new(
+            octets[12], octets[13], octets[14], octets[15],
+        ));
+    }
+    if !ipv6_has_prefix(
+        address,
+        IANA_IPV6_GLOBAL_UNICAST.0,
+        IANA_IPV6_GLOBAL_UNICAST.1,
+    ) {
+        return false;
+    }
+
+    if ipv6_has_prefix(
+        address,
+        IANA_IPV6_PROTOCOL_ASSIGNMENTS.0,
+        IANA_IPV6_PROTOCOL_ASSIGNMENTS.1,
+    ) {
+        return is_globally_reachable_ietf_protocol_assignment(address);
+    }
+
+    const NON_PUBLIC_GLOBAL_UNICAST: &[([u8; 16], u8)] = &[
+        // Documentation ranges.
+        (
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            32,
+        ),
+        ([0x3f, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 20),
+        // 6to4 has no unconditional globally-reachable guarantee.
+        ([0x20, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 16),
+    ];
+    !NON_PUBLIC_GLOBAL_UNICAST
+        .iter()
+        .any(|(network, prefix)| ipv6_has_prefix(address, *network, *prefix))
+}
+
+fn is_globally_reachable_ietf_protocol_assignment(address: Ipv6Addr) -> bool {
+    let value = u128::from_be_bytes(address.octets());
+    const PCP_ANYCAST: u128 = 0x2001_0001_0000_0000_0000_0000_0000_0001;
+    const TURN_ANYCAST: u128 = 0x2001_0001_0000_0000_0000_0000_0000_0002;
+    const DNS_SD_ANYCAST: u128 = 0x2001_0001_0000_0000_0000_0000_0000_0003;
+    if matches!(value, PCP_ANYCAST | TURN_ANYCAST | DNS_SD_ANYCAST) {
+        return true;
+    }
+    const GLOBAL_EXCEPTIONS: &[([u8; 16], u8)] = &[
+        (
+            [0x20, 0x01, 0, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            32,
+        ),
+        (
+            [
+                0x20, 0x01, 0, 0x04, 0x01, 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            48,
+        ),
+        (
+            [0x20, 0x01, 0, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            28,
+        ),
+        (
+            [0x20, 0x01, 0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            28,
+        ),
+    ];
+    GLOBAL_EXCEPTIONS
+        .iter()
+        .any(|(network, prefix)| ipv6_has_prefix(address, *network, *prefix))
+}
+
+fn ipv4_has_prefix(address: Ipv4Addr, network: [u8; 4], prefix: u8) -> bool {
+    debug_assert!(prefix <= 32);
+    let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
+    u32::from_be_bytes(address.octets()) & mask == u32::from_be_bytes(network) & mask
+}
+
+fn ipv6_has_prefix(address: Ipv6Addr, network: [u8; 16], prefix: u8) -> bool {
+    debug_assert!(prefix <= 128);
+    let mask = u128::MAX.checked_shl(u32::from(128 - prefix)).unwrap_or(0);
+    u128::from_be_bytes(address.octets()) & mask == u128::from_be_bytes(network) & mask
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscriptionResolutionError {
+    EmptyAnswer,
+    TooManyAnswers,
+    NonPublicAnswer,
+}
+
+impl fmt::Display for SubscriptionResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyAnswer => formatter.write_str("subscription DNS answer was empty"),
+            Self::TooManyAnswers => formatter.write_str("subscription DNS answer was too large"),
+            Self::NonPublicAnswer => {
+                formatter.write_str("subscription DNS answer was not globally reachable")
+            }
+        }
+    }
+}
+
+impl StdError for SubscriptionResolutionError {}
+
+fn validate_resolved_addresses(
+    addresses: &[SocketAddr],
+) -> Result<(), SubscriptionResolutionError> {
+    if addresses.is_empty() {
+        return Err(SubscriptionResolutionError::EmptyAnswer);
+    }
+    if addresses.len() > MAX_SUBSCRIPTION_DNS_ADDRESSES {
+        return Err(SubscriptionResolutionError::TooManyAnswers);
+    }
+    if addresses.iter().any(|address| !is_public_ip(address.ip())) {
+        return Err(SubscriptionResolutionError::NonPublicAnswer);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct SystemSubscriptionDnsResolver;
+
+impl Resolve for SystemSubscriptionDnsResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addresses = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn StdError + Send + Sync>)?
+                .take(MAX_SUBSCRIPTION_DNS_ADDRESSES + 1)
+                .collect::<Vec<_>>();
+            Ok(Box::new(addresses.into_iter()) as Addrs)
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PublicSubscriptionDnsResolver<R> {
+    inner: R,
+}
+
+impl<R> PublicSubscriptionDnsResolver<R> {
+    fn new(inner: R) -> Self {
+        Self { inner }
+    }
+}
+
+impl<R> Resolve for PublicSubscriptionDnsResolver<R>
+where
+    R: Resolve,
+{
+    fn resolve(&self, name: Name) -> Resolving {
+        let resolving = self.inner.resolve(name);
+        Box::pin(async move {
+            let addresses = resolving
+                .await?
+                .take(MAX_SUBSCRIPTION_DNS_ADDRESSES + 1)
+                .collect::<Vec<_>>();
+            validate_resolved_addresses(&addresses)
+                .map_err(|error| Box::new(error) as Box<dyn StdError + Send + Sync>)?;
+            Ok(Box::new(addresses.into_iter()) as Addrs)
+        })
+    }
 }
 
 async fn fetch_subscription(url: &Url) -> Result<String, String> {
@@ -476,8 +865,17 @@ fn subscription_client() -> Result<Client, String> {
     ensure_tls_crypto_provider()?;
     Client::builder()
         .user_agent(SUBSCRIPTION_USER_AGENT)
+        .referer(FORWARD_SUBSCRIPTION_REFERER)
         .connect_timeout(SUBSCRIPTION_CONNECT_TIMEOUT)
         .timeout(SUBSCRIPTION_REQUEST_TIMEOUT)
+        // A proxy can resolve the target itself and bypass the connector's
+        // public-address resolver. Subscription fetching therefore uses a
+        // direct connection unless a future explicit trusted-proxy policy is
+        // designed and verified end to end.
+        .no_proxy()
+        .dns_resolver(PublicSubscriptionDnsResolver::new(
+            SystemSubscriptionDnsResolver,
+        ))
         .redirect(Policy::custom(|attempt| {
             if attempt.previous().len() >= MAX_SUBSCRIPTION_REDIRECTS {
                 return attempt.error("too many subscription redirects");
@@ -524,10 +922,22 @@ fn sanitized_fetch_error(stage: &str, error: &reqwest::Error) -> String {
 }
 
 fn read_local_profile(path: &Path) -> Result<String, String> {
+    read_opened_local_profile(open_local_profile(path)?)
+}
+
+fn open_local_profile(path: &Path) -> Result<File, String> {
     if !path.is_absolute() {
         return Err("profile path must be absolute".into());
     }
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| error.to_string())
+}
+
+fn read_opened_local_profile(file: File) -> Result<String, String> {
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
     if !metadata.file_type().is_file() {
         return Err("profile path is not a regular file".into());
     }
@@ -536,16 +946,35 @@ fn read_local_profile(path: &Path) -> Result<String, String> {
             "profile file exceeds the {MAX_PROFILE_BYTES}-byte limit"
         ));
     }
-    std::fs::read_to_string(path).map_err(|error| error.to_string())
+    let mut body = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_PROFILE_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| error.to_string())?;
+    if body.len() > MAX_PROFILE_BYTES {
+        return Err(format!(
+            "profile file exceeds the {MAX_PROFILE_BYTES}-byte limit"
+        ));
+    }
+    String::from_utf8(body).map_err(|_| "profile document is not UTF-8".to_owned())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, Ipv6Addr};
-
     use super::*;
 
     const PROFILE_JSON: &str = r#"{"outbounds":[{"type":"trojan","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","kind":"trojan_password"},"tls":{"enabled":true,"server_name":"proxy.example.com"}}]}"#;
+
+    #[derive(Debug)]
+    struct FixedDnsResolver {
+        addresses: Vec<SocketAddr>,
+    }
+
+    impl Resolve for FixedDnsResolver {
+        fn resolve(&self, _name: Name) -> Resolving {
+            let addresses = self.addresses.clone();
+            Box::pin(async move { Ok(Box::new(addresses.into_iter()) as Addrs) })
+        }
+    }
 
     #[test]
     fn subscription_urls_must_be_public_https_endpoints() {
@@ -563,6 +992,9 @@ mod tests {
             "https://10.0.0.5/sub",
             "https://192.168.1.1/sub",
             "https://169.254.1.1/sub",
+            "https://100.64.0.1/sub",
+            "https://[fc00::1]/sub",
+            "https://[::ffff:127.0.0.1]/sub",
             "file:///etc/passwd",
             "clash://install-config?url=x",
             "https://example.com/ sub",
@@ -580,30 +1012,162 @@ mod tests {
     }
 
     #[test]
-    fn private_and_loopback_literals_are_classified_as_non_public() {
-        assert!(is_public_ipv4(Ipv4Addr::new(93, 184, 216, 34)));
+    fn subscription_redirects_never_forward_referer_credentials() {
+        const { assert!(!FORWARD_SUBSCRIPTION_REFERER) };
+    }
+
+    #[test]
+    fn subscription_client_keeps_the_closed_transport_policy_wired() {
+        let source = include_str!("subscriptions.rs");
+        let builder = source
+            .split("Client::builder()")
+            .nth(1)
+            .expect("subscription client builder")
+            .split(".build()")
+            .next()
+            .expect("bounded subscription client builder");
+        for required in [
+            ".referer(FORWARD_SUBSCRIPTION_REFERER)",
+            ".no_proxy()",
+            ".dns_resolver(PublicSubscriptionDnsResolver::new(",
+            ".redirect(Policy::custom(",
+        ] {
+            assert!(
+                builder.contains(required),
+                "missing transport policy: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv4_special_purpose_ranges_are_classified_fail_closed() {
+        for accepted in [
+            Ipv4Addr::new(93, 184, 216, 34),
+            Ipv4Addr::new(100, 128, 0, 1),
+            Ipv4Addr::new(172, 32, 0, 1),
+            Ipv4Addr::new(192, 0, 0, 9),
+            Ipv4Addr::new(192, 0, 0, 10),
+            Ipv4Addr::new(192, 0, 1, 1),
+            Ipv4Addr::new(198, 20, 0, 1),
+        ] {
+            assert!(is_public_ipv4(accepted), "rejected public {accepted}");
+        }
         for rejected in [
             Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::new(0, 255, 255, 255),
             Ipv4Addr::LOCALHOST,
             Ipv4Addr::new(10, 0, 0, 1),
             Ipv4Addr::new(172, 16, 0, 1),
             Ipv4Addr::new(192, 168, 0, 1),
             Ipv4Addr::new(169, 254, 0, 1),
+            Ipv4Addr::new(100, 64, 0, 1),
+            Ipv4Addr::new(100, 127, 255, 255),
+            Ipv4Addr::new(192, 0, 0, 8),
+            Ipv4Addr::new(192, 88, 99, 2),
+            Ipv4Addr::new(198, 18, 0, 1),
+            Ipv4Addr::new(198, 19, 255, 255),
             Ipv4Addr::new(224, 0, 0, 1),
+            Ipv4Addr::new(239, 255, 255, 255),
+            Ipv4Addr::new(240, 0, 0, 1),
             Ipv4Addr::BROADCAST,
+            Ipv4Addr::new(192, 0, 2, 1),
+            Ipv4Addr::new(198, 51, 100, 1),
             Ipv4Addr::new(203, 0, 113, 1),
         ] {
             assert!(!is_public_ipv4(rejected), "accepted {rejected}");
         }
-        assert!(is_public_ipv6("2606:4700::1111".parse().expect("address")));
-        for rejected in [
-            Ipv6Addr::UNSPECIFIED,
-            Ipv6Addr::LOCALHOST,
-            "fe80::1".parse().expect("address"),
-            "ff02::1".parse().expect("address"),
+    }
+
+    #[test]
+    fn ipv6_special_mapped_and_translation_ranges_are_classified_fail_closed() {
+        for accepted in [
+            "2606:4700::1111",
+            "2001:1::1",
+            "2001:1::2",
+            "2001:1::3",
+            "2001:3::1",
+            "2001:4:112::1",
+            "2001:20::1",
+            "2001:30::1",
+            "2001:200::1",
+            "::ffff:93.184.216.34",
+            "64:ff9b::5db8:d822",
         ] {
-            assert!(!is_public_ipv6(rejected), "accepted {rejected}");
+            let address = accepted.parse().expect("public IPv6 address");
+            assert!(is_public_ipv6(address), "rejected public {accepted}");
         }
+        for rejected in [
+            "::",
+            "::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b:1::1",
+            "100::1",
+            "100:0:0:1::1",
+            "2001::1",
+            "2001:2::1",
+            "2001:db8::1",
+            "2002::1",
+            "3fff::1",
+            "5f00::1",
+            "fc00::1",
+            "fdff::1",
+            "fe80::1",
+            "fec0::1",
+            "ff02::1",
+            "4000::1",
+        ] {
+            let address = rejected.parse().expect("non-public IPv6 address");
+            assert!(!is_public_ipv6(address), "accepted {rejected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_rejects_empty_and_mixed_public_private_answers() {
+        let oversized = std::iter::repeat_n(
+            SocketAddr::from(([93, 184, 216, 34], 0)),
+            MAX_SUBSCRIPTION_DNS_ADDRESSES + 1,
+        )
+        .collect();
+        for addresses in [
+            vec![],
+            oversized,
+            vec![
+                SocketAddr::from(([93, 184, 216, 34], 0)),
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+            ],
+            vec![SocketAddr::from(([100, 64, 0, 1], 0))],
+            vec!["[fc00::1]:0".parse().expect("ULA socket address")],
+            vec![
+                "[::ffff:127.0.0.1]:0"
+                    .parse()
+                    .expect("mapped loopback socket address"),
+            ],
+        ] {
+            let resolver = PublicSubscriptionDnsResolver::new(FixedDnsResolver { addresses });
+            let name = "subscription.example".parse::<Name>().expect("DNS name");
+            assert!(resolver.resolve(name).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_returns_the_exact_validated_public_answer_set() {
+        let expected = vec![
+            SocketAddr::from(([93, 184, 216, 34], 0)),
+            "[2606:4700::1111]:0"
+                .parse()
+                .expect("public IPv6 socket address"),
+        ];
+        let resolver = PublicSubscriptionDnsResolver::new(FixedDnsResolver {
+            addresses: expected.clone(),
+        });
+        let actual = resolver
+            .resolve("subscription.example".parse::<Name>().expect("DNS name"))
+            .await
+            .expect("public answer")
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -669,18 +1233,19 @@ mod tests {
     #[tokio::test]
     async fn fetch_errors_never_echo_the_subscription_url() {
         let secret = "token-must-not-leak";
+        let host = "malformed host";
         ensure_tls_crypto_provider().expect("test TLS provider");
         let error = Client::builder()
             .timeout(Duration::from_millis(50))
             .build()
             .expect("test client")
-            .get(format!("http://127.0.0.1:0/sub?token={secret}"))
+            .get(format!("http://{host}/sub?token={secret}"))
             .send()
             .await
-            .expect_err("port zero must be rejected");
+            .expect_err("malformed URL must be rejected");
         let rendered = sanitized_fetch_error("request", &error);
         assert!(!rendered.contains(secret));
-        assert!(!rendered.contains("127.0.0.1"));
+        assert!(!rendered.contains(host));
         assert!(rendered.starts_with("subscription request "));
     }
 
@@ -699,6 +1264,113 @@ mod tests {
         assert!(read_local_profile(&link).is_err());
         assert!(read_local_profile(temporary.path()).is_err());
         assert!(read_local_profile(Path::new("relative.json")).is_err());
+    }
+
+    #[test]
+    fn opened_profile_inode_is_stable_across_path_replacement() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let profile = temporary.path().join("profile.json");
+        let retained = temporary.path().join("opened-profile.json");
+        let replacement = temporary.path().join("replacement.json");
+        std::fs::write(&profile, PROFILE_JSON).expect("write original profile");
+        std::fs::write(&replacement, "replacement").expect("write replacement");
+
+        let opened = open_local_profile(&profile).expect("open original profile once");
+        std::fs::rename(&profile, &retained).expect("retain opened inode under another name");
+        std::os::unix::fs::symlink(&replacement, &profile).expect("replace original path");
+
+        assert_eq!(
+            read_opened_local_profile(opened).expect("read the already-opened inode"),
+            PROFILE_JSON
+        );
+        assert!(read_local_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn opened_profile_read_is_bounded_even_when_metadata_exceeds_the_limit() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let profile = temporary.path().join("oversized.json");
+        std::fs::write(&profile, vec![b'x'; MAX_PROFILE_BYTES + 1])
+            .expect("write oversized profile");
+        assert!(read_local_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn subscription_mutation_guard_rolls_back_import_and_update_when_dropped() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let original = validated_profile(PROFILE_JSON, &EngineSettings::default())
+            .expect("validated original profile");
+        let replacement = ValidatedSingBoxProfile::parse(
+            r#"{"route":{"final":"direct"},"outbounds":[{"tag":"direct","type":"direct"}]}"#,
+        )
+        .expect("validated replacement profile");
+
+        let imported = repository
+            .import_with_source(None, &original, Some("https://subscription.example/import"))
+            .expect("import profile awaiting vault provision");
+        {
+            let _rollback = SubscriptionMutationRollback::delete(&repository, imported.id.clone());
+        }
+        assert!(
+            repository
+                .load(&imported.id)
+                .expect("load rolled-back import")
+                .is_none()
+        );
+
+        let stored = repository
+            .import_with_source(
+                None,
+                &original,
+                Some("https://subscription.example/original"),
+            )
+            .and_then(|record| {
+                repository
+                    .load(&record.id)
+                    .map(|stored| stored.expect("stored original profile"))
+            })
+            .expect("import original update target");
+        repository
+            .replace(
+                &stored.record.id,
+                None,
+                &replacement,
+                Some("https://subscription.example/replacement"),
+            )
+            .expect("persist replacement awaiting vault provision");
+        {
+            let _rollback = SubscriptionMutationRollback::restore(
+                &repository,
+                stored.record.id.clone(),
+                stored.clone(),
+            );
+        }
+        assert_eq!(
+            repository
+                .load(&stored.record.id)
+                .expect("load rolled-back update")
+                .expect("restored original profile"),
+            stored
+        );
+    }
+
+    #[test]
+    fn explicit_rollback_errors_are_position_and_key_redacted() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let imported = repository
+            .import_with_source(
+                None,
+                &validated_profile(PROFILE_JSON, &EngineSettings::default())
+                    .expect("validated profile"),
+                Some("https://subscription.example/token-must-not-leak"),
+            )
+            .expect("import profile");
+        let mut rollback = SubscriptionMutationRollback::delete(&repository, imported.id.clone());
+        let rendered = rollback.rollback_import("vault rejected credential at index 1".to_owned());
+        assert!(rendered.contains("index 1"));
+        assert!(!rendered.contains("token-must-not-leak"));
     }
 
     #[test]

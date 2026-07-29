@@ -25,8 +25,20 @@ from .source_preparation import (
     stage_source,
 )
 if __package__.startswith("scripts."):
+    from scripts.candidate_artifact_binding import (
+        CandidateBindingError,
+        validate_candidate_app_manifest,
+        validate_ci_toolchain_evidence,
+    )
+    from scripts.repository_source_identity import SourceIdentityError, current_identity
     from scripts.validated_candidate_evidence import validate_candidate_review
 else:
+    from candidate_artifact_binding import (
+        CandidateBindingError,
+        validate_candidate_app_manifest,
+        validate_ci_toolchain_evidence,
+    )
+    from repository_source_identity import SourceIdentityError, current_identity
     from validated_candidate_evidence import validate_candidate_review
 
 
@@ -36,7 +48,7 @@ REPOSITORY_ARTIFACT_INPUTS = {
 NATIVE_ARTIFACT_INPUTS = {
     "native-host-bridge-manifest": "CFWNativeBridge.framework.manifest.json",
     "native-proxy-agent-manifest": "CFWProxyAgent.app.manifest.json",
-    "native-packet-tunnel-manifest": "CFWPacketTunnel.systemextension.manifest.json",
+    "native-packet-tunnel-manifest": "com.bill.clashformac.packet-tunnel.systemextension.manifest.json",
     "legacy-tombstone-manifest": "CFWLegacyTombstone.manifest.json",
 }
 
@@ -164,20 +176,42 @@ def _artifact_sources(
     notary_submission = (
         signed_root / f"Clash.for.Mac_0.4.0_{build_number}_notary.zip.manifest.json"
     )
-    _require_manifest_metadata(
-        app_manifest,
-        {
-            "artifactKind": "notarized-release-v1",
-            "buildNumber": build_number,
-            "version": "0.4.0",
-        },
-        "signed app manifest",
-    )
+    review_path = repository / "target/candidates/0.4.0/review/validated-candidate.json"
+    try:
+        source_identity = current_identity(repository)
+        review = validate_candidate_review(
+            repository,
+            review_path,
+            build_number,
+            expected_source_identity=source_identity,
+        )
+        candidate = review["candidate"]
+        ci_evidence = repository / candidate["ci_evidence_path"]
+        toolchain_binding = repository / candidate["toolchain_binding_path"]
+        toolchain_metadata = validate_ci_toolchain_evidence(
+            ci_evidence,
+            toolchain_binding,
+            source_identity["repositoryCommit"],
+            source_identity["releaseSourceSha256"],
+        )
+        validate_candidate_app_manifest(
+            app_manifest,
+            app,
+            artifact_kind="notarized-release-v1",
+            build_number=build_number,
+            source_identity=source_identity,
+            toolchain_metadata=toolchain_metadata,
+            team_id="YKUPL7Z869",
+        )
+    except (CandidateBindingError, SourceIdentityError, KeyError, OSError, ValueError) as error:
+        raise PublicationError(f"release app source/toolchain binding failed: {error}") from error
     _require_manifest_metadata(
         notary_submission,
         {
             "artifactKind": "notarization-submission-v1",
             "buildNumber": build_number,
+            **source_identity,
+            **toolchain_metadata,
             "version": "0.4.0",
         },
         "notarization submission manifest",
@@ -197,9 +231,6 @@ def _artifact_sources(
             "notarization-submission-manifest": notary_submission,
         }
     )
-    review_path = repository / "target/candidates/0.4.0/review/validated-candidate.json"
-    review = validate_candidate_review(repository, review_path, build_number)
-    candidate = review["candidate"]
     sources.update(
         {
             "validated-candidate-review": review_path,
@@ -209,6 +240,8 @@ def _artifact_sources(
             / candidate["notarization_result_path"],
             "validated-candidate-runtime-recovery": repository
             / candidate["runtime_evidence_path"],
+            "validated-candidate-unsigned-ci": ci_evidence,
+            "validated-candidate-toolchain-binding": toolchain_binding,
         }
     )
     return sources

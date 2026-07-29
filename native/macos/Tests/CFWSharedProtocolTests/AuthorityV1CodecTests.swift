@@ -45,7 +45,7 @@ private func verifyFixture<T: AuthorityV1WireModel>(
   #expect(AuthorityV1Limits.maximumEnvelopeBytes == 1_048_576)
   #expect(AuthorityV1Limits.maximumConfigurationBytes == 768 * 1_024)
   #expect(AuthorityV1Limits.maximumTotalSecretBytes == 256 * 1_024)
-  #expect(AuthorityV1Limits.maximumCredentialSlots == 128)
+  #expect(AuthorityV1Limits.maximumCredentialSlots == 256)
   #expect(AuthorityV1Limits.maximumIndividualSecretBytes == 16 * 1_024)
   #expect(AuthorityV1Limits.maximumReadOnlyRequests == 64)
   #expect(AuthorityV1Limits.maximumMutatingTransactions == 1)
@@ -62,12 +62,14 @@ private func verifyFixture<T: AuthorityV1WireModel>(
   let maximum = try AuthorityConfigurationDescriptor(
     byteCount: UInt32(AuthorityV1Limits.maximumConfigurationBytes),
     configSHA256: digest, identitySHA256: identity,
+    credentialAudience: try testCredentialAudience(),
     credentialSlots: [], tunnelOptions: nil)
   #expect(maximum.byteCount == UInt32(768 * 1_024))
   #expect(throws: AuthorityV1ValidationError.boundViolation) {
     try AuthorityConfigurationDescriptor(
       byteCount: UInt32(AuthorityV1Limits.maximumConfigurationBytes + 1),
       configSHA256: digest, identitySHA256: identity,
+      credentialAudience: try testCredentialAudience(),
       credentialSlots: [], tunnelOptions: nil)
   }
 
@@ -85,10 +87,10 @@ private func verifyFixture<T: AuthorityV1WireModel>(
   let slots = try (0..<AuthorityV1Limits.maximumCredentialSlots).map { _ in
     try AuthoritySecretSlot(
       reference: CredentialReference(id: UUID(), kind: .trojanPassword),
-      copying: Data(repeating: 1, count: 2 * 1_024))
+      copying: Data(repeating: 1, count: 1_024))
   }
   let material = try AuthoritySecretMaterial(slots: slots)
-  #expect(material.slots.count == 128)
+  #expect(material.slots.count == 256)
   #expect(material.totalByteCount == 256 * 1_024)
 
   let overflowSlot = try AuthoritySecretSlot(

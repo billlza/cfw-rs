@@ -143,6 +143,7 @@ async fn install_available_update_inner(
     let stopped = coordinator
         .set_mode(
             EngineMode::Off,
+            "00000000-0000-4000-8000-000000000000".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )

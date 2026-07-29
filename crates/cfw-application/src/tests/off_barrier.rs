@@ -55,7 +55,12 @@ async fn cross_mode_switch_proves_off_between_owners_then_allocates_fresh_genera
     let coordinator = quiet_coordinator(backend.clone());
 
     let proxy = coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("start proxy");
     let proxy_generation = generation_of(&proxy.state);
@@ -63,7 +68,12 @@ async fn cross_mode_switch_proves_off_between_owners_then_allocates_fresh_genera
     assert_eq!(backend.query_count(), 1);
 
     let tunnel = coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("switch to tunnel");
     let tunnel_generation = generation_of(&tunnel.state);
@@ -96,7 +106,12 @@ async fn switch_whose_stop_cannot_prove_off_does_not_start_other_mode() {
     let coordinator = quiet_coordinator(backend.clone());
 
     coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("start proxy");
 
@@ -108,7 +123,12 @@ async fn switch_whose_stop_cannot_prove_off_does_not_start_other_mode() {
         .expect("stop leaves owner lock") = true;
 
     let error = coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect_err("an unproven Off barrier must block the target mode");
     assert!(
@@ -127,7 +147,12 @@ async fn switch_whose_stop_cannot_prove_off_does_not_start_other_mode() {
     // The coordinator stays fail-closed: a newer operation is blocked by the
     // sticky quarantine and touches the backend for no new start.
     let blocked = coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect_err("quarantine blocks a newer operation");
     assert_eq!(blocked, error, "quarantine returns the exact typed error");
@@ -144,7 +169,12 @@ async fn connection_loss_during_off_proof_alone_is_not_off() {
     let coordinator = quiet_coordinator(backend.clone());
 
     coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("start tunnel");
 
@@ -153,7 +183,12 @@ async fn connection_loss_during_off_proof_alone_is_not_off() {
     *backend.fail_query.lock().expect("query failure lock") = true;
 
     let error = coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect_err("connection loss alone must not prove Off");
     assert!(
@@ -187,7 +222,12 @@ async fn lingering_owner_status_alone_is_never_off() {
     let coordinator = quiet_coordinator(backend.clone());
 
     coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("start tunnel");
     *backend
@@ -196,7 +236,12 @@ async fn lingering_owner_status_alone_is_never_off() {
         .expect("stop leaves owner lock") = true;
 
     let error = coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect_err("a lingering owner observation is not Off");
     let observed = match &error {
@@ -216,7 +261,12 @@ async fn stop_to_off_refuses_to_declare_off_from_an_ambiguous_observation() {
     let coordinator = quiet_coordinator(backend.clone());
 
     coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("start proxy");
     *backend
@@ -225,7 +275,12 @@ async fn stop_to_off_refuses_to_declare_off_from_an_ambiguous_observation() {
         .expect("stop leaves owner lock") = true;
 
     let error = coordinator
-        .set_mode(EngineMode::Off, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect_err("stop must not declare Off while an owner is still observed");
     assert!(
@@ -237,4 +292,51 @@ async fn stop_to_off_refuses_to_declare_off_from_an_ambiguous_observation() {
         coordinator.snapshot().state,
         EngineState::Failed { .. }
     ));
+}
+
+#[tokio::test]
+async fn failed_rollback_keeps_off_proof_obligation_until_reconciled() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend
+        .wrong_proxy_digest
+        .lock()
+        .expect("wrong digest lock") = true;
+    *backend
+        .stop_leaves_owner_present
+        .lock()
+        .expect("stop observation lock") = true;
+    let coordinator = quiet_coordinator(backend.clone());
+
+    let error = coordinator
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect_err("identity rollback requires an independent Off proof");
+    assert!(matches!(
+        error,
+        EngineCoordinatorError::ValidationAndOffProofFailed { .. }
+    ));
+    assert_eq!(backend.operations(), vec!["start_proxy", "stop_proxy"]);
+    assert_eq!(backend.query_count(), 2);
+
+    *backend
+        .stop_leaves_owner_present
+        .lock()
+        .expect("stop observation lock") = false;
+    backend.set_native_status(NativeEngineStatus::Off);
+    let off = coordinator
+        .set_mode(
+            EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect("explicit Off retries the outstanding proof obligation");
+    assert_eq!(off.state, EngineState::Off);
+    assert_eq!(backend.query_count(), 3);
 }

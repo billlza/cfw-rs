@@ -4,12 +4,14 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_toolchain_contract.sh
+source "$repo_root/scripts/release_toolchain_contract.sh"
 toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 go_bin="$toolchain_root/go-$GO_VERSION/bin/go"
 node_bin="$toolchain_root/node-$NODE_VERSION/bin/node"
 xcodegen_root="$toolchain_root/xcodegen-$XCODEGEN_VERSION"
 xcodegen_bin="$xcodegen_root/bin/xcodegen"
-xcodegen_manifest="$toolchain_root/xcodegen-$XCODEGEN_VERSION.manifest.json"
+tauri_bin="$toolchain_root/tauri-cli-$TAURI_CLI_VERSION/bin/cargo-tauri"
 
 # shellcheck source=scripts/release_workspace_secret_gate.sh
 source "$repo_root/scripts/release_workspace_secret_gate.sh"
@@ -27,6 +29,12 @@ if [[ "$(rustc --version | awk '{print $2}')" != "$RUST_VERSION" ]]; then
   echo "error: rustc $RUST_VERSION is required" >&2
   exit 1
 fi
+cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_node_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_xcodegen_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_release_tools_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_module_cache_tree "$repo_root" "$toolchain_root"
 if [[ "$("$go_bin" version)" != "go version go$GO_VERSION darwin/arm64" ]]; then
   echo "error: pinned Go $GO_VERSION toolchain is unavailable" >&2
   exit 1
@@ -47,14 +55,6 @@ if [[ "$(lipo -archs "$xcodegen_bin")" != "arm64" ]]; then
   echo "error: pinned XcodeGen must be thin arm64" >&2
   exit 1
 fi
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
-  "$xcodegen_root" \
-  "$xcodegen_manifest" \
-  --metadata "sourceArchiveSha256=$XCODEGEN_SOURCE_SHA256" \
-  --metadata "sourceCommit=$XCODEGEN_COMMIT" \
-  --metadata "version=$XCODEGEN_VERSION" \
-  --metadata "xcodeBuild=$XCODE_BUILD_VERSION" \
-  --metadata "xcodeVersion=$XCODE_VERSION"
 if [[ "$(cargo audit --version)" != "cargo-audit-audit $CARGO_AUDIT_VERSION" ]]; then
   echo "error: cargo-audit $CARGO_AUDIT_VERSION is required" >&2
   exit 1
@@ -63,7 +63,7 @@ if [[ "$(cargo deny --version)" != "cargo-deny $CARGO_DENY_VERSION" ]]; then
   echo "error: cargo-deny $CARGO_DENY_VERSION is required" >&2
   exit 1
 fi
-if [[ "$(cargo tauri --version)" != "tauri-cli $TAURI_CLI_VERSION" ]]; then
+if [[ "$("$tauri_bin" --version)" != "tauri-cli $TAURI_CLI_VERSION" ]]; then
   echo "error: tauri-cli $TAURI_CLI_VERSION is required" >&2
   exit 1
 fi
@@ -206,5 +206,15 @@ if tauri.get("bundle", {}).get("createUpdaterArtifacts") is not False:
 if tauri.get("build", {}).get("frontendDist") != "ui/dist":
     raise SystemExit("error: Tauri must consume generated ui/dist output")
 PY
+
+# Identity probes and policy validation execute files inside the managed trees.
+# Re-verify the complete payloads so self-modification or concurrent drift can
+# never be accepted as a valid release environment.
+cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_node_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_xcodegen_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_release_tools_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_module_cache_tree "$repo_root" "$toolchain_root"
 
 echo "release environment verified"

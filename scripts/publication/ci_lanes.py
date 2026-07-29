@@ -70,16 +70,20 @@ from .common import (
     PublicationError,
     canonical_json,
     read_regular,
+    require_sha256,
     sha256_bytes,
     sha256_file,
     write_new,
 )
 from .sealed_closure import derive_supply_chain
 from .sealed_manifest import REQUIRED_CI_LANES, _ci_lane_document, _require_command
+from .release_toolchains import verified_release_toolchain_trees
 
 
 SCHEMA_VERSION = 1
 DOCUMENT_KIND = "unsigned-ci-lane-record-v1"
+LANE_SCHEMA_VERSION = 2
+LANE_DOCUMENT_KIND = "unsigned-ci-lanes-v2"
 TOOLCHAIN_BINDING_KIND = "unsigned-ci-toolchain-binding-v1"
 
 PASSED = "passed"
@@ -161,15 +165,13 @@ LANES: tuple[Lane, ...] = (
         timeout=1800,
     ),
     Lane("cargo-deny", "cargo deny --locked --target aarch64-apple-darwin check", timeout=1800),
-    Lane("node-install", "npm ci", cwd="apps/cfw-tauri-shell", timeout=1800, pinned_node=True),
-    Lane("node-test", "npm test", cwd="apps/cfw-tauri-shell", timeout=1800, pinned_node=True),
-    Lane("node-build", "npm run build", cwd="apps/cfw-tauri-shell", timeout=1800, pinned_node=True),
+    Lane("node-install", "./scripts/prepare_ui_dependencies.sh", timeout=1800),
+    Lane("node-test", "./scripts/build_ui_with_pinned_node.sh --test", timeout=1800),
+    Lane("node-build", "./scripts/build_ui_with_pinned_node.sh", timeout=1800),
     Lane(
         "node-audit",
-        "npm audit --audit-level=high",
-        cwd="apps/cfw-tauri-shell",
+        "./scripts/build_ui_with_pinned_node.sh --audit",
         timeout=900,
-        pinned_node=True,
     ),
     Lane(
         "swift-format-lint",
@@ -194,22 +196,10 @@ LANES: tuple[Lane, ...] = (
     ),
     Lane(
         "libbox-module-verify",
-        'SING_BOX_SOURCE="$SING_BOX_SOURCE" ./scripts/prepare_libbox_modules.sh; '
-        "source scripts/dependency_pins.env; source scripts/go_release_environment.sh; "
-        'toolchain_root="$PWD/target/toolchains"; go_bin="$toolchain_root/go-$GO_VERSION/bin/go"; '
-        'export GOPATH="$toolchain_root/go-workspace"; export GOMODCACHE="$GOPATH/pkg/mod"; '
-        'export GOCACHE="$toolchain_root/go-build-cache"; configure_offline_go_environment; '
-        'cd "$SING_BOX_SOURCE"; "$go_bin" mod verify; '
-        '"$go_bin" test -count=1 -race -ldflags=-checklinkname=0 -tags "$LIBBOX_BUILD_TAGS" '
-        "./dns ./option; "
-        '"$go_bin" test -count=1 -ldflags=-checklinkname=0 -tags "$LIBBOX_BUILD_TAGS" '
-        "./dns ./option ./common/dialer ./daemon ./experimental/libbox; "
-        '"$go_bin" test -run \'^$\' -ldflags=-checklinkname=0 -tags "$LIBBOX_BUILD_TAGS" '
-        "./common/dialer ./route; "
-        '"$go_bin" vet -tags "$LIBBOX_BUILD_TAGS" '
-        "./dns ./option ./common/dialer ./daemon ./experimental/libbox",
+        'SING_BOX_SOURCE="$SING_BOX_SOURCE" ./scripts/test_libbox_source.sh',
         timeout=7200,
         libbox_source=True,
+        runner_temp=True,
     ),
     Lane(
         "libbox-govulncheck",
@@ -370,12 +360,19 @@ def _go_module_identity(
     raise PublicationError(f"pinned Go tool does not report its {module} module identity: {binary}")
 
 
-def _resolved_toolchain(repository: Path, pins: dict[str, str]) -> dict[str, str]:
+def _resolved_toolchain(
+    repository: Path,
+    pins: dict[str, str],
+    toolchain_root: Path | None = None,
+) -> dict[str, str]:
     """Resolve the identity of every tool that actually executes a lane."""
-    toolchain_root = repository / TOOLCHAIN_ROOT_RELATIVE
+    if toolchain_root is None:
+        toolchain_root, _tree_digests = verified_release_toolchain_trees(repository, pins)
     node_bin_dir = toolchain_root / f"node-{pins['NODE_VERSION']}" / "bin"
     go_bin = toolchain_root / f"go-{pins['GO_VERSION']}" / "bin" / "go"
     go_workspace_bin = toolchain_root / "go-workspace" / "bin"
+    xcodegen_bin = toolchain_root / f"xcodegen-{pins['XCODEGEN_VERSION']}" / "bin/xcodegen"
+    tauri_bin = toolchain_root / f"tauri-cli-{pins['TAURI_CLI_VERSION']}" / "bin/cargo-tauri"
 
     base = dict(os.environ)
     base["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -402,10 +399,15 @@ def _resolved_toolchain(repository: Path, pins: dict[str, str]) -> dict[str, str
         "cargo-deny",
     )
     resolved["cargo-tauri"] = _expect_field(
-        _identity_output(["cargo", "tauri", "--version"], repository, "tauri-cli", base),
+        _identity_output([str(tauri_bin), "--version"], repository, "tauri-cli", base),
         1,
         pins["TAURI_CLI_VERSION"],
         "tauri-cli",
+    )
+    resolved["xcodegen"] = _expect(
+        _identity_output([str(xcodegen_bin), "--version"], repository, "XcodeGen", base),
+        f"Version: {pins['XCODEGEN_VERSION']}",
+        "XcodeGen",
     )
     resolved["xcodebuild"] = _expect(
         _identity_output(["xcodebuild", "-version"], repository, "Xcode", base),
@@ -458,21 +460,29 @@ def derive_toolchain_identity(repository: Path) -> dict[str, Any]:
     """
     supply = derive_supply_chain(repository)
     pins = _pins(repository)
+    toolchain_root, tree_digests = verified_release_toolchain_trees(repository, pins)
     for key in APPLE_PIN_KEYS:
         if key not in pins:
             raise PublicationError(f"dependency_pins.env is missing required pin {key}")
+    resolved = _resolved_toolchain(repository, pins, toolchain_root)
+    _verified_root_after, tree_digests_after = verified_release_toolchain_trees(
+        repository, pins
+    )
+    if _verified_root_after != toolchain_root or tree_digests_after != tree_digests:
+        raise PublicationError("release toolchain changed while resolving its identity")
     return {
         "document": TOOLCHAIN_BINDING_KIND,
         "pins_path": PINS_RELATIVE,
         "pins_sha256": sha256_file(repository / PINS_RELATIVE),
         "toolchain_versions": supply["toolchain_versions"],
         "toolchain_digests": supply["toolchain_digests"],
+        "release_tree_sha256": tree_digests,
         "apple_toolchain": {
             "xcode_version": pins["XCODE_VERSION"],
             "xcode_build_version": pins["XCODE_BUILD_VERSION"],
             "macos_deployment_target": pins["MACOS_DEPLOYMENT_TARGET"],
         },
-        "resolved": _resolved_toolchain(repository, pins),
+        "resolved": resolved,
     }
 
 
@@ -503,6 +513,7 @@ JOURNAL_FIELDS = {
     "log_name",
     "log_bytes",
     "commit",
+    "release_source_sha256",
     "toolchain_sha256",
     "timeout_seconds",
     "duration_seconds",
@@ -517,6 +528,7 @@ DOCUMENT_LANE_FIELDS = (
     "exit_code",
     "log_sha256",
     "commit",
+    "release_source_sha256",
     "toolchain_sha256",
 )
 
@@ -539,6 +551,7 @@ def _normalized_exit(exit_code: int | None, timed_out: bool) -> tuple[str, int]:
 def record_lane(
     lane: Lane,
     commit: str,
+    release_source_sha256: str,
     toolchain: str,
     output: bytes,
     exit_code: int | None,
@@ -563,6 +576,9 @@ def record_lane(
         "log_name": f"{lane.identifier}.log",
         "log_bytes": len(output),
         "commit": commit,
+        "release_source_sha256": require_sha256(
+            release_source_sha256, "release source SHA-256"
+        ),
         "toolchain_sha256": toolchain,
         "timeout_seconds": lane.timeout,
         "duration_seconds": round(duration, 3),
@@ -577,15 +593,17 @@ def lane_environment(
     libbox_source: Path,
     libbox_output: Path,
     runner_temp: Path,
+    toolchain_root: Path,
 ) -> dict[str, str]:
     """Build the lane's environment: the pinned toolchain and nothing masking."""
     environment = dict(os.environ)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["MACOSX_DEPLOYMENT_TARGET"] = pins["MACOS_DEPLOYMENT_TARGET"]
+    environment["CFW_TOOLCHAIN_ROOT"] = str(toolchain_root)
     for key in ("SING_BOX_SOURCE", "LIBBOX_OUTPUT", "RUNNER_TEMP"):
         environment.pop(key, None)
     if lane.pinned_node:
-        node_bin = repository / TOOLCHAIN_ROOT_RELATIVE / f"node-{pins['NODE_VERSION']}" / "bin"
+        node_bin = toolchain_root / f"node-{pins['NODE_VERSION']}" / "bin"
         environment["PATH"] = f"{node_bin}:{environment.get('PATH', '')}"
     if lane.libbox_source:
         environment["SING_BOX_SOURCE"] = str(libbox_source)
@@ -657,13 +675,17 @@ def write_journal_record(journal: Path, lane: Lane, record: dict[str, Any], outp
 
 
 def read_journal_record(
-    journal: Path, lane: Lane, commit: str, toolchain: str
+    journal: Path,
+    lane: Lane,
+    commit: str,
+    release_source_sha256: str,
+    toolchain: str,
 ) -> dict[str, Any] | None:
     """Return the lane's recorded run, or None when it is absent or stale.
 
     A record is stale - and therefore unusable - when it was captured at another
-    commit, against another toolchain, for a different command, or when its log
-    no longer hashes to the recorded digest.
+    commit or source tree, against another toolchain, for a different command,
+    or when its log no longer hashes to the recorded digest.
     """
     record_path, log_path = _journal_paths(journal, lane)
     if record_path.is_symlink() or not record_path.is_file():
@@ -679,6 +701,7 @@ def read_journal_record(
         or record["command"] != lane.command
         or record["cwd"] != lane.cwd
         or record["commit"] != commit
+        or record["release_source_sha256"] != release_source_sha256
         or record["toolchain_sha256"] != toolchain
     ):
         return None
@@ -708,7 +731,10 @@ def read_journal_record(
 
 
 def assemble_document(
-    records: dict[str, dict[str, Any]], commit: str, toolchain: str
+    records: dict[str, dict[str, Any]],
+    commit: str,
+    release_source_sha256: str,
+    toolchain: str,
 ) -> tuple[dict[str, Any], list[str]]:
     """Assemble and validate the canonical unsigned-CI lane document.
 
@@ -719,13 +745,18 @@ def assemble_document(
     if missing:
         raise PublicationError(f"unsigned CI lane records are missing: {missing}")
     document = {
+        "schema_version": LANE_SCHEMA_VERSION,
+        "document": LANE_DOCUMENT_KIND,
+        "release_source_sha256": require_sha256(
+            release_source_sha256, "unsigned CI release source SHA-256"
+        ),
         "toolchain_sha256": toolchain,
         "lanes": sorted(
             ({field: records[lane][field] for field in DOCUMENT_LANE_FIELDS} for lane in records),
             key=lambda entry: entry["id"],
         ),
     }
-    validated, failures = _ci_lane_document(document, commit)
+    validated, failures = _ci_lane_document(document, commit, release_source_sha256)
     return validated, failures
 
 
@@ -741,6 +772,7 @@ def collect_ci_lanes(
     repository: Path,
     *,
     commit: str,
+    release_source_sha256: str,
     output: Path,
     journal: Path,
     only: frozenset[str] = frozenset(),
@@ -754,17 +786,46 @@ def collect_ci_lanes(
 ) -> dict[str, Any]:
     """Run the required unsigned-CI lanes and write the canonical document.
 
-    Lanes already recorded in the journal against this commit and this toolchain
-    are replayed instead of re-run; ``rerun`` forces a fresh run, ``only``
-    restricts which lanes may run at all. Nothing is fabricated: a lane that is
-    neither recorded nor run stays missing and the document is refused.
+    Lanes already recorded in the journal against this commit, source tree, and
+    toolchain are replayed instead of re-run; ``rerun`` forces a fresh run,
+    ``only`` restricts which lanes may run at all. Nothing is fabricated: a lane
+    that is neither recorded nor run stays missing and the document is refused.
     """
     self_check()
+    release_source_sha256 = require_sha256(
+        release_source_sha256, "unsigned CI release source SHA-256"
+    )
     unknown = sorted((only | rerun) - set(LANE_INDEX))
     if unknown:
         raise PublicationError(f"unknown unsigned CI lane selection: {unknown}")
-    digest, identity = toolchain if toolchain is not None else derive_toolchain_binding(repository)
     pins = _pins(repository)
+    if toolchain is None:
+        digest, identity = derive_toolchain_binding(repository)
+        execution_toolchain_root, execution_tree_digests = verified_release_toolchain_trees(
+            repository, pins
+        )
+        if identity.get("release_tree_sha256") != execution_tree_digests:
+            raise PublicationError(
+                "CI lane execution toolchain differs from the canonical binding"
+            )
+    else:
+        digest, identity = toolchain
+        configured_root = Path(
+            os.environ.get("CFW_TOOLCHAIN_ROOT", repository / TOOLCHAIN_ROOT_RELATIVE)
+        )
+        selected_root = (
+            configured_root if configured_root.is_absolute() else repository / configured_root
+        )
+        try:
+            if not selected_root.is_dir() or selected_root.is_symlink():
+                raise PublicationError(
+                    "CI lane execution toolchain root is missing, not a directory, or a symlink"
+                )
+            execution_toolchain_root = selected_root.resolve(strict=True)
+        except OSError as error:
+            raise PublicationError(
+                f"cannot resolve the CI lane execution toolchain root: {error}"
+            ) from error
     source = (
         repository / DEFAULT_LIBBOX_SOURCE_TEMPLATE.format(version=pins["SING_BOX_VERSION"])
         if libbox_source is None
@@ -781,10 +842,16 @@ def collect_ci_lanes(
     binding_path.unlink(missing_ok=True)
     write_new(binding_path, canonical_json(identity))
 
-    report(f"unsigned CI lanes: commit={commit} toolchain_sha256={digest}")
+    report(
+        "unsigned CI lanes: "
+        f"commit={commit} release_source_sha256={release_source_sha256} "
+        f"toolchain_sha256={digest}"
+    )
     records: dict[str, dict[str, Any]] = {}
     for lane in LANES:
-        existing = read_journal_record(journal, lane, commit, digest)
+        existing = read_journal_record(
+            journal, lane, commit, release_source_sha256, digest
+        )
         if existing is not None and lane.identifier not in rerun:
             records[lane.identifier] = existing
             report(
@@ -796,13 +863,27 @@ def collect_ci_lanes(
             report(f"  {lane.identifier}: not recorded")
             continue
         environment = lane_environment(
-            repository, lane, pins, source, artifact, journal / "runner-temp" / lane.identifier
+            repository,
+            lane,
+            pins,
+            source,
+            artifact,
+            journal / "runner-temp" / lane.identifier,
+            execution_toolchain_root,
         )
         report(f"  {lane.identifier}: running (bound to {lane.timeout}s) $ {lane.command}")
         started_at = int(time.time())
         output_bytes, exit_code, timed_out, duration = runner(repository, lane, environment)
         record = record_lane(
-            lane, commit, digest, output_bytes, exit_code, timed_out, duration, started_at
+            lane,
+            commit,
+            release_source_sha256,
+            digest,
+            output_bytes,
+            exit_code,
+            timed_out,
+            duration,
+            started_at,
         )
         write_journal_record(journal, lane, record, output_bytes)
         records[lane.identifier] = record
@@ -811,7 +892,9 @@ def collect_ci_lanes(
             f"{record['duration_seconds']}s, log {record['log_sha256'][:12]})"
         )
 
-    document, failures = assemble_document(records, commit, digest)
+    document, failures = assemble_document(
+        records, commit, release_source_sha256, digest
+    )
     write_new(output, canonical_json(document))
     report(f"unsigned CI lane record written: {output}")
     report(f"lanes={len(document['lanes'])} failed={failures}")
@@ -819,6 +902,7 @@ def collect_ci_lanes(
         "document": document,
         "failures": failures,
         "toolchain_sha256": digest,
+        "release_source_sha256": release_source_sha256,
         "toolchain_identity": identity,
         "records": records,
         "output": str(output),

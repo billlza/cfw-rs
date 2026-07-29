@@ -3,9 +3,11 @@
 Profiles are local typed application JSON documents whose supported protocol
 fields mirror safe sing-box outbound shapes. `credential_ref` is an
 application-owned non-secret extension that is removed during projection.
-Clash YAML, URL subscriptions, profile parsers, mixins, custom scripts, PAC
-scripts, and executable/core installation fields are not accepted or
-converted.
+Stored profiles never contain Clash YAML, parsers, mixins, custom scripts,
+PAC scripts, or executable/core installation fields. Subscription import
+converts Clash Meta YAML `proxies` lists and node-URI bundles into this
+schema at the boundary; everything outside the node list (rules, groups,
+listeners, DNS) is owned by the app's projection and is not carried over.
 
 The safe schema is intentionally closed:
 
@@ -14,8 +16,8 @@ The safe schema is intentionally closed:
   Shadowsocks, VMess, VLESS/Reality, Trojan, or Hysteria2 shape;
 - top-level `route` is optional and may contain only `final`;
 - `route.final`, when present, must reference a declared outbound tag;
-- remote server endpoints are bounded and typed, while subscriptions and
-  remote resources remain disabled;
+- remote server endpoints are bounded and typed, while profile-embedded
+  subscriptions and remote resources remain disabled;
 - credential-bearing outbounds contain canonical `credential_ref` objects;
   raw passwords, UUID values, private keys, and other secret fields fail
   validation;

@@ -34,7 +34,12 @@ async fn expect_backend_kind(
     expected: BackendErrorKind,
 ) -> EngineCoordinatorError {
     let error = coordinator
-        .set_mode(target, direct(), EngineSettings::default())
+        .set_mode(
+            target,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect_err("typed authority failure");
     match &error {
@@ -101,7 +106,12 @@ async fn replay_rejection_surfaces_typed_error_and_stays_recoverable() {
         .lock()
         .expect("tunnel start error lock") = None;
     let active = coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("fresh context starts after replay rejection");
     assert!(matches!(active.state, EngineState::TunnelActive { .. }));
@@ -153,7 +163,12 @@ async fn compensation_conflict_quarantines_and_blocks_newer_operations() {
         .lock()
         .expect("tunnel start error lock") = None;
     let blocked = coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect_err("quarantine blocks a newer operation");
     assert_eq!(
@@ -169,7 +184,12 @@ async fn compensation_conflict_quarantines_and_blocks_newer_operations() {
     // Only an explicit Off reconciliation that proves the stop barrier clears
     // the quarantine; afterwards a fresh start is permitted.
     coordinator
-        .set_mode(EngineMode::Off, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("explicit Off reconciliation proves the stop barrier");
     assert_eq!(
@@ -178,7 +198,12 @@ async fn compensation_conflict_quarantines_and_blocks_newer_operations() {
     );
 
     let active = coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("reconciled coordinator accepts a fresh start");
     assert!(matches!(active.state, EngineState::ProxyActive { .. }));
@@ -205,7 +230,12 @@ async fn cleanup_unproven_quarantine_survives_repeated_start_attempts() {
     // and never touch the backend again.
     for target in [EngineMode::SystemProxy, EngineMode::Tunnel] {
         let blocked = coordinator
-            .set_mode(target, direct(), EngineSettings::default())
+            .set_mode(
+                target,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                direct(),
+                EngineSettings::default(),
+            )
             .await
             .expect_err("quarantine is sticky until reconciliation");
         assert_eq!(blocked, quarantine);
@@ -239,7 +269,12 @@ async fn quarantine_clears_only_after_a_proven_off_stop() {
         .expect("tunnel install error lock") = None;
 
     coordinator
-        .set_mode(EngineMode::Off, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("Off reconciliation cancels the retained installation and proves Off");
     assert_eq!(
@@ -249,7 +284,12 @@ async fn quarantine_clears_only_after_a_proven_off_stop() {
     assert_eq!(coordinator.snapshot().state, EngineState::Off);
 
     let active = coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("fresh start after proven Off");
     assert!(matches!(active.state, EngineState::TunnelActive { .. }));

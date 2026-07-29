@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::CredentialRef;
 
-pub(crate) const MAX_OUTBOUNDS: usize = 128;
+/// Maximum number of outbounds one profile may declare. Public so importers
+/// can bound conversion work before handing a document to the validator.
+pub const MAX_OUTBOUNDS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

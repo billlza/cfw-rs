@@ -178,6 +178,11 @@ extension NativeBridgeCoordinator {
         )
       case .corrupt:
         return .failure(.identityRejected, "Credential vault data is corrupt.")
+      case .unsupportedSchemaVersion:
+        return .failure(
+          .credentialMigrationRequired,
+          "Credential vault schema is unsupported; clear and reprovision credentials."
+        )
       case .missingVault:
         return .failure(.credentialVaultMissing, "Credential vault does not exist.")
       case .keychain(let status):
@@ -187,7 +192,7 @@ extension NativeBridgeCoordinator {
         return .failure(code, "Credential Keychain operation failed with status \(status).")
       case .invalidAccessGroup:
         return .failure(.identityRejected, "Credential Keychain access group is invalid.")
-      case .invalidProfileIdentifier, .kindMismatch, .duplicateReference,
+      case .invalidProfileIdentifier, .invalidProfileDigest, .kindMismatch, .duplicateReference,
         .unexpectedCredential, .capacityExceeded:
         return .failure(.configurationRejected, "Credential request is invalid.")
       }

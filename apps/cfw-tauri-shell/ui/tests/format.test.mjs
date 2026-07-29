@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  delayFailureLabel,
   errorText,
   formatBytes,
   formatGeoipLabel,
@@ -65,6 +66,16 @@ test("summarizes provider batches without hiding failures", () => {
   );
   assert.equal(providerBatchSucceeded(result), false);
   assert.equal(providerBatchSucceeded({ requested: 1, succeeded: ["a"], failed: [] }), true);
+  assert.equal(providerBatchSucceeded({ requested: 2, succeeded: ["a"], failed: [] }), false);
+  assert.equal(providerBatchSucceeded({ succeeded: [], failed: [] }), false);
+});
+
+test("keeps delay probe failure types distinct", () => {
+  assert.equal(delayFailureLabel("timeout"), "Timeout");
+  assert.equal(delayFailureLabel("not_found"), "Not found");
+  assert.equal(delayFailureLabel("transport"), "Network error");
+  assert.equal(delayFailureLabel("invalid_response"), "Invalid response");
+  assert.equal(delayFailureLabel("unexpected"), "Probe failed");
 });
 
 test("relative profile timestamps never claim a time they do not have", () => {

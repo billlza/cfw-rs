@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import stat
 import subprocess
 import sys
@@ -16,7 +19,9 @@ import time
 from typing import Callable
 import unittest
 from unittest.mock import patch
+import uuid
 
+import scripts.gatekeeper_assessment as gatekeeper_module
 import scripts.notarization_transaction as transaction_module
 from scripts.gatekeeper_assessment import validate_evidence as validate_gatekeeper_evidence
 from scripts.notarization_transaction import (
@@ -40,6 +45,7 @@ from scripts.notarization_transaction import (
     recover_transaction,
 )
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
+from scripts.tests.gatekeeper_fixture import macos_27_fixture
 from scripts.tests.notary_fixture import (
     ARCHIVE_BYTES,
     ARCHIVE_SHA256,
@@ -169,6 +175,7 @@ class Fixture:
             },
         )
         self.runner = FakeRunner(self.context.archive_name)
+        self.clock: Callable[[], str] = lambda: "2026-07-28T04:02:00Z"
 
     def close(self) -> None:
         self.temporary.cleanup()
@@ -178,7 +185,11 @@ class Fixture:
         archive.chmod(0o600)
 
     def gatekeeper(self, _app: Path, tree_sha256: str) -> dict:
-        return gatekeeper_fixture(tree_sha256, "2026-07-28T04:01:00Z")
+        return gatekeeper_fixture(
+            tree_sha256,
+            "2026-07-28T04:01:00Z",
+            _app,
+        )
 
     def source_identity(self, _repository: Path) -> dict[str, str]:
         return self.context.source_identity
@@ -200,7 +211,7 @@ class Fixture:
                 self.context.toolchain_metadata
             ),
             "publisher": self.publisher,
-            "clock": lambda: "2026-07-28T04:02:00Z",
+            "clock": self.clock,
             "attempt_id_factory": lambda: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         }
 
@@ -256,6 +267,40 @@ class Fixture:
                 ) from error
         else:
             raise AssertionError("legacy submit shape unexpectedly succeeded")
+
+
+def sole_finalization_run(fixture: Fixture) -> Path:
+    runs = list(
+        (fixture.context.attempt_root / "finalization-runs").glob("*")
+    )
+    if len(runs) != 1:
+        raise AssertionError(f"expected one finalization run, observed {len(runs)}")
+    uuid.UUID(runs[0].name)
+    return runs[0]
+
+
+def current_publish_ready(fixture: Fixture) -> Path | None:
+    candidates = list(
+        (fixture.context.attempt_root / "finalization-runs").glob(
+            "*/publish-ready"
+        )
+    )
+    if len(candidates) > 1:
+        raise AssertionError("multiple active publish-ready workspaces")
+    return candidates[0] if candidates else None
+
+
+def sole_finalization_receipt(fixture: Fixture) -> Path:
+    receipts = list(
+        (fixture.context.attempt_root / "finalization-runs").glob(
+            "*/receipt.json"
+        )
+    )
+    if len(receipts) != 1:
+        raise AssertionError(
+            f"expected one finalization receipt, observed {len(receipts)}"
+        )
+    return receipts[0]
 
 
 def single_signature_diagnostic(app: Path) -> str:
@@ -455,7 +500,8 @@ class ProductionArchiveBuilderTests(unittest.TestCase):
             self.assertEqual(observed["cwd"], app.parent)
             environment = observed["environment"]
             self.assertIsInstance(environment, dict)
-            assert isinstance(environment, dict)
+            if not isinstance(environment, dict):
+                self.fail("archive builder did not provide an environment")
             self.assertEqual(environment["COPYFILE_DISABLE"], "1")
             self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o600)
             fsync_directory.assert_called_once_with(archive.parent)
@@ -639,7 +685,8 @@ class NotarizationReadinessPolicyMutationTests(unittest.TestCase):
 
     def test_rejects_every_missing_ticket_corroboration_near_match(self) -> None:
         exact = self._exact_runner()
-        assert exact.corroboration is not None
+        if exact.corroboration is None:
+            self.fail("exact readiness fixture lacks corroboration")
         expected = known_missing_ticket(self.app)
         mutations: list[tuple[str, CommandResult]] = [
             ("success", CommandResult(0, json.dumps({"output": []}), "")),
@@ -717,18 +764,20 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
                 CommandRole.FINAL_VERIFY,
             ],
         )
-        work_app = str(
+        submitted_work_app = str(
             self.fixture.context.attempt_root / "work/Clash for Mac.app"
-        )
-        publish_app = str(
-            self.fixture.context.attempt_root / "publish-ready/Clash for Mac.app"
         )
         commands = self.fixture.runner.command_calls
         self.assertEqual(
             commands[0],
             (
                 CommandRole.NOTARY_READINESS,
-                ("/usr/bin/syspolicy_check", "notary-submission", work_app, "--json"),
+                (
+                    "/usr/bin/syspolicy_check",
+                    "notary-submission",
+                    submitted_work_app,
+                    "--json",
+                ),
                 600,
             ),
         )
@@ -749,14 +798,21 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         self.assertEqual(commands[2][2], 7500)
         self.assertEqual(commands[3][0], CommandRole.FETCH_LOG)
         self.assertIn(SUBMISSION_ID, commands[3][1])
-        self.assertEqual(commands[4][1][-1], work_app)
-        self.assertEqual(commands[5][1][-1], work_app)
+        finalization_work_app = Path(commands[4][1][-1])
+        finalization_root = finalization_work_app.parent.parent
+        self.assertEqual(
+            finalization_root.parent,
+            self.fixture.context.attempt_root / "finalization-runs",
+        )
+        uuid.UUID(finalization_root.name)
+        publish_app = str(finalization_root / "publish-ready/Clash for Mac.app")
+        self.assertEqual(commands[5][1][-1], str(finalization_work_app))
         final_verifies = [
             command
             for role, command, _timeout in commands
             if role == CommandRole.FINAL_VERIFY
         ]
-        self.assertEqual(final_verifies[0][1], work_app)
+        self.assertEqual(final_verifies[0][1], str(finalization_work_app))
         self.assertEqual(final_verifies[1][1], publish_app)
         self.assertEqual(final_verifies[2][1], publish_app)
         distribution = commands[-2]
@@ -786,6 +842,9 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
                 "notary_ready",
                 "submitting",
                 "submitted",
+                "direct_finalization_preparing",
+                "direct_finalization_ready",
+                "finalization_started",
                 "accepted",
                 "log_verified",
                 "stapling",
@@ -861,6 +920,9 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
                 "pre_submission_policy_compatibility_applied",
                 "submitting",
                 "submitted",
+                "direct_finalization_preparing",
+                "direct_finalization_ready",
+                "finalization_started",
                 "accepted",
                 "log_verified",
                 "stapling",
@@ -1014,7 +1076,11 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             self.fixture.context.attempt_root / "intent.json",
             self.fixture.context.attempt_root / "submission-observation.json",
             self.fixture.context.attempt_root / "submission-receipt.json",
-            self.fixture.context.attempt_root / "receipt.json",
+            next(
+                (
+                    self.fixture.context.attempt_root / "finalization-runs"
+                ).glob("*/receipt.json")
+            ),
         ):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
@@ -1049,6 +1115,23 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
 
 
 class NotarizationRecoveryTests(unittest.TestCase):
+    FROZEN_40001_INTENT_SHA256 = (
+        "fd7472abe80c110161d8d5c418372bc68694fb49e9bcea635b6c5b766ffc0bd4"
+    )
+    FROZEN_40001_EVENT_SHA256 = (
+        "17230348094bf28632d2d476cc07de1328cb68168bf6e6e78dbff0c1160fe461",
+        "ee1f32a475907d4df0a18b4b3e15c8141d29dea61e881d0271349c696e131065",
+        "af1a861a20ae8e4ceb80b3eaf0505e933c969e279bacfcecd8bdabd7293007d4",
+        "0010f34b95418759e9717924055b87ed791862c8e877118eaa06610d2f4d0925",
+    )
+    FROZEN_40001_ARCHIVE_SHA256 = (
+        "34976cb5eaeef4fd5547304405a305f794d8ddff95676733996971173273839a"
+    )
+    FROZEN_40001_ARCHIVE_SIZE = 30_062_052
+    FROZEN_40001_APP_SHA256 = (
+        "3aee7c561dd6bfee4a54e64ec3c1995f8948496157c907b0b4cec7932d9494af"
+    )
+
     def setUp(self) -> None:
         self.fixture = Fixture()
         self.fixture.create_orphaned_submit_attempt()
@@ -1068,6 +1151,2556 @@ class NotarizationRecoveryTests(unittest.TestCase):
         self.fixture.runner.calls.clear()
         self.fixture.runner.command_calls.clear()
         self.fixture.runner.role_counts.clear()
+
+    @staticmethod
+    def _clear_runner_observations(fixture: Fixture) -> None:
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+
+    def _direct_receipt_fixture(self) -> Fixture:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        fixture.runner.fail_role = CommandRole.WAIT
+        with self.assertRaises(TransactionError) as raised:
+            fixture.execute()
+        self.assertEqual(raised.exception.code, "wait_failed")
+        fixture.runner.fail_role = None
+        self._clear_runner_observations(fixture)
+        return fixture
+
+    def _crash_after_continuation_marker(
+        self,
+        fixture: Fixture | None = None,
+    ) -> tuple[dict[str, str], Path]:
+        target = fixture or self.fixture
+        target.runner.fail_role = CommandRole.STAPLE
+        self._clear_runner_observations(target)
+        with self.assertRaises(TransactionError):
+            target.recover()
+
+        continued_identity = {
+            "repositoryCommit": "e" * 40,
+            "releaseSourceSha256": "f" * 64,
+        }
+        original_append = transaction_module.EventJournal.append
+
+        def crash_after_marker(journal, state: str, **fields) -> None:
+            original_append(journal, state, **fields)
+            if state == "recovery_tool_continued":
+                raise SimulatedCrash(state)
+
+        target.runner.fail_role = None
+        self._clear_runner_observations(target)
+        with patch.object(
+            transaction_module.EventJournal,
+            "append",
+            crash_after_marker,
+        ):
+            with self.assertRaises(SimulatedCrash):
+                target.recover(
+                    recovery_tool_identity_reader=(
+                        lambda _repository: continued_identity
+                    )
+                )
+
+        marker_path = sorted(
+            (target.context.attempt_root / "events").glob("*.json")
+        )[-1]
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        prior_event_path = marker_path.with_name(
+            f"{marker['sequence'] - 1:08d}.json"
+        )
+        prior_event = json.loads(prior_event_path.read_text(encoding="utf-8"))
+        self.assertEqual(marker["state"], "recovery_tool_continued")
+        self.assertEqual(
+            marker["previous_event_sha256"],
+            hashlib.sha256(prior_event_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(prior_event["state"], "failed")
+        self.assertFalse(
+            (
+                target.context.attempt_root
+                / "recovery-continuation.json"
+            ).exists()
+        )
+        return continued_identity, marker_path
+
+    @staticmethod
+    def _continued_identity() -> dict[str, str]:
+        return {
+            "repositoryCommit": "e" * 40,
+            "releaseSourceSha256": "f" * 64,
+        }
+
+    def _expected_continuation_from_tip(
+        self,
+        fixture: Fixture,
+        continued_identity: dict[str, str],
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        event_paths = sorted(
+            (fixture.context.attempt_root / "events").glob("*.json")
+        )
+        prior_event_path = event_paths[-1]
+        prior_event = json.loads(prior_event_path.read_text(encoding="utf-8"))
+        recovery_intent_path = (
+            fixture.context.attempt_root / "recovery-intent.json"
+        )
+        recovery_intent = json.loads(
+            recovery_intent_path.read_text(encoding="utf-8")
+        )
+        requested_at = "2026-07-28T04:02:00Z"
+        continuation: dict[str, object] = {
+            "schema_version": 1,
+            "document": transaction_module.RECOVERY_CONTINUATION_DOCUMENT,
+            "attempt_id": recovery_intent["attempt_id"],
+            "submission_id": SUBMISSION_ID,
+            "recovery_intent_sha256": hashlib.sha256(
+                recovery_intent_path.read_bytes()
+            ).hexdigest(),
+            "prior_recovery_tool_repository_commit": "c" * 40,
+            "prior_recovery_tool_release_source_sha256": "d" * 64,
+            "continuation_tool_repository_commit": continued_identity[
+                "repositoryCommit"
+            ],
+            "continuation_tool_release_source_sha256": continued_identity[
+                "releaseSourceSha256"
+            ],
+            "prior_event_sha256": hashlib.sha256(
+                prior_event_path.read_bytes()
+            ).hexdigest(),
+            "prior_failure_code": prior_event["failure_code"],
+            "requested_at": requested_at,
+        }
+        marker: dict[str, object] = {
+            "schema_version": 2,
+            "document": transaction_module.EVENT_DOCUMENT_V2,
+            "sequence": prior_event["sequence"] + 1,
+            "previous_event_sha256": continuation["prior_event_sha256"],
+            "intent_sha256": prior_event["intent_sha256"],
+            "state": "recovery_tool_continued",
+            "recorded_at": requested_at,
+            "submission_id": SUBMISSION_ID,
+            "failure_code": None,
+            "exit_code": None,
+            "evidence_sha256": hashlib.sha256(
+                transaction_module._canonical_json(continuation).encode("utf-8")
+            ).hexdigest(),
+        }
+        return continuation, marker
+
+    def _direct_preseal_fixture(self, *, before_receipt: bool) -> Fixture:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        with patch.object(
+            transaction_module,
+            "_append_direct_finalization_preparing",
+            side_effect=SimulatedCrash("legacy-direct-boundary"),
+        ):
+            with self.assertRaises(SimulatedCrash):
+                fixture.execute()
+        intent_path = fixture.context.attempt_root / "intent.json"
+        intent = json.loads(intent_path.read_text(encoding="utf-8"))
+        intent_sha256 = hashlib.sha256(intent_path.read_bytes()).hexdigest()
+        journal = transaction_module.EventJournal.load_existing(
+            fixture.context.attempt_root / "events",
+            intent_sha256,
+            lambda: "2026-07-28T04:02:00Z",
+        )
+        submission_receipt_path = (
+            fixture.context.attempt_root / "submission-receipt.json"
+        )
+        submission_receipt = json.loads(
+            submission_receipt_path.read_text(encoding="utf-8")
+        )
+        work = fixture.context.attempt_root / "work"
+        prepared = transaction_module.PreparedAttempt(
+            context=replace(fixture.context, staged_app=None),
+            work=work,
+            work_app=work / "Clash for Mac.app",
+            archive=work / fixture.context.archive_name,
+            archive_manifest=(
+                work / f"{fixture.context.archive_name}.manifest.json"
+            ),
+            archive_metadata=transaction_module._archive_metadata(
+                fixture.context
+            ),
+            archive_sha256=intent["archive_sha256"],
+            archive_size=intent["archive_size"],
+            pre_staple_app_sha256=intent["pre_staple_app_tree_sha256"],
+            attempt_id=intent["attempt_id"],
+            intent=intent,
+            intent_path=intent_path,
+            intent_sha256=intent_sha256,
+            submission_id=SUBMISSION_ID,
+            submission_receipt=submission_receipt,
+            submission_receipt_path=submission_receipt_path,
+            recovery_intent=None,
+            recovery_intent_path=None,
+            recovery_continuation=None,
+            recovery_continuation_path=None,
+            recovery_tool_repository=None,
+            recovery_tool_identity=None,
+            recovery_tool_identity_reader=None,
+        )
+
+        def finalize_legacy_direct() -> None:
+            transaction_module._finalize_accepted_submission(
+                prepared,
+                journal=journal,
+                command_runner=fixture.runner,
+                gatekeeper_capture=fixture.gatekeeper,
+                manifest_writer=transaction_module.production_manifest_writer,
+                manifest_verifier=transaction_module.production_manifest_verifier,
+                source_identity_reader=fixture.source_identity,
+                toolchain_metadata_reader=(
+                    lambda _repository: fixture.context.toolchain_metadata
+                ),
+                publisher=fixture.publisher,
+                clock=lambda: "2026-07-28T04:02:00Z",
+            )
+
+        if before_receipt:
+            real_publish = transaction_module._publish_pending_evidence
+
+            def crash_before_receipt(**arguments) -> None:
+                if arguments["destination_path"].name == "receipt.json":
+                    raise SimulatedCrash("before-receipt")
+                real_publish(**arguments)
+
+            with patch.object(
+                transaction_module,
+                "_publish_pending_evidence",
+                side_effect=crash_before_receipt,
+            ):
+                with self.assertRaises(SimulatedCrash):
+                    finalize_legacy_direct()
+        else:
+            real_append = transaction_module.EventJournal.append
+
+            def crash_before_sealed(journal, state: str, **fields) -> None:
+                if state == "sealed":
+                    raise SimulatedCrash("before-sealed")
+                real_append(journal, state, **fields)
+
+            with patch.object(
+                transaction_module.EventJournal,
+                "append",
+                crash_before_sealed,
+            ):
+                with self.assertRaises(SimulatedCrash):
+                    finalize_legacy_direct()
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+        return fixture
+
+    def _receipt_durability_unknown_fixture(
+        self,
+    ) -> tuple[Fixture, Callable[[], str], Path]:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        real_fsync_directory = transaction_module._fsync_directory
+        failed_receipt_directory_fsync = False
+        failed_receipt_path: Path | None = None
+        clock_tick = 0
+        clock_origin = datetime(
+            2026,
+            7,
+            28,
+            4,
+            1,
+            59,
+            999940,
+            tzinfo=timezone.utc,
+        )
+
+        def monotonic_clock() -> str:
+            nonlocal clock_tick
+            clock_tick += 1
+            return (
+                clock_origin + timedelta(microseconds=clock_tick * 10)
+            ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+        def fail_once_after_receipt_rename(path: Path) -> None:
+            nonlocal failed_receipt_directory_fsync, failed_receipt_path
+            receipt_path = path / "receipt.json"
+            receipt_pending_path = (
+                path / transaction_module.PUBLISH_READY_RECEIPT_PENDING_FILENAME
+            )
+            if (
+                not failed_receipt_directory_fsync
+                and path.parent
+                == fixture.context.attempt_root / "finalization-runs"
+                and receipt_path.is_file()
+                and not os.path.lexists(receipt_pending_path)
+            ):
+                failed_receipt_directory_fsync = True
+                failed_receipt_path = receipt_path
+                raise OSError("fixture receipt directory fsync failure")
+            real_fsync_directory(path)
+
+        with patch.object(
+            transaction_module,
+            "_fsync_directory",
+            side_effect=fail_once_after_receipt_rename,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                fixture.execute(clock=monotonic_clock)
+
+        self.assertEqual(
+            raised.exception.code,
+            "atomic_evidence_durability_unknown",
+        )
+        self.assertTrue(failed_receipt_directory_fsync)
+        self.assertIsNotNone(failed_receipt_path)
+        if failed_receipt_path is None:
+            self.fail("receipt durability fixture did not capture its receipt")
+        self.assertTrue(failed_receipt_path.is_file())
+        self.assertFalse(
+            os.path.lexists(
+                failed_receipt_path.parent
+                / transaction_module.PUBLISH_READY_RECEIPT_PENDING_FILENAME
+            )
+        )
+        self.assertTrue(
+            (failed_receipt_path.parent / "publish-ready").is_dir()
+        )
+        self._clear_runner_observations(fixture)
+        return fixture, monotonic_clock, failed_receipt_path
+
+    def _current_40001_compatibility_fixture(self) -> Fixture:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        snapshot_path = (
+            Path(__file__).parent
+            / "fixtures/notarization_40001_orphan.json"
+        )
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            snapshot["intentSha256"],
+            self.FROZEN_40001_INTENT_SHA256,
+        )
+        self.assertEqual(
+            snapshot["archiveSha256"],
+            self.FROZEN_40001_ARCHIVE_SHA256,
+        )
+        self.assertEqual(
+            snapshot["archiveSize"],
+            self.FROZEN_40001_ARCHIVE_SIZE,
+        )
+
+        fixture.build = fixture.candidate / "validation/40001"
+        fixture.native = fixture.build / "native-products"
+        fixture.native.mkdir(parents=True)
+        fixture.context = replace(
+            fixture.context,
+            build_number="40001",
+            native_products=fixture.native,
+            repository_commit=snapshot["intent"]["repository_commit"],
+            release_source_sha256=(
+                snapshot["intent"]["release_source_sha256"]
+            ),
+        )
+        fixture.runner = FakeRunner(fixture.context.archive_name)
+        fixture.runner.info_created_at = "2026-07-28T17:40:05Z"
+        fixture.runner.log = accepted_log(fixture.context.archive_name)
+        fixture.runner.log["sha256"] = self.FROZEN_40001_ARCHIVE_SHA256
+        fixture.runner.log["uploadDate"] = "2026-07-28T17:40:05.000Z"
+        fixture.clock = lambda: "2026-07-28T17:41:00Z"
+
+        attempts = fixture.candidate / "notary-attempts"
+        lane = attempts / "validation"
+        for directory in (
+            attempts,
+            lane,
+            fixture.context.attempt_root,
+            fixture.context.attempt_root / "events",
+            fixture.context.attempt_root / "work",
+        ):
+            transaction_module._mkdir_private(directory, exclusive=True)
+        work = fixture.context.attempt_root / "work"
+        shutil.copytree(
+            fixture.app,
+            work / "Clash for Mac.app",
+            symlinks=True,
+            copy_function=shutil.copy2,
+        )
+        archive = work / fixture.context.archive_name
+        archive.write_bytes(ARCHIVE_BYTES)
+        archive.chmod(0o600)
+        production_manifest_writer(
+            archive,
+            work / f"{fixture.context.archive_name}.manifest.json",
+            transaction_module._archive_metadata(fixture.context),
+        )
+        transaction_module._write_json_exclusive(
+            fixture.context.attempt_root / "intent.json",
+            snapshot["intent"],
+        )
+        for event in snapshot["events"]:
+            transaction_module._write_json_exclusive(
+                fixture.context.attempt_root
+                / "events"
+                / f"{event['sequence']:08d}.json",
+                event,
+            )
+
+        intent_path = fixture.context.attempt_root / "intent.json"
+        event_paths = sorted(
+            (fixture.context.attempt_root / "events").glob("*.json")
+        )
+        self.assertEqual(
+            hashlib.sha256(intent_path.read_bytes()).hexdigest(),
+            self.FROZEN_40001_INTENT_SHA256,
+        )
+        self.assertEqual(
+            tuple(
+                hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in event_paths
+            ),
+            self.FROZEN_40001_EVENT_SHA256,
+        )
+        frozen_event_bytes = [path.read_bytes() for path in event_paths]
+
+        # The historical 30 MB archive and app bytes are intentionally not
+        # copied into the test suite.  Scope the frozen identity seam to this
+        # TemporaryDirectory while production manifests continue to validate
+        # the synthetic files actually copied and published by the fixture.
+        real_archive_identity = transaction_module._archive_identity
+        real_app_identity = transaction_module._app_tree_sha256
+        real_gatekeeper_identity = gatekeeper_module._target_identity
+
+        def frozen_archive_identity(path: Path) -> tuple[str, int]:
+            if (
+                path.name == fixture.context.archive_name
+                and fixture.repository in path.parents
+            ):
+                return (
+                    self.FROZEN_40001_ARCHIVE_SHA256,
+                    self.FROZEN_40001_ARCHIVE_SIZE,
+                )
+            return real_archive_identity(path)
+
+        def frozen_app_identity(
+            path: Path,
+            *,
+            failure_code: str,
+            failure_message: str,
+        ) -> str:
+            if (
+                path.name == "Clash for Mac.app"
+                and fixture.repository in path.parents
+            ):
+                return self.FROZEN_40001_APP_SHA256
+            return real_app_identity(
+                path,
+                failure_code=failure_code,
+                failure_message=failure_message,
+            )
+
+        def frozen_gatekeeper_identity(
+            path: Path,
+            assessment_type: str,
+        ) -> tuple[str, str]:
+            if (
+                path.name == "Clash for Mac.app"
+                and fixture.repository in path.parents
+                and assessment_type == "execute"
+            ):
+                return self.FROZEN_40001_APP_SHA256, "sha256-tree-v2"
+            return real_gatekeeper_identity(path, assessment_type)
+
+        identity_patchers = (
+            patch.object(
+                transaction_module,
+                "_archive_identity",
+                side_effect=frozen_archive_identity,
+            ),
+            patch.object(
+                transaction_module,
+                "_app_tree_sha256",
+                side_effect=frozen_app_identity,
+            ),
+            patch.object(
+                gatekeeper_module,
+                "_target_identity",
+                side_effect=frozen_gatekeeper_identity,
+            ),
+        )
+        for identity_patcher in identity_patchers:
+            identity_patcher.start()
+            self.addCleanup(identity_patcher.stop)
+
+        def gatekeeper_failure(_app: Path, _digest: str) -> dict:
+            raise ValueError("frozen Gatekeeper failure")
+
+        with self.assertRaises(TransactionError) as raised:
+            fixture.recover(gatekeeper_capture=gatekeeper_failure)
+        self.assertEqual(
+            raised.exception.code,
+            "gatekeeper_verification_failed",
+        )
+        current_event_paths = sorted(
+            (fixture.context.attempt_root / "events").glob("*.json")
+        )
+        self.assertEqual(
+            [path.read_bytes() for path in current_event_paths[:4]],
+            frozen_event_bytes,
+        )
+        self.assertEqual(
+            hashlib.sha256(intent_path.read_bytes()).hexdigest(),
+            self.FROZEN_40001_INTENT_SHA256,
+        )
+        events = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in current_event_paths
+        ]
+        self.assertEqual(
+            [event["state"] for event in events[:4]],
+            [
+                "prepared",
+                "pre_submission_policy_compatibility_applied",
+                "submitting",
+                "outcome_unknown",
+            ],
+        )
+        self.assertIn("recovery_intent_anchored", [event["state"] for event in events])
+        self.assertEqual(
+            events[-1]["failure_code"],
+            "gatekeeper_verification_failed",
+        )
+        reduced = transaction_module._reduce_attempt_events(
+            transaction_module.EventJournal.load_existing(
+                fixture.context.attempt_root / "events",
+                hashlib.sha256(
+                    (fixture.context.attempt_root / "intent.json").read_bytes()
+                ).hexdigest(),
+                lambda: "2026-07-28T04:02:00Z",
+            )
+        )
+        self.assertEqual(
+            reduced.phase,
+            transaction_module.AttemptPhase.FINALIZATION_FAILED,
+        )
+        self.assertTrue(reduced.reconciled)
+        self.assertEqual(reduced.finalization_attempt_count, 1)
+        self.assertEqual(
+            {
+                path.name
+                for path in fixture.context.attempt_root.iterdir()
+            },
+            {
+                "events",
+                "finalization-runs",
+                "intent.json",
+                "recovery-intent.json",
+                "recovery-source",
+                "submission-receipt.json",
+            },
+        )
+        recovery_intent = json.loads(
+            (
+                fixture.context.attempt_root / "recovery-intent.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            recovery_intent["intent_sha256"],
+            self.FROZEN_40001_INTENT_SHA256,
+        )
+        self.assertEqual(
+            recovery_intent["archive_sha256"],
+            self.FROZEN_40001_ARCHIVE_SHA256,
+        )
+        run = sole_finalization_run(fixture)
+        self.assertEqual(
+            {path.name for path in run.iterdir()},
+            {"work"},
+        )
+        self.assertEqual(
+            {path.name for path in (run / "work").iterdir()},
+            {
+                "Clash for Mac.app",
+                fixture.context.archive_name,
+                f"{fixture.context.archive_name}.manifest.json",
+                "notarization.json",
+                "notarization-log.json",
+            },
+        )
+        self._clear_runner_observations(fixture)
+        return fixture
+
+    @staticmethod
+    def _regular_file_snapshot(root: Path) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and not path.is_symlink()
+        }
+
+    def test_current_40001_fixture_continues_once_then_recovers_locally(self) -> None:
+        fixture = self._current_40001_compatibility_fixture()
+        self.assertEqual(fixture.context.build_number, "40001")
+        self.assertEqual(
+            fixture.context.archive_name,
+            "Clash.for.Mac_0.4.0_40001_notary.zip",
+        )
+        attempt_root = fixture.context.attempt_root
+        original_event_paths = sorted(
+            (attempt_root / "events").glob("*.json")
+        )
+        original_event_bytes = [path.read_bytes() for path in original_event_paths]
+        immutable_documents = {
+            name: (attempt_root / name).read_bytes()
+            for name in (
+                "intent.json",
+                "recovery-intent.json",
+                "submission-receipt.json",
+            )
+        }
+        original_run = sole_finalization_run(fixture)
+        original_run_snapshot = self._regular_file_snapshot(original_run)
+        continued_identity = self._continued_identity()
+
+        first = fixture.recover(
+            recovery_tool_identity_reader=(
+                lambda _repository: continued_identity
+            )
+        )
+
+        self.assertEqual(
+            first,
+            fixture.candidate / "validation/40001/signed/Clash for Mac.app",
+        )
+        self.assertTrue(first.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+        self.assertEqual(
+            [path.read_bytes() for path in original_event_paths],
+            original_event_bytes,
+        )
+        for name, data in immutable_documents.items():
+            self.assertEqual((attempt_root / name).read_bytes(), data)
+        self.assertEqual(
+            self._regular_file_snapshot(original_run),
+            original_run_snapshot,
+        )
+        runs = self._finalization_runs(fixture)
+        self.assertEqual(len(runs), 2)
+        self.assertIn(original_run, runs)
+        self.assertTrue(
+            (attempt_root / "recovery-continuation.json").is_file()
+        )
+        sealed = transaction_module._reduce_attempt_events(
+            transaction_module.EventJournal.load_existing(
+                attempt_root / "events",
+                hashlib.sha256(
+                    (attempt_root / "intent.json").read_bytes()
+                ).hexdigest(),
+                lambda: "2026-07-28T04:02:00Z",
+            )
+        )
+        self.assertEqual(
+            sealed.phase,
+            transaction_module.AttemptPhase.SEALED,
+        )
+        self.assertTrue(sealed.reconciled)
+        self.assertEqual(sealed.finalization_attempt_count, 2)
+        continuation = json.loads(
+            (attempt_root / "recovery-continuation.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            continuation["prior_recovery_tool_release_source_sha256"],
+            "d" * 64,
+        )
+        self.assertEqual(
+            continuation["continuation_tool_release_source_sha256"],
+            "f" * 64,
+        )
+        recovery_intent_path = attempt_root / "recovery-intent.json"
+        continuation_path = attempt_root / "recovery-continuation.json"
+        self.assertEqual(
+            continuation["recovery_intent_sha256"],
+            hashlib.sha256(recovery_intent_path.read_bytes()).hexdigest(),
+        )
+        final_event_paths = sorted(
+            (attempt_root / "events").glob("*.json")
+        )
+        final_events = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in final_event_paths
+        ]
+        self.assertEqual(
+            [event["state"] for event in final_events],
+            [
+                "prepared",
+                "pre_submission_policy_compatibility_applied",
+                "submitting",
+                "outcome_unknown",
+                "recovery_intent_anchored",
+                "reconciliation_started",
+                "submission_reconciled",
+                "finalization_started",
+                "accepted",
+                "log_verified",
+                "stapling",
+                "stapled",
+                "failed",
+                "recovery_tool_continued",
+                "finalization_started",
+                "accepted",
+                "log_verified",
+                "stapling",
+                "stapled",
+                "gatekeeper_verified",
+                "app_verified",
+                "distribution_verified",
+                "sealed",
+            ],
+        )
+        continuation_event = final_events[13]
+        self.assertEqual(
+            continuation_event["evidence_sha256"],
+            hashlib.sha256(continuation_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            continuation_event["previous_event_sha256"],
+            hashlib.sha256(final_event_paths[12].read_bytes()).hexdigest(),
+        )
+        receipt_path = sole_finalization_receipt(fixture)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            receipt["intent_sha256"],
+            self.FROZEN_40001_INTENT_SHA256,
+        )
+        self.assertEqual(
+            receipt["archive_sha256"],
+            self.FROZEN_40001_ARCHIVE_SHA256,
+        )
+        self.assertEqual(
+            receipt["pre_staple_app_tree_sha256"],
+            self.FROZEN_40001_APP_SHA256,
+        )
+        self.assertEqual(
+            receipt["post_staple_app_tree_sha256"],
+            self.FROZEN_40001_APP_SHA256,
+        )
+        self.assertEqual(
+            receipt["recovery_intent_sha256"],
+            hashlib.sha256(recovery_intent_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            receipt["recovery_continuation_sha256"],
+            hashlib.sha256(continuation_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            receipt["preseal_event_sha256"],
+            hashlib.sha256(final_event_paths[-2].read_bytes()).hexdigest(),
+        )
+        final_manifest = json.loads(
+            (
+                fixture.context.final_root
+                / "Clash for Mac.app.manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(final_manifest["metadata"]["buildNumber"], "40001")
+        self.assertEqual(
+            final_manifest["metadata"]["repositoryCommit"],
+            "9d3ab6615a667040182eb874d7d20f167a13e3a4",
+        )
+        self.assertEqual(
+            final_manifest["metadata"]["releaseSourceSha256"],
+            "2cc0a657434d45b4fd7e1bc61b366393c84637c6f200e2b40f2585d20f852696",
+        )
+        self._clear_runner_observations(fixture)
+        publisher_called = False
+
+        def forbidden_publisher(_source: Path, _destination: Path) -> None:
+            nonlocal publisher_called
+            publisher_called = True
+
+        second = fixture.recover(
+            command_runner=lambda role, _command, _timeout: self.fail(
+                f"second 40001 recovery invoked runner: {role.value}"
+            ),
+            publisher=forbidden_publisher,
+            recovery_tool_identity_reader=(
+                lambda _repository: continued_identity
+            ),
+        )
+        self.assertEqual(second, first)
+        self.assertEqual(fixture.runner.calls, [])
+        self.assertFalse(publisher_called)
+
+    def test_current_40001_fixture_capacity_fails_closed(self) -> None:
+        fixture = self._current_40001_compatibility_fixture()
+        attempt_root = fixture.context.attempt_root
+        original_event_paths = sorted(
+            (attempt_root / "events").glob("*.json")
+        )
+        original_event_bytes = [path.read_bytes() for path in original_event_paths]
+        original_run = sole_finalization_run(fixture)
+        with patch.object(
+            transaction_module,
+            "MAX_FINALIZATION_RUNS",
+            1,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                fixture.recover(
+                    recovery_tool_identity_reader=(
+                        lambda _repository: self._continued_identity()
+                    )
+                )
+        self.assertEqual(
+            raised.exception.code,
+            "finalization_run_quota_exceeded",
+        )
+        self.assertEqual(
+            [path.read_bytes() for path in original_event_paths],
+            original_event_bytes,
+        )
+        self.assertEqual(self._finalization_runs(fixture), [original_run])
+        self.assertFalse(os.path.lexists(fixture.context.final_root))
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_current_40001_fixture_finalization_fsync_fails_closed(self) -> None:
+        fixture = self._current_40001_compatibility_fixture()
+        attempt_root = fixture.context.attempt_root
+        original_event_paths = sorted(
+            (attempt_root / "events").glob("*.json")
+        )
+        original_event_bytes = [path.read_bytes() for path in original_event_paths]
+        original_run = sole_finalization_run(fixture)
+        real_fsync_tree = transaction_module._fsync_tree
+        injected = False
+
+        def fail_new_run_fsync(root: Path) -> None:
+            nonlocal injected
+            real_fsync_tree(root)
+            if (
+                not injected
+                and root.name == "work"
+                and root.parent.parent
+                == attempt_root / "finalization-runs"
+                and root.parent != original_run
+            ):
+                injected = True
+                raise TransactionError(
+                    "fixture_finalization_fsync_failed",
+                    "fixture finalization fsync failure",
+                )
+
+        with patch.object(
+            transaction_module,
+            "_fsync_tree",
+            side_effect=fail_new_run_fsync,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                fixture.recover(
+                    recovery_tool_identity_reader=(
+                        lambda _repository: self._continued_identity()
+                    )
+                )
+        self.assertTrue(injected)
+        self.assertEqual(
+            raised.exception.code,
+            "fixture_finalization_fsync_failed",
+        )
+        self.assertEqual(
+            [path.read_bytes() for path in original_event_paths],
+            original_event_bytes,
+        )
+        self.assertEqual(len(self._finalization_runs(fixture)), 2)
+        self.assertFalse(os.path.lexists(fixture.context.final_root))
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    @staticmethod
+    def _finalization_runs(fixture: Fixture) -> list[Path]:
+        root = fixture.context.attempt_root / "finalization-runs"
+        if not root.exists():
+            return []
+        return sorted(root.iterdir(), key=lambda path: path.name)
+
+    def _assert_fresh_uuid_recovery(
+        self,
+        fixture: Fixture,
+        original_runs: list[Path],
+    ) -> Path:
+        original_names = {run.name for run in original_runs}
+        self._clear_runner_observations(fixture)
+
+        recovered_app = fixture.recover()
+
+        self.assertEqual(
+            recovered_app,
+            fixture.context.final_root / "Clash for Mac.app",
+        )
+        self.assertTrue(recovered_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+        recovered_runs = self._finalization_runs(fixture)
+        self.assertEqual(len(recovered_runs), len(original_runs) + 1)
+        recovered_names = {run.name for run in recovered_runs}
+        self.assertTrue(original_names < recovered_names)
+        for run in recovered_runs:
+            with self.subTest(run=run.name):
+                self.assertEqual(str(uuid.UUID(run.name)), run.name)
+        source_executable = (
+            fixture.context.attempt_root
+            / "recovery-source/Clash for Mac.app/Contents/MacOS/clash-for-mac"
+        )
+        self.assertEqual(source_executable.read_bytes(), b"signed-app")
+        self.assertFalse((fixture.context.final_root / "fault-marker").exists())
+
+        receipt_paths = list(
+            (fixture.context.attempt_root / "finalization-runs").glob(
+                "*/receipt.json"
+            )
+        )
+        receipts = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in receipt_paths
+        ]
+        recovery_receipts = [
+            receipt
+            for receipt in receipts
+            if receipt["recovery_intent_sha256"] is not None
+        ]
+        self.assertEqual(len(recovery_receipts), 1)
+        self.assertIsNone(
+            recovery_receipts[0]["recovery_continuation_sha256"]
+        )
+        for receipt in receipts:
+            if receipt is recovery_receipts[0]:
+                continue
+            self.assertIsNone(receipt["recovery_intent_sha256"])
+            self.assertIsNone(receipt["recovery_continuation_sha256"])
+
+        event_paths = sorted(
+            (fixture.context.attempt_root / "events").glob("*.json")
+        )
+        events = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in event_paths
+        ]
+        ready_entries = [
+            (path, event)
+            for path, event in zip(event_paths, events, strict=True)
+            if event["state"] == "direct_finalization_ready"
+        ]
+        anchor_entries = [
+            (path, event)
+            for path, event in zip(event_paths, events, strict=True)
+            if event["state"] == "recovery_intent_anchored"
+        ]
+        self.assertEqual(len(ready_entries), 1)
+        self.assertEqual(len(anchor_entries), 1)
+        ready_path, _ready = ready_entries[0]
+        anchor_path, anchor = anchor_entries[0]
+        recovery_intent_path = (
+            fixture.context.attempt_root / "recovery-intent.json"
+        )
+        recovery_intent = json.loads(
+            recovery_intent_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            recovery_intent["prior_event_sha256"],
+            hashlib.sha256(ready_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            anchor["evidence_sha256"],
+            hashlib.sha256(recovery_intent_path.read_bytes()).hexdigest(),
+        )
+        anchor_prior_path = anchor_path.with_name(
+            f"{anchor['sequence'] - 1:08d}.json"
+        )
+        self.assertEqual(
+            anchor["previous_event_sha256"],
+            hashlib.sha256(anchor_prior_path.read_bytes()).hexdigest(),
+        )
+        return recovered_app
+
+    def test_direct_source_boundary_fault_matrix_recovers_without_resubmit(
+        self,
+    ) -> None:
+        for stage in ("work-fsync", "rename-parent-fsync", "source-fsync"):
+            for failure_kind in ("typed", "baseexception"):
+                with self.subTest(stage=stage, failure_kind=failure_kind):
+                    fixture = Fixture()
+                    try:
+                        real_fsync_tree = transaction_module._fsync_tree
+                        real_fsync_directory = (
+                            transaction_module._fsync_directory
+                        )
+                        injected = False
+
+                        def fail() -> None:
+                            nonlocal injected
+                            injected = True
+                            if failure_kind == "typed":
+                                raise OSError(f"fixture {stage} failure")
+                            raise SimulatedCrash(stage)
+
+                        def faulting_fsync_tree(root: Path) -> None:
+                            if (
+                                not injected
+                                and stage == "work-fsync"
+                                and root
+                                == fixture.context.attempt_root / "work"
+                            ):
+                                fail()
+                            if (
+                                not injected
+                                and stage == "source-fsync"
+                                and root
+                                == fixture.context.attempt_root
+                                / "recovery-source"
+                            ):
+                                fail()
+                            real_fsync_tree(root)
+
+                        def faulting_fsync_directory(path: Path) -> None:
+                            real_fsync_directory(path)
+                            if (
+                                not injected
+                                and stage == "rename-parent-fsync"
+                                and path == fixture.context.attempt_root
+                                and (
+                                    path / "recovery-source"
+                                ).is_dir()
+                            ):
+                                fail()
+
+                        expected = (
+                            TransactionError
+                            if failure_kind == "typed"
+                            else SimulatedCrash
+                        )
+                        with patch.object(
+                            transaction_module,
+                            "_fsync_tree",
+                            side_effect=faulting_fsync_tree,
+                        ), patch.object(
+                            transaction_module,
+                            "_fsync_directory",
+                            side_effect=faulting_fsync_directory,
+                        ):
+                            with self.assertRaises(expected):
+                                fixture.execute()
+
+                        self.assertTrue(injected)
+                        states = [
+                            json.loads(path.read_text(encoding="utf-8"))[
+                                "state"
+                            ]
+                            for path in sorted(
+                                (
+                                    fixture.context.attempt_root / "events"
+                                ).glob("*.json")
+                            )
+                        ]
+                        self.assertIn(
+                            "direct_finalization_preparing",
+                            states,
+                        )
+                        self.assertNotIn("direct_finalization_ready", states)
+                        self._assert_fresh_uuid_recovery(fixture, [])
+                    finally:
+                        fixture.close()
+
+    def test_direct_workspace_copy_fault_matrix_uses_new_uuid(self) -> None:
+        for stage in ("copytree", "copy-fsync"):
+            for failure_kind in ("typed", "baseexception"):
+                with self.subTest(stage=stage, failure_kind=failure_kind):
+                    fixture = Fixture()
+                    try:
+                        real_copytree = transaction_module.shutil.copytree
+                        real_fsync_tree = transaction_module._fsync_tree
+                        injected = False
+
+                        def fail() -> None:
+                            nonlocal injected
+                            injected = True
+                            if failure_kind == "typed":
+                                if stage == "copytree":
+                                    raise OSError("fixture copy failure")
+                                raise TransactionError(
+                                    "fixture_copy_fsync_failed",
+                                    "fixture copy fsync failure",
+                                )
+                            raise SimulatedCrash(stage)
+
+                        def faulting_copytree(
+                            source: Path,
+                            destination: Path,
+                            *args,
+                            **kwargs,
+                        ):
+                            if (
+                                not injected
+                                and stage == "copytree"
+                                and destination.parent.parent
+                                == fixture.context.attempt_root
+                                / "finalization-runs"
+                            ):
+                                fail()
+                            return real_copytree(
+                                source,
+                                destination,
+                                *args,
+                                **kwargs,
+                            )
+
+                        def faulting_fsync_tree(root: Path) -> None:
+                            real_fsync_tree(root)
+                            if (
+                                not injected
+                                and stage == "copy-fsync"
+                                and root.name == "work"
+                                and root.parent.parent
+                                == fixture.context.attempt_root
+                                / "finalization-runs"
+                            ):
+                                (root / "fault-marker").write_text(
+                                    "old run must not be reused\n",
+                                    encoding="utf-8",
+                                )
+                                fail()
+
+                        expected = (
+                            TransactionError
+                            if failure_kind == "typed"
+                            else SimulatedCrash
+                        )
+                        with patch.object(
+                            transaction_module.shutil,
+                            "copytree",
+                            side_effect=faulting_copytree,
+                        ), patch.object(
+                            transaction_module,
+                            "_fsync_tree",
+                            side_effect=faulting_fsync_tree,
+                        ):
+                            with self.assertRaises(expected):
+                                fixture.execute()
+
+                        self.assertTrue(injected)
+                        original_runs = self._finalization_runs(fixture)
+                        self.assertEqual(
+                            len(original_runs),
+                            (
+                                0
+                                if stage == "copytree"
+                                and failure_kind == "typed"
+                                else 1
+                            ),
+                        )
+                        self._assert_fresh_uuid_recovery(
+                            fixture,
+                            original_runs,
+                        )
+                    finally:
+                        fixture.close()
+
+    def test_direct_command_fault_matrix_recovers_from_fresh_uuid(self) -> None:
+        cases = (
+            (CommandRole.FETCH_LOG, 1),
+            (CommandRole.STAPLE, 1),
+            (CommandRole.STAPLE_VALIDATE, 1),
+            (CommandRole.FINAL_VERIFY, 1),
+            (CommandRole.FINAL_VERIFY, 2),
+            (CommandRole.FINAL_VERIFY, 3),
+            (CommandRole.DISTRIBUTION_CHECK, 1),
+        )
+        for role, occurrence in cases:
+            for failure_kind in ("typed", "baseexception"):
+                with self.subTest(
+                    role=role,
+                    occurrence=occurrence,
+                    failure_kind=failure_kind,
+                ):
+                    fixture = Fixture()
+                    try:
+                        target_count = 0
+                        injected = False
+
+                        def faulting_runner(
+                            observed_role: CommandRole,
+                            command: list[str],
+                            timeout: float,
+                        ) -> CommandResult:
+                            nonlocal target_count, injected
+                            result = fixture.runner(
+                                observed_role,
+                                command,
+                                timeout,
+                            )
+                            if observed_role == role:
+                                target_count += 1
+                            if (
+                                not injected
+                                and observed_role == role
+                                and target_count == occurrence
+                            ):
+                                injected = True
+                                runs = self._finalization_runs(fixture)
+                                self.assertEqual(len(runs), 1)
+                                workspace = current_publish_ready(fixture)
+                                if workspace is None:
+                                    workspace = runs[0] / "work"
+                                (workspace / "fault-marker").write_text(
+                                    "old run must not be reused\n",
+                                    encoding="utf-8",
+                                )
+                                if failure_kind == "typed":
+                                    return CommandResult(
+                                        9,
+                                        "",
+                                        "fixture command failure",
+                                    )
+                                raise SimulatedCrash(role.value)
+                            return result
+
+                        expected = (
+                            TransactionError
+                            if failure_kind == "typed"
+                            else SimulatedCrash
+                        )
+                        with self.assertRaises(expected):
+                            fixture.execute(command_runner=faulting_runner)
+
+                        self.assertTrue(injected)
+                        original_runs = self._finalization_runs(fixture)
+                        self.assertEqual(len(original_runs), 1)
+                        self.assertTrue(
+                            any(original_runs[0].rglob("fault-marker"))
+                        )
+                        self._assert_fresh_uuid_recovery(
+                            fixture,
+                            original_runs,
+                        )
+                        self.assertTrue(
+                            any(original_runs[0].rglob("fault-marker"))
+                        )
+                    finally:
+                        fixture.close()
+
+    def test_direct_callback_fault_matrix_recovers_from_fresh_uuid(self) -> None:
+        for boundary in ("gatekeeper", "manifest-writer", "manifest-verifier"):
+            for failure_kind in ("typed", "baseexception"):
+                with self.subTest(
+                    boundary=boundary,
+                    failure_kind=failure_kind,
+                ):
+                    fixture = Fixture()
+                    try:
+                        injected = False
+
+                        def fail(label: str) -> None:
+                            nonlocal injected
+                            injected = True
+                            if failure_kind == "typed":
+                                raise TransactionError(
+                                    f"fixture_{label}_failed",
+                                    f"fixture {label} failure",
+                                )
+                            raise SimulatedCrash(label)
+
+                        def gatekeeper_capture(
+                            app: Path,
+                            tree_sha256: str,
+                        ) -> dict:
+                            if boundary == "gatekeeper" and not injected:
+                                (app.parent / "fault-marker").write_text(
+                                    "old run must not be reused\n",
+                                    encoding="utf-8",
+                                )
+                                fail(boundary)
+                            return fixture.gatekeeper(app, tree_sha256)
+
+                        def manifest_writer(
+                            artifact: Path,
+                            manifest: Path,
+                            metadata: dict[str, str],
+                        ) -> None:
+                            transaction_module.production_manifest_writer(
+                                artifact,
+                                manifest,
+                                metadata,
+                            )
+                            if (
+                                boundary == "manifest-writer"
+                                and not injected
+                                and artifact.name == "Clash for Mac.app"
+                                and "finalization-runs" in artifact.parts
+                            ):
+                                (artifact.parent / "fault-marker").write_text(
+                                    "old run must not be reused\n",
+                                    encoding="utf-8",
+                                )
+                                fail(boundary)
+
+                        def manifest_verifier(
+                            artifact: Path,
+                            manifest: Path,
+                            metadata: dict[str, str],
+                        ) -> None:
+                            transaction_module.production_manifest_verifier(
+                                artifact,
+                                manifest,
+                                metadata,
+                            )
+                            if (
+                                boundary == "manifest-verifier"
+                                and not injected
+                                and artifact.name == "Clash for Mac.app"
+                                and "finalization-runs" in artifact.parts
+                            ):
+                                (artifact.parent / "fault-marker").write_text(
+                                    "old run must not be reused\n",
+                                    encoding="utf-8",
+                                )
+                                fail(boundary)
+
+                        expected = (
+                            TransactionError
+                            if failure_kind == "typed"
+                            else SimulatedCrash
+                        )
+                        with self.assertRaises(expected):
+                            fixture.execute(
+                                gatekeeper_capture=gatekeeper_capture,
+                                manifest_writer=manifest_writer,
+                                manifest_verifier=manifest_verifier,
+                            )
+
+                        self.assertTrue(injected)
+                        original_runs = self._finalization_runs(fixture)
+                        self.assertEqual(len(original_runs), 1)
+                        self.assertTrue(
+                            any(original_runs[0].rglob("fault-marker"))
+                        )
+                        self._assert_fresh_uuid_recovery(
+                            fixture,
+                            original_runs,
+                        )
+                    finally:
+                        fixture.close()
+
+    def test_gatekeeper_post_status_regression_retries_from_pristine_source(
+        self,
+    ) -> None:
+        fixture = Fixture()
+        try:
+            def disabled_post_status(app: Path, tree_sha256: str) -> dict:
+                (app.parent / "fault-marker").write_text(
+                    "old run must not be reused\n",
+                    encoding="utf-8",
+                )
+                evidence = fixture.gatekeeper(app, tree_sha256)
+                evidence["post_status_output"] = "assessments disabled\n"
+                evidence["post_status_output_sha256"] = hashlib.sha256(
+                    evidence["post_status_output"].encode("utf-8")
+                ).hexdigest()
+                return evidence
+
+            with self.assertRaises(TransactionError) as raised:
+                fixture.execute(gatekeeper_capture=disabled_post_status)
+
+            self.assertEqual(
+                raised.exception.code,
+                "gatekeeper_verification_failed",
+            )
+            states = [
+                json.loads(path.read_text(encoding="utf-8"))["state"]
+                for path in sorted(
+                    (fixture.context.attempt_root / "events").glob("*.json")
+                )
+            ]
+            self.assertNotIn("gatekeeper_verified", states)
+            original_runs = self._finalization_runs(fixture)
+            self.assertEqual(len(original_runs), 1)
+            self._assert_fresh_uuid_recovery(fixture, original_runs)
+        finally:
+            fixture.close()
+
+    def test_direct_receipt_seal_and_fsync_fault_matrix_uses_new_uuid(
+        self,
+    ) -> None:
+        boundaries = (
+            "receipt-before",
+            "receipt-after",
+            "sealed-before",
+            "sealed-after",
+            "sealed-fsync",
+        )
+        for boundary in boundaries:
+            for failure_kind in ("typed", "baseexception"):
+                with self.subTest(
+                    boundary=boundary,
+                    failure_kind=failure_kind,
+                ):
+                    fixture = Fixture()
+                    try:
+                        real_publish_evidence = (
+                            transaction_module._publish_pending_evidence
+                        )
+                        real_append = transaction_module.EventJournal.append
+                        real_fsync_tree = transaction_module._fsync_tree
+                        injected = False
+
+                        def fail() -> None:
+                            nonlocal injected
+                            injected = True
+                            if failure_kind == "typed":
+                                raise TransactionError(
+                                    "fixture_local_boundary_failed",
+                                    f"fixture {boundary} failure",
+                                )
+                            raise SimulatedCrash(boundary)
+
+                        def faulting_publish_evidence(**arguments) -> None:
+                            destination = arguments["destination_path"]
+                            is_finalization_receipt = (
+                                destination.name == "receipt.json"
+                                and destination.parent.parent
+                                == fixture.context.attempt_root
+                                / "finalization-runs"
+                            )
+                            if (
+                                is_finalization_receipt
+                                and boundary == "receipt-before"
+                                and not injected
+                            ):
+                                publish_ready = (
+                                    destination.parent / "publish-ready"
+                                )
+                                (publish_ready / "fault-marker").write_text(
+                                    "old run must not be reused\n",
+                                    encoding="utf-8",
+                                )
+                                fail()
+                            real_publish_evidence(**arguments)
+                            if (
+                                is_finalization_receipt
+                                and boundary == "receipt-after"
+                                and not injected
+                            ):
+                                publish_ready = (
+                                    destination.parent / "publish-ready"
+                                )
+                                (publish_ready / "fault-marker").write_text(
+                                    "old run must not be reused\n",
+                                    encoding="utf-8",
+                                )
+                                fail()
+
+                        def faulting_append(
+                            journal,
+                            state: str,
+                            **fields,
+                        ) -> None:
+                            if (
+                                state == "sealed"
+                                and boundary == "sealed-before"
+                                and not injected
+                            ):
+                                publish_ready = current_publish_ready(fixture)
+                                if publish_ready is None:
+                                    self.fail("sealed fault lacks publish-ready")
+                                (publish_ready / "fault-marker").write_text(
+                                    "old run must not be reused\n",
+                                    encoding="utf-8",
+                                )
+                                fail()
+                            real_append(journal, state, **fields)
+                            if (
+                                state == "sealed"
+                                and boundary == "sealed-after"
+                                and not injected
+                            ):
+                                publish_ready = current_publish_ready(fixture)
+                                if publish_ready is None:
+                                    self.fail("sealed fault lacks publish-ready")
+                                (publish_ready / "fault-marker").write_text(
+                                    "old run must not be reused\n",
+                                    encoding="utf-8",
+                                )
+                                fail()
+
+                        def faulting_fsync_tree(root: Path) -> None:
+                            real_fsync_tree(root)
+                            if (
+                                boundary == "sealed-fsync"
+                                and not injected
+                                and root.name == "publish-ready"
+                                and (root.parent / "receipt.json").is_file()
+                            ):
+                                event_paths = sorted(
+                                    (
+                                        fixture.context.attempt_root
+                                        / "events"
+                                    ).glob("*.json")
+                                )
+                                latest = json.loads(
+                                    event_paths[-1].read_text(
+                                        encoding="utf-8"
+                                    )
+                                )
+                                if latest["state"] == "sealed":
+                                    (root / "fault-marker").write_text(
+                                        "old run must not be reused\n",
+                                        encoding="utf-8",
+                                    )
+                                    fail()
+
+                        expected = (
+                            TransactionError
+                            if failure_kind == "typed"
+                            else SimulatedCrash
+                        )
+                        with patch.object(
+                            transaction_module,
+                            "_publish_pending_evidence",
+                            side_effect=faulting_publish_evidence,
+                        ), patch.object(
+                            transaction_module.EventJournal,
+                            "append",
+                            new=faulting_append,
+                        ), patch.object(
+                            transaction_module,
+                            "_fsync_tree",
+                            side_effect=faulting_fsync_tree,
+                        ):
+                            with self.assertRaises(expected):
+                                fixture.execute()
+
+                        self.assertTrue(injected)
+                        original_runs = self._finalization_runs(fixture)
+                        self.assertEqual(len(original_runs), 1)
+                        self.assertTrue(
+                            any(original_runs[0].rglob("fault-marker"))
+                        )
+                        self._assert_fresh_uuid_recovery(
+                            fixture,
+                            original_runs,
+                        )
+                    finally:
+                        fixture.close()
+
+    def test_direct_publisher_fault_matrix_distinguishes_pre_and_post_rename(
+        self,
+    ) -> None:
+        for position in ("before", "after"):
+            for failure_kind in ("typed", "baseexception"):
+                with self.subTest(
+                    position=position,
+                    failure_kind=failure_kind,
+                ):
+                    fixture = Fixture()
+                    try:
+                        def faulting_publisher(
+                            source: Path,
+                            destination: Path,
+                        ) -> None:
+                            if position == "before":
+                                (source / "fault-marker").write_text(
+                                    "publisher boundary marker\n",
+                                    encoding="utf-8",
+                                )
+                            else:
+                                os.rename(source, destination)
+                            if failure_kind == "typed":
+                                raise TransactionError(
+                                    (
+                                        "publish_durability_unknown"
+                                        if position == "after"
+                                        else "atomic_publish_failed"
+                                    ),
+                                    f"fixture publisher {position} failure",
+                                    terminal_state=(
+                                        "outcome_unknown"
+                                        if position == "after"
+                                        else "failed"
+                                    ),
+                                )
+                            raise SimulatedCrash(
+                                f"publisher-{position}"
+                            )
+
+                        expected = (
+                            TransactionError
+                            if failure_kind == "typed"
+                            else SimulatedCrash
+                        )
+                        with self.assertRaises(expected):
+                            fixture.execute(publisher=faulting_publisher)
+
+                        original_runs = self._finalization_runs(fixture)
+                        self.assertEqual(len(original_runs), 1)
+                        if position == "before":
+                            self.assertFalse(
+                                os.path.lexists(fixture.context.final_root)
+                            )
+                            self._assert_fresh_uuid_recovery(
+                                fixture,
+                                original_runs,
+                            )
+                            continue
+
+                        self.assertTrue(fixture.context.final_root.is_dir())
+                        self._clear_runner_observations(fixture)
+                        publisher_called = False
+
+                        def forbidden_publisher(
+                            _source: Path,
+                            _destination: Path,
+                        ) -> None:
+                            nonlocal publisher_called
+                            publisher_called = True
+
+                        recovered_app = fixture.recover(
+                            publisher=forbidden_publisher
+                        )
+                        self.assertEqual(
+                            recovered_app,
+                            fixture.context.final_root
+                            / "Clash for Mac.app",
+                        )
+                        self.assertEqual(fixture.runner.calls, [])
+                        self.assertFalse(publisher_called)
+                        self.assertEqual(
+                            self._finalization_runs(fixture),
+                            original_runs,
+                        )
+                        self.assertFalse(
+                            (
+                                fixture.context.attempt_root
+                                / "recovery-intent.json"
+                            ).exists()
+                        )
+                        receipt = json.loads(
+                            (original_runs[0] / "receipt.json").read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                        self.assertIsNone(
+                            receipt["recovery_intent_sha256"]
+                        )
+                        self.assertIsNone(
+                            receipt["recovery_continuation_sha256"]
+                        )
+                        recovered_again = fixture.recover(
+                            publisher=forbidden_publisher
+                        )
+                        self.assertEqual(recovered_again, recovered_app)
+                        self.assertEqual(fixture.runner.calls, [])
+                        self.assertFalse(publisher_called)
+                    finally:
+                        fixture.close()
+
+    def test_direct_attempt_lock_spans_submit_wait_and_finalization(self) -> None:
+        for blocked_role in (
+            CommandRole.SUBMIT,
+            CommandRole.WAIT,
+            CommandRole.STAPLE,
+        ):
+            with self.subTest(blocked_role=blocked_role):
+                fixture = Fixture()
+                try:
+                    entered = threading.Event()
+                    release = threading.Event()
+                    blocked = False
+
+                    def blocking_runner(
+                        role: CommandRole,
+                        command: list[str],
+                        timeout: float,
+                    ) -> CommandResult:
+                        nonlocal blocked
+                        if role == blocked_role and not blocked:
+                            blocked = True
+                            entered.set()
+                            if not release.wait(5):
+                                raise AssertionError(
+                                    "test did not release direct command"
+                                )
+                        return fixture.runner(role, command, timeout)
+
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        executing = executor.submit(
+                            fixture.execute,
+                            command_runner=blocking_runner,
+                        )
+                        self.assertTrue(entered.wait(2))
+                        calls_before_recovery = list(fixture.runner.calls)
+                        with self.assertRaises(TransactionError) as raised:
+                            fixture.recover()
+                        self.assertEqual(
+                            raised.exception.code,
+                            "recovery_in_progress",
+                        )
+                        self.assertEqual(
+                            fixture.runner.calls,
+                            calls_before_recovery,
+                        )
+                        release.set()
+                        self.assertTrue(
+                            executing.result(timeout=5).is_dir()
+                        )
+                finally:
+                    fixture.close()
+
+    def test_direct_attempt_lock_spans_terminal_receipt(self) -> None:
+        fixture = Fixture()
+        try:
+            terminal_entered = threading.Event()
+            release_terminal = threading.Event()
+            real_append = transaction_module.EventJournal.append
+
+            def blocking_terminal_append(
+                journal,
+                state: str,
+                **fields,
+            ) -> None:
+                if (
+                    state == "failed"
+                    and fields.get("failure_code")
+                    == "atomic_publish_failed"
+                ):
+                    terminal_entered.set()
+                    if not release_terminal.wait(5):
+                        raise AssertionError(
+                            "test did not release terminal append"
+                        )
+                real_append(journal, state, **fields)
+
+            def fail_publisher(_source: Path, _destination: Path) -> None:
+                raise TransactionError(
+                    "atomic_publish_failed",
+                    "fixture publication failure",
+                )
+
+            with patch.object(
+                transaction_module.EventJournal,
+                "append",
+                new=blocking_terminal_append,
+            ):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    executing = executor.submit(
+                        fixture.execute,
+                        publisher=fail_publisher,
+                    )
+                    self.assertTrue(terminal_entered.wait(2))
+                    calls_before_recovery = list(fixture.runner.calls)
+                    with self.assertRaises(TransactionError) as raised:
+                        fixture.recover()
+                    self.assertEqual(
+                        raised.exception.code,
+                        "recovery_in_progress",
+                    )
+                    self.assertEqual(
+                        fixture.runner.calls,
+                        calls_before_recovery,
+                    )
+                    release_terminal.set()
+                    with self.assertRaises(TransactionError) as execution_error:
+                        executing.result(timeout=5)
+                    self.assertEqual(
+                        execution_error.exception.code,
+                        "atomic_publish_failed",
+                    )
+
+            original_runs = self._finalization_runs(fixture)
+            self.assertEqual(len(original_runs), 1)
+            self._assert_fresh_uuid_recovery(fixture, original_runs)
+        finally:
+            fixture.close()
+
+    def test_direct_capacity_is_reserved_before_submit(self) -> None:
+        fixture = Fixture()
+        try:
+            expected_direct_reserve = (
+                3
+                + len(transaction_module.FINALIZATION_EVENT_STATES)
+                + 1
+            )
+            self.assertEqual(
+                transaction_module.DIRECT_FINALIZATION_EVENT_RESERVE,
+                expected_direct_reserve,
+            )
+            insufficient_capacity = 2 + 2 + expected_direct_reserve - 1
+            with patch.object(
+                transaction_module,
+                "MAX_EVENT_DOCUMENTS",
+                insufficient_capacity,
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.execute()
+
+            self.assertEqual(
+                raised.exception.code,
+                "event_journal_capacity_exceeded",
+            )
+            self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+            self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+            self.assertFalse(
+                (
+                    fixture.context.attempt_root
+                    / "submission-observation.json"
+                ).exists()
+            )
+            self.assertFalse(
+                (
+                    fixture.context.attempt_root
+                    / "submission-receipt.json"
+                ).exists()
+            )
+        finally:
+            fixture.close()
+
+    def test_incomplete_direct_boundary_reserves_ready_anchor_and_recovery(
+        self,
+    ) -> None:
+        fixture = Fixture()
+        try:
+            real_fsync_tree = transaction_module._fsync_tree
+            injected = False
+
+            def fail_work_fsync(root: Path) -> None:
+                nonlocal injected
+                if (
+                    not injected
+                    and root == fixture.context.attempt_root / "work"
+                ):
+                    injected = True
+                    raise OSError("fixture source fsync failure")
+                real_fsync_tree(root)
+
+            with patch.object(
+                transaction_module,
+                "_fsync_tree",
+                side_effect=fail_work_fsync,
+            ):
+                with self.assertRaises(TransactionError):
+                    fixture.execute()
+            self.assertTrue(injected)
+
+            event_paths = sorted(
+                (fixture.context.attempt_root / "events").glob("*.json")
+            )
+            original_events = [path.read_bytes() for path in event_paths]
+            original_count = len(event_paths)
+            expected_boundary_reserve = (
+                2 + transaction_module.RECOVERY_SUCCESS_EVENT_RESERVE
+            )
+            self.assertEqual(
+                transaction_module.DIRECT_BOUNDARY_RECOVERY_EVENT_RESERVE,
+                expected_boundary_reserve,
+            )
+            self._clear_runner_observations(fixture)
+            with patch.object(
+                transaction_module,
+                "MAX_EVENT_DOCUMENTS",
+                original_count + expected_boundary_reserve - 1,
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.recover()
+
+            self.assertEqual(
+                raised.exception.code,
+                "event_journal_capacity_exceeded",
+            )
+            self.assertEqual(
+                [path.read_bytes() for path in event_paths],
+                original_events,
+            )
+            self.assertFalse(
+                (
+                    fixture.context.attempt_root
+                    / "recovery-intent.json"
+                ).exists()
+            )
+            self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+            self.assertNotIn(CommandRole.FETCH_LOG, fixture.runner.calls)
+            self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+            self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+            states = [
+                json.loads(data.decode("utf-8"))["state"]
+                for data in original_events
+            ]
+            self.assertNotIn("direct_finalization_ready", states)
+            self._assert_fresh_uuid_recovery(fixture, [])
+        finally:
+            fixture.close()
+
+    def test_direct_boundary_evidence_tamper_is_rejected_before_remote_io(
+        self,
+    ) -> None:
+        for boundary in (
+            "direct_finalization_preparing",
+            "direct_finalization_ready",
+        ):
+            with self.subTest(boundary=boundary):
+                fixture = Fixture()
+                try:
+                    if boundary == "direct_finalization_preparing":
+                        with patch.object(
+                            transaction_module,
+                            "_ensure_immutable_recovery_source",
+                            side_effect=SimulatedCrash("after-preparing"),
+                        ):
+                            with self.assertRaises(SimulatedCrash):
+                                fixture.execute()
+                    else:
+                        with patch.object(
+                            transaction_module,
+                            "_run_accepted_finalization_locked",
+                            side_effect=SimulatedCrash("after-ready"),
+                        ):
+                            with self.assertRaises(SimulatedCrash):
+                                fixture.execute()
+
+                    event_paths = sorted(
+                        (
+                            fixture.context.attempt_root / "events"
+                        ).glob("*.json")
+                    )
+                    boundary_path = event_paths[-1]
+                    event = json.loads(
+                        boundary_path.read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(event["state"], boundary)
+                    self.assertEqual(
+                        event["document"],
+                        transaction_module.EVENT_DOCUMENT_V2,
+                    )
+                    event["evidence_sha256"] = "0" * 64
+                    boundary_path.write_bytes(
+                        transaction_module._canonical_json(event).encode(
+                            "utf-8"
+                        )
+                    )
+                    self._clear_runner_observations(fixture)
+                    publisher_called = False
+
+                    def forbidden_publisher(
+                        _source: Path,
+                        _destination: Path,
+                    ) -> None:
+                        nonlocal publisher_called
+                        publisher_called = True
+
+                    with self.assertRaises(TransactionError) as raised:
+                        fixture.recover(publisher=forbidden_publisher)
+
+                    self.assertEqual(
+                        raised.exception.code,
+                        "direct_finalization_boundary_mismatch",
+                    )
+                    self.assertEqual(fixture.runner.calls, [])
+                    self.assertFalse(publisher_called)
+                    self.assertFalse(
+                        (
+                            fixture.context.attempt_root
+                            / "recovery-intent.json"
+                        ).exists()
+                    )
+                finally:
+                    fixture.close()
+
+    def test_finalization_run_count_and_byte_quotas_block_before_copy(self) -> None:
+        fixture = Fixture()
+        try:
+            fixture.runner.fail_role = CommandRole.STAPLE
+            with self.assertRaises(TransactionError):
+                fixture.execute()
+            original_runs = self._finalization_runs(fixture)
+            self.assertEqual(len(original_runs), 1)
+            self._clear_runner_observations(fixture)
+            fixture.runner.fail_role = None
+            with patch.object(
+                transaction_module,
+                "MAX_FINALIZATION_RUNS",
+                1,
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.recover()
+            self.assertEqual(
+                raised.exception.code,
+                "finalization_run_quota_exceeded",
+            )
+            self.assertEqual(self._finalization_runs(fixture), original_runs)
+            self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+            self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+        finally:
+            fixture.close()
+
+        fixture = Fixture()
+        try:
+            with patch.object(
+                transaction_module,
+                "MAX_FINALIZATION_RUNS_BYTES",
+                1,
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.execute()
+            self.assertEqual(
+                raised.exception.code,
+                "finalization_byte_quota_exceeded",
+            )
+            self.assertEqual(self._finalization_runs(fixture), [])
+            self.assertFalse(os.path.lexists(fixture.context.final_root))
+        finally:
+            fixture.close()
+
+    def test_finalization_quota_contract_is_exactly_eight_runs_and_four_gib(self) -> None:
+        self.assertEqual(transaction_module.MAX_FINALIZATION_RUNS, 8)
+        self.assertEqual(
+            transaction_module.MAX_FINALIZATION_RUNS_BYTES,
+            4 * 1024 * 1024 * 1024,
+        )
+
+    def test_attempt_inventory_enforces_retained_logical_byte_quota(self) -> None:
+        fixture = Fixture()
+        try:
+            fixture.runner.fail_role = CommandRole.STAPLE
+            with self.assertRaises(TransactionError):
+                fixture.execute()
+            finalization_runs = (
+                fixture.context.attempt_root / "finalization-runs"
+            )
+            _, logical_bytes = (
+                transaction_module._bounded_finalization_run_inventory(
+                    finalization_runs
+                )
+            )
+            self.assertGreater(logical_bytes, 0)
+            allowed_entries = {
+                path.name for path in fixture.context.attempt_root.iterdir()
+            }
+
+            with patch.object(
+                transaction_module,
+                "MAX_FINALIZATION_RUNS_BYTES",
+                logical_bytes - 1,
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    transaction_module._decode_attempt_inventory(
+                        replace(fixture.context, staged_app=None),
+                        allowed_entries=allowed_entries,
+                        require_source=True,
+                    )
+
+            self.assertEqual(
+                raised.exception.code,
+                "finalization_byte_quota_exceeded",
+            )
+        finally:
+            fixture.close()
+
+    def test_sibling_growth_during_copy_is_rejected_after_copy(self) -> None:
+        byte_limit = 64 * 1024
+        for growth in ("run-count", "logical-bytes"):
+            with self.subTest(growth=growth):
+                fixture = Fixture()
+                try:
+                    copied = False
+                    publisher_called = False
+                    real_copytree = shutil.copytree
+
+                    def copy_with_sibling_growth(
+                        source: Path,
+                        destination: Path,
+                        *args,
+                        **kwargs,
+                    ) -> Path:
+                        nonlocal copied
+                        result = real_copytree(
+                            source,
+                            destination,
+                            *args,
+                            **kwargs,
+                        )
+                        destination_path = Path(destination)
+                        if destination_path.name != "work":
+                            return result
+                        copied = True
+                        sibling = (
+                            destination_path.parent.parent
+                            / "11111111-2222-4333-8444-555555555555"
+                        )
+                        sibling.mkdir(mode=0o700)
+                        if growth == "logical-bytes":
+                            (sibling / "growth.bin").write_bytes(
+                                b"x" * byte_limit
+                            )
+                        return result
+
+                    def forbidden_publisher(
+                        _source: Path,
+                        _destination: Path,
+                    ) -> None:
+                        nonlocal publisher_called
+                        publisher_called = True
+
+                    limit_patch = (
+                        patch.object(
+                            transaction_module,
+                            "MAX_FINALIZATION_RUNS",
+                            1,
+                        )
+                        if growth == "run-count"
+                        else patch.object(
+                            transaction_module,
+                            "MAX_FINALIZATION_RUNS_BYTES",
+                            byte_limit,
+                        )
+                    )
+                    with (
+                        patch.object(
+                            transaction_module.shutil,
+                            "copytree",
+                            side_effect=copy_with_sibling_growth,
+                        ),
+                        limit_patch,
+                    ):
+                        with self.assertRaises(TransactionError) as raised:
+                            fixture.execute(publisher=forbidden_publisher)
+
+                    self.assertTrue(copied)
+                    self.assertFalse(publisher_called)
+                    self.assertEqual(
+                        raised.exception.code,
+                        (
+                            "finalization_run_quota_exceeded"
+                            if growth == "run-count"
+                            else "finalization_byte_quota_exceeded"
+                        ),
+                    )
+                    self.assertFalse(
+                        os.path.lexists(fixture.context.final_root)
+                    )
+                finally:
+                    fixture.close()
+
+    def test_sibling_growth_after_copy_blocks_before_publication(self) -> None:
+        fixture = Fixture()
+        try:
+            sibling_created = False
+            publisher_called = False
+
+            def growing_runner(
+                role: CommandRole,
+                command: list[str],
+                timeout: float,
+            ) -> CommandResult:
+                nonlocal sibling_created
+                result = fixture.runner(role, command, timeout)
+                if role is CommandRole.DISTRIBUTION_CHECK:
+                    sibling = (
+                        fixture.context.attempt_root
+                        / "finalization-runs"
+                        / "11111111-2222-4333-8444-555555555555"
+                    )
+                    sibling.mkdir(mode=0o700)
+                    sibling_created = True
+                return result
+
+            def forbidden_publisher(
+                _source: Path,
+                _destination: Path,
+            ) -> None:
+                nonlocal publisher_called
+                publisher_called = True
+
+            with patch.object(
+                transaction_module,
+                "MAX_FINALIZATION_RUNS",
+                1,
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.execute(
+                        command_runner=growing_runner,
+                        publisher=forbidden_publisher,
+                    )
+
+            self.assertTrue(sibling_created)
+            self.assertFalse(publisher_called)
+            self.assertEqual(
+                raised.exception.code,
+                "finalization_run_quota_exceeded",
+            )
+            self.assertFalse(os.path.lexists(fixture.context.final_root))
+        finally:
+            fixture.close()
+
+    def test_sibling_growth_during_publication_is_detected_afterward(self) -> None:
+        byte_limit = 64 * 1024
+        for growth in ("run-count", "logical-bytes"):
+            with self.subTest(growth=growth):
+                fixture = Fixture()
+                try:
+                    publisher_called = False
+
+                    def publisher_with_sibling_growth(
+                        source: Path,
+                        destination: Path,
+                    ) -> None:
+                        nonlocal publisher_called
+                        publisher_called = True
+                        Fixture.publisher(source, destination)
+                        sibling = (
+                            fixture.context.attempt_root
+                            / "finalization-runs"
+                            / "11111111-2222-4333-8444-555555555555"
+                        )
+                        sibling.mkdir(mode=0o700)
+                        if growth == "logical-bytes":
+                            (sibling / "growth.bin").write_bytes(
+                                b"x" * byte_limit
+                            )
+
+                    limit_patch = (
+                        patch.object(
+                            transaction_module,
+                            "MAX_FINALIZATION_RUNS",
+                            1,
+                        )
+                        if growth == "run-count"
+                        else patch.object(
+                            transaction_module,
+                            "MAX_FINALIZATION_RUNS_BYTES",
+                            byte_limit,
+                        )
+                    )
+                    with limit_patch:
+                        with self.assertRaises(TransactionError) as raised:
+                            fixture.execute(
+                                publisher=publisher_with_sibling_growth
+                            )
+
+                    self.assertTrue(publisher_called)
+                    self.assertEqual(
+                        raised.exception.code,
+                        "publish_durability_unknown",
+                    )
+                    self.assertEqual(
+                        raised.exception.terminal_state,
+                        "outcome_unknown",
+                    )
+                    self.assertTrue(fixture.context.final_root.is_dir())
+                    last_event = json.loads(
+                        sorted(
+                            (
+                                fixture.context.attempt_root / "events"
+                            ).glob("*.json")
+                        )[-1].read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(last_event["state"], "outcome_unknown")
+                    self.assertEqual(
+                        last_event["failure_code"],
+                        "publish_durability_unknown",
+                    )
+                finally:
+                    fixture.close()
+
+    def test_partial_enospc_copy_passes_run_root_to_safe_cleanup(self) -> None:
+        fixture = Fixture()
+        try:
+            partial_work: Path | None = None
+
+            def enospc_copy(
+                _source: Path,
+                destination: Path,
+                *args,
+                **kwargs,
+            ) -> Path:
+                nonlocal partial_work
+                del args, kwargs
+                partial_work = Path(destination)
+                (partial_work / "partial.bin").write_bytes(b"x" * 4096)
+                raise OSError(errno.ENOSPC, "fixture disk full")
+
+            with patch.object(
+                transaction_module.shutil,
+                "copytree",
+                side_effect=enospc_copy,
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.execute()
+
+            self.assertEqual(
+                raised.exception.code,
+                "recovery_workspace_copy_failed",
+            )
+            self.assertIsNotNone(partial_work)
+            if partial_work is not None:
+                self.assertFalse(os.path.lexists(partial_work.parent))
+            self.assertEqual(self._finalization_runs(fixture), [])
+            self.assertTrue(
+                (fixture.context.attempt_root / "recovery-source").is_dir()
+            )
+            self.assertFalse(os.path.lexists(fixture.context.final_root))
+        finally:
+            fixture.close()
+
+    def test_enospc_before_first_copy_entry_releases_empty_work_run(self) -> None:
+        fixture = Fixture()
+        try:
+            copy_called = False
+
+            def immediate_enospc(
+                _source: Path,
+                _destination: Path,
+                *args,
+                **kwargs,
+            ) -> Path:
+                nonlocal copy_called
+                del args, kwargs
+                copy_called = True
+                raise OSError(errno.ENOSPC, "fixture disk full")
+
+            with patch.object(
+                transaction_module.shutil,
+                "copytree",
+                side_effect=immediate_enospc,
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.execute()
+
+            self.assertTrue(copy_called)
+            self.assertEqual(
+                raised.exception.code,
+                "recovery_workspace_copy_failed",
+            )
+            self.assertEqual(self._finalization_runs(fixture), [])
+            self.assertTrue(
+                (fixture.context.attempt_root / "recovery-source").is_dir()
+            )
+            self.assertFalse(os.path.lexists(fixture.context.final_root))
+        finally:
+            fixture.close()
+
+    def test_large_typed_failed_work_is_cleaned_only_without_ambiguity(
+        self,
+    ) -> None:
+        fixture = Fixture()
+        try:
+            injected = False
+
+            def failing_runner(
+                role: CommandRole,
+                command: list[str],
+                timeout: float,
+            ) -> CommandResult:
+                nonlocal injected
+                result = fixture.runner(role, command, timeout)
+                if role is CommandRole.STAPLE and not injected:
+                    injected = True
+                    run = sole_finalization_run(fixture)
+                    (run / "work/large-failed.bin").write_bytes(b"x" * 4096)
+                    return CommandResult(9, "", "fixture staple failure")
+                return result
+
+            with patch.object(
+                transaction_module,
+                "FAILED_FINALIZATION_CLEANUP_MIN_BYTES",
+                1,
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.execute(command_runner=failing_runner)
+            self.assertTrue(injected)
+            self.assertEqual(raised.exception.code, "staple_failed")
+            self.assertEqual(self._finalization_runs(fixture), [])
+            self.assertTrue(
+                (fixture.context.attempt_root / "recovery-source").is_dir()
+            )
+            self._clear_runner_observations(fixture)
+            recovered = fixture.recover()
+            self.assertTrue(recovered.is_dir())
+            self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+            self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+        finally:
+            fixture.close()
+
+    def test_large_baseexception_or_publish_ready_run_is_never_cleaned(self) -> None:
+        for ambiguity in ("baseexception", "publish-ready"):
+            with self.subTest(ambiguity=ambiguity):
+                fixture = Fixture()
+                try:
+                    if ambiguity == "baseexception":
+                        def crash_runner(
+                            role: CommandRole,
+                            command: list[str],
+                            timeout: float,
+                        ) -> CommandResult:
+                            result = fixture.runner(role, command, timeout)
+                            if role is CommandRole.STAPLE:
+                                run = sole_finalization_run(fixture)
+                                (run / "work/large-crash.bin").write_bytes(
+                                    b"x" * 4096
+                                )
+                                raise SimulatedCrash("large-work")
+                            return result
+
+                        with patch.object(
+                            transaction_module,
+                            "FAILED_FINALIZATION_CLEANUP_MIN_BYTES",
+                            1,
+                        ):
+                            with self.assertRaises(SimulatedCrash):
+                                fixture.execute(command_runner=crash_runner)
+                    else:
+                        def fail_publish(
+                            source: Path,
+                            _destination: Path,
+                        ) -> None:
+                            (source / "large-publish.bin").write_bytes(
+                                b"x" * 4096
+                            )
+                            raise TransactionError(
+                                "atomic_publish_failed",
+                                "fixture publication failure",
+                            )
+
+                        with patch.object(
+                            transaction_module,
+                            "FAILED_FINALIZATION_CLEANUP_MIN_BYTES",
+                            1,
+                        ):
+                            with self.assertRaises(TransactionError):
+                                fixture.execute(publisher=fail_publish)
+                    runs = self._finalization_runs(fixture)
+                    self.assertEqual(len(runs), 1)
+                    self.assertTrue(
+                        any(runs[0].rglob("large-*.bin"))
+                    )
+                finally:
+                    fixture.close()
+
+    def test_any_retained_publish_ready_run_blocks_large_cleanup(self) -> None:
+        fixture = Fixture()
+        try:
+            sibling_run: Path | None = None
+
+            def failing_runner(
+                role: CommandRole,
+                command: list[str],
+                timeout: float,
+            ) -> CommandResult:
+                nonlocal sibling_run
+                result = fixture.runner(role, command, timeout)
+                if role is CommandRole.STAPLE:
+                    active_run = sole_finalization_run(fixture)
+                    (active_run / "work/large-failed.bin").write_bytes(
+                        b"x" * 4096
+                    )
+                    sibling_run = (
+                        fixture.context.attempt_root
+                        / "finalization-runs"
+                        / "11111111-2222-4333-8444-555555555555"
+                    )
+                    sibling_run.mkdir(mode=0o700)
+                    (sibling_run / "publish-ready").mkdir(mode=0o700)
+                    return CommandResult(9, "", "fixture staple failure")
+                return result
+
+            with patch.object(
+                transaction_module,
+                "FAILED_FINALIZATION_CLEANUP_MIN_BYTES",
+                1,
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.execute(command_runner=failing_runner)
+
+            self.assertEqual(raised.exception.code, "staple_failed")
+            self.assertIsNotNone(sibling_run)
+            runs = self._finalization_runs(fixture)
+            self.assertEqual(len(runs), 2)
+            self.assertTrue(
+                any((run / "work/large-failed.bin").is_file() for run in runs)
+            )
+            if sibling_run is not None:
+                self.assertTrue((sibling_run / "publish-ready").is_dir())
+        finally:
+            fixture.close()
+
+    def test_cleanup_rechecks_sibling_markers_after_workspace_scan(self) -> None:
+        fixture = Fixture()
+        try:
+            sibling_run: Path | None = None
+            marker_injected = False
+            real_logical_bytes = (
+                transaction_module._finalization_tree_logical_bytes
+            )
+
+            def failing_runner(
+                role: CommandRole,
+                command: list[str],
+                timeout: float,
+            ) -> CommandResult:
+                result = fixture.runner(role, command, timeout)
+                if role is CommandRole.STAPLE:
+                    run = sole_finalization_run(fixture)
+                    (run / "work/large-failed.bin").write_bytes(
+                        b"x" * 4096
+                    )
+                    return CommandResult(9, "", "fixture staple failure")
+                return result
+
+            def scan_then_publish_marker(
+                root: Path,
+                *,
+                ceiling: int | None,
+            ) -> int:
+                nonlocal marker_injected, sibling_run
+                result = real_logical_bytes(root, ceiling=ceiling)
+                if (
+                    not marker_injected
+                    and (root / "large-failed.bin").is_file()
+                ):
+                    sibling_run = (
+                        fixture.context.attempt_root
+                        / "finalization-runs"
+                        / "11111111-2222-4333-8444-555555555555"
+                    )
+                    sibling_run.mkdir(mode=0o700)
+                    (sibling_run / "publish-ready").mkdir(mode=0o700)
+                    marker_injected = True
+                return result
+
+            with (
+                patch.object(
+                    transaction_module,
+                    "FAILED_FINALIZATION_CLEANUP_MIN_BYTES",
+                    1,
+                ),
+                patch.object(
+                    transaction_module,
+                    "_finalization_tree_logical_bytes",
+                    side_effect=scan_then_publish_marker,
+                ),
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.execute(command_runner=failing_runner)
+
+            self.assertEqual(raised.exception.code, "staple_failed")
+            self.assertTrue(marker_injected)
+            self.assertIsNotNone(sibling_run)
+            runs = self._finalization_runs(fixture)
+            self.assertEqual(len(runs), 2)
+            self.assertTrue(
+                any((run / "work/large-failed.bin").is_file() for run in runs)
+            )
+            if sibling_run is not None:
+                self.assertTrue((sibling_run / "publish-ready").is_dir())
+        finally:
+            fixture.close()
 
     def test_frozen_legacy_40001_event_prefix_is_recoverable(self) -> None:
         snapshot_path = (
@@ -1096,13 +3729,22 @@ class NotarizationRecoveryTests(unittest.TestCase):
                 snapshot["intentSha256"],
                 lambda: "2026-07-28T17:41:00Z",
             )
-            boundary = transaction_module._require_recoverable_event_prefix(
-                journal
-            )
+            boundary = transaction_module._reduce_attempt_events(journal)
 
-        self.assertEqual(boundary[0].isoformat(), "2026-07-28T17:40:01+00:00")
-        self.assertEqual(boundary[1].isoformat(), "2026-07-28T17:40:13+00:00")
-        self.assertEqual(boundary[3:], (4, None, False, False))
+        self.assertEqual(
+            boundary.submit_window_start.isoformat(),
+            "2026-07-28T17:40:01+00:00",
+        )
+        self.assertEqual(
+            boundary.submit_window_end.isoformat(),
+            "2026-07-28T17:40:13+00:00",
+        )
+        self.assertEqual(boundary.recovery_event_start, 4)
+        self.assertIsNone(boundary.submission_id)
+        self.assertFalse(boundary.submitted_receipt_expected)
+        self.assertFalse(boundary.direct_evidence_required)
+        self.assertFalse(boundary.direct_finalization_ready)
+        self.assertFalse(boundary.direct_source_preparation_incomplete)
         self.assertEqual(snapshot["archiveSize"], 30062052)
         self.assertEqual(
             snapshot["archiveSha256"],
@@ -1116,7 +3758,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
                 tampered["exit_code"] = invalid_exit_code
                 journal.documents[-1] = tampered
                 with self.assertRaises(TransactionError):
-                    transaction_module._require_recoverable_event_prefix(journal)
+                    transaction_module._reduce_attempt_events(journal)
         journal.documents[-1] = snapshot["events"][-1]
 
     def test_reconciles_exact_orphan_without_resubmission(self) -> None:
@@ -1155,6 +3797,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
                 "notary_ready",
                 "submitting",
                 "outcome_unknown",
+                "recovery_intent_anchored",
                 "reconciliation_started",
                 "submission_reconciled",
                 "finalization_started",
@@ -1180,6 +3823,688 @@ class NotarizationRecoveryTests(unittest.TestCase):
         )
         self.assertIsNone(receipt["submission_observation_sha256"])
         self.assertRegex(receipt["recovery_intent_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_first_recovery_intent_is_anchored_before_apple_reads(self) -> None:
+        observed_states: list[list[str]] = []
+
+        def inspect_before_apple(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            if role in {
+                CommandRole.INFO,
+                CommandRole.HISTORY,
+                CommandRole.FETCH_LOG,
+            }:
+                observed_states.append(
+                    [
+                        json.loads(path.read_text(encoding="utf-8"))["state"]
+                        for path in sorted(
+                            (
+                                self.fixture.context.attempt_root / "events"
+                            ).glob("*.json")
+                        )
+                    ]
+                )
+            return self.fixture.runner(role, command, timeout)
+
+        self._reset_runner_observations()
+        self.fixture.recover(command_runner=inspect_before_apple)
+
+        self.assertEqual(len(observed_states), 3)
+        for states in observed_states:
+            self.assertIn("recovery_intent_anchored", states)
+            self.assertLess(
+                states.index("recovery_intent_anchored"),
+                states.index("reconciliation_started"),
+            )
+
+    def test_legacy_explicit_recovery_receipt_remains_an_intent_anchor(self) -> None:
+        with (
+            patch.object(
+                transaction_module,
+                "_require_recovery_intent_anchor",
+                return_value=False,
+            ),
+            patch.object(
+                transaction_module,
+                "_finalize_accepted_submission",
+                side_effect=SimulatedCrash("legacy-explicit-recovery"),
+            ),
+        ):
+            with self.assertRaises(SimulatedCrash):
+                self.fixture.recover()
+
+        self._reset_runner_observations()
+        final_app = self.fixture.recover()
+
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, self.fixture.runner.calls)
+        states = [
+            json.loads(path.read_text(encoding="utf-8"))["state"]
+            for path in sorted(
+                (self.fixture.context.attempt_root / "events").glob("*.json")
+            )
+        ]
+        self.assertNotIn("recovery_intent_anchored", states)
+
+    def test_old_direct_receipt_suffix_without_intent_anchor_is_rejected(self) -> None:
+        fixture = self._direct_receipt_fixture()
+        fixture.runner.fail_role = CommandRole.INFO
+        with patch.object(
+            transaction_module,
+            "_require_recovery_intent_anchor",
+            return_value=False,
+        ):
+            with self.assertRaises(TransactionError):
+                fixture.recover()
+
+        fixture.runner.fail_role = None
+        self._clear_runner_observations(fixture)
+        with self.assertRaises(TransactionError) as raised:
+            fixture.recover()
+
+        self.assertEqual(
+            raised.exception.code,
+            "recovery_intent_anchor_missing",
+        )
+        self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_direct_receipt_intent_deletion_or_rewrite_is_rejected(self) -> None:
+        for mutation in ("delete", "rewrite"):
+            with self.subTest(mutation=mutation):
+                fixture = self._direct_receipt_fixture()
+                fixture.runner.fail_role = CommandRole.STAPLE
+                with self.assertRaises(TransactionError):
+                    fixture.recover()
+
+                intent_path = (
+                    fixture.context.attempt_root / "recovery-intent.json"
+                )
+                if mutation == "delete":
+                    intent_path.unlink()
+                else:
+                    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+                    intent["recovery_tool_repository_commit"] = "e" * 40
+                    intent["recovery_tool_release_source_sha256"] = "f" * 64
+                    intent_path.write_bytes(
+                        transaction_module._canonical_json(intent).encode("utf-8")
+                    )
+
+                fixture.runner.fail_role = None
+                self._clear_runner_observations(fixture)
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.recover(
+                        recovery_tool_identity_reader=lambda _repository: {
+                            "repositoryCommit": "e" * 40,
+                            "releaseSourceSha256": "f" * 64,
+                        }
+                    )
+
+                self.assertIn(
+                    raised.exception.code,
+                    {
+                        "recovery_intent_identity_drift",
+                        "recovery_intent_missing",
+                    },
+                )
+                self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+                self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+                self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_marker_first_crash_reconstructs_exact_continuation(self) -> None:
+        continued_identity, marker_path = self._crash_after_continuation_marker()
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        self._reset_runner_observations()
+
+        final_app = self.fixture.recover(
+            recovery_tool_identity_reader=lambda _repository: continued_identity
+        )
+
+        continuation_path = (
+            self.fixture.context.attempt_root / "recovery-continuation.json"
+        )
+        continuation = json.loads(
+            continuation_path.read_text(encoding="utf-8")
+        )
+        self.assertTrue(final_app.is_dir())
+        self.assertEqual(
+            hashlib.sha256(continuation_path.read_bytes()).hexdigest(),
+            marker["evidence_sha256"],
+        )
+        self.assertEqual(continuation["requested_at"], marker["recorded_at"])
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, self.fixture.runner.calls)
+
+    def test_continuation_pending_zero_partial_or_complete_is_recovered_atomically(
+        self,
+    ) -> None:
+        for pending_kind in ("zero", "partial", "complete"):
+            with self.subTest(pending_kind=pending_kind):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                fixture.create_orphaned_submit_attempt()
+                fixture.runner.fail_role = CommandRole.STAPLE
+                self._clear_runner_observations(fixture)
+                with self.assertRaises(TransactionError):
+                    fixture.recover()
+                continued_identity = self._continued_identity()
+                continuation, marker = self._expected_continuation_from_tip(
+                    fixture,
+                    continued_identity,
+                )
+                marker_path = (
+                    fixture.context.attempt_root
+                    / "events"
+                    / f"{marker['sequence']:08d}.json"
+                )
+                marker_path.write_bytes(
+                    transaction_module._canonical_json(marker).encode("utf-8")
+                )
+                marker_path.chmod(0o600)
+                expected = transaction_module._canonical_json(continuation).encode(
+                    "utf-8"
+                )
+                pending_path = (
+                    fixture.context.attempt_root
+                    / transaction_module.RECOVERY_CONTINUATION_PENDING_FILENAME
+                )
+                pending_data = {
+                    "zero": b"",
+                    "partial": expected[: max(1, len(expected) // 2)],
+                    "complete": expected,
+                }[pending_kind]
+                pending_path.write_bytes(pending_data)
+                pending_path.chmod(0o600)
+                fixture.runner.fail_role = None
+                self._clear_runner_observations(fixture)
+
+                with patch.object(
+                    transaction_module,
+                    "_recovery_read_result",
+                    side_effect=SimulatedCrash("before-apple-read"),
+                ):
+                    with self.assertRaises(SimulatedCrash):
+                        fixture.recover(
+                            recovery_tool_identity_reader=(
+                                lambda _repository: continued_identity
+                            )
+                        )
+
+                final_path = (
+                    fixture.context.attempt_root / "recovery-continuation.json"
+                )
+                self.assertEqual(final_path.read_bytes(), expected)
+                self.assertFalse(pending_path.exists())
+                self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+                self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+                self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_event_marker_pending_partial_or_complete_is_recovered_atomically(
+        self,
+    ) -> None:
+        for pending_kind in ("zero", "partial", "complete"):
+            with self.subTest(pending_kind=pending_kind):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                fixture.create_orphaned_submit_attempt()
+                fixture.runner.fail_role = CommandRole.STAPLE
+                self._clear_runner_observations(fixture)
+                with self.assertRaises(TransactionError):
+                    fixture.recover()
+                continued_identity = self._continued_identity()
+                _continuation, marker = self._expected_continuation_from_tip(
+                    fixture,
+                    continued_identity,
+                )
+                expected_marker = transaction_module._canonical_json(marker).encode(
+                    "utf-8"
+                )
+                pending_path = (
+                    fixture.context.attempt_root
+                    / "events"
+                    / f"{marker['sequence']:08d}.pending"
+                )
+                pending_path.write_bytes(
+                    {
+                        "zero": b"",
+                        "partial": expected_marker[: len(expected_marker) // 2],
+                        "complete": expected_marker,
+                    }[pending_kind]
+                )
+                pending_path.chmod(0o600)
+                fixture.runner.fail_role = None
+                self._clear_runner_observations(fixture)
+
+                with patch.object(
+                    transaction_module,
+                    "_recovery_read_result",
+                    side_effect=SimulatedCrash("before-apple-read"),
+                ):
+                    with self.assertRaises(SimulatedCrash):
+                        fixture.recover(
+                            recovery_tool_identity_reader=(
+                                lambda _repository: continued_identity
+                            )
+                        )
+
+                final_marker = pending_path.with_suffix(".json")
+                self.assertEqual(final_marker.read_bytes(), expected_marker)
+                self.assertFalse(pending_path.exists())
+                self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+                self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+                self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_foreign_or_out_of_sequence_event_pending_is_rejected(self) -> None:
+        for pending_kind in ("symlink", "hardlink", "out-of-sequence"):
+            with self.subTest(pending_kind=pending_kind):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                fixture.create_orphaned_submit_attempt()
+                fixture.runner.fail_role = CommandRole.STAPLE
+                with self.assertRaises(TransactionError):
+                    fixture.recover()
+                continued_identity = self._continued_identity()
+                _continuation, marker = self._expected_continuation_from_tip(
+                    fixture,
+                    continued_identity,
+                )
+                sequence = int(marker["sequence"])
+                if pending_kind == "out-of-sequence":
+                    pending_path = (
+                        fixture.context.attempt_root
+                        / "events"
+                        / f"{sequence + 1:08d}.pending"
+                    )
+                    pending_path.write_bytes(
+                        transaction_module._canonical_json(marker).encode("utf-8")
+                    )
+                    pending_path.chmod(0o600)
+                else:
+                    pending_path = (
+                        fixture.context.attempt_root
+                        / "events"
+                        / f"{sequence:08d}.pending"
+                    )
+                    foreign = fixture.repository / f"event-{pending_kind}"
+                    foreign.write_bytes(b"foreign")
+                    if pending_kind == "symlink":
+                        pending_path.symlink_to(foreign)
+                    else:
+                        os.link(foreign, pending_path)
+                fixture.runner.fail_role = None
+                self._clear_runner_observations(fixture)
+
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.recover(
+                        recovery_tool_identity_reader=(
+                            lambda _repository: continued_identity
+                        )
+                    )
+
+                self.assertIn(
+                    raised.exception.code,
+                    {
+                        "event_journal_identity_drift",
+                        "unsafe_pending_evidence",
+                    },
+                )
+                self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+                self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+                self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_event_marker_rename_fsync_unknown_retries_from_final(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        fixture.create_orphaned_submit_attempt()
+        fixture.runner.fail_role = CommandRole.STAPLE
+        with self.assertRaises(TransactionError):
+            fixture.recover()
+        continued_identity = self._continued_identity()
+        _continuation, marker = self._expected_continuation_from_tip(
+            fixture,
+            continued_identity,
+        )
+        pending_path = (
+            fixture.context.attempt_root
+            / "events"
+            / f"{marker['sequence']:08d}.pending"
+        )
+        pending_path.write_bytes(
+            transaction_module._canonical_json(marker).encode("utf-8")
+        )
+        pending_path.chmod(0o600)
+        final_marker = pending_path.with_suffix(".json")
+        events_directory = pending_path.parent
+        real_fsync_directory = transaction_module._fsync_directory
+
+        def fail_after_event_rename(path: Path) -> None:
+            if path == events_directory and final_marker.exists():
+                raise OSError("fixture event directory fsync failure")
+            real_fsync_directory(path)
+
+        fixture.runner.fail_role = None
+        self._clear_runner_observations(fixture)
+        with patch.object(
+            transaction_module,
+            "_fsync_directory",
+            side_effect=fail_after_event_rename,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                fixture.recover(
+                    recovery_tool_identity_reader=lambda _repository: continued_identity
+                )
+        self.assertEqual(
+            raised.exception.code,
+            "atomic_evidence_durability_unknown",
+        )
+        self.assertTrue(final_marker.is_file())
+        self.assertFalse(pending_path.exists())
+        self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+        self._clear_runner_observations(fixture)
+        with patch.object(
+            transaction_module,
+            "_recovery_read_result",
+            side_effect=SimulatedCrash("before-apple-read"),
+        ):
+            with self.assertRaises(SimulatedCrash):
+                fixture.recover(
+                    recovery_tool_identity_reader=lambda _repository: continued_identity
+                )
+        self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_continuation_rename_fsync_unknown_retries_from_final(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        fixture.create_orphaned_submit_attempt()
+        fixture.runner.fail_role = CommandRole.STAPLE
+        with self.assertRaises(TransactionError):
+            fixture.recover()
+        continued_identity = self._continued_identity()
+        continuation, marker = self._expected_continuation_from_tip(
+            fixture,
+            continued_identity,
+        )
+        marker_path = (
+            fixture.context.attempt_root
+            / "events"
+            / f"{marker['sequence']:08d}.json"
+        )
+        marker_path.write_bytes(
+            transaction_module._canonical_json(marker).encode("utf-8")
+        )
+        marker_path.chmod(0o600)
+        real_fsync_directory = transaction_module._fsync_directory
+
+        def fail_after_continuation_rename(path: Path) -> None:
+            if (
+                path == fixture.context.attempt_root
+                and (
+                    fixture.context.attempt_root / "recovery-continuation.json"
+                ).exists()
+            ):
+                raise OSError("fixture continuation directory fsync failure")
+            real_fsync_directory(path)
+
+        fixture.runner.fail_role = None
+        self._clear_runner_observations(fixture)
+        with patch.object(
+            transaction_module,
+            "_fsync_directory",
+            side_effect=fail_after_continuation_rename,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                fixture.recover(
+                    recovery_tool_identity_reader=lambda _repository: continued_identity
+                )
+        self.assertEqual(
+            raised.exception.code,
+            "atomic_evidence_durability_unknown",
+        )
+        final_path = fixture.context.attempt_root / "recovery-continuation.json"
+        self.assertEqual(
+            final_path.read_bytes(),
+            transaction_module._canonical_json(continuation).encode("utf-8"),
+        )
+        self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+        self._clear_runner_observations(fixture)
+        with patch.object(
+            transaction_module,
+            "_recovery_read_result",
+            side_effect=SimulatedCrash("before-apple-read"),
+        ):
+            with self.assertRaises(SimulatedCrash):
+                fixture.recover(
+                    recovery_tool_identity_reader=lambda _repository: continued_identity
+                )
+        self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_foreign_continuation_pending_symlink_or_hardlink_is_rejected(self) -> None:
+        for pending_kind in ("symlink", "hardlink", "complete-json"):
+            with self.subTest(pending_kind=pending_kind):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                fixture.create_orphaned_submit_attempt()
+                fixture.runner.fail_role = CommandRole.STAPLE
+                with self.assertRaises(TransactionError):
+                    fixture.recover()
+                continued_identity = self._continued_identity()
+                _continuation, marker = self._expected_continuation_from_tip(
+                    fixture,
+                    continued_identity,
+                )
+                marker_path = (
+                    fixture.context.attempt_root
+                    / "events"
+                    / f"{marker['sequence']:08d}.json"
+                )
+                marker_path.write_bytes(
+                    transaction_module._canonical_json(marker).encode("utf-8")
+                )
+                marker_path.chmod(0o600)
+                pending_path = (
+                    fixture.context.attempt_root
+                    / transaction_module.RECOVERY_CONTINUATION_PENDING_FILENAME
+                )
+                if pending_kind == "complete-json":
+                    pending_path.write_bytes(b"{}\n")
+                    pending_path.chmod(0o600)
+                else:
+                    foreign = fixture.repository / f"foreign-{pending_kind}"
+                    foreign.write_bytes(b"foreign")
+                    if pending_kind == "symlink":
+                        pending_path.symlink_to(foreign)
+                    else:
+                        os.link(foreign, pending_path)
+                fixture.runner.fail_role = None
+                self._clear_runner_observations(fixture)
+
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.recover(
+                        recovery_tool_identity_reader=(
+                            lambda _repository: continued_identity
+                        )
+                    )
+
+                self.assertIn(
+                    raised.exception.code,
+                    {
+                        "pending_evidence_identity_drift",
+                        "unsafe_pending_evidence",
+                    },
+                )
+                self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+                self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+                self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_continuation_pending_after_marker_progress_is_rejected(self) -> None:
+        self.fixture.runner.fail_role = CommandRole.STAPLE
+        with self.assertRaises(TransactionError):
+            self.fixture.recover()
+        continued_identity = self._continued_identity()
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError):
+            self.fixture.recover(
+                recovery_tool_identity_reader=lambda _repository: continued_identity
+            )
+        continuation_path = (
+            self.fixture.context.attempt_root / "recovery-continuation.json"
+        )
+        continuation_bytes = continuation_path.read_bytes()
+        continuation_path.unlink()
+        pending_path = (
+            self.fixture.context.attempt_root
+            / transaction_module.RECOVERY_CONTINUATION_PENDING_FILENAME
+        )
+        pending_path.write_bytes(continuation_bytes[: len(continuation_bytes) // 2])
+        pending_path.chmod(0o600)
+        self.fixture.runner.fail_role = None
+        self._reset_runner_observations()
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(
+                recovery_tool_identity_reader=lambda _repository: continued_identity
+            )
+
+        self.assertEqual(raised.exception.code, "recovery_inventory_mismatch")
+        self.assertNotIn(CommandRole.INFO, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, self.fixture.runner.calls)
+
+    def test_continuation_marker_deletion_or_tamper_is_rejected(self) -> None:
+        for mutation in ("delete", "tamper"):
+            with self.subTest(mutation=mutation):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                fixture.create_orphaned_submit_attempt()
+                fixture.runner.fail_role = CommandRole.STAPLE
+                self._clear_runner_observations(fixture)
+                with self.assertRaises(TransactionError):
+                    fixture.recover()
+                continued_identity = {
+                    "repositoryCommit": "e" * 40,
+                    "releaseSourceSha256": "f" * 64,
+                }
+                self._clear_runner_observations(fixture)
+                with self.assertRaises(TransactionError):
+                    fixture.recover(
+                        recovery_tool_identity_reader=(
+                            lambda _repository: continued_identity
+                        )
+                    )
+                marker_path = next(
+                    path
+                    for path in sorted(
+                        (fixture.context.attempt_root / "events").glob("*.json")
+                    )
+                    if json.loads(path.read_text(encoding="utf-8"))["state"]
+                    == "recovery_tool_continued"
+                )
+                if mutation == "delete":
+                    marker_path.unlink()
+                else:
+                    marker = json.loads(
+                        marker_path.read_text(encoding="utf-8")
+                    )
+                    marker["evidence_sha256"] = "1" * 64
+                    marker_path.write_bytes(
+                        transaction_module._canonical_json(marker).encode(
+                            "utf-8"
+                        )
+                    )
+                fixture.runner.fail_role = None
+                self._clear_runner_observations(fixture)
+
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.recover(
+                        recovery_tool_identity_reader=(
+                            lambda _repository: continued_identity
+                        )
+                    )
+
+                self.assertIn(
+                    raised.exception.code,
+                    {
+                        "event_journal_identity_drift",
+                        "recovery_continuation_identity_drift",
+                        "recovery_continuation_marker_missing",
+                    },
+                )
+                self.assertNotIn(CommandRole.INFO, fixture.runner.calls)
+                self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+                self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_continuation_cannot_predate_its_failed_event(self) -> None:
+        continued_identity, marker_path = self._crash_after_continuation_marker()
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        prior_event_path = marker_path.with_name(
+            f"{marker['sequence'] - 1:08d}.json"
+        )
+        prior_event = json.loads(prior_event_path.read_text(encoding="utf-8"))
+        recovery_intent_path = (
+            self.fixture.context.attempt_root / "recovery-intent.json"
+        )
+        recovery_intent = json.loads(
+            recovery_intent_path.read_text(encoding="utf-8")
+        )
+        requested_at = "2026-07-28T04:01:59Z"
+        continuation = {
+            "schema_version": 1,
+            "document": transaction_module.RECOVERY_CONTINUATION_DOCUMENT,
+            "attempt_id": recovery_intent["attempt_id"],
+            "submission_id": SUBMISSION_ID,
+            "recovery_intent_sha256": hashlib.sha256(
+                recovery_intent_path.read_bytes()
+            ).hexdigest(),
+            "prior_recovery_tool_repository_commit": "c" * 40,
+            "prior_recovery_tool_release_source_sha256": "d" * 64,
+            "continuation_tool_repository_commit": continued_identity[
+                "repositoryCommit"
+            ],
+            "continuation_tool_release_source_sha256": continued_identity[
+                "releaseSourceSha256"
+            ],
+            "prior_event_sha256": hashlib.sha256(
+                prior_event_path.read_bytes()
+            ).hexdigest(),
+            "prior_failure_code": prior_event["failure_code"],
+            "requested_at": requested_at,
+        }
+        marker["recorded_at"] = requested_at
+        marker["evidence_sha256"] = hashlib.sha256(
+            transaction_module._canonical_json(continuation).encode("utf-8")
+        ).hexdigest()
+        marker_path.write_bytes(
+            transaction_module._canonical_json(marker).encode("utf-8")
+        )
+        self._reset_runner_observations()
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(
+                recovery_tool_identity_reader=lambda _repository: continued_identity
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            "event_journal_identity_drift",
+        )
+        self.assertFalse(
+            (
+                self.fixture.context.attempt_root
+                / "recovery-continuation.json"
+            ).exists()
+        )
+        self.assertNotIn(CommandRole.INFO, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, self.fixture.runner.calls)
 
     def test_ambiguous_history_fails_before_staple_or_receipt(self) -> None:
         duplicate = {
@@ -1239,7 +4564,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
             )
         ]
         self.assertEqual(
-            states[4:8],
+            states[5:9],
             [
                 "reconciliation_started",
                 "reconciliation_deferred",
@@ -1489,6 +4814,106 @@ class NotarizationRecoveryTests(unittest.TestCase):
         self.assertIn("failed", states)
         self.assertEqual(states.count("finalization_started"), 2)
 
+    def test_failed_finalization_can_bind_one_clean_tool_continuation(self) -> None:
+        self.fixture.runner.fail_role = CommandRole.STAPLE
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError):
+            self.fixture.recover()
+
+        self.fixture.runner.fail_role = None
+        self._reset_runner_observations()
+        continued_identity = {
+            "repositoryCommit": "e" * 40,
+            "releaseSourceSha256": "f" * 64,
+        }
+        final_app = self.fixture.recover(
+            recovery_tool_identity_reader=lambda _repository: continued_identity
+        )
+
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        continuation_path = (
+            self.fixture.context.attempt_root / "recovery-continuation.json"
+        )
+        continuation = json.loads(
+            continuation_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            continuation["continuation_tool_repository_commit"],
+            continued_identity["repositoryCommit"],
+        )
+        self.assertEqual(
+            continuation["prior_failure_code"],
+            "staple_failed",
+        )
+        final_receipts = list(
+            (
+                self.fixture.context.attempt_root / "finalization-runs"
+            ).glob("*/receipt.json")
+        )
+        self.assertEqual(len(final_receipts), 1)
+        final_receipt = json.loads(
+            final_receipts[0].read_text(encoding="utf-8")
+        )
+        self.assertEqual(final_receipt["schema_version"], 3)
+        self.assertEqual(
+            final_receipt["recovery_continuation_sha256"],
+            hashlib.sha256(continuation_path.read_bytes()).hexdigest(),
+        )
+
+    def test_recovery_tool_continuation_cannot_transition_twice(self) -> None:
+        self.fixture.runner.fail_role = CommandRole.STAPLE
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError):
+            self.fixture.recover()
+
+        continued_identity = {
+            "repositoryCommit": "e" * 40,
+            "releaseSourceSha256": "f" * 64,
+        }
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError):
+            self.fixture.recover(
+                recovery_tool_identity_reader=lambda _repository: continued_identity
+            )
+
+        self.fixture.runner.fail_role = None
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(
+                recovery_tool_identity_reader=lambda _repository: {
+                    "repositoryCommit": "1" * 40,
+                    "releaseSourceSha256": "2" * 64,
+                }
+            )
+        self.assertEqual(
+            raised.exception.code,
+            "recovery_continuation_identity_drift",
+        )
+        self.assertNotIn(CommandRole.INFO, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_recovery_tool_cannot_change_before_failed_finalization(self) -> None:
+        self.fixture.runner.fail_role = CommandRole.INFO
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError):
+            self.fixture.recover()
+
+        self.fixture.runner.fail_role = None
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(
+                recovery_tool_identity_reader=lambda _repository: {
+                    "repositoryCommit": "e" * 40,
+                    "releaseSourceSha256": "f" * 64,
+                }
+            )
+        self.assertEqual(
+            raised.exception.code,
+            "recovery_tool_transition_unavailable",
+        )
+        self.assertNotIn(CommandRole.INFO, self.fixture.runner.calls)
+
     def test_history_status_must_match_accepted_info(self) -> None:
         self.fixture.runner.history_entries = [
             {
@@ -1589,13 +5014,25 @@ class NotarizationRecoveryTests(unittest.TestCase):
 
     def test_recovery_reserves_event_capacity_before_remote_reads(self) -> None:
         self._reset_runner_observations()
-        current_events = len(
-            list((self.fixture.context.attempt_root / "events").glob("*.json"))
+        event_paths = sorted(
+            (self.fixture.context.attempt_root / "events").glob("*.json")
+        )
+        original_events = [path.read_bytes() for path in event_paths]
+        current_events = len(event_paths)
+        expected_base_reserve = (
+            2
+            + 1
+            + len(transaction_module.FINALIZATION_EVENT_STATES)
+            + 1
+        )
+        self.assertEqual(
+            transaction_module.RECOVERY_SUCCESS_EVENT_RESERVE,
+            expected_base_reserve,
         )
         with patch.object(
             transaction_module,
             "MAX_EVENT_DOCUMENTS",
-            current_events + transaction_module.RECOVERY_SUCCESS_EVENT_RESERVE - 1,
+            current_events + expected_base_reserve,
         ):
             with self.assertRaises(TransactionError) as raised:
                 self.fixture.recover()
@@ -1604,8 +5041,952 @@ class NotarizationRecoveryTests(unittest.TestCase):
             raised.exception.code,
             "event_journal_capacity_exceeded",
         )
+        self.assertEqual(
+            [path.read_bytes() for path in event_paths],
+            original_events,
+        )
+        self.assertTrue(
+            (self.fixture.context.attempt_root / "recovery-intent.json").is_file()
+        )
+        self.assertFalse(
+            (
+                self.fixture.context.attempt_root
+                / "recovery-continuation.json"
+            ).exists()
+        )
         self.assertNotIn(CommandRole.INFO, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.HISTORY, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.FETCH_LOG, self.fixture.runner.calls)
         self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, self.fixture.runner.calls)
+
+    def test_existing_intent_anchor_is_not_reserved_twice(self) -> None:
+        self.fixture.runner.fail_role = CommandRole.INFO
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError):
+            self.fixture.recover()
+        self.fixture.runner.fail_role = None
+        self._reset_runner_observations()
+        current_events = len(
+            list((self.fixture.context.attempt_root / "events").glob("*.json"))
+        )
+
+        with patch.object(
+            transaction_module,
+            "MAX_EVENT_DOCUMENTS",
+            current_events + transaction_module.RECOVERY_SUCCESS_EVENT_RESERVE,
+        ):
+            final_app = self.fixture.recover()
+
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, self.fixture.runner.calls)
+
+    def test_existing_continuation_marker_is_not_reserved_twice(self) -> None:
+        continued_identity, _marker_path = self._crash_after_continuation_marker()
+        self._reset_runner_observations()
+        current_events = len(
+            list((self.fixture.context.attempt_root / "events").glob("*.json"))
+        )
+        reconciled_failure_reserve = (
+            1 + len(transaction_module.FINALIZATION_EVENT_STATES) + 1
+        )
+
+        with patch.object(
+            transaction_module,
+            "MAX_EVENT_DOCUMENTS",
+            current_events + reconciled_failure_reserve,
+        ):
+            final_app = self.fixture.recover(
+                recovery_tool_identity_reader=lambda _repository: continued_identity
+            )
+
+        self.assertTrue(final_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, self.fixture.runner.calls)
+
+    def test_completed_recovery_is_idempotently_recognized(self) -> None:
+        final_app = self.fixture.recover()
+        self._reset_runner_observations()
+        publisher_called = False
+
+        def forbidden_publisher(_source: Path, _destination: Path) -> None:
+            nonlocal publisher_called
+            publisher_called = True
+            raise AssertionError("published recovery must not invoke publisher")
+
+        recovered_app = self.fixture.recover(publisher=forbidden_publisher)
+
+        self.assertEqual(recovered_app, final_app)
+        self.assertFalse(publisher_called)
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_post_rename_baseexception_is_idempotently_recovered(self) -> None:
+        def publish_then_crash(source: Path, destination: Path) -> None:
+            os.rename(source, destination)
+            raise SimulatedCrash("after-rename")
+
+        with self.assertRaises(SimulatedCrash):
+            self.fixture.recover(publisher=publish_then_crash)
+        self.assertTrue(self.fixture.context.final_root.is_dir())
+        self._reset_runner_observations()
+
+        recovered_app = self.fixture.recover(
+            publisher=lambda _source, _destination: self.fail(
+                "published recovery invoked publisher"
+            )
+        )
+
+        self.assertEqual(
+            recovered_app,
+            self.fixture.context.final_root / "Clash for Mac.app",
+        )
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_publish_durability_unknown_is_idempotently_recovered(self) -> None:
+        def publish_then_unknown(source: Path, destination: Path) -> None:
+            os.rename(source, destination)
+            raise TransactionError(
+                "publish_durability_unknown",
+                "fixture durability is unknown",
+                terminal_state="outcome_unknown",
+            )
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(publisher=publish_then_unknown)
+        self.assertEqual(raised.exception.code, "publish_durability_unknown")
+        terminal = json.loads(
+            sorted(
+                (self.fixture.context.attempt_root / "events").glob("*.json")
+            )[-1].read_text(encoding="utf-8")
+        )
+        self.assertEqual(terminal["state"], "outcome_unknown")
+        self._reset_runner_observations()
+
+        recovered_app = self.fixture.recover(
+            publisher=lambda _source, _destination: self.fail(
+                "published recovery invoked publisher"
+            )
+        )
+
+        self.assertTrue(recovered_app.is_dir())
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_foreign_published_destination_is_rejected_without_mutation(self) -> None:
+        final_root = self.fixture.context.final_root
+        final_root.mkdir(mode=0o700)
+        (final_root / "foreign").write_bytes(b"foreign")
+        self._reset_runner_observations()
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(
+                publisher=lambda _source, _destination: self.fail(
+                    "foreign destination invoked publisher"
+                )
+            )
+
+        self.assertEqual(raised.exception.code, "recovery_intent_missing")
+        self.assertEqual(self.fixture.runner.calls, [])
+        self.assertEqual({path.name for path in final_root.iterdir()}, {"foreign"})
+        self.assertFalse(
+            (self.fixture.context.attempt_root / "recovery-intent.json").exists()
+        )
+
+    def test_tampered_published_candidate_is_rejected_without_remote_reads(self) -> None:
+        final_app = self.fixture.recover()
+        executable = final_app / "Contents/MacOS/clash-for-mac"
+        executable.write_bytes(b"tampered-published-app")
+        self._reset_runner_observations()
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(
+                publisher=lambda _source, _destination: self.fail(
+                    "tampered destination invoked publisher"
+                )
+            )
+
+        self.assertEqual(raised.exception.code, "published_candidate_unrecognized")
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_tampered_published_receipt_is_rejected_without_remote_reads(self) -> None:
+        self.fixture.recover()
+        receipt_path = next(
+            (
+                self.fixture.context.attempt_root / "finalization-runs"
+            ).glob("*/receipt.json")
+        )
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["state"] = "tampered"
+        receipt_path.write_bytes(
+            transaction_module._canonical_json(receipt).encode("utf-8")
+        )
+        self._reset_runner_observations()
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover()
+
+        self.assertEqual(raised.exception.code, "published_candidate_unrecognized")
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_multiple_matching_published_receipts_are_rejected(self) -> None:
+        self.fixture.recover()
+        finalization_runs = (
+            self.fixture.context.attempt_root / "finalization-runs"
+        )
+        receipt_path = next(finalization_runs.glob("*/receipt.json"))
+        duplicate_run = (
+            finalization_runs / "11111111-2222-4333-8444-555555555555"
+        )
+        duplicate_run.mkdir(mode=0o700)
+        duplicate_receipt = duplicate_run / "receipt.json"
+        duplicate_receipt.write_bytes(receipt_path.read_bytes())
+        duplicate_receipt.chmod(0o600)
+        self._reset_runner_observations()
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover()
+
+        self.assertEqual(raised.exception.code, "published_candidate_ambiguous")
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_published_candidate_toctou_is_rejected(self) -> None:
+        final_app = self.fixture.recover()
+        executable = final_app / "Contents/MacOS/clash-for-mac"
+        real_fsync_tree = transaction_module._fsync_tree
+        mutated = False
+
+        def mutate_after_fsync(root: Path) -> None:
+            nonlocal mutated
+            real_fsync_tree(root)
+            if root == self.fixture.context.final_root and not mutated:
+                executable.write_bytes(b"changed-after-first-validation")
+                mutated = True
+
+        self._reset_runner_observations()
+        with patch.object(
+            transaction_module,
+            "_fsync_tree",
+            side_effect=mutate_after_fsync,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                self.fixture.recover()
+
+        self.assertTrue(mutated)
+        self.assertEqual(raised.exception.code, "published_candidate_unrecognized")
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_direct_post_rename_baseexception_is_recovered_locally(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def publish_then_crash(source: Path, destination: Path) -> None:
+            os.rename(source, destination)
+            raise SimulatedCrash("direct-after-rename")
+
+        with self.assertRaises(SimulatedCrash):
+            fixture.execute(publisher=publish_then_crash)
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+
+        recovered_app = fixture.recover(
+            publisher=lambda _source, _destination: self.fail(
+                "direct post-rename recovery invoked publisher"
+            )
+        )
+
+        self.assertEqual(
+            recovered_app,
+            fixture.context.final_root / "Clash for Mac.app",
+        )
+        self.assertEqual(fixture.runner.calls, [])
+        self.assertFalse(
+            (fixture.context.attempt_root / "recovery-intent.json").exists()
+        )
+
+    def test_direct_publish_durability_unknown_is_recovered_locally(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def publish_then_unknown(source: Path, destination: Path) -> None:
+            os.rename(source, destination)
+            raise TransactionError(
+                "publish_durability_unknown",
+                "direct durability unknown fixture",
+                terminal_state="outcome_unknown",
+            )
+
+        with self.assertRaises(TransactionError):
+            fixture.execute(publisher=publish_then_unknown)
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+
+        recovered_app = fixture.recover()
+
+        self.assertTrue(recovered_app.is_dir())
+        self.assertEqual(fixture.runner.calls, [])
+        self.assertFalse(
+            (fixture.context.attempt_root / "recovery-intent.json").exists()
+        )
+
+    def test_direct_publish_ready_is_validated_then_published_locally(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def fail_before_rename(_source: Path, _destination: Path) -> None:
+            raise TransactionError(
+                "atomic_publish_failed",
+                "direct pre-rename fixture",
+            )
+
+        with self.assertRaises(TransactionError):
+            fixture.execute(publisher=fail_before_rename)
+        original_run = sole_finalization_run(fixture)
+        original_publish_ready = original_run / "publish-ready"
+        self.assertTrue(original_publish_ready.is_dir())
+        original_receipt = json.loads(
+            (original_run / "receipt.json").read_text(encoding="utf-8")
+        )
+        self.assertIsNone(original_receipt["recovery_intent_sha256"])
+        self.assertIsNone(original_receipt["recovery_continuation_sha256"])
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+        publisher_calls = 0
+
+        def local_publisher(source: Path, destination: Path) -> None:
+            nonlocal publisher_calls
+            publisher_calls += 1
+            os.rename(source, destination)
+
+        recovered_app = fixture.recover(publisher=local_publisher)
+
+        self.assertTrue(recovered_app.is_dir())
+        self.assertEqual(publisher_calls, 1)
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+        self.assertTrue(original_publish_ready.is_dir())
+        runs = list(
+            (fixture.context.attempt_root / "finalization-runs").glob("*")
+        )
+        self.assertEqual(len(runs), 2)
+        for run in runs:
+            with self.subTest(run=run.name):
+                self.assertEqual(str(uuid.UUID(run.name)), run.name)
+        self.assertTrue(
+            (fixture.context.attempt_root / "recovery-intent.json").is_file()
+        )
+        recovery_receipts = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (
+                fixture.context.attempt_root / "finalization-runs"
+            ).glob("*/receipt.json")
+        ]
+        self.assertEqual(len(recovery_receipts), 2)
+        self.assertEqual(
+            sum(
+                receipt["recovery_intent_sha256"] is not None
+                for receipt in recovery_receipts
+            ),
+            1,
+        )
+
+    def test_direct_foreign_destination_is_rejected_without_local_publish(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def fail_before_rename(_source: Path, _destination: Path) -> None:
+            raise TransactionError("atomic_publish_failed", "fixture pre-rename")
+
+        with self.assertRaises(TransactionError):
+            fixture.execute(publisher=fail_before_rename)
+        fixture.context.final_root.mkdir(mode=0o700)
+        (fixture.context.final_root / "foreign").write_bytes(b"foreign")
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+        publisher_called = False
+
+        def forbidden_publisher(_source: Path, _destination: Path) -> None:
+            nonlocal publisher_called
+            publisher_called = True
+
+        with self.assertRaises(TransactionError) as raised:
+            fixture.recover(publisher=forbidden_publisher)
+
+        self.assertEqual(raised.exception.code, "published_candidate_unrecognized")
+        self.assertFalse(publisher_called)
+        self.assertEqual(fixture.runner.calls, [])
+        self.assertFalse(
+            (fixture.context.attempt_root / "recovery-intent.json").exists()
+        )
+
+    def test_direct_coordinated_invalid_observation_is_rejected(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def fail_before_rename(_source: Path, _destination: Path) -> None:
+            raise TransactionError("atomic_publish_failed", "fixture pre-rename")
+
+        with self.assertRaises(TransactionError):
+            fixture.execute(publisher=fail_before_rename)
+        observation_path = (
+            fixture.context.attempt_root / "submission-observation.json"
+        )
+        observation = json.loads(observation_path.read_text(encoding="utf-8"))
+        observation["path_binding"] = "tampered"
+        observation_path.write_bytes(
+            transaction_module._canonical_json(observation).encode("utf-8")
+        )
+        submission_receipt_path = (
+            fixture.context.attempt_root / "submission-receipt.json"
+        )
+        submission_receipt = json.loads(
+            submission_receipt_path.read_text(encoding="utf-8")
+        )
+        submission_receipt["submission_observation_sha256"] = hashlib.sha256(
+            observation_path.read_bytes()
+        ).hexdigest()
+        submission_receipt_path.write_bytes(
+            transaction_module._canonical_json(submission_receipt).encode("utf-8")
+        )
+        receipt_path = sole_finalization_receipt(fixture)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["submission_receipt_sha256"] = hashlib.sha256(
+            submission_receipt_path.read_bytes()
+        ).hexdigest()
+        receipt_path.write_bytes(
+            transaction_module._canonical_json(receipt).encode("utf-8")
+        )
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+
+        with self.assertRaises(TransactionError) as raised:
+            fixture.recover()
+
+        self.assertEqual(
+            raised.exception.code,
+            "submission_observation_identity_drift",
+        )
+        self.assertEqual(fixture.runner.calls, [])
+
+    def test_direct_publisher_returning_two_locations_is_rejected(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def fail_before_rename(_source: Path, _destination: Path) -> None:
+            raise TransactionError("atomic_publish_failed", "fixture pre-rename")
+
+        with self.assertRaises(TransactionError):
+            fixture.execute(publisher=fail_before_rename)
+
+        def ambiguous_publisher(source: Path, destination: Path) -> None:
+            os.rename(source, destination)
+            source.mkdir(mode=0o700)
+
+        fixture.runner.calls.clear()
+        fixture.runner.command_calls.clear()
+        fixture.runner.role_counts.clear()
+        with self.assertRaises(TransactionError) as raised:
+            fixture.recover(publisher=ambiguous_publisher)
+
+        self.assertEqual(raised.exception.code, "publish_result_ambiguous")
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+
+    def test_direct_crash_before_receipt_or_sealed_is_recovered_locally(self) -> None:
+        for before_receipt in (True, False):
+            with self.subTest(before_receipt=before_receipt):
+                fixture = self._direct_preseal_fixture(
+                    before_receipt=before_receipt
+                )
+                recovered_app = fixture.recover(
+                    publisher=lambda source, destination: os.rename(
+                        source,
+                        destination,
+                    )
+                )
+
+                self.assertTrue(recovered_app.is_dir())
+                self.assertEqual(fixture.runner.calls, [])
+                states = [
+                    json.loads(path.read_text(encoding="utf-8"))["state"]
+                    for path in sorted(
+                        (fixture.context.attempt_root / "events").glob("*.json")
+                    )
+                ]
+                self.assertEqual(states.count("sealed"), 1)
+                self.assertFalse(
+                    (fixture.context.attempt_root / "recovery-intent.json").exists()
+                )
+
+    def test_direct_receipt_pending_zero_partial_or_complete_is_recovered(self) -> None:
+        for pending_kind in ("zero", "partial", "complete"):
+            with self.subTest(pending_kind=pending_kind):
+                fixture = self._direct_preseal_fixture(before_receipt=False)
+                receipt_path = fixture.context.attempt_root / "receipt.json"
+                expected = receipt_path.read_bytes()
+                receipt_path.unlink()
+                pending_path = (
+                    fixture.context.attempt_root
+                    / transaction_module.PUBLISH_READY_RECEIPT_PENDING_FILENAME
+                )
+                pending_path.write_bytes(
+                    {
+                        "zero": b"",
+                        "partial": expected[: len(expected) // 2],
+                        "complete": expected,
+                    }[pending_kind]
+                )
+                pending_path.chmod(0o600)
+
+                recovered_app = fixture.recover(
+                    publisher=lambda source, destination: os.rename(
+                        source,
+                        destination,
+                    )
+                )
+
+                self.assertTrue(recovered_app.is_dir())
+                self.assertTrue(receipt_path.is_file())
+                self.assertFalse(pending_path.exists())
+                self.assertEqual(fixture.runner.calls, [])
+
+    def test_direct_sealed_event_pending_zero_partial_or_complete_is_recovered(
+        self,
+    ) -> None:
+        for pending_kind in ("zero", "partial", "complete"):
+            with self.subTest(pending_kind=pending_kind):
+                fixture = self._direct_preseal_fixture(before_receipt=False)
+                receipt = json.loads(
+                    (
+                        fixture.context.attempt_root / "receipt.json"
+                    ).read_text(encoding="utf-8")
+                )
+                event_paths = sorted(
+                    (fixture.context.attempt_root / "events").glob("*.json")
+                )
+                prior_event = json.loads(
+                    event_paths[-1].read_text(encoding="utf-8")
+                )
+                sealed_event = {
+                    "schema_version": 1,
+                    "document": transaction_module.EVENT_DOCUMENT,
+                    "sequence": prior_event["sequence"] + 1,
+                    "previous_event_sha256": hashlib.sha256(
+                        event_paths[-1].read_bytes()
+                    ).hexdigest(),
+                    "intent_sha256": prior_event["intent_sha256"],
+                    "state": "sealed",
+                    "recorded_at": receipt["sealed_at"],
+                    "submission_id": SUBMISSION_ID,
+                    "failure_code": None,
+                    "exit_code": None,
+                }
+                expected = transaction_module._canonical_json(sealed_event).encode(
+                    "utf-8"
+                )
+                pending_path = (
+                    fixture.context.attempt_root
+                    / "events"
+                    / f"{sealed_event['sequence']:08d}.pending"
+                )
+                pending_path.write_bytes(
+                    {
+                        "zero": b"",
+                        "partial": expected[: len(expected) // 2],
+                        "complete": expected,
+                    }[pending_kind]
+                )
+                pending_path.chmod(0o600)
+
+                recovered_app = fixture.recover(
+                    publisher=lambda source, destination: os.rename(
+                        source,
+                        destination,
+                    )
+                )
+
+                self.assertTrue(recovered_app.is_dir())
+                self.assertFalse(pending_path.exists())
+                self.assertEqual(fixture.runner.calls, [])
+
+    def test_direct_foreign_or_partial_final_receipt_is_rejected(self) -> None:
+        for receipt_kind in ("foreign-pending", "partial-final"):
+            with self.subTest(receipt_kind=receipt_kind):
+                fixture = self._direct_preseal_fixture(before_receipt=False)
+                receipt_path = fixture.context.attempt_root / "receipt.json"
+                if receipt_kind == "foreign-pending":
+                    receipt_path.unlink()
+                    pending_path = (
+                        fixture.context.attempt_root
+                        / transaction_module.PUBLISH_READY_RECEIPT_PENDING_FILENAME
+                    )
+                    pending_path.write_bytes(b"{}\n")
+                    pending_path.chmod(0o600)
+                else:
+                    receipt_path.write_bytes(b"{\n")
+
+                with self.assertRaises(TransactionError):
+                    fixture.recover()
+
+                states = [
+                    json.loads(path.read_text(encoding="utf-8"))["state"]
+                    for path in sorted(
+                        (fixture.context.attempt_root / "events").glob("*.json")
+                    )
+                ]
+                self.assertNotIn("sealed", states)
+                self.assertEqual(fixture.runner.calls, [])
+
+    def test_direct_receipt_rename_fsync_unknown_retries_from_final(self) -> None:
+        fixture = self._direct_preseal_fixture(before_receipt=True)
+        receipt_path = fixture.context.attempt_root / "receipt.json"
+        real_fsync_directory = transaction_module._fsync_directory
+
+        def fail_after_receipt_rename(path: Path) -> None:
+            if path == fixture.context.attempt_root and receipt_path.exists():
+                raise OSError("fixture receipt directory fsync failure")
+            real_fsync_directory(path)
+
+        with patch.object(
+            transaction_module,
+            "_fsync_directory",
+            side_effect=fail_after_receipt_rename,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                fixture.recover()
+        self.assertEqual(
+            raised.exception.code,
+            "atomic_evidence_durability_unknown",
+        )
+        self.assertTrue(receipt_path.is_file())
+        self.assertEqual(fixture.runner.calls, [])
+        recovered_app = fixture.recover(
+            publisher=lambda source, destination: os.rename(source, destination)
+        )
+        self.assertTrue(recovered_app.is_dir())
+        self.assertEqual(fixture.runner.calls, [])
+
+    def test_execute_receipt_durability_unknown_recovers_locally(self) -> None:
+        fixture, monotonic_clock, original_receipt_path = (
+            self._receipt_durability_unknown_fixture()
+        )
+
+        event_paths = sorted(
+            (fixture.context.attempt_root / "events").glob("*.json")
+        )
+        events = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in event_paths
+        ]
+        self.assertEqual(
+            [event["state"] for event in events[-2:]],
+            ["distribution_verified", "outcome_unknown"],
+        )
+        self.assertEqual(
+            events[-1]["failure_code"],
+            "atomic_evidence_durability_unknown",
+        )
+        self.assertIsNone(events[-1]["exit_code"])
+        original_distribution_path = event_paths[-2]
+        original_distribution = events[-2]
+        original_distribution_sha256 = hashlib.sha256(
+            original_distribution_path.read_bytes()
+        ).hexdigest()
+        original_receipt = json.loads(
+            original_receipt_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            original_receipt["preseal_event_sha256"],
+            original_distribution_sha256,
+        )
+        original_run = original_receipt_path.parent
+
+        recovered_app = fixture.recover(
+            publisher=lambda source, destination: os.rename(
+                source,
+                destination,
+            ),
+            clock=monotonic_clock,
+        )
+
+        self.assertTrue(recovered_app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
+        recovery_intent_path = (
+            fixture.context.attempt_root / "recovery-intent.json"
+        )
+        self.assertTrue(recovery_intent_path.is_file())
+        self.assertTrue((original_run / "publish-ready").is_dir())
+        self.assertTrue(fixture.context.final_root.is_dir())
+
+        event_paths = sorted(
+            (fixture.context.attempt_root / "events").glob("*.json")
+        )
+        events = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in event_paths
+        ]
+        self.assertEqual(events[-2]["state"], "distribution_verified")
+        self.assertEqual(events[-1]["state"], "sealed")
+        self.assertEqual(
+            sum(event["state"] == "sealed" for event in events),
+            1,
+        )
+        self.assertEqual(
+            sum(event["state"] == "distribution_verified" for event in events),
+            2,
+        )
+        recovery_distribution_path, _sealed_path = event_paths[-2:]
+        recovery_distribution, sealed = events[-2:]
+        recovery_distribution_sha256 = hashlib.sha256(
+            recovery_distribution_path.read_bytes()
+        ).hexdigest()
+        self.assertEqual(
+            sealed["previous_event_sha256"],
+            recovery_distribution_sha256,
+        )
+        receipt_paths = list(
+            (fixture.context.attempt_root / "finalization-runs").glob(
+                "*/receipt.json"
+            )
+        )
+        self.assertEqual(len(receipt_paths), 2)
+        recovery_receipt_path = next(
+            path for path in receipt_paths if path != original_receipt_path
+        )
+        recovery_receipt = json.loads(
+            recovery_receipt_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            recovery_receipt["preseal_event_sha256"],
+            recovery_distribution_sha256,
+        )
+        self.assertEqual(
+            recovery_receipt["recovery_intent_sha256"],
+            hashlib.sha256(recovery_intent_path.read_bytes()).hexdigest(),
+        )
+        self.assertIsNone(recovery_receipt["recovery_continuation_sha256"])
+        original_distribution_at = transaction_module._parse_utc_timestamp(
+            original_distribution["recorded_at"],
+            "fixture distribution recorded_at",
+        )[1]
+        original_receipt_at = transaction_module._parse_utc_timestamp(
+            original_receipt["sealed_at"],
+            "fixture receipt sealed_at",
+        )[1]
+        unknown_event = next(
+            event
+            for event in events
+            if event["failure_code"]
+            == "atomic_evidence_durability_unknown"
+        )
+        unknown_at = transaction_module._parse_utc_timestamp(
+            unknown_event["recorded_at"],
+            "fixture receipt durability outcome recorded_at",
+        )[1]
+        recovery_distribution_at = transaction_module._parse_utc_timestamp(
+            recovery_distribution["recorded_at"],
+            "fixture recovery distribution recorded_at",
+        )[1]
+        recovery_receipt_at = transaction_module._parse_utc_timestamp(
+            recovery_receipt["sealed_at"],
+            "fixture recovery receipt sealed_at",
+        )[1]
+        sealed_at = transaction_module._parse_utc_timestamp(
+            sealed["recorded_at"],
+            "fixture recovery sealed recorded_at",
+        )[1]
+        self.assertLessEqual(original_distribution_at, original_receipt_at)
+        self.assertLessEqual(original_receipt_at, unknown_at)
+        self.assertLessEqual(unknown_at, recovery_distribution_at)
+        self.assertLessEqual(recovery_distribution_at, recovery_receipt_at)
+        self.assertEqual(recovery_receipt_at, sealed_at)
+
+    def test_receipt_durability_unknown_invalid_variants_fail_closed(
+        self,
+    ) -> None:
+        cases = (
+            ("boundary-evidence", "event_journal_identity_drift"),
+            ("previous-hash", "event_journal_identity_drift"),
+            ("chronology", "event_journal_identity_drift"),
+            ("submission-receipt", "submission_receipt_identity_drift"),
+            ("source", "app_identity_drift"),
+        )
+        for mutation, expected_code in cases:
+            with self.subTest(mutation=mutation):
+                fixture, monotonic_clock, _receipt_path = (
+                    self._receipt_durability_unknown_fixture()
+                )
+                event_paths = sorted(
+                    (fixture.context.attempt_root / "events").glob("*.json")
+                )
+                outcome_path = event_paths[-1]
+                outcome = json.loads(
+                    outcome_path.read_text(encoding="utf-8")
+                )
+                if mutation == "boundary-evidence":
+                    boundary_path = next(
+                        path
+                        for path in event_paths
+                        if json.loads(path.read_text(encoding="utf-8"))[
+                            "state"
+                        ]
+                        == "direct_finalization_ready"
+                    )
+                    boundary = json.loads(
+                        boundary_path.read_text(encoding="utf-8")
+                    )
+                    boundary["evidence_sha256"] = "0" * 64
+                    boundary_path.write_bytes(
+                        transaction_module._canonical_json(boundary).encode(
+                            "utf-8"
+                        )
+                    )
+                elif mutation == "previous-hash":
+                    outcome["previous_event_sha256"] = "0" * 64
+                    outcome_path.write_bytes(
+                        transaction_module._canonical_json(outcome).encode(
+                            "utf-8"
+                        )
+                    )
+                elif mutation == "chronology":
+                    outcome["recorded_at"] = "2026-07-28T04:01:59Z"
+                    outcome_path.write_bytes(
+                        transaction_module._canonical_json(outcome).encode(
+                            "utf-8"
+                        )
+                    )
+                elif mutation == "submission-receipt":
+                    submission_receipt_path = (
+                        fixture.context.attempt_root
+                        / "submission-receipt.json"
+                    )
+                    submission_receipt = json.loads(
+                        submission_receipt_path.read_text(encoding="utf-8")
+                    )
+                    submission_receipt["causal_binding"] = "tampered"
+                    submission_receipt_path.write_bytes(
+                        transaction_module._canonical_json(
+                            submission_receipt
+                        ).encode("utf-8")
+                    )
+                else:
+                    (
+                        fixture.context.attempt_root
+                        / "recovery-source/Clash for Mac.app/Contents/MacOS/clash-for-mac"
+                    ).write_bytes(
+                        b"tampered-immutable-source"
+                    )
+
+                publisher_called = False
+
+                def forbidden_publisher(
+                    _source: Path,
+                    _destination: Path,
+                ) -> None:
+                    nonlocal publisher_called
+                    publisher_called = True
+
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.recover(
+                        publisher=forbidden_publisher,
+                        clock=monotonic_clock,
+                    )
+
+                self.assertEqual(raised.exception.code, expected_code)
+                states = [
+                    json.loads(path.read_text(encoding="utf-8"))["state"]
+                    for path in sorted(
+                        (fixture.context.attempt_root / "events").glob(
+                            "*.json"
+                        )
+                    )
+                ]
+                self.assertNotIn("sealed", states)
+                self.assertFalse(publisher_called)
+                self.assertEqual(fixture.runner.calls, [])
+                self.assertFalse(os.path.lexists(fixture.context.final_root))
+                self.assertTrue(
+                    (_receipt_path.parent / "publish-ready").is_dir()
+                )
+
+    def test_direct_receipt_cannot_predate_distribution_verification(self) -> None:
+        fixture = self._direct_preseal_fixture(before_receipt=False)
+        receipt_path = fixture.context.attempt_root / "receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["sealed_at"] = "2026-07-28T04:01:59Z"
+        receipt_path.write_bytes(
+            transaction_module._canonical_json(receipt).encode("utf-8")
+        )
+
+        with self.assertRaises(TransactionError) as raised:
+            fixture.recover()
+
+        self.assertEqual(
+            raised.exception.code,
+            "receipt_preseal_lineage_mismatch",
+        )
+        states = [
+            json.loads(path.read_text(encoding="utf-8"))["state"]
+            for path in sorted(
+                (fixture.context.attempt_root / "events").glob("*.json")
+            )
+        ]
+        self.assertNotIn("sealed", states)
+        self.assertEqual(fixture.runner.calls, [])
+
+    def test_direct_preseal_wrong_head_or_artifact_tamper_does_not_seal(self) -> None:
+        for mutation in ("wrong-head", "manifest", "extra-entry"):
+            with self.subTest(mutation=mutation):
+                fixture = self._direct_preseal_fixture(before_receipt=True)
+                if mutation == "wrong-head":
+                    intent_sha256 = hashlib.sha256(
+                        (fixture.context.attempt_root / "intent.json").read_bytes()
+                    ).hexdigest()
+                    journal = transaction_module.EventJournal.load_existing(
+                        fixture.context.attempt_root / "events",
+                        intent_sha256,
+                        lambda: "2026-07-28T04:03:00Z",
+                    )
+                    journal.append(
+                        "failed",
+                        submission_id=SUBMISSION_ID,
+                        failure_code="internal_error",
+                    )
+                elif mutation == "manifest":
+                    (
+                        fixture.context.attempt_root
+                        / "publish-ready/Clash for Mac.app.manifest.json"
+                    ).write_bytes(b"{}\n")
+                else:
+                    (
+                        fixture.context.attempt_root / "publish-ready/extra"
+                    ).write_bytes(b"extra")
+                publisher_called = False
+
+                def forbidden_publisher(_source: Path, _destination: Path) -> None:
+                    nonlocal publisher_called
+                    publisher_called = True
+
+                with self.assertRaises(TransactionError):
+                    fixture.recover(publisher=forbidden_publisher)
+
+                states = [
+                    json.loads(path.read_text(encoding="utf-8"))["state"]
+                    for path in sorted(
+                        (fixture.context.attempt_root / "events").glob("*.json")
+                    )
+                ]
+                self.assertNotIn("sealed", states)
+                self.assertFalse(
+                    (fixture.context.attempt_root / "receipt.json").exists()
+                )
+                self.assertFalse(publisher_called)
+                self.assertEqual(fixture.runner.calls, [])
 
     def test_recovery_tool_source_drift_blocks_every_finalization_checkpoint(self) -> None:
         for drift_call in (2, 3, 4):
@@ -1644,6 +6025,63 @@ class NotarizationRecoveryTests(unittest.TestCase):
 
 
 class NotarizationTransactionFailureTests(unittest.TestCase):
+    def test_macos_27_absent_origin_evidence_can_finalize(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def current_gatekeeper(_app: Path, digest: str) -> dict:
+            return macos_27_fixture(
+                digest,
+                "2026-07-28T04:01:00Z",
+                _app,
+            )
+
+        final_app = fixture.execute(gatekeeper_capture=current_gatekeeper)
+
+        self.assertTrue(final_app.is_dir())
+        persisted = json.loads(
+            (fixture.context.final_root / "gatekeeper.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertIsNone(persisted["origin"])
+        self.assertEqual(
+            persisted["identity_source"],
+            "codesign-leaf-authority",
+        )
+
+    def test_gatekeeper_capture_rejects_target_tree_change_between_commands(self) -> None:
+        expected_tree = "a" * 64
+        evidence = gatekeeper_fixture(
+            expected_tree,
+            "2026-07-28T04:02:00Z",
+            Path("/tmp/Clash for Mac.app"),
+        )
+        core = {
+            key: value
+            for key, value in evidence.items()
+            if key != "captured_at"
+        }
+        with (
+            patch.object(
+                transaction_module,
+                "_app_tree_sha256",
+                side_effect=[expected_tree, "b" * 64],
+            ),
+            patch.object(
+                transaction_module,
+                "capture_gatekeeper",
+                return_value=core,
+            ),
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                transaction_module.production_gatekeeper_capture(
+                    Path("/tmp/Clash for Mac.app"),
+                    expected_tree,
+                )
+
+        self.assertEqual(raised.exception.code, "gatekeeper_target_mismatch")
+
     def assert_role_failure_is_durable(self, role: CommandRole) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
@@ -1660,7 +6098,39 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         self.assertTrue(fixture.context.attempt_root.is_dir())
         self.assertFalse(os.path.lexists(fixture.context.final_root))
         retained = list(fixture.context.attempt_root.rglob(fixture.context.archive_name))
-        self.assertEqual(len(retained), 1)
+        finalization_roles = {
+            CommandRole.FETCH_LOG,
+            CommandRole.STAPLE,
+            CommandRole.STAPLE_VALIDATE,
+            CommandRole.FINAL_VERIFY,
+            CommandRole.DISTRIBUTION_CHECK,
+        }
+        if role in finalization_roles:
+            self.assertEqual(len(retained), 2)
+            self.assertTrue(
+                (
+                    fixture.context.attempt_root
+                    / f"recovery-source/{fixture.context.archive_name}"
+                ).is_file()
+            )
+            run = sole_finalization_run(fixture)
+            self.assertTrue(
+                any(
+                    path.is_file()
+                    for path in (
+                        run / f"work/{fixture.context.archive_name}",
+                        run / f"publish-ready/{fixture.context.archive_name}",
+                    )
+                )
+            )
+        else:
+            self.assertEqual(len(retained), 1)
+            self.assertTrue(
+                (
+                    fixture.context.attempt_root
+                    / f"work/{fixture.context.archive_name}"
+                ).is_file()
+            )
         calls = list(fixture.runner.calls)
         with self.assertRaisesRegex(TransactionError, "must not be resubmitted"):
             fixture.execute()
@@ -1675,17 +6145,25 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         self.addCleanup(fixture.close)
         calls = 0
         publisher_called = False
+        mutated_publish_ready: Path | None = None
 
         def tampering(_repository: Path) -> dict[str, str]:
-            nonlocal calls
+            nonlocal calls, mutated_publish_ready
             calls += 1
-            if calls == 4:
-                publish_ready = fixture.context.attempt_root / "publish-ready"
-                self.assertTrue(publish_ready.is_dir())
-                self.assertFalse(
-                    (fixture.context.attempt_root / "receipt.json").exists()
+            publish_ready = current_publish_ready(fixture)
+            if publish_ready is not None and mutated_publish_ready is None:
+                event_paths = sorted(
+                    (fixture.context.attempt_root / "events").glob("*.json")
                 )
-                mutator(fixture, publish_ready)
+                latest = json.loads(
+                    event_paths[-1].read_text(encoding="utf-8")
+                )
+                if latest["state"] == "distribution_verified":
+                    self.assertFalse(
+                        (publish_ready.parent / "receipt.json").exists()
+                    )
+                    mutated_publish_ready = publish_ready
+                    mutator(fixture, publish_ready)
             return fixture.context.source_identity
 
         def publisher(_source: Path, _destination: Path) -> None:
@@ -1696,11 +6174,14 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
             fixture.execute(source_identity_reader=tampering, publisher=publisher)
         self.assertEqual(raised.exception.code, expected_code)
         self.assertEqual(raised.exception.terminal_state, "failed")
-        self.assertEqual(calls, 5)
+        self.assertGreaterEqual(calls, 1)
+        self.assertIsNotNone(mutated_publish_ready)
         self.assertFalse(publisher_called)
         self.assertFalse(os.path.lexists(fixture.context.final_root))
-        self.assertTrue((fixture.context.attempt_root / "publish-ready").is_dir())
-        self.assertFalse((fixture.context.attempt_root / "receipt.json").exists())
+        if mutated_publish_ready is None:
+            self.fail("test fault was not injected at publish-ready")
+        self.assertTrue(mutated_publish_ready.is_dir())
+        self.assertFalse((mutated_publish_ready.parent / "receipt.json").exists())
         events = [
             json.loads(path.read_text(encoding="utf-8"))
             for path in sorted((fixture.context.attempt_root / "events").iterdir())
@@ -1772,10 +6253,33 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         self.addCleanup(fixture.close)
 
         def mismatched_gatekeeper(_app: Path, _digest: str) -> dict:
-            return gatekeeper_fixture("f" * 64, "2026-07-28T04:01:00Z")
+            return gatekeeper_fixture(
+                "f" * 64,
+                "2026-07-28T04:01:00Z",
+                _app,
+            )
 
         with self.assertRaisesRegex(TransactionError, "exact stapled app tree"):
             fixture.execute(gatekeeper_capture=mismatched_gatekeeper)
+        self.assertFalse(os.path.lexists(fixture.context.final_root))
+
+    def test_gatekeeper_open_policy_cannot_substitute_for_app_execution(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def open_policy_gatekeeper(_app: Path, digest: str) -> dict:
+            evidence = gatekeeper_fixture(
+                digest,
+                "2026-07-28T04:01:00Z",
+                _app,
+            )
+            evidence["assessment_type"] = "open"
+            evidence["primary_signature_context"] = True
+            return evidence
+
+        with self.assertRaises(TransactionError) as raised:
+            fixture.execute(gatekeeper_capture=open_policy_gatekeeper)
+        self.assertEqual(raised.exception.code, "gatekeeper_verification_failed")
         self.assertFalse(os.path.lexists(fixture.context.final_root))
 
     def test_manifest_failure_never_exposes_final_root(self) -> None:
@@ -1794,7 +6298,11 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(TransactionError, "fixture failure"):
             fixture.execute(manifest_writer=failing_writer)
         self.assertFalse(os.path.lexists(fixture.context.final_root))
-        self.assertTrue((fixture.context.attempt_root / "publish-ready").is_dir())
+        publish_ready = current_publish_ready(fixture)
+        self.assertIsNotNone(publish_ready)
+        if publish_ready is None:
+            self.fail("manifest failure lost its UUID publish-ready workspace")
+        self.assertTrue(publish_ready.is_dir())
 
     def test_manifest_verifier_failure_never_exposes_final_root(self) -> None:
         fixture = Fixture()
@@ -1938,18 +6446,32 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                 fixture = Fixture()
                 self.addCleanup(fixture.close)
                 calls = 0
+                mutated = False
 
                 def tampering(_repository: Path) -> dict[str, str]:
-                    nonlocal calls
+                    nonlocal calls, mutated
                     calls += 1
-                    if calls == 3:
-                        target = fixture.context.attempt_root / "publish-ready" / relative
+                    publish_ready = current_publish_ready(fixture)
+                    if publish_ready is not None and not mutated:
+                        event_paths = sorted(
+                            (fixture.context.attempt_root / "events").glob(
+                                "*.json"
+                            )
+                        )
+                        latest = json.loads(
+                            event_paths[-1].read_text(encoding="utf-8")
+                        )
+                        if latest["state"] != "distribution_verified":
+                            return fixture.context.toolchain_metadata
+                        mutated = True
+                        target = publish_ready / relative
                         target.write_text('{"tampered":true}\n', encoding="utf-8")
                     return fixture.context.toolchain_metadata
 
                 with self.assertRaises(TransactionError) as raised:
                     fixture.execute(toolchain_metadata_reader=tampering)
                 self.assertEqual(raised.exception.code, expected_code)
+                self.assertTrue(mutated)
                 self.assertFalse(os.path.lexists(fixture.context.final_root))
 
     def test_pre_receipt_notarization_message_tamper_is_rejected(self) -> None:
@@ -1979,14 +6501,19 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         def mutate(_fixture: Fixture, publish_ready: Path) -> None:
             path = publish_ready / "gatekeeper.json"
             evidence = json.loads(path.read_text(encoding="utf-8"))
+            original_target = evidence["assessed_target"]
+            replacement_target = "/Applications/Other/Clash for Mac.app"
             output = evidence["assessment_output"].replace(
-                "/Applications/Clash for Mac.app",
-                "/Applications/Other/Clash for Mac.app",
+                original_target,
+                replacement_target,
             )
             evidence["assessment_output"] = output
             evidence["assessment_output_sha256"] = hashlib.sha256(
                 output.encode("utf-8")
             ).hexdigest()
+            evidence["assessed_target"] = replacement_target
+            evidence["assessment_command"][-1] = replacement_target
+            evidence["codesign_command"][-1] = replacement_target
             validate_gatekeeper_evidence(evidence)
             path.write_text(
                 json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n",
@@ -2051,20 +6578,21 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
 
     def test_preseal_artifact_and_transaction_tamper_is_not_sealed(self) -> None:
         cases = (
-            ("app", "manifest_verification_failed", 5),
-            ("archive", "manifest_verification_failed", 5),
-            ("app-manifest", "manifest_verification_failed", 5),
-            ("archive-manifest", "manifest_verification_failed", 5),
-            ("submission-receipt", "submission_receipt_identity_drift", 5),
-            ("intent", "notarization_intent_identity_drift", 5),
-            ("prior-event", "event_journal_identity_drift", 5),
+            ("app", "manifest_verification_failed"),
+            ("archive", "manifest_verification_failed"),
+            ("app-manifest", "manifest_verification_failed"),
+            ("archive-manifest", "manifest_verification_failed"),
+            ("submission-receipt", "submission_receipt_identity_drift"),
+            ("intent", "notarization_intent_identity_drift"),
+            ("prior-event", "event_journal_identity_drift"),
         )
-        for kind, expected_code, expected_calls in cases:
+        for kind, expected_code in cases:
             with self.subTest(kind=kind):
                 fixture = Fixture()
                 self.addCleanup(fixture.close)
                 calls = 0
                 publisher_called = False
+                mutated = False
 
                 def rewrite(path: Path, field: str, value: object) -> None:
                     document = json.loads(path.read_text(encoding="utf-8"))
@@ -2076,7 +6604,9 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                     )
 
                 def mutate() -> None:
-                    publish_ready = fixture.context.attempt_root / "publish-ready"
+                    publish_ready = current_publish_ready(fixture)
+                    if publish_ready is None:
+                        self.fail("preseal mutation lacks publish-ready workspace")
                     if kind == "app":
                         executable = (
                             publish_ready
@@ -2122,10 +6652,24 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                         self.fail(f"unknown tamper kind: {kind}")
 
                 def source_identity(_repository: Path) -> dict[str, str]:
-                    nonlocal calls
+                    nonlocal calls, mutated
                     calls += 1
-                    if calls == 4:
-                        mutate()
+                    publish_ready = current_publish_ready(fixture)
+                    if publish_ready is not None and not mutated:
+                        event_paths = sorted(
+                            (fixture.context.attempt_root / "events").glob(
+                                "*.json"
+                            )
+                        )
+                        latest = json.loads(
+                            event_paths[-1].read_text(encoding="utf-8")
+                        )
+                        if (
+                            latest["state"] == "distribution_verified"
+                            and not (publish_ready.parent / "receipt.json").exists()
+                        ):
+                            mutated = True
+                            mutate()
                     return fixture.context.source_identity
 
                 def publisher(_source: Path, _destination: Path) -> None:
@@ -2138,11 +6682,17 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                         publisher=publisher,
                     )
                 self.assertEqual(raised.exception.code, expected_code)
-                self.assertEqual(calls, expected_calls)
+                self.assertGreaterEqual(calls, 1)
+                self.assertTrue(mutated)
                 self.assertFalse(publisher_called)
                 self.assertFalse(os.path.lexists(fixture.context.final_root))
-                self.assertFalse(
-                    (fixture.context.attempt_root / "receipt.json").exists()
+                self.assertEqual(
+                    list(
+                        (
+                            fixture.context.attempt_root / "finalization-runs"
+                        ).glob("*/receipt.json")
+                    ),
+                    [],
                 )
                 events = [
                     json.loads(path.read_text(encoding="utf-8"))
@@ -2173,6 +6723,7 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                 self.addCleanup(fixture.close)
                 calls = 0
                 publisher_called = False
+                mutated = False
 
                 def rewrite(path: Path, field: str, value: object) -> None:
                     document = json.loads(path.read_text(encoding="utf-8"))
@@ -2184,7 +6735,9 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                     )
 
                 def mutate() -> None:
-                    publish_ready = fixture.context.attempt_root / "publish-ready"
+                    publish_ready = current_publish_ready(fixture)
+                    if publish_ready is None:
+                        self.fail("postseal mutation lacks publish-ready workspace")
                     if kind == "app":
                         executable = (
                             publish_ready
@@ -2241,13 +6794,24 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                         self.fail(f"unknown tamper kind: {kind}")
 
                 def toolchain(_repository: Path) -> dict[str, str]:
-                    nonlocal calls
+                    nonlocal calls, mutated
                     calls += 1
-                    if calls == 4:
-                        self.assertTrue(
-                            (fixture.context.attempt_root / "receipt.json").is_file()
+                    publish_ready = current_publish_ready(fixture)
+                    if publish_ready is not None and not mutated:
+                        event_paths = sorted(
+                            (fixture.context.attempt_root / "events").glob(
+                                "*.json"
+                            )
                         )
-                        mutate()
+                        latest = json.loads(
+                            event_paths[-1].read_text(encoding="utf-8")
+                        )
+                        if (
+                            latest["state"] == "sealed"
+                            and (publish_ready.parent / "receipt.json").is_file()
+                        ):
+                            mutated = True
+                            mutate()
                     return fixture.context.toolchain_metadata
 
                 def publisher(_source: Path, _destination: Path) -> None:
@@ -2260,12 +6824,11 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                         publisher=publisher,
                     )
                 self.assertEqual(raised.exception.code, expected_code)
-                self.assertEqual(calls, 4)
+                self.assertGreaterEqual(calls, 1)
+                self.assertTrue(mutated)
                 self.assertFalse(publisher_called)
                 self.assertFalse(os.path.lexists(fixture.context.final_root))
-                self.assertTrue(
-                    (fixture.context.attempt_root / "receipt.json").is_file()
-                )
+                self.assertTrue(sole_finalization_receipt(fixture).is_file())
                 events = [
                     json.loads(path.read_text(encoding="utf-8"))
                     for path in sorted(
@@ -2291,10 +6854,10 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                     latest = json.loads(paths[-1].read_text(encoding="utf-8"))
                     if latest["state"] == "distribution_verified":
                         tampered = True
-                        path = (
-                            fixture.context.attempt_root
-                            / "publish-ready/notarization.json"
-                        )
+                        publish_ready = current_publish_ready(fixture)
+                        if publish_ready is None:
+                            self.fail("seal callback lacks publish-ready workspace")
+                        path = publish_ready / "notarization.json"
                         document = json.loads(path.read_text(encoding="utf-8"))
                         document["message"] = "callback injected raw message"
                         path.write_text(
@@ -2698,16 +7261,29 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         self.addCleanup(fixture.close)
         calls = 0
         publisher_called = False
+        drifted = False
 
         def drifting(_repository: Path) -> dict[str, str]:
-            nonlocal calls
+            nonlocal calls, drifted
             calls += 1
-            if calls < 6:
-                return fixture.context.source_identity
-            return {
-                "repositoryCommit": "c" * 40,
-                "releaseSourceSha256": "d" * 64,
-            }
+            publish_ready = current_publish_ready(fixture)
+            if publish_ready is not None:
+                event_paths = sorted(
+                    (fixture.context.attempt_root / "events").glob("*.json")
+                )
+                latest = json.loads(
+                    event_paths[-1].read_text(encoding="utf-8")
+                )
+                if (
+                    latest["state"] == "sealed"
+                    and (publish_ready.parent / "receipt.json").is_file()
+                ):
+                    drifted = True
+                    return {
+                        "repositoryCommit": "c" * 40,
+                        "releaseSourceSha256": "d" * 64,
+                    }
+            return fixture.context.source_identity
 
         def publisher(_source: Path, _destination: Path) -> None:
             nonlocal publisher_called
@@ -2715,10 +7291,11 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TransactionError, "source identity changed"):
             fixture.execute(source_identity_reader=drifting, publisher=publisher)
-        self.assertEqual(calls, 6)
+        self.assertGreaterEqual(calls, 1)
+        self.assertTrue(drifted)
         self.assertFalse(publisher_called)
         self.assertFalse(os.path.lexists(fixture.context.final_root))
-        self.assertTrue((fixture.context.attempt_root / "receipt.json").is_file())
+        self.assertTrue(sole_finalization_receipt(fixture).is_file())
 
     def test_publisher_failure_retains_complete_publish_ready_tree(self) -> None:
         fixture = Fixture()
@@ -2730,7 +7307,10 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(TransactionError, "fixture publish failure"):
             fixture.execute(publisher=fail_publish)
         self.assertFalse(os.path.lexists(fixture.context.final_root))
-        publish_ready = fixture.context.attempt_root / "publish-ready"
+        publish_ready = current_publish_ready(fixture)
+        self.assertIsNotNone(publish_ready)
+        if publish_ready is None:
+            self.fail("publisher failure lost its UUID publish-ready workspace")
         self.assertTrue(publish_ready.is_dir())
         self.assertEqual(
             {path.name for path in publish_ready.iterdir()},
@@ -2745,7 +7325,7 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
             },
         )
         receipt = json.loads(
-            (fixture.context.attempt_root / "receipt.json").read_text(encoding="utf-8")
+            (publish_ready.parent / "receipt.json").read_text(encoding="utf-8")
         )
         self.assertEqual(receipt["state"], "publish-ready")
         events = sorted((fixture.context.attempt_root / "events").glob("*.json"))
@@ -2886,19 +7466,22 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
     def test_failed_event_write_does_not_create_a_sequence_gap(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
-        real_write = transaction_module._write_json_exclusive
+        real_publish = transaction_module._publish_pending_evidence
         injected = False
 
-        def flaky_write(path: Path, value: object) -> None:
+        def flaky_publish(**arguments) -> None:
             nonlocal injected
-            if path.name == "00000002.json" and not injected:
+            if (
+                arguments["destination_path"].name == "00000002.json"
+                and not injected
+            ):
                 injected = True
                 raise TransactionError("event_write_fixture", "event write fixture")
-            real_write(path, value)
+            real_publish(**arguments)
 
         with patch(
-            "scripts.notarization_transaction._write_json_exclusive",
-            side_effect=flaky_write,
+            "scripts.notarization_transaction._publish_pending_evidence",
+            side_effect=flaky_publish,
         ):
             with self.assertRaisesRegex(TransactionError, "event write fixture"):
                 fixture.execute()

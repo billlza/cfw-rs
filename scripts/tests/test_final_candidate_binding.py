@@ -32,6 +32,7 @@ from scripts.tests.test_physical_evidence_aggregator import (
     fixture as physical_fixture,
 )
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
+from scripts.tests.gatekeeper_fixture import macos_27_fixture
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 REPOSITORY_COMMIT = repository_commit(REPOSITORY)
@@ -168,6 +169,22 @@ class FinalCandidateRoundTripTests(_CleanWorkspaceMixin):
         roles = {entry["role"] for entry in binding["nested_code"]}
         self.assertEqual(roles, set(REQUIRED_NESTED_CODE))
 
+    def test_macos_27_absent_origin_gatekeeper_evidence_is_bound(self) -> None:
+        request = _request()
+        request["gatekeeper"] = macos_27_fixture(SIGNED_TREE, CAPTURED_AT)
+        binding = build_final_candidate_binding(
+            REPOSITORY,
+            request,
+            fixture=True,
+            workspace_root=self.workspace,
+        )
+        self.assertEqual(binding["status"], VERIFIED)
+        self.assertIsNone(binding["gatekeeper"]["origin"])
+        self.assertEqual(
+            binding["gatekeeper"]["identity_source"],
+            "codesign-leaf-authority",
+        )
+
     def test_missing_physical_inputs_block_and_cannot_be_promoted(self) -> None:
         for missing in PHYSICAL_INPUTS:
             binding = self.build(**{missing: None})
@@ -279,6 +296,15 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
         request = _request()
         request["gatekeeper"]["assessment_output_sha256"] = _sha("foreign output")
         with self.assertRaisesRegex(PublicationError, "assessment output digest mismatch"):
+            build_final_candidate_binding(
+                REPOSITORY, request, fixture=True, workspace_root=self.workspace
+            )
+
+    def test_gatekeeper_open_policy_cannot_substitute_for_app_execution(self) -> None:
+        request = _request()
+        request["gatekeeper"]["assessment_type"] = "open"
+        request["gatekeeper"]["primary_signature_context"] = True
+        with self.assertRaisesRegex(PublicationError, "required policy"):
             build_final_candidate_binding(
                 REPOSITORY, request, fixture=True, workspace_root=self.workspace
             )

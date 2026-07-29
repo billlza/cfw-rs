@@ -487,7 +487,11 @@ def _staple(value: object, signed_app_tree: str, built_at: datetime) -> dict[str
 
 def _gatekeeper(value: object, signed_app_tree: str, built_at: datetime) -> dict[str, Any]:
     try:
-        gatekeeper = validate_gatekeeper_evidence(value)
+        gatekeeper = validate_gatekeeper_evidence(
+            value,
+            expected_assessment_type="execute",
+            expected_primary_signature_context=False,
+        )
     except GatekeeperEvidenceError as error:
         raise PublicationError(f"Gatekeeper evidence is invalid: {error}") from error
     gatekeeper["target_signed_app_tree_sha256"] = _check_target(

@@ -6,6 +6,7 @@ const HANDOFF_FAILURE_CODES = new Set([
 ]);
 const MAX_RECEIPT_TTL_MILLIS = 5 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 function exactKeys(value, expected) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -19,6 +20,61 @@ function boundedMessage(value, label) {
     throw new TypeError(`${label} is invalid`);
   }
   return value;
+}
+
+function boundedProductField(value, label) {
+  if (typeof value !== "string" || !value.trim() || value.length > 128) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value;
+}
+
+export function normalizeBootPayload(value) {
+  if (!exactKeys(value, [
+    "migration_handoff",
+    "migration_handoff_renderer_ready",
+    "migration_handoff_status",
+    "product",
+  ])) {
+    throw new TypeError("boot payload fields are invalid");
+  }
+  if (!exactKeys(value.product, ["architecture", "license", "minimum_macos", "name", "version"])) {
+    throw new TypeError("boot product fields are invalid");
+  }
+  if (typeof value.migration_handoff !== "boolean") {
+    throw new TypeError("boot migration role is invalid");
+  }
+  const product = Object.fromEntries(
+    Object.entries(value.product).map(([key, field]) => [key, boundedProductField(field, `product ${key}`)]),
+  );
+  const migrationHandoffStatus = normalizeMigrationHandoffStatus(value.migration_handoff_status);
+  const rendererReady = value.migration_handoff_renderer_ready;
+  if (!value.migration_handoff) {
+    if (rendererReady !== null) {
+      throw new TypeError("dashboard boot payload cannot contain renderer readiness authority");
+    }
+  } else if (rendererReady?.state === "published") {
+    if (!exactKeys(rendererReady, ["state"])) {
+      throw new TypeError("published renderer readiness fields are invalid");
+    }
+  } else if (rendererReady?.state === "challenge") {
+    if (!exactKeys(rendererReady, ["challenge", "generation", "state"])
+      || !Number.isSafeInteger(rendererReady.generation)
+      || rendererReady.generation <= 0
+      || rendererReady.generation > 0xffff_ffff
+      || typeof rendererReady.challenge !== "string"
+      || !UUID_V4.test(rendererReady.challenge)) {
+      throw new TypeError("renderer readiness challenge is invalid");
+    }
+  } else {
+    throw new TypeError("handoff boot payload requires renderer readiness authority");
+  }
+  return {
+    product,
+    migration_handoff: value.migration_handoff,
+    migration_handoff_status: migrationHandoffStatus,
+    migration_handoff_renderer_ready: rendererReady === null ? null : { ...rendererReady },
+  };
 }
 
 function target(value) {
@@ -111,6 +167,39 @@ export function migrationRoute(retirement, migrationHandoff) {
     default:
       return "unverifiable";
   }
+}
+
+export function migrationHandoffRendererAckArguments(
+  bootPayload,
+  retirement,
+  {
+    activePage,
+    migrationRendered,
+    globalActionsBound,
+    criticalListenersBound,
+  },
+) {
+  if (!bootPayload.migration_handoff) return null;
+  const rendererReady = bootPayload.migration_handoff_renderer_ready;
+  if (rendererReady?.state === "published") return null;
+  if (retirement?.state === "unverifiable") return null;
+  const route = migrationRoute(retirement, true);
+  if (!["prepare", "recover"].includes(route)) {
+    throw new TypeError("handoff renderer has no actionable migration route");
+  }
+  if (activePage !== "general"
+    || migrationRendered !== true
+    || globalActionsBound !== true
+    || criticalListenersBound !== true) {
+    throw new TypeError("handoff renderer is not ready to acknowledge its first migration view");
+  }
+  if (rendererReady?.state !== "challenge") {
+    throw new TypeError("handoff renderer readiness challenge is unavailable");
+  }
+  return {
+    generation: rendererReady.generation,
+    challenge: rendererReady.challenge,
+  };
 }
 
 export function newCutoverState(targetValue = "system_proxy", message = null) {

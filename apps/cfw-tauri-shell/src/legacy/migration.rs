@@ -123,7 +123,7 @@ pub(super) fn run_launch_preflight(app: &AppHandle) -> Result<(), String> {
             CutoverPhase::Prepared | CutoverPhase::GuiStopped => {
                 let launch = app.state::<crate::LaunchContext>();
                 match require_pre_network_launch_recovery(
-                    launch.migration_handoff,
+                    launch.is_migration_handoff(),
                     super::admission::require_canonical_handoff_candidate,
                     || super::recovery::resume_pre_network_cutover_if_intact(&journal, &store),
                 ) {

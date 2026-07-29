@@ -22,7 +22,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::ManagedProfiles;
 use crate::legacy::{LegacyRetirementGate, LegacyRetirementStatus};
-use crate::lifecycle::{AppLifecycle, MigrationHandoffStatus};
 use crate::settings_store;
 use cutover::CutoverPreparationGate;
 pub(crate) use maintenance::{EngineMaintenanceError, EngineMaintenanceLease, ProfileControlError};
@@ -432,45 +431,4 @@ fn selected_profile_for_mode(
             .require_selected()
             .map(|stored| (stored.record.id, stored.profile))
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProductInfo {
-    name: &'static str,
-    version: &'static str,
-    license: &'static str,
-    minimum_macos: &'static str,
-    architecture: &'static str,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct BootPayload {
-    product: ProductInfo,
-    /// Whether this process is the explicit `--migration-handoff` instance. The
-    /// dashboard uses it to decide whether to offer the controlled restart that
-    /// enters the handoff, or the prepare/confirm/recover cutover controls that
-    /// only the handoff instance may drive.
-    migration_handoff: bool,
-    /// Application-owned launch orchestration survives renderer reloads. This
-    /// closed status contains only bounded static diagnostics; transient events
-    /// tell the renderer to refresh it but are never the source of truth.
-    migration_handoff_status: MigrationHandoffStatus,
-}
-
-#[tauri::command]
-pub(crate) fn boot_payload(
-    launch: State<'_, crate::LaunchContext>,
-    lifecycle: State<'_, AppLifecycle>,
-) -> Result<BootPayload, String> {
-    Ok(BootPayload {
-        product: ProductInfo {
-            name: "Clash for Mac",
-            version: env!("CARGO_PKG_VERSION"),
-            license: "GPL-3.0-or-later",
-            minimum_macos: "15.0",
-            architecture: "arm64",
-        },
-        migration_handoff: launch.migration_handoff,
-        migration_handoff_status: lifecycle.migration_handoff_status()?,
-    })
 }

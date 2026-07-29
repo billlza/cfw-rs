@@ -245,12 +245,13 @@ pub(crate) async fn prepare_legacy_cutover(
     launch: State<'_, crate::LaunchContext>,
     target: EngineMode,
 ) -> Result<UiCutoverPreparation, String> {
-    if !launch.migration_handoff {
+    if !launch.is_migration_handoff() {
         return Err(
             "legacy preparation requires launching 0.4.0 with --migration-handoff while the old GUI remains running"
                 .into(),
         );
     }
+    launch.require_renderer_ready_published()?;
     crate::legacy::require_canonical_handoff_candidate()?;
     if !matches!(
         retirement.status()?,

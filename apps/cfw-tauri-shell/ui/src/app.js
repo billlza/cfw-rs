@@ -55,13 +55,17 @@ import {
   clearCutoverReceipt,
   cutoverConfirmArguments,
   cutoverReceiptIsCurrent,
+  migrationHandoffRendererAckArguments,
   migrationRoute,
   newCutoverState,
+  normalizeBootPayload,
   normalizeCutoverPreparation,
-  normalizeMigrationHandoffStatus,
   normalizeRetirementStatus,
   unverifiableRetirementStatus,
 } from "./migration.js";
+
+let migrationHandoffRendererReady = null;
+let criticalMigrationListenersBound = false;
 
 /// Reasons the dashboard shows next to a control the 0.4.0 backend refuses.
 /// Each one states what the product does instead, so a disabled switch is never
@@ -3828,7 +3832,7 @@ function focusProfileEditorSection(key) {
 }
 
 async function reloadPayload() {
-  await loadBootPayload();
+  if (!state.migrationHandoff) await loadBootPayload();
   state.lastRefresh = "Just now";
   await loadSettingsSnapshot();
   await loadPlatformDesign();
@@ -3844,13 +3848,11 @@ async function reloadPayload() {
 }
 
 function applyBootPayload(payload) {
-  state.payload = payload;
-  state.migrationHandoff = payload?.migration_handoff === true;
-  try {
-    state.migrationHandoffStatus = normalizeMigrationHandoffStatus(payload?.migration_handoff_status);
-  } catch (error) {
-    markHandoffStatusUnverifiable(error);
-  }
+  const normalized = normalizeBootPayload(payload);
+  state.payload = { product: normalized.product };
+  state.migrationHandoff = normalized.migration_handoff;
+  state.migrationHandoffStatus = normalized.migration_handoff_status;
+  migrationHandoffRendererReady = normalized.migration_handoff_renderer_ready;
 }
 
 function markHandoffStatusUnverifiable(error) {
@@ -3864,6 +3866,26 @@ function markHandoffStatusUnverifiable(error) {
 
 async function loadBootPayload() {
   applyBootPayload(await invoke("boot_payload"));
+}
+
+async function acknowledgeMigrationHandoffRendererReady() {
+  const page = document.getElementById("page");
+  const args = migrationHandoffRendererAckArguments(
+    {
+      migration_handoff: state.migrationHandoff,
+      migration_handoff_renderer_ready: migrationHandoffRendererReady,
+    },
+    state.retirement,
+    {
+      activePage: state.activePage,
+      migrationRendered: Boolean(page?.querySelector(".cfw-migration-banner")),
+      globalActionsBound: runtime.globalEventsBound,
+      criticalListenersBound: criticalMigrationListenersBound,
+    },
+  );
+  if (!args) return;
+  await invoke("acknowledge_migration_handoff_renderer_ready", args);
+  migrationHandoffRendererReady = { state: "published" };
 }
 
 /// Applies an engine status envelope, validating the runtime identity before the
@@ -4097,6 +4119,7 @@ async function startLiveStreams() {
 async function bootstrap() {
   bindGlobalEvents();
   await loadBootPayload();
+  if (state.migrationHandoff) state.activePage = "general";
   await loadSettingsSnapshot();
   await loadPlatformDesign();
   await loadEngineStatus();
@@ -4167,10 +4190,12 @@ async function bootstrap() {
       return;
     }
     if (typeof payload.code === "string" && payload.code.startsWith("migration_handoff_")) {
-      try {
-        await loadBootPayload();
-      } catch (error) {
-        markHandoffStatusUnverifiable(error);
+      if (!state.migrationHandoff) {
+        try {
+          await loadBootPayload();
+        } catch (error) {
+          markHandoffStatusUnverifiable(error);
+        }
       }
       renderPage();
     }
@@ -4212,6 +4237,16 @@ async function bootstrap() {
       await importProfileFromPath(path);
     }
   });
+
+  criticalMigrationListenersBound = true;
+  if (state.migrationHandoff) {
+    // Close the snapshot/listener gap without requesting another boot challenge
+    // in this renderer lifetime. A real WebView reload receives the next
+    // parent-ticket-bound generation from its one bootstrap call.
+    await loadRetirementStatus();
+    renderPage();
+  }
+  await acknowledgeMigrationHandoffRendererReady();
 
   // Register every listener before the automatic check. The setup-time check
   // used to race this subscription and could lose the only availability event.

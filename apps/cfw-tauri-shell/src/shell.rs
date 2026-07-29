@@ -215,7 +215,7 @@ pub(crate) fn handle_app_menu_event(app: &AppHandle, id: &str) {
     match app_menu_action(id) {
         Some(AppMenuAction::OpenPage(page)) => show_main_page(app, page),
         Some(AppMenuAction::CheckForUpdates(page)) => {
-            if app.state::<crate::LaunchContext>().migration_handoff {
+            if app.state::<crate::LaunchContext>().is_migration_handoff() {
                 emit_shell_error(
                     app,
                     "handoff_command_rejected",

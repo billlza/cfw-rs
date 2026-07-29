@@ -6,17 +6,21 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const HANDOFF_DIRECTORY: &str = ".migration-handoff-v1";
+const HANDOFF_DIRECTORY: &str = ".migration-handoff-v2";
 const HANDOFF_FLAG: &str = "--migration-handoff";
 const TICKET_FLAG: &str = "--migration-ticket";
-const TICKET_SCHEMA_VERSION: u16 = 1;
-const TICKET_DOCUMENT: &str = "migration-handoff-startup-ticket-v1";
-const READY_DOCUMENT: &str = "migration-handoff-ready-v1";
+const TICKET_SCHEMA_VERSION: u16 = 2;
+const READY_SCHEMA_VERSION: u16 = 2;
+const TICKET_DOCUMENT: &str = "migration-handoff-startup-ticket-v2";
+const READY_DOCUMENT: &str = "migration-handoff-renderer-ready-v2";
+const READY_WINDOW_LABEL: &str = "main";
+const RENDERER_CHALLENGE_COUNT: usize = 16;
 const MAX_DOCUMENT_BYTES: u64 = 16 * 1024;
 const MAX_PROCESS_LIST_BYTES: usize = 1024 * 1024;
 const MAX_HANDOFF_DOCUMENTS: usize = 64;
@@ -48,13 +52,25 @@ pub(crate) struct ProcessIdentity {
     pub(super) executable: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum LaunchArguments {
     Dashboard,
     MigrationHandoff { token: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for LaunchArguments {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dashboard => formatter.write_str("Dashboard"),
+            Self::MigrationHandoff { .. } => formatter
+                .debug_struct("MigrationHandoff")
+                .field("token", &"[redacted]")
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartupTicket {
     schema_version: u16,
@@ -65,9 +81,34 @@ struct StartupTicket {
     parent: ProcessIdentity,
     child_executable: PathBuf,
     child_argv: Vec<String>,
+    renderer_challenges: Vec<RendererReadyChallenge>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RendererReadyChallenge {
+    pub(crate) generation: u32,
+    pub(crate) challenge: String,
+}
+
+impl RendererReadyChallenge {
+    pub(crate) fn from_renderer_input(generation: u32, challenge: String) -> Result<Self, String> {
+        if generation == 0
+            || usize::try_from(generation)
+                .ok()
+                .is_none_or(|value| value > RENDERER_CHALLENGE_COUNT)
+            || require_canonical_renderer_challenge(&challenge).is_err()
+        {
+            return Err("renderer-ready acknowledgement input is invalid".into());
+        }
+        Ok(Self {
+            generation,
+            challenge,
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReadyAcknowledgement {
     schema_version: u16,
@@ -76,15 +117,16 @@ struct ReadyAcknowledgement {
     issued_at_unix_ms: u64,
     expires_at_unix_ms: u64,
     child: ProcessIdentity,
+    window_label: String,
+    renderer: RendererReadyChallenge,
 }
 
-#[derive(Debug)]
 pub(super) struct PendingHandoff {
     root: PathBuf,
     ticket: StartupTicket,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct HandoffCleanup {
     root: PathBuf,
     token: String,
@@ -164,11 +206,12 @@ pub(super) struct PendingHandoffChild {
     cleanup: ArmedCleanup<PendingHandoffResources>,
 }
 
-#[derive(Debug)]
 pub(crate) struct ConsumedHandoffTicket {
     root: PathBuf,
     ticket: StartupTicket,
+    child: ProcessIdentity,
     _locked_ticket: File,
+    ready_failure_quarantine: Mutex<Option<File>>,
 }
 
 pub(crate) fn parse_launch_arguments(arguments: &[OsString]) -> Result<LaunchArguments, String> {
@@ -200,6 +243,7 @@ impl PendingHandoff {
             .checked_add(duration_millis(TICKET_LIFETIME)?)
             .ok_or_else(|| "migration handoff ticket expiry overflowed".to_owned())?;
         let token = Uuid::new_v4().hyphenated().to_string();
+        let renderer_challenges = new_renderer_challenges(&token)?;
         let parent = observe_exact_process(std::process::id(), executable)?
             .ok_or_else(|| "running dashboard process identity is not exact".to_owned())?;
         let child_argv = child_argv(&token);
@@ -212,6 +256,7 @@ impl PendingHandoff {
             parent,
             child_executable: executable.to_path_buf(),
             child_argv,
+            renderer_challenges,
         };
         ticket.validate_at(issued_at_unix_ms)?;
         let directory = PrivateDirectory::open_or_create(root)?;
@@ -386,6 +431,8 @@ impl ConsumedHandoffTicket {
         {
             return Err("migration handoff parent identity is no longer exact".into());
         }
+        let child = observe_exact_process(std::process::id(), executable)?
+            .ok_or_else(|| "migration handoff child process identity is not exact".to_owned())?;
         directory.unlink_locked(
             &ticket_filename(token),
             file.try_clone()
@@ -394,7 +441,9 @@ impl ConsumedHandoffTicket {
         Ok(Self {
             root: root.to_path_buf(),
             ticket,
+            child,
             _locked_ticket: file,
+            ready_failure_quarantine: Mutex::new(None),
         })
     }
 
@@ -402,22 +451,52 @@ impl ConsumedHandoffTicket {
         &self.ticket.parent
     }
 
-    pub(crate) fn publish_ready(&self) -> Result<(), String> {
-        let child = observe_exact_process(std::process::id(), &self.ticket.child_executable)?
+    pub(crate) fn renderer_challenges(&self) -> &[RendererReadyChallenge] {
+        &self.ticket.renderer_challenges
+    }
+
+    pub(crate) fn require_child_identity(&self) -> Result<ProcessIdentity, String> {
+        let observed = observe_exact_process(std::process::id(), &self.ticket.child_executable)?
             .ok_or_else(|| "migration handoff child process identity is not exact".to_owned())?;
+        if observed != self.child {
+            return Err("migration handoff child process identity is not exact".into());
+        }
+        Ok(observed)
+    }
+
+    pub(crate) fn publish_ready(&self, renderer: &RendererReadyChallenge) -> Result<(), String> {
+        let child = self.require_child_identity()?;
         let ready = ReadyAcknowledgement {
-            schema_version: TICKET_SCHEMA_VERSION,
+            schema_version: READY_SCHEMA_VERSION,
             document: READY_DOCUMENT.into(),
             token: self.ticket.token.clone(),
             issued_at_unix_ms: self.ticket.issued_at_unix_ms,
             expires_at_unix_ms: self.ticket.expires_at_unix_ms,
             child,
+            window_label: READY_WINDOW_LABEL.into(),
+            renderer: renderer.clone(),
         };
         ready.validate(&self.ticket, std::process::id())?;
-        PrivateDirectory::open_or_create(&self.root)?.write_new(
+        let directory = PrivateDirectory::open_or_create(&self.root)?;
+        let mut quarantine = self
+            .ready_failure_quarantine
+            .lock()
+            .map_err(|_| "migration handoff ready quarantine lock failed".to_owned())?;
+        if quarantine.is_some() {
+            return Err(
+                "migration handoff ready publication is quarantined after a prior failure".into(),
+            );
+        }
+        match directory.write_new_retaining_ambiguous_failure(
             &ready_filename(&self.ticket.token),
             &canonical_bytes(&ready)?,
-        )
+        ) {
+            Ok(()) => Ok(()),
+            Err(mut failure) => {
+                *quarantine = failure.quarantine.take();
+                Err(failure.message)
+            }
+        }
     }
 
     pub(crate) fn require_parent_absent(&self) -> Result<(), String> {
@@ -444,6 +523,7 @@ impl StartupTicket {
             || self.parent.executable != self.child_executable
             || !self.child_executable.is_absolute()
             || self.child_argv != child_argv(&self.token)
+            || validate_renderer_challenges(&self.token, &self.renderer_challenges).is_err()
         {
             return Err("migration handoff startup ticket is invalid".into());
         }
@@ -453,7 +533,7 @@ impl StartupTicket {
 
 impl ReadyAcknowledgement {
     fn validate(&self, ticket: &StartupTicket, expected_pid: u32) -> Result<(), String> {
-        if self.schema_version != TICKET_SCHEMA_VERSION
+        if self.schema_version != READY_SCHEMA_VERSION
             || self.document != READY_DOCUMENT
             || self.token != ticket.token
             || self.issued_at_unix_ms != ticket.issued_at_unix_ms
@@ -468,6 +548,8 @@ impl ReadyAcknowledgement {
             || self.child.pid != expected_pid
             || !self.child.start_identity.is_valid()
             || self.child.executable != ticket.child_executable
+            || self.window_label != READY_WINDOW_LABEL
+            || !ticket.renderer_challenges.contains(&self.renderer)
         {
             return Err("migration handoff ready acknowledgement is invalid".into());
         }
@@ -772,6 +854,62 @@ fn require_canonical_token(value: &str) -> Result<(), String> {
     }
 }
 
+fn new_renderer_challenges(startup_token: &str) -> Result<Vec<RendererReadyChallenge>, String> {
+    let mut seen = std::collections::BTreeSet::from([startup_token.to_owned()]);
+    let mut challenges = Vec::with_capacity(RENDERER_CHALLENGE_COUNT);
+    for index in 0..RENDERER_CHALLENGE_COUNT {
+        let challenge = Uuid::new_v4().hyphenated().to_string();
+        if !seen.insert(challenge.clone()) {
+            return Err(
+                "renderer-ready challenge generation collided with existing authority".into(),
+            );
+        }
+        challenges.push(RendererReadyChallenge {
+            generation: u32::try_from(index + 1)
+                .map_err(|_| "renderer-ready generation exceeds u32".to_owned())?,
+            challenge,
+        });
+    }
+    validate_renderer_challenges(startup_token, &challenges)?;
+    Ok(challenges)
+}
+
+fn validate_renderer_challenges(
+    startup_token: &str,
+    challenges: &[RendererReadyChallenge],
+) -> Result<(), String> {
+    if challenges.len() != RENDERER_CHALLENGE_COUNT {
+        return Err("migration handoff renderer challenge count is invalid".into());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (index, challenge) in challenges.iter().enumerate() {
+        let expected_generation = u32::try_from(index + 1)
+            .map_err(|_| "renderer-ready generation exceeds u32".to_owned())?;
+        if challenge.generation != expected_generation
+            || require_canonical_renderer_challenge(&challenge.challenge).is_err()
+            || challenge.challenge == startup_token
+            || !seen.insert(challenge.challenge.as_str())
+        {
+            return Err(
+                "migration handoff renderer challenges are not canonical and unique".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn require_canonical_renderer_challenge(value: &str) -> Result<(), String> {
+    if value.len() != 36 {
+        return Err("renderer-ready challenge has the wrong length".into());
+    }
+    let parsed = Uuid::parse_str(value)
+        .map_err(|_| "renderer-ready challenge is not a canonical UUIDv4".to_owned())?;
+    if parsed.get_version_num() != 4 || parsed.hyphenated().to_string() != value {
+        return Err("renderer-ready challenge is not a canonical UUIDv4".into());
+    }
+    Ok(())
+}
+
 fn current_unix_ms() -> Result<u64, String> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -838,6 +976,11 @@ where
 
 struct PrivateDirectory {
     file: File,
+}
+
+struct WriteNewFailure {
+    message: String,
+    quarantine: Option<File>,
 }
 
 impl PrivateDirectory {
@@ -930,7 +1073,7 @@ impl PrivateDirectory {
             } else if let Some(token) = document_token(&name, "ready-") {
                 let ready: ReadyAcknowledgement =
                     decode_canonical(&bytes, "stale readiness acknowledgement")?;
-                if ready.schema_version != TICKET_SCHEMA_VERSION
+                if ready.schema_version != READY_SCHEMA_VERSION
                     || ready.document != READY_DOCUMENT
                     || ready.token != token
                     || !canonical_ticket_window(ready.issued_at_unix_ms, ready.expires_at_unix_ms)
@@ -1026,7 +1169,19 @@ impl PrivateDirectory {
     }
 
     fn write_new(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
-        let name = safe_name(name)?;
+        self.write_new_retaining_ambiguous_failure(name, bytes)
+            .map_err(|failure| failure.message)
+    }
+
+    fn write_new_retaining_ambiguous_failure(
+        &self,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), WriteNewFailure> {
+        let name = safe_name(name).map_err(|message| WriteNewFailure {
+            message,
+            quarantine: None,
+        })?;
         let descriptor = unsafe {
             libc::openat(
                 self.file.as_raw_fd(),
@@ -1041,21 +1196,23 @@ impl PrivateDirectory {
             )
         };
         if descriptor == -1 {
-            return Err(format!(
-                "failed to create handoff document: {}",
-                std::io::Error::last_os_error()
-            ));
+            return Err(WriteNewFailure {
+                message: format!(
+                    "failed to create handoff document: {}",
+                    std::io::Error::last_os_error()
+                ),
+                quarantine: None,
+            });
         }
         let mut file = unsafe { File::from_raw_fd(descriptor) };
         if let Err(operation) = validate_private_file(&file) {
             let cleanup = self.unlink_created(&name);
-            drop(file);
-            return match cleanup {
-                Ok(()) => Err(operation),
-                Err(cleanup) => Err(format!(
-                    "{operation}; unsafe handoff document cleanup also failed: {cleanup}"
-                )),
-            };
+            return Err(write_failure_after_cleanup(
+                operation,
+                "unsafe handoff document cleanup",
+                cleanup,
+                file,
+            ));
         }
         let persisted = file.write_all(bytes).and_then(|()| file.sync_all());
         let operation = match persisted {
@@ -1067,13 +1224,12 @@ impl PrivateDirectory {
         };
         if let Err(operation) = operation {
             let cleanup = self.unlink_created(&name);
-            drop(file);
-            return match cleanup {
-                Ok(()) => Err(operation),
-                Err(cleanup) => Err(format!(
-                    "{operation}; failed handoff document cleanup also failed: {cleanup}"
-                )),
-            };
+            return Err(write_failure_after_cleanup(
+                operation,
+                "failed handoff document cleanup",
+                cleanup,
+                file,
+            ));
         }
         drop(file);
         Ok(())
@@ -1158,6 +1314,24 @@ impl PrivateDirectory {
         self.file
             .sync_all()
             .map_err(|error| format!("failed to fsync incomplete document removal: {error}"))
+    }
+}
+
+fn write_failure_after_cleanup(
+    operation: String,
+    cleanup_label: &str,
+    cleanup: Result<(), String>,
+    file: File,
+) -> WriteNewFailure {
+    match cleanup {
+        Ok(()) => WriteNewFailure {
+            message: operation,
+            quarantine: None,
+        },
+        Err(cleanup) => WriteNewFailure {
+            message: format!("{operation}; {cleanup_label} also failed: {cleanup}"),
+            quarantine: Some(file),
+        },
     }
 }
 
@@ -1266,6 +1440,12 @@ mod tests {
             parent: fixture_identity(42, executable),
             child_executable: executable.to_path_buf(),
             child_argv: child_argv(token),
+            renderer_challenges: (1..=RENDERER_CHALLENGE_COUNT)
+                .map(|generation| RendererReadyChallenge {
+                    generation: u32::try_from(generation).expect("fixture generation"),
+                    challenge: format!("00000000-0000-4000-8000-{generation:012x}"),
+                })
+                .collect(),
         }
     }
 
@@ -1283,6 +1463,15 @@ mod tests {
             LaunchArguments::MigrationHandoff {
                 token: token.into()
             }
+        );
+        assert!(
+            !format!(
+                "{:?}",
+                LaunchArguments::MigrationHandoff {
+                    token: token.into()
+                }
+            )
+            .contains(token)
         );
         for invalid in [
             vec![HANDOFF_FLAG, TICKET_FLAG],
@@ -1321,6 +1510,112 @@ mod tests {
         noncanonical_lifetime.expires_at_unix_ms += 1;
         assert!(noncanonical_lifetime.validate_at(now).is_err());
         assert!(ticket.validate_at(ticket.expires_at_unix_ms + 1).is_err());
+    }
+
+    #[test]
+    fn renderer_challenges_are_parent_bound_canonical_unique_and_independent() {
+        let token = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let now = 1_800_000_000_000;
+        let ticket = fixture_ticket(token, now);
+        ticket.validate_at(now).expect("ticket challenge pool");
+        assert_eq!(ticket.renderer_challenges.len(), RENDERER_CHALLENGE_COUNT);
+        assert!(
+            ticket
+                .renderer_challenges
+                .iter()
+                .all(|challenge| challenge.challenge != token)
+        );
+
+        let mut duplicate = ticket.clone();
+        duplicate.renderer_challenges[1].challenge =
+            duplicate.renderer_challenges[0].challenge.clone();
+        assert!(duplicate.validate_at(now).is_err());
+
+        let mut reordered = ticket.clone();
+        reordered.renderer_challenges[0].generation = 2;
+        assert!(reordered.validate_at(now).is_err());
+    }
+
+    #[test]
+    fn renderer_acknowledgement_input_is_bounded_and_canonical_before_gate_lookup() {
+        let canonical = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+        assert!(RendererReadyChallenge::from_renderer_input(1, canonical.into()).is_ok());
+        for (generation, challenge) in [
+            (0, canonical.to_owned()),
+            (
+                u32::try_from(RENDERER_CHALLENGE_COUNT + 1).expect("bounded generation"),
+                canonical.to_owned(),
+            ),
+            (1, canonical.to_uppercase()),
+            (1, "00000000-0000-1000-8000-000000000001".into()),
+            (1, "x".repeat(4096)),
+        ] {
+            assert!(RendererReadyChallenge::from_renderer_input(generation, challenge).is_err());
+        }
+    }
+
+    #[test]
+    fn ready_v2_binds_main_window_exact_child_and_parent_committed_challenge() {
+        let now = current_unix_ms().expect("clock");
+        let ticket = fixture_ticket("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", now);
+        let child = fixture_identity(77, &ticket.child_executable);
+        let ready = ReadyAcknowledgement {
+            schema_version: READY_SCHEMA_VERSION,
+            document: READY_DOCUMENT.into(),
+            token: ticket.token.clone(),
+            issued_at_unix_ms: ticket.issued_at_unix_ms,
+            expires_at_unix_ms: ticket.expires_at_unix_ms,
+            child,
+            window_label: READY_WINDOW_LABEL.into(),
+            renderer: ticket.renderer_challenges[0].clone(),
+        };
+        ready.validate(&ticket, 77).expect("ready v2");
+
+        let mut native_only_v1 = ready.clone();
+        native_only_v1.schema_version = 1;
+        native_only_v1.document = "migration-handoff-ready-v1".into();
+        assert!(native_only_v1.validate(&ticket, 77).is_err());
+
+        let mut wrong_window = ready.clone();
+        wrong_window.window_label = "other".into();
+        assert!(wrong_window.validate(&ticket, 77).is_err());
+
+        let mut uncommitted = ready;
+        uncommitted.renderer.challenge = "ffffffff-ffff-4fff-8fff-ffffffffffff".into();
+        assert!(uncommitted.validate(&ticket, 77).is_err());
+    }
+
+    #[test]
+    fn ambiguous_ready_write_failure_retains_the_exclusive_file_lock() {
+        let fixture = tempfile::NamedTempFile::new().expect("fixture");
+        let locked = fixture.reopen().expect("locked descriptor");
+        assert_eq!(
+            unsafe { libc::flock(locked.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let failure = write_failure_after_cleanup(
+            "injected persistence failure".into(),
+            "failed handoff document cleanup",
+            Err("injected unlink failure".into()),
+            locked,
+        );
+        assert!(failure.quarantine.is_some());
+
+        let competing = fixture.reopen().expect("competing descriptor");
+        assert_eq!(
+            unsafe { libc::flock(competing.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            -1,
+            "parent reader must observe writer-busy while the child quarantines failure"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(failure);
+        assert_eq!(
+            unsafe { libc::flock(competing.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
     }
 
     #[test]

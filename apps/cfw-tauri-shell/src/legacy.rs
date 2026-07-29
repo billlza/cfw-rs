@@ -32,7 +32,8 @@ use journal::{
 
 pub(crate) use admission::require_canonical_handoff_candidate;
 pub(crate) use handoff_ticket::{
-    ConsumedHandoffTicket, LaunchArguments, ProcessIdentity, parse_launch_arguments,
+    ConsumedHandoffTicket, LaunchArguments, ProcessIdentity, RendererReadyChallenge,
+    parse_launch_arguments,
 };
 pub(crate) use journal::MigrationHandoffLease;
 
@@ -63,7 +64,7 @@ pub(crate) async fn begin_migration_handoff(
     app: AppHandle,
     launch: State<'_, crate::LaunchContext>,
 ) -> Result<(), String> {
-    if launch.migration_handoff {
+    if launch.is_migration_handoff() {
         return Err("this instance is already the migration handoff".into());
     }
     let mut lifecycle_lease = crate::lifecycle::begin_handoff_lifecycle(&app)?;
@@ -206,12 +207,13 @@ pub(crate) async fn disable_service_mode(
     cutover_confirmed: bool,
     dns_review_confirmed: bool,
 ) -> Result<(), String> {
-    if !launch.migration_handoff {
+    if !launch.is_migration_handoff() {
         return Err(
             "destructive legacy cutover is accepted only by an explicit --migration-handoff instance"
                 .into(),
         );
     }
+    launch.require_renderer_ready_published()?;
     admission::require_canonical_handoff_candidate()?;
     launch.require_handoff_parent_absent()?;
     require_explicit_cutover_confirmation(cutover_confirmed)?;
@@ -438,12 +440,13 @@ pub(crate) async fn recover_legacy_cutover(
     profiles: State<'_, ManagedProfiles>,
     launch: State<'_, crate::LaunchContext>,
 ) -> Result<(), String> {
-    if !launch.migration_handoff {
+    if !launch.is_migration_handoff() {
         return Err(
             "replacement recovery is accepted only by an explicit --migration-handoff instance"
                 .into(),
         );
     }
+    launch.require_renderer_ready_published()?;
     admission::require_canonical_handoff_candidate()?;
     launch.require_handoff_parent_absent()?;
     let _maintenance = engine

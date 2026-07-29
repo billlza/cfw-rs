@@ -53,6 +53,11 @@ function element(tag = "div", id = "") {
 }
 
 const page = element("section", "page");
+page.querySelector = (selector) => (
+  selector === ".cfw-migration-banner" && page.innerHTML.includes("cfw-migration-banner")
+    ? element("div")
+    : null
+);
 const glassRoot = element("div", "glass-menu-root");
 const documentStub = {
   documentElement: element("html"),
@@ -158,6 +163,7 @@ const responses = {
     },
     migration_handoff: false,
     migration_handoff_status: { state: "idle" },
+    migration_handoff_renderer_ready: null,
   },
   legacy_retirement_status: { state: "cleared" },
   read_settings_snapshot: {
@@ -297,6 +303,11 @@ test("bootstrap reaches the dashboard instead of the fatal handler", () => {
   assert.ok(listeners.has("cfw://page"), "the page event is subscribed during bootstrap");
   assert.ok(invoked.includes("boot_payload"));
   assert.ok(invoked.includes("engine_snapshot"));
+  assert.equal(
+    invoked.includes("acknowledge_migration_handoff_renderer_ready"),
+    false,
+    "the ordinary dashboard never acknowledges handoff renderer readiness",
+  );
   assert.equal(updateListenerWasReady, true, "automatic update check must start after its listener");
 });
 

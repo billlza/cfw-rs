@@ -1,3 +1,4 @@
+mod bootstrap;
 mod commands;
 mod engine;
 mod legacy;
@@ -6,6 +7,7 @@ mod shell;
 mod subscription_import;
 mod updater;
 
+use bootstrap::{LaunchContext, acknowledge_migration_handoff_renderer_ready, boot_payload};
 use cfw_apple_network::NativeFrameworkBridge;
 use cfw_core::SettingsStore;
 use cfw_engine_api::EngineEvent;
@@ -30,8 +32,7 @@ use commands::{
     update_proxy_provider, update_rule_provider, write_settings_snapshot,
 };
 use engine::{
-    boot_payload, build_managed_engine, engine_snapshot, prepare_legacy_cutover,
-    start_engine_event_forwarder,
+    build_managed_engine, engine_snapshot, prepare_legacy_cutover, start_engine_event_forwarder,
 };
 use legacy::{
     ConsumedHandoffTicket, LaunchArguments, LegacyRetirementGate, MigrationHandoffLease,
@@ -46,35 +47,6 @@ use shell::{
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use updater::{UpdaterSecurityState, check_for_updates, open_available_update};
 
-#[derive(Debug)]
-pub(crate) struct LaunchContext {
-    pub(crate) migration_handoff: bool,
-    handoff_ticket: Option<ConsumedHandoffTicket>,
-    _handoff_lease: Option<MigrationHandoffLease>,
-}
-
-impl LaunchContext {
-    pub(crate) fn publish_handoff_ready(&self) -> Result<(), String> {
-        self.handoff_ticket
-            .as_ref()
-            .ok_or_else(|| "dashboard launch has no migration startup ticket".to_owned())?
-            .publish_ready()
-    }
-
-    pub(crate) fn require_handoff_parent_absent(&self) -> Result<(), String> {
-        self.handoff_ticket
-            .as_ref()
-            .ok_or_else(|| "migration launch has no ticket-bound parent".to_owned())?
-            .require_parent_absent()
-    }
-
-    pub(crate) fn handoff_parent_identity(&self) -> Option<&legacy::ProcessIdentity> {
-        self.handoff_ticket
-            .as_ref()
-            .map(ConsumedHandoffTicket::parent_identity)
-    }
-}
-
 fn settings_store() -> Result<SettingsStore, String> {
     SettingsStore::default_for_current_user().map_err(|error| error.to_string())
 }
@@ -84,7 +56,8 @@ type AppInvokeHandler = Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
 fn migration_handoff_command_allowed(command: &str) -> bool {
     matches!(
         command,
-        "boot_payload"
+        "acknowledge_migration_handoff_renderer_ready"
+            | "boot_payload"
             | "engine_snapshot"
             | "legacy_retirement_status"
             | "prepare_legacy_cutover"
@@ -131,7 +104,7 @@ fn main() {
             return;
         }
     };
-    let (migration_handoff, handoff_ticket, handoff_lease) = match launch_arguments {
+    let launch = match launch_arguments {
         LaunchArguments::Dashboard => {
             let available = settings_store().and_then(|store| {
                 store.ensure_layout().map_err(|error| error.to_string())?;
@@ -141,7 +114,7 @@ fn main() {
                 eprintln!("dashboard launch blocked while migration handoff is active: {error}");
                 return;
             }
-            (false, None, None)
+            LaunchContext::dashboard()
         }
         LaunchArguments::MigrationHandoff { token } => {
             let admitted = settings_store().and_then(|store| {
@@ -159,7 +132,7 @@ fn main() {
                 Ok((ticket, lease))
             });
             match admitted {
-                Ok((ticket, lease)) => (true, Some(ticket), Some(lease)),
+                Ok((ticket, lease)) => LaunchContext::handoff(ticket, lease),
                 Err(error) => {
                     eprintln!("migration handoff admission failed: {error}");
                     return;
@@ -167,12 +140,9 @@ fn main() {
             }
         }
     };
+    let migration_handoff = launch.is_migration_handoff();
     let builder = tauri::Builder::default()
-        .manage(LaunchContext {
-            migration_handoff,
-            handoff_ticket,
-            _handoff_lease: handoff_lease,
-        })
+        .manage(launch)
         .manage(LegacyRetirementGate::default())
         .manage(AppLifecycle::default())
         .manage(LiveStreams::default())
@@ -192,6 +162,7 @@ fn main() {
         ))
     };
     let invoke_handler: AppInvokeHandler = Box::new(tauri::generate_handler![
+        acknowledge_migration_handoff_renderer_ready,
         engine_snapshot,
         boot_payload,
         quit_app,
@@ -301,10 +272,10 @@ fn main() {
             app.set_menu(build_app_menu(app.handle())?)?;
             run_launch_preflight(app.handle()).map_err(std::io::Error::other)?;
 
-            if app.state::<LaunchContext>().migration_handoff {
+            if app.state::<LaunchContext>().is_migration_handoff() {
                 prepare_migration_handoff_window(app.handle()).map_err(std::io::Error::other)?;
                 app.state::<LaunchContext>()
-                    .publish_handoff_ready()
+                    .mark_renderer_native_ready()
                     .map_err(std::io::Error::other)?;
             } else {
                 build_tray(app.handle())?;
@@ -350,6 +321,7 @@ mod tests {
     #[test]
     fn migration_handoff_backend_exposes_only_read_and_cutover_commands() {
         for command in [
+            "acknowledge_migration_handoff_renderer_ready",
             "boot_payload",
             "engine_snapshot",
             "prepare_legacy_cutover",

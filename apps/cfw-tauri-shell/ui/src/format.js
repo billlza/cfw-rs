@@ -8,6 +8,7 @@ import { MAX_LOG_ROWS, PAGES, state } from "./state.js";
 /// the IPC boundary, and so `ui/tests/contract.test.mjs` can prove the whole
 /// surface against `generate_handler!` mechanically.
 export const UI_COMMANDS = Object.freeze([
+  "acknowledge_migration_handoff_renderer_ready",
   "apply_active_profile",
   "begin_migration_handoff",
   "boot_payload",

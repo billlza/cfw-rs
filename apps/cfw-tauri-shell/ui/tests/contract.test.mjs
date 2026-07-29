@@ -100,7 +100,7 @@ const listened = dashboardMatches(/listen\("([a-z][a-z0-9:/-]+)"/gu);
 
 test("every command the dashboard invokes exists in generate_handler!", () => {
   const handlers = handlerCommands();
-  assert.equal(handlers.size, 79, "the release command surface is 79 commands");
+  assert.equal(handlers.size, 80, "the release command surface is 80 commands");
   const missing = [...invoked.keys()].filter((command) => !handlers.has(command));
   assert.deepEqual(missing, [], `dashboard invokes commands that do not exist: ${missing.join(", ")}`);
 });

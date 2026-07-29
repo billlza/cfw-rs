@@ -13,25 +13,123 @@ use super::state_gate::{LegacyCleanupAction, LegacyCleanupError, LegacyRetiremen
 use crate::commands::sanitize_legacy_preferences;
 use crate::settings_store;
 
+const MAX_LAUNCH_RECOVERY_DIAGNOSTIC_BYTES: usize = 2 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LaunchRecoveryFailureCategory {
+    Role,
+    Admission,
+    Recovery,
+    ActiveProof,
+}
+
+impl LaunchRecoveryFailureCategory {
+    const fn diagnostic_code(self) -> &'static str {
+        match self {
+            Self::Role => "role",
+            Self::Admission => "admission",
+            Self::Recovery => "recovery",
+            Self::ActiveProof => "active-proof",
+        }
+    }
+
+    pub(super) const fn user_message(self) -> &'static str {
+        match self {
+            Self::Role => {
+                "Recovery must run in the signed migration session. Select Open Recovery to start that session; no recovery action ran in this dashboard."
+            }
+            Self::Admission => {
+                "The migration session could not verify the installed, signed, notarized 0.4.0 app. Reinstall the release in /Applications and ensure Gatekeeper is enabled, then reopen Recovery; no recovery action ran."
+            }
+            Self::Recovery => {
+                "The interrupted pre-network cutover could not safely restore the recorded legacy process/network state or durably clear its journal. Do not change either app or network settings; review the local migration log, then retry Recovery."
+            }
+            Self::ActiveProof => {
+                "The journal says the replacement was active, but the current native owner, context, digest, and readiness proof does not match. Keep the app open, review the local migration log, then select Recover Replacement."
+            }
+        }
+    }
+}
+
+pub(super) struct LaunchRecoveryFailure {
+    category: LaunchRecoveryFailureCategory,
+    cause: String,
+}
+
+impl std::fmt::Debug for LaunchRecoveryFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LaunchRecoveryFailure")
+            .field("category", &self.category)
+            .field(
+                "cause",
+                &"[available only at the bounded diagnostic boundary]",
+            )
+            .finish()
+    }
+}
+
+impl LaunchRecoveryFailure {
+    fn new(category: LaunchRecoveryFailureCategory, cause: impl Into<String>) -> Self {
+        Self {
+            category,
+            cause: cause.into(),
+        }
+    }
+
+    pub(super) const fn category(&self) -> LaunchRecoveryFailureCategory {
+        self.category
+    }
+
+    pub(super) const fn user_message(&self) -> &'static str {
+        self.category.user_message()
+    }
+}
+
+pub(super) fn require_pre_network_launch_recovery<Admission, Recovery>(
+    migration_handoff: bool,
+    require_admission: Admission,
+    resume_recovery: Recovery,
+) -> Result<(), LaunchRecoveryFailure>
+where
+    Admission: FnOnce() -> Result<(), String>,
+    Recovery: FnOnce() -> Result<(), String>,
+{
+    if !migration_handoff {
+        return Err(LaunchRecoveryFailure::new(
+            LaunchRecoveryFailureCategory::Role,
+            "the current process is not the explicit migration handoff",
+        ));
+    }
+    require_admission().map_err(|cause| {
+        LaunchRecoveryFailure::new(LaunchRecoveryFailureCategory::Admission, cause)
+    })?;
+    resume_recovery()
+        .map_err(|cause| LaunchRecoveryFailure::new(LaunchRecoveryFailureCategory::Recovery, cause))
+}
+
+pub(super) fn classify_replacement_active_proof(
+    proof: Result<(), String>,
+) -> Result<(), LaunchRecoveryFailure> {
+    proof.map_err(|cause| {
+        LaunchRecoveryFailure::new(LaunchRecoveryFailureCategory::ActiveProof, cause)
+    })
+}
+
 pub(super) fn run_launch_preflight(app: &AppHandle) -> Result<(), String> {
     let store = settings_store()?;
     if let Some(journal) = CutoverJournalStore::new(store.paths().app_home.clone()).load()? {
         let status = match journal.phase {
             CutoverPhase::Prepared | CutoverPhase::GuiStopped => {
                 let launch = app.state::<crate::LaunchContext>();
-                if launch.migration_handoff
-                    && super::admission::require_canonical_handoff_candidate().is_ok()
-                    && super::recovery::resume_pre_network_cutover_if_intact(&journal, &store)
-                        .is_ok()
-                {
-                    LegacyRetirementStatus::AwaitingConfirmation
-                } else {
-                    LegacyRetirementStatus::RecoveryStartRequired {
-                        target: journal.target,
-                        message: format!(
-                            "cutover was interrupted in phase {:?}; the old GUI was not resumed because exact live ownership or installed release identity could not be proven",
-                            journal.phase
-                        ),
+                match require_pre_network_launch_recovery(
+                    launch.migration_handoff,
+                    super::admission::require_canonical_handoff_candidate,
+                    || super::recovery::resume_pre_network_cutover_if_intact(&journal, &store),
+                ) {
+                    Ok(()) => LegacyRetirementStatus::AwaitingConfirmation,
+                    Err(failure) => {
+                        recovery_required_status(journal.phase, journal.target, failure)
                     }
                 }
             }
@@ -51,22 +149,17 @@ pub(super) fn run_launch_preflight(app: &AppHandle) -> Result<(), String> {
                     cfw_engine_api::EngineMode::Tunnel => &journal.tunnel_digest,
                     cfw_engine_api::EngineMode::Off => unreachable!("journal rejects Off"),
                 };
-                if super::require_replacement_active(
+                let proof = super::require_replacement_active(
                     engine.coordinator.snapshot(),
                     journal.target,
                     digest,
                     &journal.context,
-                )
-                .is_ok()
-                {
+                );
+                if let Err(failure) = classify_replacement_active_proof(proof) {
+                    recovery_required_status(journal.phase, journal.target, failure)
+                } else {
                     LegacyRetirementStatus::PostCutoverCleanupRequired {
                         message: "native state proves the journal-bound replacement is Active; finish non-network legacy data cleanup"
-                            .into(),
-                    }
-                } else {
-                    LegacyRetirementStatus::RecoveryStartRequired {
-                        target: journal.target,
-                        message: "journal claimed ReplacementActive but the native owner/context/digest/ready state does not currently prove it; explicit recovery is required"
                             .into(),
                     }
                 }
@@ -97,6 +190,52 @@ pub(super) fn run_launch_preflight(app: &AppHandle) -> Result<(), String> {
     app.state::<super::LegacyRetirementGate>()
         .apply_launch_preflight(status)?;
     emit_engine_snapshot_refresh(app)
+}
+
+fn recovery_required_status(
+    phase: CutoverPhase,
+    target: cfw_engine_api::EngineMode,
+    failure: LaunchRecoveryFailure,
+) -> LegacyRetirementStatus {
+    emit_launch_recovery_diagnostic(phase, &failure);
+    LegacyRetirementStatus::RecoveryStartRequired {
+        target,
+        message: failure.user_message().to_owned(),
+    }
+}
+
+/// Raw launch-recovery causes never cross the IPC/event boundary. This local
+/// diagnostic boundary removes log-control characters and caps the rendered
+/// cause before it reaches the application log.
+fn emit_launch_recovery_diagnostic(phase: CutoverPhase, failure: &LaunchRecoveryFailure) {
+    eprintln!(
+        "legacy launch recovery failed (phase={phase:?}, category={}): {}",
+        failure.category().diagnostic_code(),
+        bounded_diagnostic_cause(&failure.cause)
+    );
+}
+
+pub(super) fn bounded_diagnostic_cause(cause: &str) -> String {
+    const TRUNCATED: &str = " [truncated]";
+    let content_limit = MAX_LAUNCH_RECOVERY_DIAGNOSTIC_BYTES - TRUNCATED.len();
+    let mut rendered = String::with_capacity(cause.len().min(MAX_LAUNCH_RECOVERY_DIAGNOSTIC_BYTES));
+    let mut truncated = false;
+    for character in cause.chars() {
+        let safe = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if rendered.len() + safe.len_utf8() > content_limit {
+            truncated = true;
+            break;
+        }
+        rendered.push(safe);
+    }
+    if truncated {
+        rendered.push_str(TRUNCATED);
+    }
+    rendered
 }
 
 pub(super) fn launch_preflight_with<Marker, VerifyNetwork, VerifyData>(

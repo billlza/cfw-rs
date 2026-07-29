@@ -10,10 +10,11 @@ use tokio::sync::oneshot;
 
 use crate::{NativeBridgeError, NativeBridgeErrorCode};
 
-use super::{BridgeState, Execute, LoadedABI};
+use super::{BridgeState, Cancel, Execute, LoadedABI};
 
 const MAXIMUM_RESPONSE_BYTES: usize = 1_048_576;
 const EXECUTE_SYMBOL: &CStr = c"cfw_native_bridge_execute_v1";
+const CANCEL_SYMBOL: &CStr = c"cfw_native_bridge_cancel_v1";
 
 pub(super) fn parse_response(
     request_id: uuid::Uuid,
@@ -149,11 +150,20 @@ impl LoadedABI {
     pub(super) fn load() -> Result<Self, String> {
         // SAFETY: RTLD_DEFAULT is a process-global pseudo-handle valid for
         // dlsym. The symbol is copied into a typed function pointer below.
-        let default_symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, EXECUTE_SYMBOL.as_ptr()) };
-        if !default_symbol.is_null() {
+        let default_execute = unsafe { libc::dlsym(libc::RTLD_DEFAULT, EXECUTE_SYMBOL.as_ptr()) };
+        // SAFETY: RTLD_DEFAULT is valid for both symbols in the same image.
+        let default_cancel = unsafe { libc::dlsym(libc::RTLD_DEFAULT, CANCEL_SYMBOL.as_ptr()) };
+        if !default_execute.is_null() || !default_cancel.is_null() {
+            if default_execute.is_null() || default_cancel.is_null() {
+                return Err(
+                    "linked native bridge exports only part of the required ABI v1 pair".to_owned(),
+                );
+            }
             return Ok(Self {
                 // SAFETY: the versioned symbol's C header fixes this signature.
-                execute: unsafe { std::mem::transmute::<*mut c_void, Execute>(default_symbol) },
+                execute: unsafe { std::mem::transmute::<*mut c_void, Execute>(default_execute) },
+                // SAFETY: the versioned cancel symbol's C header fixes this signature.
+                cancel: unsafe { std::mem::transmute::<*mut c_void, Cancel>(default_cancel) },
                 library_handle: None,
             });
         }
@@ -172,10 +182,12 @@ impl LoadedABI {
             ));
         }
         // SAFETY: handle is a live dlopen handle and symbol is NUL terminated.
-        let symbol = unsafe { libc::dlsym(handle, EXECUTE_SYMBOL.as_ptr()) };
-        if symbol.is_null() {
+        let execute_symbol = unsafe { libc::dlsym(handle, EXECUTE_SYMBOL.as_ptr()) };
+        // SAFETY: handle remains live and the cancel symbol is NUL terminated.
+        let cancel_symbol = unsafe { libc::dlsym(handle, CANCEL_SYMBOL.as_ptr()) };
+        if execute_symbol.is_null() || cancel_symbol.is_null() {
             let message = format!(
-                "signed native bridge framework does not export ABI v1: {}",
+                "signed native bridge framework does not export the complete ABI v1 pair: {}",
                 dl_error()
             );
             // SAFETY: no symbol call can be in flight before construction.
@@ -186,7 +198,9 @@ impl LoadedABI {
         }
         Ok(Self {
             // SAFETY: the exported v1 C header fixes this exact signature.
-            execute: unsafe { std::mem::transmute::<*mut c_void, Execute>(symbol) },
+            execute: unsafe { std::mem::transmute::<*mut c_void, Execute>(execute_symbol) },
+            // SAFETY: the exported cancel v1 C header fixes this exact signature.
+            cancel: unsafe { std::mem::transmute::<*mut c_void, Cancel>(cancel_symbol) },
             library_handle: Some(handle),
         })
     }

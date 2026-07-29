@@ -37,7 +37,8 @@ private final class RecordingPreparer: TunnelStartPreparing, @unchecked Sendable
       copying: Data(repeating: ticketByte, count: AuthorityV1Limits.ticketBytes))
     return HostPreparedTunnelStart(
       ticket: ticket,
-      descriptor: descriptorOverride ?? preparation.descriptor)
+      descriptor: descriptorOverride ?? preparation.descriptor,
+      operationID: UUID())
   }
 }
 
@@ -61,7 +62,10 @@ private final class FakeManagedTunnel: ManagedTunnelOperating, @unchecked Sendab
   var startCount: Int { lock.withLock { startCountValue } }
   var startedTicket: Data? { lock.withLock { startedTicketValue } }
 
-  func saveDescriptorOnly(_ descriptor: ConfigurationDescriptor) async throws {
+  func saveDescriptorOnly(
+    _ descriptor: ConfigurationDescriptor,
+    operationID: UUID
+  ) async throws {
     lock.withLock {
       saveCountValue += 1
       savedDescriptor = descriptor

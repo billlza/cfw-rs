@@ -149,6 +149,12 @@ RFC 5180 benchmarking subnet `2001:2:0:64::1/126` with peer/DNS
 prefixes. Disabling IPv6 removes both the IPv6 default route and IPv6 resolver
 from Network Extension settings.
 
+The descriptor-only manager contract also requires VPN On Demand to be disabled
+with no non-empty rules. An inherited enabled/rule-bearing manager is rejected
+before any preference write because rule contents are outside the non-secret WAL.
+Every create/restore explicitly clears On Demand and verifies the full bounded
+manager state after reloading preferences.
+
 ## Build and test
 
 Fast, unsigned validation:
@@ -166,8 +172,8 @@ python3 -B scripts/verify_native_product_graph.py
 python3 -B scripts/verify_release_authority_gate.py .
 python3 -B scripts/verify_production_boundary_removal.py .
 
-export CFW_BUILD_NUMBER=40001
-export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.4.0/validation-40001/native-products"
+export CFW_BUILD_NUMBER=40002
+export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.4.0/validation-40002/native-products"
 ./scripts/build_native_products.sh --unsigned
 
 cd native/macos
@@ -186,11 +192,15 @@ xcodebuild build \
   GCC_TREAT_WARNINGS_AS_ERRORS=YES SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
 ```
 
-The pinned XcodeGen generator adds a `ditto` phase for Swift static-library Objective-C
-headers. Script sandboxing is disabled only on those three generated static
-library targets because that generated phase cannot create its declared header
-output under Xcode 26.6; it remains enabled for the Agent and System Extension
-targets. No repository-authored build script receives this exception.
+Automatic Swift-to-Objective-C header installation is disabled for every native
+target (`SWIFT_INSTALL_OBJC_HEADER=NO`). Internal modules communicate through
+Swift/XPC, while the reviewed `Headers/CFWNativeBridge.h` C ABI is declared as a
+public header on the `CFWNativeBridge` framework and installed by its Xcode
+Public Headers build phase. User Script Sandboxing remains enabled for every
+target; there is no static-library exception. `verify_xcode_project.sh`
+regenerates the project with the pinned XcodeGen toolchain and compares it with
+the tracked project, while `verify_native_product_graph.py` rejects a generated
+Swift Objective-C header-copy phase and requires the explicit header boundary.
 
 Signed activation additionally requires matching Developer ID provisioning for
 `com.bill.clashformac`, `com.bill.clashformac.packet-tunnel`, the System

@@ -116,6 +116,17 @@ private actor RecordingTunnelHost: TunnelHostBridging {
   func snapshot() -> EngineSnapshot { .off }
   func hasManagedTunnelConfiguration() -> Bool { false }
   func managedTunnelConfiguration() -> ConfigurationDescriptor? { managedConfiguration }
+  func pendingPreferenceMutationConfiguration() -> ConfigurationDescriptor? { nil }
+  func compensatePendingPreferenceMutation(
+    expectedConfiguration: ConfigurationDescriptor,
+    revokePreparation: @escaping @Sendable () async throws -> Void
+  ) async throws -> Bool { false }
+  func finishPreferenceCompensation(
+    expectedConfiguration: ConfigurationDescriptor
+  ) async throws {}
+  func completePreferenceMutation(
+    expectedConfiguration: ConfigurationDescriptor
+  ) {}
 
   func mutationCounts() -> (install: Int, cancel: Int, start: Int, stop: Int) {
     (installCalls, cancelCalls, startCalls, stopCalls)
@@ -245,7 +256,8 @@ private func makeCoordinator(
     systemProxyPreparer: UnusedSystemProxyStartPreparer(),
     tunnel: tunnel,
     engineLease: AvailableEngineLease(),
-    credentialVault: credentialVault
+    credentialVault: credentialVault,
+    hostOperationLease: AvailableNativeHostOperationLease()
   )
 }
 
@@ -392,7 +404,7 @@ private func preflightRequest(target: EngineMode = .tunnel) throws -> CutoverPre
   #expect(await tunnel.mutationCounts() == (install: 0, cancel: 0, start: 0, stop: 0))
 }
 
-@Test func approvalRetryReconcilesLateCompletionWithoutStartingTunnel() async throws {
+@Test func approvalRetryReattachesWithoutAbandoningRequestOrStartingTunnel() async throws {
   let proxy = RecordingProxyAgent()
   let tunnel = RecordingTunnelHost(installResults: [.awaitingApproval, .completed])
   let coordinator = makeCoordinator(
@@ -414,7 +426,9 @@ private func preflightRequest(target: EngineMode = .tunnel) throws -> CutoverPre
   }
   #expect(await proxy.validationCount() == 4)
   #expect(await proxy.mutationCounts() == (0, 0))
-  #expect(await tunnel.mutationCounts() == (install: 2, cancel: 1, start: 0, stop: 0))
+  // The retry reattaches to the pending OS request. An explicit local cancel
+  // would abandon its identity and allow a late callback to race a new request.
+  #expect(await tunnel.mutationCounts() == (install: 2, cancel: 0, start: 0, stop: 0))
 }
 
 @Test func nonOffNativeStateBlocksPreflightBeforeValidationOrInstallation() async throws {

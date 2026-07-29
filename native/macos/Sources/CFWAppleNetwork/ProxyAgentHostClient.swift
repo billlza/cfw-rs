@@ -15,6 +15,7 @@ public enum ProxyAgentHostError: Error, Equatable, Sendable {
   case registrationFailed(String)
   case transportUnavailable(String)
   case transportTimedOut
+  case transportCapacityExceeded
   case malformedResponse
   case responseMismatch
   case agentFailure(EngineFailure)
@@ -33,6 +34,8 @@ extension ProxyAgentHostError: LocalizedError {
       "ProxyAgent XPC transport is unavailable."
     case .transportTimedOut:
       "ProxyAgent did not reply before the bounded timeout."
+    case .transportCapacityExceeded:
+      "ProxyAgent request capacity is exhausted."
     case .malformedResponse:
       "ProxyAgent returned a malformed response."
     case .responseMismatch:
@@ -106,30 +109,98 @@ public protocol ProxyAgentTransporting: Sendable {
   ) async throws
 }
 
-private final class ProxyAgentReplyGate: @unchecked Sendable {
-  private let lock = NSLock()
-  private var continuation: CheckedContinuation<Data, Error>?
-
-  init(_ continuation: CheckedContinuation<Data, Error>) {
-    self.continuation = continuation
-  }
-
-  func finish(_ result: Result<Data, Error>) {
-    let continuation = lock.withLock { () -> CheckedContinuation<Data, Error>? in
-      let continuation = self.continuation
-      self.continuation = nil
-      return continuation
-    }
-    continuation?.resume(with: result)
-  }
-}
-
 private final class ProxyAgentConnectionReference: @unchecked Sendable {
   let identifier = UUID()
   let connection: NSXPCConnection
+  let lifecycle: ProxyAgentConnectionLifecycle
 
   init(_ connection: NSXPCConnection) {
     self.connection = connection
+    let box = UncheckedProxyAgentXPCConnection(connection)
+    lifecycle = ProxyAgentConnectionLifecycle {
+      box.value.invalidate()
+    }
+  }
+}
+
+private final class UncheckedProxyAgentXPCConnection: @unchecked Sendable {
+  let value: NSXPCConnection
+
+  init(_ value: NSXPCConnection) { self.value = value }
+}
+
+/// Controllable connection-generation seam. Every request registered on one XPC
+/// connection receives a terminal transport failure when that exact generation is
+/// retired. Late replies race through their per-request first-result gate and can
+/// never complete a request on the replacement connection.
+final class ProxyAgentConnectionLifecycle: @unchecked Sendable {
+  let identifier = UUID()
+
+  private let lock = NSLock()
+  private let invalidate: @Sendable () -> Void
+  private var retired = false
+  private var pending: [UUID: @Sendable () -> Void] = [:]
+
+  init(invalidate: @escaping @Sendable () -> Void) {
+    self.invalidate = invalidate
+  }
+
+  func register(
+    token: UUID,
+    onRetire: @escaping @Sendable () -> Void
+  ) -> Bool {
+    let accepted = lock.withLock {
+      guard !retired else { return false }
+      pending[token] = onRetire
+      return true
+    }
+    if !accepted { onRetire() }
+    return accepted
+  }
+
+  func release(token: UUID) {
+    _ = lock.withLock { pending.removeValue(forKey: token) }
+  }
+
+  func retire() {
+    let outcome = lock.withLock { () -> (Bool, [@Sendable () -> Void]) in
+      guard !retired else { return (false, []) }
+      retired = true
+      let callbacks = Array(pending.values)
+      pending.removeAll(keepingCapacity: false)
+      return (true, callbacks)
+    }
+    guard outcome.0 else { return }
+    invalidate()
+    for callback in outcome.1 { callback() }
+  }
+
+  var pendingCount: Int { lock.withLock { pending.count } }
+  var isRetired: Bool { lock.withLock { retired } }
+}
+
+struct BoundedProxyAgentRequestRegistry: Sendable {
+  static let productionMaximum = 16
+
+  let maximum: Int
+  private(set) var tokens: Set<UUID> = []
+
+  init(maximum: Int = productionMaximum) {
+    precondition(maximum > 0, "ProxyAgent request capacity must be positive")
+    self.maximum = maximum
+  }
+
+  mutating func reserve() throws -> UUID {
+    guard tokens.count < maximum else {
+      throw ProxyAgentHostError.transportCapacityExceeded
+    }
+    let token = UUID()
+    tokens.insert(token)
+    return token
+  }
+
+  mutating func release(_ token: UUID) {
+    tokens.remove(token)
   }
 }
 
@@ -137,8 +208,9 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
   private let machServiceName: String
   private let identity: CodeIdentityRequirement
   private let serviceController: any ProxyAgentServiceControlling
-  private let replyTimeout: Duration
+  private let replyDeadline: CallbackDeadlineScheduler
   private var connectionReference: ProxyAgentConnectionReference?
+  private var outstandingRequests = BoundedProxyAgentRequestRegistry()
 
   public init(
     machServiceName: String,
@@ -156,7 +228,7 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
       expectedBundleIdentifier: proxyAgentBundleIdentifier
     )
     self.serviceController = serviceController
-    self.replyTimeout = replyTimeout
+    replyDeadline = CallbackDeadlineScheduler(timeout: replyTimeout)
   }
 
   public func registrationStatus() -> ProxyAgentRegistrationStatus {
@@ -183,15 +255,12 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
         in: capabilityData.startIndex..<capabilityData.endIndex)
       capabilityData.removeAll(keepingCapacity: false)
     }
-    let result = try await awaitAuthorizedStart(
+    try await awaitAuthorizedStart(
       capabilityData: capabilityData,
       contextData: contextData,
       configurationData: configuration,
       requestData: requestData,
       requestID: request.requestID)
-    guard result.kind == .accepted, result.snapshot == nil else {
-      throw ProxyAgentHostError.malformedResponse
-    }
   }
 
   private func awaitAuthorizedStart(
@@ -200,16 +269,15 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
     configurationData: Data,
     requestData: Data,
     requestID: RequestID
-  ) async throws -> CommandResult {
-    let connection = try connectedSession().connection
-    let responseData: Data = try await withCheckedThrowingContinuation { continuation in
-      let gate = ProxyAgentReplyGate(continuation)
+  ) async throws {
+    _ = try await awaitProxyAgentResult(requestID: requestID, expectedKind: .accepted) {
+      connection, finish in
       guard
         let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
-          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+          finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
         }) as? CFWProxyAgentXPCProtocol
       else {
-        gate.finish(
+        finish(
           .failure(ProxyAgentHostError.transportUnavailable("remote interface is unavailable")))
         return
       }
@@ -220,45 +288,21 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
         request: requestData
       ) { data, error in
         if error != nil {
-          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+          finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
         } else if let data {
-          gate.finish(.success(data))
+          finish(.success(data))
         } else {
-          gate.finish(.failure(ProxyAgentHostError.malformedResponse))
-        }
-      }
-      let timeout = replyTimeout
-      Task {
-        do {
-          try await Task.sleep(for: timeout)
-          gate.finish(.failure(ProxyAgentHostError.transportTimedOut))
-        } catch is CancellationError {
-          return
-        } catch {
-          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("sleep-error")))
+          finish(.failure(ProxyAgentHostError.malformedResponse))
         }
       }
     }
-    let response = try ProtocolCodec.decodeResponse(responseData)
-    guard response.requestID == requestID else {
-      throw ProxyAgentHostError.responseMismatch
-    }
-    if let failure = response.failure {
-      throw ProxyAgentHostError.agentFailure(failure)
-    }
-    guard let result = response.result else {
-      throw ProxyAgentHostError.malformedResponse
-    }
-    return result
   }
 
   public func stop(configuration: ConfigurationDescriptor) async throws {
-    let result = try await execute(
-      NativeCommand(kind: .stop, configuration: configuration)
+    _ = try await execute(
+      NativeCommand(kind: .stop, configuration: configuration),
+      expectedKind: .accepted
     )
-    guard result.kind == .accepted, result.snapshot == nil else {
-      throw ProxyAgentHostError.malformedResponse
-    }
   }
 
   public func snapshot() async throws -> EngineSnapshot {
@@ -270,8 +314,10 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
     case .notRegistered, .notFound:
       throw ProxyAgentHostError.registrationUnavailable
     }
-    let result = try await execute(NativeCommand(kind: .snapshot))
-    guard result.kind == .snapshot, let snapshot = result.snapshot else {
+    let result = try await execute(
+      NativeCommand(kind: .snapshot),
+      expectedKind: .snapshot)
+    guard let snapshot = result.snapshot else {
       throw ProxyAgentHostError.malformedResponse
     }
     return snapshot
@@ -293,100 +339,144 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
       )
     )
     let requestData = try ProtocolCodec.encode(request)
-    let connection = try connectedSession().connection
-    let responseData: Data = try await withCheckedThrowingContinuation { continuation in
-      let gate = ProxyAgentReplyGate(continuation)
+    _ = try await awaitProxyAgentResult(
+      requestID: request.requestID,
+      expectedKind: .accepted
+    ) {
+      connection, finish in
       guard
-        let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
-          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+        let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+          finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
         }) as? CFWProxyAgentXPCProtocol
       else {
-        gate.finish(
+        finish(
           .failure(ProxyAgentHostError.transportUnavailable("remote interface is unavailable"))
         )
         return
       }
       proxy.validateConfiguration(configuration, request: requestData) { data, error in
         if error != nil {
-          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+          finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
         } else if let data {
-          gate.finish(.success(data))
+          finish(.success(data))
         } else {
-          gate.finish(.failure(ProxyAgentHostError.malformedResponse))
+          finish(.failure(ProxyAgentHostError.malformedResponse))
         }
       }
-      let timeout = replyTimeout
-      Task {
-        do {
-          try await Task.sleep(for: timeout)
-          gate.finish(.failure(ProxyAgentHostError.transportTimedOut))
-        } catch is CancellationError {
-          return
-        } catch {
-          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("sleep-error")))
-        }
-      }
-    }
-    let response = try ProtocolCodec.decodeResponse(responseData)
-    guard response.requestID == request.requestID else {
-      throw ProxyAgentHostError.responseMismatch
-    }
-    if let failure = response.failure {
-      throw ProxyAgentHostError.agentFailure(failure)
-    }
-    guard response.result?.kind == .accepted, response.result?.snapshot == nil else {
-      throw ProxyAgentHostError.malformedResponse
     }
   }
 
-  private func execute(_ command: NativeCommand) async throws -> CommandResult {
+  private func execute(
+    _ command: NativeCommand,
+    expectedKind: CommandResultKind
+  ) async throws -> CommandResult {
     let request = RequestEnvelope(command: command)
     let requestData = try ProtocolCodec.encode(request)
-    let connection = try connectedSession().connection
-    let responseData: Data = try await withCheckedThrowingContinuation { continuation in
-      let gate = ProxyAgentReplyGate(continuation)
+    return try await awaitProxyAgentResult(
+      requestID: request.requestID,
+      expectedKind: expectedKind
+    ) {
+      connection, finish in
       guard
-        let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
-          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+        let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+          finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
         }) as? CFWProxyAgentXPCProtocol
       else {
-        gate.finish(
+        finish(
           .failure(ProxyAgentHostError.transportUnavailable("remote interface is unavailable"))
         )
         return
       }
       proxy.execute(requestData) { data, error in
         if error != nil {
-          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+          finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
         } else if let data {
-          gate.finish(.success(data))
+          finish(.success(data))
         } else {
-          gate.finish(.failure(ProxyAgentHostError.malformedResponse))
-        }
-      }
-      let timeout = replyTimeout
-      Task {
-        do {
-          try await Task.sleep(for: timeout)
-          gate.finish(.failure(ProxyAgentHostError.transportTimedOut))
-        } catch is CancellationError {
-          return
-        } catch {
-          gate.finish(.failure(ProxyAgentHostError.transportUnavailable("sleep-error")))
+          finish(.failure(ProxyAgentHostError.malformedResponse))
         }
       }
     }
-    let response = try ProtocolCodec.decodeResponse(responseData)
-    guard response.requestID == request.requestID else {
-      throw ProxyAgentHostError.responseMismatch
+  }
+
+  private func awaitProxyAgentResult(
+    requestID: RequestID,
+    expectedKind: CommandResultKind,
+    _ operation:
+      @escaping @Sendable (
+        NSXPCConnection,
+        @escaping @Sendable (Result<Data, Error>) -> Void
+      ) -> Void
+  ) async throws -> CommandResult {
+    let token = try outstandingRequests.reserve()
+    defer { outstandingRequests.release(token) }
+    let reference = try connectedSession()
+    defer { reference.lifecycle.release(token: token) }
+    do {
+      let responseData: Data = try await awaitBoundedCallback(
+        deadline: replyDeadline,
+        timeoutError: ProxyAgentHostError.transportTimedOut
+      ) { finish in
+        guard
+          reference.lifecycle.register(
+            token: token,
+            onRetire: {
+              finish(
+                .failure(
+                  ProxyAgentHostError.transportUnavailable("connection-retired")
+                )
+              )
+            }
+          )
+        else { return }
+        operation(reference.connection) { result in
+          reference.lifecycle.release(token: token)
+          finish(result)
+        }
+      }
+      let response: ResponseEnvelope
+      do {
+        response = try ProtocolCodec.decodeResponse(responseData)
+      } catch {
+        throw ProxyAgentHostError.malformedResponse
+      }
+      guard response.requestID == requestID else {
+        throw ProxyAgentHostError.responseMismatch
+      }
+      if let failure = response.failure {
+        throw ProxyAgentHostError.agentFailure(failure)
+      }
+      guard let result = response.result else {
+        throw ProxyAgentHostError.malformedResponse
+      }
+      guard result.kind == expectedKind else {
+        throw ProxyAgentHostError.malformedResponse
+      }
+      return result
+    } catch {
+      if Self.shouldRetireConnection(after: error) {
+        retireConnection(reference)
+      }
+      throw error
     }
-    if let failure = response.failure {
-      throw ProxyAgentHostError.agentFailure(failure)
+  }
+
+  static func shouldRetireConnection(after error: Error) -> Bool {
+    if error is CancellationError { return true }
+    guard let error = error as? ProxyAgentHostError else { return false }
+    switch error {
+    case .transportTimedOut, .transportUnavailable, .malformedResponse, .responseMismatch:
+      return true
+    case .registrationRequiresApproval, .registrationUnavailable,
+      .registrationFailed, .transportCapacityExceeded, .agentFailure:
+      return false
     }
-    guard let result = response.result else {
-      throw ProxyAgentHostError.malformedResponse
-    }
-    return result
+  }
+
+  private func retireConnection(_ reference: ProxyAgentConnectionReference) {
+    guard connectionReference?.identifier == reference.identifier else { return }
+    connectionReference = nil
+    reference.lifecycle.retire()
   }
 
   private func connectedSession() throws -> ProxyAgentConnectionReference {

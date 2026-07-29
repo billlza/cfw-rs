@@ -45,6 +45,24 @@ protocol NativeCredentialVaulting: Sendable {
 
 extension CredentialVault: NativeCredentialVaulting {}
 
+protocol NativeHostOperationLeaseHolding: AnyObject, Sendable {
+  func release()
+}
+
+protocol NativeHostOperationLeaseAcquiring: Sendable {
+  func acquire() throws -> any NativeHostOperationLeaseHolding
+}
+
+extension CrossProcessEngineLease: NativeHostOperationLeaseHolding {}
+
+struct KernelNativeHostOperationLeaseAcquirer: NativeHostOperationLeaseAcquiring {
+  private let store = CrossProcessHostOperationLeaseStore()
+
+  func acquire() throws -> any NativeHostOperationLeaseHolding {
+    try store.acquire()
+  }
+}
+
 struct NativeAuthorityStopContext: Equatable, Sendable {
   let operation: OperationContext
   let leaseID: AuthorityIdentifier
@@ -87,6 +105,7 @@ struct NativeStopTransaction: Sendable {
   var authorityContext: NativeAuthorityStopContext?
   var ownerStopped: Bool
   var authorityCompleted: Bool
+  var preferenceCompensated: Bool
 
   init(
     owner: NativeStopOwner,
@@ -99,6 +118,7 @@ struct NativeStopTransaction: Sendable {
     authorityContext = nil
     ownerStopped = false
     authorityCompleted = false
+    preferenceCompensated = false
   }
 }
 
@@ -106,6 +126,22 @@ struct NativeStartCleanupReceipt: Equatable, Sendable {
   let owner: NativeStopOwner
   let commandContext: EngineCommandContext
   let descriptor: ConfigurationDescriptor
+}
+
+enum NativeTunnelInstallationState: Equatable, Sendable {
+  /// A callback wait is currently submitted by the active mutation.
+  case waiting
+  /// The local wait timed out, was canceled, or reported user approval. The
+  /// exact generation may reattach to the same submitted OS request.
+  case retryable
+  /// The OS returned a terminal failure/restart result. The exact cancel command
+  /// must acknowledge this receipt before another request can be submitted.
+  case terminalReceipt
+}
+
+struct NativePendingTunnelInstallation: Equatable, Sendable {
+  let context: EngineCommandContext
+  var state: NativeTunnelInstallationState
 }
 
 protocol NativeEngineLeaseInspecting: Sendable {
@@ -156,8 +192,10 @@ actor NativeBridgeCoordinator {
   let tunnel: any TunnelHostBridging
   let engineLease: any NativeEngineLeaseInspecting
   let credentialVault: any NativeCredentialVaulting
-  var activeMutation: UUID?
-  var pendingInstallationContext: EngineCommandContext?
+  let hostOperationLease: any NativeHostOperationLeaseAcquiring
+  var activeOperation: UUID?
+  var startupPreferenceRecoveryComplete = false
+  var pendingTunnelInstallation: NativePendingTunnelInstallation?
   var pendingStop: NativeStopTransaction?
   var pendingStartCleanup: NativeStopTransaction?
   var completedStartCleanup: NativeStartCleanupReceipt?
@@ -167,19 +205,38 @@ actor NativeBridgeCoordinator {
     systemProxyPreparer: any SystemProxyStartPreparing,
     tunnel: any TunnelHostBridging,
     engineLease: any NativeEngineLeaseInspecting,
-    credentialVault: any NativeCredentialVaulting
+    credentialVault: any NativeCredentialVaulting,
+    hostOperationLease: any NativeHostOperationLeaseAcquiring
   ) {
     self.proxy = proxy
     self.systemProxyPreparer = systemProxyPreparer
     self.tunnel = tunnel
     self.engineLease = engineLease
     self.credentialVault = credentialVault
+    self.hostOperationLease = hostOperationLease
   }
 
   func execute(_ command: NativeBridgeCommand) async throws -> NativeBridgeResult {
+    try Task.checkCancellation()
+    let operationLease: any NativeHostOperationLeaseHolding
+    do {
+      operationLease = try hostOperationLease.acquire()
+    } catch CrossProcessEngineLeaseError.alreadyHeld {
+      throw NativeBridgeExecutionError.failure(
+        .busy,
+        "Another Host process is performing a native operation."
+      )
+    } catch {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "The crash-safe Host operation lease could not be acquired."
+      )
+    }
+    defer { operationLease.release() }
+
     switch command {
     case .queryStatus:
-      return .status(try await queryStatus())
+      return .status(try await queryExternalStatus())
     case .startSystemProxy(let request):
       return .runtime(try await startSystemProxy(request))
     case .stopSystemProxy(let context):
@@ -196,9 +253,9 @@ actor NativeBridgeCoordinator {
       try await stopTunnel(context)
       return .acknowledged
     case .provisionCredentials(let request):
-      return .credentialReceipt(try provisionCredentials(request))
+      return .credentialReceipt(try await provisionCredentials(request))
     case .queryCredentialPresence(let request):
-      return .credentialPresence(try queryCredentialPresence(request))
+      return .credentialPresence(try await queryCredentialPresence(request))
     case .preflightCutover(let request):
       return .cutoverPreflight(try await preflightCutover(request))
     case .previewCredentialGarbageCollection(let request):
@@ -212,7 +269,26 @@ actor NativeBridgeCoordinator {
     }
   }
 
-  func queryStatus() async throws -> NativeEngineStatus {
+  private func queryExternalStatus() async throws -> NativeEngineStatus {
+    let operationID = try beginOperation()
+    defer { endOperation(operationID) }
+    return try await queryStatus(enforcePreferenceBarrier: true)
+  }
+
+  func queryStatus(
+    enforcePreferenceBarrier: Bool = true
+  ) async throws -> NativeEngineStatus {
+    if enforcePreferenceBarrier {
+      if try await tunnel.pendingPreferenceMutationConfiguration() != nil {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "A durable Tunnel preference mutation must be recovered before status can be projected."
+        )
+      }
+      if !startupPreferenceRecoveryComplete {
+        startupPreferenceRecoveryComplete = true
+      }
+    }
     // Every ProxyAgent observation must follow an explicit SMAppService
     // registration check. A fresh installation is registered here; approval or
     // missing-bundle states remain typed failures instead of false global Off.

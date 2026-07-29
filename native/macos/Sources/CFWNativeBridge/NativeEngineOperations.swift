@@ -7,8 +7,9 @@ extension NativeBridgeCoordinator {
   func startSystemProxy(_ request: EngineStartRequest) async throws
     -> NativeRuntimeIdentity
   {
-    try beginMutation()
-    defer { endMutation() }
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    try Task.checkCancellation()
     try requireNoPendingStopBeforeStart()
     guard request.tunnelOptions == nil else {
       throw NativeBridgeExecutionError.failure(
@@ -21,6 +22,7 @@ extension NativeBridgeCoordinator {
     } catch {
       throw Self.map(error)
     }
+    try Task.checkCancellation()
     let descriptor = try request.descriptor(slot: .systemProxy)
     var configuration = Data(request.configJSON.utf8)
     defer {
@@ -36,6 +38,7 @@ extension NativeBridgeCoordinator {
       throw Self.map(error)
     }
     do {
+      try Task.checkCancellation()
       try preflightCredentials(request)
     } catch {
       try await cancelSystemProxyPreparation(
@@ -69,6 +72,7 @@ extension NativeBridgeCoordinator {
       throw Self.map(originalError)
     }
     do {
+      try Task.checkCancellation()
       let status = try await queryStatus()
       guard case .systemProxy(let runtime) = status,
         runtime.context == request.context,
@@ -80,6 +84,7 @@ extension NativeBridgeCoordinator {
           "ProxyAgent did not return readiness for the exact start request."
         )
       }
+      try Task.checkCancellation()
       return runtime
     } catch {
       try await rollbackStartedOwner(
@@ -113,8 +118,8 @@ extension NativeBridgeCoordinator {
   }
 
   func stopSystemProxy(_ context: EngineCommandContext) async throws {
-    try beginMutation()
-    defer { endMutation() }
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
     if try acknowledgeCompletedStartCleanup(.systemProxy, context: context) {
       return
     }
@@ -125,28 +130,18 @@ extension NativeBridgeCoordinator {
   func installTunnel(_ context: EngineCommandContext) async throws
     -> NativeTunnelInstallOutcome
   {
-    try beginMutation()
-    defer { endMutation() }
-    guard pendingInstallationContext == nil else {
-      throw NativeBridgeExecutionError.failure(
-        .busy,
-        "A prior System Extension installation request is still pending."
-      )
-    }
-    // Register the exact local wait ownership before submitting the public
-    // System Extension request. A synchronous error, timeout, cancellation, or
-    // restart-required terminal result can then be acknowledged by Rust's
-    // exact cancel command without inventing that the OS request was revoked.
-    pendingInstallationContext = context
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    try Task.checkCancellation()
     let result: SystemExtensionInstallResult
     do {
-      result = try await tunnel.installTunnel()
+      result = try await awaitTunnelInstallation(context: context)
+      try Task.checkCancellation()
     } catch {
       throw Self.map(error)
     }
     switch result {
     case .completed:
-      pendingInstallationContext = nil
       return .ready
     case .awaitingApproval:
       return .awaitingApproval
@@ -159,21 +154,22 @@ extension NativeBridgeCoordinator {
   }
 
   func cancelTunnelInstall(_ context: EngineCommandContext) async throws {
-    try beginMutation()
-    defer { endMutation() }
-    guard pendingInstallationContext == context else {
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    guard pendingTunnelInstallation?.context == context else {
       throw NativeBridgeExecutionError.failure(
         .identityRejected,
         "Tunnel installation cancellation does not match the pending generation."
       )
     }
     await tunnel.cancelTunnelInstallationWait()
-    pendingInstallationContext = nil
+    pendingTunnelInstallation = nil
   }
 
   func startTunnel(_ request: EngineStartRequest) async throws -> NativeRuntimeIdentity {
-    try beginMutation()
-    defer { endMutation() }
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    try Task.checkCancellation()
     try requireNoPendingStopBeforeStart()
     guard request.tunnelOptions != nil else {
       throw NativeBridgeExecutionError.failure(
@@ -189,6 +185,7 @@ extension NativeBridgeCoordinator {
     } catch {
       throw Self.map(error)
     }
+    try Task.checkCancellation()
     var credentialMaterial: CredentialMaterial
     do {
       credentialMaterial = try credentialVault.resolve(
@@ -215,6 +212,7 @@ extension NativeBridgeCoordinator {
       }
     }
     let descriptor = try request.descriptor(slot: .tunnel)
+    try Task.checkCancellation()
     do {
       try await tunnel.startTunnel(
         configuration: Data(request.configJSON.utf8),
@@ -238,6 +236,7 @@ extension NativeBridgeCoordinator {
       throw Self.map(originalError)
     }
     do {
+      try Task.checkCancellation()
       let clock = ContinuousClock()
       let deadline = clock.now.advanced(by: .seconds(10))
       while clock.now < deadline {
@@ -248,7 +247,7 @@ extension NativeBridgeCoordinator {
           throw Self.map(error)
         }
         if providerSnapshot.state.kind == .tunnelActive {
-          let status = try await queryStatus()
+          let status = try await queryStatus(enforcePreferenceBarrier: false)
           guard case .tunnel(let runtime) = status else {
             throw NativeBridgeExecutionError.failure(
               .identityRejected,
@@ -264,6 +263,13 @@ extension NativeBridgeCoordinator {
               "Packet Tunnel readiness does not match the exact start request."
             )
           }
+          do {
+            try await tunnel.completePreferenceMutation(
+              expectedConfiguration: descriptor)
+          } catch {
+            throw Self.map(error)
+          }
+          try Task.checkCancellation()
           return runtime
         }
         if providerSnapshot.state.kind == .failed {
@@ -288,8 +294,8 @@ extension NativeBridgeCoordinator {
   }
 
   func stopTunnel(_ context: EngineCommandContext) async throws {
-    try beginMutation()
-    defer { endMutation() }
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
     if try acknowledgeCompletedStartCleanup(.tunnel, context: context) {
       return
     }
@@ -375,6 +381,41 @@ extension NativeBridgeCoordinator {
     after originalError: Error,
     cancellationFailure: Error? = nil
   ) async throws -> Never {
+    if owner == .tunnel {
+      if let pendingStartCleanup {
+        guard pendingStartCleanup.owner == owner,
+          pendingStartCleanup.commandContext == commandContext,
+          pendingStartCleanup.descriptor == descriptor
+        else {
+          throw NativeBridgeExecutionError.failure(
+            .cleanupUnproven,
+            "Tunnel start verification conflicts with another cleanup transaction."
+          )
+        }
+      } else {
+        pendingStartCleanup = NativeStopTransaction(
+          owner: owner,
+          commandContext: commandContext,
+          descriptor: descriptor)
+      }
+      do {
+        try await reconcilePendingTunnelStartCleanup()
+      } catch let error as NativeBridgeExecutionError {
+        let localCleanup = await attemptLocalStopAfterOrderingFailure()
+        let local = localCleanup.map { " Local stop also failed: \($0)" } ?? ""
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Tunnel start failed and durable preference cleanup remains unproven: \(error.responseFailure.message).\(local)"
+        )
+      } catch {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Tunnel start cleanup failed at an untyped boundary."
+        )
+      }
+      throw Self.map(originalError)
+    }
+
     if let pendingStop {
       guard pendingStop.owner == owner,
         pendingStop.commandContext == commandContext,
@@ -422,7 +463,9 @@ extension NativeBridgeCoordinator {
     throw Self.map(originalError)
   }
 
-  private func reconcilePendingTunnelStartCleanup() async throws {
+  func reconcilePendingTunnelStartCleanup(
+    recordCompletion: Bool = true
+  ) async throws {
     guard let transaction = pendingStartCleanup,
       transaction.owner == .tunnel
     else {
@@ -432,22 +475,103 @@ extension NativeBridgeCoordinator {
       )
     }
 
-    if try await engineLease.cancelPreparedStart(for: transaction.descriptor) {
-      pendingStartCleanup = nil
+    var ownerControlled = false
+    if let pendingStop {
+      guard pendingStop.owner == transaction.owner,
+        pendingStop.commandContext == transaction.commandContext,
+        pendingStop.descriptor == transaction.descriptor
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Tunnel preference cleanup conflicts with another stop transaction."
+        )
+      }
+      ownerControlled = true
+    } else {
+      ownerControlled =
+        !(try await engineLease.cancelPreparedStart(
+          for: transaction.descriptor))
+      if ownerControlled {
+        pendingStop = transaction
+      }
+    }
+
+    if ownerControlled {
+      try await beginPendingStopAtAuthority()
+    }
+
+    let preferenceCompensated: Bool
+    if pendingStop?.preferenceCompensated == true {
+      // A prior attempt already restored the exact preference state and proved
+      // OS Off, but Authority completion or the final global query failed. Do
+      // not replay beginStop after a lost complete reply may have committed Off.
+      // The final fresh verification below still guards journal removal.
+      preferenceCompensated = true
+    } else {
+      let authorityContext = pendingStop?.authorityContext
+      let engineLease = self.engineLease
+      do {
+        preferenceCompensated = try await tunnel.compensatePendingPreferenceMutation(
+          expectedConfiguration: transaction.descriptor,
+          revokePreparation: {
+            if let authorityContext {
+              let observed = try await engineLease.beginStop(
+                for: transaction.descriptor)
+              guard observed == authorityContext else {
+                throw NativeBridgeExecutionError.failure(
+                  .cleanupUnproven,
+                  "Authority stop identity changed during preference compensation."
+                )
+              }
+            } else {
+              guard try await engineLease.cancelPreparedStart(for: transaction.descriptor) else {
+                throw NativeBridgeExecutionError.failure(
+                  .cleanupUnproven,
+                  "Authority retained owner control during preference compensation."
+                )
+              }
+            }
+          }
+        )
+      } catch {
+        throw Self.map(error)
+      }
+    }
+
+    if ownerControlled {
+      if preferenceCompensated {
+        guard var stoppedTransaction = pendingStop else {
+          throw NativeBridgeExecutionError.failure(
+            .cleanupUnproven,
+            "Tunnel preference compensation lost its Authority stop transaction."
+          )
+        }
+        // Compensation has independently stopped the exact written manager and
+        // proved NetworkExtension Off. Authority completion remains the final,
+        // independent durable owner-stopped check.
+        stoppedTransaction.preferenceCompensated = true
+        stoppedTransaction.ownerStopped = true
+        pendingStop = stoppedTransaction
+      } else {
+        try await drivePendingStopToOwnerStopped()
+      }
+      try await completePendingStopAfterOwnerStopped()
+    }
+
+    do {
+      try await tunnel.finishPreferenceCompensation(
+        expectedConfiguration: transaction.descriptor)
+    } catch {
+      throw Self.map(error)
+    }
+
+    pendingStartCleanup = nil
+    if recordCompletion {
       rememberCompletedStartCleanup(
         owner: transaction.owner,
         commandContext: transaction.commandContext,
         descriptor: transaction.descriptor)
-      return
     }
-
-    pendingStartCleanup = nil
-    pendingStop = transaction
-    try await drivePendingStop()
-    rememberCompletedStartCleanup(
-      owner: transaction.owner,
-      commandContext: transaction.commandContext,
-      descriptor: transaction.descriptor)
   }
 
   private func rememberCompletedStartCleanup(
@@ -479,6 +603,11 @@ extension NativeBridgeCoordinator {
   }
 
   private func drivePendingStop() async throws {
+    try await drivePendingStopToOwnerStopped()
+    try await completePendingStopAfterOwnerStopped()
+  }
+
+  private func beginPendingStopAtAuthority() async throws {
     guard var transaction = pendingStop else {
       throw NativeBridgeExecutionError.failure(
         .cleanupUnproven,
@@ -495,6 +624,16 @@ extension NativeBridgeCoordinator {
       }
       pendingStop = transaction
     }
+  }
+
+  private func drivePendingStopToOwnerStopped() async throws {
+    try await beginPendingStopAtAuthority()
+    guard var transaction = pendingStop else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "The native stop transaction disappeared after Authority ordering."
+      )
+    }
 
     if !transaction.ownerStopped {
       do {
@@ -504,6 +643,15 @@ extension NativeBridgeCoordinator {
       }
       transaction.ownerStopped = true
       pendingStop = transaction
+    }
+  }
+
+  private func completePendingStopAfterOwnerStopped() async throws {
+    guard var transaction = pendingStop, transaction.ownerStopped else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "The owner is not proven stopped before Authority completion."
+      )
     }
 
     if !transaction.authorityCompleted {
@@ -522,7 +670,7 @@ extension NativeBridgeCoordinator {
       pendingStop = transaction
     }
 
-    guard case .off = try await queryStatus() else {
+    guard case .off = try await queryStatus(enforcePreferenceBarrier: false) else {
       throw NativeBridgeExecutionError.failure(
         .cleanupUnproven,
         "The native stop transaction did not reach the global Off barrier."

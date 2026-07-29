@@ -47,6 +47,7 @@ private final class FakePreferences: ManagedTunnelPreferences, @unchecked Sendab
   private let stopReachesDisconnected: Bool
   private let applyMutatesStore: Bool
   private let removeMutatesStore: Bool
+  private let valuesAfterStop: ManagedTunnelPreferenceValues?
   private var log: [Event] = []
 
   init(
@@ -54,13 +55,15 @@ private final class FakePreferences: ManagedTunnelPreferences, @unchecked Sendab
     values: ManagedTunnelPreferenceValues?,
     stopReachesDisconnected: Bool = true,
     applyMutatesStore: Bool = true,
-    removeMutatesStore: Bool = true
+    removeMutatesStore: Bool = true,
+    valuesAfterStop: ManagedTunnelPreferenceValues? = nil
   ) {
     self.status = status
     self.values = values
     self.stopReachesDisconnected = stopReachesDisconnected
     self.applyMutatesStore = applyMutatesStore
     self.removeMutatesStore = removeMutatesStore
+    self.valuesAfterStop = valuesAfterStop
   }
 
   var events: [Event] { lock.withLock { log } }
@@ -85,6 +88,7 @@ private final class FakePreferences: ManagedTunnelPreferences, @unchecked Sendab
     lock.withLock {
       log.append(.stop)
       if stopReachesDisconnected { status = .disconnected }
+      if let valuesAfterStop { values = valuesAfterStop }
     }
   }
 
@@ -131,11 +135,21 @@ private func descriptor(
 
 private func values(
   _ descriptor: ConfigurationDescriptor,
+  providerBundleIdentifier: String = "com.bill.clashformac.packet-tunnel",
+  serverAddress: String? = "Clash for Mac",
   enabled: Bool = true,
+  onDemandEnabled: Bool = false,
+  hasOnDemandRules: Bool = false,
   description: String? = "Clash for Mac Tunnel"
 ) -> ManagedTunnelPreferenceValues {
   ManagedTunnelPreferenceValues(
-    descriptor: descriptor, isEnabled: enabled, localizedDescription: description)
+    descriptor: descriptor,
+    providerBundleIdentifier: providerBundleIdentifier,
+    serverAddress: serverAddress,
+    isEnabled: enabled,
+    isOnDemandEnabled: onDemandEnabled,
+    hasOnDemandRules: hasOnDemandRules,
+    localizedDescription: description)
 }
 
 /// A stop-wait policy with a no-op sleep so bounded waits resolve instantly.
@@ -167,12 +181,65 @@ private func expectThrows(
 
 @Suite(.serialized)
 struct TunnelPreferenceCompensationTests {
+  @Test func structurallyInvalidReceiptFailsBeforeAuthorityOrPreferences() async throws {
+    let written = values(try descriptor(generation: 2), description: "written")
+    let invalidPrior = values(try descriptor(generation: 1), description: "invalid-prior")
+    let receipt = TunnelPreferenceMutationReceipt(
+      operationID: UUID(),
+      createdManager: true,
+      priorValues: invalidPrior,
+      writtenValues: written)
+    let preferences = FakePreferences(status: .connected, values: written)
+    let authority = FakeAuthorityRevoker()
+    let secrets = SecretEraseCounter()
+
+    await expectThrows(.cleanupUnproven("")) {
+      try await TunnelPreferenceCompensation.run(
+        receipt: receipt,
+        authority: authority,
+        preferences: preferences,
+        secretEraser: secrets.eraser,
+        stopWait: fastStopWait())
+    }
+    #expect(authority.revokeCount == 0)
+    #expect(preferences.events.isEmpty)
+    #expect(secrets.eraseCount == 1)
+  }
+
+  @Test func onDemandReceiptFailsBeforeAuthorityOrPreferences() async throws {
+    let descriptor = try descriptor(generation: 2)
+    let invalidWrittenValues = [
+      values(descriptor, onDemandEnabled: true),
+      values(descriptor, hasOnDemandRules: true),
+    ]
+
+    for written in invalidWrittenValues {
+      let receipt = TunnelPreferenceMutationReceipt(
+        operationID: UUID(),
+        createdManager: true,
+        priorValues: nil,
+        writtenValues: written)
+      let preferences = FakePreferences(status: .connected, values: written)
+      let authority = FakeAuthorityRevoker()
+
+      await expectThrows(.cleanupUnproven("")) {
+        try await TunnelPreferenceCompensation.run(
+          receipt: receipt,
+          authority: authority,
+          preferences: preferences,
+          stopWait: fastStopWait())
+      }
+      #expect(authority.revokeCount == 0)
+      #expect(preferences.events.isEmpty)
+    }
+  }
+
   // (Restore path) An operation that did NOT create the manager restores the exact
   // prior values, in the ordered steps, and proves Off.
   @Test func compareAndRestoreRestoresPriorManager() async throws {
     let written = values(try descriptor(generation: 2), description: "written")
     let prior = values(try descriptor(generation: 1), description: "prior")
-    let receipt = PreferenceMutationReceipt(
+    let receipt = TunnelPreferenceMutationReceipt(
       operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
 
     let preferences = FakePreferences(status: .connected, values: written)
@@ -190,17 +257,17 @@ struct TunnelPreferenceCompensationTests {
     #expect(preferences.count(of: .remove) == 0)
     #expect(preferences.currentValues == prior)
     #expect(secrets.eraseCount >= 1)
-    // Ordered: revoke happens (authority) before the first preference touch, and
-    // the compare-load precedes the restore apply.
+    // Ordered: revoke happens (authority) before the first preference touch; a
+    // fresh compare-load precedes stop and the restore apply.
     let events = preferences.events
-    #expect(events.first == .status)
+    #expect(events.first == .load)
     #expect(events.contains(.apply))
   }
 
   // (Created-manager path) An operation that created the manager removes it.
   @Test func compareAndRemoveRemovesCreatedManager() async throws {
     let written = values(try descriptor(generation: 2), description: "written")
-    let receipt = PreferenceMutationReceipt(
+    let receipt = TunnelPreferenceMutationReceipt(
       operationID: UUID(), createdManager: true, priorValues: nil, writtenValues: written)
 
     let preferences = FakePreferences(status: .connected, values: written)
@@ -221,7 +288,7 @@ struct TunnelPreferenceCompensationTests {
   @Test func doesNotStopWhenAlreadyDisconnected() async throws {
     let written = values(try descriptor(generation: 2))
     let prior = values(try descriptor(generation: 1))
-    let receipt = PreferenceMutationReceipt(
+    let receipt = TunnelPreferenceMutationReceipt(
       operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
 
     let preferences = FakePreferences(status: .disconnected, values: written)
@@ -233,6 +300,52 @@ struct TunnelPreferenceCompensationTests {
     #expect(preferences.currentValues == prior)
   }
 
+  @Test func alreadyRestoredPriorIsIdempotentOnlyWhileOff() async throws {
+    let written = values(try descriptor(generation: 2), description: "written")
+    let prior = values(try descriptor(generation: 1), description: "prior")
+    let receipt = TunnelPreferenceMutationReceipt(
+      operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
+    let preferences = FakePreferences(status: .disconnected, values: prior)
+
+    try await TunnelPreferenceCompensation.run(
+      receipt: receipt, authority: FakeAuthorityRevoker(), preferences: preferences,
+      secretEraser: {}, stopWait: fastStopWait())
+
+    #expect(preferences.currentValues == prior)
+    #expect(preferences.count(of: .stop) == 0)
+    #expect(preferences.count(of: .apply) == 0)
+  }
+
+  @Test func alreadyRestoredPriorButActiveIsNeverStoppedOrCleared() async throws {
+    let written = values(try descriptor(generation: 2), description: "written")
+    let prior = values(try descriptor(generation: 1), description: "prior")
+    let receipt = TunnelPreferenceMutationReceipt(
+      operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
+    let preferences = FakePreferences(status: .connected, values: prior)
+
+    await expectThrows(.cleanupUnproven("")) {
+      try await TunnelPreferenceCompensation.run(
+        receipt: receipt, authority: FakeAuthorityRevoker(), preferences: preferences,
+        secretEraser: {}, stopWait: fastStopWait())
+    }
+    #expect(preferences.count(of: .stop) == 0)
+    #expect(preferences.count(of: .apply) == 0)
+  }
+
+  @Test func alreadyRemovedCreatedManagerIsIdempotentWhileOff() async throws {
+    let written = values(try descriptor(generation: 2), description: "written")
+    let receipt = TunnelPreferenceMutationReceipt(
+      operationID: UUID(), createdManager: true, priorValues: nil, writtenValues: written)
+    let preferences = FakePreferences(status: .invalid, values: nil)
+
+    try await TunnelPreferenceCompensation.run(
+      receipt: receipt, authority: FakeAuthorityRevoker(), preferences: preferences,
+      secretEraser: {}, stopWait: fastStopWait())
+
+    #expect(preferences.count(of: .remove) == 0)
+    #expect(preferences.currentValues == nil)
+  }
+
   // (External change) When current values no longer equal the written values, the
   // external/administrator change is never overwritten: compensationConflict and
   // Quarantined. Neither apply nor remove is called.
@@ -240,7 +353,7 @@ struct TunnelPreferenceCompensationTests {
     let written = values(try descriptor(generation: 2), description: "written")
     let prior = values(try descriptor(generation: 1), description: "prior")
     let external = values(try descriptor(generation: 2), description: "administrator-edited")
-    let receipt = PreferenceMutationReceipt(
+    let receipt = TunnelPreferenceMutationReceipt(
       operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
 
     let preferences = FakePreferences(status: .disconnected, values: external)
@@ -259,12 +372,77 @@ struct TunnelPreferenceCompensationTests {
     #expect(secrets.eraseCount >= 1)
   }
 
+  @Test func everyOverwrittenPreferenceFieldParticipatesInConflictDetection() async throws {
+    let written = values(try descriptor(generation: 2), description: "written")
+    let prior = values(try descriptor(generation: 1), description: "prior")
+    let receipt = TunnelPreferenceMutationReceipt(
+      operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
+    let externalValues = [
+      values(
+        try descriptor(generation: 2),
+        providerBundleIdentifier: "com.example.external-tunnel",
+        description: "written"),
+      values(
+        try descriptor(generation: 2),
+        serverAddress: "Externally changed",
+        description: "written"),
+      values(
+        try descriptor(generation: 2),
+        onDemandEnabled: true,
+        description: "written"),
+      values(
+        try descriptor(generation: 2),
+        hasOnDemandRules: true,
+        description: "written"),
+    ]
+
+    for external in externalValues {
+      let preferences = FakePreferences(status: .disconnected, values: external)
+      await expectThrows(.compensationConflict("")) {
+        try await TunnelPreferenceCompensation.run(
+          receipt: receipt,
+          authority: FakeAuthorityRevoker(),
+          preferences: preferences,
+          stopWait: fastStopWait())
+      }
+      #expect(preferences.currentValues == external)
+      #expect(preferences.count(of: .apply) == 0)
+      #expect(preferences.count(of: .remove) == 0)
+    }
+  }
+
+  @Test func changeDuringStopBoundaryIsDetectedBeforeRestore() async throws {
+    let written = values(try descriptor(generation: 2), description: "written")
+    let prior = values(try descriptor(generation: 1), description: "prior")
+    let external = values(
+      try descriptor(generation: 2),
+      hasOnDemandRules: true,
+      description: "written")
+    let receipt = TunnelPreferenceMutationReceipt(
+      operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
+    let preferences = FakePreferences(
+      status: .connected,
+      values: written,
+      valuesAfterStop: external)
+
+    await expectThrows(.compensationConflict("")) {
+      try await TunnelPreferenceCompensation.run(
+        receipt: receipt,
+        authority: FakeAuthorityRevoker(),
+        preferences: preferences,
+        stopWait: fastStopWait())
+    }
+    #expect(preferences.currentValues == external)
+    #expect(preferences.count(of: .stop) == 1)
+    #expect(preferences.count(of: .apply) == 0)
+  }
+
   // An externally removed manager (current values now nil) is also a conflict, not
   // a silent success.
   @Test func externallyRemovedManagerConflicts() async throws {
     let written = values(try descriptor(generation: 2))
     let prior = values(try descriptor(generation: 1))
-    let receipt = PreferenceMutationReceipt(
+    let receipt = TunnelPreferenceMutationReceipt(
       operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
 
     let preferences = FakePreferences(status: .disconnected, values: nil)
@@ -280,7 +458,7 @@ struct TunnelPreferenceCompensationTests {
   @Test func stopTimeoutReturnsCleanupUnproven() async throws {
     let written = values(try descriptor(generation: 2))
     let prior = values(try descriptor(generation: 1))
-    let receipt = PreferenceMutationReceipt(
+    let receipt = TunnelPreferenceMutationReceipt(
       operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
 
     // stopReachesDisconnected == false: status stays connected forever.
@@ -304,7 +482,7 @@ struct TunnelPreferenceCompensationTests {
   @Test func unverifiableRestoreReturnsCleanupUnproven() async throws {
     let written = values(try descriptor(generation: 2))
     let prior = values(try descriptor(generation: 1))
-    let receipt = PreferenceMutationReceipt(
+    let receipt = TunnelPreferenceMutationReceipt(
       operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
 
     // apply is a no-op: the reloaded values will not match the expected prior.
@@ -322,7 +500,7 @@ struct TunnelPreferenceCompensationTests {
   // still runs and the error propagates (never a silent success).
   @Test func authorityRevocationFailureStillErasesSecrets() async throws {
     let written = values(try descriptor(generation: 2))
-    let receipt = PreferenceMutationReceipt(
+    let receipt = TunnelPreferenceMutationReceipt(
       operationID: UUID(), createdManager: true, priorValues: nil, writtenValues: written)
 
     let preferences = FakePreferences(status: .disconnected, values: written)
@@ -348,7 +526,7 @@ struct TunnelPreferenceCompensationTests {
   // erases eagerly after revocation and again from the terminal defer.
   @Test func secretEraserRunsExactlyOnceOnSuccess() async throws {
     let written = values(try descriptor(generation: 2))
-    let receipt = PreferenceMutationReceipt(
+    let receipt = TunnelPreferenceMutationReceipt(
       operationID: UUID(), createdManager: true, priorValues: nil, writtenValues: written)
     let preferences = FakePreferences(status: .disconnected, values: written)
     let secrets = SecretEraseCounter()
@@ -372,7 +550,7 @@ struct TunnelPreferenceCompensationTests {
     for trigger in triggers {
       let written = values(try descriptor(generation: 2), description: trigger)
       let prior = values(try descriptor(generation: 1), description: "prior-\(trigger)")
-      let receipt = PreferenceMutationReceipt(
+      let receipt = TunnelPreferenceMutationReceipt(
         operationID: UUID(), createdManager: false, priorValues: prior, writtenValues: written)
       let preferences = FakePreferences(status: .connecting, values: written)
       let secrets = SecretEraseCounter()

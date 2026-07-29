@@ -5,10 +5,11 @@ mod maintenance;
 mod tests;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use cfw_apple_network::{
-    AppleNetworkBackend, KeychainEngineGenerationStore, NativeFrameworkBridge,
+    AppleNetworkBackend, KeychainEngineGenerationStore, NATIVE_BRIDGE_OUTER_WATCHDOG,
+    NativeFrameworkBridge,
 };
 use cfw_application::{EngineControllerAccess, EngineModeCoordinator};
 use cfw_engine_api::{
@@ -319,7 +320,7 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
         Ok(generation_store) => EngineModeCoordinator::spawn_persisted_with(
             engine_backend.clone(),
             Arc::new(generation_store),
-            Duration::from_secs(15),
+            NATIVE_BRIDGE_OUTER_WATCHDOG,
             spawn_coordinator_task,
         ),
         Err(error) => Err(cfw_application::EngineCoordinatorError::Journal(
@@ -333,7 +334,7 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
             let coordinator = EngineModeCoordinator::spawn_journal_unavailable_with(
                 engine_backend,
                 message.clone(),
-                Duration::from_secs(15),
+                NATIVE_BRIDGE_OUTER_WATCHDOG,
                 spawn_coordinator_task,
             );
             (coordinator, Some(message))

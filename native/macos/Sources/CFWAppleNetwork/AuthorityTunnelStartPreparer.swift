@@ -147,7 +147,10 @@ public struct AuthorityBackedTunnelStartPreparer: TunnelStartPreparing {
     }
     // Copy the ticket bytes out before `prepared` erases its backing buffer.
     let ticket = try preparedTicket.withUnsafeBytes { try StartTicket(copying: Data($0)) }
-    return HostPreparedTunnelStart(ticket: ticket, descriptor: descriptor)
+    return HostPreparedTunnelStart(
+      ticket: ticket,
+      descriptor: descriptor,
+      operationID: prepared.operation.operationID.rawValue)
   }
 
   /// Normalizes any failure into a stable typed error suitable for the Rust

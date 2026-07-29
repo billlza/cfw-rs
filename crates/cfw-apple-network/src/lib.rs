@@ -15,7 +15,7 @@ mod generation_store;
 mod native_bridge;
 
 pub use generation_store::{GenerationStoreError, KeychainEngineGenerationStore};
-pub use native_bridge::NativeFrameworkBridge;
+pub use native_bridge::{NATIVE_BRIDGE_OUTER_WATCHDOG, NativeFrameworkBridge};
 
 pub type NativeBridgeFuture<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, NativeBridgeError>> + Send + 'a>>;

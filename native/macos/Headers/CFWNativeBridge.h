@@ -11,6 +11,9 @@ extern "C" {
 #define CFW_NATIVE_BRIDGE_ABI_VERSION 1
 #define CFW_NATIVE_BRIDGE_MAX_REQUEST_BYTES (1024u * 1024u)
 #define CFW_NATIVE_BRIDGE_MAX_RESPONSE_BYTES (1024u * 1024u)
+#define CFW_NATIVE_BRIDGE_OPERATION_BUDGET_MILLISECONDS 30000u
+#define CFW_NATIVE_BRIDGE_CLEANUP_GRACE_MILLISECONDS 20000u
+#define CFW_NATIVE_BRIDGE_OUTER_WATCHDOG_MILLISECONDS 55000u
 
 typedef void (*cfw_native_bridge_completion_v1)(
     void *context,
@@ -26,6 +29,15 @@ int32_t cfw_native_bridge_execute_v1(
     intptr_t request_length,
     cfw_native_bridge_completion_v1 completion,
     void *completion_context);
+
+/// Cancels only the accepted request whose canonical lowercase UUID is supplied.
+/// The request identifier is copied before this function returns. Zero means the
+/// exact live request was found and cancellation was delivered. A nonzero value
+/// means no request was cancelled. An accepted execute still owns its completion
+/// context until its exactly-once terminal callback, including after cancellation.
+int32_t cfw_native_bridge_cancel_v1(
+    const uint8_t *request_id_bytes,
+    intptr_t request_id_length);
 
 #ifdef __cplusplus
 }

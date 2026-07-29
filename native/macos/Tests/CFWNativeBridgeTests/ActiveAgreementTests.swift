@@ -116,6 +116,17 @@ private actor StubTunnelHost: TunnelHostBridging {
   func snapshot() -> EngineSnapshot { observed }
   func hasManagedTunnelConfiguration() -> Bool { false }
   func managedTunnelConfiguration() -> ConfigurationDescriptor? { nil }
+  func pendingPreferenceMutationConfiguration() -> ConfigurationDescriptor? { nil }
+  func compensatePendingPreferenceMutation(
+    expectedConfiguration: ConfigurationDescriptor,
+    revokePreparation: @escaping @Sendable () async throws -> Void
+  ) async throws -> Bool { false }
+  func finishPreferenceCompensation(
+    expectedConfiguration: ConfigurationDescriptor
+  ) async throws {}
+  func completePreferenceMutation(
+    expectedConfiguration: ConfigurationDescriptor
+  ) {}
 }
 
 private final class StubCredentialVault: NativeCredentialVaulting, @unchecked Sendable {
@@ -156,7 +167,8 @@ private func coordinator(
     systemProxyPreparer: UnusedSystemProxyStartPreparer(),
     tunnel: StubTunnelHost(tunnel),
     engineLease: StubLease(observation: observation),
-    credentialVault: StubCredentialVault()
+    credentialVault: StubCredentialVault(),
+    hostOperationLease: AvailableNativeHostOperationLease()
   )
 }
 

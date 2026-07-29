@@ -7,12 +7,110 @@ private struct TunnelManagerList: @unchecked Sendable {
   let values: [NETunnelProviderManager]
 }
 
-final class ProviderResponseGate: @unchecked Sendable {
-  private let lock = NSLock()
-  private var continuation: CheckedContinuation<Data, Error>?
-  private var completedResult: Result<Data, Error>?
+public enum NetworkExtensionFailureDisposition: Equatable, Sendable {
+  case permissionDenied
+  case unavailable
+}
 
-  func install(_ continuation: CheckedContinuation<Data, Error>) {
+/// Stable, bounded provenance for an NSError returned by NetworkExtension.
+/// Policy is derived only from the official domain/code pair; localized text is
+/// retained solely as a bounded diagnostic and never drives classification.
+public struct NetworkExtensionOperationFailure: Codable, Equatable, Sendable {
+  public static let maximumDomainLength = 128
+  public static let maximumDiagnosticLength = 256
+
+  public let domain: String
+  public let code: Int
+  public let diagnostic: String
+
+  public init(_ error: Error) {
+    let error = error as NSError
+    self.init(
+      domain: error.domain,
+      code: error.code,
+      diagnostic: error.localizedDescription
+    )
+  }
+
+  public init(domain: String, code: Int, diagnostic: String) {
+    self.domain = Self.bounded(domain, maximumLength: Self.maximumDomainLength)
+    self.code = code
+    self.diagnostic = Self.bounded(
+      diagnostic,
+      maximumLength: Self.maximumDiagnosticLength
+    )
+  }
+
+  public var disposition: NetworkExtensionFailureDisposition {
+    if domain == NSPOSIXErrorDomain,
+      code == Int(POSIXErrorCode.EACCES.rawValue)
+        || code == Int(POSIXErrorCode.EPERM.rawValue)
+    {
+      return .permissionDenied
+    }
+    if domain == NSCocoaErrorDomain,
+      code == CocoaError.Code.fileReadNoPermission.rawValue
+        || code == CocoaError.Code.fileWriteNoPermission.rawValue
+    {
+      return .permissionDenied
+    }
+    return .unavailable
+  }
+
+  private static func bounded(_ value: String, maximumLength: Int) -> String {
+    var result = ""
+    var byteCount = 0
+    for scalar in value.unicodeScalars {
+      let output: Unicode.Scalar =
+        CharacterSet.controlCharacters.contains(scalar) ? " " : scalar
+      let scalarBytes = String(output).utf8.count
+      guard byteCount + scalarBytes <= maximumLength else { break }
+      result.unicodeScalars.append(output)
+      byteCount += scalarBytes
+    }
+    return result
+  }
+}
+
+/// Schedules a callback deadline independently of the caller task. Production
+/// uses a monotonic dispatch deadline; tests inject a manual scheduler so timeout
+/// and late-callback races do not depend on wall-clock sleeps.
+struct CallbackDeadlineScheduler: Sendable {
+  private let scheduleBody: @Sendable (@escaping @Sendable () -> Void) -> Void
+
+  init(timeout: Duration) {
+    precondition(timeout > .zero, "Callback deadline must be positive")
+    let components = timeout.components
+    let seconds =
+      Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+    precondition(seconds.isFinite && seconds > 0, "Callback deadline must be finite")
+    scheduleBody = { action in
+      DispatchQueue.global(qos: .utility).asyncAfter(
+        deadline: .now() + seconds,
+        execute: action
+      )
+    }
+  }
+
+  init(schedule: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void) {
+    scheduleBody = schedule
+  }
+
+  func schedule(_ action: @escaping @Sendable () -> Void) {
+    scheduleBody(action)
+  }
+}
+
+/// First-terminal-result gate for callback APIs that cannot be canceled. The
+/// callback, deadline, and task-cancellation paths race through one lock and
+/// therefore resume the checked continuation exactly once.
+final class CallbackContinuationGate<Value: Sendable>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var continuation: CheckedContinuation<Value, Error>?
+  private var completedResult: Result<Value, Error>?
+  private var operationStarted = false
+
+  func install(_ continuation: CheckedContinuation<Value, Error>) {
     lock.lock()
     if let completedResult {
       lock.unlock()
@@ -24,7 +122,20 @@ final class ProviderResponseGate: @unchecked Sendable {
     lock.unlock()
   }
 
-  func finish(_ result: Result<Data, Error>) {
+  /// Atomically claims the right to invoke the callback API. Cancellation or an
+  /// injected synchronous deadline that wins first prevents the side effect.
+  func beginOperation() -> Bool {
+    lock.lock()
+    guard completedResult == nil, !operationStarted else {
+      lock.unlock()
+      return false
+    }
+    operationStarted = true
+    lock.unlock()
+    return true
+  }
+
+  func finish(_ result: Result<Value, Error>) {
     lock.lock()
     guard completedResult == nil else {
       lock.unlock()
@@ -38,22 +149,201 @@ final class ProviderResponseGate: @unchecked Sendable {
   }
 }
 
+typealias ProviderResponseGate = CallbackContinuationGate<Data>
+
+/// Adapts a single callback operation to async/await with an internal deadline.
+/// The deadline is owned by the Swift boundary rather than a Rust waiter, so a
+/// missing framework callback cannot retain a coordinator mutation forever.
+func awaitBoundedCallback<Value: Sendable>(
+  deadline: CallbackDeadlineScheduler,
+  timeoutError: any Error,
+  operation:
+    @escaping (
+      @escaping @Sendable (Result<Value, Error>) -> Void
+    ) -> Void
+) async throws -> Value {
+  let gate = CallbackContinuationGate<Value>()
+  return try await withTaskCancellationHandler {
+    try await withCheckedThrowingContinuation { continuation in
+      gate.install(continuation)
+      guard !Task.isCancelled else {
+        gate.finish(.failure(CancellationError()))
+        return
+      }
+      deadline.schedule {
+        gate.finish(.failure(timeoutError))
+      }
+      guard gate.beginOperation() else { return }
+      operation { result in
+        gate.finish(result)
+      }
+    }
+  } onCancel: {
+    gate.finish(.failure(CancellationError()))
+  }
+}
+
+final class PreferenceSaveWait: @unchecked Sendable {
+  let operationID: UUID
+  let stageID: UUID
+  private let operation: PreferenceMutationOperation
+  private let journal: PreferenceMutationJournal
+  private let timeoutError: AppleNetworkError
+  private let failureError: @Sendable (NetworkExtensionOperationFailure) -> AppleNetworkError
+  private let gate = CallbackContinuationGate<Void>()
+  private let lock = NSLock()
+  private var submitted = false
+
+  init(
+    operationID: UUID,
+    stageID: UUID,
+    operation: PreferenceMutationOperation,
+    journal: PreferenceMutationJournal,
+    timeoutError: AppleNetworkError,
+    failureError: @escaping @Sendable (NetworkExtensionOperationFailure) -> AppleNetworkError
+  ) {
+    self.operationID = operationID
+    self.stageID = stageID
+    self.operation = operation
+    self.journal = journal
+    self.timeoutError = timeoutError
+    self.failureError = failureError
+  }
+
+  var wasSubmitted: Bool { lock.withLock { submitted } }
+
+  func install(_ continuation: CheckedContinuation<Void, Error>) {
+    gate.install(continuation)
+  }
+
+  func beginSubmission() -> Bool {
+    guard gate.beginOperation() else { return false }
+    do {
+      try journal.markSubmitted(
+        operationID: operationID,
+        stageID: stageID,
+        operation: operation
+      )
+      lock.withLock { submitted = true }
+      return true
+    } catch {
+      gate.finish(.failure(error))
+      return false
+    }
+  }
+
+  func timeout() {
+    gate.finish(.failure(timeoutError))
+  }
+
+  func cancel() {
+    gate.finish(.failure(CancellationError()))
+  }
+
+  func finish(_ error: Error?) {
+    let outcome: PreferenceSaveCallbackOutcome
+    if let error {
+      outcome = .failed(NetworkExtensionOperationFailure(error))
+    } else {
+      outcome = .succeeded
+    }
+    do {
+      let disposition = try journal.recordCallback(
+        operationID: operationID,
+        stageID: stageID,
+        operation: operation,
+        outcome: outcome
+      )
+      guard disposition == .recorded else {
+        // A timeout/cancellation that already won the gate may safely ignore an
+        // obsolete late callback. If this callback still owns the live waiter,
+        // the gate accepts this failure instead of projecting an unjournaled
+        // Network Extension success.
+        gate.finish(.failure(AppleNetworkError.preferenceMutationUncertain))
+        return
+      }
+      switch outcome {
+      case .succeeded:
+        gate.finish(.success(()))
+      case .failed(let failure):
+        gate.finish(.failure(failureError(failure)))
+      }
+    } catch {
+      gate.finish(.failure(error))
+    }
+  }
+}
+
+enum IdentityBoundInstallAction: Equatable, Sendable {
+  case submit
+  case reattach
+  case completed
+  case rejected
+  case retirementCapacityExceeded
+}
+
 final class IdentityBoundContinuation<Request: AnyObject, Value: Sendable>: @unchecked Sendable {
   private let lock = NSLock()
   private var activeRequest: Request?
   private var continuation: CheckedContinuation<Value, Error>?
+  private var waitID: UUID?
+  private var requestSubmitted = false
+  private var completedResult: Result<Value, Error>?
+  private var pendingWaitResult: Result<Value, Error>?
+  private var intermediateResultDelivered = false
+  private var retiredRequests: [ObjectIdentifier: Request] = [:]
+  private let maximumRetiredRequests = 1
 
   func install(
     request: Request,
+    waitID: UUID,
     continuation: CheckedContinuation<Value, Error>
-  ) -> Bool {
+  ) -> IdentityBoundInstallAction {
     lock.lock()
-    guard activeRequest == nil else {
+    if let completedResult {
+      self.completedResult = nil
+      lock.unlock()
+      continuation.resume(with: completedResult)
+      return .completed
+    }
+    if let pendingWaitResult {
+      self.pendingWaitResult = nil
+      lock.unlock()
+      continuation.resume(with: pendingWaitResult)
+      return .completed
+    }
+    if activeRequest != nil {
+      guard self.continuation == nil else {
+        lock.unlock()
+        return .rejected
+      }
+      self.waitID = waitID
+      self.continuation = continuation
+      lock.unlock()
+      return .reattach
+    }
+    if retiredRequests.count >= maximumRetiredRequests {
+      lock.unlock()
+      return .retirementCapacityExceeded
+    }
+    activeRequest = request
+    self.waitID = waitID
+    self.continuation = continuation
+    requestSubmitted = false
+    intermediateResultDelivered = false
+    lock.unlock()
+    return .submit
+  }
+
+  func beginSubmission(request: Request, waitID: UUID) -> Bool {
+    lock.lock()
+    guard activeRequest === request, self.waitID == waitID,
+      continuation != nil, !requestSubmitted
+    else {
       lock.unlock()
       return false
     }
-    activeRequest = request
-    self.continuation = continuation
+    requestSubmitted = true
     lock.unlock()
     return true
   }
@@ -61,56 +351,88 @@ final class IdentityBoundContinuation<Request: AnyObject, Value: Sendable>: @unc
   func finish(request: Request, result: Result<Value, Error>) {
     lock.lock()
     guard activeRequest === request else {
+      retiredRequests.removeValue(forKey: ObjectIdentifier(request))
       lock.unlock()
       return
     }
     activeRequest = nil
     let continuation = continuation
     self.continuation = nil
+    waitID = nil
+    requestSubmitted = false
+    pendingWaitResult = nil
+    intermediateResultDelivered = false
+    if continuation == nil {
+      completedResult = result
+    }
     lock.unlock()
     continuation?.resume(with: result)
   }
 
-  func cancelWait(request: Request) {
+  func finishWaitKeepingRequest(waitID: UUID, result: Result<Value, Error>) {
     lock.lock()
-    guard activeRequest === request else {
+    guard self.waitID == waitID, continuation != nil else {
       lock.unlock()
       return
     }
     let continuation = continuation
     self.continuation = nil
+    self.waitID = nil
+    if !requestSubmitted {
+      activeRequest = nil
+    }
     lock.unlock()
-    continuation?.resume(throwing: CancellationError())
+    continuation?.resume(with: result)
   }
 
   /// Completes only the caller's wait while retaining the operating-system
   /// request identity until its terminal delegate callback arrives.
-  func completeWaitKeepingRequest(request: Request, value: Value) {
+  @discardableResult
+  func completeWaitKeepingRequest(request: Request, value: Value) -> Bool {
     lock.lock()
-    guard activeRequest === request else {
+    guard activeRequest === request, !intermediateResultDelivered else {
       lock.unlock()
-      return
+      return false
     }
+    intermediateResultDelivered = true
     let continuation = continuation
     self.continuation = nil
+    waitID = nil
+    if continuation == nil {
+      pendingWaitResult = .success(value)
+    }
     lock.unlock()
     continuation?.resume(returning: value)
+    return true
   }
 
+  /// Retires one exact submitted request for an explicit cancel command. The OS
+  /// request cannot be withdrawn; while it remains unresolved, the single-entry
+  /// retirement bound rejects another submission instead of accumulating
+  /// uncancellable requests. Its terminal callback releases the capacity only.
   func cancelActiveWait() {
     lock.lock()
     let continuation = continuation
+    if let activeRequest, requestSubmitted {
+      precondition(
+        retiredRequests.count < maximumRetiredRequests,
+        "System Extension retired-request capacity invariant"
+      )
+      retiredRequests[ObjectIdentifier(activeRequest)] = activeRequest
+    }
+    activeRequest = nil
     self.continuation = nil
+    waitID = nil
+    requestSubmitted = false
+    completedResult = nil
+    pendingWaitResult = nil
+    intermediateResultDelivered = false
     lock.unlock()
     continuation?.resume(throwing: CancellationError())
   }
 
-  func isAwaited(request: Request) -> Bool {
-    lock.lock()
-    let result = activeRequest === request && continuation != nil
-    lock.unlock()
-    return result
-  }
+  var retiredRequestCount: Int { lock.withLock { retiredRequests.count } }
+
 }
 
 public enum SystemExtensionInstallResult: Equatable, Sendable {
@@ -121,10 +443,18 @@ public enum SystemExtensionInstallResult: Equatable, Sendable {
 
 public enum AppleNetworkError: Error, Equatable, Sendable {
   case installationAlreadyInProgress
+  case systemExtensionRequestCapacityExceeded
+  case systemExtensionInstallationTimedOut
   case unknownSystemExtensionResult(Int)
-  case systemExtensionInstallationFailed(code: Int, message: String)
-  case preferenceLoadFailed(String)
-  case preferenceSaveFailed(String)
+  case systemExtensionInstallationFailed(domain: String, code: Int, message: String)
+  case preferenceLoadFailed(NetworkExtensionOperationFailure)
+  case preferenceLoadTimedOut
+  case preferenceSaveFailed(NetworkExtensionOperationFailure)
+  case preferenceSaveTimedOut
+  case preferenceMutationUncertain
+  case preferenceMutationJournalUnavailable(String)
+  case preferenceRemoveFailed(NetworkExtensionOperationFailure)
+  case preferenceRemoveTimedOut
   case duplicateTunnelManagers(Int)
   case globalAuthorityUnavailable
   case invalidConfigurationSlot
@@ -168,16 +498,22 @@ public struct HostTunnelStartPreparation: Sendable {
   }
 }
 
-/// The single-use opaque Start Ticket plus the bounded non-secret descriptor the
-/// Authority authorized. Only these two values leave preparation; no configuration
-/// or credential bytes are returned to the Host.
+/// The single-use opaque Start Ticket, bounded non-secret descriptor, and exact
+/// Authority operation identity. No configuration or credential bytes are
+/// returned to the Host.
 public struct HostPreparedTunnelStart: Sendable {
   public let ticket: StartTicket
   public let descriptor: ConfigurationDescriptor
+  public let operationID: UUID
 
-  public init(ticket: StartTicket, descriptor: ConfigurationDescriptor) {
+  public init(
+    ticket: StartTicket,
+    descriptor: ConfigurationDescriptor,
+    operationID: UUID
+  ) {
     self.ticket = ticket
     self.descriptor = descriptor
+    self.operationID = operationID
   }
 }
 
@@ -208,12 +544,15 @@ public struct FailClosedTunnelStartPreparer: TunnelStartPreparing {
 /// ticket-only start flow needs. Extracted so the flow is exercised with an
 /// in-memory fake and requires no real NetworkExtension in tests.
 protocol ManagedTunnelOperating: Sendable {
-  /// Persists ONLY the descriptor-only provider configuration to the managed
-  /// manager, creating it when absent. No configuration or credential bytes are
-  /// ever written.
-  func saveDescriptorOnly(_ descriptor: ConfigurationDescriptor) async throws
-  /// Reloads the managed manager from preferences and returns the descriptor read
-  /// back so the caller verifies the exact round trip before starting.
+  /// Persists ONLY the descriptor-only preference contract to the managed
+  /// manager, creating it when absent and explicitly disabling/clearing VPN On
+  /// Demand. No configuration, credential, or on-demand rule bytes are written.
+  func saveDescriptorOnly(
+    _ descriptor: ConfigurationDescriptor,
+    operationID: UUID
+  ) async throws
+  /// Reloads the managed manager from preferences, verifies every bounded value
+  /// against the durable receipt, and returns its descriptor.
   func reloadDescriptor() async throws -> ConfigurationDescriptor
   /// Starts the managed tunnel connection with ONLY the one-use start ticket.
   func startWithTicket(_ ticketBytes: Data) async throws
@@ -221,8 +560,9 @@ protocol ManagedTunnelOperating: Sendable {
 
 /// Ordered ticket-only Tunnel start: prepare with the Authority before any
 /// preference mutation, save the descriptor-only manager, reload and verify the
-/// exact descriptor, then start with only the single-use ticket. Every Authority,
-/// XPC, and NetworkExtension side effect lives behind an injected seam.
+/// exact bounded preference values, then start with only the single-use ticket.
+/// Every Authority, XPC, and NetworkExtension side effect lives behind an
+/// injected seam.
 enum TicketOnlyTunnelStartFlow {
   static func run(
     descriptor: ConfigurationDescriptor,
@@ -254,13 +594,15 @@ enum TicketOnlyTunnelStartFlow {
     try checkCancellation()
 
     // (2) Save only the descriptor-only provider configuration.
-    try await manager.saveDescriptorOnly(preparedDescriptor)
+    try await manager.saveDescriptorOnly(
+      preparedDescriptor,
+      operationID: prepared.operationID)
     // Saving preferences is a committed external mutation and cannot be canceled
     // through NetworkExtension. Honor cancellation before reloading and, critically,
     // before starting the data plane.
     try checkCancellation()
 
-    // (3) Reload and verify the exact managed manager/descriptor round trip.
+    // (3) Reload and verify the exact bounded managed-manager round trip.
     let reloaded = try await manager.reloadDescriptor()
     guard reloaded == preparedDescriptor else {
       throw AppleNetworkError.managedManagerVerificationFailed(
@@ -278,8 +620,9 @@ enum TicketOnlyTunnelStartFlow {
 
 public protocol SystemExtensionInstalling: Sendable {
   func install() async throws -> SystemExtensionInstallResult
-  /// Cancels only the caller's local wait. Public SystemExtensions API does
-  /// not provide a way to withdraw a submitted activation request.
+  /// Abandons only local wait/request identity. Public SystemExtensions API
+  /// does not provide a way to withdraw a submitted activation request; its
+  /// eventual callback is ignored and cannot affect a newer request.
   func cancelInstallationWait()
 }
 
@@ -292,15 +635,18 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
 
   private let extensionIdentifier: String
   private let approvalHandler: ApprovalHandler
+  private let requestDeadline: CallbackDeadlineScheduler
   private let continuationGate =
     IdentityBoundContinuation<OSSystemExtensionRequest, SystemExtensionInstallResult>()
 
   public init(
     extensionIdentifier: String,
-    approvalHandler: @escaping ApprovalHandler
+    approvalHandler: @escaping ApprovalHandler,
+    requestTimeout: Duration = .seconds(10)
   ) {
     self.extensionIdentifier = extensionIdentifier
     self.approvalHandler = approvalHandler
+    requestDeadline = CallbackDeadlineScheduler(timeout: requestTimeout)
   }
 
   public func install() async throws -> SystemExtensionInstallResult {
@@ -309,18 +655,38 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
       forExtensionWithIdentifier: extensionIdentifier,
       queue: .main
     )
+    let waitID = UUID()
     return try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in
         guard !Task.isCancelled else {
           continuation.resume(throwing: CancellationError())
           return
         }
-        guard continuationGate.install(request: request, continuation: continuation) else {
+        let action = continuationGate.install(
+          request: request,
+          waitID: waitID,
+          continuation: continuation
+        )
+        guard action != .rejected else {
           continuation.resume(throwing: AppleNetworkError.installationAlreadyInProgress)
           return
         }
-        if Task.isCancelled {
-          continuationGate.finish(request: request, result: .failure(CancellationError()))
+        guard action != .retirementCapacityExceeded else {
+          continuation.resume(
+            throwing: AppleNetworkError.systemExtensionRequestCapacityExceeded
+          )
+          return
+        }
+        guard action != .completed else { return }
+
+        requestDeadline.schedule {
+          self.continuationGate.finishWaitKeepingRequest(
+            waitID: waitID,
+            result: .failure(AppleNetworkError.systemExtensionInstallationTimedOut)
+          )
+        }
+        guard action == .submit else { return }
+        guard continuationGate.beginSubmission(request: request, waitID: waitID) else {
           return
         }
 
@@ -328,7 +694,7 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
         OSSystemExtensionManager.shared.submitRequest(request)
       }
     } onCancel: {
-      cancelWaitingTask(request)
+      cancelWaitingTask(waitID)
     }
   }
 
@@ -362,25 +728,25 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
     _ request: OSSystemExtensionRequest,
     didFailWithError error: Error
   ) {
-    let nsError = error as NSError
+    let failure = NetworkExtensionOperationFailure(error)
     finish(
       request,
       .failure(
         AppleNetworkError.systemExtensionInstallationFailed(
-          code: nsError.code,
-          message: nsError.localizedDescription
+          domain: failure.domain,
+          code: failure.code,
+          message: failure.diagnostic
         )
       )
     )
   }
 
   public func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-    if continuationGate.isAwaited(request: request) {
+    if continuationGate.completeWaitKeepingRequest(
+      request: request,
+      value: .awaitingApproval
+    ) {
       approvalHandler()
-      continuationGate.completeWaitKeepingRequest(
-        request: request,
-        value: .awaitingApproval
-      )
     }
   }
 
@@ -389,11 +755,38 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
     actionForReplacingExtension existing: OSSystemExtensionProperties,
     withExtension extension: OSSystemExtensionProperties
   ) -> OSSystemExtensionRequest.ReplacementAction {
-    let versionOrder = `extension`.bundleVersion.compare(
-      existing.bundleVersion,
-      options: .numeric
+    Self.replacementAction(
+      existingBundleVersion: existing.bundleVersion,
+      candidateBundleVersion: `extension`.bundleVersion
     )
-    return versionOrder == .orderedAscending ? .cancel : .replace
+  }
+
+  static func replacementAction(
+    existingBundleVersion: String,
+    candidateBundleVersion: String
+  ) -> OSSystemExtensionRequest.ReplacementAction {
+    guard
+      let existing = canonicalReleaseBundleVersion(existingBundleVersion),
+      let candidate = canonicalReleaseBundleVersion(candidateBundleVersion),
+      candidate > existing
+    else {
+      return .cancel
+    }
+    return .replace
+  }
+
+  /// Release builds use the repository-wide canonical `CFBundleVersion`
+  /// contract: one positive signed-64-bit base-10 integer, with no leading zero. Foundation's
+  /// numeric string comparison orders malformed/suffixed values such as `abc`
+  /// or `42.8b1`, so it must not decide a privileged extension replacement.
+  private static func canonicalReleaseBundleVersion(_ value: String) -> Int64? {
+    guard !value.isEmpty, value.utf8.count <= 19, value.utf8.first != 48,
+      value.utf8.allSatisfy({ (48...57).contains($0) }),
+      let parsed = Int64(value), parsed > 0
+    else {
+      return nil
+    }
+    return parsed
   }
 
   private func finish(
@@ -403,8 +796,11 @@ public final class OSSystemExtensionInstaller: NSObject, SystemExtensionInstalli
     continuationGate.finish(request: request, result: result)
   }
 
-  private func cancelWaitingTask(_ request: OSSystemExtensionRequest) {
-    continuationGate.cancelWait(request: request)
+  private func cancelWaitingTask(_ waitID: UUID) {
+    continuationGate.finishWaitKeepingRequest(
+      waitID: waitID,
+      result: .failure(CancellationError())
+    )
   }
 }
 
@@ -423,6 +819,26 @@ public protocol TunnelHostBridging: Sendable {
   func recoveryManagedTunnelStatus() async throws -> RecoveryManagedTunnelStatus
   func hasManagedTunnelConfiguration() async throws -> Bool
   func managedTunnelConfiguration() async throws -> ConfigurationDescriptor?
+  /// Returns the exact durable write-ahead descriptor recovered at Host startup.
+  /// A non-nil value blocks every new native mutation until compensation succeeds.
+  func pendingPreferenceMutationConfiguration() async throws -> ConfigurationDescriptor?
+  /// Revokes or stop-orders the exact Authority generation and compare-and-
+  /// restores/removes its durable manager. This step deliberately retains the
+  /// write-ahead receipt.
+  func compensatePendingPreferenceMutation(
+    expectedConfiguration: ConfigurationDescriptor,
+    revokePreparation: @escaping @Sendable () async throws -> Void
+  ) async throws -> Bool
+  /// Clears an idempotently compensated receipt only after a final fresh reload
+  /// proves the exact prior/nil state and OS Off.
+  func finishPreferenceCompensation(
+    expectedConfiguration: ConfigurationDescriptor
+  ) async throws
+  /// Commits a successful start only after the durable manager and connected
+  /// runtime still match the exact write-ahead receipt.
+  func completePreferenceMutation(
+    expectedConfiguration: ConfigurationDescriptor
+  ) async throws
 }
 
 extension TunnelHostBridging {
@@ -431,23 +847,49 @@ extension TunnelHostBridging {
   }
 }
 
+private struct ClosureAuthorityPreparationRevoker: AuthorityPreparationRevoking {
+  let body: @Sendable () async throws -> Void
+
+  func revokePreparation() async throws {
+    try await body()
+  }
+}
+
 /// Serializes all NETunnelProviderManager mutations in one actor. It never
 /// reports TunnelActive from NEVPNStatus alone: the connected provider must
 /// return a typed snapshot whose configuration digest matches preferences.
-public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperating {
+public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperating,
+  ManagedTunnelPreferences
+{
   private let providerBundleIdentifier: String
   private let installer: any SystemExtensionInstalling
   private let preparer: any TunnelStartPreparing
+  private let callbackDeadline: CallbackDeadlineScheduler
+  private let preferenceMutationJournal: PreferenceMutationJournal
   private var inFlightManager: NETunnelProviderManager?
 
   public init(
     providerBundleIdentifier: String,
     installer: any SystemExtensionInstalling,
-    preparer: any TunnelStartPreparing = FailClosedTunnelStartPreparer()
-  ) {
+    preparer: any TunnelStartPreparing = FailClosedTunnelStartPreparer(),
+    preferenceMutationKeychainAccessGroup: String,
+    callbackTimeout: Duration = .seconds(5)
+  ) throws {
     self.providerBundleIdentifier = providerBundleIdentifier
     self.installer = installer
     self.preparer = preparer
+    callbackDeadline = CallbackDeadlineScheduler(timeout: callbackTimeout)
+    do {
+      preferenceMutationJournal = try PreferenceMutationJournal(
+        store: KeychainTunnelPreferenceMutationJournalStore(
+          keychainAccessGroup: preferenceMutationKeychainAccessGroup
+        )
+      )
+    } catch {
+      throw AppleNetworkError.preferenceMutationJournalUnavailable(
+        "The Host-only Keychain receipt could not be loaded."
+      )
+    }
   }
 
   /// Builds the single-key `startVPNTunnel(options:)` dictionary carrying only the
@@ -473,32 +915,57 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     credentialPayload: Data?
   ) async throws {
     // Prepare with the Global Authority before any preference mutation, persist only
-    // the descriptor-only manager, verify the exact reloaded descriptor, and start
+    // the descriptor-only manager, verify the exact reloaded preferences, and start
     // with only the single-use ticket. There is no direct configuration/credential
     // payload path: `startVPNTunnel(options:)` carries only the ticket.
-    try await TicketOnlyTunnelStartFlow.run(
-      descriptor: descriptor,
-      configuration: configuration,
-      credentialPayload: credentialPayload,
-      preparer: preparer,
-      manager: self
-    )
+    do {
+      try await TicketOnlyTunnelStartFlow.run(
+        descriptor: descriptor,
+        configuration: configuration,
+        credentialPayload: credentialPayload,
+        preparer: preparer,
+        manager: self
+      )
+    } catch {
+      // A timed-out load/save callback may still arrive, but its manager object
+      // must never be reused by a later mutation. A retry reloads the durable
+      // preference store and reconciles what the OS actually committed.
+      inFlightManager = nil
+      throw error
+    }
   }
 
   // MARK: - ManagedTunnelOperating (NetworkExtension-backed)
 
-  func saveDescriptorOnly(_ descriptor: ConfigurationDescriptor) async throws {
-    let manager = try await loadOrCreateManager()
-    let tunnelProtocol = NETunnelProviderProtocol()
-    tunnelProtocol.providerBundleIdentifier = providerBundleIdentifier
-    tunnelProtocol.serverAddress = "Clash for Mac"
-    // Only the bounded non-secret descriptor identity and network options are
-    // written; no configuration bytes and no credentials ever reach preferences.
-    tunnelProtocol.providerConfiguration = try descriptor.providerConfiguration()
-    manager.protocolConfiguration = tunnelProtocol
-    manager.localizedDescription = "Clash for Mac Tunnel"
-    manager.isEnabled = true
-    try await save(manager)
+  func saveDescriptorOnly(
+    _ descriptor: ConfigurationDescriptor,
+    operationID: UUID
+  ) async throws {
+    let (manager, createdManager) = try await loadOrCreateManager()
+    guard try managedConnectionStatus(manager).isStopped else {
+      throw AppleNetworkError.cleanupUnproven(
+        "Managed tunnel preferences cannot be replaced while the OS connection is active."
+      )
+    }
+    let priorValues = createdManager ? nil : try Self.managedPreferenceValues(manager)
+    let writtenValues = ManagedTunnelPreferenceValues(
+      descriptor: descriptor,
+      providerBundleIdentifier: providerBundleIdentifier,
+      serverAddress: "Clash for Mac",
+      isEnabled: true,
+      localizedDescription: "Clash for Mac Tunnel"
+    )
+    let receipt = TunnelPreferenceMutationReceipt(
+      operationID: operationID,
+      createdManager: createdManager,
+      priorValues: priorValues,
+      writtenValues: writtenValues
+    )
+    // Always replace the protocol object. Reusing a legacy protocol would retain
+    // inherited credential, proxy, sleep, route, or on-demand state that is outside
+    // the descriptor-only preference contract.
+    try Self.applyDescriptorOnlyPreferences(writtenValues, to: manager)
+    try await save(manager, receipt: receipt)
     inFlightManager = manager
   }
 
@@ -509,7 +976,19 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
       )
     }
     try await reload(manager)
-    return try manager.configurationDescriptor()
+    let reloaded = try Self.managedPreferenceValues(manager)
+    guard
+      let receipt = try preferenceMutationJournal.pendingReceipt(
+        expectedDescriptor: reloaded.descriptor,
+        requireSettledCurrentProcessMutation: true
+      ),
+      reloaded == receipt.writtenValues
+    else {
+      throw AppleNetworkError.managedManagerVerificationFailed(
+        "Reloaded managed tunnel preferences do not match the durable write receipt."
+      )
+    }
+    return reloaded.descriptor
   }
 
   func startWithTicket(_ ticketBytes: Data) async throws {
@@ -530,7 +1009,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
   }
 
   public func stopTunnel(expectedConfiguration: ConfigurationDescriptor) async throws {
-    guard let manager = try await matchingManager() else {
+    guard let manager = try await soleManager() else {
       throw AppleNetworkError.staleStopRequest
     }
     guard try manager.configurationDescriptor() == expectedConfiguration else {
@@ -553,7 +1032,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
 
   public func snapshot() async throws -> EngineSnapshot {
     try Task.checkCancellation()
-    guard let manager = try await matchingManager() else {
+    guard let manager = try await soleManager() else {
       return .off
     }
     try Task.checkCancellation()
@@ -587,7 +1066,7 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
 
   public func recoveryManagedTunnelStatus() async throws -> RecoveryManagedTunnelStatus {
     try Task.checkCancellation()
-    guard let manager = try await matchingManager() else {
+    guard let manager = try await soleManager() else {
       return .invalid
     }
     try Task.checkCancellation()
@@ -608,14 +1087,171 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
   }
 
   public func hasManagedTunnelConfiguration() async throws -> Bool {
-    try await matchingManager() != nil
+    try await soleManager() != nil
   }
 
   public func managedTunnelConfiguration() async throws -> ConfigurationDescriptor? {
-    guard let manager = try await matchingManager() else {
+    guard let manager = try await soleManager() else {
       return nil
     }
     return try manager.configurationDescriptor()
+  }
+
+  public func pendingPreferenceMutationConfiguration() async throws
+    -> ConfigurationDescriptor?
+  {
+    try preferenceMutationJournal.pendingDescriptor()
+  }
+
+  public func compensatePendingPreferenceMutation(
+    expectedConfiguration: ConfigurationDescriptor,
+    revokePreparation: @escaping @Sendable () async throws -> Void
+  ) async throws -> Bool {
+    guard
+      let receipt = try preferenceMutationJournal.pendingReceipt(
+        expectedDescriptor: expectedConfiguration,
+        requireSettledCurrentProcessMutation: true
+      )
+    else {
+      return false
+    }
+
+    try await TunnelPreferenceCompensation.run(
+      receipt: receipt,
+      authority: ClosureAuthorityPreparationRevoker(body: revokePreparation),
+      preferences: self
+    )
+    inFlightManager = nil
+    return true
+  }
+
+  public func finishPreferenceCompensation(
+    expectedConfiguration: ConfigurationDescriptor
+  ) async throws {
+    guard
+      let receipt = try preferenceMutationJournal.pendingReceipt(
+        expectedDescriptor: expectedConfiguration,
+        requireSettledCurrentProcessMutation: true
+      )
+    else { return }
+    guard try await loadCurrentValues() == receipt.expectedRestoredValues,
+      try await connectionStatus().isStopped
+    else {
+      throw AppleNetworkError.cleanupUnproven(
+        "Tunnel preference compensation is not durably restored and Off."
+      )
+    }
+    try preferenceMutationJournal.clear(operationID: receipt.operationID)
+    inFlightManager = nil
+  }
+
+  public func completePreferenceMutation(
+    expectedConfiguration: ConfigurationDescriptor
+  ) async throws {
+    guard
+      let receipt = try preferenceMutationJournal.pendingReceipt(
+        expectedDescriptor: expectedConfiguration,
+        requireSettledCurrentProcessMutation: true
+      )
+    else {
+      throw AppleNetworkError.cleanupUnproven(
+        "A Tunnel start reached readiness without its durable preference receipt."
+      )
+    }
+
+    let manager = try await soleManager()
+    guard let manager,
+      try Self.managedPreferenceValues(manager) == receipt.writtenValues,
+      try managedConnectionStatus(manager) == .connected
+    else {
+      throw AppleNetworkError.cleanupUnproven(
+        "The ready Tunnel no longer matches its durable preference receipt."
+      )
+    }
+    try preferenceMutationJournal.clear(operationID: receipt.operationID)
+    inFlightManager = nil
+  }
+
+  // MARK: - ManagedTunnelPreferences (durable compensation)
+
+  public func loadCurrentValues() async throws -> ManagedTunnelPreferenceValues? {
+    try await soleManager().map(Self.managedPreferenceValues)
+  }
+
+  public func connectionStatus() async throws -> ManagedTunnelConnectionStatus {
+    guard let manager = try await soleManager() else { return .invalid }
+    return try managedConnectionStatus(manager)
+  }
+
+  public func stop() async throws {
+    guard let manager = try await soleManager() else { return }
+    manager.connection.stopVPNTunnel()
+  }
+
+  public func apply(_ values: ManagedTunnelPreferenceValues) async throws {
+    guard let manager = try await soleManager(),
+      let descriptor = try preferenceMutationJournal.pendingDescriptor(),
+      let receipt = try preferenceMutationJournal.pendingReceipt(
+        expectedDescriptor: descriptor,
+        requireSettledCurrentProcessMutation: false
+      ),
+      try Self.managedPreferenceValues(manager) == receipt.writtenValues
+    else {
+      throw AppleNetworkError.compensationConflict(
+        "Managed tunnel preferences changed before the restore save."
+      )
+    }
+
+    let stageID = try preferenceMutationJournal.prepareCompensation(
+      operationID: receipt.operationID,
+      operation: .compensationSave
+    )
+
+    try Self.applyDescriptorOnlyPreferences(values, to: manager)
+    try await saveCompensation(
+      manager,
+      operationID: receipt.operationID,
+      stageID: stageID
+    )
+    try await reload(manager)
+    guard try Self.managedPreferenceValues(manager) == values else {
+      throw AppleNetworkError.cleanupUnproven(
+        "Reloaded managed tunnel preferences do not match the compensation receipt."
+      )
+    }
+    inFlightManager = nil
+  }
+
+  public func removeManager() async throws {
+    guard let manager = try await soleManager(),
+      let descriptor = try preferenceMutationJournal.pendingDescriptor(),
+      let receipt = try preferenceMutationJournal.pendingReceipt(
+        expectedDescriptor: descriptor,
+        requireSettledCurrentProcessMutation: false
+      ),
+      try Self.managedPreferenceValues(manager) == receipt.writtenValues
+    else {
+      throw AppleNetworkError.compensationConflict(
+        "Managed tunnel preferences changed before manager removal."
+      )
+    }
+
+    let stageID = try preferenceMutationJournal.prepareCompensation(
+      operationID: receipt.operationID,
+      operation: .compensationRemove
+    )
+    let wait = PreferenceSaveWait(
+      operationID: receipt.operationID,
+      stageID: stageID,
+      operation: .compensationRemove,
+      journal: preferenceMutationJournal,
+      timeoutError: .preferenceRemoveTimedOut,
+      failureError: AppleNetworkError.preferenceRemoveFailed
+    )
+    try await awaitPreferenceMutationCallback(wait) { callback in
+      manager.removeFromPreferences(completionHandler: callback)
+    }
+    inFlightManager = nil
   }
 
   private func providerSnapshot(_ manager: NETunnelProviderManager) async throws -> EngineSnapshot {
@@ -625,31 +1261,25 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     let command = try NativeCommand(kind: .snapshot)
     let request = RequestEnvelope(command: command)
     let requestData = try ProtocolCodec.encode(request)
-    let gate = ProviderResponseGate()
-    let responseData: Data = try await withTaskCancellationHandler {
-      try await withCheckedThrowingContinuation { continuation in
-        gate.install(continuation)
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
-          gate.finish(.failure(AppleNetworkError.providerMessageTimedOut))
-        }
-        do {
-          try session.sendProviderMessage(requestData) { data in
-            guard let data else {
-              gate.finish(.failure(AppleNetworkError.providerDidNotRespond))
-              return
-            }
-            gate.finish(.success(data))
+    let responseData: Data = try await awaitBoundedCallback(
+      deadline: callbackDeadline,
+      timeoutError: AppleNetworkError.providerMessageTimedOut
+    ) { finish in
+      do {
+        try session.sendProviderMessage(requestData) { data in
+          guard let data else {
+            finish(.failure(AppleNetworkError.providerDidNotRespond))
+            return
           }
-        } catch {
-          gate.finish(
-            .failure(
-              AppleNetworkError.providerMessageFailed(error.localizedDescription)
-            )
-          )
+          finish(.success(data))
         }
+      } catch {
+        finish(
+          .failure(
+            AppleNetworkError.providerMessageFailed(error.localizedDescription)
+          )
+        )
       }
-    } onCancel: {
-      gate.finish(.failure(CancellationError()))
     }
     let response = try ProtocolCodec.decodeResponse(responseData)
     guard response.requestID == request.requestID else {
@@ -667,61 +1297,270 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
     return providerSnapshot
   }
 
-  private func loadOrCreateManager() async throws -> NETunnelProviderManager {
-    if let manager = try await matchingManager() {
-      return manager
+  private func loadOrCreateManager() async throws -> (NETunnelProviderManager, Bool) {
+    if let manager = try await soleManager() {
+      let values = try Self.managedPreferenceValues(manager)
+      guard values.providerBundleIdentifier == providerBundleIdentifier else {
+        throw AppleNetworkError.compensationConflict(
+          "The calling application's managed tunnel has an unexpected provider identity."
+        )
+      }
+      return (manager, false)
     }
-    return NETunnelProviderManager()
+    return (NETunnelProviderManager(), true)
   }
 
-  private func matchingManager() async throws -> NETunnelProviderManager? {
-    let managerList: TunnelManagerList = try await withCheckedThrowingContinuation {
-      continuation in
+  private func soleManager() async throws -> NETunnelProviderManager? {
+    let managerList: TunnelManagerList = try await awaitBoundedCallback(
+      deadline: callbackDeadline,
+      timeoutError: AppleNetworkError.preferenceLoadTimedOut
+    ) { finish in
       NETunnelProviderManager.loadAllFromPreferences { managers, error in
         if let error {
-          continuation.resume(
-            throwing: AppleNetworkError.preferenceLoadFailed(error.localizedDescription)
+          finish(
+            .failure(
+              AppleNetworkError.preferenceLoadFailed(
+                NetworkExtensionOperationFailure(error)
+              )
+            )
           )
         } else {
-          continuation.resume(returning: TunnelManagerList(values: managers ?? []))
+          finish(.success(TunnelManagerList(values: managers ?? [])))
         }
       }
     }
-    let matches = managerList.values.filter { manager in
-      (manager.protocolConfiguration as? NETunnelProviderProtocol)?
-        .providerBundleIdentifier == providerBundleIdentifier
-    }
-    guard matches.count <= 1 else {
-      throw AppleNetworkError.duplicateTunnelManagers(matches.count)
-    }
-    return matches.first
+    return try Self.classifyManagerInventory(managerList.values)
   }
 
-  private func save(_ manager: NETunnelProviderManager) async throws {
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-      manager.saveToPreferences { error in
-        if let error {
-          continuation.resume(
-            throwing: AppleNetworkError.preferenceSaveFailed(error.localizedDescription)
-          )
-        } else {
-          continuation.resume(returning: ())
+  static func classifyManagerInventory(
+    _ managers: [NETunnelProviderManager]
+  ) throws -> NETunnelProviderManager? {
+    guard managers.count <= 1 else {
+      throw AppleNetworkError.duplicateTunnelManagers(managers.count)
+    }
+    return managers.first
+  }
+
+  private func save(
+    _ manager: NETunnelProviderManager,
+    receipt: TunnelPreferenceMutationReceipt
+  ) async throws {
+    let stageID = try preferenceMutationJournal.begin(receipt)
+    let wait = PreferenceSaveWait(
+      operationID: receipt.operationID,
+      stageID: stageID,
+      operation: .originalSave,
+      journal: preferenceMutationJournal,
+      timeoutError: .preferenceSaveTimedOut,
+      failureError: AppleNetworkError.preferenceSaveFailed
+    )
+    do {
+      let _: Void = try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+          wait.install(continuation)
+          guard !Task.isCancelled else {
+            wait.cancel()
+            return
+          }
+          callbackDeadline.schedule { wait.timeout() }
+          guard wait.beginSubmission() else { return }
+          manager.saveToPreferences { error in
+            wait.finish(error)
+          }
         }
+      } onCancel: {
+        wait.cancel()
       }
+    } catch {
+      if !wait.wasSubmitted {
+        try preferenceMutationJournal.abandonUnsubmitted(
+          operationID: receipt.operationID,
+          stageID: stageID)
+      }
+      throw error
     }
   }
 
   private func reload(_ manager: NETunnelProviderManager) async throws {
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+    let _: Void = try await awaitBoundedCallback(
+      deadline: callbackDeadline,
+      timeoutError: AppleNetworkError.preferenceLoadTimedOut
+    ) { finish in
       manager.loadFromPreferences { error in
         if let error {
-          continuation.resume(
-            throwing: AppleNetworkError.preferenceLoadFailed(error.localizedDescription)
+          finish(
+            .failure(
+              AppleNetworkError.preferenceLoadFailed(
+                NetworkExtensionOperationFailure(error)
+              )
+            )
           )
         } else {
-          continuation.resume(returning: ())
+          finish(.success(()))
         }
       }
+    }
+  }
+
+  private func saveCompensation(
+    _ manager: NETunnelProviderManager,
+    operationID: UUID,
+    stageID: UUID
+  ) async throws {
+    let wait = PreferenceSaveWait(
+      operationID: operationID,
+      stageID: stageID,
+      operation: .compensationSave,
+      journal: preferenceMutationJournal,
+      timeoutError: .preferenceSaveTimedOut,
+      failureError: AppleNetworkError.preferenceSaveFailed
+    )
+    try await awaitPreferenceMutationCallback(wait) { callback in
+      manager.saveToPreferences(completionHandler: callback)
+    }
+  }
+
+  private func awaitPreferenceMutationCallback(
+    _ wait: PreferenceSaveWait,
+    submission: @escaping @Sendable (@escaping @Sendable (Error?) -> Void) -> Void
+  ) async throws {
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        wait.install(continuation)
+        guard !Task.isCancelled else {
+          wait.cancel()
+          return
+        }
+        callbackDeadline.schedule { wait.timeout() }
+        guard wait.beginSubmission() else { return }
+        submission { error in wait.finish(error) }
+      }
+    } onCancel: {
+      wait.cancel()
+    }
+  }
+
+  static func managedPreferenceValues(
+    _ manager: NETunnelProviderManager
+  ) throws -> ManagedTunnelPreferenceValues {
+    let hasOnDemandRules = manager.onDemandRules?.isEmpty == false
+    guard !manager.isOnDemandEnabled, !hasOnDemandRules else {
+      throw AppleNetworkError.compensationConflict(
+        "The calling application's managed tunnel contains unauthorized on-demand settings."
+      )
+    }
+    guard let tunnelProtocol = manager.protocolConfiguration as? NETunnelProviderProtocol,
+      let providerBundleIdentifier = tunnelProtocol.providerBundleIdentifier,
+      !providerBundleIdentifier.isEmpty
+    else {
+      throw AppleNetworkError.compensationConflict(
+        "The calling application's managed tunnel protocol cannot be decoded completely."
+      )
+    }
+    let protocolSettings = Self.protocolSettings(tunnelProtocol)
+    guard protocolSettings.isDescriptorOnly else {
+      throw AppleNetworkError.compensationConflict(
+        "The calling application's managed tunnel contains unauthorized protocol fields."
+      )
+    }
+    let descriptor: ConfigurationDescriptor
+    do {
+      descriptor = try manager.configurationDescriptor()
+    } catch {
+      throw AppleNetworkError.compensationConflict(
+        "The calling application's managed tunnel descriptor cannot be decoded completely."
+      )
+    }
+    return ManagedTunnelPreferenceValues(
+      descriptor: descriptor,
+      providerBundleIdentifier: providerBundleIdentifier,
+      serverAddress: tunnelProtocol.serverAddress,
+      isEnabled: manager.isEnabled,
+      isOnDemandEnabled: manager.isOnDemandEnabled,
+      hasOnDemandRules: hasOnDemandRules,
+      localizedDescription: manager.localizedDescription,
+      protocolSettings: protocolSettings
+    )
+  }
+
+  static func applyDescriptorOnlyPreferences(
+    _ values: ManagedTunnelPreferenceValues,
+    to manager: NETunnelProviderManager
+  ) throws {
+    guard values.isDescriptorOnly else {
+      throw AppleNetworkError.compensationConflict(
+        "A managed tunnel receipt contains unauthorized manager or protocol settings."
+      )
+    }
+    manager.protocolConfiguration = try Self.descriptorOnlyProtocol(for: values)
+    manager.localizedDescription = values.localizedDescription
+    manager.isEnabled = values.isEnabled
+    manager.isOnDemandEnabled = false
+    manager.onDemandRules = nil
+  }
+
+  static func descriptorOnlyProtocol(
+    for values: ManagedTunnelPreferenceValues
+  ) throws -> NETunnelProviderProtocol {
+    guard values.isDescriptorOnly else {
+      throw AppleNetworkError.compensationConflict(
+        "A managed tunnel receipt contains unauthorized manager or protocol settings."
+      )
+    }
+    let tunnelProtocol = NETunnelProviderProtocol()
+    tunnelProtocol.providerBundleIdentifier = values.providerBundleIdentifier
+    tunnelProtocol.serverAddress = values.serverAddress
+    tunnelProtocol.providerConfiguration = try values.descriptor.providerConfiguration()
+    tunnelProtocol.username = nil
+    tunnelProtocol.passwordReference = nil
+    tunnelProtocol.identityReference = nil
+    tunnelProtocol.identityData = nil
+    tunnelProtocol.identityDataPassword = nil
+    tunnelProtocol.proxySettings = nil
+    tunnelProtocol.disconnectOnSleep = false
+    tunnelProtocol.includeAllNetworks = false
+    tunnelProtocol.excludeLocalNetworks = false
+    tunnelProtocol.excludeCellularServices = false
+    tunnelProtocol.excludeAPNs = false
+    tunnelProtocol.excludeDeviceCommunication = false
+    tunnelProtocol.enforceRoutes = false
+    return tunnelProtocol
+  }
+
+  static func protocolSettings(
+    _ tunnelProtocol: NETunnelProviderProtocol
+  ) -> ManagedTunnelProtocolSettings {
+    ManagedTunnelProtocolSettings(
+      usernamePresent: tunnelProtocol.username != nil,
+      passwordReferencePresent: tunnelProtocol.passwordReference != nil,
+      identityReferencePresent: tunnelProtocol.identityReference != nil,
+      identityDataPresent: tunnelProtocol.identityData != nil,
+      identityDataPasswordPresent: tunnelProtocol.identityDataPassword != nil,
+      proxySettingsPresent: tunnelProtocol.proxySettings != nil,
+      disconnectOnSleep: tunnelProtocol.disconnectOnSleep,
+      includeAllNetworks: tunnelProtocol.includeAllNetworks,
+      excludeLocalNetworks: tunnelProtocol.excludeLocalNetworks,
+      excludeCellularServices: tunnelProtocol.excludeCellularServices,
+      excludeAPNs: tunnelProtocol.excludeAPNs,
+      excludeDeviceCommunication: tunnelProtocol.excludeDeviceCommunication,
+      enforceRoutes: tunnelProtocol.enforceRoutes
+    )
+  }
+
+  private func managedConnectionStatus(
+    _ manager: NETunnelProviderManager
+  ) throws -> ManagedTunnelConnectionStatus {
+    switch manager.connection.status {
+    case .invalid: return .invalid
+    case .disconnected: return .disconnected
+    case .connecting: return .connecting
+    case .connected: return .connected
+    case .reasserting: return .reasserting
+    case .disconnecting: return .disconnecting
+    @unknown default:
+      throw AppleNetworkError.cleanupUnproven(
+        "NetworkExtension returned an unknown status during preference reconciliation."
+      )
     }
   }
 }
@@ -768,6 +1607,7 @@ extension NETunnelProviderManager {
       schemaVersion == NativeProtocolConstants.schemaVersion,
       let slotRawValue = configuration["slot"] as? String,
       let slot = ConfigurationSlot(rawValue: slotRawValue),
+      slot == .tunnel,
       let tunnelOptions = try Self.decodeTunnelOptions(
         configuration,
         slot: slot
@@ -795,7 +1635,7 @@ extension NETunnelProviderManager {
     else {
       throw AppleNetworkError.providerResponseMismatch
     }
-    return try ConfigurationDescriptor(
+    let descriptor = try ConfigurationDescriptor(
       slot: slot,
       tunnelOptions: tunnelOptions,
       credentialAudience: CredentialAudience(
@@ -810,6 +1650,14 @@ extension NETunnelProviderManager {
       identitySHA256: SHA256Digest(hex: identityDigest),
       credentialSlots: credentialSlots
     )
+    guard
+      NSDictionary(dictionary: configuration).isEqual(
+        to: try descriptor.providerConfiguration()
+      )
+    else {
+      throw AppleNetworkError.providerResponseMismatch
+    }
+    return descriptor
   }
 
   private static func decodeTunnelOptions(

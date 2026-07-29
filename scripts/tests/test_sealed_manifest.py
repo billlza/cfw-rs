@@ -14,7 +14,9 @@ This module also provides the deterministic fixtures reused by
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stderr
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -94,8 +96,6 @@ def validate_sealed_evidence_manifest(*args, **kwargs):
 
 
 def authorize_publication_artifacts(*args, **kwargs):
-    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
-    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
     return _authorize_publication_artifacts(*args, **kwargs)
 
 
@@ -343,9 +343,10 @@ class _CleanWorkspace(unittest.TestCase):
 
 
 class SealedManifestRoundTripTests(_CleanWorkspace):
-    def test_full_closure_seals_and_authorizes_publication(self) -> None:
+    def test_full_fixture_closure_seals_but_cannot_authorize_publication(self) -> None:
         manifest = self.build(request(3, self.workspace))
         self.assertEqual(manifest["document"], DOCUMENT_KIND)
+        self.assertEqual(manifest["visibility"], "private-release-operations")
         self.assertEqual(manifest["status"], SEALED)
         self.assertEqual(manifest["blocked_inputs"], [])
         for gate in GATE_ORDER:
@@ -354,14 +355,16 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
             [capability["highest_level"] for capability in manifest["capabilities"]],
             [SEALED_LEVEL] * len(CAPABILITIES),
         )
-        self.assertTrue(manifest["publication"]["artifacts_permitted"])
-        self.assertEqual(manifest["publication"]["refusals"], [])
+        self.assertFalse(manifest["publication"]["allowed"])
+        self.assertFalse(manifest["publication"]["artifacts_permitted"])
+        self.assertEqual(manifest["publication"]["refusals"], ["fixture-mode"])
         self.validate(manifest, require_sealed=True)
-        authorize_publication_artifacts(
-            REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
-        )
+        with self.assertRaisesRegex(PublicationError, "fixture evidence"):
+            authorize_publication_artifacts(
+                REPOSITORY, manifest, workspace_root=self.workspace
+            )
 
-    def test_publication_authorization_reopens_the_private_aggregate(self) -> None:
+    def test_fixture_validation_reopens_the_private_aggregate(self) -> None:
         payload = request(3, self.workspace)
         manifest = self.build(payload)
         aggregate_path = REPOSITORY / payload["signed_installed"]["path"]
@@ -369,12 +372,7 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
         try:
             aggregate_path.write_bytes(original + b"drift")
             with self.assertRaisesRegex(PublicationError, "size does not match"):
-                authorize_publication_artifacts(
-                    REPOSITORY,
-                    manifest,
-                    fixture=True,
-                    workspace_root=self.workspace,
-                )
+                self.validate(manifest)
         finally:
             aggregate_path.write_bytes(original)
 
@@ -408,9 +406,43 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
         self.validate(manifest)
         with self.assertRaisesRegex(PublicationError, "environment-gated"):
             self.validate(manifest, require_sealed=True)
-        with self.assertRaisesRegex(PublicationError, "environment-gated"):
+        with self.assertRaisesRegex(PublicationError, "fixture evidence"):
             authorize_publication_artifacts(
-                REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
+                REPOSITORY, manifest, workspace_root=self.workspace
+            )
+
+    def test_production_authorizer_has_no_fixture_or_policy_injection_api(self) -> None:
+        manifest = self.build(request(3, self.workspace))
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'fixture'"):
+            authorize_publication_artifacts(
+                REPOSITORY,
+                manifest,
+                fixture=True,
+                workspace_root=self.workspace,
+            )
+        with self.assertRaisesRegex(
+            TypeError, "unexpected keyword argument 'physical_trust_policy'"
+        ):
+            authorize_publication_artifacts(
+                REPOSITORY,
+                manifest,
+                physical_trust_policy=PHYSICAL_TRUST_POLICY,
+                workspace_root=self.workspace,
+            )
+
+    def test_publication_gate_cli_has_no_fixture_option(self) -> None:
+        from scripts.sealed_evidence_manifest import parser
+
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            parser().parse_args(["publication-gate", "--fixture"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_production_authorizer_fails_closed_without_canonical_trust_key(self) -> None:
+        manifest = self.build(request(3, self.workspace))
+        manifest["fixture"] = False
+        with self.assertRaisesRegex(PublicationError, "production collector trust policy"):
+            authorize_publication_artifacts(
+                REPOSITORY, manifest, workspace_root=self.workspace
             )
 
     def test_bindings_carry_every_required_digest(self) -> None:
@@ -559,9 +591,10 @@ class SealedManifestCapabilityTests(_CleanWorkspace):
             f"capability:global-authority={LEVEL_ORDER[2]}",
             manifest["publication"]["refusals"],
         )
-        with self.assertRaisesRegex(PublicationError, "publication artifacts are refused"):
+        self.validate(manifest)
+        with self.assertRaisesRegex(PublicationError, "fixture evidence"):
             authorize_publication_artifacts(
-                REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
+                REPOSITORY, manifest, workspace_root=self.workspace
             )
 
 
@@ -772,9 +805,9 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
             # Path/name only: no content is ever recorded.
             self.assertNotIn("contents", json.dumps(blocks))
             self.assertFalse(manifest["publication"]["allowed"])
-            with self.assertRaisesRegex(PublicationError, "environment-gated"):
+            with self.assertRaisesRegex(PublicationError, "fixture evidence"):
                 authorize_publication_artifacts(
-                    REPOSITORY, manifest, fixture=True, workspace_root=workspace
+                    REPOSITORY, manifest, workspace_root=workspace
                 )
 
     def test_updater_key_presence_refuses_a_sealed_claim(self) -> None:

@@ -41,7 +41,7 @@ from scripts.tests.gatekeeper_fixture import macos_27_fixture
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 REPOSITORY_COMMIT = repository_commit(REPOSITORY)
 CAPTURED_AT = "2026-07-25T00:00:00Z"
-OBSERVED_AT = "2026-07-26T00:00:00Z"
+OBSERVED_AT = "2026-07-29T00:00:00Z"
 
 # The pinned patched-source identity the XCFramework must declare, taken from the
 # same sealed-closure derivation the release pipeline uses.
@@ -176,6 +176,7 @@ class _CleanWorkspaceMixin(unittest.TestCase):
 class FinalCandidateRoundTripTests(_CleanWorkspaceMixin):
     def test_full_inputs_produce_verified_binding(self) -> None:
         binding = self.build()
+        self.assertEqual(binding["visibility"], "private-release-operations")
         self.assertEqual(binding["status"], VERIFIED)
         self.assertEqual(binding["blocked_inputs"], [])
         self.validate(binding, require_verified=True)

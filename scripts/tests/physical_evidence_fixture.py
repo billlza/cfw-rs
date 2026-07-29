@@ -11,6 +11,7 @@ import calendar
 import copy
 from datetime import datetime, timezone
 import hashlib
+import ipaddress
 from pathlib import Path
 import struct
 from typing import Any
@@ -48,8 +49,12 @@ APP_MANIFEST = "a" * 64
 SIGNED_TREE = "b" * 64
 BUILD_NUMBER = "40000"
 BUILT_AT = "2026-07-01T00:00:00Z"
-CAPTURED_AT = "2026-07-22T00:00:00Z"
-RUN_CAPTURED_AT = "2026-07-25T00:00:00Z"
+CAPTURED_AT = "2026-07-27T12:00:00Z"
+PERFORMANCE_COMPLETED_AT = "2026-07-28T12:00:00Z"
+REPORT_SIGNED_AT = "2026-07-28T12:30:00Z"
+RUN_CAPTURED_AT = CAPTURED_AT
+RUN_COMPLETED_AT = PERFORMANCE_COMPLETED_AT
+RUN_SIGNED_AT = "2026-07-28T13:00:00Z"
 COLLECTOR_VERSION = "physical-collector-v1"
 COLLECTOR_SOURCE = "c" * 64
 COLLECTOR_EXECUTABLE = "d" * 64
@@ -147,17 +152,145 @@ def pcap_bytes(
     end_marker: bytes,
     include_token: bool,
     malformed: bool = False,
+    protocol: str = "tcp",
+    family: str = "ipv4",
+    local_address: str | None = None,
+    remote_address: str | None = None,
+    local_port: int = 41000,
+    remote_port: int | None = None,
+    link_type: int = 1,
+    vlan_tags: int = 0,
+    include_tcp_fallback: bool = False,
 ) -> bytes:
-    epoch = calendar.timegm(datetime(2026, 7, 22, tzinfo=timezone.utc).timetuple())
-    header = struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)
-    packets = [(epoch, start_marker)]
+    """Build a structurally valid transport capture for v3 packet fixtures."""
+
+    if family not in {"ipv4", "ipv6"}:
+        raise ValueError("fixture packet family is invalid")
+    local_address = local_address or ("192.0.2.10" if family == "ipv4" else "2001:db8:1::10")
+    remote_address = remote_address or (
+        "198.51.100.20" if family == "ipv4" else "2001:db8:2::20"
+    )
+    remote_port = remote_port or (53 if protocol == "dns" else 443)
+    epoch = calendar.timegm(datetime(2026, 7, 27, 12, tzinfo=timezone.utc).timetuple())
+    header = struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, link_type)
+
+    def dns_query(label: bytes, identifier: int) -> bytes:
+        qtype = 1 if family == "ipv4" else 28
+        suffix = (b"evidence", b"test")
+        qname = bytes([len(label)]) + label
+        for component in suffix:
+            qname += bytes([len(component)]) + component
+        qname += b"\x00"
+        return struct.pack("!HHHHHH", identifier, 0x0100, 1, 0, 0, 0) + qname + struct.pack(
+            "!HH", qtype, 1
+        )
+
+    def quic_packet(connection_id: bytes) -> bytes:
+        source_id = b"fixture1"
+        return (
+            b"\xc0"
+            + (1).to_bytes(4, "big")
+            + bytes([len(connection_id)])
+            + connection_id
+            + bytes([len(source_id)])
+            + source_id
+        )
+
+    def transport(payload: bytes, sequence: int, identifier: int) -> bytes:
+        if protocol == "tcp":
+            return struct.pack(
+                "!HHIIBBHHH",
+                local_port,
+                remote_port,
+                sequence,
+                0,
+                5 << 4,
+                0x18,
+                65535,
+                0,
+                0,
+            ) + payload
+        application = (
+            dns_query(payload, identifier)
+            if protocol == "dns"
+            else quic_packet(payload)
+            if protocol == "quic"
+            else payload
+        )
+        return struct.pack(
+            "!HHHH", local_port, remote_port, len(application) + 8, 0
+        ) + application
+
+    def network(payload: bytes, protocol_number: int, identifier: int) -> bytes:
+        source = ipaddress.ip_address(local_address).packed
+        destination = ipaddress.ip_address(remote_address).packed
+        if family == "ipv4":
+            total = 20 + len(payload)
+            return (
+                struct.pack(
+                    "!BBHHHBBH4s4s",
+                    0x45,
+                    0,
+                    total,
+                    identifier,
+                    0x4000,
+                    64,
+                    protocol_number,
+                    0,
+                    source,
+                    destination,
+                )
+                + payload
+            )
+        return struct.pack(
+            "!IHBB16s16s",
+            6 << 28,
+            len(payload),
+            protocol_number,
+            64,
+            source,
+            destination,
+        ) + payload
+
+    def link_frame(payload: bytes) -> bytes:
+        ether_type = 0x0800 if family == "ipv4" else 0x86DD
+        if link_type == 1:
+            frame = b"\x02" * 6 + b"\x04" * 6
+            for _ in range(vlan_tags):
+                frame += (0x8100).to_bytes(2, "big") + b"\x00\x01"
+            return frame + ether_type.to_bytes(2, "big") + payload
+        if link_type == 101:
+            return payload
+        if link_type == 0:
+            return (2 if family == "ipv4" else 30).to_bytes(4, "little") + payload
+        if link_type == 108:
+            return (2 if family == "ipv4" else 30).to_bytes(4, "big") + payload
+        if link_type == 113:
+            return struct.pack("!HHH8sH", 0, 1, 6, b"\x00" * 8, ether_type) + payload
+        if link_type == 276:
+            return struct.pack("!HHIHBB8s", ether_type, 0, 1, 1, 0, 6, b"\x00" * 8) + payload
+        raise ValueError("fixture link type is unsupported")
+
+    tokens = [start_marker]
     if include_token:
-        packets.append((epoch + 1, token))
-    packets.append((epoch + 5, end_marker))
+        tokens.append(token)
+    tokens.append(end_marker)
     body = bytearray()
-    for timestamp, payload in packets:
-        frame = b"\x00" * 14 + payload
+    sequence = 1000
+    for packet_index, application in enumerate(tokens):
+        protocol_number = 6 if protocol == "tcp" else 17
+        transport_bytes = transport(application, sequence, packet_index + 1)
+        frame = link_frame(network(transport_bytes, protocol_number, packet_index + 1))
+        timestamp = epoch + (5 if packet_index == len(tokens) - 1 else packet_index)
         body.extend(struct.pack("<IIII", timestamp, 0, len(frame), len(frame)))
+        body.extend(frame)
+        sequence += len(application)
+    if include_tcp_fallback:
+        tcp_header = struct.pack(
+            "!HHIIBBHHH", local_port, remote_port, sequence, 0, 5 << 4, 0x18, 65535, 0, 0
+        )
+        frame = link_frame(network(tcp_header + b"fallback", 6, 99))
+        body.extend(struct.pack("<IIII", epoch + 2, 0, len(frame), len(frame)))
         body.extend(frame)
     result = header + bytes(body)
     return result[:-1] if malformed else result
@@ -193,7 +326,7 @@ class PhysicalEvidenceFixture:
         self.report_bindings: list[list[dict[str, Any]]] = []
         self.raw_bindings: list[list[dict[str, Any]]] = []
         for index, (os_label, version, build) in enumerate(
-            (("macos15", "15.7.8", "24G908"), ("current-macos", "26.6", "25G123"))
+            (("macos15", "15.7.8", "24G824"), ("current-macos", "26.6", "25G72"))
         ):
             self._build_run(index, os_label, version, build)
 
@@ -242,18 +375,91 @@ class PhysicalEvidenceFixture:
         cases: list[dict[str, Any]] = []
         bindings: list[dict[str, Any]] = []
         for index, (case_id, spec) in enumerate(PACKET_CASES.items()):
-            token = f"packet-{run_name}-{index:02d}-target"
-            start = f"packet-{run_name}-{index:02d}-start"
-            end = f"packet-{run_name}-{index:02d}-finish"
+            token = "t" + sha(f"{run_name}-{case_id}-target")[:19]
+            start = "s" + sha(f"{run_name}-{case_id}-start")[:19]
+            end = "e" + sha(f"{run_name}-{case_id}-finish")[:19]
+            local_address = "192.0.2.10" if spec.family == "ipv4" else "2001:db8:1::10"
+            remote_address = (
+                f"198.51.100.{index + 1}"
+                if spec.family == "ipv4"
+                else f"2001:db8:2::{index + 1}"
+            )
+            remote_port = 53 if spec.protocol == "dns" else 5300 if spec.protocol == "udp" else 443
             capture = pcap_bytes(
                 start_marker=start.encode("ascii"),
                 token=token.encode("ascii"),
                 end_marker=end.encode("ascii"),
                 include_token=spec.token_observed,
+                protocol=spec.protocol,
+                family=spec.family,
+                local_address=local_address,
+                remote_address=remote_address,
+                remote_port=remote_port,
             )
             artifact = self._write(
                 f"{run_name}/packet/{case_id}.pcap", capture, "packet-pcap"
             )
+            interface_name = (
+                "en1"
+                if spec.vantage == "lan_segment"
+                else "en0"
+                if spec.vantage in {"direct_wan", "independent_server"}
+                else "utun5"
+            )
+            provenance = {
+                "schema_version": 1,
+                "proof": copy.deepcopy(proof),
+                "case_id": case_id,
+                "interface": {"name": interface_name, "index": 5, "link_type": 1},
+                "capture_point": spec.vantage,
+                "resolver_role": spec.resolver_role,
+                "capture_filter_sha256": sha(f"{run_name}-{case_id}-capture-filter"),
+                "capture_command_sha256": sha(f"{run_name}-{case_id}-capture-command"),
+                "quic_version": 1 if spec.protocol == "quic" else None,
+                "endpoint_set": [
+                    {
+                        "role": "local",
+                        "address": local_address,
+                        "port": 41000,
+                        "transport": "tcp" if spec.protocol == "tcp" else "udp",
+                    },
+                    {
+                        "role": "remote",
+                        "address": remote_address,
+                        "port": remote_port,
+                        "transport": "tcp" if spec.protocol == "tcp" else "udp",
+                    },
+                ],
+                "started_at": CAPTURED_AT,
+                "completed_at": "2026-07-27T12:00:05Z",
+                "signed_at": "2026-07-27T12:00:10Z",
+            }
+            provenance_artifact = self._write_json(
+                f"{run_name}/packet/{case_id}-provenance.json",
+                provenance,
+                "packet-capture-provenance",
+            )
+            attempt_artifact = None
+            if not spec.token_observed:
+                attempt = {
+                    "schema_version": 1,
+                    "proof": copy.deepcopy(proof),
+                    "case_id": case_id,
+                    "token_sha256": hashlib.sha256(token.encode("ascii")).hexdigest(),
+                    "send_command_sha256": sha(f"{run_name}-{case_id}-send-command"),
+                    "capture_provenance_sha256": provenance_artifact["sha256"],
+                    "endpoint_set": copy.deepcopy(provenance["endpoint_set"]),
+                    "started_at": "2026-07-27T12:00:01Z",
+                    "completed_at": "2026-07-27T12:00:02Z",
+                    "recorded_at": "2026-07-27T12:00:11Z",
+                    "exit_code": 0,
+                    "bytes_submitted": len(token.encode("ascii")),
+                }
+                attempt_artifact = self._write_json(
+                    f"{run_name}/packet/{case_id}-send-attempt.json",
+                    attempt,
+                    "packet-send-attempt",
+                )
             cases.append(
                 {
                     "id": case_id,
@@ -266,13 +472,34 @@ class PhysicalEvidenceFixture:
                     "window_end_token": end,
                     "token_observed": spec.token_observed,
                     "observation_ms": 5_000,
+                    "quic_version": 1 if spec.protocol == "quic" else None,
+                    "capture_filter_sha256": provenance["capture_filter_sha256"],
+                    "capture_command_sha256": provenance["capture_command_sha256"],
+                    "send_command_sha256": sha(f"{run_name}-{case_id}-send-command"),
                     "artifact": artifact,
+                    "provenance_artifact": provenance_artifact,
+                    "attempt_artifact": attempt_artifact,
                 }
             )
             bindings.append({"harness": "packet", "subject": case_id, "descriptor": artifact})
+            bindings.append(
+                {
+                    "harness": "packet",
+                    "subject": f"{case_id}:capture-provenance",
+                    "descriptor": provenance_artifact,
+                }
+            )
+            if attempt_artifact is not None:
+                bindings.append(
+                    {
+                        "harness": "packet",
+                        "subject": f"{case_id}:send-attempt",
+                        "descriptor": attempt_artifact,
+                    }
+                )
         return (
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "harness_version": PACKET_VERSION,
                 "proof": copy.deepcopy(proof),
                 "platform": {
@@ -282,6 +509,8 @@ class PhysicalEvidenceFixture:
                     "clean_install": True,
                 },
                 "captured_at": CAPTURED_AT,
+                "completed_at": "2026-07-27T12:00:05Z",
+                "signed_at": "2026-07-27T12:00:12Z",
                 "cases": cases,
             },
             bindings,
@@ -314,8 +543,8 @@ class PhysicalEvidenceFixture:
                 attributes["user_count"] = 2
             if "concurrent_start_count" in checks:
                 attributes["concurrent_start_count"] = 2
-            started = datetime(2026, 7, 22, 0, index, tzinfo=timezone.utc)
-            finished = datetime(2026, 7, 22, 0, index, 1, tzinfo=timezone.utc)
+            started = datetime(2026, 7, 27, 12, index, tzinfo=timezone.utc)
+            finished = datetime(2026, 7, 27, 12, index, 1, tzinfo=timezone.utc)
             raw = {
                 "schema_version": 1,
                 "proof": copy.deepcopy(proof),
@@ -355,6 +584,9 @@ class PhysicalEvidenceFixture:
             bindings.append(
                 {"harness": "lifecycle", "subject": probe_id, "descriptor": artifact}
             )
+        completed_at = datetime(
+            2026, 7, 27, 12, len(PROBE_SPECS) - 1, 1, tzinfo=timezone.utc
+        )
         return (
             {
                 "schema_version": 2,
@@ -362,6 +594,8 @@ class PhysicalEvidenceFixture:
                 "proof": copy.deepcopy(proof),
                 "environment": environment,
                 "captured_at": CAPTURED_AT,
+                "completed_at": completed_at.isoformat().replace("+00:00", "Z"),
+                "signed_at": "2026-07-27T12:30:00Z",
                 "probes": probes,
             },
             bindings,
@@ -426,6 +660,7 @@ class PhysicalEvidenceFixture:
         raw = {
             "schema_version": 1,
             "captured_at": CAPTURED_AT,
+            "completed_at": PERFORMANCE_COMPLETED_AT,
             "proof": copy.deepcopy(proof),
             "parameters": copy.deepcopy(parameters),
             "weak_network": weak_raw,
@@ -438,7 +673,7 @@ class PhysicalEvidenceFixture:
             "switch_cycle": {"records": switch_records},
             "soak": {
                 "started_at": CAPTURED_AT,
-                "ended_at": "2026-07-23T00:00:00Z",
+                "ended_at": PERFORMANCE_COMPLETED_AT,
                 "crash_events": [],
             },
         }
@@ -449,6 +684,8 @@ class PhysicalEvidenceFixture:
             "schema_version": 2,
             "harness_version": PERFORMANCE_VERSION,
             "captured_at": CAPTURED_AT,
+            "completed_at": PERFORMANCE_COMPLETED_AT,
+            "signed_at": REPORT_SIGNED_AT,
             "proof": copy.deepcopy(proof),
             "parameters": parameters,
             "weak_network": weak_declared,
@@ -511,6 +748,8 @@ class PhysicalEvidenceFixture:
                 }
             )
 
+        transcript_finishes: list[datetime] = []
+
         def transcript(
             case_id: str,
             category: str,
@@ -520,8 +759,9 @@ class PhysicalEvidenceFixture:
             cleanup: str,
             offset: int,
         ) -> dict[str, Any]:
-            started = datetime(2026, 7, 22, 0, 0, offset, tzinfo=timezone.utc)
-            finished = datetime(2026, 7, 22, 0, 0, offset + 1, tzinfo=timezone.utc)
+            started = datetime(2026, 7, 27, 12, 0, offset, tzinfo=timezone.utc)
+            finished = datetime(2026, 7, 27, 12, 0, offset + 1, tzinfo=timezone.utc)
+            transcript_finishes.append(finished)
             raw = {
                 "schema_version": 1,
                 "proof": copy.deepcopy(proof),
@@ -592,6 +832,10 @@ class PhysicalEvidenceFixture:
                 "harness_version": ADVERSARIAL_VERSION,
                 "proof": copy.deepcopy(proof),
                 "captured_at": CAPTURED_AT,
+                "completed_at": max(transcript_finishes).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "signed_at": "2026-07-27T12:01:00Z",
                 "platform": {
                     "architecture": "arm64",
                     "macos_version": macos_version,
@@ -646,6 +890,8 @@ class PhysicalEvidenceFixture:
             reports[harness] = {
                 "tool_version": versions[harness],
                 "captured_at": CAPTURED_AT,
+                "completed_at": document["completed_at"],
+                "signed_at": document["signed_at"],
                 "artifact": artifact,
             }
             report_bindings.append(
@@ -653,6 +899,8 @@ class PhysicalEvidenceFixture:
                     "harness": harness,
                     "tool_version": versions[harness],
                     "captured_at": CAPTURED_AT,
+                    "completed_at": document["completed_at"],
+                    "signed_at": document["signed_at"],
                     "descriptor": artifact,
                 }
             )
@@ -671,6 +919,8 @@ class PhysicalEvidenceFixture:
             "machine_sha256": machine,
             "clean_install": True,
             "captured_at": RUN_CAPTURED_AT,
+            "completed_at": RUN_COMPLETED_AT,
+            "signed_at": RUN_SIGNED_AT,
             "run_id": run_id,
             "run_nonce": run_nonce,
             "collector": collector,

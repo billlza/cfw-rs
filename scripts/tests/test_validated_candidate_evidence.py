@@ -335,6 +335,23 @@ class ValidatedCandidateEvidenceTests(unittest.TestCase):
                 )
             self.assertIn("validated-candidate-unsigned-ci", sources)
             self.assertIn("validated-candidate-toolchain-binding", sources)
+            self.assertTrue(
+                {
+                    "final-candidate-binding",
+                    "sealed-evidence-manifest",
+                    "physical-evidence-aggregate",
+                    "physical-evidence-private-archive",
+                }.isdisjoint(sources),
+                "private physical/release-operations manifests must not enter the public bundle",
+            )
+            self.assertTrue(
+                {
+                    "final-candidate.json",
+                    "physical-evidence.json",
+                    "sealed-evidence-manifest.json",
+                }.isdisjoint(source.name for source in sources.values()),
+                "private release-input filenames must not enter the public bundle",
+            )
 
     def test_publication_preparation_rejects_final_app_tree_or_binding_tamper(self) -> None:
         for defect in ("tree", "metadata"):

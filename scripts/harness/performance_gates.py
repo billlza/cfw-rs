@@ -392,7 +392,7 @@ def _switch_cycle(declared: Any, raw: Any) -> None:
         raise PerformanceGateError("switch_cycle resource growth exceeds the gate")
 
 
-def _soak(declared: Any, raw: Any) -> datetime:
+def _soak(declared: Any, raw: Any) -> tuple[datetime, datetime]:
     declared_value = exact_object(declared, {"duration_hours", "crash_count"}, "soak")
     raw_value = exact_object(raw, {"started_at", "ended_at", "crash_events"}, "raw.soak")
     started = _timestamp(raw_value["started_at"], "raw.soak.started_at")
@@ -425,7 +425,7 @@ def _soak(declared: Any, raw: Any) -> datetime:
         raise PerformanceGateError("soak crash_count declaration differs from raw events")
     if duration_hours < SOAK_MIN_HOURS or len(crash_events) > SOAK_MAX_CRASHES:
         raise PerformanceGateError("soak duration/crash result fails the gate")
-    return started
+    return started, ended
 
 
 def _validate_raw(
@@ -434,10 +434,11 @@ def _validate_raw(
     proof: dict[str, Any],
     parameters: dict[str, Any],
     document: dict[str, Any],
-) -> None:
+) -> tuple[datetime, datetime]:
     fields = {
         "schema_version",
         "captured_at",
+        "completed_at",
         "proof",
         "parameters",
         "weak_network",
@@ -459,12 +460,16 @@ def _validate_raw(
     _throughput(document["throughput"], raw_value["throughput"])
     _resources(document["resources"], raw_value["resources"])
     _switch_cycle(document["switch_cycle"], raw_value["switch_cycle"])
-    soak_started = _soak(document["soak"], raw_value["soak"])
+    soak_started, soak_ended = _soak(document["soak"], raw_value["soak"])
     raw_captured_at = _timestamp(raw_value["captured_at"], "raw.performance.captured_at")
     if raw_value["captured_at"] != document["captured_at"]:
         raise PerformanceGateError("raw performance captured_at differs from its report")
     if raw_captured_at != min(weak_started, soak_started):
         raise PerformanceGateError("performance captured_at differs from earliest raw event")
+    raw_completed_at = _timestamp(raw_value["completed_at"], "raw.performance.completed_at")
+    if raw_completed_at != soak_ended:
+        raise PerformanceGateError("raw performance completed_at differs from soak completion")
+    return raw_captured_at, raw_completed_at
 
 
 def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
@@ -472,6 +477,8 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         "schema_version",
         "harness_version",
         "captured_at",
+        "completed_at",
+        "signed_at",
         "proof",
         "parameters",
         "weak_network",
@@ -498,11 +505,19 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         expected_kind="performance-samples",
         label="performance.samples_artifact",
     )
-    _validate_raw(raw, proof=proof, parameters=parameters, document=document)
+    started_at, completed_at = _validate_raw(
+        raw, proof=proof, parameters=parameters, document=document
+    )
+    if _timestamp(document["completed_at"], "completed_at") != completed_at:
+        raise PerformanceGateError("report completed_at differs from raw completion")
+    if _timestamp(document["signed_at"], "signed_at") < completed_at:
+        raise PerformanceGateError("report signed_at predates raw completion")
     return {
         "document": document,
         "proof": proof,
         "parameters": parameters,
+        "started_at": started_at,
+        "completed_at": completed_at,
         "artifacts": [{"subject": "measurements", "descriptor": descriptor.as_dict()}],
     }
 

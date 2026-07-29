@@ -22,7 +22,7 @@ Usage:
     sealed_evidence_manifest.py collect-ci-lanes --output unsigned-ci-lanes.json
     sealed_evidence_manifest.py seal --request request.json --output manifest.json [--fixture]
     sealed_evidence_manifest.py verify --manifest manifest.json [--fixture] [--require-sealed]
-    sealed_evidence_manifest.py publication-gate [--manifest manifest.json] [--fixture]
+    sealed_evidence_manifest.py publication-gate [--manifest manifest.json]
     sealed_evidence_manifest.py status [--evidence-dir DIR]
     sealed_evidence_manifest.py self-check
 """
@@ -34,27 +34,50 @@ import hashlib
 import subprocess
 from pathlib import Path
 
-from publication.ci_lanes import (
-    DEFAULT_LIBBOX_OUTPUT,
-    DEFAULT_LIBBOX_SOURCE_TEMPLATE,
-    LANES,
-    collect_ci_lanes,
-    derive_toolchain_binding,
-)
-from publication.common import PublicationError, canonical_json, write_new
-from publication.sealed_manifest import (
-    DEFAULT_MANIFEST_PATH,
-    GATE_ORDER,
-    REQUIRED_SOURCE_GATES,
-    authorize_publication_artifacts,
-    build_sealed_evidence_manifest,
-    environment_status,
-    load_sealed_manifest,
-    seal_manifest,
-    self_check,
-    validate_sealed_evidence_manifest,
-)
-from repository_source_identity import SourceIdentityError, current_identity
+if __package__:
+    from .publication.ci_lanes import (
+        DEFAULT_LIBBOX_OUTPUT,
+        DEFAULT_LIBBOX_SOURCE_TEMPLATE,
+        LANES,
+        collect_ci_lanes,
+        derive_toolchain_binding,
+    )
+    from .publication.common import PublicationError, canonical_json, write_new
+    from .publication.sealed_manifest import (
+        DEFAULT_MANIFEST_PATH,
+        GATE_ORDER,
+        REQUIRED_SOURCE_GATES,
+        authorize_publication_artifacts,
+        build_sealed_evidence_manifest,
+        environment_status,
+        load_sealed_manifest,
+        seal_manifest,
+        self_check,
+        validate_sealed_evidence_manifest,
+    )
+    from .repository_source_identity import SourceIdentityError, current_identity
+else:
+    from publication.ci_lanes import (
+        DEFAULT_LIBBOX_OUTPUT,
+        DEFAULT_LIBBOX_SOURCE_TEMPLATE,
+        LANES,
+        collect_ci_lanes,
+        derive_toolchain_binding,
+    )
+    from publication.common import PublicationError, canonical_json, write_new
+    from publication.sealed_manifest import (
+        DEFAULT_MANIFEST_PATH,
+        GATE_ORDER,
+        REQUIRED_SOURCE_GATES,
+        authorize_publication_artifacts,
+        build_sealed_evidence_manifest,
+        environment_status,
+        load_sealed_manifest,
+        seal_manifest,
+        self_check,
+        validate_sealed_evidence_manifest,
+    )
+    from repository_source_identity import SourceIdentityError, current_identity
 
 # The fixed per-gate wall-clock bound. A gate that exceeds it is recorded as
 # ``timeout`` - a non-passing result - and is never masked into a pass.
@@ -231,9 +254,7 @@ def command_publication_gate(arguments: argparse.Namespace) -> None:
             f"publication is blocked: no sealed Evidence Manifest at {manifest_path}"
         )
     document = load_sealed_manifest(manifest_path.resolve(strict=True))
-    result = authorize_publication_artifacts(
-        repository, document, fixture=arguments.fixture
-    )
+    result = authorize_publication_artifacts(repository, document)
     print(
         "publication artifacts authorized by the sealed Evidence Manifest: "
         f"{result['bindings']['final_candidate_sha256']}"
@@ -319,7 +340,6 @@ def parser() -> argparse.ArgumentParser:
     verify.set_defaults(handler=command_verify)
     gate = commands.add_parser("publication-gate")
     gate.add_argument("--manifest", type=Path, default=None)
-    gate.add_argument("--fixture", action="store_true")
     gate.set_defaults(handler=command_publication_gate)
     status = commands.add_parser("status")
     status.add_argument("--evidence-dir", type=Path, default=None)

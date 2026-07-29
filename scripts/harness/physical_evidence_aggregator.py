@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Source-pinned proof-to-byte physical-evidence aggregation gate.
 
-The aggregate contains descriptors for four v2 harness reports, never embedded
+The aggregate contains descriptors for four source-pinned harness reports, never embedded
 claim-only documents. Each report is reopened and hashed beneath the aggregate's
 evidence root; each harness then reopens and validates its own raw artifacts.
 Finally, a source-pinned external collector key verifies a canonical receipt
@@ -15,10 +15,9 @@ the collector signing key or the collection host.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
-import re
 from typing import Any, Callable
 
 if __package__:
@@ -127,10 +126,13 @@ REQUIRED_MACOS_VERSIONS = {
     "macos15": "15.7.8",
     "current-macos": "26.6",
 }
-REQUIRED_MACOS_BUILD_TRAINS = {
-    "macos15": re.compile(r"^24G[0-9]{1,5}$"),
-    "current-macos": re.compile(r"^25G[0-9]{1,5}$"),
+REQUIRED_MACOS_BUILDS = {
+    "macos15": "24G824",
+    "current-macos": "25G72",
 }
+STABLE_MATRIX_GENERAL_AVAILABILITY = datetime(
+    2026, 7, 27, tzinfo=timezone.utc
+)
 REQUIRED_HARNESSES = frozenset({"lifecycle", "packet", "performance", "adversarial"})
 EXPECTED_TOOL_VERSIONS = {
     "lifecycle": LIFECYCLE_VERSION,
@@ -160,6 +162,8 @@ RUN_FIELDS = {
     "machine_sha256",
     "clean_install",
     "captured_at",
+    "completed_at",
+    "signed_at",
     "run_id",
     "run_nonce",
     "collector",
@@ -173,7 +177,7 @@ COLLECTOR_FIELDS = {
     "algorithm",
     "signature",
 }
-REPORT_FIELDS = {"tool_version", "captured_at", "artifact"}
+REPORT_FIELDS = {"tool_version", "captured_at", "completed_at", "signed_at", "artifact"}
 
 
 class PhysicalEvidenceError(ValueError):
@@ -363,10 +367,18 @@ def _validate_report(
     label = f"run[{run['os']}].reports.{harness}"
     report = exact_object(value, REPORT_FIELDS, label)
     if report["tool_version"] != EXPECTED_TOOL_VERSIONS[harness]:
-        raise PhysicalEvidenceError(f"{label}.tool_version differs from the v2 harness")
+        raise PhysicalEvidenceError(
+            f"{label}.tool_version differs from the source-pinned harness"
+        )
     captured_at = _timestamp(report["captured_at"], f"{label}.captured_at")
-    if captured_at < built_at or captured_at > run["captured_at_dt"]:
-        raise PhysicalEvidenceError(f"{label}.captured_at is stale or after its run receipt")
+    completed_at = _timestamp(report["completed_at"], f"{label}.completed_at")
+    signed_at = _timestamp(report["signed_at"], f"{label}.signed_at")
+    if not (
+        built_at <= run["captured_at_dt"] <= captured_at <= completed_at <= signed_at
+        and completed_at <= run["completed_at_dt"]
+        and signed_at <= run["signed_at_dt"]
+    ):
+        raise PhysicalEvidenceError(f"{label} timestamps are stale, reversed, or after its run")
     descriptor, document = artifacts.read_json(
         report["artifact"], expected_kind=REPORT_KINDS[harness], label=f"{label}.artifact"
     )
@@ -379,13 +391,16 @@ def _validate_report(
         raise PhysicalEvidenceError(f"{label} candidate/run/collector proof differs")
     if document.get("harness_version") != report["tool_version"]:
         raise PhysicalEvidenceError(f"{label} report wrapper/tool version differs from its bytes")
-    if "captured_at" in document and document["captured_at"] != report["captured_at"]:
-        raise PhysicalEvidenceError(f"{label} captured_at differs from its report bytes")
+    for field in ("captured_at", "completed_at", "signed_at"):
+        if document.get(field) != report[field]:
+            raise PhysicalEvidenceError(f"{label} {field} differs from its report bytes")
     _identity_check(harness, result, run, label)
     report_binding = {
         "harness": harness,
         "tool_version": report["tool_version"],
         "captured_at": report["captured_at"],
+        "completed_at": report["completed_at"],
+        "signed_at": report["signed_at"],
         "descriptor": descriptor.as_dict(),
     }
     raw_bindings = [
@@ -421,6 +436,8 @@ def _receipt_payload(
                 "machine_sha256",
                 "clean_install",
                 "captured_at",
+                "completed_at",
+                "signed_at",
                 "run_id",
                 "run_nonce",
             )
@@ -464,10 +481,11 @@ def _validate_run(
     macos_build = raw["macos_build"]
     if not isinstance(macos_build, str) or not MACOS_BUILD_RE.fullmatch(macos_build):
         raise PhysicalEvidenceError(f"runs[{index}].macos_build is invalid")
-    if not REQUIRED_MACOS_BUILD_TRAINS[os_label].fullmatch(macos_build):
+    expected_build = REQUIRED_MACOS_BUILDS[os_label]
+    if macos_build != expected_build:
         raise PhysicalEvidenceError(
-            f"runs[{index}].macos_build is not in the source-pinned stable build "
-            f"train for {os_label!r}"
+            f"runs[{index}].macos_build must be the source-pinned stable build "
+            f"{expected_build!r} for {os_label!r}"
         )
     machine = require_sha256(raw["machine_sha256"], f"runs[{index}].machine_sha256")
     if machine in seen_machines:
@@ -476,8 +494,18 @@ def _validate_run(
     if raw["clean_install"] is not True:
         raise PhysicalEvidenceError(f"runs[{index}] is not a clean physical install")
     captured_at_dt = _timestamp(raw["captured_at"], f"runs[{index}].captured_at")
-    if captured_at_dt < built_at:
-        raise PhysicalEvidenceError(f"runs[{index}] predates the candidate build")
+    completed_at_dt = _timestamp(raw["completed_at"], f"runs[{index}].completed_at")
+    signed_at_dt = _timestamp(raw["signed_at"], f"runs[{index}].signed_at")
+    if not (
+        max(built_at, STABLE_MATRIX_GENERAL_AVAILABILITY)
+        <= captured_at_dt
+        <= completed_at_dt
+        <= signed_at_dt
+    ) or signed_at_dt > datetime.now(timezone.utc):
+        raise PhysicalEvidenceError(
+            f"runs[{index}] predates stable GA, has reversed completion/signing "
+            "timestamps, or is dated in the future"
+        )
     run_id = require_identifier(raw["run_id"], f"runs[{index}].run_id")
     if run_id in seen_run_ids:
         raise PhysicalEvidenceError("physical runs reuse a run_id")
@@ -494,6 +522,10 @@ def _validate_run(
         "clean_install": True,
         "captured_at": raw["captured_at"],
         "captured_at_dt": captured_at_dt,
+        "completed_at": raw["completed_at"],
+        "completed_at_dt": completed_at_dt,
+        "signed_at": raw["signed_at"],
+        "signed_at_dt": signed_at_dt,
         "run_id": run_id,
         "run_nonce": run_nonce,
     }
@@ -552,6 +584,8 @@ def _validate_run(
                 "category": category_map[binding["harness"]],
                 "tool_version": binding["tool_version"],
                 "captured_at": binding["captured_at"],
+                "completed_at": binding["completed_at"],
+                "signed_at": binding["signed_at"],
                 "report_sha256": descriptor["sha256"],
                 "artifact_path": descriptor["path"],
             }
@@ -571,6 +605,8 @@ def _validate_run(
             "category": "soak",
             "tool_version": performance_report["tool_version"],
             "captured_at": performance_report["captured_at"],
+            "completed_at": performance_report["completed_at"],
+            "signed_at": performance_report["signed_at"],
             "report_sha256": soak_descriptor["sha256"],
             "artifact_path": soak_descriptor["path"],
         }
@@ -581,10 +617,12 @@ def _validate_run(
 def _validate(
     value: Any,
     *,
-    evidence_root: Path,
+    artifacts: ArtifactReader,
     trust_policy: CollectorTrustPolicy,
     fixture: bool,
 ) -> dict[str, Any]:
+    initial_artifact_count = artifacts.artifact_count
+    initial_artifact_bytes = artifacts.total_bytes
     if not trust_policy.release_source_pinned and not fixture:
         raise PhysicalEvidenceError(
             "collector trust policy is not pinned by release source; "
@@ -627,36 +665,35 @@ def _validate(
     raw_bindings: list[dict[str, Any]] = []
     receipt_hashes: list[str] = []
     installed_runs: list[dict[str, Any]] = []
-    with ArtifactReader(evidence_root) as artifacts:
-        for index, raw_run in enumerate(runs):
-            _os, publication, raw_artifacts, receipt_sha256 = _validate_run(
-                raw_run,
-                index,
-                policy=trust_policy,
-                candidate=candidate,
-                built_at=built_at,
-                artifacts=artifacts,
-                seen_os=seen_os,
-                seen_run_ids=seen_run_ids,
-                seen_nonces=seen_nonces,
-                seen_machines=seen_machines,
-            )
-            report_bindings.extend(publication)
-            raw_bindings.extend(raw_artifacts)
-            receipt_hashes.append(receipt_sha256)
-            run_value = runs[index]
-            installed_runs.append(
-                {
-                    "os": run_value["os"],
-                    "macos_build": run_value["macos_build"],
-                    "machine_sha256": run_value["machine_sha256"],
-                    "report_hashes": sorted(
-                        entry["report_sha256"] for entry in publication
-                    ),
-                }
-            )
-        artifact_count = artifacts.artifact_count
-        artifact_bytes = artifacts.total_bytes
+    for index, raw_run in enumerate(runs):
+        _os, publication, raw_artifacts, receipt_sha256 = _validate_run(
+            raw_run,
+            index,
+            policy=trust_policy,
+            candidate=candidate,
+            built_at=built_at,
+            artifacts=artifacts,
+            seen_os=seen_os,
+            seen_run_ids=seen_run_ids,
+            seen_nonces=seen_nonces,
+            seen_machines=seen_machines,
+        )
+        report_bindings.extend(publication)
+        raw_bindings.extend(raw_artifacts)
+        receipt_hashes.append(receipt_sha256)
+        run_value = runs[index]
+        installed_runs.append(
+            {
+                "os": run_value["os"],
+                "macos_build": run_value["macos_build"],
+                "machine_sha256": run_value["machine_sha256"],
+                "report_hashes": sorted(
+                    entry["report_sha256"] for entry in publication
+                ),
+            }
+        )
+    artifact_count = artifacts.artifact_count - initial_artifact_count
+    artifact_bytes = artifacts.total_bytes - initial_artifact_bytes
     if seen_os != set(REQUIRED_OS):
         raise PhysicalEvidenceError("aggregate is missing a required macOS run set")
     if len(set(receipt_hashes)) != len(receipt_hashes):
@@ -711,12 +748,15 @@ def validate_physical_evidence(
                 "a bound aggregate artifact"
             )
         policy = _resolve_trust_policy(trust_policy, fixture=True)
-        return _validate(
-            value,
-            evidence_root=evidence_root,
-            trust_policy=policy,
-            fixture=True,
-        )
+        with ArtifactReader(evidence_root) as artifacts:
+            summary = _validate(
+                value,
+                artifacts=artifacts,
+                trust_policy=policy,
+                fixture=True,
+            )
+            artifacts.verify_all_unchanged()
+            return summary
     except RawArtifactError as error:
         raise PhysicalEvidenceError(str(error)) from error
 
@@ -753,7 +793,7 @@ def load_physical_evidence_artifact(
 ) -> dict[str, Any]:
     """Reopen a bound aggregate, then every report/raw byte, from one root.
 
-    The aggregate descriptor is the public edge of a private evidence archive.
+    The aggregate descriptor is the root binding of a private evidence archive.
     Its exact bytes are read before validation and reopened once more after all
     descendant report/raw validation, so a summary digest alone can never grant
     the release level.
@@ -767,27 +807,22 @@ def load_physical_evidence_artifact(
             expected_kinds={"physical-aggregate"},
             label="physical evidence aggregate artifact",
         )
-        with ArtifactReader(root) as aggregate_reader:
-            parsed_descriptor, data = aggregate_reader.read(
+        with ArtifactReader(root) as artifacts:
+            parsed_descriptor, data = artifacts.read(
                 descriptor.as_dict(),
                 expected_kinds={"physical-aggregate"},
                 label="physical evidence aggregate artifact",
             )
-        document = load_json_bytes(data, "physical evidence aggregate")
-        summary = _validate(
-            document,
-            evidence_root=root,
-            trust_policy=policy,
-            fixture=fixture,
-        )
-        # Reopen after every descendant has been checked. This catches an
-        # aggregate path/byte drift spanning the complete final-gate traversal.
-        with ArtifactReader(root) as final_reader:
-            final_reader.read(
-                parsed_descriptor.as_dict(),
-                expected_kinds={"physical-aggregate"},
-                label="physical evidence aggregate artifact final reopen",
+            document = load_json_bytes(data, "physical evidence aggregate")
+            summary = _validate(
+                document,
+                artifacts=artifacts,
+                trust_policy=policy,
+                fixture=fixture,
             )
+            # Reopen, reread, and rehash every report/raw object before checking
+            # the aggregate last, all beneath the same held evidence-root fd.
+            artifacts.verify_all_unchanged(final_path=parsed_descriptor.path)
         return _with_private_archive_binding(summary, parsed_descriptor.as_dict())
     except RawArtifactError as error:
         raise PhysicalEvidenceError(str(error)) from error
@@ -847,7 +882,7 @@ def self_check() -> None:
     if len(REQUIRED_OS) != 2:
         raise PhysicalEvidenceError("physical gate must require two OS runs")
     if set(REQUIRED_MACOS_VERSIONS) != set(REQUIRED_OS) or (
-        set(REQUIRED_MACOS_BUILD_TRAINS) != set(REQUIRED_OS)
+        set(REQUIRED_MACOS_BUILDS) != set(REQUIRED_OS)
     ):
         raise PhysicalEvidenceError("physical macOS release-matrix wiring is inconsistent")
     try:

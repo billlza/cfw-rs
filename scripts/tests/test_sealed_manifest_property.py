@@ -88,8 +88,6 @@ def validate_sealed_evidence_manifest(*args, **kwargs):
 
 
 def authorize_publication_artifacts(*args, **kwargs):
-    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
-    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
     return _authorize_publication_artifacts(*args, **kwargs)
 
 
@@ -409,10 +407,14 @@ class SealedManifestRoundTripProperty(_CleanWorkspace):
             if depth == len(LEVEL_ORDER) - 1:
                 self.assertEqual(manifest["status"], SEALED, f"seed={seed}")
                 self.assertEqual(manifest["blocked_inputs"], [], f"seed={seed}")
-                self.assertTrue(manifest["publication"]["artifacts_permitted"], f"seed={seed}")
-                authorize_publication_artifacts(
-                    REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
+                self.assertFalse(
+                    manifest["publication"]["artifacts_permitted"], f"seed={seed}"
                 )
+                self.assertIn("fixture-mode", manifest["publication"]["refusals"])
+                with self.assertRaisesRegex(PublicationError, "fixture evidence"):
+                    authorize_publication_artifacts(
+                        REPOSITORY, manifest, workspace_root=self.workspace
+                    )
             else:
                 self.assertEqual(manifest["status"], BLOCKED, f"seed={seed}")
                 self.assertNotEqual(manifest["blocked_inputs"], [], f"seed={seed}")
@@ -432,7 +434,7 @@ class SealedManifestRoundTripProperty(_CleanWorkspace):
                     )
                 with self.assertRaises(PublicationError, msg=f"seed={seed}"):
                     authorize_publication_artifacts(
-                        REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
+                        REPOSITORY, manifest, workspace_root=self.workspace
                     )
             depth_hits[depth] += 1
             cases += 1

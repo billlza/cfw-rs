@@ -164,12 +164,42 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
 
     def test_prerelease_build_cannot_masquerade_as_current_stable(self) -> None:
         self.fixture.aggregate["runs"][1]["macos_build"] = "25G5123a"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "stable build train"):
+        with self.assertRaisesRegex(PhysicalEvidenceError, "source-pinned stable build"):
             self.validate()
 
     def test_wrong_darwin_build_train_is_rejected_for_macos15(self) -> None:
         self.fixture.aggregate["runs"][0]["macos_build"] = "25G123"
-        with self.assertRaisesRegex(PhysicalEvidenceError, "stable build train"):
+        with self.assertRaisesRegex(PhysicalEvidenceError, "source-pinned stable build"):
+            self.validate()
+
+    def test_same_train_but_unpinned_build_is_rejected(self) -> None:
+        self.fixture.aggregate["runs"][1]["macos_build"] = "25G123"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "source-pinned stable build"):
+            self.validate()
+
+    def test_pre_ga_run_is_rejected(self) -> None:
+        run = self.fixture.aggregate["runs"][0]
+        run["captured_at"] = "2026-07-26T23:59:59Z"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "predates stable GA"):
+            self.validate()
+
+    def test_reversed_run_completion_and_signing_is_rejected(self) -> None:
+        run = self.fixture.aggregate["runs"][0]
+        run["completed_at"] = "2026-07-28T14:00:00Z"
+        run["signed_at"] = "2026-07-28T13:00:00Z"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "reversed"):
+            self.validate()
+
+    def test_future_run_timestamp_is_rejected(self) -> None:
+        self.fixture.aggregate["runs"][0]["signed_at"] = "2099-01-01T00:00:00Z"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "future"):
+            self.validate()
+
+    def test_report_completion_after_run_completion_is_rejected(self) -> None:
+        report = self.fixture.aggregate["runs"][0]["reports"]["packet"]
+        report["completed_at"] = "2026-07-28T12:00:01Z"
+        report["signed_at"] = "2026-07-28T12:30:01Z"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "after its run"):
             self.validate()
 
     def test_collector_signature_missing_fails(self) -> None:

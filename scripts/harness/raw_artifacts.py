@@ -63,6 +63,8 @@ ARTIFACT_KINDS: dict[str, ArtifactKindSpec] = {
     "adversarial-report": ArtifactKindSpec(".json", REPORT_MAX_BYTES),
     "packet-pcap": ArtifactKindSpec(".pcap", 32 * 1024 * 1024),
     "packet-pcapng": ArtifactKindSpec(".pcapng", 32 * 1024 * 1024),
+    "packet-capture-provenance": ArtifactKindSpec(".json", 256 * 1024),
+    "packet-send-attempt": ArtifactKindSpec(".json", 256 * 1024),
     "lifecycle-event": ArtifactKindSpec(".json", 1 * 1024 * 1024),
     "performance-samples": ArtifactKindSpec(".json", 16 * 1024 * 1024),
     "adversarial-transcript": ArtifactKindSpec(".json", 1 * 1024 * 1024),
@@ -118,6 +120,14 @@ class ArtifactDescriptor:
             "size": self.size,
             "sha256": self.sha256,
         }
+
+
+@dataclass(frozen=True)
+class ArtifactSnapshot:
+    """The accepted descriptor and inode metadata retained for a final rescan."""
+
+    descriptor: ArtifactDescriptor
+    identity: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -339,6 +349,7 @@ class ArtifactReader:
         self._seen_digests: set[str] = set()
         self._artifact_count = 0
         self._total_bytes = 0
+        self._snapshots: list[ArtifactSnapshot] = []
 
     def __enter__(self) -> ArtifactReader:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
@@ -425,6 +436,62 @@ class ArtifactReader:
             remaining -= len(chunk)
         return b"".join(chunks)
 
+    def _revalidate_snapshot(self, snapshot: ArtifactSnapshot, label: str) -> None:
+        """Reopen, reread, and rehash one previously accepted path."""
+
+        descriptor = snapshot.descriptor
+        self._check_root_path()
+        fd = self._open_relative(descriptor.path)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise RawArtifactError(f"{label} is no longer a regular single-link file")
+            if _stat_identity(before) != snapshot.identity:
+                raise RawArtifactError(f"{label} identity drifted after its initial verification")
+            data = self._read_fd(fd, descriptor.size)
+            after = os.fstat(fd)
+        finally:
+            os.close(fd)
+        if _stat_identity(before) != _stat_identity(after):
+            raise RawArtifactError(f"{label} changed during its final verification")
+        if len(data) != descriptor.size:
+            raise RawArtifactError(f"{label} byte count drifted after its initial verification")
+        digest = hashlib.sha256(data).hexdigest()
+        if not hmac.compare_digest(digest, descriptor.sha256):
+            raise RawArtifactError(f"{label} bytes drifted after its initial verification")
+        check_fd = self._open_relative(descriptor.path)
+        try:
+            reopened = os.fstat(check_fd)
+        finally:
+            os.close(check_fd)
+        if _stat_identity(reopened) != snapshot.identity:
+            raise RawArtifactError(f"{label} path drifted during its final verification")
+        self._check_root_path()
+
+    def verify_all_unchanged(self, *, final_path: str | None = None) -> None:
+        """Final-rescan every accepted object, with the aggregate checked last."""
+
+        if not self._snapshots:
+            raise RawArtifactError("artifact reader has no accepted objects to revalidate")
+        final: ArtifactSnapshot | None = None
+        ordered: list[ArtifactSnapshot] = []
+        for snapshot in self._snapshots:
+            if final_path is not None and snapshot.descriptor.path == final_path:
+                if final is not None:
+                    raise RawArtifactError("final artifact path was accepted more than once")
+                final = snapshot
+            else:
+                ordered.append(snapshot)
+        if final_path is not None and final is None:
+            raise RawArtifactError("final artifact path was not accepted by this reader")
+        if final is not None:
+            ordered.append(final)
+        for index, snapshot in enumerate(ordered):
+            self._revalidate_snapshot(
+                snapshot,
+                f"final artifact rescan[{index}] {snapshot.descriptor.path!r}",
+            )
+
     def read(
         self,
         value: Any,
@@ -481,6 +548,9 @@ class ArtifactReader:
         self._seen_digests.add(descriptor.sha256)
         self._artifact_count += 1
         self._total_bytes += descriptor.size
+        self._snapshots.append(
+            ArtifactSnapshot(descriptor=descriptor, identity=_stat_identity(before))
+        )
         return descriptor, data
 
     def read_json(

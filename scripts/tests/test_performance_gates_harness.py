@@ -70,7 +70,7 @@ class PerformanceGateTests(unittest.TestCase):
 
     def test_soak_duration_is_derived_from_raw_timestamps(self) -> None:
         raw = self.raw()
-        raw["soak"]["ended_at"] = "2026-07-22T23:00:00Z"
+        raw["soak"]["ended_at"] = "2026-07-28T11:00:00Z"
         self.fixture.rewrite_json(self.artifact, raw)
         self.document["soak"]["duration_hours"] = 23.0
         with self.assertRaisesRegex(PerformanceGateError, "fails the gate"):
@@ -79,7 +79,7 @@ class PerformanceGateTests(unittest.TestCase):
     def test_soak_crash_events_cannot_be_declared_away(self) -> None:
         raw = self.raw()
         raw["soak"]["crash_events"] = [
-            {"timestamp": "2026-07-22T12:00:00Z", "code": "providerCrash"}
+            {"timestamp": "2026-07-27T13:00:00Z", "code": "providerCrash"}
         ]
         self.fixture.rewrite_json(self.artifact, raw)
         with self.assertRaisesRegex(PerformanceGateError, "crash_count declaration differs"):
@@ -90,6 +90,18 @@ class PerformanceGateTests(unittest.TestCase):
         raw["proof"]["run_nonce"] = "e" * 64
         self.fixture.rewrite_json(self.artifact, raw)
         with self.assertRaisesRegex(PerformanceGateError, "proof differs"):
+            self.validate()
+
+    def test_raw_completion_must_equal_soak_completion(self) -> None:
+        raw = self.raw()
+        raw["completed_at"] = "2026-07-28T11:59:59Z"
+        self.fixture.rewrite_json(self.artifact, raw)
+        with self.assertRaisesRegex(PerformanceGateError, "soak completion"):
+            self.validate()
+
+    def test_report_signature_must_follow_raw_completion(self) -> None:
+        self.document["signed_at"] = "2026-07-28T11:59:59Z"
+        with self.assertRaisesRegex(PerformanceGateError, "predates raw completion"):
             self.validate()
 
     def test_shaping_control_command_failure_fails(self) -> None:

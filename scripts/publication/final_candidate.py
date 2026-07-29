@@ -131,6 +131,7 @@ from scripts.repository_source_identity import (  # noqa: E402
 
 SCHEMA_VERSION = 2
 DOCUMENT_KIND = "final-candidate-notarization-installed-binding-v2"
+DOCUMENT_VISIBILITY = "private-release-operations"
 VERIFIED = "verified"
 BLOCKED = "blocked"
 STATUSES = {VERIFIED, BLOCKED}
@@ -595,6 +596,8 @@ def _derive_report_bindings(summary: dict[str, Any]) -> dict[str, Any]:
                 "category",
                 "tool_version",
                 "captured_at",
+                "completed_at",
+                "signed_at",
                 "report_sha256",
                 "artifact_path",
             },
@@ -609,6 +612,8 @@ def _derive_report_bindings(summary: dict[str, Any]) -> dict[str, Any]:
                     entry["report_sha256"], f"physical report binding[{index}].sha256"
                 ),
                 "captured_at": entry["captured_at"],
+                "completed_at": entry["completed_at"],
+                "signed_at": entry["signed_at"],
                 "artifact_path": str(
                     safe_relative(
                         entry["artifact_path"],
@@ -939,7 +944,7 @@ def build_final_candidate_binding(
             physical_archive = summary["private_archive"]
             physical_trust_policy_sha256 = summary["trust_policy_sha256"]
             evidence_timestamps.extend(
-                _timestamp(entry["captured_at"], f"report[{entry['os']}.{entry['category']}]")
+                _timestamp(entry["signed_at"], f"report[{entry['os']}.{entry['category']}]")
                 for entry in report_bindings
             )
 
@@ -971,6 +976,7 @@ def build_final_candidate_binding(
     body = {
         "schema_version": SCHEMA_VERSION,
         "document": DOCUMENT_KIND,
+        "visibility": DOCUMENT_VISIBILITY,
         "fixture": bool(fixture),
         "status": status,
         "blocked_inputs": blocked_inputs,
@@ -1021,6 +1027,7 @@ def validate_final_candidate_binding(
     fields = {
         "schema_version",
         "document",
+        "visibility",
         "fixture",
         "status",
         "blocked_inputs",
@@ -1043,6 +1050,8 @@ def validate_final_candidate_binding(
     parsed = require_exact_keys(document, fields | {"binding_sha256"}, "final candidate binding")
     if parsed["schema_version"] != SCHEMA_VERSION or parsed["document"] != DOCUMENT_KIND:
         raise PublicationError("final candidate binding has an unsupported schema/document kind")
+    if parsed["visibility"] != DOCUMENT_VISIBILITY:
+        raise PublicationError("final candidate binding is not private release-operations evidence")
     if parsed["fixture"] is not bool(fixture):
         raise PublicationError("final candidate binding fixture mode mismatch")
     status = parsed["status"]

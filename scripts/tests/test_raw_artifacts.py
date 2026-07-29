@@ -231,6 +231,59 @@ class ArtifactReaderSecurityTests(unittest.TestCase):
             with self.assertRaisesRegex(RawArtifactError, "reuses artifact bytes"):
                 reader.read(second, expected_kinds={"lifecycle-event"}, label="second")
 
+    def test_final_rescan_detects_append_after_initial_read(self) -> None:
+        value = self.write("append-race.json", b"initial-bytes")
+        path = self.root / value["path"]
+        with ArtifactReader(self.root) as reader:
+            reader.read(value, expected_kinds={"lifecycle-event"}, label="append race")
+            with path.open("ab") as stream:
+                stream.write(b"-appended")
+            with self.assertRaisesRegex(RawArtifactError, "identity drifted"):
+                reader.verify_all_unchanged()
+
+    def test_final_rescan_detects_path_replacement_after_initial_read(self) -> None:
+        value = self.write("replacement-race.json", b"initial-bytes")
+        path = self.root / value["path"]
+        with ArtifactReader(self.root) as reader:
+            reader.read(value, expected_kinds={"lifecycle-event"}, label="replacement race")
+            path.rename(self.root / "original.json")
+            path.write_bytes(b"initial-bytes")
+            with self.assertRaisesRegex(RawArtifactError, "identity drifted"):
+                reader.verify_all_unchanged()
+
+    def test_final_rescan_detects_same_bytes_restored_in_place(self) -> None:
+        value = self.write("restore-race.json", b"initial-bytes")
+        path = self.root / value["path"]
+        with ArtifactReader(self.root) as reader:
+            reader.read(value, expected_kinds={"lifecycle-event"}, label="restore race")
+            path.write_bytes(b"mutated-value")
+            path.write_bytes(b"initial-bytes")
+            with self.assertRaisesRegex(RawArtifactError, "identity drifted"):
+                reader.verify_all_unchanged()
+
+    def test_final_path_is_revalidated_last(self) -> None:
+        aggregate_path = self.root / "aggregate.json"
+        aggregate_path.write_bytes(b"aggregate")
+        aggregate = _descriptor("aggregate.json", b"aggregate", kind="physical-aggregate")
+        child = self.write("child.json", b"child")
+        with ArtifactReader(self.root) as reader:
+            reader.read(
+                aggregate,
+                expected_kinds={"physical-aggregate"},
+                label="aggregate",
+            )
+            reader.read(child, expected_kinds={"lifecycle-event"}, label="child")
+            order: list[str] = []
+            original = reader._revalidate_snapshot
+
+            def record(snapshot, label):
+                order.append(snapshot.descriptor.path)
+                original(snapshot, label)
+
+            with mock.patch.object(reader, "_revalidate_snapshot", side_effect=record):
+                reader.verify_all_unchanged(final_path="aggregate.json")
+            self.assertEqual(order, ["child.json", "aggregate.json"])
+
     def test_oversize_descriptor_rejected_before_open(self) -> None:
         value = {
             "kind": "lifecycle-event",

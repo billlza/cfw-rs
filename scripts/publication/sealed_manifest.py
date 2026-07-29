@@ -141,6 +141,7 @@ from scripts.publication.sealed_closure import (  # noqa: E402
 
 SCHEMA_VERSION = 1
 DOCUMENT_KIND = "sealed-outer-evidence-manifest-v1"
+DOCUMENT_VISIBILITY = "private-release-operations"
 
 # Outer manifest statuses. ``sealed`` is only reachable when every composed gate
 # passes; otherwise the manifest seals to ``blocked``.
@@ -898,7 +899,10 @@ def _documents(repository: Path, gates: dict[str, dict[str, Any]], closure: obje
 
 
 def publication_decision(
-    gates: dict[str, dict[str, Any]], capabilities: list[dict[str, Any]]
+    gates: dict[str, dict[str, Any]],
+    capabilities: list[dict[str, Any]],
+    *,
+    fixture: bool = False,
 ) -> dict[str, Any]:
     """Decide whether publication artifacts may be created. Fail closed.
 
@@ -917,6 +921,10 @@ def publication_decision(
         for capability in capabilities
         if capability["highest_level"] != SEALED_LEVEL
     )
+    if fixture:
+        # Fixtures may prove that every substantive gate would pass, but a test
+        # document must never itself authorize creation of publication assets.
+        refusals.append("fixture-mode")
     refusals.sort()
     allowed = not refusals
     return {
@@ -949,6 +957,7 @@ REQUEST_FIELDS = {
 DOCUMENT_FIELDS = {
     "schema_version",
     "document",
+    "visibility",
     "fixture",
     "status",
     "blocked_inputs",
@@ -1111,11 +1120,12 @@ def build_sealed_evidence_manifest(
 
     blocked_inputs = sorted(name for name in GATE_ORDER if gates[name]["status"] != PASSED)
     status = SEALED if not blocked_inputs else BLOCKED
-    publication = publication_decision(gates, capabilities)
+    publication = publication_decision(gates, capabilities, fixture=fixture)
 
     body = {
         "schema_version": SCHEMA_VERSION,
         "document": DOCUMENT_KIND,
+        "visibility": DOCUMENT_VISIBILITY,
         "fixture": bool(fixture),
         "status": status,
         "blocked_inputs": blocked_inputs,
@@ -1163,6 +1173,8 @@ def validate_sealed_evidence_manifest(
     )
     if parsed["schema_version"] != SCHEMA_VERSION or parsed["document"] != DOCUMENT_KIND:
         raise PublicationError("sealed evidence manifest has an unsupported schema/document kind")
+    if parsed["visibility"] != DOCUMENT_VISIBILITY:
+        raise PublicationError("sealed evidence manifest is not private release-operations evidence")
     if parsed["fixture"] is not bool(fixture):
         raise PublicationError("sealed evidence manifest fixture mode mismatch")
     if parsed["status"] not in STATUSES:
@@ -1224,10 +1236,8 @@ def authorize_publication_artifacts(
     repository: Path,
     document: object,
     *,
-    fixture: bool = False,
     workspace_root: Path | None = None,
     physical_evidence_root: Path | None = None,
-    physical_trust_policy: CollectorTrustPolicy | None = None,
 ) -> dict[str, Any]:
     """Authorize creating publication artifacts, or refuse. There is no override.
 
@@ -1235,13 +1245,21 @@ def authorize_publication_artifacts(
     validates the sealed manifest, refuses a ``blocked`` manifest, and refuses
     any manifest whose gates or capability levels are not fully sealed.
     """
+    if not isinstance(document, dict) or document.get("fixture") is not False:
+        raise PublicationError("fixture evidence can never authorize publication artifacts")
+    try:
+        production_policy = load_release_trust_policy()
+    except (CollectorTrustNotConfiguredError, RawArtifactError) as error:
+        raise PublicationError(
+            "production collector trust policy is unavailable for publication authorization"
+        ) from error
     result = validate_sealed_evidence_manifest(
         repository,
         document,
-        fixture=fixture,
+        fixture=False,
         workspace_root=workspace_root,
         physical_evidence_root=physical_evidence_root,
-        physical_trust_policy=physical_trust_policy,
+        physical_trust_policy=production_policy,
         require_sealed=True,
     )
     decision = result["publication"]

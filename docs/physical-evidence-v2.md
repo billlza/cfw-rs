@@ -24,17 +24,43 @@ Resolution is fd-based. Each path component is opened relative to the held
 evidence-root fd with `O_NOFOLLOW`; the final object must be a regular file with
 one link. The reader checks descriptor size, reads and hashes through the open
 fd, compares pre/post `fstat`, reopens the declared path, and compares inode and
-metadata again. A missing file, symlink, hardlink, byte drift, path swap, or
+metadata again. Aggregate, report, provenance, and raw bytes share one held root
+fd. After semantic validation, every accepted object is reopened, reread, and
+rehashed; the aggregate is checked last. A missing file, symlink, hardlink,
+append, same-byte restore with metadata drift, path replacement, byte drift, or
 TOCTOU-visible mutation fails the entire physical level.
 
 ## Harness recomputation
 
-- Packet reports reference one bounded `.pcap` or `.pcapng` per required case.
-  The parser validates capture/record/block lengths and timestamps. It searches
-  only captured packet-record payloads, never capture headers, pcapng options,
-  report text, or file metadata. Unique start/end markers establish a real
-  1-second to 10-minute window. Presence tokens must occur in that window;
-  absence tokens must not. Unsigned server-observation JSON is not accepted.
+- Packet schema v3 binds one bounded `.pcap` or `.pcapng` plus one signed
+  capture-provenance artifact per required case. The parser accepts only DLT
+  NULL, Ethernet (including bounded VLAN/QinQ), RAW, LOOP, SLL, and SLL2; then
+  decodes IPv4/IPv6 and TCP/UDP lengths before interpreting application data.
+  Fragmented IP is rejected. DNS proof requires an A/AAAA question at the
+  signed resolver endpoint. QUIC proof requires UDP, the QUIC fixed bit, a
+  source-pinned v1 or v2 version that matches signed provenance, and bounded
+  DCID/SCID fields; GREASE/private versions and TCP fallback to the same
+  endpoint/window are rejected. Tokens count only in decoded TCP/UDP application
+  data, DNS names, or QUIC connection IDs, never link/IP headers, pcapng
+  options, report text, or metadata. This proves QUIC transport only and does
+  not claim HTTP/3 application semantics.
+- Every absence case additionally binds a signed raw send-attempt artifact. It
+  proves successful submission of the exact token hash and byte count to the
+  same local/remote endpoint tuple using an independently bound send-command
+  digest, within the marker-bounded capture window. The attempt receipt binds
+  the finalized capture-provenance digest and is recorded only after capture
+  completion/signing; the packet report is signed after that recording. The
+  collector run receipt then signs the report and both raw descriptors. Markers
+  without this causal attempt receipt cannot prove stop-cleanup or
+  IPv6-disabled absence.
+- Capture provenance binds interface name/index/link type, capture point,
+  independently named capture-command/capture-filter digests, endpoint tuple,
+  and collection/signing times. The report binds those capture digests and the
+  distinct send-command digest; they are never treated as interchangeable.
+  Classic pcap has no interface-name field, so its DLT and endpoint tuple come
+  from packet bytes while interface identity/capture point remain an attestation
+  by the source-pinned collector. With pcapng, an available IDB interface name
+  is also cross-checked byte-for-byte against that signed provenance.
 - Lifecycle probes reference raw command/event documents. Candidate, run,
   machine, macOS build, operation context, command, exit code, ordered event
   sequence, and structured attributes must all match the fixed matrix.
@@ -47,34 +73,45 @@ TOCTOU-visible mutation fails the entire physical level.
   request nonce, command, exit code, authorization decision, denial code,
   cleanup, and secret-observation result are checked against the fixed case.
 
-Each v2 report carries the same candidate identity, collector source/tool
+Each report carries the same candidate identity, collector source/tool
 digests, run ID, and 256-bit run nonce. The aggregate reopens the report file
 itself, compares that common proof to its run, and rejects report/raw reuse.
 
+Raw completion (including the full soak) must precede report completion and
+signing, and every report must complete/sign before its run receipt is signed.
+Reversed timestamps, timestamps before the 2026-07-27 stable-matrix GA, and
+future-dated run receipts are rejected.
+
 The two environment labels are release-source contracts, not collector-chosen
 aliases. For this release, `macos15` is pinned to stable macOS `15.7.8` on the
-`24G` build train and `current-macos` is pinned to stable macOS `26.6` on the
-`25G` build train. A label/version swap, an older major, macOS 27 beta, or a
-lowercase-suffixed prerelease build is rejected before report or receipt
-acceptance. Advancing the current stable matrix requires a reviewed source
-change to these exact pins; the verifier never infers it from the collection
-host.
+exact build `24G824`, and `current-macos` is pinned to stable macOS `26.6` build
+`25G72`. Same-train alternatives, a label/version swap, an older major, macOS 27
+beta, or a lowercase-suffixed prerelease build are rejected before report or
+receipt acceptance. Advancing the current stable matrix requires a reviewed
+source change to these exact pins; the verifier never infers it from the
+collection host.
 
-## Public manifest and private archive boundary
+## Private operational manifests and public upload boundary
 
-The final-candidate binding and sealed outer manifest do not publish packet
-captures, lifecycle events, performance samples, adversarial transcripts, or
-the aggregate document. Their public edge is the aggregate descriptor
-`{kind,path,size,sha256}`, the source-pinned trust-policy digest, collector
-receipt digests, the raw-artifact-manifest digest, bounded artifact counts and
-bytes, and a canonical private-archive binding digest.
+The final-candidate binding and sealed outer manifest are explicitly marked
+`visibility: private-release-operations`. They are retained operational
+evidence, not public upload artifacts. They may contain machine hashes, internal
+relative paths, and collection/signing timestamps needed to revalidate the
+private archive.
+
+The existing public publication-evidence bundle is not expanded with either
+private manifest, the physical aggregate, packet captures, lifecycle events,
+performance samples, adversarial transcripts, capture provenance, machine
+hashes, internal evidence paths, or physical collection timestamps. Publication
+authorization consumes the private sealed manifest before creating the public
+bundle; it does not copy that manifest into the bundle.
 
 The corresponding private release-evidence archive is the directory tree under
 the explicitly supplied evidence root. The aggregate descriptor records its
 canonical retained location relative to that root and its exact bytes; the
 aggregate records every report descriptor; each report records every raw
 descriptor. Thus every retained object has an exact relative path, byte count,
-kind, and SHA-256 without leaking raw payloads into the public manifest. The
+kind, and SHA-256 without leaking raw payloads into the public bundle. The
 absolute storage root is an operational secret/configuration and is deliberately
 not embedded in a portable release document.
 

@@ -61,7 +61,7 @@ jobs:
         run: ./scripts/build_ui_with_pinned_node.sh --audit
       - name: Test release tooling
         run: |
-          PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover \
+          PYTHONWARNINGS=error PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover \
             -s scripts/tests \
             -p 'test_*.py'
           while IFS= read -r test_script; do

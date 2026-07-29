@@ -319,7 +319,7 @@ def _validate_transcript(
     expected_code: str,
     expected_cleanup: str,
     nonces: set[str],
-) -> datetime:
+) -> tuple[datetime, datetime]:
     transcript = exact_object(value, TRANSCRIPT_FIELDS, f"{case_id}.transcript")
     if transcript["schema_version"] != 1:
         raise AdversarialMatrixError(f"{case_id} transcript schema_version must be 1")
@@ -357,7 +357,7 @@ def _validate_transcript(
         denial_code=expected_code,
         cleanup=expected_cleanup,
     )
-    return started
+    return started, finished
 
 
 def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
@@ -368,6 +368,8 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
             "harness_version",
             "proof",
             "captured_at",
+            "completed_at",
+            "signed_at",
             "platform",
             "signing",
             "baseline",
@@ -390,6 +392,7 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
     )
     nonces: set[str] = set()
     starts: list[datetime] = []
+    finishes: list[datetime] = []
 
     baseline = exact_object(document["baseline"], BASELINE_FIELDS, "baseline")
     if baseline["client"] != "allowed":
@@ -399,20 +402,20 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         expected_kind="adversarial-transcript",
         label="baseline.artifact",
     )
-    starts.append(
-        _validate_transcript(
-            transcript,
-            case_id="baseline",
-            category="baseline",
-            client="allowed",
-            identity=identities["allowed"],
-            proof=proof,
-            expected_outcome="authorized",
-            expected_code="",
-            expected_cleanup="off",
-            nonces=nonces,
-        )
+    baseline_started, baseline_finished = _validate_transcript(
+        transcript,
+        case_id="baseline",
+        category="baseline",
+        client="allowed",
+        identity=identities["allowed"],
+        proof=proof,
+        expected_outcome="authorized",
+        expected_code="",
+        expected_cleanup="off",
+        nonces=nonces,
     )
+    starts.append(baseline_started)
+    finishes.append(baseline_finished)
     bindings.append({"subject": "baseline", "descriptor": descriptor.as_dict()})
 
     cases = document["cases"]
@@ -435,20 +438,20 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
             expected_kind="adversarial-transcript",
             label=f"{case_id}.artifact",
         )
-        starts.append(
-            _validate_transcript(
-                transcript,
-                case_id=case_id,
-                category=category,
-                client=client,
-                identity=identities[client],
-                proof=proof,
-                expected_outcome="denied",
-                expected_code=denial_code,
-                expected_cleanup=cleanup,
-                nonces=nonces,
-            )
+        started, finished = _validate_transcript(
+            transcript,
+            case_id=case_id,
+            category=category,
+            client=client,
+            identity=identities[client],
+            proof=proof,
+            expected_outcome="denied",
+            expected_code=denial_code,
+            expected_cleanup=cleanup,
+            nonces=nonces,
         )
+        starts.append(started)
+        finishes.append(finished)
         bindings.append({"subject": case_id, "descriptor": descriptor.as_dict()})
     if seen != set(REQUIRED_CASES):
         raise AdversarialMatrixError("adversarial matrix is missing a required case")
@@ -460,7 +463,19 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         starts + signature_times
     ):
         raise AdversarialMatrixError("captured_at differs from the earliest raw evidence")
-    return {"document": document, "proof": proof, "artifacts": bindings}
+    completed_at = _timestamp(document["completed_at"], "completed_at")
+    signed_at = _timestamp(document["signed_at"], "signed_at")
+    if completed_at != max(finishes + signature_times) or signed_at < completed_at:
+        raise AdversarialMatrixError(
+            "completed_at/signed_at do not cover every adversarial transcript"
+        )
+    return {
+        "document": document,
+        "proof": proof,
+        "started_at": min(starts + signature_times),
+        "completed_at": completed_at,
+        "artifacts": bindings,
+    }
 
 
 def validate_adversarial_matrix(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:

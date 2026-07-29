@@ -225,7 +225,7 @@ def _validate_raw_event(
     proof: dict[str, Any],
     environment: dict[str, Any],
     report_attributes: dict[str, Any],
-) -> datetime:
+) -> tuple[datetime, datetime]:
     raw = exact_object(value, EVENT_DOCUMENT_FIELDS, f"{probe_id}.raw_event")
     if raw["schema_version"] != 1:
         raise LifecycleMatrixError(f"{probe_id}.raw_event schema_version must be 1")
@@ -253,7 +253,7 @@ def _validate_raw_event(
         report_attributes
     ):
         raise LifecycleMatrixError(f"{probe_id}.raw_event attributes differ from its report")
-    return started
+    return started, finished
 
 
 def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
@@ -265,6 +265,8 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
             "proof",
             "environment",
             "captured_at",
+            "completed_at",
+            "signed_at",
             "probes",
         },
         "lifecycle matrix",
@@ -287,6 +289,7 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
     seen: set[str] = set()
     bindings: list[dict[str, Any]] = []
     starts: list[datetime] = []
+    finishes: list[datetime] = []
     for index, raw_probe in enumerate(probes):
         probe = exact_object(raw_probe, PROBE_FIELDS, f"probes[{index}]")
         probe_id = probe["id"]
@@ -301,25 +304,33 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
             expected_kind="lifecycle-event",
             label=f"{probe_id}.artifact",
         )
-        starts.append(
-            _validate_raw_event(
-                raw_event,
-                probe_id=probe_id,
-                proof=proof,
-                environment=environment,
-                report_attributes=report_attributes,
-            )
+        started, finished = _validate_raw_event(
+            raw_event,
+            probe_id=probe_id,
+            proof=proof,
+            environment=environment,
+            report_attributes=report_attributes,
         )
+        starts.append(started)
+        finishes.append(finished)
         bindings.append({"subject": probe_id, "descriptor": descriptor.as_dict()})
     if seen != set(REQUIRED_PROBES):
         raise LifecycleMatrixError("lifecycle matrix is missing a required probe")
     if not starts or _timestamp(document["captured_at"], "captured_at") != min(starts):
         raise LifecycleMatrixError("captured_at differs from the earliest raw probe event")
+    completed_at = _timestamp(document["completed_at"], "completed_at")
+    signed_at = _timestamp(document["signed_at"], "signed_at")
+    if completed_at != max(finishes) or signed_at < completed_at:
+        raise LifecycleMatrixError(
+            "completed_at/signed_at do not cover every raw probe event"
+        )
     return {
         "document": document,
         "proof": proof,
         "environment": environment,
         "probes": sorted(seen),
+        "started_at": min(starts),
+        "completed_at": completed_at,
         "artifacts": bindings,
     }
 

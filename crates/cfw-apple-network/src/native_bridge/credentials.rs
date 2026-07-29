@@ -168,6 +168,7 @@ fn map_vault_error(error: NativeBridgeError) -> CredentialVaultError {
         | NativeBridgeErrorCode::JournalCapacityExhausted
         | NativeBridgeErrorCode::ApprovalDenied
         | NativeBridgeErrorCode::CredentialsUnavailable
+        | NativeBridgeErrorCode::ProxyAgentApprovalRequired
         | NativeBridgeErrorCode::GlobalAuthorityUnavailable
         | NativeBridgeErrorCode::GlobalAuthorityRegistrationRequired
         | NativeBridgeErrorCode::GlobalAuthorityApprovalRequired

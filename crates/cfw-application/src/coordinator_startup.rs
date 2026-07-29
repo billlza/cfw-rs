@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use cfw_engine_api::{
     EngineBackend, EngineMode, EngineOwner, EngineSessionIdentity, EngineSnapshot,
-    NativeEngineStatus, RuntimeIdentity,
+    NativeEngineStatus, RetryDirective, RuntimeIdentity,
 };
 use tokio::sync::watch;
 
@@ -21,6 +21,27 @@ use crate::{
 pub(crate) struct ReconciliationFailure {
     pub(crate) error: EngineCoordinatorError,
     pub(crate) safely_off: bool,
+}
+
+impl ReconciliationFailure {
+    /// A failed startup observation may be repeated only at a later explicit
+    /// command boundary and only when the typed backend contract says that a
+    /// fresh read or an external registration-state change can resolve it.
+    /// Failures after cleanup, identity validation, or mutation remain terminal
+    /// because repeating those operations could target ambiguous native state.
+    pub(crate) fn allows_explicit_retry(&self) -> bool {
+        let EngineCoordinatorError::Backend {
+            operation: EngineOperation::QueryStatus,
+            source,
+        } = &self.error
+        else {
+            return false;
+        };
+        matches!(
+            source.kind.retry_directive(),
+            RetryDirective::IdempotentReadOnly | RetryDirective::RegistrationStatusChange
+        )
+    }
 }
 
 pub(crate) async fn reconcile_initial_state(

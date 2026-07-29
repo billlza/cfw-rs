@@ -121,6 +121,7 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
   case credentialVaultMissing = "credential_vault_missing"
   case credentialMigrationRequired = "credential_migration_required"
   case credentialGCConflict = "credential_gc_conflict"
+  case proxyAgentApprovalRequired = "proxy_agent_approval_required"
   case globalAuthorityUnavailable = "global_authority_unavailable"
   case globalAuthorityRegistrationRequired = "global_authority_registration_required"
   case globalAuthorityApprovalRequired = "global_authority_approval_required"
@@ -163,6 +164,7 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
     case .credentialMigrationRequired:
       "The credential vault uses an unsupported schema and must be cleared and reprovisioned."
     case .credentialGCConflict: "Credential cleanup requires a fresh preview."
+    case .proxyAgentApprovalRequired: "ProxyAgent approval is required in System Settings."
     case .globalAuthorityUnavailable: "Global Authority is unavailable."
     case .globalAuthorityRegistrationRequired: "Global Authority registration is required."
     case .globalAuthorityApprovalRequired: "Global Authority approval is required."

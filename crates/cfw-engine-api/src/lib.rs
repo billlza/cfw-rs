@@ -893,6 +893,7 @@ pub enum BackendErrorKind {
     CredentialVaultMissing,
     CredentialMigrationRequired,
     CredentialGcConflict,
+    ProxyAgentApprovalRequired,
     GlobalAuthorityUnavailable,
     GlobalAuthorityRegistrationRequired,
     GlobalAuthorityApprovalRequired,
@@ -975,7 +976,8 @@ impl BackendErrorKind {
             | Self::Unavailable => RetryDirective::IdempotentReadOnly,
             Self::JournalCapacityExhausted => RetryDirective::MaintenanceRequired,
             Self::CredentialMigrationRequired => RetryDirective::Never,
-            Self::GlobalAuthorityUnavailable
+            Self::ProxyAgentApprovalRequired
+            | Self::GlobalAuthorityUnavailable
             | Self::GlobalAuthorityRegistrationRequired
             | Self::GlobalAuthorityApprovalRequired => RetryDirective::RegistrationStatusChange,
             Self::GlobalAuthorityProtocolMismatch => RetryDirective::CompatibleSoftwareUpdate,
@@ -1028,6 +1030,9 @@ impl BackendErrorKind {
                 "The credential vault uses an unsupported schema and must be cleared and reprovisioned."
             }
             Self::CredentialGcConflict => "Credential cleanup requires a fresh preview.",
+            Self::ProxyAgentApprovalRequired => {
+                "ProxyAgent approval is required in System Settings."
+            }
             Self::GlobalAuthorityUnavailable => "Global Authority is unavailable.",
             Self::GlobalAuthorityRegistrationRequired => {
                 "Global Authority registration is required."
@@ -1439,6 +1444,24 @@ mod tests {
         assert_eq!(unknown, BackendErrorKind::Internal);
         assert_eq!(unknown.retry_directive(), RetryDirective::Never);
         assert!(!unknown.allows_automatic_retry(true));
+    }
+
+    #[test]
+    fn proxy_agent_approval_has_a_typed_registration_retry_contract() {
+        let kind = BackendErrorKind::ProxyAgentApprovalRequired;
+        assert_eq!(
+            serde_json::to_value(kind).expect("wire code"),
+            serde_json::Value::String("proxy_agent_approval_required".into())
+        );
+        assert_eq!(
+            kind.retry_directive(),
+            RetryDirective::RegistrationStatusChange
+        );
+        assert!(!kind.allows_automatic_retry(true));
+        assert_eq!(
+            kind.stable_message(),
+            "ProxyAgent approval is required in System Settings."
+        );
     }
 
     #[test]

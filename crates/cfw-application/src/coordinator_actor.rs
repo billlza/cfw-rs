@@ -75,7 +75,7 @@ pub(crate) async fn run_coordinator(
         native_lease: None,
         quarantine: None,
     };
-    let startup_failure = match reconcile_initial_state(
+    let mut startup_failure = match reconcile_initial_state(
         backend.as_ref(),
         &mut state,
         &snapshots,
@@ -106,6 +106,30 @@ pub(crate) async fn run_coordinator(
                 let Some(command) = command else {
                     break;
                 };
+                if startup_failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.allows_explicit_retry())
+                {
+                    startup_failure = match reconcile_initial_state(
+                        backend.as_ref(),
+                        &mut state,
+                        &snapshots,
+                        &session,
+                        options.operation_timeout,
+                        startup_reconciliation,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            reconciliation.send_replace(Some(Ok(state.snapshot.clone())));
+                            None
+                        }
+                        Err(failure) => {
+                            reconciliation.send_replace(Some(Err(failure.error.clone())));
+                            Some(failure)
+                        }
+                    };
+                }
                 if let Some(failure) = &startup_failure {
                     match command {
                         Command::SetMode(command)

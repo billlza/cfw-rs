@@ -33,6 +33,7 @@ pub enum NativeBridgeErrorCode {
     CredentialVaultMissing,
     CredentialMigrationRequired,
     CredentialGcConflict,
+    ProxyAgentApprovalRequired,
     GlobalAuthorityUnavailable,
     GlobalAuthorityRegistrationRequired,
     GlobalAuthorityApprovalRequired,
@@ -75,6 +76,7 @@ impl From<NativeBridgeErrorCode> for BackendErrorKind {
             NativeBridgeErrorCode::CredentialVaultMissing => Self::CredentialVaultMissing,
             NativeBridgeErrorCode::CredentialMigrationRequired => Self::CredentialMigrationRequired,
             NativeBridgeErrorCode::CredentialGcConflict => Self::CredentialGcConflict,
+            NativeBridgeErrorCode::ProxyAgentApprovalRequired => Self::ProxyAgentApprovalRequired,
             NativeBridgeErrorCode::GlobalAuthorityUnavailable => Self::GlobalAuthorityUnavailable,
             NativeBridgeErrorCode::GlobalAuthorityRegistrationRequired => {
                 Self::GlobalAuthorityRegistrationRequired
@@ -127,6 +129,7 @@ impl From<BackendErrorKind> for NativeBridgeErrorCode {
             BackendErrorKind::CredentialVaultMissing => Self::CredentialVaultMissing,
             BackendErrorKind::CredentialMigrationRequired => Self::CredentialMigrationRequired,
             BackendErrorKind::CredentialGcConflict => Self::CredentialGcConflict,
+            BackendErrorKind::ProxyAgentApprovalRequired => Self::ProxyAgentApprovalRequired,
             BackendErrorKind::GlobalAuthorityUnavailable => Self::GlobalAuthorityUnavailable,
             BackendErrorKind::GlobalAuthorityRegistrationRequired => {
                 Self::GlobalAuthorityRegistrationRequired
@@ -512,6 +515,14 @@ mod tests {
             let bridge = NativeBridgeErrorCode::from(kind);
             assert_eq!(BackendErrorKind::from(bridge), kind);
         }
+    }
+
+    #[test]
+    fn proxy_agent_approval_mapping_is_one_to_one() {
+        let kind = BackendErrorKind::ProxyAgentApprovalRequired;
+        let bridge = NativeBridgeErrorCode::from(kind);
+        assert_eq!(bridge, NativeBridgeErrorCode::ProxyAgentApprovalRequired);
+        assert_eq!(BackendErrorKind::from(bridge), kind);
     }
 
     #[tokio::test]

@@ -408,6 +408,81 @@ async fn unavailable_lineage_keeps_query_failure_failed_and_not_safely_off() {
         EngineState::Failed { .. }
     ));
     assert!(coordinator.shutdown().await.is_err());
+    assert_eq!(backend.query_count(), 2);
+    assert!(backend.operations().is_empty());
+}
+
+#[tokio::test]
+async fn explicit_command_retries_startup_after_proxy_agent_approval_changes() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend.query_error.lock().expect("query error lock") =
+        Some(BackendErrorKind::ProxyAgentApprovalRequired);
+    let coordinator = EngineModeCoordinator::spawn_persisted(
+        backend.clone(),
+        Arc::new(MemoryGenerationStore::new(0)),
+        Duration::from_millis(100),
+    )
+    .expect("persisted coordinator");
+
+    assert!(matches!(
+        coordinator.wait_for_reconciliation().await,
+        Err(EngineCoordinatorError::Backend {
+            operation: crate::EngineOperation::QueryStatus,
+            source: BackendError {
+                kind: BackendErrorKind::ProxyAgentApprovalRequired,
+                ..
+            },
+        })
+    ));
+    assert_eq!(backend.query_count(), 1);
+
+    *backend.query_error.lock().expect("query error lock") = None;
+    let active = coordinator
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect("explicit request observes the approved registration and starts");
+    assert!(matches!(active.state, EngineState::ProxyActive { .. }));
+    assert_eq!(backend.query_count(), 2);
+    assert_eq!(backend.operations(), vec!["start_proxy"]);
+    coordinator.shutdown().await.expect("shutdown barrier");
+}
+
+#[tokio::test]
+async fn permanent_startup_failure_is_not_retried_by_later_commands() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend.query_error.lock().expect("query error lock") =
+        Some(BackendErrorKind::IdentityRejected);
+    let coordinator = EngineModeCoordinator::spawn_persisted(
+        backend.clone(),
+        Arc::new(MemoryGenerationStore::new(0)),
+        Duration::from_millis(100),
+    )
+    .expect("persisted coordinator");
+
+    assert!(coordinator.wait_for_reconciliation().await.is_err());
+    *backend.query_error.lock().expect("query error lock") = None;
+    assert!(matches!(
+        coordinator
+            .set_mode(
+                EngineMode::SystemProxy,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                ValidatedSingBoxProfile::direct(),
+                EngineSettings::default(),
+            )
+            .await,
+        Err(EngineCoordinatorError::Backend {
+            operation: crate::EngineOperation::QueryStatus,
+            source: BackendError {
+                kind: BackendErrorKind::IdentityRejected,
+                ..
+            },
+        })
+    ));
     assert_eq!(backend.query_count(), 1);
     assert!(backend.operations().is_empty());
 }

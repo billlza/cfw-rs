@@ -32,6 +32,7 @@ pub(super) struct FakeBackend {
     pub(super) fail_proxy_start: Mutex<bool>,
     pub(super) fail_proxy_stop: Mutex<bool>,
     pub(super) fail_query: Mutex<bool>,
+    pub(super) query_error: Mutex<Option<BackendErrorKind>>,
     /// When true, a successful stop attests the owner stopped (returns `Ok`) but
     /// does not clear the native observation, so a subsequent independent
     /// OS-state query still reports the prior owner. Models a stop whose owner
@@ -162,6 +163,12 @@ impl EngineBackend for FakeBackend {
                 return Err(BackendError::new(
                     BackendErrorKind::Unavailable,
                     "native status unavailable",
+                ));
+            }
+            if let Some(kind) = *self.query_error.lock().expect("query error lock") {
+                return Err(BackendError::new(
+                    kind,
+                    "native status reported a typed backend error",
                 ));
             }
             Ok(self

@@ -629,7 +629,7 @@ struct NativeBridgeStartCommandIntegrationTests {
       tunnel: tunnel,
       observation: AuthorityOwnershipObservation(state: .off, lease: nil))
 
-    #expect(await failureCode(coordinator, .queryStatus) == .permissionDenied)
+    #expect(await failureCode(coordinator, .queryStatus) == .proxyAgentApprovalRequired)
     let counters = await proxy.counters()
     #expect(counters.ensure == 1)
     #expect(counters.snapshot == 0)
@@ -799,7 +799,7 @@ struct NativeBridgeStartCommandIntegrationTests {
 
     let code = await failureCode(coordinator, .startSystemProxy(request))
     let proxyCounts = await proxy.counters()
-    #expect(code == .permissionDenied)
+    #expect(code == .proxyAgentApprovalRequired)
     #expect(proxyCounts.ensure == 1)
     #expect(await preparer.counters() == (prepare: 0, cancel: 0))
     // Registration denial fails closed before Authority preparation, runtime-byte

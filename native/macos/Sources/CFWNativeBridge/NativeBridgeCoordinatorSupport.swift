@@ -112,7 +112,7 @@ extension NativeBridgeCoordinator {
     if let error = error as? ProxyAgentHostError {
       switch error {
       case .registrationRequiresApproval:
-        return .failure(.permissionDenied, error.localizedDescription)
+        return .failure(.proxyAgentApprovalRequired, error.localizedDescription)
       case .registrationUnavailable, .transportUnavailable:
         return .failure(.unavailable, error.localizedDescription)
       case .transportTimedOut:

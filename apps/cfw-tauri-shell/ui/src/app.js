@@ -58,6 +58,7 @@ import {
   migrationRoute,
   newCutoverState,
   normalizeCutoverPreparation,
+  normalizeMigrationHandoffStatus,
   normalizeRetirementStatus,
   unverifiableRetirementStatus,
 } from "./migration.js";
@@ -591,17 +592,28 @@ function renderMigrationBanner() {
 
   if (route === "launch_prepare" || route === "launch_recovery") {
     const recovery = route === "launch_recovery";
-    const detail = recovery
-      ? "A previous one-way cutover was interrupted. Recovery runs in a separate, signed migration session."
-      : "This install has not retired the legacy network yet. The network stays disabled until you complete the one-way cutover, which runs in a separate, signed migration session while the old app keeps running.";
+    const handoffStatus = state.migrationHandoffStatus;
+    const starting = handoffStatus?.state === "in_progress";
+    const failure = handoffStatus?.state === "failed" ? handoffStatus.message : null;
+    const detail = starting
+      ? "The signed migration session is starting. This dashboard will close only after the new window is ready and replacement networking is safely Off."
+      : recovery
+        ? "A previous one-way cutover was interrupted. Recovery runs in a separate, signed migration session."
+        : "This install has not retired the legacy network yet. The network stays disabled until you complete the one-way cutover, which runs in a separate, signed migration session while the old app keeps running.";
+    const button = starting
+      ? "Starting…"
+      : failure
+        ? (recovery ? "Retry Recovery…" : "Retry Migration…")
+        : (recovery ? "Open Recovery…" : "Start Migration…");
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
-          <strong>${recovery ? "Recovery required" : "Finish setup: migrate to the 0.4.0 network"}</strong>
+          <strong>${starting ? "Migration session is starting" : recovery ? "Recovery required" : "Finish setup: migrate to the 0.4.0 network"}</strong>
           <small>${escapeHtml(detail)}</small>
           ${retirement.message ? `<small>${escapeHtml(retirement.message)}</small>` : ""}
+          ${failure ? `<small>${escapeHtml(failure)}</small>` : ""}
         </div>
-        <button type="button" class="cfw-big-button" data-action="begin-migration-handoff">${recovery ? "Open Recovery…" : "Start Migration…"}</button>
+        <button type="button" class="cfw-big-button" data-action="begin-migration-handoff" ${starting ? "disabled" : ""}>${button}</button>
       </div>
     `;
   }
@@ -3094,12 +3106,18 @@ export async function handleAction(action) {
     state.activePage = "settings";
   }
   if (action === "begin-migration-handoff") {
+    state.migrationHandoffStatus = { state: "in_progress" };
+    renderPage();
     try {
       await invoke("begin_migration_handoff");
       appendLog("info", "migration", "Launching the signed migration session…");
       state.cutover.message = "The verified migration window is ready. This dashboard will now close.";
     } catch (error) {
-      state.cutover.message = errorText(error);
+      try {
+        await loadBootPayload();
+      } catch (refreshError) {
+        markHandoffStatusUnverifiable(refreshError);
+      }
       appendLog("error", "migration", `Could not start the migration session: ${errorText(error)}`);
     }
   }
@@ -3810,7 +3828,7 @@ function focusProfileEditorSection(key) {
 }
 
 async function reloadPayload() {
-  state.payload = await invoke("boot_payload");
+  await loadBootPayload();
   state.lastRefresh = "Just now";
   await loadSettingsSnapshot();
   await loadPlatformDesign();
@@ -3823,6 +3841,29 @@ async function reloadPayload() {
     appendLog("info", "shell", "Dashboard reloaded");
     renderPage();
   });
+}
+
+function applyBootPayload(payload) {
+  state.payload = payload;
+  state.migrationHandoff = payload?.migration_handoff === true;
+  try {
+    state.migrationHandoffStatus = normalizeMigrationHandoffStatus(payload?.migration_handoff_status);
+  } catch (error) {
+    markHandoffStatusUnverifiable(error);
+  }
+}
+
+function markHandoffStatusUnverifiable(error) {
+  state.migrationHandoffStatus = {
+    state: "failed",
+    code: "migration_handoff_task_failed",
+    message: "Migration handoff status could not be verified. Review the application log before retrying.",
+  };
+  appendLog("warning", "migration", `Migration handoff state could not be trusted: ${errorText(error)}`);
+}
+
+async function loadBootPayload() {
+  applyBootPayload(await invoke("boot_payload"));
 }
 
 /// Applies an engine status envelope, validating the runtime identity before the
@@ -4055,8 +4096,7 @@ async function startLiveStreams() {
 
 async function bootstrap() {
   bindGlobalEvents();
-  state.payload = await invoke("boot_payload");
-  state.migrationHandoff = state.payload?.migration_handoff === true;
+  await loadBootPayload();
   await loadSettingsSnapshot();
   await loadPlatformDesign();
   await loadEngineStatus();
@@ -4125,6 +4165,14 @@ async function bootstrap() {
       await startLiveStreams();
       renderPage();
       return;
+    }
+    if (typeof payload.code === "string" && payload.code.startsWith("migration_handoff_")) {
+      try {
+        await loadBootPayload();
+      } catch (error) {
+        markHandoffStatusUnverifiable(error);
+      }
+      renderPage();
     }
     appendLog("error", "engine", summarizeEngineEvent(payload));
     if (state.activePage === "logs") scheduleLogStreamPatch();

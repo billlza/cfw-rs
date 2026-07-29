@@ -85,9 +85,83 @@ pub(super) struct PendingHandoff {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct HandoffCleanup {
+struct HandoffCleanup {
     root: PathBuf,
     token: String,
+}
+
+trait CleanupBoundary {
+    fn cleanup(&mut self) -> Result<(), String>;
+}
+
+/// Owns one fail-closed cleanup boundary. It is armed before the blocking task
+/// is spawned, so dropping an unstarted closure, unwinding a worker, or aborting
+/// its async caller all execute the same bounded cleanup. Only the successful
+/// parent shutdown path may call `disarm`.
+struct ArmedCleanup<T: CleanupBoundary> {
+    resource: Option<T>,
+}
+
+impl<T: CleanupBoundary> ArmedCleanup<T> {
+    fn new(resource: T) -> Self {
+        Self {
+            resource: Some(resource),
+        }
+    }
+
+    fn resource_mut(&mut self) -> &mut T {
+        self.resource
+            .as_mut()
+            .expect("armed handoff cleanup resource")
+    }
+
+    fn cleanup_now(&mut self) -> Result<(), String> {
+        let Some(resource) = self.resource.as_mut() else {
+            return Ok(());
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resource.cleanup()));
+        self.resource = None;
+        match outcome {
+            Ok(result) => result,
+            Err(_) => Err("migration handoff cleanup panicked".into()),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.resource = None;
+    }
+}
+
+impl<T: CleanupBoundary> Drop for ArmedCleanup<T> {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup_now() {
+            eprintln!("migration handoff cleanup after task termination failed: {error}");
+        }
+    }
+}
+
+struct PendingHandoffResources {
+    pending: PendingHandoff,
+    child: Option<Child>,
+}
+
+impl CleanupBoundary for PendingHandoffResources {
+    fn cleanup(&mut self) -> Result<(), String> {
+        let executable = self.pending.ticket.child_executable.clone();
+        let documents = self.pending.cleanup_handle();
+        cleanup_handoff_resources(
+            self.child
+                .as_mut()
+                .map(|child| child as &mut dyn ChildProcess),
+            &executable,
+            &SystemProcessOperations,
+            || documents.cleanup(),
+        )
+    }
+}
+
+pub(super) struct PendingHandoffChild {
+    cleanup: ArmedCleanup<PendingHandoffResources>,
 }
 
 #[derive(Debug)]
@@ -149,72 +223,49 @@ impl PendingHandoff {
         })
     }
 
-    pub(super) fn spawn(&self) -> Result<Child, String> {
-        match Command::new(&self.ticket.child_executable)
+    fn spawn(&self) -> Result<Child, String> {
+        Command::new(&self.ticket.child_executable)
             .args(&self.ticket.child_argv)
             .spawn()
-        {
-            Ok(child) => Ok(child),
-            Err(error) => {
-                let operation = format!("failed to launch the migration handoff instance: {error}");
-                self.cleanup_handle().fail(operation)
-            }
-        }
+            .map_err(|error| format!("failed to launch the migration handoff instance: {error}"))
     }
 
-    pub(super) fn cleanup_handle(&self) -> HandoffCleanup {
+    pub(super) fn child_guard(self) -> PendingHandoffChild {
+        PendingHandoffChild::new(self)
+    }
+
+    fn cleanup_handle(&self) -> HandoffCleanup {
         HandoffCleanup {
             root: self.root.clone(),
             token: self.ticket.token.clone(),
         }
     }
 
-    pub(super) fn wait_until_ready(&self, child: &mut Child) -> Result<(), String> {
+    fn wait_until_ready(&self, child: &mut Child) -> Result<(), String> {
         if child.id() == 0 {
-            return self.fail_and_terminate(
-                child,
-                "migration handoff child has no process identity".into(),
-            );
+            return Err("migration handoff child has no process identity".into());
         }
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
             match self.read_ready(child.id()) {
                 Ok(Some(())) => return Ok(()),
                 Ok(None) => {}
-                Err(error) => {
-                    return self.fail_and_terminate(child, error);
-                }
+                Err(error) => return Err(error),
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    return self.cleanup_handle().fail(format!(
+                    return Err(format!(
                         "migration handoff exited before readiness with status {status}"
                     ));
                 }
                 Ok(None) => {}
-                Err(error) => {
-                    return self.fail_and_terminate(
-                        child,
-                        format!("failed to observe migration child: {error}"),
-                    );
-                }
+                Err(error) => return Err(format!("failed to observe migration child: {error}")),
             }
             if Instant::now() >= deadline {
-                return self.fail_and_terminate(
-                    child,
-                    "migration handoff did not become ready within 20 seconds".into(),
-                );
+                return Err("migration handoff did not become ready within 20 seconds".into());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-    }
-
-    pub(super) fn terminate_child(&self, child: &mut Child) -> Result<(), String> {
-        terminate_exact_process(
-            child,
-            &self.ticket.child_executable,
-            &self.ticket.child_argv,
-        )
     }
 
     fn read_ready(&self, expected_pid: u32) -> Result<Option<()>, String> {
@@ -234,45 +285,69 @@ impl PendingHandoff {
         directory.unlink_locked(&ready_filename(&self.ticket.token), file)?;
         Ok(Some(()))
     }
+}
 
-    fn fail_and_terminate(&self, child: &mut Child, operation: String) -> Result<(), String> {
-        let mut failures = Vec::new();
-        if let Err(error) = self.terminate_child(child) {
-            failures.push(format!("exact migration child termination failed: {error}"));
+impl PendingHandoffChild {
+    fn new(pending: PendingHandoff) -> Self {
+        Self {
+            cleanup: ArmedCleanup::new(PendingHandoffResources {
+                pending,
+                child: None,
+            }),
         }
-        if let Err(error) = self.cleanup_handle().cleanup() {
-            failures.push(format!("handoff document cleanup failed: {error}"));
+    }
+
+    pub(super) fn launch_until_ready(mut self) -> Result<Self, String> {
+        let launch = self.cleanup.resource_mut().pending.spawn();
+        match launch {
+            Ok(child) => self.cleanup.resource_mut().child = Some(child),
+            Err(error) => return self.fail(error),
         }
-        if failures.is_empty() {
-            Err(operation)
-        } else {
-            Err(format!("{operation}; {}", failures.join("; ")))
+        let readiness = {
+            let resources = self.cleanup.resource_mut();
+            resources.pending.wait_until_ready(
+                resources
+                    .child
+                    .as_mut()
+                    .expect("launched migration handoff child"),
+            )
+        };
+        match readiness {
+            Ok(()) => Ok(self),
+            Err(error) => self.fail(error),
         }
+    }
+
+    pub(super) fn fail<T>(mut self, operation: String) -> Result<T, String> {
+        match self.cleanup.cleanup_now() {
+            Ok(()) => Err(operation),
+            Err(cleanup) => Err(format!(
+                "{operation}; migration handoff cleanup also failed: {cleanup}"
+            )),
+        }
+    }
+
+    pub(super) fn disarm(mut self) {
+        self.cleanup.disarm();
     }
 }
 
 impl HandoffCleanup {
-    pub(super) fn cleanup(&self) -> Result<(), String> {
+    fn cleanup(&self) -> Result<(), String> {
         let directory = PrivateDirectory::open_or_create(&self.root)?;
         let mut failures = Vec::new();
-        for name in [ticket_filename(&self.token), ready_filename(&self.token)] {
+        for (kind, name) in [
+            ("startup ticket", ticket_filename(&self.token)),
+            ("readiness acknowledgement", ready_filename(&self.token)),
+        ] {
             if let Err(error) = directory.unlink_optional(&name) {
-                failures.push(format!("{name}: {error}"));
+                failures.push(format!("{kind}: {error}"));
             }
         }
         if failures.is_empty() {
             Ok(())
         } else {
             Err(failures.join("; "))
-        }
-    }
-
-    pub(super) fn fail<T>(&self, operation: String) -> Result<T, String> {
-        match self.cleanup() {
-            Ok(()) => Err(operation),
-            Err(cleanup) => Err(format!(
-                "{operation}; handoff cleanup also failed: {cleanup}"
-            )),
         }
     }
 }
@@ -568,14 +643,6 @@ fn process_ids() -> Result<Vec<u32>, String> {
         .collect())
 }
 
-fn terminate_exact_process(
-    child: &mut Child,
-    executable: &Path,
-    _argv: &[String],
-) -> Result<(), String> {
-    terminate_exact_process_with(child, executable, &SystemProcessOperations)
-}
-
 trait ChildProcess {
     fn process_id(&self) -> u32;
     fn has_exited(&mut self) -> Result<bool, String>;
@@ -643,13 +710,34 @@ impl ProcessOperations for SystemProcessOperations {
     }
 }
 
+fn cleanup_handoff_resources<F>(
+    child: Option<&mut dyn ChildProcess>,
+    executable: &Path,
+    operations: &dyn ProcessOperations,
+    cleanup_documents: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let termination = child
+        .map(|child| terminate_exact_process_with(child, executable, operations))
+        .unwrap_or(Ok(()));
+    let documents = cleanup_documents();
+    match (termination, documents) {
+        (Ok(()), Ok(())) => Ok(()),
+        (termination, documents) => Err(format!(
+            "termination={termination:?}, documents={documents:?}"
+        )),
+    }
+}
+
 fn terminate_exact_process_with(
     child: &mut dyn ChildProcess,
     executable: &Path,
     operations: &dyn ProcessOperations,
 ) -> Result<(), String> {
     if child.has_exited()? {
-        return Ok(());
+        return child.reap();
     }
     // This PID belongs to our Child and remains unreaped throughout each
     // signal boundary, so Darwin cannot recycle it. Kernel incarnation checks
@@ -663,7 +751,7 @@ fn terminate_exact_process_with(
     }
     operations.signal(identity.pid, libc::SIGTERM)?;
     if operations.wait_bounded(child, TERMINATION_TIMEOUT)? {
-        return Ok(());
+        return child.reap();
     }
     if operations.observe(pid, executable)?.as_ref() != Some(&identity) {
         return Err("migration child identity changed before forced termination".into());
@@ -1105,6 +1193,55 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingCleanup {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CleanupBoundary for CountingCleanup {
+        fn cleanup(&mut self) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn armed_cleanup_runs_during_unwind_and_only_disarms_explicitly() {
+        let panic_calls = Arc::new(AtomicUsize::new(0));
+        let observed = panic_calls.clone();
+        let unwind = std::panic::catch_unwind(move || {
+            let _cleanup = ArmedCleanup::new(CountingCleanup { calls: observed });
+            panic!("injected handoff panic");
+        });
+        assert!(unwind.is_err());
+        assert_eq!(panic_calls.load(Ordering::Acquire), 1);
+
+        let disarmed_calls = Arc::new(AtomicUsize::new(0));
+        let mut cleanup = ArmedCleanup::new(CountingCleanup {
+            calls: disarmed_calls.clone(),
+        });
+        cleanup.disarm();
+        drop(cleanup);
+        assert_eq!(disarmed_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn armed_cleanup_runs_when_its_owning_task_is_cancelled() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let task_calls = calls.clone();
+        let (started, start) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _cleanup = ArmedCleanup::new(CountingCleanup { calls: task_calls });
+            started.send(()).expect("start cleanup owner");
+            std::future::pending::<()>().await;
+        });
+        start.await.expect("cleanup owner started");
+        task.abort();
+        assert!(task.await.expect_err("cancelled task").is_cancelled());
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
 
     fn fixture_identity(pid: u32, executable: &Path) -> ProcessIdentity {
         ProcessIdentity {
@@ -1260,6 +1397,50 @@ mod tests {
         ) -> Result<bool, String> {
             Ok(self.bounded_exit)
         }
+    }
+
+    #[test]
+    fn resource_cleanup_attempts_documents_after_termination_failure() {
+        let executable = Path::new("/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac");
+        let operations = FakeProcessOperations {
+            observations: RefCell::new(VecDeque::from([None])),
+            bounded_exit: false,
+            signals: RefCell::new(Vec::new()),
+        };
+        let mut child = FakeChild {
+            pid: 42,
+            exited: false,
+            reaped: false,
+        };
+        let documents = std::cell::Cell::new(false);
+        let error = cleanup_handoff_resources(Some(&mut child), executable, &operations, || {
+            documents.set(true);
+            Ok(())
+        })
+        .expect_err("identity failure must remain visible");
+        assert!(documents.get(), "document cleanup must always be attempted");
+        assert!(error.contains("termination=Err"));
+        assert!(operations.signals.borrow().is_empty());
+    }
+
+    #[test]
+    fn graceful_resource_cleanup_explicitly_reaps_the_child() {
+        let executable = Path::new("/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac");
+        let identity = fixture_identity(42, executable);
+        let operations = FakeProcessOperations {
+            observations: RefCell::new(VecDeque::from([Some(identity.clone()), Some(identity)])),
+            bounded_exit: true,
+            signals: RefCell::new(Vec::new()),
+        };
+        let mut child = FakeChild {
+            pid: 42,
+            exited: false,
+            reaped: false,
+        };
+        cleanup_handoff_resources(Some(&mut child), executable, &operations, || Ok(()))
+            .expect("graceful cleanup");
+        assert_eq!(*operations.signals.borrow(), [libc::SIGTERM]);
+        assert!(child.reaped);
     }
 
     #[test]

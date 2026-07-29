@@ -1,4 +1,9 @@
 const CUTOVER_TARGETS = new Set(["system_proxy", "tunnel"]);
+const HANDOFF_FAILURE_CODES = new Set([
+  "migration_handoff_admission_failed",
+  "migration_handoff_failed",
+  "migration_handoff_task_failed",
+]);
 const MAX_RECEIPT_TTL_MILLIS = 5 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
@@ -19,6 +24,25 @@ function boundedMessage(value, label) {
 function target(value) {
   if (!CUTOVER_TARGETS.has(value)) throw new TypeError("cutover target is invalid");
   return value;
+}
+
+export function normalizeMigrationHandoffStatus(value) {
+  if (value?.state === "idle" || value?.state === "in_progress") {
+    if (!exactKeys(value, ["state"])) throw new TypeError("migration handoff status fields are invalid");
+    return { state: value.state };
+  }
+  if (value?.state === "failed") {
+    if (!exactKeys(value, ["state", "code", "message"])) {
+      throw new TypeError("migration handoff failure fields are invalid");
+    }
+    if (!HANDOFF_FAILURE_CODES.has(value.code)) {
+      throw new TypeError("migration handoff failure code is invalid");
+    }
+    const message = boundedMessage(value.message, "migration handoff failure");
+    if (message.length > 512) throw new TypeError("migration handoff failure is too long");
+    return { state: "failed", code: value.code, message };
+  }
+  throw new TypeError("migration handoff status is invalid");
 }
 
 export function normalizeRetirementStatus(value) {

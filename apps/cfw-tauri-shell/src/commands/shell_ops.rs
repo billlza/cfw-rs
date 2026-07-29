@@ -150,8 +150,8 @@ pub(crate) fn toggle_devtools(app: AppHandle) -> Result<(), String> {
 /// stopped through the coordinator, because leaving an orphaned ProxyAgent or
 /// Packet Tunnel behind is never an acceptable outcome of a user action.
 #[tauri::command]
-pub(crate) fn force_quit_app(app: AppHandle) {
-    request_shutdown(app, 1);
+pub(crate) fn force_quit_app(app: AppHandle) -> Result<(), String> {
+    request_shutdown(app, 1)
 }
 
 #[tauri::command]
@@ -320,6 +320,21 @@ pub(super) fn owned_profile_path(profiles_dir: &Path, file_name: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn force_quit_propagates_lifecycle_rejection_to_ipc() {
+        let source = include_str!("shell_ops.rs");
+        let command = source
+            .split("pub(crate) fn force_quit_app")
+            .nth(1)
+            .expect("force quit command")
+            .split("#[tauri::command]")
+            .next()
+            .expect("force quit boundary");
+        assert!(command.starts_with("(app: AppHandle) -> Result<(), String>"));
+        assert!(command.contains("request_shutdown(app, 1)"));
+        assert!(!command.contains("let _"));
+    }
 
     #[test]
     fn only_plain_absolute_http_urls_can_be_opened() {

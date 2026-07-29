@@ -335,7 +335,9 @@ fn main() {
             let lifecycle = app.state::<AppLifecycle>();
             if !lifecycle.exit_ready() {
                 api.prevent_exit();
-                request_shutdown(app.clone(), 0);
+                if let Err(error) = request_shutdown(app.clone(), 0) {
+                    emit_startup_error(app, "shutdown_rejected", error);
+                }
             }
         }
     });

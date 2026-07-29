@@ -1,5 +1,8 @@
 use std::fs;
 use std::os::unix::fs::symlink;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use cfw_core::{LegacyNetworkState, MacOsAppPaths};
 use cfw_engine_api::{
@@ -16,7 +19,52 @@ use super::process_cleanup::{
     validate_unique_root_managed_process,
 };
 use super::state_gate::{LegacyCleanupAction, LegacyRetirementGate, LegacyRetirementStatus};
-use super::{require_explicit_cutover_confirmation, require_replacement_active};
+use super::{
+    require_explicit_cutover_confirmation, require_replacement_active, spawn_supervised_app_result,
+};
+
+#[tokio::test]
+async fn renderer_response_cancellation_cannot_cancel_the_app_owned_task() {
+    let (release, released) = tokio::sync::oneshot::channel();
+    let completed = Arc::new(AtomicBool::new(false));
+    let after_response = Arc::new(AtomicBool::new(false));
+    let operation_completed = completed.clone();
+    let response_completed = after_response.clone();
+    let receiver = spawn_supervised_app_result(
+        async move {
+            released.await.expect("release app task");
+            operation_completed.store(true, Ordering::Release);
+        },
+        |operation| operation,
+        move || response_completed.store(true, Ordering::Release),
+    );
+    drop(receiver);
+    release.send(()).expect("release sender");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !completed.load(Ordering::Acquire) || !after_response.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached task must reach terminal side effects");
+}
+
+#[tokio::test]
+async fn supervised_app_task_turns_worker_panic_into_a_terminal_error() {
+    let receiver = spawn_supervised_app_result(
+        async move {
+            panic!("injected migration worker panic");
+        },
+        |operation| operation,
+        || {},
+    );
+    let error = receiver
+        .await
+        .expect("supervisor response")
+        .expect_err("worker panic must fail");
+    assert_eq!(error, "migration handoff application task panicked");
+}
 
 #[test]
 fn legacy_retirement_gate_serializes_attempts_and_preserves_post_cutover_access() {

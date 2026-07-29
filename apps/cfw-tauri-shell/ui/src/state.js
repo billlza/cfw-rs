@@ -74,6 +74,9 @@ export const state = {
   // read from `boot_payload`. The default (main) dashboard offers the restart
   // that enters the handoff; only the handoff instance drives the cutover.
   migrationHandoff: false,
+  // Application-owned parent launch status, queried through `boot_payload` so
+  // renderer reload cannot lose an in-flight or failed handoff.
+  migrationHandoffStatus: { state: "idle" },
   // Latest validated `legacy_retirement_status` (`{ state, ... }`). An IPC or
   // schema failure becomes the explicit local `unverifiable` state; it is
   // never represented as an ordinary absence or a cleared migration.

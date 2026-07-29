@@ -157,6 +157,7 @@ const responses = {
       architecture: "arm64",
     },
     migration_handoff: false,
+    migration_handoff_status: { state: "idle" },
   },
   legacy_retirement_status: { state: "cleared" },
   read_settings_snapshot: {
@@ -240,6 +241,7 @@ const responses = {
   stop_log_stream: null,
   refresh_tray_menu: null,
   open_page: null,
+  begin_migration_handoff: null,
   check_for_updates: { available: false, current: "0.4.0" },
 };
 
@@ -503,6 +505,48 @@ test("General routes recovery, post-cutover cleanup and unreadable state without
   assert.ok(html.includes("TUN"));
 
   state.migrationHandoff = false;
+  state.retirement = { state: "cleared" };
+});
+
+test("renderer refresh recovers app-owned handoff progress and terminal failure", async () => {
+  state.migrationHandoff = false;
+  state.retirement = { state: "awaiting_confirmation" };
+  responses.boot_payload.migration_handoff_status = { state: "in_progress" };
+  await emit("cfw://engine-event", {
+    type: "boundary_failure",
+    code: "migration_handoff_failed",
+    message: "refresh",
+  });
+  let html = await renderPage("general");
+  assert.equal(state.migrationHandoffStatus.state, "in_progress");
+  assert.match(html, /Migration session is starting/u);
+  assert.match(html, /data-action="begin-migration-handoff" disabled>Starting…/u);
+
+  responses.boot_payload.migration_handoff_status = {
+    state: "failed",
+    code: "migration_handoff_failed",
+    message: "The migration session did not complete. No legacy cutover was authorized; review the migration log and retry.",
+  };
+  await emit("cfw://engine-event", {
+    type: "boundary_failure",
+    code: "migration_handoff_failed",
+    message: "refresh",
+  });
+  html = await renderPage("general");
+  assert.equal(state.migrationHandoffStatus.state, "failed");
+  assert.match(html, /No legacy cutover was authorized/u);
+  assert.match(html, /Retry Migration…/u);
+  assert.doesNotMatch(html, /begin-migration-handoff" disabled/u);
+
+  rejected.begin_migration_handoff = "injected readiness failure";
+  await appModule.handleAction("begin-migration-handoff");
+  assert.equal(state.migrationHandoffStatus.state, "failed");
+  assert.equal(invocationDetails.at(-2).command, "begin_migration_handoff");
+  assert.equal(invocationDetails.at(-1).command, "boot_payload");
+  delete rejected.begin_migration_handoff;
+
+  responses.boot_payload.migration_handoff_status = { state: "idle" };
+  state.migrationHandoffStatus = { state: "idle" };
   state.retirement = { state: "cleared" };
 });
 

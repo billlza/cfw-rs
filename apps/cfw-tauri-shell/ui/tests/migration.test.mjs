@@ -9,12 +9,38 @@ import {
   migrationRoute,
   newCutoverState,
   normalizeCutoverPreparation,
+  normalizeMigrationHandoffStatus,
   normalizeRetirementStatus,
   unverifiableRetirementStatus,
 } from "../src/migration.js";
 
 const RECEIPT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PROFILE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+test("handoff status is closed, bounded and reload-safe", () => {
+  assert.deepEqual(normalizeMigrationHandoffStatus({ state: "idle" }), { state: "idle" });
+  assert.deepEqual(
+    normalizeMigrationHandoffStatus({ state: "in_progress" }),
+    { state: "in_progress" },
+  );
+  assert.deepEqual(normalizeMigrationHandoffStatus({
+    state: "failed",
+    code: "migration_handoff_failed",
+    message: "safe failure",
+  }), {
+    state: "failed",
+    code: "migration_handoff_failed",
+    message: "safe failure",
+  });
+  for (const invalid of [
+    { state: "unknown" },
+    { state: "in_progress", message: "extra" },
+    { state: "failed", code: "unknown", message: "failure" },
+    { state: "failed", code: "migration_handoff_failed", message: "x".repeat(513) },
+  ]) {
+    assert.throws(() => normalizeMigrationHandoffStatus(invalid), /invalid|too long/u);
+  }
+});
 
 test("every durable retirement status has one explicit migration route", () => {
   const cases = [

@@ -231,7 +231,7 @@ pub(crate) fn handle_app_menu_event(app: &AppHandle, id: &str) {
                 }
             });
         }
-        Some(AppMenuAction::Quit) => request_shutdown(app.clone(), 0),
+        Some(AppMenuAction::Quit) => request_shell_shutdown(app, 0),
         None => {}
     }
 }
@@ -245,7 +245,7 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match tray_action(event.id.as_ref()) {
             TrayAction::OpenPage(page) => show_main_page(app, page),
-            TrayAction::Quit => request_shutdown(app.clone(), 0),
+            TrayAction::Quit => request_shell_shutdown(app, 0),
             TrayAction::ProxySelection => handle_tray_proxy_event(app, event.id.as_ref()),
         })
         .on_tray_icon_event(|tray, event| {
@@ -260,6 +260,12 @@ pub(crate) fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+fn request_shell_shutdown(app: &AppHandle, exit_code: i32) {
+    if let Err(error) = request_shutdown(app.clone(), exit_code) {
+        emit_shell_error(app, "shutdown_rejected", error);
+    }
 }
 
 fn build_tray_menu(app: &AppHandle, groups: &[TrayProxyGroup]) -> tauri::Result<Menu<Wry>> {

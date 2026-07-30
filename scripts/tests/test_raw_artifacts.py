@@ -378,9 +378,25 @@ class TrustPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(RawArtifactError, "unknown fields"):
             self.parse(value)
 
-    def test_checked_in_production_policy_is_explicitly_unconfigured(self) -> None:
-        with self.assertRaisesRegex(RawArtifactError, "not configured"):
-            load_release_trust_policy()
+    def test_checked_in_production_policy_is_source_pinned_and_configured(self) -> None:
+        policy = load_release_trust_policy()
+        self.assertTrue(policy.release_source_pinned)
+        self.assertEqual(policy.algorithm, "PS256")
+        self.assertEqual(policy.protection_level, "HSM")
+        self.assertEqual(
+            policy.key_version,
+            "projects/cfw-release-evidence-20260730/locations/asia-east1/"
+            "keyRings/physical-evidence/cryptoKeys/collector-receipts-v040/"
+            "cryptoKeyVersions/1",
+        )
+        self.assertEqual(
+            policy.collector_source_sha256,
+            "2439c826b23fc1c7f33f5d6003c9aa790268737d1da62db3577adcaa59e15caa",
+        )
+        self.assertEqual(
+            policy.collector_executable_sha256,
+            "0fb9e2281730c6534101cfed26d31c04f718e3517a00c9e1bdb51dcf3c7bedd2",
+        )
 
     def test_not_configured_policy_requires_exact_schema_v2_integer(self) -> None:
         for schema_version in (1, 2.0, True):

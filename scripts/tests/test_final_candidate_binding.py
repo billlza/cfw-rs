@@ -181,18 +181,15 @@ class FinalCandidateRoundTripTests(_CleanWorkspaceMixin):
         )
         self.validate(binding, require_verified=True)
 
-    def test_unconfigured_production_collector_key_is_an_explicit_blocker(self) -> None:
-        binding = _build_final_candidate_binding(
-            REPOSITORY,
-            _request(),
-            fixture=True,
-            workspace_root=self.workspace,
-            physical_evidence_root=REPOSITORY,
-        )
-        self.assertEqual(binding["status"], BLOCKED)
-        self.assertIn("collector_trust_policy", binding["blocked_inputs"])
-        self.assertIsNone(binding["physical_artifact_hash_manifest_sha256"])
-        self.assertIsNone(binding["physical_trust_policy_sha256"])
+    def test_configured_production_policy_rejects_fixture_evidence(self) -> None:
+        with self.assertRaisesRegex(PublicationError, "source-pinned policy"):
+            _build_final_candidate_binding(
+                REPOSITORY,
+                _request(),
+                fixture=True,
+                workspace_root=self.workspace,
+                physical_evidence_root=REPOSITORY,
+            )
 
     def test_all_inside_out_identities_are_bound(self) -> None:
         binding = self.build()

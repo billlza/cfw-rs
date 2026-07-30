@@ -1,0 +1,64 @@
+steps:
+  - id: verify-source-closure
+    name: golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
+    entrypoint: /bin/bash
+    args:
+      - -euo
+      - pipefail
+      - -c
+      - |
+        actual="$(./source_digest.sh)"
+        if [[ ! "${_EXPECTED_SOURCE_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+          echo 'error: _EXPECTED_SOURCE_SHA256 must be an approved lowercase SHA-256' >&2
+          exit 1
+        fi
+        if [[ "$actual" != "${_EXPECTED_SOURCE_SHA256}" ]]; then
+          echo 'error: collector source closure differs from the approved digest' >&2
+          exit 1
+        fi
+        printf '%s\n' "$actual" > /workspace/.collector-source-sha256
+        printf 'collector source closure verified: %s\n' "$actual"
+
+  - id: test
+    name: golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
+    entrypoint: go
+    env:
+      - CGO_ENABLED=0
+    args:
+      - test
+      - ./...
+
+  - id: vet
+    name: golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
+    entrypoint: go
+    env:
+      - CGO_ENABLED=0
+    args:
+      - vet
+      - ./...
+
+  - id: build-image
+    name: gcr.io/cloud-builders/docker@sha256:680b2a8d18a794c165cf97a3f9476784d5d962e945d424cb40b3e086cde0c284
+    entrypoint: /bin/bash
+    args:
+      - -euo
+      - pipefail
+      - -c
+      - |
+        source_digest="$(cat /workspace/.collector-source-sha256)"
+        exec docker build \
+          --file Dockerfile \
+          --label "com.bill.clashformac.collector-source-sha256=$source_digest" \
+          --tag "${_IMAGE_URI}" \
+          .
+
+images:
+  - ${_IMAGE_URI}
+
+substitutions:
+  _EXPECTED_SOURCE_SHA256: REQUIRED
+  _IMAGE_URI: asia-east1-docker.pkg.dev/${PROJECT_ID}/physical-evidence-control/physical-collector:${BUILD_ID}
+
+options:
+  dynamicSubstitutions: true
+  logging: CLOUD_LOGGING_ONLY

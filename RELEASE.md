@@ -489,12 +489,15 @@ installation artifact.
 This updater rotation is independent of the physical collector trust root.
 Production physical receipts accept only the source-pinned aggregate v4 /
 receipt v3 / proof v3 PS256 contract backed by one versioned Cloud KMS HSM
-RSA-3072 key. The checked-in collector policy remains `not-configured`; release
-is blocked until external release operations provision and verify the HSM key,
-attestation and public-key digests, collector source/executable digests,
-least-privilege signing identity, Data Access audit retention, nonce issuance,
-and replay ledger. No updater key, Apple notarization key, local private key, or
-older RS256 receipt may substitute for that missing trust root.
+RSA-3072 key. The checked-in collector policy is configured for the reviewed
+v0.4.0 key, attestation, public key, collector source closure and immutable OCI
+image digest. External release operations have live-tested the least-privilege
+signer, Firestore nonce ledger, Binary Authorization and locked Data Access
+audit retention described in
+[`docs/release/physical-collector-v040.md`](docs/release/physical-collector-v040.md).
+This does not close the two-distinct-clean-Mac physical gate or authorize build
+40002. No updater key, Apple notarization key, local private key, or older RS256
+receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable
 entrypoint. Do not prefix it with `bash`: its `#!/bin/bash -p` boundary prevents

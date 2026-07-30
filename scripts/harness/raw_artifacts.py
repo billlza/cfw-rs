@@ -117,10 +117,9 @@ COLLECTOR_BINDING_FIELDS = {
 RELEASE_TRUST_POLICY_PATH = Path(__file__).with_name(
     "physical_collector_trust_policy.json"
 )
-# Updated only together with the canonical policy file. The checked-in policy
-# intentionally has state=not-configured until release engineering provisions
-# and reviews a production collector key.
-RELEASE_TRUST_POLICY_SHA256 = "a616bbc91d72f25a904ae1d4c9c54ddad6106652c8997ca8b4131536b8f3bba4"
+# Updated only together with the canonical policy file after the external HSM
+# attestation, collector source closure, and immutable image digest are reviewed.
+RELEASE_TRUST_POLICY_SHA256 = "f7a3e459384537c5b74ac8766dc6e2874a1dce95342e7be288d1ce5989b2ad61"
 
 
 class RawArtifactError(ValueError):

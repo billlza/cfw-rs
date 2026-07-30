@@ -148,15 +148,15 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
             }.issubset(subjects)
         )
 
-    def test_static_self_check_does_not_fabricate_trust(self) -> None:
-        self.assertEqual(self_check(), "not-configured")
+    def test_static_self_check_accepts_the_source_pinned_policy(self) -> None:
+        self.assertEqual(self_check(), "configured")
 
     def test_self_check_output_reports_the_actual_policy_state(self) -> None:
         output = io.StringIO()
         with patch("sys.argv", ["physical_evidence_aggregator.py", "--self-check"]):
             with redirect_stdout(output):
                 main()
-        self.assertIn("policy state=not-configured", output.getvalue())
+        self.assertIn("policy state=configured", output.getvalue())
         self.assertNotIn("remains fail-closed until", output.getvalue())
 
     def test_receipt_v3_binds_manifest_algorithm_and_key_version(self) -> None:
@@ -526,13 +526,13 @@ class PhysicalEvidenceLoaderTests(unittest.TestCase):
                     trust_policy=fixture_value.policy,
                 )
 
-    def test_forged_source_pinned_flag_cannot_bypass_unconfigured_policy(self) -> None:
+    def test_forged_source_pinned_flag_cannot_bypass_configured_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             fixture_value = PhysicalEvidenceFixture(root)
             artifact = fixture_value.write_aggregate_artifact()
             forged = replace(fixture_value.policy, release_source_pinned=True)
-            with self.assertRaisesRegex(PhysicalEvidenceError, "not configured"):
+            with self.assertRaisesRegex(PhysicalEvidenceError, "source-pinned policy"):
                 load_physical_evidence_artifact(
                     artifact,
                     evidence_root=root,
@@ -575,11 +575,11 @@ class PhysicalEvidenceLoaderTests(unittest.TestCase):
                     trust_policy=forged,
                 )
 
-    def test_default_release_policy_blocks_when_production_key_is_absent(self) -> None:
+    def test_default_release_policy_blocks_an_unbound_fixture_aggregate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture_value = PhysicalEvidenceFixture(Path(temporary))
             path = fixture_value.write_aggregate()
-            with self.assertRaisesRegex(PhysicalEvidenceError, "not configured"):
+            with self.assertRaisesRegex(PhysicalEvidenceError, "source-pinned policy"):
                 load_physical_evidence(path, evidence_root=Path(temporary))
 
 

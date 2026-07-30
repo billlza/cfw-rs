@@ -271,16 +271,15 @@ The application continues to open the canonical GitHub release page instead of
 performing an in-process bundle replacement.
 
 The physical-evidence collector uses a separate trust domain from Apple
-notarization and the updater key. Its production policy is source-pinned but
-remains `state: not-configured`. A configured policy must bind one complete
-Cloud KMS HSM key version using `RSA_SIGN_PSS_3072_SHA256`, the exact DER SPKI
-digest, a verified Cloud HSM attestation format/content digest, and approved
-collector source/executable digests. Provisioning the KMS key, least-privilege
-signer IAM, short-lived workload identity, Data Access audit logging and
-retention, certificate-chain/attestation verification, nonce issuance, and the
-cross-release replay ledger are external release-operations gates. The
-repository creates none of those resources and cannot treat their absence as a
-software fallback. See [Physical evidence v4](physical-evidence-v4.md).
+notarization and the updater key. Its production policy is source-pinned and
+`state: configured` for the reviewed v0.4.0 Cloud KMS HSM key version, exact DER
+SPKI digest, verified Cloud HSM attestation bytes, collector source closure and
+immutable OCI image digest. The least-privilege Cloud Run identities,
+Firestore replay ledger, Binary Authorization attestation, Data Access audit
+sink and locked retention bucket remain external release-operations controls;
+repository code neither creates them nor falls back when they are absent. See
+[Physical evidence v4](physical-evidence-v4.md) and the
+[v0.4.0 collector provisioning record](release/physical-collector-v040.md).
 
 ## Release ordering
 

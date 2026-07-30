@@ -449,10 +449,12 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
             parser().parse_args(["publication-gate", "--fixture"])
         self.assertEqual(raised.exception.code, 2)
 
-    def test_production_authorizer_fails_closed_without_canonical_trust_key(self) -> None:
+    def test_production_authorizer_rejects_fixture_evidence_under_configured_policy(
+        self,
+    ) -> None:
         manifest = self.build(request(3, self.workspace))
         manifest["fixture"] = False
-        with self.assertRaisesRegex(PublicationError, "production collector trust policy"):
+        with self.assertRaisesRegex(PublicationError, "source-pinned policy"):
             authorize_publication_artifacts(
                 REPOSITORY, manifest, workspace_root=self.workspace
             )

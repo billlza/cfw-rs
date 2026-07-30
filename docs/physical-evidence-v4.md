@@ -212,16 +212,17 @@ canonical policy and requires full object equality before use. Key provisioning
 or rotation therefore requires a reviewed release-source change to the
 canonical policy bytes and their pinned digest.
 
-The checked-in production policy is intentionally `state: not-configured`.
-Until release engineering provisions an externally controlled Cloud KMS HSM
-key version and approved collector source/executable digests, production
-physical evidence is `blocked` and cannot be promoted or published. Test
-fixtures use a committed test-only RSA-3072 private key only in fixture mode;
-it is not a production trust root. The fixtures exercise byte recomputation and
-rejection paths only. They are not evidence that the signed two-process
-migration, Network Extension user flows, sleep/wake packets, 850 by 603
-WKWebView rendering, or long-duration stability have run on a clean physical
-Mac.
+The checked-in production policy is `state: configured` and pins the reviewed
+v0.4.0 Cloud KMS HSM key version, attestation bytes, DER public key, collector
+source closure, and immutable OCI image digest. The external provisioning and
+live preflight record is documented in
+[`release/physical-collector-v040.md`](release/physical-collector-v040.md).
+This closes the collector trust-root prerequisite only. It is not evidence that
+the signed two-process migration, Network Extension user flows, sleep/wake
+packets, 850 by 603 WKWebView rendering, or long-duration stability have run on
+the two required clean physical Macs. Test fixtures still use a committed
+test-only RSA-3072 private key only in fixture mode and are not a production
+trust root.
 
 ### External Cloud KMS HSM provisioning gate
 
@@ -244,28 +245,30 @@ The policy digests have exact byte meanings:
   `attestation_format` records how those exact content bytes must be interpreted.
 
 The repository parser pins these declarations but cannot by itself prove their
-external origin. Before changing the checked-in policy from `not-configured`,
-release engineering must follow Google's
+external origin. Provisioning or rotating this policy requires release
+engineering to follow Google's
 [attestation verification procedure](https://docs.cloud.google.com/kms/docs/attest-key):
 verify the manufacturer and Google certificate chains, verify the attested key
 version resource-name hash, verify the public key, require non-extractable HSM
 generation, and record the reviewed raw attestation bytes. The signer identity
-must have only permission to sign with that one key, key administration must be
-separate, short-lived workload identity or impersonation must replace service-
-account key files, and Cloud KMS Data Access audit logging must be enabled and
-retained before the first production receipt. KMS unavailability fails closed;
-there is no local-key or old-algorithm fallback. No Cloud KMS resource, IAM
-grant, audit sink, attestation verification, or production collector credential
-is created by this repository change.
+must have only permission to sign with the dedicated receipt key, key
+administration must be separate, metadata-based workload identity must replace
+service-account key files, and Cloud KMS Data Access audit logging must be
+enabled and retained before the first production receipt. KMS unavailability
+fails closed; there is no local-key or old-algorithm fallback. Those external
+controls were provisioned and live-tested for the pinned v0.4.0 policy, but are
+not created or silently repaired by repository code.
 
 ## Security boundary and remaining external proof
 
 Hashes and race-resistant file reads detect drift; the signed receipt proves
 that an approved collector attested to the exact bytes and identities. They do
-not make a malicious operator, compromised collection host, or compromised
-collector key trustworthy, and they do not provide a cross-release replay
-ledger. Collector key custody, host control, nonce issuance, audit retention,
-and any replay ledger remain external release-process controls.
+not make a malicious operator, compromised collection host, compromised GCP
+project, or compromised collector key trustworthy. Nonce issuance, the
+Firestore replay ledger, key custody, Binary Authorization and locked audit
+retention remain external release-process controls. The current provisioning
+record verifies those controls for v0.4.0, but a single human administrator is
+still logical role separation rather than independent two-person approval.
 
 Standalone harness commands report only raw-byte structural verification.
 Only the aggregate, with the source-pinned collector receipt and both required

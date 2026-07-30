@@ -76,9 +76,11 @@ version under the existing grant.
 
 ## Runtime and replay ledger
 
-- Nonce issuer: `physical-nonce-issuer-v040`, runtime identity
+- Nonce issuer: `physical-nonce-issuer-v040`, active revision
+  `physical-nonce-issuer-v040-00002-fp4`, runtime identity
   `physical-nonce-issuer@cfw-release-evidence-20260730.iam.gserviceaccount.com`.
-- Receipt signer: `physical-receipt-signer-v040`, runtime identity
+- Receipt signer: `physical-receipt-signer-v040`, active revision
+  `physical-receipt-signer-v040-00002-q2b`, runtime identity
   `physical-receipt-signer@cfw-release-evidence-20260730.iam.gserviceaccount.com`.
 - Both services are private Cloud Run services in `asia-east1`, use the exact
   image digest, enforce Binary Authorization, scale from zero to at most one
@@ -92,9 +94,12 @@ version under the existing grant.
   `d8fe752553e72191fc144cdd599e16411fbfd41c74fcc5bcd17beb005f392090`.
   Independent local OpenSSL verification accepted the RSA-PSS signature with a
   32-byte salt over `cfw-physical-collector-kms-preflight-v1`.
-- Production nonce issuance and receipt signing remain disabled until the
-  configured source pin is committed and the two services are updated to that
-  exact policy digest.
+- Source pin commit `852cfd9` was deployed to both services with production
+  receipt handling enabled and trust-policy SHA-256
+  `f7a3e459384537c5b74ac8766dc6e2874a1dce95342e7be288d1ce5989b2ad61`.
+  Both production routes remained private and returned HTTP 403 to
+  unauthenticated requests. Activation issued no production nonce or receipt
+  and did not start validation build 40002.
 
 ## Audit retention and operational boundary
 

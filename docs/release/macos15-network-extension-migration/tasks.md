@@ -105,6 +105,8 @@ candidate satisfies them.
 
 ## Physical Apple-silicon evidence
 
+- [ ] Use one physical Mac for both source-pinned clean OS runs; require the
+  same machine digest with distinct run IDs, nonces, receipts, and archives.
 - [ ] Prove clean install, daemon registration approval/denial, System
   Extension approval/pending/activation, replacement, upgrade, downgrade
   refusal, reboot, and uninstall cleanup on macOS 15 and current macOS.
@@ -116,7 +118,7 @@ candidate satisfies them.
   QUIC, DNS A/AAAA, LAN bypass, included/excluded routes, stop cleanup, and
   IPv6-disabled behavior.
 - [ ] Complete weak-network, connect/disconnect latency, throughput, CPU/RSS,
-  descriptor growth, 100-switch, and 24-hour soak gates.
+  descriptor growth, 100-switch, and 3-hour-per-OS internal-release soak gates.
 
 ## Release decision
 

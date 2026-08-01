@@ -78,6 +78,10 @@ try:  # pragma: no cover - import shim exercised by both invocation styles
         PhysicalEvidenceError,
         load_physical_evidence_artifact,
     )
+    from scripts.harness.physical_machine_identity import (
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from scripts.harness.raw_artifacts import (
         CollectorTrustNotConfiguredError,
         CollectorTrustPolicy,
@@ -98,6 +102,10 @@ except ImportError:  # pragma: no cover - CLI invocation style
         REQUIRED_OS,
         PhysicalEvidenceError,
         load_physical_evidence_artifact,
+    )
+    from scripts.harness.physical_machine_identity import (
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
     )
     from scripts.harness.raw_artifacts import (
         CollectorTrustNotConfiguredError,
@@ -161,12 +169,12 @@ XCFRAMEWORK_NAME = "Libbox.xcframework"
 
 # The five report families that must exist for *every* required macOS run set:
 # the installed lifecycle matrix (Requirement 6.1), unique-token packet evidence
-# (6.2), the performance/weak-network gates and the 24-hour soak (6.3), and the
+# (6.2), the performance/weak-network gates and the 3-hour internal soak (6.3), and the
 # separately signed adversarial/security matrix (6.4).
 REPORT_CATEGORIES = ("installed_matrix", "packet", "performance", "security", "soak")
 
 # Report family -> wave-11 harness that produces its raw report. ``soak`` has no
-# separate harness: Requirement 6.3 keeps the 24-hour zero-crash result inside
+# separate harness: Requirement 6.3 keeps the 3-hour zero-crash result inside
 # the performance document, so its hash is content-addressed from that section.
 HARNESS_BY_CATEGORY: dict[str, str] = {
     "installed_matrix": "lifecycle",
@@ -631,7 +639,14 @@ def _derive_report_bindings(summary: dict[str, Any]) -> dict[str, Any]:
     installed_runs = [
         require_exact_keys(
             run,
-            {"os", "macos_build", "machine_sha256", "report_hashes"},
+            {
+                "os",
+                "macos_build",
+                "machine_sha256",
+                "hardware_model",
+                "boot_environment_sha256",
+                "report_hashes",
+            },
             f"installed run[{index}]",
         )
         for index, run in enumerate(raw_runs)
@@ -659,8 +674,34 @@ def _derive_report_bindings(summary: dict[str, Any]) -> dict[str, Any]:
         seen_runs.add(os_label)
         safe_identifier(run["macos_build"], f"installed run[{index}].macos_build")
         require_sha256(run["machine_sha256"], f"installed run[{index}].machine_sha256")
+        require_sha256(
+            run["boot_environment_sha256"],
+            f"installed run[{index}].boot_environment_sha256",
+        )
+        try:
+            validate_physical_hardware_model(run["hardware_model"])
+        except PhysicalMachineIdentityError as error:
+            raise PublicationError(
+                f"installed run[{index}].hardware_model is invalid"
+            ) from error
         if run["report_hashes"] != expected_run_hashes[os_label]:
             raise PublicationError("installed-run report hashes differ from raw descriptors")
+    if seen_runs != set(REQUIRED_OS):
+        raise PublicationError("installed-run summary is missing a required OS")
+    if len({run["machine_sha256"] for run in installed_runs}) != 1:
+        raise PublicationError(
+            "installed-run summary does not bind one physical machine"
+        )
+    if len({run["hardware_model"] for run in installed_runs}) != 1:
+        raise PublicationError(
+            "installed-run summary does not bind one hardware model"
+        )
+    if len({run["boot_environment_sha256"] for run in installed_runs}) != len(
+        REQUIRED_OS
+    ):
+        raise PublicationError(
+            "installed-run summary reuses a boot/install environment"
+        )
     bindings.sort(key=lambda entry: (entry["os"], entry["category"]))
     installed_runs.sort(key=lambda entry: entry["os"])
     return {"report_bindings": bindings, "installed_runs": installed_runs}

@@ -18,6 +18,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -62,9 +63,43 @@ MAX_ARTIFACT_COUNT = 512
 MAX_TOTAL_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_RELATIVE_PATH_BYTES = 512
 MAX_JSON_DEPTH = 32
+MAX_JSON_INTEGER_DIGITS = 19
+MAX_JSON_FLOAT_CHARS = 128
 MAX_TRUST_POLICY_BYTES = 64 * 1024
 
 REPORT_MAX_BYTES = 1 * 1024 * 1024
+
+EVIDENCE_PROFILE = {
+    "aggregate_schema_version": 5,
+    "aggregator_version": "physical-evidence-aggregator-v5-single-machine",
+    "boot_environment_scheme": "cfw-boot-environment-v1",
+    "machine_identity_scheme": "cfw-physical-machine-identity-v1",
+    "machine_topology": "one-machine-two-clean-os-v1",
+    "required_runs": [
+        {
+            "macos_build": "25G72",
+            "macos_version": "26.6",
+            "os": "current-macos",
+        },
+        {
+            "macos_build": "24G824",
+            "macos_version": "15.7.8",
+            "os": "macos15",
+        },
+    ],
+    "schema_version": 1,
+    "soak_hours_per_run": 3,
+}
+EVIDENCE_PROFILE_FIELDS = {
+    "schema_version",
+    "aggregate_schema_version",
+    "aggregator_version",
+    "boot_environment_scheme",
+    "machine_identity_scheme",
+    "machine_topology",
+    "required_runs",
+    "soak_hours_per_run",
+}
 
 
 @dataclass(frozen=True)
@@ -119,7 +154,7 @@ RELEASE_TRUST_POLICY_PATH = Path(__file__).with_name(
 )
 # Updated only together with the canonical policy file after the external HSM
 # attestation, collector source closure, and immutable image digest are reviewed.
-RELEASE_TRUST_POLICY_SHA256 = "f7a3e459384537c5b74ac8766dc6e2874a1dce95342e7be288d1ce5989b2ad61"
+RELEASE_TRUST_POLICY_SHA256 = "ed8538dbf11f49555a917617b3f20911801364c4853b05f9704fec99729293d0"
 
 
 class RawArtifactError(ValueError):
@@ -173,6 +208,12 @@ class CollectorTrustPolicy:
     collector_version: str
     collector_source_sha256: str
     collector_executable_sha256: str
+    evidence_profile_sha256: str
+    aggregate_schema_version: int
+    aggregator_version: str
+    boot_environment_scheme: str
+    machine_identity_scheme: str
+    machine_topology: str
     release_source_pinned: bool
 
 
@@ -189,6 +230,26 @@ def exact_object(value: Any, fields: set[str], label: str) -> dict[str, Any]:
     if unknown:
         raise RawArtifactError(f"{label} has unknown fields: {sorted(unknown)}")
     return value
+
+
+def _require_exact_json_value(value: Any, expected: Any, label: str) -> None:
+    """Require the exact JSON shape, scalar type, and value of a pinned contract."""
+
+    if type(value) is not type(expected):
+        raise RawArtifactError(f"{label} has a non-canonical JSON type")
+    if isinstance(expected, dict):
+        raw = exact_object(value, set(expected), label)
+        for key in sorted(expected):
+            _require_exact_json_value(raw[key], expected[key], f"{label}.{key}")
+        return
+    if isinstance(expected, list):
+        if len(value) != len(expected):
+            raise RawArtifactError(f"{label} has a non-canonical JSON array length")
+        for index, (item, expected_item) in enumerate(zip(value, expected)):
+            _require_exact_json_value(item, expected_item, f"{label}[{index}]")
+        return
+    if value != expected:
+        raise RawArtifactError(f"{label} differs from the source-pinned value")
 
 
 def require_sha256(value: Any, label: str) -> str:
@@ -209,6 +270,15 @@ def require_kms_key_version(value: Any, label: str) -> str:
     return value
 
 
+def utf8_size(value: str, label: str) -> int:
+    """Return the UTF-8 byte length or reject an unencodable Unicode scalar."""
+
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise RawArtifactError(f"{label} is not valid Unicode text") from error
+
+
 def canonical_json(value: Any) -> bytes:
     """Encode the exact canonical JSON bytes used by collector signatures."""
 
@@ -220,7 +290,7 @@ def canonical_json(value: Any) -> bytes:
             ensure_ascii=False,
             allow_nan=False,
         ).encode("utf-8")
-    except (TypeError, ValueError) as error:
+    except (TypeError, UnicodeEncodeError, ValueError) as error:
         raise RawArtifactError("value cannot be encoded as canonical JSON") from error
 
 
@@ -237,6 +307,26 @@ def _reject_constant(value: str) -> None:
     raise RawArtifactError(f"JSON contains a non-finite number: {value}")
 
 
+def _parse_json_integer(value: str) -> int:
+    digits = value[1:] if value.startswith("-") else value
+    if len(digits) > MAX_JSON_INTEGER_DIGITS:
+        raise RawArtifactError(
+            f"JSON integer exceeds {MAX_JSON_INTEGER_DIGITS} decimal digits"
+        )
+    return int(value)
+
+
+def _parse_json_float(value: str) -> float:
+    if len(value) > MAX_JSON_FLOAT_CHARS:
+        raise RawArtifactError(
+            f"JSON floating-point token exceeds {MAX_JSON_FLOAT_CHARS} characters"
+        )
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise RawArtifactError("JSON floating-point value is not finite")
+    return parsed
+
+
 def _json_depth(value: Any, depth: int = 0) -> int:
     if depth > MAX_JSON_DEPTH:
         raise RawArtifactError(f"JSON nesting exceeds {MAX_JSON_DEPTH}")
@@ -244,10 +334,13 @@ def _json_depth(value: Any, depth: int = 0) -> int:
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise RawArtifactError("JSON object key is not a string")
+            utf8_size(key, "JSON object key")
             _json_depth(nested, depth + 1)
     elif isinstance(value, list):
         for nested in value:
             _json_depth(nested, depth + 1)
+    elif isinstance(value, str):
+        utf8_size(value, "JSON string")
     return depth
 
 
@@ -262,8 +355,12 @@ def load_json_bytes(data: bytes, label: str) -> Any:
         value = json.loads(
             text,
             object_pairs_hook=_reject_duplicate_keys,
+            parse_float=_parse_json_float,
+            parse_int=_parse_json_integer,
             parse_constant=_reject_constant,
         )
+    except RawArtifactError:
+        raise
     except json.JSONDecodeError as error:
         raise RawArtifactError(f"{label} is not valid JSON") from error
     except RecursionError as error:
@@ -290,7 +387,7 @@ def parse_proof_binding(value: Any, label: str = "proof") -> dict[str, Any]:
     if (
         not isinstance(version, str)
         or not version
-        or len(version.encode("utf-8")) > 32
+        or utf8_size(version, f"{label}.candidate.version") > 32
         or any(ord(character) < 0x20 or ord(character) == 0x7F for character in version)
     ):
         raise RawArtifactError(f"{label}.candidate.version must be bounded printable text")
@@ -356,7 +453,7 @@ def parse_descriptor(
     path = raw["path"]
     if not isinstance(path, str) or not path:
         raise RawArtifactError(f"{label}.path must be a non-empty relative path")
-    if "\\" in path or len(path.encode("utf-8")) > MAX_RELATIVE_PATH_BYTES:
+    if "\\" in path or utf8_size(path, f"{label}.path") > MAX_RELATIVE_PATH_BYTES:
         raise RawArtifactError(f"{label}.path is not a bounded POSIX relative path")
     relative = PurePosixPath(path)
     if relative.is_absolute() or str(relative) != path:
@@ -777,10 +874,13 @@ def parse_trust_policy_bytes(
         reason = value["reason"]
         if (
             type(value["schema_version"]) is not int
+            # This is the historical deployment sentinel recognized by the
+            # immutable collector image. Configured policies use schema v3;
+            # changing this sentinel requires a new image and source digest.
             or value["schema_version"] != 2
             or not isinstance(reason, str)
             or not reason
-            or len(reason.encode("utf-8")) > 512
+            or utf8_size(reason, "collector trust policy.reason") > 512
             or any(ord(character) < 0x20 or ord(character) == 0x7F for character in reason)
         ):
             raise RawArtifactError("collector trust policy not-configured record is malformed")
@@ -805,15 +905,29 @@ def parse_trust_policy_bytes(
             "collector_version",
             "collector_source_sha256",
             "collector_executable_sha256",
+            "evidence_profile",
         },
         "collector trust policy",
     )
     if (
         type(policy["schema_version"]) is not int
-        or policy["schema_version"] != 2
+        or policy["schema_version"] != 3
         or policy["state"] != "configured"
     ):
         raise RawArtifactError("collector trust policy state/schema is unsupported")
+    evidence_profile = exact_object(
+        policy["evidence_profile"],
+        EVIDENCE_PROFILE_FIELDS,
+        "collector trust policy.evidence_profile",
+    )
+    _require_exact_json_value(
+        evidence_profile,
+        EVIDENCE_PROFILE,
+        "collector trust policy.evidence_profile",
+    )
+    evidence_profile_sha256 = hashlib.sha256(
+        canonical_json(evidence_profile)
+    ).hexdigest()
     if policy["kty"] != "RSA" or policy["alg"] != COLLECTOR_SIGNATURE_ALGORITHM:
         raise RawArtifactError(
             f"collector trust policy must use RSA/{COLLECTOR_SIGNATURE_ALGORITHM}"
@@ -893,6 +1007,12 @@ def parse_trust_policy_bytes(
             policy["collector_executable_sha256"],
             "collector trust policy.collector_executable_sha256",
         ),
+        evidence_profile_sha256=evidence_profile_sha256,
+        aggregate_schema_version=evidence_profile["aggregate_schema_version"],
+        aggregator_version=evidence_profile["aggregator_version"],
+        boot_environment_scheme=evidence_profile["boot_environment_scheme"],
+        machine_identity_scheme=evidence_profile["machine_identity_scheme"],
+        machine_topology=evidence_profile["machine_topology"],
         release_source_pinned=release_source_pinned,
     )
 

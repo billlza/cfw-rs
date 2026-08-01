@@ -126,12 +126,20 @@
 - Add fail-closed release documentation for nested signing, provisioning,
   notarization, SBOM/license evidence, real packet evidence, weak-network
   recovery, resource limits, and physical-device testing.
-- Upgrade physical evidence to aggregate schema v4, receipt schema v3, proof
-  schema v3, and trust-policy schema v2. The only accepted collector signature
+- Upgrade physical evidence to aggregate schema v5, receipt schema v3, proof
+  schema v3, and trust-policy schema v3. The signed policy digest now binds the
+  exact single-machine profile, preventing old receipts from being relabelled
+  under the new aggregate marker. The only accepted collector signature
   is PS256 with a source-pinned RSA-PSS-3072 Cloud KMS HSM key version; every
   harness report and receipt binds that identity and the recomputed final
   artifact-hash manifest. Final-candidate schema v3 derives the binding from the
   reopened aggregate and rejects the former caller-only evidence declaration.
+  The two fixed clean-OS runs now share one automatically observed physical-
+  machine identity, use distinct sealed boot-environment digests, and retain
+  independent nonces, receipts, reports, and raw archives. The blocking soak is
+  an operator-observed three-hour interval with no reported crash per OS for
+  this limited internal distribution; it is not a remote-liveness or public-GA
+  endurance claim.
 - Build XcodeGen from checksum-bound source with a digest-pinned
   installed-resource patch, isolated resolved-only SwiftPM state, a real project
   generation probe, debug-path stripping, and a complete tree-v2 manifest.

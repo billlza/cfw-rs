@@ -89,7 +89,8 @@ The release operator must have:
 - the validated `clashformac-notary` notarytool Keychain profile;
 - the encrypted Tauri updater signing key outside the repository and its
   non-synchronizing Keychain-held password;
-- clean macOS 15 and current macOS Apple Silicon test machines.
+- one physical Apple Silicon test Mac that can boot separate clean macOS 15
+  and current-macOS environments.
 
 `verify_release_environment.sh` rejects `.key`, `.pem`, or `.p8` material under
 the repository workspace. Git ignore rules are not a key-management boundary:
@@ -200,10 +201,13 @@ does resolve in the target graph remains blocking.
 
 ## 4. Native data-plane evidence
 
-Run the signed app on clean physical Apple Silicon machines. Capture unique
-per-test tokens and packet evidence for TCPv4, TCPv6, UDP/QUIC, DNS A/AAAA, LAN
-bypass, included routes, and excluded routes. A connected VPN status or an
-existing `utun` interface is not data-plane evidence.
+Run the signed app on one controlled physical Apple Silicon Mac, sequentially
+booted into the two source-pinned clean OS environments. Both runs must bind
+the same machine identity while retaining distinct run IDs, nonces, receipts,
+and raw archives. Capture unique per-test tokens and packet evidence for TCPv4,
+TCPv6, UDP/QUIC, DNS A/AAAA, LAN bypass, included routes, and excluded routes.
+A connected VPN status or an existing `utun` interface is not data-plane
+evidence.
 
 Required network conditions:
 
@@ -403,20 +407,27 @@ commit:
    ```
 
    This exclusively creates
-   `target/candidates/0.4.0/release/final-candidate/physical-candidate-artifact-hash-manifest.json`.
+   `target/candidates/0.4.0/release/final-candidate/physical-candidate-artifact-hash-manifest.json`
+   and the exact collector projection
+   `target/candidates/0.4.0/release/final-candidate/physical-collector-candidate.json`.
    It reopens the publish-ready notarization receipt and journal lineage and
    binds the post-staple app, app manifest, libbox, notarization archive/result/
    log, Gatekeeper evidence, publication closure, SBOMs, receipt, intent, and
    event tree. It refuses to replace an existing file; any drift requires a new
    build and clean evidence root, never an in-place rewrite;
-5. run the source-pinned production collector on both required clean physical
-   machines (`macos15` and `current-macos`) following
-   [`docs/physical-evidence-v4.md`](./docs/physical-evidence-v4.md). Both PS256
+5. run the source-pinned production collector for both required clean OS
+   environments (`macos15` and `current-macos`) on the same physical Mac,
+   following
+   [`docs/physical-evidence-v5.md`](./docs/physical-evidence-v5.md). Both PS256
    run receipts and the aggregate must bind the exact manifest digest from step
    4. Retain all raw private bytes and place only the strict aggregate descriptor
    at
    `target/candidates/0.4.0/release/final-candidate/physical-evidence.json`;
-6. after both machine archives are complete, seal the runtime evidence:
+   the current policy requires a 3-hour operator-observed interval with no
+   reported crash on each pinned OS. This duration and timestamp/crash-list
+   evidence model are approved only for the small internal distribution; they
+   are neither a remote liveness attestation nor a public-GA stability claim;
+6. after both OS-run archives are complete, seal the runtime evidence:
 
    ```bash
    python3 -B scripts/production_release_evidence.py seal
@@ -487,17 +498,19 @@ The 0.4.0 archive and its embedded trust configuration use replacement key ID
 installation artifact.
 
 This updater rotation is independent of the physical collector trust root.
-Production physical receipts accept only the source-pinned aggregate v4 /
-receipt v3 / proof v3 PS256 contract backed by one versioned Cloud KMS HSM
+Production physical receipts accept only the source-pinned aggregate v5 /
+receipt v3 / proof v3 / trust-policy v3 PS256 contract backed by one versioned Cloud KMS HSM
 RSA-3072 key. The checked-in collector policy is configured for the reviewed
 v0.4.0 key, attestation, public key, collector source closure and immutable OCI
 image digest. External release operations have live-tested the least-privilege
 signer, Firestore nonce ledger, Binary Authorization and locked Data Access
 audit retention described in
 [`docs/release/physical-collector-v040.md`](docs/release/physical-collector-v040.md).
-This does not close the two-distinct-clean-Mac physical gate or authorize build
-40002. No updater key, Apple notarization key, local private key, or older RS256
-receipt may substitute for this trust root.
+The trust-policy profile is inside the receipt-signed policy digest, so a v4
+aggregate or a receipt issued under the former policy digest cannot be
+relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
+build 40002. No updater key, Apple notarization key, local private key, or older
+RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable
 entrypoint. Do not prefix it with `bash`: its `#!/bin/bash -p` boundary prevents

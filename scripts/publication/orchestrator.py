@@ -122,6 +122,9 @@ FINAL_CANDIDATE_INPUT = CANDIDATE_ROOT / "release" / "final-candidate"
 PHYSICAL_CANDIDATE_MANIFEST = (
     FINAL_CANDIDATE_INPUT / "physical-candidate-artifact-hash-manifest.json"
 )
+PHYSICAL_COLLECTOR_CANDIDATE = (
+    FINAL_CANDIDATE_INPUT / "physical-collector-candidate.json"
+)
 PHYSICAL_EVIDENCE_INPUT = FINAL_CANDIDATE_INPUT / "physical-evidence.json"
 SEALED_OUTPUT = CANDIDATE_ROOT / "release" / "sealed-manifest"
 
@@ -545,6 +548,25 @@ def _physical_candidate_hash_manifest(context: ProductionContext) -> dict[str, A
     return {"entries": entries, "sha256": tree_digest(entries)}
 
 
+def _physical_collector_candidate(
+    context: ProductionContext, manifest: dict[str, Any]
+) -> dict[str, str]:
+    """Derive the sole candidate projection accepted by collector requests."""
+
+    return {
+        "version": PRODUCT_VERSION,
+        "build_number": FINAL_BUILD,
+        "app_manifest_sha256": sha256_file(
+            _path(context.repository, SIGNED_APP_MANIFEST)
+        ),
+        "signed_app_tree_sha256": context.app_manifest["sha256"],
+        "artifact_hash_manifest_sha256": require_sha256(
+            manifest.get("sha256"), "physical candidate artifact-hash manifest"
+        ),
+        "built_at": context.transaction.prepared_at,
+    }
+
+
 def _require_real_directory(path: Path, *, create: bool = False) -> None:
     if create and not path.exists() and not path.is_symlink():
         path.mkdir(mode=0o700)
@@ -556,14 +578,31 @@ def prepare_physical_candidate_manifest(repository: Path) -> dict[str, Any]:
     """Freeze the signed/notarized runtime candidate physical collection may bind."""
     context = _production_context(repository)
     manifest = _physical_candidate_hash_manifest(context)
+    collector_candidate = _physical_collector_candidate(context, manifest)
     output = _path(context.repository, PHYSICAL_CANDIDATE_MANIFEST)
+    candidate_output = _path(context.repository, PHYSICAL_COLLECTOR_CANDIDATE)
     _require_real_directory(output.parent.parent)
     _require_real_directory(output.parent, create=True)
-    if output.exists() or output.is_symlink():
+    if (
+        output.exists()
+        or output.is_symlink()
+        or candidate_output.exists()
+        or candidate_output.is_symlink()
+    ):
         raise PublicationError(
-            f"refusing to replace physical candidate artifact-hash manifest: {output}"
+            "refusing to replace physical candidate preparation outputs"
         )
-    write_new(output, canonical_json(manifest))
+    try:
+        write_new(candidate_output, canonical_json(collector_candidate))
+        write_new(output, canonical_json(manifest))
+    except BaseException:
+        if not output.exists() and not output.is_symlink():
+            candidate_output.unlink(missing_ok=True)
+        raise
+    if _load_strict_json(candidate_output, canonical=True) != collector_candidate:
+        raise PublicationError(
+            "physical collector candidate changed after publication"
+        )
     if _load_strict_json(output, canonical=True) != manifest:
         raise PublicationError(
             "physical candidate artifact-hash manifest changed after publication"

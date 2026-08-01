@@ -59,6 +59,17 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 with self.assertRaises(BuildIdentityError):
                     canonical_build_version(value)
 
+    def test_build_bound_rejects_overflow_without_unbounded_integer_parsing(self) -> None:
+        self.assertEqual(
+            canonical_build_version("9223372036854775807"),
+            "9223372036854775807",
+        )
+        for value in ("9223372036854775808", "9" * 5_000):
+            with self.subTest(length=len(value)), self.assertRaisesRegex(
+                BuildIdentityError, "signed 64-bit"
+            ):
+                canonical_build_version(value)
+
     def test_final_build_must_exceed_validated_candidate(self) -> None:
         require_newer_build("40001", "40000")
         for final in ("40000", "39999"):

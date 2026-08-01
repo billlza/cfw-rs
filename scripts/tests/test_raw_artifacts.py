@@ -11,11 +11,13 @@ from unittest import mock
 
 from scripts.harness.raw_artifacts import (
     COLLECTOR_SIGNATURE_ALGORITHM,
+    EVIDENCE_PROFILE,
     KMS_ATTESTATION_FORMATS,
     KMS_PROTECTION_LEVEL,
     KMS_SIGNATURE_ALGORITHM,
     MAX_ARTIFACT_COUNT,
     ArtifactReader,
+    CollectorTrustNotConfiguredError,
     RawArtifactError,
     canonical_json,
     load_json_bytes,
@@ -218,13 +220,14 @@ class TrustPolicyTests(unittest.TestCase):
             "collector_source_sha256": "c" * 64,
             "collector_version": "collector-v1",
             "e": TEST_RSA_E,
+            "evidence_profile": EVIDENCE_PROFILE,
             "key_version": TEST_KEY_VERSION,
             "kms_algorithm": KMS_SIGNATURE_ALGORITHM,
             "kty": "RSA",
             "n": TEST_RSA_N,
             "protection_level": KMS_PROTECTION_LEVEL,
             "public_key_sha256": TEST_PUBLIC_KEY_SHA256,
-            "schema_version": 2,
+            "schema_version": 3,
             "state": "configured",
         }
 
@@ -258,6 +261,50 @@ class TrustPolicyTests(unittest.TestCase):
             parse_trust_policy_bytes(pretty, expected_sha256=hashlib.sha256(pretty).hexdigest())
         self.assertNotEqual(hashlib.sha256(pretty).hexdigest(), digest)
 
+    def test_evidence_profile_is_exact_and_has_no_legacy_compatibility(self) -> None:
+        mutations = []
+        changed_marker = self.configured_value()
+        changed_marker["evidence_profile"] = copy.deepcopy(EVIDENCE_PROFILE)
+        changed_marker["evidence_profile"]["aggregator_version"] = (
+            "physical-evidence-aggregator-v4-single-machine"
+        )
+        mutations.append(changed_marker)
+        missing_topology = self.configured_value()
+        missing_topology["evidence_profile"] = copy.deepcopy(EVIDENCE_PROFILE)
+        del missing_topology["evidence_profile"]["machine_topology"]
+        mutations.append(missing_topology)
+        unknown_field = self.configured_value()
+        unknown_field["evidence_profile"] = copy.deepcopy(EVIDENCE_PROFILE)
+        unknown_field["evidence_profile"]["fallback"] = True
+        mutations.append(unknown_field)
+        for value in mutations:
+            with self.subTest(profile=value["evidence_profile"]), self.assertRaises(
+                RawArtifactError
+            ):
+                self.parse(value)
+
+    def test_evidence_profile_numeric_fields_require_exact_integer_types(self) -> None:
+        for field, invalid_values in (
+            ("schema_version", (1.0, True)),
+            ("aggregate_schema_version", (5.0, True)),
+            ("soak_hours_per_run", (3.0, True)),
+        ):
+            for invalid in invalid_values:
+                value = self.configured_value()
+                value["evidence_profile"] = copy.deepcopy(EVIDENCE_PROFILE)
+                value["evidence_profile"][field] = invalid
+                with self.subTest(field=field, invalid=invalid), self.assertRaisesRegex(
+                    RawArtifactError, "evidence_profile"
+                ):
+                    self.parse(value)
+
+    def test_evidence_profile_required_run_shape_is_exact(self) -> None:
+        value = self.configured_value()
+        value["evidence_profile"] = copy.deepcopy(EVIDENCE_PROFILE)
+        value["evidence_profile"]["required_runs"][0]["fallback"] = "macos27"
+        with self.assertRaisesRegex(RawArtifactError, "required_runs"):
+            self.parse(value)
+
     def test_even_policy_modulus_is_rejected(self) -> None:
         data, _digest = self.configured_policy()
         value = load_json_bytes(data, "fixture")
@@ -279,14 +326,17 @@ class TrustPolicyTests(unittest.TestCase):
             ):
                 self.parse(value)
 
-    def test_policy_v1_is_rejected_without_compatibility(self) -> None:
+    def test_legacy_policy_versions_are_rejected_without_compatibility(self) -> None:
         value = self.configured_value()
-        value["schema_version"] = 1
-        with self.assertRaisesRegex(RawArtifactError, "state/schema"):
-            self.parse(value)
+        for schema_version in (1, 2):
+            value["schema_version"] = schema_version
+            with self.subTest(schema_version=schema_version), self.assertRaisesRegex(
+                RawArtifactError, "state/schema"
+            ):
+                self.parse(value)
 
     def test_policy_schema_rejects_float_and_bool(self) -> None:
-        for schema_version in (2.0, True):
+        for schema_version in (3.0, True):
             value = self.configured_value()
             value["schema_version"] = schema_version
             with self.subTest(schema_version=schema_version), self.assertRaisesRegex(
@@ -398,8 +448,21 @@ class TrustPolicyTests(unittest.TestCase):
             "0fb9e2281730c6534101cfed26d31c04f718e3517a00c9e1bdb51dcf3c7bedd2",
         )
 
-    def test_not_configured_policy_requires_exact_schema_v2_integer(self) -> None:
-        for schema_version in (1, 2.0, True):
+    def test_not_configured_deployment_sentinel_requires_exact_schema_v2(self) -> None:
+        valid = {
+            "reason": "fixture trust is absent",
+            "schema_version": 2,
+            "state": "not-configured",
+        }
+        data = canonical_json(valid) + b"\n"
+        with self.assertRaisesRegex(
+            CollectorTrustNotConfiguredError, "not configured"
+        ):
+            parse_trust_policy_bytes(
+                data, expected_sha256=hashlib.sha256(data).hexdigest()
+            )
+
+        for schema_version in (1, 3, 2.0, True):
             value = {
                 "reason": "fixture trust is absent",
                 "schema_version": schema_version,
@@ -585,6 +648,33 @@ class ArtifactReaderSecurityTests(unittest.TestCase):
     def test_duplicate_json_keys_are_rejected(self) -> None:
         with self.assertRaisesRegex(RawArtifactError, "duplicate field"):
             load_json_bytes(b'{"a":1,"a":2}', "duplicate")
+
+    def test_unpaired_unicode_surrogates_are_rejected_as_domain_errors(self) -> None:
+        with self.assertRaisesRegex(RawArtifactError, "valid Unicode"):
+            load_json_bytes(b'{"value":"\\ud800"}', "surrogate")
+        with self.assertRaisesRegex(RawArtifactError, "valid Unicode"):
+            parse_descriptor(
+                {
+                    "kind": "lifecycle-event",
+                    "path": "\ud800.json",
+                    "size": 1,
+                    "sha256": "a" * 64,
+                },
+                expected_kinds={"lifecycle-event"},
+                label="surrogate descriptor",
+            )
+
+    def test_oversized_json_integer_is_rejected_before_native_conversion(self) -> None:
+        data = b'{"value":' + b"9" * 5_000 + b"}"
+        with self.assertRaisesRegex(RawArtifactError, "integer exceeds"):
+            load_json_bytes(data, "oversized integer")
+
+    def test_json_exponent_overflow_cannot_create_non_finite_float(self) -> None:
+        for token in (b"1e999999", b"-1e999999"):
+            with self.subTest(token=token), self.assertRaisesRegex(
+                RawArtifactError, "not finite"
+            ):
+                load_json_bytes(b'{"value":' + token + b"}", "overflowing float")
 
 
 if __name__ == "__main__":

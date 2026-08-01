@@ -162,6 +162,12 @@ The release pipeline separates four levels:
    artifact hashes, corresponding source, notices, licenses, SBOMs, and
    publication bindings.
 
+The signed-installed level uses one physical Apple Silicon Mac across the two
+source-pinned clean OS environments. Cross-run validation requires one shared
+machine digest while keeping each run ID, nonce, receipt, report, and raw
+archive independent. This deliberately trades hardware diversity for a
+single-machine release operation without reducing the two-OS behavior matrix.
+
 The outer manifest hashes this requirements document, this design, and the
 implementation checklist. Missing or changed documents invalidate the seal.
 

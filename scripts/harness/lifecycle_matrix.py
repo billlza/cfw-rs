@@ -17,6 +17,12 @@ import re
 from typing import Any, Callable
 
 if __package__:
+    from .physical_machine_identity import (
+        BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
+        DOCUMENT as MACHINE_IDENTITY_SCHEME,
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from .packet_capture import (
         ALLOWED_LINK_TYPES,
         PacketCaptureError,
@@ -36,6 +42,12 @@ else:  # pragma: no cover - direct-script import path
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from physical_machine_identity import (  # type: ignore
+        BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
+        DOCUMENT as MACHINE_IDENTITY_SCHEME,
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from packet_capture import (  # type: ignore
         ALLOWED_LINK_TYPES,
         PacketCaptureError,
@@ -135,6 +147,11 @@ REQUIRED_PROBES = frozenset(PROBE_SPECS)
 OPERATION_FIELDS = {"operation_id", "installation_id", "epoch", "generation"}
 ENVIRONMENT_FIELDS = {
     "machine_sha256",
+    "machine_identity_scheme",
+    "hardware_model",
+    "virtualization_present",
+    "boot_environment_sha256",
+    "boot_environment_scheme",
     "macos_build",
     "architecture",
     "operation_context",
@@ -211,6 +228,22 @@ def _operation_context(value: Any, label: str) -> dict[str, Any]:
 def _environment(value: Any, label: str = "environment") -> dict[str, Any]:
     environment = exact_object(value, ENVIRONMENT_FIELDS, label)
     machine = require_sha256(environment["machine_sha256"], f"{label}.machine_sha256")
+    if environment["machine_identity_scheme"] != MACHINE_IDENTITY_SCHEME:
+        raise LifecycleMatrixError(f"{label}.machine_identity_scheme is unsupported")
+    try:
+        hardware_model = validate_physical_hardware_model(
+            environment["hardware_model"]
+        )
+    except PhysicalMachineIdentityError as error:
+        raise LifecycleMatrixError(f"{label}.hardware_model is invalid") from error
+    if environment["virtualization_present"] is not False:
+        raise LifecycleMatrixError(f"{label} must not be virtualized")
+    boot_environment = require_sha256(
+        environment["boot_environment_sha256"],
+        f"{label}.boot_environment_sha256",
+    )
+    if environment["boot_environment_scheme"] != BOOT_ENVIRONMENT_SCHEME:
+        raise LifecycleMatrixError(f"{label}.boot_environment_scheme is unsupported")
     macos_build = environment["macos_build"]
     if not isinstance(macos_build, str) or not MACOS_BUILD_RE.fullmatch(macos_build):
         raise LifecycleMatrixError(f"{label}.macos_build is not a macOS build identifier")
@@ -218,6 +251,11 @@ def _environment(value: Any, label: str = "environment") -> dict[str, Any]:
         raise LifecycleMatrixError(f"{label}.architecture must be arm64")
     return {
         "machine_sha256": machine,
+        "machine_identity_scheme": MACHINE_IDENTITY_SCHEME,
+        "hardware_model": hardware_model,
+        "virtualization_present": False,
+        "boot_environment_sha256": boot_environment,
+        "boot_environment_scheme": BOOT_ENVIRONMENT_SCHEME,
         "macos_build": macos_build,
         "architecture": REQUIRED_ARCHITECTURE,
         "operation_context": _operation_context(

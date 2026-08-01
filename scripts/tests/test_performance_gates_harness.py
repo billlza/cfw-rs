@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timedelta
 import json
 import tempfile
 import unittest
@@ -95,11 +96,21 @@ class PerformanceGateTests(unittest.TestCase):
 
     def test_soak_duration_is_derived_from_raw_timestamps(self) -> None:
         raw = self.raw()
-        raw["soak"]["ended_at"] = "2026-07-28T11:00:00Z"
+        raw["soak"]["ended_at"] = "2026-07-27T14:00:00Z"
         self.fixture.rewrite_json(self.artifact, raw)
-        self.document["soak"]["duration_hours"] = 23.0
+        self.document["soak"]["duration_hours"] = 2.0
         with self.assertRaisesRegex(PerformanceGateError, "fails the gate"):
             self.validate()
+
+    def test_exact_three_hour_internal_soak_passes(self) -> None:
+        raw = self.raw()
+        raw["soak"]["ended_at"] = "2026-07-27T15:00:00Z"
+        raw["completed_at"] = "2026-07-27T15:00:00Z"
+        self.fixture.rewrite_json(self.artifact, raw)
+        self.document["soak"]["duration_hours"] = 3.0
+        self.document["completed_at"] = "2026-07-27T15:00:00Z"
+        result = self.validate()
+        self.assertEqual(result["completed_at"].isoformat(), "2026-07-27T15:00:00+00:00")
 
     def test_soak_crash_events_cannot_be_declared_away(self) -> None:
         raw = self.raw()
@@ -125,7 +136,12 @@ class PerformanceGateTests(unittest.TestCase):
             self.validate()
 
     def test_report_signature_must_follow_raw_completion(self) -> None:
-        self.document["signed_at"] = "2026-07-28T11:59:59Z"
+        completed_at = datetime.fromisoformat(
+            self.document["completed_at"].replace("Z", "+00:00")
+        )
+        self.document["signed_at"] = (
+            completed_at - timedelta(seconds=1)
+        ).isoformat().replace("+00:00", "Z")
         with self.assertRaisesRegex(PerformanceGateError, "predates raw completion"):
             self.validate()
 

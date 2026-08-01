@@ -46,14 +46,17 @@ for node in ast.walk(tree):
         )
 PY
 
-# Confirm the Signed_Installed physical-evidence aggregate v4 / receipt v3 /
-# proof v3 gate is wired to packet and lifecycle v3 plus performance and
+# Confirm the Signed_Installed physical-evidence aggregate v5 / receipt v3 /
+# proof v3 / collector-policy v3 gate is wired to packet and lifecycle v3 plus performance and
 # adversarial v2, the source-pinned PS256 Cloud KMS HSM policy bytes, and the
 # Evidence_Manifest level order.
 # This is a source-boundary contract check only;
-# the physical evidence itself requires signed Apple Silicon runs on two macOS
-# versions and an externally provisioned collector trust root.
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/harness/physical_evidence_aggregator.py --self-check
+# the physical evidence itself requires signed runs on one Apple Silicon Mac
+# across both source-pinned clean macOS environments and an externally
+# provisioned collector trust root.
+/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_machine_identity.py --self-check
+/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_collector_request.py self-check
+/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_evidence_aggregator.py --self-check
 
 # Confirm the final-candidate notarization/installed binder (Task 12.2) is wired
 # to the physical-evidence aggregator, the sealed-closure pins, and the

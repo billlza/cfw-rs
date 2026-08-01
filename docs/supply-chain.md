@@ -278,7 +278,7 @@ immutable OCI image digest. The least-privilege Cloud Run identities,
 Firestore replay ledger, Binary Authorization attestation, Data Access audit
 sink and locked retention bucket remain external release-operations controls;
 repository code neither creates them nor falls back when they are absent. See
-[Physical evidence v4](physical-evidence-v4.md) and the
+[Physical evidence v5](physical-evidence-v5.md) and the
 [v0.4.0 collector provisioning record](release/physical-collector-v040.md).
 
 ## Release ordering
@@ -308,7 +308,8 @@ Authority transport are linked into the Packet Tunnel and ProxyAgent product
 graph. Their source/unit and unsigned-bundle evidence is not a physical
 data-plane verdict: the exact signed and installed candidate must still prove
 traffic, performance, cancellation, revocation, crash/reboot recovery, and
-fast-user switching on clean physical machines.
+fast-user switching on the same physical Mac across both required clean OS
+environments.
 
 The durable Authority journal remains bounded without a crash-safe compaction
 protocol, Quarantined has no product repair workflow, and unattended System

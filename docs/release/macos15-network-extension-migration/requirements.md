@@ -145,10 +145,11 @@ profile mismatch is a release failure.
    digest, successful staple and validation, Gatekeeper acceptance with the
    expected origin, DMG verification, final hashes, GPL corresponding source,
    notices, reviewed licenses, vulnerability results, and SPDX/CycloneDX SBOMs.
-5. Signed-installed evidence requires clean Apple-silicon machines for macOS 15
-   and the current supported macOS, including approval/denial, upgrade,
-   replacement, reboot, sleep/wake, crashes, cancellation, multi-user/Fast User
-   Switching, cleanup, and uninstall cases.
+5. Signed-installed evidence requires one physical Apple-silicon machine to run
+   separate clean installations of macOS 15 and the current supported macOS.
+   Both runs shall bind the same machine identity and independently cover
+   approval/denial, upgrade, replacement, reboot, sleep/wake, crashes,
+   cancellation, multi-user/Fast User Switching, cleanup, and uninstall cases.
 6. Packet evidence must use independent observations and unique tokens for
    IPv4, IPv6, TCP, UDP, QUIC, DNS A/AAAA, LAN bypass, route inclusion and
    exclusion, stop cleanup, and IPv6-disabled behavior.

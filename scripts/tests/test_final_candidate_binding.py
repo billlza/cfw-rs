@@ -406,17 +406,19 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
                     physical_trust_policy=physical.policy,
                 )
 
-    def test_physical_aggregate_v3_is_rejected_without_compatibility(self) -> None:
+    def test_physical_aggregate_v4_is_rejected_without_compatibility(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             physical = PhysicalEvidenceFixture(root)
-            physical.aggregate["schema_version"] = 3
-            physical.aggregate["aggregator_version"] = "physical-evidence-aggregator-v3"
+            physical.aggregate["schema_version"] = 4
+            physical.aggregate["aggregator_version"] = (
+                "physical-evidence-aggregator-v4-single-machine"
+            )
             request = _request(
                 physical_evidence=physical.write_aggregate_artifact()
             )
             with self.assertRaisesRegex(
-                PublicationError, "aggregate schema_version must be 4"
+                PublicationError, "aggregate schema_version must be 5"
             ):
                 _build_final_candidate_binding(
                     REPOSITORY,
@@ -584,6 +586,23 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
         )
         self.assertEqual(
             [run["os"] for run in binding["installed_runs"]], ["current-macos", "macos15"]
+        )
+        self.assertEqual(
+            len({run["machine_sha256"] for run in binding["installed_runs"]}),
+            1,
+        )
+        self.assertEqual(
+            len({run["hardware_model"] for run in binding["installed_runs"]}),
+            1,
+        )
+        self.assertEqual(
+            len(
+                {
+                    run["boot_environment_sha256"]
+                    for run in binding["installed_runs"]
+                }
+            ),
+            2,
         )
 
     def test_soak_binding_is_the_raw_performance_sample_bytes(self) -> None:

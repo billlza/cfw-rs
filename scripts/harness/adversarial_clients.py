@@ -17,6 +17,10 @@ import re
 from typing import Any
 
 if __package__:
+    from .physical_machine_identity import (
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from .raw_artifacts import (
         ArtifactReader,
         RawArtifactError,
@@ -29,6 +33,10 @@ else:  # pragma: no cover - direct-script import path
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from physical_machine_identity import (  # type: ignore
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from raw_artifacts import (  # type: ignore
         ArtifactReader,
         RawArtifactError,
@@ -181,7 +189,10 @@ def _platform(value: Any) -> dict[str, Any]:
     if platform["architecture"] != "arm64" or platform["clean_install"] is not True:
         raise AdversarialMatrixError("adversarial matrix requires a clean Apple Silicon machine")
     _bounded_text(platform["macos_version"], "platform.macos_version")
-    _bounded_text(platform["hardware_model"], "platform.hardware_model")
+    try:
+        validate_physical_hardware_model(platform["hardware_model"])
+    except PhysicalMachineIdentityError as error:
+        raise AdversarialMatrixError("platform.hardware_model is invalid") from error
     return platform
 
 

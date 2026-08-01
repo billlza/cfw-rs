@@ -1,8 +1,8 @@
 # v0.4.0 physical collector provisioning record
 
 This record binds the v0.4.0 production collector trust root and its external
-control plane. It does not grant `Signed_Installed_Verified`, replace the two
-distinct clean-Mac requirement, or authorize validation build 40002.
+control plane. It does not grant `Signed_Installed_Verified`, replace the
+same-machine two-clean-OS requirement, or authorize validation build 40002.
 
 ## Source and image binding
 
@@ -18,7 +18,7 @@ distinct clean-Mac requirement, or authorize validation build 40002.
 - On-demand scan:
   `projects/cfw-release-evidence-20260730/locations/asia/scans/b3bd8346-74a9-4b69-8674-d34298266def`;
   the result contained no vulnerability occurrences.
-- Canonical checked-in trust-policy SHA-256:
+- Original activated trust-policy v2 SHA-256:
   `f7a3e459384537c5b74ac8766dc6e2874a1dce95342e7be288d1ce5989b2ad61`.
 
 The build pushes a tag only as an upload handle. Binary Authorization and Cloud
@@ -101,6 +101,44 @@ version under the existing grant.
   unauthenticated requests. Activation issued no production nonce or receipt
   and did not start validation build 40002.
 
+## Single-machine policy transition
+
+Repository source now defines trust-policy schema v3 with exact SHA-256
+`ed8538dbf11f49555a917617b3f20911801364c4853b05f9704fec99729293d0`.
+Its signed `evidence_profile` authorizes only aggregate schema v5,
+`physical-evidence-aggregator-v5-single-machine`, the two pinned OS/build
+lanes, one-machine/two-clean-OS topology, distinct sealed boot environments,
+the fixed machine/boot identity schemes, and a 3-hour-per-OS internal-release
+soak. The image and HSM key do not need
+to change because receipt v3 already signs the server-owned trust-policy hash.
+
+The transition was activated on 2026-08-01 through a fail-closed maintenance
+window: the receipt signer was disabled first, then the nonce issuer; both were
+changed to the exact v3 policy digest while disabled; a fresh fixed-challenge
+KMS preflight was independently verified with the checked-in RSA public key;
+then signer and issuer were re-enabled in that order. The active revisions are:
+
+- receipt signer `physical-receipt-signer-v040-00005-2tl`;
+- nonce issuer `physical-nonce-issuer-v040-00005-dct`.
+
+Both serve 100 percent of traffic from the unchanged immutable image digest,
+retain Binary Authorization `default`, and report
+`CFW_PRODUCTION_RECEIPTS_ENABLED=true` with the exact v3 policy hash. The
+activation preflight issued at `2026-08-01T07:12:34Z` reached `COMMITTED` with
+signature SHA-256
+`c01738abbc65051f9efa9e77817846c0d5ef65c360dfbb7d07c5fcf7a955d60c`.
+A subsequent fixed-challenge preflight issued and committed at
+`2026-08-01T07:13:07Z` with signature SHA-256
+`2394e39dc01c8388f206d8c8a942c3cc3458e5b8bfe6c865204e91b9b77241b2`.
+Both were `kms-ledger-preflight-v1` records; neither created a production nonce
+or receipt.
+Authenticated malformed nonce/receipt documents returned HTTP 400, proving
+that both enabled schema gates were reached without issuing a production nonce
+or receipt. Anonymous requests returned the platform's HTTP 404 privacy
+response, and each IAM policy still grants `roles/run.invoker` only to the
+named release operator. The original v2 hash and revision IDs above remain
+historical evidence and are not rewritten as v5 activation.
+
 ## Audit retention and operational boundary
 
 - Control project: `cfw-release-evidence-20260730`.
@@ -113,9 +151,10 @@ version under the existing grant.
   a 100% forecast alert. A budget is an alerting control, not a hard spending
   cap.
 
-One local Mac is sufficient to operate this control plane and may supply one
-physical evidence lane. It cannot satisfy the source-pinned requirement for
-two distinct clean Macs on the pinned macOS versions/builds. One human retains
-administrative authority over the GCP organization and both projects, so the
-service identities provide technical and audit separation, not independent
-two-person approval.
+One local physical Mac is designated to supply both sequential clean-OS
+evidence lanes; neither lane has been collected by this provisioning record.
+The two future runs must use the same machine digest while
+remaining independent in every run ID, nonce, receipt, report, and raw archive.
+One human retains administrative authority over the GCP organization and both
+projects, so the service identities provide technical and audit separation,
+not independent two-person approval.

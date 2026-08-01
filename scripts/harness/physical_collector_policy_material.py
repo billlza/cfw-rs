@@ -25,6 +25,7 @@ import zlib
 if __package__:
     from .raw_artifacts import (
         COLLECTOR_SIGNATURE_ALGORITHM,
+        EVIDENCE_PROFILE,
         KMS_ATTESTATION_FORMATS,
         KMS_PROTECTION_LEVEL,
         KMS_SIGNATURE_ALGORITHM,
@@ -44,6 +45,7 @@ if __package__:
 else:  # Direct-script import path.
     from raw_artifacts import (
         COLLECTOR_SIGNATURE_ALGORITHM,
+        EVIDENCE_PROFILE,
         KMS_ATTESTATION_FORMATS,
         KMS_PROTECTION_LEVEL,
         KMS_SIGNATURE_ALGORITHM,
@@ -388,13 +390,14 @@ def build_configured_policy(
             "collector_source_sha256": source_digest,
             "collector_version": version,
             "e": _base64url(exponent_bytes),
+            "evidence_profile": EVIDENCE_PROFILE,
             "key_version": observed_name,
             "kms_algorithm": KMS_SIGNATURE_ALGORITHM,
             "kty": "RSA",
             "n": _base64url(modulus_bytes),
             "protection_level": KMS_PROTECTION_LEVEL,
             "public_key_sha256": public_key_sha256,
-            "schema_version": 2,
+            "schema_version": 3,
             "state": "configured",
         }
         encoded = canonical_json(policy) + b"\n"

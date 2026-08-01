@@ -17,8 +17,13 @@ import re
 from typing import Any
 
 if __package__:
+    from .physical_machine_identity import (
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from .raw_artifacts import (
         ArtifactReader,
+        EVIDENCE_PROFILE,
         RawArtifactError,
         exact_object,
         load_json_file,
@@ -30,8 +35,13 @@ else:  # pragma: no cover - direct-script import path
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from physical_machine_identity import (  # type: ignore
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from raw_artifacts import (  # type: ignore
         ArtifactReader,
+        EVIDENCE_PROFILE,
         RawArtifactError,
         exact_object,
         load_json_file,
@@ -63,7 +73,7 @@ ACTIVE_RSS_MAX_MIB = 120.0
 SWITCH_MIN_COUNT = 100
 SWITCH_RSS_GROWTH_MAX_MIB = 5.0
 SWITCH_FD_GROWTH_MAX = 2
-SOAK_MIN_HOURS = 24
+SOAK_MIN_HOURS = EVIDENCE_PROFILE["soak_hours_per_run"]
 SOAK_MAX_CRASHES = 0
 
 WEAK_NETWORK_PROFILES: dict[str, dict[str, Any]] = {
@@ -166,7 +176,12 @@ def _parameters(value: Any, label: str = "parameters") -> dict[str, Any]:
     macos_build = machine["macos_build"]
     if not isinstance(macos_build, str) or not MACOS_BUILD_RE.fullmatch(macos_build):
         raise PerformanceGateError(f"{label}.machine.macos_build is invalid")
-    _bounded_text(machine["hardware_model"], f"{label}.machine.hardware_model")
+    try:
+        validate_physical_hardware_model(machine["hardware_model"])
+    except PhysicalMachineIdentityError as error:
+        raise PerformanceGateError(
+            f"{label}.machine.hardware_model is invalid"
+        ) from error
     require_sha256(machine["machine_sha256"], f"{label}.machine.machine_sha256")
     network = exact_object(
         parameters["network"], {"description", "uplink_mbps"}, f"{label}.network"

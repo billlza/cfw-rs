@@ -1,8 +1,9 @@
-# Physical evidence v4: PS256 collector trust and final-artifact binding
+# Physical evidence v5: single-machine PS256 collector trust
 
 `Signed_Installed_Verified` is granted only by
-`scripts/harness/physical_evidence_aggregator.py`. Aggregate schema v4, receipt
-schema v3, proof schema v3, and trust-policy schema v2 are mandatory; older
+`scripts/harness/physical_evidence_aggregator.py`. Aggregate schema v5 with
+aggregator identity `physical-evidence-aggregator-v5-single-machine`, receipt
+schema v3, proof schema v3, and trust-policy schema v3 are mandatory; older
 documents have no compatibility path. A syntactically correct report, a
 reported SHA-256, or a string such as
 `evidence_source: harness` is not physical proof.
@@ -64,8 +65,9 @@ TOCTOU-visible mutation fails the entire physical level.
   by the source-pinned collector. With pcapng, an available IDB interface name
   is also cross-checked byte-for-byte against that signed provenance.
 - Lifecycle v3 probes reference raw command/event documents. Candidate, run,
-  machine, macOS build, operation context, command, exit code, ordered event
-  sequence, and structured attributes must all match the fixed matrix. Raw
+  machine, physical hardware model, machine-identity scheme, distinct sealed
+  boot-environment digest, macOS build, operation context, command, exit code,
+  ordered event sequence, and structured attributes must all match the fixed matrix. Raw
   lifecycle event schema v1 and lifecycle report v2 are rejected; there is no
   compatibility path that can silently omit the v3 evidence described below.
 - `renderer-ready-v2` additionally references a raw renderer trace. It binds
@@ -134,6 +136,73 @@ receipt acceptance. Advancing the current stable matrix requires a reviewed
 source change to these exact pins; the verifier never infers it from the
 collection host.
 
+Both OS runs must carry the same `machine_sha256`, binding the release policy's
+declared single-hardware boundary. They must come from separate clean
+installations or boot volumes with distinct `boot_environment_sha256` values
+and retain distinct run IDs, nonces, receipts,
+reports, and raw artifact bytes. Each OS run independently supplies a full
+3-hour operator-observed wall-clock interval with no reported crash event, so
+the sequential single-machine reservation takes at least 6 hours. The current
+raw schema recomputes that interval from its start/end timestamps and validates
+the ordered crash-event list; it does not cryptographically prove uninterrupted
+process liveness or a monotonic-clock trace. That assurance is accepted only for
+this controlled small internal distribution. A virtual
+machine, an in-place label change, or the current macOS 27 beta installation
+cannot substitute for either source-pinned environment. This policy accepts
+the loss of hardware diversity; it does not weaken any lifecycle, packet,
+performance, security, or cleanup assertion.
+
+At the start of each OS run, create the private run context with the sole
+supported producer:
+
+```sh
+/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_collector_request.py initialize \
+  --candidate "$PWD/target/candidates/0.4.0/release/final-candidate/physical-collector-candidate.json" \
+  --run-id run-40003-macos15 \
+  --confirm-clean-install \
+  --output /absolute/private/path/run-context.json
+```
+
+The producer exposes no machine, model, OS-version, OS-build, or boot-volume
+override. It uses fixed absolute `uname`, `sysctl`, `ioreg`, `diskutil`, and
+`sw_vers` commands; requires a non-virtualized physical Apple model; maps only
+the two source-pinned OS/build pairs; and stores only domain-separated machine
+and sealed-boot-volume digests. Before creating either a nonce or receipt
+request it re-observes those values and fails on drift. The raw platform and
+volume UUIDs must not enter a report, aggregate, seal, or public artifact.
+Matching digests detect an accidental host or boot-volume switch under this
+operator-controlled evidence model; they are not independent Secure Enclave
+hardware attestation. `--confirm-clean-install` records an explicit operator
+observation and is not cryptographic proof that an installation is pristine.
+
+The six-hour production nonce authorizes and de-duplicates receipt signing; it
+is requested after the complete raw run has finished and must be consumed
+before expiry. It is not a collection-start challenge and therefore does not
+truncate or replace the 3-hour raw soak timeline.
+The producer binds the immutable service's six-hour TTL, derives the issue time
+from `expires_at`, and refuses a nonce issued before raw completion, after the
+local observation time, or after any proof-bearing report was signed. This is a
+local controlled-operator guard; the receipt schema does not independently
+carry or remotely attest that derived issue time.
+
+After raw measurement completes, create the exact nonce request from the saved
+context. After the private nonce issuer responds, materialize the final proof-
+bearing report/raw JSON, prepare the strict descriptor binding document, and
+create the receipt request. Neither command performs a network call or accepts
+an identity override:
+
+```sh
+/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_collector_request.py nonce-request \
+  --context /absolute/private/path/run-context.json \
+  --output /absolute/private/path/nonce-request.json
+
+/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_collector_request.py receipt-request \
+  --context /absolute/private/path/run-context.json \
+  --nonce-response /absolute/private/path/nonce-response.json \
+  --bindings /absolute/private/path/receipt-bindings.json \
+  --output /absolute/private/path/receipt-request.json
+```
+
 ## Private operational manifests and public upload boundary
 
 The final-candidate binding and sealed outer manifest are explicitly marked
@@ -174,7 +243,7 @@ authorization fail; no public digest can substitute for it.
 
 Final-candidate schema v3 independently recomputes the physical-candidate
 artifact-hash manifest from `final_artifacts`, then requires its digest to equal
-the digest in the reopened, PS256-signed aggregate schema v4. There is no caller-supplied
+the digest in the reopened, PS256-signed aggregate schema v5. There is no caller-supplied
 `evidence_binding`, empty superseded list, or other declaration that can replace
 that signed cross-check. If physical evidence is unavailable, the derived
 physical manifest binding is absent and the candidate remains blocked.
@@ -194,6 +263,14 @@ Each physical run has a PS256 receipt schema v3 over canonical JSON containing:
   KMS resource name, and algorithm;
 - all four report descriptors; and
 - the complete harness/subject/raw-descriptor set.
+
+Receipt v3 signs the exact collector trust-policy SHA-256. Trust-policy schema
+v3 embeds the exact aggregate schema, aggregator marker, one-machine/two-clean-
+OS topology, OS/build matrix, 3-hour internal-release soak duration, machine-identity scheme,
+and boot-environment scheme. The nonce intent is bound to that same server-
+owned policy digest. Consequently, a receipt issued under the former policy
+cannot be made valid by replacing only an unsigned aggregate marker; activating
+this policy requires both private Cloud Run roles to use the new exact digest.
 
 The sole accepted signature contract is RSASSA-PSS with SHA-256 (`PS256`) using
 an exact 3072-bit RSA modulus, exponent 65537, MGF1-SHA-256, a 32-byte salt,
@@ -220,9 +297,9 @@ live preflight record is documented in
 This closes the collector trust-root prerequisite only. It is not evidence that
 the signed two-process migration, Network Extension user flows, sleep/wake
 packets, 850 by 603 WKWebView rendering, or long-duration stability have run on
-the two required clean physical Macs. Test fixtures still use a committed
-test-only RSA-3072 private key only in fixture mode and are not a production
-trust root.
+the same physical Mac in both required clean OS environments. Test fixtures
+still use a committed test-only RSA-3072 private key only in fixture mode and
+are not a production trust root.
 
 ### External Cloud KMS HSM provisioning gate
 
@@ -262,7 +339,14 @@ not created or silently repaired by repository code.
 ## Security boundary and remaining external proof
 
 Hashes and race-resistant file reads detect drift; the signed receipt proves
-that an approved collector attested to the exact bytes and identities. They do
+that an approved collector signed the exact request bindings. The Cloud API
+does not independently execute or enforce the local producer and does not
+remotely attest the hardware model, virtualization state, boot volume, clean-
+install claim, or continuous liveness. Those fields are operator observations
+that the downstream aggregate cross-checks against the signed report bytes.
+A direct API caller can bypass the recommended producer, so this profile is
+appropriate only while the release operator and collection host remain inside
+the stated trust boundary. These controls do
 not make a malicious operator, compromised collection host, compromised GCP
 project, or compromised collector key trustworthy. Nonce issuance, the
 Firestore replay ledger, key custody, Binary Authorization and locked audit

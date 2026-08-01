@@ -131,6 +131,29 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
             summary["candidate"]["artifact_hash_manifest_sha256"],
             self.fixture.candidate["artifact_hash_manifest_sha256"],
         )
+        self.assertEqual(
+            len(
+                {
+                    run["machine_sha256"]
+                    for run in self.fixture.aggregate["runs"]
+                }
+            ),
+            1,
+        )
+
+    def test_zero_one_or_three_runs_are_rejected(self) -> None:
+        original = self.fixture.aggregate["runs"]
+        cases = ([], original[:1], [*original, copy.deepcopy(original[0])])
+        for runs in cases:
+            with self.subTest(run_count=len(runs)):
+                self.fixture.aggregate["runs"] = runs
+                try:
+                    with self.assertRaisesRegex(
+                        PhysicalEvidenceError, "both required physical run sets"
+                    ):
+                        self.validate()
+                finally:
+                    self.fixture.aggregate["runs"] = original
 
     def test_private_runtime_extensions_are_in_the_signed_raw_set(self) -> None:
         self.validate()
@@ -264,19 +287,55 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
         with self.assertRaisesRegex(PhysicalEvidenceError, "proof differs"):
             self.validate()
 
-    def test_aggregate_v3_is_rejected_without_compatibility(self) -> None:
-        self.fixture.aggregate["schema_version"] = 3
-        self.fixture.aggregate["aggregator_version"] = "physical-evidence-aggregator-v3"
-        self.assertEqual(SCHEMA_VERSION, 4)
-        self.assertEqual(AGGREGATOR_VERSION, "physical-evidence-aggregator-v4")
-        with self.assertRaisesRegex(PhysicalEvidenceError, "schema_version must be 4"):
+    def test_aggregate_v4_is_rejected_without_compatibility(self) -> None:
+        self.fixture.aggregate["schema_version"] = 4
+        self.fixture.aggregate["aggregator_version"] = "physical-evidence-aggregator-v4"
+        self.assertEqual(SCHEMA_VERSION, 5)
+        self.assertEqual(
+            AGGREGATOR_VERSION,
+            "physical-evidence-aggregator-v5-single-machine",
+        )
+        with self.assertRaisesRegex(PhysicalEvidenceError, "schema_version must be 5"):
+            self.validate()
+
+    def test_old_two_machine_aggregator_marker_is_rejected(self) -> None:
+        self.fixture.aggregate["aggregator_version"] = (
+            "physical-evidence-aggregator-v4-single-machine"
+        )
+        with self.assertRaisesRegex(PhysicalEvidenceError, "aggregator_version"):
+            self.validate()
+
+    def test_legacy_policy_receipts_cannot_be_rewrapped_with_new_marker(self) -> None:
+        legacy_policy_sha256 = "1" * 64
+        original_signatures: list[str] = []
+        for index, run in enumerate(self.fixture.aggregate["runs"]):
+            payload = _receipt_payload(
+                policy_sha256=legacy_policy_sha256,
+                candidate=self.fixture.candidate,
+                run=run,
+                collector=run["collector"],
+                report_bindings=self.fixture.report_bindings[index],
+                raw_bindings=self.fixture.raw_bindings[index],
+            )
+            signature = ps256_sign(canonical_json(payload))
+            run["collector"]["signature"] = signature
+            original_signatures.append(signature)
+
+        self.assertEqual(
+            self.fixture.aggregate["aggregator_version"], AGGREGATOR_VERSION
+        )
+        self.assertEqual(
+            [run["collector"]["signature"] for run in self.fixture.aggregate["runs"]],
+            original_signatures,
+        )
+        with self.assertRaisesRegex(PhysicalEvidenceError, "collector receipt failed"):
             self.validate()
 
     def test_aggregate_schema_rejects_float_and_bool(self) -> None:
-        for schema_version in (4.0, True):
+        for schema_version in (5.0, True):
             self.fixture.aggregate["schema_version"] = schema_version
             with self.subTest(schema_version=schema_version), self.assertRaisesRegex(
-                PhysicalEvidenceError, "schema_version must be 4"
+                PhysicalEvidenceError, "schema_version must be 5"
             ):
                 self.validate()
 
@@ -331,11 +390,60 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
         with self.assertRaisesRegex(PhysicalEvidenceError, "reuse a run nonce"):
             self.validate()
 
-    def test_duplicate_machine_fails(self) -> None:
-        self.fixture.aggregate["runs"][1]["machine_sha256"] = self.fixture.aggregate["runs"][0][
-            "machine_sha256"
-        ]
-        with self.assertRaisesRegex(PhysicalEvidenceError, "reuse a machine"):
+    def test_distinct_machines_fail_the_single_machine_policy(self) -> None:
+        fixture = PhysicalEvidenceFixture(
+            self.root,
+            prefix="distinct-machines",
+            single_machine=False,
+        )
+        with self.assertRaisesRegex(PhysicalEvidenceError, "different machine"):
+            validate_physical_evidence(
+                fixture.aggregate,
+                evidence_root=self.root,
+                trust_policy=fixture.policy,
+                fixture=True,
+            )
+
+    def test_resigned_distinct_hardware_models_fail_single_machine_policy(self) -> None:
+        run = self.fixture.aggregate["runs"][1]
+        run["hardware_model"] = "MacBookPro18,2"
+        documents = self.fixture.report_documents[1]
+        documents["lifecycle"]["environment"]["hardware_model"] = "MacBookPro18,2"
+        documents["packet"]["platform"]["hardware_model"] = "MacBookPro18,2"
+        documents["performance"]["parameters"]["machine"]["hardware_model"] = (
+            "MacBookPro18,2"
+        )
+        documents["adversarial"]["platform"]["hardware_model"] = "MacBookPro18,2"
+        self.fixture.resign_run(1)
+
+        with self.assertRaisesRegex(PhysicalEvidenceError, "different hardware models"):
+            self.validate()
+
+    def test_boot_environments_must_be_distinct(self) -> None:
+        self.fixture.aggregate["runs"][1]["boot_environment_sha256"] = (
+            self.fixture.aggregate["runs"][0]["boot_environment_sha256"]
+        )
+        with self.assertRaisesRegex(
+            PhysicalEvidenceError, "reuse a boot/install environment"
+        ):
+            self.validate()
+
+    def test_single_machine_run_timelines_are_sequential_at_the_boundary(self) -> None:
+        first, second = self.fixture.aggregate["runs"]
+        self.assertEqual(second["captured_at"], first["signed_at"])
+        self.validate()
+
+    def test_resigned_overlapping_single_machine_run_is_rejected(self) -> None:
+        self.fixture.aggregate["runs"][1]["captured_at"] = (
+            "2026-07-27T15:59:59Z"
+        )
+        self.fixture.resign_run(1)
+        with self.assertRaisesRegex(PhysicalEvidenceError, "timelines overlap"):
+            self.validate()
+
+    def test_virtual_hardware_model_is_rejected_before_receipt_acceptance(self) -> None:
+        self.fixture.aggregate["runs"][0]["hardware_model"] = "VirtualMac2,1"
+        with self.assertRaisesRegex(PhysicalEvidenceError, "physical Apple Mac"):
             self.validate()
 
     def test_os_labels_require_the_exact_source_pinned_stable_versions(self) -> None:

@@ -19,6 +19,7 @@ from scripts.harness.physical_collector_policy_material import (
     main,
 )
 from scripts.harness.raw_artifacts import (
+    EVIDENCE_PROFILE,
     KMS_SIGNATURE_ALGORITHM,
     canonical_json,
     parse_trust_policy_bytes,
@@ -135,6 +136,7 @@ class PhysicalCollectorPolicyMaterialTests(unittest.TestCase):
                 "collector_source_sha256",
                 "collector_version",
                 "e",
+                "evidence_profile",
                 "key_version",
                 "kms_algorithm",
                 "kty",
@@ -146,7 +148,8 @@ class PhysicalCollectorPolicyMaterialTests(unittest.TestCase):
             },
         )
         self.assertEqual(value["state"], "configured")
-        self.assertEqual(value["schema_version"], 2)
+        self.assertEqual(value["schema_version"], 3)
+        self.assertEqual(value["evidence_profile"], EVIDENCE_PROFILE)
         self.assertEqual(value["key_version"], KEY_VERSION)
         self.assertEqual(value["n"], TEST_RSA_N)
         self.assertEqual(value["e"], "AQAB")

@@ -22,6 +22,10 @@ import re
 from typing import Any
 
 if __package__:
+    from .physical_machine_identity import (
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from .packet_capture import (
         ALLOWED_LINK_TYPES,
         PacketCaptureError,
@@ -40,6 +44,10 @@ else:  # pragma: no cover - direct-script import path
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from physical_machine_identity import (  # type: ignore
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from packet_capture import (  # type: ignore
         ALLOWED_LINK_TYPES,
         PacketCaptureError,
@@ -161,9 +169,14 @@ def _platform(value: Any) -> dict[str, Any]:
     )
     if platform["architecture"] != "arm64" or platform["clean_install"] is not True:
         raise PacketEvidenceError("packet evidence requires a clean Apple Silicon machine")
-    for field in ("macos_version", "hardware_model"):
-        if not isinstance(platform[field], str) or not platform[field].strip():
-            raise PacketEvidenceError(f"platform.{field} must be a non-empty string")
+    if not isinstance(platform["macos_version"], str) or not platform[
+        "macos_version"
+    ].strip():
+        raise PacketEvidenceError("platform.macos_version must be a non-empty string")
+    try:
+        validate_physical_hardware_model(platform["hardware_model"])
+    except PhysicalMachineIdentityError as error:
+        raise PacketEvidenceError("platform.hardware_model is invalid") from error
     return platform
 
 

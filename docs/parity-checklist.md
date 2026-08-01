@@ -67,7 +67,7 @@ test items do not imply a signed physical-device release.
       rights expire, or introduce and validate a narrowly scoped privileged
       SystemConfiguration boundary
 - [ ] pass IPv4/IPv6/TCP/UDP/QUIC/DNS/route packet evidence
-- [ ] pass weak-network, resource, 100-switch, and 24-hour soak gates
+- [ ] pass weak-network, resource, 100-switch, and operator-observed 3-hour-per-OS internal-release soak gates
 - [ ] pass nested signing, entitlement, provisioning, notarization, staple, and
       Gatekeeper gates with assessments enabled for the unchanged candidate
 - [ ] publish complete corresponding source, modification notice, SBOM, and

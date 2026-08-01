@@ -41,6 +41,7 @@ from scripts.harness.physical_evidence_aggregator import (
 )
 from scripts.harness.raw_artifacts import (
     COLLECTOR_SIGNATURE_ALGORITHM,
+    EVIDENCE_PROFILE,
     KMS_ATTESTATION_FORMATS,
     KMS_PROTECTION_LEVEL,
     KMS_SIGNATURE_ALGORITHM,
@@ -58,11 +59,12 @@ SIGNED_TREE = "b" * 64
 BUILD_NUMBER = "40000"
 BUILT_AT = "2026-07-01T00:00:00Z"
 CAPTURED_AT = "2026-07-27T12:00:00Z"
-PERFORMANCE_COMPLETED_AT = "2026-07-28T12:00:00Z"
-REPORT_SIGNED_AT = "2026-07-28T12:30:00Z"
+PERFORMANCE_COMPLETED_AT = "2026-07-27T15:00:00Z"
+REPORT_SIGNED_AT = "2026-07-27T15:30:00Z"
 RUN_CAPTURED_AT = CAPTURED_AT
 RUN_COMPLETED_AT = PERFORMANCE_COMPLETED_AT
-RUN_SIGNED_AT = "2026-07-28T13:00:00Z"
+RUN_SIGNED_AT = "2026-07-27T16:00:00Z"
+RUN_TIMELINE_OFFSET = timedelta(hours=4)
 COLLECTOR_VERSION = "physical-collector-v1"
 COLLECTOR_SOURCE = "c" * 64
 COLLECTOR_EXECUTABLE = "d" * 64
@@ -165,13 +167,14 @@ def test_policy() -> CollectorTrustPolicy:
         "collector_source_sha256": COLLECTOR_SOURCE,
         "collector_version": COLLECTOR_VERSION,
         "e": TEST_RSA_E,
+        "evidence_profile": EVIDENCE_PROFILE,
         "key_version": TEST_KEY_VERSION,
         "kms_algorithm": KMS_SIGNATURE_ALGORITHM,
         "kty": "RSA",
         "n": TEST_RSA_N,
         "protection_level": KMS_PROTECTION_LEVEL,
         "public_key_sha256": TEST_PUBLIC_KEY_SHA256,
-        "schema_version": 2,
+        "schema_version": 3,
         "state": "configured",
     }
     data = canonical_json(value) + b"\n"
@@ -393,7 +396,7 @@ def _summary(samples: list[float]) -> dict[str, float]:
 
 
 class PhysicalEvidenceFixture:
-    """Materialize one complete two-run aggregate and all referenced bytes."""
+    """Materialize one complete same-machine, two-OS aggregate and its bytes."""
 
     def __init__(
         self,
@@ -402,6 +405,7 @@ class PhysicalEvidenceFixture:
         *,
         signed_tree_sha256: str = SIGNED_TREE,
         artifact_hash_manifest_sha256: str | None = None,
+        single_machine: bool = True,
     ) -> None:
         self.root = root.absolute()
         self.prefix = prefix.strip("/")
@@ -432,6 +436,7 @@ class PhysicalEvidenceFixture:
         self.report_documents: list[dict[str, dict[str, Any]]] = []
         self.report_bindings: list[list[dict[str, Any]]] = []
         self.raw_bindings: list[list[dict[str, Any]]] = []
+        self.machine_sha256 = sha("physical-machine") if single_machine else None
         for index, (os_label, version, build) in enumerate(
             (("macos15", "15.7.8", "24G824"), ("current-macos", "26.6", "25G72"))
         ):
@@ -481,7 +486,11 @@ class PhysicalEvidenceFixture:
         }
 
     def _packet_report(
-        self, run_name: str, proof: dict[str, Any], macos_version: str
+        self,
+        run_name: str,
+        proof: dict[str, Any],
+        macos_version: str,
+        time_offset: timedelta,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         cases: list[dict[str, Any]] = []
         bindings: list[dict[str, Any]] = []
@@ -506,6 +515,12 @@ class PhysicalEvidenceFixture:
                 local_address=local_address,
                 remote_address=remote_address,
                 remote_port=remote_port,
+                start_epoch=calendar.timegm(
+                    (
+                        datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+                        + time_offset
+                    ).utctimetuple()
+                ),
             )
             artifact = self._write(
                 f"{run_name}/packet/{case_id}.pcap", capture, "packet-pcap"
@@ -541,9 +556,13 @@ class PhysicalEvidenceFixture:
                         "transport": "tcp" if spec.protocol == "tcp" else "udp",
                     },
                 ],
-                "started_at": CAPTURED_AT,
-                "completed_at": "2026-07-27T12:00:05Z",
-                "signed_at": "2026-07-27T12:00:10Z",
+                "started_at": self._shifted(CAPTURED_AT, time_offset),
+                "completed_at": self._shifted(
+                    "2026-07-27T12:00:05Z", time_offset
+                ),
+                "signed_at": self._shifted(
+                    "2026-07-27T12:00:10Z", time_offset
+                ),
             }
             provenance_artifact = self._write_json(
                 f"{run_name}/packet/{case_id}-provenance.json",
@@ -560,9 +579,15 @@ class PhysicalEvidenceFixture:
                     "send_command_sha256": sha(f"{run_name}-{case_id}-send-command"),
                     "capture_provenance_sha256": provenance_artifact["sha256"],
                     "endpoint_set": copy.deepcopy(provenance["endpoint_set"]),
-                    "started_at": "2026-07-27T12:00:01Z",
-                    "completed_at": "2026-07-27T12:00:02Z",
-                    "recorded_at": "2026-07-27T12:00:11Z",
+                    "started_at": self._shifted(
+                        "2026-07-27T12:00:01Z", time_offset
+                    ),
+                    "completed_at": self._shifted(
+                        "2026-07-27T12:00:02Z", time_offset
+                    ),
+                    "recorded_at": self._shifted(
+                        "2026-07-27T12:00:11Z", time_offset
+                    ),
                     "exit_code": 0,
                     "bytes_submitted": len(token.encode("ascii")),
                 }
@@ -616,12 +641,16 @@ class PhysicalEvidenceFixture:
                 "platform": {
                     "architecture": "arm64",
                     "macos_version": macos_version,
-                    "hardware_model": "Mac16,1 fixture",
+                    "hardware_model": "Mac16,1",
                     "clean_install": True,
                 },
-                "captured_at": CAPTURED_AT,
-                "completed_at": "2026-07-27T12:00:05Z",
-                "signed_at": "2026-07-27T12:00:12Z",
+                "captured_at": self._shifted(CAPTURED_AT, time_offset),
+                "completed_at": self._shifted(
+                    "2026-07-27T12:00:05Z", time_offset
+                ),
+                "signed_at": self._shifted(
+                    "2026-07-27T15:05:00Z", time_offset
+                ),
                 "cases": cases,
             },
             bindings,
@@ -630,6 +659,11 @@ class PhysicalEvidenceFixture:
     @staticmethod
     def _utc(value: datetime) -> str:
         return value.isoformat().replace("+00:00", "Z")
+
+    @classmethod
+    def _shifted(cls, value: str, offset: timedelta) -> str:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+        return cls._utc(parsed + offset)
 
     def _renderer_ready_evidence(
         self,
@@ -938,10 +972,17 @@ class PhysicalEvidenceFixture:
         run_name: str,
         proof: dict[str, Any],
         machine: str,
+        boot_environment: str,
         macos_build: str,
+        time_offset: timedelta,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         environment = {
             "machine_sha256": machine,
+            "machine_identity_scheme": EVIDENCE_PROFILE["machine_identity_scheme"],
+            "hardware_model": "Mac16,1",
+            "virtualization_present": False,
+            "boot_environment_sha256": boot_environment,
+            "boot_environment_scheme": EVIDENCE_PROFILE["boot_environment_scheme"],
             "macos_build": macos_build,
             "architecture": "arm64",
             "operation_context": {
@@ -961,7 +1002,10 @@ class PhysicalEvidenceFixture:
                 attributes["user_count"] = 2
             if "concurrent_start_count" in checks:
                 attributes["concurrent_start_count"] = 2
-            started = datetime(2026, 7, 27, 12, index, tzinfo=timezone.utc)
+            started = (
+                datetime(2026, 7, 27, 12, index, tzinfo=timezone.utc)
+                + time_offset
+            )
             duration_seconds = {
                 "renderer-ready-v2": 8,
                 "network-extension-approval": 3,
@@ -1037,9 +1081,11 @@ class PhysicalEvidenceFixture:
                 "harness_version": LIFECYCLE_VERSION,
                 "proof": copy.deepcopy(proof),
                 "environment": environment,
-                "captured_at": CAPTURED_AT,
+                "captured_at": self._shifted(CAPTURED_AT, time_offset),
                 "completed_at": completed_at.isoformat().replace("+00:00", "Z"),
-                "signed_at": "2026-07-27T12:35:00Z",
+                "signed_at": self._shifted(
+                    "2026-07-27T15:10:00Z", time_offset
+                ),
                 "probes": probes,
             },
             bindings,
@@ -1052,13 +1098,14 @@ class PhysicalEvidenceFixture:
         machine: str,
         macos_version: str,
         macos_build: str,
+        time_offset: timedelta,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         parameters = {
             "machine": {
                 "architecture": "arm64",
                 "macos_version": macos_version,
                 "macos_build": macos_build,
-                "hardware_model": "Mac16,1 fixture",
+                "hardware_model": "Mac16,1",
                 "machine_sha256": machine,
                 "clean_install": True,
             },
@@ -1078,7 +1125,7 @@ class PhysicalEvidenceFixture:
                     "id": profile_id,
                     "control": {
                         **control,
-                        "applied_at": CAPTURED_AT,
+                        "applied_at": self._shifted(CAPTURED_AT, time_offset),
                         "command_exit_code": 0,
                     },
                     "recovery_ms": samples,
@@ -1103,8 +1150,10 @@ class PhysicalEvidenceFixture:
         ]
         raw = {
             "schema_version": 1,
-            "captured_at": CAPTURED_AT,
-            "completed_at": PERFORMANCE_COMPLETED_AT,
+            "captured_at": self._shifted(CAPTURED_AT, time_offset),
+            "completed_at": self._shifted(
+                PERFORMANCE_COMPLETED_AT, time_offset
+            ),
             "proof": copy.deepcopy(proof),
             "parameters": copy.deepcopy(parameters),
             "weak_network": weak_raw,
@@ -1116,8 +1165,10 @@ class PhysicalEvidenceFixture:
             "resources": resources_raw,
             "switch_cycle": {"records": switch_records},
             "soak": {
-                "started_at": CAPTURED_AT,
-                "ended_at": PERFORMANCE_COMPLETED_AT,
+                "started_at": self._shifted(CAPTURED_AT, time_offset),
+                "ended_at": self._shifted(
+                    PERFORMANCE_COMPLETED_AT, time_offset
+                ),
                 "crash_events": [],
             },
         }
@@ -1127,9 +1178,11 @@ class PhysicalEvidenceFixture:
         report = {
             "schema_version": 2,
             "harness_version": PERFORMANCE_VERSION,
-            "captured_at": CAPTURED_AT,
-            "completed_at": PERFORMANCE_COMPLETED_AT,
-            "signed_at": REPORT_SIGNED_AT,
+            "captured_at": self._shifted(CAPTURED_AT, time_offset),
+            "completed_at": self._shifted(
+                PERFORMANCE_COMPLETED_AT, time_offset
+            ),
+            "signed_at": self._shifted(REPORT_SIGNED_AT, time_offset),
             "proof": copy.deepcopy(proof),
             "parameters": parameters,
             "weak_network": weak_declared,
@@ -1141,7 +1194,7 @@ class PhysicalEvidenceFixture:
             },
             "resources": {key: _summary(value) for key, value in resources_raw.items()},
             "switch_cycle": {"switch_count": 100, "rss_growth_mib": 1.0, "fd_growth": 1},
-            "soak": {"duration_hours": 24.0, "crash_count": 0},
+            "soak": {"duration_hours": 3.0, "crash_count": 0},
             "samples_artifact": artifact,
         }
         return report, [
@@ -1149,7 +1202,11 @@ class PhysicalEvidenceFixture:
         ]
 
     def _adversarial_report(
-        self, run_name: str, proof: dict[str, Any], macos_version: str
+        self,
+        run_name: str,
+        proof: dict[str, Any],
+        macos_version: str,
+        time_offset: timedelta,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         identities = {
             "allowed": {
@@ -1176,7 +1233,7 @@ class PhysicalEvidenceFixture:
                 **identity,
                 "command": [COLLECTOR_VERSION, "client-signature", client],
                 "exit_code": 0,
-                "assessed_at": CAPTURED_AT,
+                "assessed_at": self._shifted(CAPTURED_AT, time_offset),
             }
             artifact = self._write_json(
                 f"{run_name}/adversarial/{client}-signature.json",
@@ -1203,8 +1260,14 @@ class PhysicalEvidenceFixture:
             cleanup: str,
             offset: int,
         ) -> dict[str, Any]:
-            started = datetime(2026, 7, 27, 12, 0, offset, tzinfo=timezone.utc)
-            finished = datetime(2026, 7, 27, 12, 0, offset + 1, tzinfo=timezone.utc)
+            started = (
+                datetime(2026, 7, 27, 12, 0, offset, tzinfo=timezone.utc)
+                + time_offset
+            )
+            finished = (
+                datetime(2026, 7, 27, 12, 0, offset + 1, tzinfo=timezone.utc)
+                + time_offset
+            )
             transcript_finishes.append(finished)
             raw = {
                 "schema_version": 1,
@@ -1275,15 +1338,17 @@ class PhysicalEvidenceFixture:
                 "schema_version": 2,
                 "harness_version": ADVERSARIAL_VERSION,
                 "proof": copy.deepcopy(proof),
-                "captured_at": CAPTURED_AT,
+                "captured_at": self._shifted(CAPTURED_AT, time_offset),
                 "completed_at": max(transcript_finishes).isoformat().replace(
                     "+00:00", "Z"
                 ),
-                "signed_at": "2026-07-27T12:01:00Z",
+                "signed_at": self._shifted(
+                    "2026-07-27T15:15:00Z", time_offset
+                ),
                 "platform": {
                     "architecture": "arm64",
                     "macos_version": macos_version,
-                    "hardware_model": "Mac16,1 fixture",
+                    "hardware_model": "Mac16,1",
                     "clean_install": True,
                 },
                 "signing": signing,
@@ -1297,19 +1362,23 @@ class PhysicalEvidenceFixture:
         run_name = f"run-{index}"
         run_id = f"physical-{run_name}"
         run_nonce = sha(f"{run_name}-nonce")
-        machine = sha(f"{run_name}-machine")
+        machine = self.machine_sha256 or sha(f"{run_name}-machine")
+        boot_environment = sha(f"{run_name}-boot-environment")
+        time_offset = RUN_TIMELINE_OFFSET * index
         proof = self._proof(run_id, run_nonce)
         documents: dict[str, dict[str, Any]] = {}
         raw_bindings: list[dict[str, Any]] = []
-        documents["packet"], packet_raw = self._packet_report(run_name, proof, version)
+        documents["packet"], packet_raw = self._packet_report(
+            run_name, proof, version, time_offset
+        )
         documents["lifecycle"], lifecycle_raw = self._lifecycle_report(
-            run_name, proof, machine, build
+            run_name, proof, machine, boot_environment, build, time_offset
         )
         documents["performance"], performance_raw = self._performance_report(
-            run_name, proof, machine, version, build
+            run_name, proof, machine, version, build, time_offset
         )
         documents["adversarial"], adversarial_raw = self._adversarial_report(
-            run_name, proof, version
+            run_name, proof, version, time_offset
         )
         raw_bindings.extend(packet_raw + lifecycle_raw + performance_raw + adversarial_raw)
 
@@ -1333,7 +1402,7 @@ class PhysicalEvidenceFixture:
             )
             reports[harness] = {
                 "tool_version": versions[harness],
-                "captured_at": CAPTURED_AT,
+                "captured_at": self._shifted(CAPTURED_AT, time_offset),
                 "completed_at": document["completed_at"],
                 "signed_at": document["signed_at"],
                 "artifact": artifact,
@@ -1342,7 +1411,7 @@ class PhysicalEvidenceFixture:
                 {
                     "harness": harness,
                     "tool_version": versions[harness],
-                    "captured_at": CAPTURED_AT,
+                    "captured_at": self._shifted(CAPTURED_AT, time_offset),
                     "completed_at": document["completed_at"],
                     "signed_at": document["signed_at"],
                     "descriptor": artifact,
@@ -1361,10 +1430,15 @@ class PhysicalEvidenceFixture:
             "macos_version": version,
             "macos_build": build,
             "machine_sha256": machine,
+            "machine_identity_scheme": EVIDENCE_PROFILE["machine_identity_scheme"],
+            "hardware_model": "Mac16,1",
+            "virtualization_present": False,
+            "boot_environment_sha256": boot_environment,
+            "boot_environment_scheme": EVIDENCE_PROFILE["boot_environment_scheme"],
             "clean_install": True,
-            "captured_at": RUN_CAPTURED_AT,
-            "completed_at": RUN_COMPLETED_AT,
-            "signed_at": RUN_SIGNED_AT,
+            "captured_at": self._shifted(RUN_CAPTURED_AT, time_offset),
+            "completed_at": self._shifted(RUN_COMPLETED_AT, time_offset),
+            "signed_at": self._shifted(RUN_SIGNED_AT, time_offset),
             "run_id": run_id,
             "run_nonce": run_nonce,
             "collector": collector,

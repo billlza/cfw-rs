@@ -21,6 +21,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 if __package__:
+    from .physical_machine_identity import (
+        BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
+        DOCUMENT as MACHINE_IDENTITY_SCHEME,
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from .adversarial_clients import (
         HARNESS_VERSION as ADVERSARIAL_VERSION,
         AdversarialMatrixError,
@@ -39,6 +45,7 @@ if __package__:
     )
     from .performance_gates import (
         HARNESS_VERSION as PERFORMANCE_VERSION,
+        SOAK_MIN_HOURS,
         PerformanceGateError,
         validate_performance_evidence,
     )
@@ -47,6 +54,7 @@ if __package__:
         CollectorTrustNotConfiguredError,
         CollectorTrustPolicy,
         COLLECTOR_SIGNATURE_ALGORITHM,
+        EVIDENCE_PROFILE,
         PROOF_SCHEMA_VERSION,
         RELEASE_TRUST_POLICY_SHA256,
         RawArtifactError,
@@ -70,6 +78,12 @@ else:  # pragma: no cover - direct-script import path
     here = Path(__file__).resolve().parent
     sys.path.insert(0, str(here))
     sys.path.insert(0, str(here.parent))
+    from physical_machine_identity import (  # type: ignore
+        BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
+        DOCUMENT as MACHINE_IDENTITY_SCHEME,
+        PhysicalMachineIdentityError,
+        validate_physical_hardware_model,
+    )
     from adversarial_clients import (  # type: ignore
         HARNESS_VERSION as ADVERSARIAL_VERSION,
         AdversarialMatrixError,
@@ -88,6 +102,7 @@ else:  # pragma: no cover - direct-script import path
     )
     from performance_gates import (  # type: ignore
         HARNESS_VERSION as PERFORMANCE_VERSION,
+        SOAK_MIN_HOURS,
         PerformanceGateError,
         validate_performance_evidence,
     )
@@ -96,6 +111,7 @@ else:  # pragma: no cover - direct-script import path
         CollectorTrustNotConfiguredError,
         CollectorTrustPolicy,
         COLLECTOR_SIGNATURE_ALGORITHM,
+        EVIDENCE_PROFILE,
         PROOF_SCHEMA_VERSION,
         RELEASE_TRUST_POLICY_SHA256,
         RawArtifactError,
@@ -115,25 +131,28 @@ else:  # pragma: no cover - direct-script import path
     from release_build_identity import BuildIdentityError, canonical_build_version  # type: ignore
 
 
-SCHEMA_VERSION = 4
-AGGREGATOR_VERSION = "physical-evidence-aggregator-v4"
+SCHEMA_VERSION = EVIDENCE_PROFILE["aggregate_schema_version"]
+AGGREGATOR_VERSION = EVIDENCE_PROFILE["aggregator_version"]
 RECEIPT_SCHEMA_VERSION = 3
 PRODUCT_VERSION = "0.4.0"
 GRANTED_LEVEL = "Signed_Installed_Verified"
 if GRANTED_LEVEL not in LEVEL_ORDER:
     raise RuntimeError("physical evidence level is absent from Evidence_Manifest")
 
-REQUIRED_OS = frozenset({"macos15", "current-macos"})
+REQUIRED_RUNS_BY_OS = {
+    entry["os"]: entry for entry in EVIDENCE_PROFILE["required_runs"]
+}
+REQUIRED_OS = frozenset(REQUIRED_RUNS_BY_OS)
 # Reviewed stable release matrix, source-pinned on 2026-07-29 from Apple's
 # 2026-07-27 security-release list. Updating "current" is a release-source
 # change, never an inference from whichever host happens to run the collector.
 REQUIRED_MACOS_VERSIONS = {
-    "macos15": "15.7.8",
-    "current-macos": "26.6",
+    os_label: entry["macos_version"]
+    for os_label, entry in REQUIRED_RUNS_BY_OS.items()
 }
 REQUIRED_MACOS_BUILDS = {
-    "macos15": "24G824",
-    "current-macos": "25G72",
+    os_label: entry["macos_build"]
+    for os_label, entry in REQUIRED_RUNS_BY_OS.items()
 }
 STABLE_MATRIX_GENERAL_AVAILABILITY = datetime(
     2026, 7, 27, tzinfo=timezone.utc
@@ -166,6 +185,11 @@ RUN_FIELDS = {
     "macos_version",
     "macos_build",
     "machine_sha256",
+    "machine_identity_scheme",
+    "hardware_model",
+    "virtualization_present",
+    "boot_environment_sha256",
+    "boot_environment_scheme",
     "clean_install",
     "captured_at",
     "completed_at",
@@ -327,19 +351,32 @@ def _identity_check(
     document = result["document"]
     if harness == "lifecycle":
         environment = result["environment"]
-        if environment["machine_sha256"] != run["machine_sha256"]:
-            raise PhysicalEvidenceError(f"{label} machine identity differs from its run")
-        if environment["macos_build"] != run["macos_build"]:
-            raise PhysicalEvidenceError(f"{label} macOS build differs from its run")
+        expected = {
+            "machine_sha256": run["machine_sha256"],
+            "machine_identity_scheme": run["machine_identity_scheme"],
+            "hardware_model": run["hardware_model"],
+            "virtualization_present": False,
+            "boot_environment_sha256": run["boot_environment_sha256"],
+            "boot_environment_scheme": run["boot_environment_scheme"],
+            "macos_build": run["macos_build"],
+        }
+        for field, wanted in expected.items():
+            if environment[field] != wanted:
+                raise PhysicalEvidenceError(
+                    f"{label} environment.{field} differs from its run"
+                )
     elif harness == "packet":
         if document["platform"]["macos_version"] != run["macos_version"]:
             raise PhysicalEvidenceError(f"{label} macOS version differs from its run")
+        if document["platform"]["hardware_model"] != run["hardware_model"]:
+            raise PhysicalEvidenceError(f"{label} hardware model differs from its run")
     elif harness == "performance":
         machine = result["parameters"]["machine"]
         expected = {
             "macos_version": run["macos_version"],
             "macos_build": run["macos_build"],
             "machine_sha256": run["machine_sha256"],
+            "hardware_model": run["hardware_model"],
         }
         for field, wanted in expected.items():
             if machine[field] != wanted:
@@ -347,6 +384,8 @@ def _identity_check(
     elif harness == "adversarial":
         if document["platform"]["macos_version"] != run["macos_version"]:
             raise PhysicalEvidenceError(f"{label} macOS version differs from its run")
+        if document["platform"]["hardware_model"] != run["hardware_model"]:
+            raise PhysicalEvidenceError(f"{label} hardware model differs from its run")
     else:
         raise PhysicalEvidenceError(f"unknown harness identity check: {harness}")
 
@@ -508,7 +547,15 @@ def _validate_run(
     seen_run_ids: set[str],
     seen_nonces: set[str],
     seen_machines: set[str],
-) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], str]:
+    seen_hardware_models: set[str],
+    seen_boot_environments: set[str],
+) -> tuple[
+    str,
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    str,
+    tuple[datetime, datetime],
+]:
     raw = exact_object(value, RUN_FIELDS, f"runs[{index}]")
     os_label = raw["os"]
     if os_label not in REQUIRED_OS or os_label in seen_os:
@@ -531,9 +578,41 @@ def _validate_run(
             f"{expected_build!r} for {os_label!r}"
         )
     machine = require_sha256(raw["machine_sha256"], f"runs[{index}].machine_sha256")
-    if machine in seen_machines:
-        raise PhysicalEvidenceError("physical runs reuse a machine identity")
+    if seen_machines and machine not in seen_machines:
+        raise PhysicalEvidenceError(
+            "required physical runs use different machine identities"
+        )
     seen_machines.add(machine)
+    if raw["machine_identity_scheme"] != policy.machine_identity_scheme:
+        raise PhysicalEvidenceError(
+            f"runs[{index}].machine_identity_scheme differs from the signed policy"
+        )
+    try:
+        hardware_model = validate_physical_hardware_model(raw["hardware_model"])
+    except PhysicalMachineIdentityError as error:
+        raise PhysicalEvidenceError(
+            f"runs[{index}].hardware_model is not a physical Apple Mac"
+        ) from error
+    if seen_hardware_models and hardware_model not in seen_hardware_models:
+        raise PhysicalEvidenceError(
+            "required physical runs use different hardware models"
+        )
+    seen_hardware_models.add(hardware_model)
+    if raw["virtualization_present"] is not False:
+        raise PhysicalEvidenceError(f"runs[{index}] is virtualized")
+    boot_environment = require_sha256(
+        raw["boot_environment_sha256"],
+        f"runs[{index}].boot_environment_sha256",
+    )
+    if raw["boot_environment_scheme"] != policy.boot_environment_scheme:
+        raise PhysicalEvidenceError(
+            f"runs[{index}].boot_environment_scheme differs from the signed policy"
+        )
+    if boot_environment in seen_boot_environments:
+        raise PhysicalEvidenceError(
+            "required OS runs reuse a boot/install environment"
+        )
+    seen_boot_environments.add(boot_environment)
     if raw["clean_install"] is not True:
         raise PhysicalEvidenceError(f"runs[{index}] is not a clean physical install")
     captured_at_dt = _timestamp(raw["captured_at"], f"runs[{index}].captured_at")
@@ -562,6 +641,11 @@ def _validate_run(
         "macos_version": macos_version,
         "macos_build": macos_build,
         "machine_sha256": machine,
+        "machine_identity_scheme": policy.machine_identity_scheme,
+        "hardware_model": hardware_model,
+        "virtualization_present": False,
+        "boot_environment_sha256": boot_environment,
+        "boot_environment_scheme": policy.boot_environment_scheme,
         "clean_install": True,
         "captured_at": raw["captured_at"],
         "captured_at_dt": captured_at_dt,
@@ -654,7 +738,13 @@ def _validate_run(
             "artifact_path": soak_descriptor["path"],
         }
     )
-    return os_label, publication_bindings, raw_bindings, receipt_sha256
+    return (
+        os_label,
+        publication_bindings,
+        raw_bindings,
+        receipt_sha256,
+        (captured_at_dt, signed_at_dt),
+    )
 
 
 def _validate(
@@ -691,6 +781,18 @@ def _validate(
         raise PhysicalEvidenceError(
             f"aggregate aggregator_version must be {AGGREGATOR_VERSION!r}"
         )
+    if (
+        trust_policy.aggregate_schema_version != SCHEMA_VERSION
+        or trust_policy.aggregator_version != AGGREGATOR_VERSION
+        or trust_policy.machine_topology != EVIDENCE_PROFILE["machine_topology"]
+        or trust_policy.boot_environment_scheme
+        != EVIDENCE_PROFILE["boot_environment_scheme"]
+        or trust_policy.machine_identity_scheme
+        != EVIDENCE_PROFILE["machine_identity_scheme"]
+    ):
+        raise PhysicalEvidenceError(
+            "collector trust policy does not authorize this evidence profile"
+        )
     if document["granted_level"] != GRANTED_LEVEL:
         raise PhysicalEvidenceError("aggregate may grant only Signed_Installed_Verified")
     declared_policy = require_sha256(
@@ -706,12 +808,15 @@ def _validate(
     seen_run_ids: set[str] = set()
     seen_nonces: set[str] = set()
     seen_machines: set[str] = set()
+    seen_hardware_models: set[str] = set()
+    seen_boot_environments: set[str] = set()
     report_bindings: list[dict[str, Any]] = []
     raw_bindings: list[dict[str, Any]] = []
     receipt_hashes: list[str] = []
+    run_intervals: list[tuple[datetime, datetime, str]] = []
     installed_runs: list[dict[str, Any]] = []
     for index, raw_run in enumerate(runs):
-        _os, publication, raw_artifacts, receipt_sha256 = _validate_run(
+        _os, publication, raw_artifacts, receipt_sha256, run_interval = _validate_run(
             raw_run,
             index,
             policy=trust_policy,
@@ -722,16 +827,23 @@ def _validate(
             seen_run_ids=seen_run_ids,
             seen_nonces=seen_nonces,
             seen_machines=seen_machines,
+            seen_hardware_models=seen_hardware_models,
+            seen_boot_environments=seen_boot_environments,
         )
         report_bindings.extend(publication)
         raw_bindings.extend(raw_artifacts)
         receipt_hashes.append(receipt_sha256)
+        run_intervals.append((*run_interval, _os))
         run_value = runs[index]
         installed_runs.append(
             {
                 "os": run_value["os"],
                 "macos_build": run_value["macos_build"],
                 "machine_sha256": run_value["machine_sha256"],
+                "hardware_model": run_value["hardware_model"],
+                "boot_environment_sha256": run_value[
+                    "boot_environment_sha256"
+                ],
                 "report_hashes": sorted(
                     entry["report_sha256"] for entry in publication
                 ),
@@ -741,6 +853,24 @@ def _validate(
     artifact_bytes = artifacts.total_bytes - initial_artifact_bytes
     if seen_os != set(REQUIRED_OS):
         raise PhysicalEvidenceError("aggregate is missing a required macOS run set")
+    if len(seen_machines) != 1:
+        raise PhysicalEvidenceError(
+            "required physical runs must share one machine identity"
+        )
+    if len(seen_hardware_models) != 1:
+        raise PhysicalEvidenceError(
+            "required physical runs must share one hardware model"
+        )
+    if len(seen_boot_environments) != len(REQUIRED_OS):
+        raise PhysicalEvidenceError(
+            "required OS runs must use distinct boot/install environments"
+        )
+    ordered_intervals = sorted(run_intervals, key=lambda interval: interval[0])
+    for previous, current in zip(ordered_intervals, ordered_intervals[1:]):
+        if current[0] < previous[1]:
+            raise PhysicalEvidenceError(
+                "single-machine physical run timelines overlap"
+            )
     if len(set(receipt_hashes)) != len(receipt_hashes):
         raise PhysicalEvidenceError("physical runs reuse a collector receipt")
     raw_manifest_sha256 = hashlib.sha256(
@@ -917,10 +1047,18 @@ def self_check() -> str:
     """Verify static wiring without granting or requiring physical evidence."""
 
     if (
-        SCHEMA_VERSION != 4
-        or AGGREGATOR_VERSION != "physical-evidence-aggregator-v4"
+        SCHEMA_VERSION != 5
+        or AGGREGATOR_VERSION
+        != "physical-evidence-aggregator-v5-single-machine"
         or PROOF_SCHEMA_VERSION != 3
         or RECEIPT_SCHEMA_VERSION != 3
+        or SOAK_MIN_HOURS != EVIDENCE_PROFILE["soak_hours_per_run"]
+        or MACHINE_IDENTITY_SCHEME
+        != EVIDENCE_PROFILE["machine_identity_scheme"]
+        or BOOT_ENVIRONMENT_SCHEME
+        != EVIDENCE_PROFILE["boot_environment_scheme"]
+        or EVIDENCE_PROFILE["machine_topology"]
+        != "one-machine-two-clean-os-v1"
     ):
         raise PhysicalEvidenceError("physical evidence schema wiring is inconsistent")
     if GRANTED_LEVEL not in LEVEL_ORDER:

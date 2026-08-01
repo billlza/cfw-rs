@@ -210,6 +210,8 @@ _PINNED_INPUTS = (
     "scripts/evidence_manifest.py",
     "scripts/harness/physical_collector_trust_policy.json",
     "scripts/harness/physical_evidence_aggregator.py",
+    "scripts/harness/physical_machine_identity.py",
+    "scripts/harness/physical_collector_request.py",
     "scripts/harness/raw_artifacts.py",
     "scripts/production_release_evidence.py",
     "scripts/publication/final_candidate.py",

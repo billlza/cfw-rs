@@ -15,11 +15,17 @@ from pathlib import Path
 
 from scripts.hash_artifact import build_manifest
 from scripts.notarization_transaction import PublishedTransactionEvidence
-from scripts.publication.common import PublicationError, canonical_json
+from scripts.publication.common import (
+    PublicationError,
+    canonical_json,
+    write_new as write_publication_new,
+)
 from scripts.publication.orchestrator import (
     CAPABILITY_IDS,
     FINAL_BUILD,
     PRODUCT_VERSION,
+    PHYSICAL_CANDIDATE_MANIFEST,
+    PHYSICAL_COLLECTOR_CANDIDATE,
     SEALED_OUTPUT,
     VALIDATION_BUILD,
     ProductionContext,
@@ -27,11 +33,13 @@ from scripts.publication.orchestrator import (
     _observe_signed_app_tree,
     _parse_codesign_details,
     _physical_candidate_hash_manifest,
+    _physical_collector_candidate,
     _publish_outputs,
     _require_final_inputs_unchanged,
     _require_physical_candidate_binding,
     _requirement_digest,
     _run_checked,
+    prepare_physical_candidate_manifest,
     seal_production_evidence,
     self_check,
 )
@@ -111,6 +119,74 @@ class ProductionOrchestratorIdentityTests(unittest.TestCase):
 
 
 class ProductionOrchestratorDerivationTests(unittest.TestCase):
+    def test_prepare_physical_candidate_outputs_are_transactional_and_reopened(self) -> None:
+        manifest = {"entries": [], "sha256": "a" * 64}
+        candidate = {
+            "version": PRODUCT_VERSION,
+            "build_number": FINAL_BUILD,
+            "app_manifest_sha256": "b" * 64,
+            "signed_app_tree_sha256": "c" * 64,
+            "artifact_hash_manifest_sha256": manifest["sha256"],
+            "built_at": "2026-07-29T12:00:00.000000Z",
+        }
+
+        def patches(repository: Path):
+            return (
+                patch(
+                    "scripts.publication.orchestrator._production_context",
+                    return_value=_context(repository),
+                ),
+                patch(
+                    "scripts.publication.orchestrator._physical_candidate_hash_manifest",
+                    return_value=manifest,
+                ),
+                patch(
+                    "scripts.publication.orchestrator._physical_collector_candidate",
+                    return_value=candidate,
+                ),
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            (repository / PHYSICAL_CANDIDATE_MANIFEST.parent.parent).mkdir(
+                parents=True
+            )
+            context_patch, manifest_patch, candidate_patch = patches(repository)
+            with context_patch, manifest_patch, candidate_patch:
+                self.assertEqual(
+                    prepare_physical_candidate_manifest(repository), manifest
+                )
+                self.assertEqual(
+                    json.loads((repository / PHYSICAL_CANDIDATE_MANIFEST).read_bytes()),
+                    manifest,
+                )
+                self.assertEqual(
+                    json.loads((repository / PHYSICAL_COLLECTOR_CANDIDATE).read_bytes()),
+                    candidate,
+                )
+                with self.assertRaisesRegex(PublicationError, "refusing to replace"):
+                    prepare_physical_candidate_manifest(repository)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            (repository / PHYSICAL_CANDIDATE_MANIFEST.parent.parent).mkdir(
+                parents=True
+            )
+
+            def fail_commit_marker(path: Path, data: bytes) -> None:
+                if path.name == PHYSICAL_CANDIDATE_MANIFEST.name:
+                    raise PublicationError("simulated commit-marker failure")
+                write_publication_new(path, data)
+
+            context_patch, manifest_patch, candidate_patch = patches(repository)
+            with context_patch, manifest_patch, candidate_patch, patch(
+                "scripts.publication.orchestrator.write_new",
+                side_effect=fail_commit_marker,
+            ), self.assertRaisesRegex(PublicationError, "commit-marker failure"):
+                prepare_physical_candidate_manifest(repository)
+            self.assertFalse((repository / PHYSICAL_CANDIDATE_MANIFEST).exists())
+            self.assertFalse((repository / PHYSICAL_COLLECTOR_CANDIDATE).exists())
+
     def test_physical_candidate_manifest_and_final_guard_reject_input_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
@@ -157,6 +233,24 @@ class ProductionOrchestratorDerivationTests(unittest.TestCase):
                 b"event\n",
             )
             first = _physical_candidate_hash_manifest(context)
+            collector_candidate = _physical_collector_candidate(context, first)
+            self.assertEqual(
+                set(collector_candidate),
+                {
+                    "version",
+                    "build_number",
+                    "app_manifest_sha256",
+                    "signed_app_tree_sha256",
+                    "artifact_hash_manifest_sha256",
+                    "built_at",
+                },
+            )
+            self.assertEqual(collector_candidate["version"], "0.4.0")
+            self.assertEqual(collector_candidate["build_number"], "40003")
+            self.assertEqual(
+                collector_candidate["artifact_hash_manifest_sha256"],
+                first["sha256"],
+            )
             with patch(
                 "scripts.publication.orchestrator.current_identity",
                 return_value=context.source_identity,

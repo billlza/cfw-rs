@@ -14,6 +14,7 @@ from typing import Any
 PRODUCT_VERSION = "0.4.0"
 POSITIVE_INTEGER_RE = re.compile(r"^[1-9][0-9]*$")
 MAX_BUILD_VERSION = 9_223_372_036_854_775_807
+MAX_BUILD_VERSION_TEXT = str(MAX_BUILD_VERSION)
 
 
 class BuildIdentityError(ValueError):
@@ -29,7 +30,9 @@ class BundleBuildIdentity:
 def canonical_build_version(value: Any, label: str = "CFBundleVersion") -> str:
     if not isinstance(value, str) or not POSITIVE_INTEGER_RE.fullmatch(value):
         raise BuildIdentityError(f"{label} must be one canonical positive decimal integer")
-    if int(value) > MAX_BUILD_VERSION:
+    if len(value) > len(MAX_BUILD_VERSION_TEXT) or (
+        len(value) == len(MAX_BUILD_VERSION_TEXT) and value > MAX_BUILD_VERSION_TEXT
+    ):
         raise BuildIdentityError(f"{label} exceeds the signed 64-bit release bound")
     return value
 

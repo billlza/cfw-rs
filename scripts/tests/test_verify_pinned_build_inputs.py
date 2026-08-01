@@ -29,6 +29,7 @@ PATCH_BODIES = {
 }
 LEGACY_BODY = b"synthetic legacy partial digest body\n"
 TAURI_LOCK_PATCH_BODY = b"synthetic tauri-cli spin lock patch body\n"
+TAURI_CACHE_CONTRACT_BODY = b"synthetic Tauri Cargo cache contract\n"
 XCODEGEN_PATCH_BODY = b"synthetic XcodeGen installed-resource patch body\n"
 
 SECURITY_SHA = _sha(PATCH_BODIES["security"])
@@ -41,11 +42,13 @@ TAURI_UPSTREAM_LOCK_SHA = _sha(b"synthetic upstream tauri-cli Cargo.lock")
 TAURI_LOCK_PATCH_SHA = _sha(TAURI_LOCK_PATCH_BODY)
 TAURI_PATCHED_LOCK_SHA = _sha(b"synthetic patched tauri-cli Cargo.lock")
 TAURI_SPIN_SHA = _sha(b"synthetic spin crate")
+TAURI_CACHE_CONTRACT_SHA = _sha(TAURI_CACHE_CONTRACT_BODY)
 XCODEGEN_PATCH_SHA = _sha(XCODEGEN_PATCH_BODY)
 XCODEGEN_PATCHED_SETTINGS_SHA = _sha(b"synthetic patched SettingsBuilder.swift")
 COMMIT = "25a600db24f7680ad9806ce5427bd0ab8afe1114"
 GOMOBILE_COMMIT = "9f03b8f25789099c5c8abef4a02085da783ba923"
 TAURI_PATCH_PATH = "scripts/tauri-cli-spin.patch"
+TAURI_CACHE_CONTRACT_PATH = "scripts/tauri_cargo_cache_contract.py"
 XCODEGEN_PATCH_PATH = "scripts/xcodegen-installed-resources.patch"
 
 PATCH_PATHS = {
@@ -120,27 +123,52 @@ echo "$TAURI_CLI_LOCK_PATCH_SHA256"
 echo "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256"
 echo "$TAURI_CLI_SPIN_VERSION"
 echo "$TAURI_CLI_SPIN_CRATE_SHA256"
+echo "$TAURI_CARGO_CACHE_CONTRACT_SHA256"
+readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"
+verify_cargo_preparation_cache() {
+  local root="$1"
+  PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract" \
+    validate-preparation "$root"
+}
+normalize_cargo_offline_cache() {
+  local root="$1"
+  PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract" \
+    normalize-offline "$root"
+}
 git apply --unidiff-zero "$TAURI_CLI_LOCK_PATCH_PATH"
 rustup which --toolchain "$rust_toolchain" cargo
+verify_cargo_preparation_cache "$prepared_cargo_home"
 /usr/bin/env -i CARGO_HOME="$prepared_cargo_home" \
   CARGO_HTTP_LOW_SPEED_LIMIT=1 CARGO_HTTP_MULTIPLEXING=true \
   CARGO_HTTP_TIMEOUT=600 CARGO_NET_RETRY=3 \
-  CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse RUSTC="$rustc_bin" \
-  cargo fetch --manifest-path "$cargo_manifest" --locked \
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse CARGO_TERM_COLOR=never RUSTC="$rustc_bin" \
+  "$cargo_bin" fetch --manifest-path "$cargo_manifest" --locked \
   --target aarch64-apple-darwin
+reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"
+verify_cargo_preparation_cache "$prepared_cargo_home"
 /usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"
-cfw_verify_release_toolchain_manifest
-/usr/bin/env -i CARGO_HOME="$offline_cargo_home" CARGO_TARGET_DIR="$cargo_target" \
+normalize_cargo_offline_cache "$offline_cargo_home"
+python3 "$repo_root/scripts/hash_artifact.py" \
+  "$offline_cargo_home"
+offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest)"
+/usr/bin/env -i PATH="$cargo_install_root/bin:$(dirname "$cargo_bin"):/usr/bin:/bin:/usr/sbin:/sbin" \
+  CARGO_HOME="$offline_cargo_home" CARGO_TARGET_DIR="$cargo_target" \
   CARGO_NET_OFFLINE=true CARGO_NET_RETRY=0 \
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse RUSTC="$rustc_bin" \
-  cargo install --path "$source_root" --offline --locked \
+  "$cargo_bin" install --path "$source_root" --offline --locked \
   --target aarch64-apple-darwin
+reject_cargo_warnings "$install_log" "tauri-cli installation"
+normalize_cargo_offline_cache "$offline_cargo_home"
+offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest)"
+[[ "$offline_cache_sha256_after" == "$offline_cache_sha256_before" ]]
 echo "tauri-cli-$TAURI_CLI_VERSION"
 readonly payload="$staging/payload/tauri-cli-$TAURI_CLI_VERSION"
 /bin/mv "$source_root" "$payload/source"
 /usr/bin/lipo -archs "$payload/bin/cargo-tauri"
 echo "--algorithm sha256-tree-v2"
 echo "artifactKind=pinned-tauri-cli-v2"
+echo "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256"
+echo "cacheNormalization=cargo-runtime-metadata-v1"
 echo "dependencyMode=isolated-fetch-offline-locked-v1"
 echo "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET"
 echo "payloadLayout=bin-and-patched-source-v1"
@@ -194,6 +222,7 @@ class Fixture:
             "TAURI_CLI_PATCHED_CARGO_LOCK_SHA256": TAURI_PATCHED_LOCK_SHA,
             "TAURI_CLI_SPIN_VERSION": "0.9.9",
             "TAURI_CLI_SPIN_CRATE_SHA256": TAURI_SPIN_SHA,
+            "TAURI_CARGO_CACHE_CONTRACT_SHA256": TAURI_CACHE_CONTRACT_SHA,
             "GOMOBILE_VERSION": "v0.1.13",
             "GOMOBILE_COMMIT": GOMOBILE_COMMIT,
             "GOMOBILE_MODULE_SUM": "h1:foTOGKJetah9VwaJl1XJx5TswIAVg8NfYmHOhrOc95I=",
@@ -280,6 +309,9 @@ class Fixture:
                 "spinVersion": "0.9.9",
                 "spinCrateSha256Key": "TAURI_CLI_SPIN_CRATE_SHA256",
                 "spinCrateSha256": TAURI_SPIN_SHA,
+                "cacheContractPath": TAURI_CACHE_CONTRACT_PATH,
+                "cacheContractSha256Key": "TAURI_CARGO_CACHE_CONTRACT_SHA256",
+                "cacheContractSha256": TAURI_CACHE_CONTRACT_SHA,
                 "ciWorkflowPath": ".github/workflows/ci.yml",
                 "requiredCiFragment": "./scripts/install_pinned_tauri_cli.sh",
                 "installerPath": "scripts/install_pinned_tauri_cli.sh",
@@ -291,6 +323,11 @@ class Fixture:
                     "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256",
                     "$TAURI_CLI_SPIN_VERSION",
                     "$TAURI_CLI_SPIN_CRATE_SHA256",
+                    "$TAURI_CARGO_CACHE_CONTRACT_SHA256",
+                    'readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"',
+                    'PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract"',
+                    'validate-preparation "$root"',
+                    'normalize-offline "$root"',
                     'which --toolchain "$rust_toolchain"',
                     "/usr/bin/env -i",
                     'CARGO_HOME="$prepared_cargo_home"',
@@ -303,6 +340,7 @@ class Fixture:
                     "CARGO_NET_RETRY=0",
                     "CARGO_NET_OFFLINE=true",
                     "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse",
+                    "CARGO_TERM_COLOR=never",
                     'RUSTC="$rustc_bin"',
                     "--unidiff-zero",
                     "fetch",
@@ -315,10 +353,16 @@ class Fixture:
                     "tauri-cli-$TAURI_CLI_VERSION",
                     'payload="$staging/payload/tauri-cli-$TAURI_CLI_VERSION"',
                     '/usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"',
+                    'normalize_cargo_offline_cache "$offline_cargo_home"',
+                    'reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"',
+                    'reject_cargo_warnings "$install_log" "tauri-cli installation"',
+                    'PATH="$cargo_install_root/bin:$(dirname "$cargo_bin"):/usr/bin:/bin:/usr/sbin:/sbin"',
                     '/bin/mv "$source_root" "$payload/source"',
                     "/usr/bin/lipo -archs",
                     "--algorithm sha256-tree-v2",
                     "artifactKind=pinned-tauri-cli-v2",
+                    "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256",
+                    "cacheNormalization=cargo-runtime-metadata-v1",
                     "dependencyMode=isolated-fetch-offline-locked-v1",
                     "macosDeploymentTarget=$MACOS_DEPLOYMENT_TARGET",
                     "payloadLayout=bin-and-patched-source-v1",
@@ -481,6 +525,7 @@ class Fixture:
             self.build_unsigned, encoding="utf-8"
         )
         (root / TAURI_PATCH_PATH).write_bytes(self.tauri_lock_patch)
+        (root / TAURI_CACHE_CONTRACT_PATH).write_bytes(TAURI_CACHE_CONTRACT_BODY)
         (root / XCODEGEN_PATCH_PATH).write_bytes(self.xcodegen_patch)
         (root / "scripts/bootstrap_release_toolchain.sh").write_text(
             self.xcodegen_bootstrap, encoding="utf-8"
@@ -586,6 +631,76 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         fixture.tauri_lock_patch = b"tampered tauri-cli lock patch\n"
         self._assert_fails(fixture, "lock patch digest")
+
+    def test_tauri_cache_contract_content_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.extra_artifact_files[TAURI_CACHE_CONTRACT_PATH] = "tampered contract\n"
+        self._assert_fails(fixture, "cache contract file digest")
+
+    def test_tauri_cache_contract_env_digest_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.env["TAURI_CARGO_CACHE_CONTRACT_SHA256"] = "a" * 64
+        self._assert_fails(fixture, "cache contract digest")
+
+    def test_tauri_cache_contract_manifest_digest_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.manifest["tauriCli"]["cacheContractSha256"] = "a" * 64
+        self._assert_fails(fixture, "cache contract digest")
+
+    def test_tauri_cache_contract_path_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.manifest["tauriCli"]["cacheContractPath"] = "scripts/other.py"
+        self._assert_fails(fixture, "cache contract is missing")
+
+    def test_tauri_cache_contract_wrapper_cannot_be_noop(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            'PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract" '
+            '    normalize-offline "$root"',
+            "true",
+        )
+        self._assert_fails(fixture, "exact occurrences|required pinned fragment")
+
+    def test_tauri_cache_contract_operation_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            'normalize-offline "$root"',
+            'validate-preparation "$root"',
+        )
+        self._assert_fails(fixture, "exact occurrences|required pinned fragment")
+
+    def test_tauri_cli_installer_must_normalize_before_and_after_install(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            'normalize_cargo_offline_cache "$offline_cargo_home"',
+            "true",
+            1,
+        )
+        self._assert_fails(fixture, "exact occurrences")
+
+    def test_tauri_cli_installer_rejects_misordered_normalization(self) -> None:
+        fixture = Fixture()
+        call = 'normalize_cargo_offline_cache "$offline_cargo_home"'
+        fixture.tauri_installer = fixture.tauri_installer.replace(call, "", 2)
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            '/usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"',
+            '/usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"\n'
+            f"{call}\n{call}",
+        )
+        self._assert_fails(fixture, "lacks ordered operation")
+
+    def test_tauri_cli_installer_must_keep_fetch_and_install_warning_gates(self) -> None:
+        for warning_gate in (
+            'reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"',
+            'reject_cargo_warnings "$install_log" "tauri-cli installation"',
+        ):
+            with self.subTest(warning_gate=warning_gate):
+                fixture = Fixture()
+                fixture.tauri_installer = fixture.tauri_installer.replace(
+                    warning_gate,
+                    "true",
+                )
+                self._assert_fails(fixture, "required pinned fragment|exact occurrences")
 
     def test_tauri_cli_installer_must_keep_locked_path_install(self) -> None:
         fixture = Fixture()

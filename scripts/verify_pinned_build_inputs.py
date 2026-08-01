@@ -11,7 +11,8 @@ to the tracked release configuration without invoking any toolchain or the netwo
 * the XcodeGen installed-resource patch and patched source digest are bound to
     the isolated bootstrap and its installed-resource probe;
 * the official Tauri CLI crate, its published lock, the narrow yanked-spin lock
-  update, and the resulting lock are checksum-bound to one installer entrypoint;
+  update, the resulting lock, and the exact Cargo cache-normalization contract
+  are checksum-bound to one installer entrypoint;
 * the three design-pinned patch files exist as regular files and their computed
   SHA-256 digests match both the manifest and dependency_pins.env;
 * the combined diff SHA-256 is pinned and is distinct from any single patch digest;
@@ -252,6 +253,54 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
                 f"{description} digest {key} is {actual} but must be {expected}"
             )
 
+    cache_contract_relative = spec.get("cacheContractPath")
+    cache_contract_key = spec.get("cacheContractSha256Key")
+    cache_contract_expected = spec.get("cacheContractSha256")
+    if (
+        not isinstance(cache_contract_relative, str)
+        or not isinstance(cache_contract_key, str)
+        or not isinstance(cache_contract_expected, str)
+    ):
+        raise PinnedInputError("Tauri Cargo cache contract has no complete digest binding")
+    _require_sha256(
+        cache_contract_expected,
+        "manifest digest for Tauri Cargo cache contract",
+    )
+    cache_contract_env = _require_env(env, cache_contract_key)
+    _require_sha256(
+        cache_contract_env,
+        f"dependency_pins.env value {cache_contract_key}",
+    )
+    if cache_contract_env != cache_contract_expected:
+        raise PinnedInputError(
+            f"Tauri Cargo cache contract digest {cache_contract_key} is "
+            f"{cache_contract_env} but must be {cache_contract_expected}"
+        )
+    cache_contract_path = _safe_repository_path(
+        repository,
+        cache_contract_relative,
+        "Tauri Cargo cache contract",
+    )
+    if cache_contract_path.is_symlink() or not cache_contract_path.is_file():
+        raise PinnedInputError(
+            "Tauri Cargo cache contract is missing or not a regular file: "
+            f"{cache_contract_relative}"
+        )
+    try:
+        computed_cache_contract_sha = hashlib.sha256(
+            cache_contract_path.read_bytes()
+        ).hexdigest()
+    except OSError as error:
+        raise PinnedInputError(
+            f"Tauri Cargo cache contract cannot be read: {error}"
+        ) from error
+    if computed_cache_contract_sha != cache_contract_expected:
+        raise PinnedInputError(
+            "Tauri Cargo cache contract file digest "
+            f"{computed_cache_contract_sha} differs from the pinned "
+            f"{cache_contract_expected}"
+        )
+
     spin_version_key = spec.get("spinVersionKey")
     spin_version = spec.get("spinVersion")
     if not isinstance(spin_version_key, str) or not isinstance(spin_version, str):
@@ -293,6 +342,81 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
             raise PinnedInputError(
                 f"Tauri CLI installer does not contain required pinned fragment {fragment!r}"
             )
+    exact_counts = {
+        'readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"': 1,
+        'PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract"': 2,
+        'validate-preparation "$root"': 1,
+        'normalize-offline "$root"': 1,
+        'verify_cargo_preparation_cache "$prepared_cargo_home"': 2,
+        'normalize_cargo_offline_cache "$offline_cargo_home"': 2,
+        'reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"': 1,
+        'reject_cargo_warnings "$install_log" "tauri-cli installation"': 1,
+        'offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest': 1,
+        'offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest': 1,
+        '[[ "$offline_cache_sha256_after" == "$offline_cache_sha256_before" ]]': 1,
+    }
+    for fragment, expected_count in exact_counts.items():
+        actual_count = installer.count(fragment)
+        if actual_count != expected_count:
+            raise PinnedInputError(
+                f"Tauri CLI installer requires {expected_count} exact occurrences of "
+                f"{fragment!r}, found {actual_count}"
+            )
+
+    def locate(fragment: str, after: int = 0) -> int:
+        try:
+            return installer.index(fragment, after)
+        except ValueError as error:
+            raise PinnedInputError(
+                f"Tauri CLI installer lacks ordered operation {fragment!r}"
+            ) from error
+
+    preparation_before = locate(
+        'verify_cargo_preparation_cache "$prepared_cargo_home"'
+    )
+    fetch = locate('"$cargo_bin" fetch', preparation_before)
+    fetch_warning_gate = locate(
+        'reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"',
+        fetch,
+    )
+    preparation_after = locate(
+        'verify_cargo_preparation_cache "$prepared_cargo_home"',
+        fetch_warning_gate,
+    )
+    copied = locate(
+        '/usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"',
+        preparation_after,
+    )
+    normalized_before = locate(
+        'normalize_cargo_offline_cache "$offline_cargo_home"',
+        copied,
+    )
+    manifest_generation = locate(
+        'python3 "$repo_root/scripts/hash_artifact.py"',
+        normalized_before,
+    )
+    manifest_input = locate('"$offline_cargo_home"', manifest_generation)
+    verified_before = locate(
+        'offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest',
+        manifest_input,
+    )
+    install = locate('"$cargo_bin" install', verified_before)
+    install_warning_gate = locate(
+        'reject_cargo_warnings "$install_log" "tauri-cli installation"',
+        install,
+    )
+    normalized_after = locate(
+        'normalize_cargo_offline_cache "$offline_cargo_home"',
+        install_warning_gate,
+    )
+    verified_after = locate(
+        'offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest',
+        normalized_after,
+    )
+    locate(
+        '[[ "$offline_cache_sha256_after" == "$offline_cache_sha256_before" ]]',
+        verified_after,
+    )
     if re.search(r"cargo\s+install\s+tauri-cli", installer):
         raise PinnedInputError(
             "Tauri CLI installer bypasses the checksum-bound local --path source"

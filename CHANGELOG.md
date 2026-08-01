@@ -123,6 +123,11 @@
   constructor. The pinned tag list is now itself a verified build input: the
   pinned-input gate fails closed when a tag the engine start path requires is
   missing.
+- Seal Tauri CLI's complete offline Cargo registry before and after compilation
+  while excluding only three validated Cargo runtime tracking/lock files from
+  the private snapshot. The exact normalization helper is digest-bound into the
+  build-input and final toolchain manifests, and fetch/install warnings block
+  the bootstrap.
 - Add fail-closed release documentation for nested signing, provisioning,
   notarization, SBOM/license evidence, real packet evidence, weak-network
   recovery, resource limits, and physical-device testing.

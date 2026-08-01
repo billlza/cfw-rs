@@ -39,6 +39,11 @@ readonly install_manifest="$toolchain_root/tauri-cli-$TAURI_CLI_VERSION.manifest
 readonly preparation_root="$toolchain_root/preparation/tauri-cli-$TAURI_CLI_VERSION"
 readonly prepared_archive="$preparation_root/tauri-cli-$TAURI_CLI_VERSION.crate"
 readonly prepared_cargo_home="$preparation_root/cargo-home"
+readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"
+[[ -f "$cargo_cache_contract" && ! -L "$cargo_cache_contract" ]] ||
+  die "the Tauri Cargo cache contract is missing or not a regular file"
+printf '%s  %s\n' "$TAURI_CARGO_CACHE_CONTRACT_SHA256" "$cargo_cache_contract" |
+  shasum -a 256 --check >/dev/null
 
 verify_tauri_payload_layout() {
   local root="$1"
@@ -108,38 +113,26 @@ PY
 
 verify_cargo_preparation_cache() {
   local root="$1"
-  [[ -d "$root" && ! -L "$root" ]] ||
-    die "Tauri CLI preparation cache must be a real directory"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B - "$root" <<'PY'
-import os
-import stat
-import sys
-from pathlib import Path
+  PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract" \
+    validate-preparation "$root"
+}
 
-root = Path(sys.argv[1])
-allowed = {".global-cache", ".package-cache", ".package-cache-mutate", "registry"}
-unexpected = sorted(entry.name for entry in root.iterdir() if entry.name not in allowed)
-if unexpected:
-    raise SystemExit(
-        f"error: Tauri CLI preparation cache has unsafe top-level entries: {unexpected!r}"
-    )
-for current, directories, files in os.walk(root, topdown=True, followlinks=False):
-    current_path = Path(current)
-    for name in [*directories, *files]:
-        path = current_path / name
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode):
-            raise SystemExit(f"error: Tauri CLI preparation cache contains a symlink: {path}")
-        if stat.S_ISREG(metadata.st_mode):
-            if metadata.st_nlink != 1:
-                raise SystemExit(
-                    f"error: Tauri CLI preparation cache contains a hard link: {path}"
-                )
-        elif not stat.S_ISDIR(metadata.st_mode):
-            raise SystemExit(
-                f"error: Tauri CLI preparation cache contains an unsupported entry: {path}"
-            )
-PY
+normalize_cargo_offline_cache() {
+  local root="$1"
+  PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract" \
+    normalize-offline "$root"
+}
+
+reject_cargo_warnings() {
+  local log="$1"
+  local operation="$2"
+  local grep_status
+  if grep -Eiq '(^|[[:space:]])warning([[:space:]]|:)' "$log"; then
+    die "$operation emitted a warning"
+  else
+    grep_status=$?
+  fi
+  [[ "$grep_status" -eq 1 ]] || die "cannot scan $operation log for warnings"
 }
 
 if [[ -e "$install_root" || -L "$install_root" || -e "$install_manifest" || -L "$install_manifest" ]]; then
@@ -298,6 +291,7 @@ PY
 readonly fetch_home="$staging/fetch-home"
 readonly fetch_target="$staging/fetch-target"
 readonly fetch_tmp="$staging/fetch-tmp"
+readonly fetch_log="$staging/cargo-fetch.log"
 mkdir -p "$fetch_home" "$fetch_target" "$fetch_tmp"
 if /usr/bin/env -i \
   HOME="$fetch_home" \
@@ -315,38 +309,44 @@ if /usr/bin/env -i \
   CARGO_HTTP_TIMEOUT=600 \
   CARGO_NET_RETRY=3 \
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+  CARGO_TERM_COLOR=never \
   RUSTC="$rustc_bin" \
   GIT_CONFIG_GLOBAL=/dev/null \
   GIT_CONFIG_SYSTEM=/dev/null \
   "$cargo_bin" fetch \
   --manifest-path "$cargo_manifest" \
   --locked \
-  --target aarch64-apple-darwin; then
+  --target aarch64-apple-darwin 2>&1 | tee "$fetch_log"; then
   :
 else
   die "checksum-bound Tauri CLI dependency preparation failed; the isolated cache was preserved"
 fi
+reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"
 verify_cargo_preparation_cache "$prepared_cargo_home"
 
 # Final compilation gets a snapshot of the prepared cache and is forced
-# offline. The snapshot is fully verified before and after Cargo executes, so
-# the compile cannot mutate or substitute its dependency input.
+# offline. The complete normalized dependency tree is verified before and after
+# Cargo executes, detecting every persistent cache mutation after Cargo exits.
 readonly offline_cargo_home="$staging/offline-cargo-home"
 readonly offline_cache_manifest="$staging/offline-cargo-home.manifest.json"
 /usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"
-verify_cargo_preparation_cache "$offline_cargo_home"
+normalize_cargo_offline_cache "$offline_cargo_home"
 python3 "$repo_root/scripts/hash_artifact.py" \
   "$offline_cargo_home" \
   --output "$offline_cache_manifest" \
   --algorithm sha256-tree-v2 \
-  --metadata "artifactKind=pinned-tauri-offline-cache-v1" \
+  --metadata "artifactKind=pinned-tauri-offline-cache-v2" \
+  --metadata "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256" \
+  --metadata "cacheNormalization=cargo-runtime-metadata-v1" \
   --metadata "patchedCargoLockSha256=$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" \
   --metadata "rustToolchain=$rust_toolchain"
 offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest \
   "$repo_root" \
   "$offline_cargo_home" \
   "$offline_cache_manifest" \
-  "artifactKind=pinned-tauri-offline-cache-v1" \
+  "artifactKind=pinned-tauri-offline-cache-v2" \
+  "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256" \
+  "cacheNormalization=cargo-runtime-metadata-v1" \
   "patchedCargoLockSha256=$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" \
   "rustToolchain=$rust_toolchain")"
 readonly offline_cache_sha256_before
@@ -362,7 +362,7 @@ if /usr/bin/env -i \
   TMPDIR="$isolated_tmp" \
   LANG=C \
   LC_ALL=C \
-  PATH="$(dirname "$cargo_bin"):/usr/bin:/bin:/usr/sbin:/sbin" \
+  PATH="$cargo_install_root/bin:$(dirname "$cargo_bin"):/usr/bin:/bin:/usr/sbin:/sbin" \
   DEVELOPER_DIR="$developer_dir" \
   SDKROOT="$sdk_root" \
   MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
@@ -389,18 +389,15 @@ if /usr/bin/env -i \
 else
   die "checksum-bound tauri-cli installation failed"
 fi
-readonly cargo_path_warning="^warning: be sure to add \`[^\`]+/bin\` to your PATH to be able to run the installed binaries\$"
-[[ "$(grep -Ec "$cargo_path_warning" "$install_log")" == "1" ]] ||
-  die "tauri-cli installation did not emit the exact expected Cargo PATH notice"
-if grep -Ev "$cargo_path_warning" "$install_log" |
-  grep -Eiq '(^|[[:space:]])warning([[:space:]]|:)'; then
-  die "tauri-cli installation emitted a warning"
-fi
+reject_cargo_warnings "$install_log" "tauri-cli installation"
+normalize_cargo_offline_cache "$offline_cargo_home"
 offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest \
   "$repo_root" \
   "$offline_cargo_home" \
   "$offline_cache_manifest" \
-  "artifactKind=pinned-tauri-offline-cache-v1" \
+  "artifactKind=pinned-tauri-offline-cache-v2" \
+  "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256" \
+  "cacheNormalization=cargo-runtime-metadata-v1" \
   "patchedCargoLockSha256=$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" \
   "rustToolchain=$rust_toolchain")"
 readonly offline_cache_sha256_after
@@ -425,6 +422,8 @@ python3 "$repo_root/scripts/hash_artifact.py" \
   --output "$staging/tauri-cli-$TAURI_CLI_VERSION.manifest.json" \
   --algorithm sha256-tree-v2 \
   --metadata "artifactKind=pinned-tauri-cli-v2" \
+  --metadata "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256" \
+  --metadata "cacheNormalization=cargo-runtime-metadata-v1" \
   --metadata "crateSha256=$TAURI_CLI_CRATE_SHA256" \
   --metadata "dependencyMode=isolated-fetch-offline-locked-v1" \
   --metadata "lockPatchSha256=$TAURI_CLI_LOCK_PATCH_SHA256" \

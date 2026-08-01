@@ -68,6 +68,8 @@ cfw_verify_tauri_toolchain_tree() {
     "$contract_toolchain_root/tauri-cli-$TAURI_CLI_VERSION" \
     "$contract_toolchain_root/tauri-cli-$TAURI_CLI_VERSION.manifest.json" \
     "artifactKind=pinned-tauri-cli-v2" \
+    "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256" \
+    "cacheNormalization=cargo-runtime-metadata-v1" \
     "crateSha256=$TAURI_CLI_CRATE_SHA256" \
     "dependencyMode=isolated-fetch-offline-locked-v1" \
     "lockPatchSha256=$TAURI_CLI_LOCK_PATCH_SHA256" \

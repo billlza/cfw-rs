@@ -355,6 +355,8 @@ class ExecutionBeforeVersionTests(unittest.TestCase):
             binary = root / "bin/cargo-tauri"
             metadata = [
                 "artifactKind=pinned-tauri-cli-v2",
+                f"cacheContractSha256={self.pins['TAURI_CARGO_CACHE_CONTRACT_SHA256']}",
+                "cacheNormalization=cargo-runtime-metadata-v1",
                 f"crateSha256={self.pins['TAURI_CLI_CRATE_SHA256']}",
                 "dependencyMode=isolated-fetch-offline-locked-v1",
                 f"lockPatchSha256={self.pins['TAURI_CLI_LOCK_PATCH_SHA256']}",
@@ -571,6 +573,10 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertIn("PINNED_TAURI_SIGNER_SHA256", launcher)
         self.assertIn("PINNED_TAURI_SIGNER_BYTES", launcher)
         self.assertIn(
+            f'"cacheContractSha256={_pins()["TAURI_CARGO_CACHE_CONTRACT_SHA256"]}"',
+            launcher,
+        )
+        self.assertIn(
             'repository / "target/toolchains" / f"tauri-cli-{TAURI_CLI_VERSION}"',
             launcher,
         )
@@ -722,8 +728,105 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             '/bin/mv "$source_root" "$payload/source"',
             "artifactKind=pinned-tauri-cli-v2",
             "payloadLayout=bin-and-patched-source-v1",
+            'PATH="$cargo_install_root/bin:$(dirname "$cargo_bin"):',
+            'readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"',
+            'PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract"',
+            'reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"',
+            'reject_cargo_warnings "$install_log" "tauri-cli installation"',
+            "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256",
+            "cacheNormalization=cargo-runtime-metadata-v1",
         ):
             self.assertIn(fragment, installer)
+        preparation_call = 'verify_cargo_preparation_cache "$prepared_cargo_home"'
+        normalization_call = 'normalize_cargo_offline_cache "$offline_cargo_home"'
+        fetch_warning_call = (
+            'reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"'
+        )
+        install_warning_call = (
+            'reject_cargo_warnings "$install_log" "tauri-cli installation"'
+        )
+        self.assertEqual(installer.count(preparation_call), 2)
+        self.assertEqual(installer.count(normalization_call), 2)
+        self.assertEqual(installer.count(fetch_warning_call), 1)
+        self.assertEqual(installer.count(install_warning_call), 1)
+        self.assertEqual(
+            installer.count(
+                'offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest'
+            ),
+            1,
+        )
+        self.assertEqual(
+            installer.count(
+                'offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest'
+            ),
+            1,
+        )
+        self.assertEqual(installer.count('--output "$offline_cache_manifest"'), 1)
+        equality = '[[ "$offline_cache_sha256_after" == "$offline_cache_sha256_before" ]]'
+        self.assertEqual(installer.count(equality), 1)
+        self.assertNotIn("cargo_path_warning", installer)
+        preparation_before = installer.index(preparation_call)
+        fetch = installer.index('"$cargo_bin" fetch', preparation_before)
+        fetch_warning = installer.index(fetch_warning_call, fetch)
+        preparation_after = installer.index(preparation_call, fetch_warning)
+        copied = installer.index(
+            '/usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"',
+            preparation_after,
+        )
+        normalized_before = installer.index(
+            normalization_call,
+            copied,
+        )
+        manifest = installer.index('--output "$offline_cache_manifest"', normalized_before)
+        verified_before = installer.index(
+            'offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest',
+            manifest,
+        )
+        install = installer.index('"$cargo_bin" install', verified_before)
+        install_warning = installer.index(install_warning_call, install)
+        normalized_after = installer.index(
+            normalization_call,
+            install_warning,
+        )
+        verified_after = installer.index(
+            'offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest',
+            normalized_after,
+        )
+        compared = installer.index(equality, verified_after)
+        self.assertEqual(
+            sorted(
+                (
+                    preparation_before,
+                    fetch,
+                    fetch_warning,
+                    preparation_after,
+                    copied,
+                    normalized_before,
+                    manifest,
+                    verified_before,
+                    install,
+                    install_warning,
+                    normalized_after,
+                    verified_after,
+                    compared,
+                )
+            ),
+            [
+                preparation_before,
+                fetch,
+                fetch_warning,
+                preparation_after,
+                copied,
+                normalized_before,
+                manifest,
+                verified_before,
+                install,
+                install_warning,
+                normalized_after,
+                verified_after,
+                compared,
+            ],
+        )
         collector = (SCRIPTS / "publication/native_collector.py").read_text(encoding="utf-8")
         self.assertIn('tauri_source = (tauri_root / "source")', collector)
         self.assertNotIn('repository / "apps/cfw-tauri-shell/node_modules/esbuild"', collector)
@@ -903,6 +1006,8 @@ class PublicationToolchainBindingTests(unittest.TestCase):
                 f"tauri-cli-{self.pins['TAURI_CLI_VERSION']}.manifest.json",
                 [
                     "artifactKind=pinned-tauri-cli-v2",
+                    f"cacheContractSha256={self.pins['TAURI_CARGO_CACHE_CONTRACT_SHA256']}",
+                    "cacheNormalization=cargo-runtime-metadata-v1",
                     f"crateSha256={self.pins['TAURI_CLI_CRATE_SHA256']}",
                     "dependencyMode=isolated-fetch-offline-locked-v1",
                     f"lockPatchSha256={self.pins['TAURI_CLI_LOCK_PATCH_SHA256']}",

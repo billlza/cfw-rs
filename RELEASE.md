@@ -133,8 +133,12 @@ SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
 The Tauri installer verifies the official 2.11.4 crate and its published lock,
 applies the digest-pinned `spin` 0.9.9 lock update, verifies the resulting lock,
 and installs only from that local source with `--locked` using isolated Cargo
-home and target directories. The sealed payload contains only its thin arm64
-binary and clean patched crate source, lock, and licenses under
+home and target directories. It normalizes only Cargo's three exact root-level
+runtime tracking/lock files in the private offline cache copy, then proves the
+complete remaining registry tree is byte-identical before and after compilation.
+The normalization helper digest and policy are bound into the final toolchain
+manifest, and any fetch or install warning blocks the bootstrap. The sealed
+payload contains only its thin arm64 binary and clean patched crate source, lock, and licenses under
 `target/toolchains/tauri-cli-2.11.4`. Release scripts invoke that absolute
 binary; an ambient Cargo home cannot substitute it. Go, Node.js, XcodeGen,
 Tauri, the Go release tools, and the prepared Go module cache must each have a verified

@@ -59,7 +59,12 @@ Network access is isolated to explicit preparation:
    only the thin arm64 executable and clean patched crate source (including the
    exact lock and licenses) under `target/toolchains/tauri-cli-2.11.4`; release
    scripts call that exact binary and never resolve `cargo tauri` from an
-   ambient Cargo home.
+   ambient Cargo home. Cargo's three root-level runtime tracking/lock files are
+   validated and removed only from the private offline cache snapshot before
+   each complete registry-tree measurement. The exact normalization contract
+   is SHA-256 pinned into both the build-input policy and final toolchain
+   manifest; unknown metadata, registry drift, or any fetch/install warning
+   fails closed.
 3. `scripts/prepare_ui_dependencies.sh` runs the pinned npm `ci` operation in
    an isolated networked workspace, copies regular files into a self-contained
    tree without npm cache hard links, and seals the complete `node_modules`

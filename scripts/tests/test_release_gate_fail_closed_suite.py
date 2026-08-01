@@ -240,6 +240,7 @@ _PINNED_INPUTS = (
     "scripts/verify_release_app.sh",
     "scripts/bootstrap_release_toolchain.sh",
     "scripts/install_pinned_tauri_cli.sh",
+    "scripts/tauri_cargo_cache_contract.py",
     "scripts/tauri-cli-2.11.4-spin-0.9.9.patch",
     "scripts/xcodegen-2.46.0-installed-resources.patch",
     "crates/cfw-release-verifier/src/main.rs",

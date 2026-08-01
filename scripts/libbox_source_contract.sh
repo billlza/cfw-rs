@@ -119,6 +119,45 @@ libbox_validate_upstream_source() {
   fi
 }
 
+libbox_canonical_diff() {
+  local source_root="$1"
+  shift
+  # Full object IDs and explicit diff settings keep the release digest independent
+  # of clone depth, object population, and operator Git configuration.
+  /usr/bin/env \
+    -u GIT_CONFIG_COUNT \
+    -u GIT_CONFIG_PARAMETERS \
+    -u GIT_DIFF_OPTS \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_SYSTEM=/dev/null \
+    git -C "$source_root" \
+    -c core.attributesFile=/dev/null \
+    -c core.autocrlf=false \
+    -c core.filemode=true \
+    -c diff.interHunkContext=0 \
+    -c diff.suppressBlankEmpty=false \
+    --no-pager diff \
+    --no-color \
+    --no-ext-diff \
+    --no-textconv \
+    --binary \
+    --full-index \
+    --no-renames \
+    --no-indent-heuristic \
+    --diff-algorithm=myers \
+    --unified=3 \
+    -O/dev/null \
+    --src-prefix=a/ \
+    --dst-prefix=b/ \
+    "$@"
+}
+
+libbox_dependency_diff_sha256() {
+  local source_root="$1"
+  libbox_canonical_diff "$source_root" -- go.mod go.sum |
+    shasum -a 256 | awk '{print $1}'
+}
+
 libbox_combined_diff_sha256() {
   local source_root="$1"
   local temporary_directory temporary_index digest
@@ -130,9 +169,7 @@ libbox_combined_diff_sha256() {
     return 1
   fi
   digest="$(
-    GIT_INDEX_FILE="$temporary_index" git -C "$source_root" \
-      -c core.autocrlf=false --no-pager \
-      diff --cached --no-ext-diff --binary HEAD -- |
+    GIT_INDEX_FILE="$temporary_index" libbox_canonical_diff "$source_root" --cached HEAD -- |
       shasum -a 256 | awk '{print $1}'
   )"
   /bin/rm -r "$temporary_directory"
@@ -151,10 +188,7 @@ libbox_validate_patched_source() {
     echo "error: patched sing-box checkout contains ignored files" >&2
     return 1
   fi
-  actual_diff="$(
-    git -C "$source_root" -c core.autocrlf=false --no-pager \
-      diff --no-ext-diff --binary -- go.mod go.sum | shasum -a 256 | awk '{print $1}'
-  )"
+  actual_diff="$(libbox_dependency_diff_sha256 "$source_root")"
   if [[ "$actual_diff" != "$SING_BOX_PATCHED_DIFF_SHA256" ]]; then
     echo "error: patched sing-box security diff digest mismatch" >&2
     return 1

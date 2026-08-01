@@ -33,12 +33,13 @@ PATCH_PATHS = {
 EXPECTED_RAW_PACKET_PATCH_SHA256 = (
     "5e578e7f3695116f8e1dfbb3fc7c2fc276c9b8c193428e5fd6fa71dc57fb8d60"
 )
-# The combined diff is the digest of the whole working-tree diff of the patched
-# sing-box checkout (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256),
-# which cannot be recomputed from the patch files alone. A pinned literal is
-# therefore the only form of this assertion that still fails when a pin drifts.
+# The combined diff is the full-object-ID digest of the whole working-tree diff
+# of the patched sing-box checkout
+# (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256), which cannot
+# be recomputed from the patch files alone. A pinned literal is therefore the
+# only form of this assertion that still fails when a pin drifts.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "019f283e86222aed9aec2de94efa3166165af85d6828fbc876a689daa28c384a"
+    "25d3d611f1c1bf317e9ec2dc23609f32972bfbeec4b2502131ee1e7dd4e68cfe"
 )
 
 

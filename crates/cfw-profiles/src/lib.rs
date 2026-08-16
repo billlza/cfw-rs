@@ -6,6 +6,7 @@
 
 mod envelope;
 mod repository;
+mod selected_replace;
 mod selection;
 mod storage;
 mod storage_atomic;
@@ -14,9 +15,10 @@ mod storage_tests;
 
 pub use cfw_singbox_config::ValidatedSingBoxProfile;
 pub use repository::{
-    LockedProfileCredentialSnapshot, LockedSelectedProfile, ProfileCredentialCatalogEntry,
-    ProfileCredentialSnapshot, ProfileImportResult, ProfileRecord, ProfileRepository,
-    ProfileRepositorySnapshot, StoredProfile,
+    ExactProfileImportOutcome, LockedCredentialProfileMutation, LockedProfileCredentialSnapshot,
+    LockedSelectedProfile, ProfileCredentialCatalogEntry, ProfileCredentialSnapshot,
+    ProfileImportResult, ProfileRecord, ProfileRepository, ProfileRepositorySnapshot,
+    StoredProfile,
 };
 
 use cfw_singbox_config::{ConfigError, MAX_PROFILE_BYTES};
@@ -27,6 +29,9 @@ const PROFILE_FILE_SUFFIX: &str = ".profile.json";
 const SELECTION_SCHEMA_VERSION: u16 = 1;
 const SELECTION_FILE_NAME: &str = "selected-profile-v1.json";
 const MAX_SELECTION_BYTES: usize = 1_024;
+const MAX_SELECTED_REPLACE_BYTES: usize = 1_024;
+const SELECTED_REPLACE_FILE_NAME: &str = ".selected-profile-replace-v1.json";
+const SELECTED_REPLACE_SCHEMA_VERSION: u16 = 1;
 const MAX_PROFILE_NAME_CHARS: usize = 256;
 /// Shortest string that can still be an absolute `https` URL with a host.
 const MIN_SOURCE_URL_CHARS: usize = "https://a".len();
@@ -83,10 +88,18 @@ pub enum ProfileError {
     UnsafeProfileFile(String),
     #[error("selected-profile state is not an effective-user-owned private regular file")]
     UnsafeSelectionFile,
+    #[error(
+        "selected-profile replacement intent is not an effective-user-owned private regular file"
+    )]
+    UnsafeSelectedReplaceFile,
     #[error("stored profile exceeds the {MAX_ENVELOPE_BYTES}-byte envelope limit: {actual} bytes")]
     StoredProfileTooLarge { actual: u64 },
     #[error("selected-profile state exceeds the {MAX_SELECTION_BYTES}-byte limit: {actual} bytes")]
     SelectionTooLarge { actual: u64 },
+    #[error(
+        "selected-profile replacement intent exceeds the {MAX_SELECTED_REPLACE_BYTES}-byte limit: {actual} bytes"
+    )]
+    SelectedReplaceTooLarge { actual: u64 },
     #[error("unsupported profile envelope schema version: {0}")]
     UnsupportedSchema(u16),
     #[error("unsupported selected-profile schema version: {0}")]
@@ -95,10 +108,20 @@ pub enum ProfileError {
     IdentityMismatch { expected: String, stored: String },
     #[error("profile digest mismatch for {id}")]
     DigestMismatch { id: String },
+    #[error("profile changed while an update was in progress: {id}")]
+    ProfileChanged { id: String },
     #[error("profile envelope is not in canonical form: {0}")]
     NonCanonicalEnvelope(String),
     #[error("selected-profile state is not in canonical form")]
     NonCanonicalSelection,
+    #[error("selected-profile replacement intent is invalid: {0}")]
+    InvalidSelectedReplace(String),
+    #[error("selected-profile replacement recovery conflicts with the repository state: {0}")]
+    SelectedReplaceConflict(String),
+    #[error(
+        "selected-profile replacement failed ({operation}); deterministic recovery also failed ({recovery})"
+    )]
+    SelectedReplaceRecovery { operation: String, recovery: String },
     #[error("selected profile does not exist: {0}")]
     SelectedProfileMissing(String),
     #[error("no profile is selected")]

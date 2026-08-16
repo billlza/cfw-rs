@@ -8,10 +8,27 @@
 //! Nothing in this module can enable, disable, or otherwise write a proxy, DNS,
 //! or route setting.
 
-use anyhow::Result;
+use std::time::Duration;
+
+use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::MacOsPlatformService;
+
+const NETWORK_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_NETWORK_OBSERVATION_BYTES: usize = 1024 * 1024;
+const MAX_NETWORK_OBSERVATION_ERROR_BYTES: usize = 64 * 1024;
+
+/// Fixed-tool snapshot used to prove ownership or absence of legacy routes.
+/// The platform adapter owns process execution; callers receive only bounded,
+/// UTF-8 observation text and cannot choose an executable or arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkRoutingObservation {
+    pub interfaces: String,
+    pub ipv4_routes: String,
+    pub ipv6_routes: String,
+    pub dns: String,
+}
 
 /// One protocol slot of a service's proxy configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -51,6 +68,24 @@ impl NetworkServiceObservation {
 }
 
 impl MacOsPlatformService {
+    /// Captures interfaces, IPv4/IPv6 route tables, and scoped DNS state using
+    /// fixed absolute macOS tools under one shared timeout/output policy.
+    pub fn observe_network_routing(&self) -> Result<NetworkRoutingObservation> {
+        #[cfg(target_os = "macos")]
+        {
+            Ok(NetworkRoutingObservation {
+                interfaces: run_network_observation("/sbin/ifconfig", &[])?,
+                ipv4_routes: run_network_observation("/usr/sbin/netstat", &["-rn", "-f", "inet"])?,
+                ipv6_routes: run_network_observation("/usr/sbin/netstat", &["-rn", "-f", "inet6"])?,
+                dns: run_network_observation("/usr/sbin/scutil", &["--dns"])?,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            bail!("network routing observation is only available on macOS")
+        }
+    }
+
     /// Observes every service of the current network set.
     ///
     /// A service without a proxy configuration is reported with all modes
@@ -66,6 +101,36 @@ impl MacOsPlatformService {
             anyhow::bail!("network service observation is only available on macOS")
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn run_network_observation(program: &str, args: &[&str]) -> Result<String> {
+    let output = crate::bounded_command::run_bounded_command(
+        program,
+        args,
+        NETWORK_OBSERVATION_TIMEOUT,
+        MAX_NETWORK_OBSERVATION_BYTES,
+        MAX_NETWORK_OBSERVATION_ERROR_BYTES,
+    )
+    .with_context(|| format!("network observation command {program} failed"))?;
+    let stderr = String::from_utf8(output.stderr).with_context(|| {
+        format!("network observation command {program} returned non-UTF-8 stderr")
+    })?;
+    if !output.status.success() {
+        bail!(
+            "network observation command {program} failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+    if !stderr.trim().is_empty() {
+        bail!(
+            "network observation command {program} succeeded with unexpected stderr: {}",
+            stderr.trim()
+        );
+    }
+    String::from_utf8(output.stdout)
+        .with_context(|| format!("network observation command {program} returned non-UTF-8 output"))
 }
 
 #[cfg(test)]

@@ -1,11 +1,19 @@
 mod bootstrap;
 mod commands;
 mod engine;
+mod launch;
 mod legacy;
 mod lifecycle;
+#[cfg(feature = "physical-release-evidence")]
+mod packet_evidence_transport;
+mod release_observation;
 mod shell;
 mod subscription_import;
 mod updater;
+mod window_state;
+
+#[cfg(feature = "physical-release-evidence")]
+pub use engine::{ManagedEngine, packet_evidence};
 
 use bootstrap::{LaunchContext, acknowledge_migration_handoff_renderer_ready, boot_payload};
 use cfw_apple_network::NativeFrameworkBridge;
@@ -14,30 +22,34 @@ use cfw_engine_api::EngineEvent;
 use commands::{
     LiveStreams, apply_active_profile, apply_restore_dns_servers, build_managed_profiles,
     cancel_credential_gc, close_all_connections, close_connection, commit_credential_gc,
-    controller_snapshot, controller_version, current_platform_design, delete_profile, dns_query,
-    flush_fake_ip_cache, force_quit_app, geoip_database_status, health_check_all_proxy_providers,
-    health_check_proxy_provider, import_profile_file, import_profile_text, import_profile_url,
-    migrate_legacy_cfw_profiles, move_dashboard_to_nearest_monitor, network_diagnostics,
-    open_login_items_settings, open_page, open_profile_externally, parse_deep_links,
-    preview_credential_gc, profile_credential_presence, profile_credential_requirements,
-    profile_qrcode_svg, profiles_snapshot, providers_snapshot, provision_profile_credentials,
-    read_profile_text, read_runtime_config_text, read_settings_snapshot, refresh_tray_menu,
-    reset_settings_snapshot, reveal_home_directory, reveal_logs_directory, reveal_profile,
-    rules_snapshot, save_profile_text, select_profile, select_proxy, set_allow_lan,
-    set_bind_address, set_launch_at_login_enabled, set_log_level, set_mixin_enabled,
-    set_proxy_mode, set_system_proxy_enabled, set_tun_enabled, start_connections_stream,
-    start_log_stream, stop_connections_stream, stop_log_stream, system_proxy_state,
-    test_proxy_delays, toggle_devtools, tun_runtime_state, update_all_proxy_providers,
-    update_all_rule_providers, update_geoip_database, update_profile, update_profile_info,
-    update_proxy_provider, update_rule_provider, write_settings_snapshot,
+    commit_legacy_cfw_profile_migration, controller_snapshot, controller_version,
+    current_platform_design, delete_profile, dns_query, flush_fake_ip_cache, force_quit_app,
+    geoip_database_status, health_check_all_proxy_providers, health_check_proxy_provider,
+    import_profile_file, import_profile_text, import_profile_url,
+    move_dashboard_to_nearest_monitor, network_diagnostics, open_login_items_settings, open_page,
+    open_profile_externally, parse_deep_links, preview_credential_gc,
+    preview_legacy_cfw_profile_migration, profile_credential_presence,
+    profile_credential_requirements, profile_qrcode_svg, profiles_snapshot, providers_snapshot,
+    provision_profile_credentials, read_profile_text, read_runtime_config_text,
+    read_settings_snapshot, refresh_tray_menu, reset_settings_snapshot, reveal_home_directory,
+    reveal_logs_directory, reveal_profile, rules_snapshot, save_profile_text, select_profile,
+    select_proxy, set_allow_lan, set_bind_address, set_launch_at_login_enabled, set_log_level,
+    set_mixin_enabled, set_proxy_mode, set_system_proxy_enabled, set_tun_enabled,
+    start_connections_stream, start_log_stream, stop_connections_stream, stop_log_stream,
+    system_proxy_state, test_proxy_delays, toggle_devtools, tun_runtime_state,
+    update_all_proxy_providers, update_all_rule_providers, update_geoip_database, update_profile,
+    update_profile_info, update_proxy_provider, update_rule_provider, write_settings_snapshot,
 };
 use engine::{
     build_managed_engine, engine_snapshot, prepare_legacy_cutover, start_engine_event_forwarder,
 };
+use launch::{LaunchMode, parse_launch_mode};
+
+const STARTUP_USAGE_EXIT_CODE: i32 = 64;
+const STARTUP_ADMISSION_EXIT_CODE: i32 = 78;
 use legacy::{
-    ConsumedHandoffTicket, LaunchArguments, LegacyRetirementGate, MigrationHandoffLease,
-    begin_migration_handoff, disable_service_mode, legacy_retirement_status,
-    parse_launch_arguments, recover_legacy_cutover, run_launch_preflight,
+    ConsumedHandoffTicket, LegacyRetirementGate, MigrationHandoffLease, begin_migration_handoff,
+    disable_service_mode, legacy_retirement_status, recover_legacy_cutover, run_launch_preflight,
 };
 use lifecycle::{AppLifecycle, quit_app, request_shutdown};
 use shell::{
@@ -46,6 +58,7 @@ use shell::{
 };
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use updater::{UpdaterSecurityState, check_for_updates, open_available_update};
+use window_state::{WindowBoundsManager, handle_window_bounds_event, initialize_window_bounds};
 
 fn settings_store() -> Result<SettingsStore, String> {
     SettingsStore::default_for_current_user().map_err(|error| error.to_string())
@@ -97,26 +110,26 @@ fn emit_startup_error(app: &tauri::AppHandle, kind: &str, message: String) {
 
 fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let launch_arguments = match parse_launch_arguments(&arguments) {
+    let launch_arguments = match parse_launch_mode(&arguments) {
         Ok(arguments) => arguments,
         Err(error) => {
-            eprintln!("migration handoff admission failed: {error}");
-            return;
+            eprintln!("startup argument admission failed: {error}");
+            std::process::exit(STARTUP_USAGE_EXIT_CODE);
         }
     };
     let launch = match launch_arguments {
-        LaunchArguments::Dashboard => {
+        LaunchMode::Dashboard => {
             let available = settings_store().and_then(|store| {
                 store.ensure_layout().map_err(|error| error.to_string())?;
                 MigrationHandoffLease::acquire(&store.paths().app_home).map(std::mem::drop)
             });
             if let Err(error) = available {
                 eprintln!("dashboard launch blocked while migration handoff is active: {error}");
-                return;
+                std::process::exit(STARTUP_ADMISSION_EXIT_CODE);
             }
             LaunchContext::dashboard()
         }
-        LaunchArguments::MigrationHandoff { token } => {
+        LaunchMode::MigrationHandoff { token } => {
             let admitted = settings_store().and_then(|store| {
                 store.ensure_layout().map_err(|error| error.to_string())?;
                 let executable = std::env::current_exe()
@@ -135,9 +148,17 @@ fn main() {
                 Ok((ticket, lease)) => LaunchContext::handoff(ticket, lease),
                 Err(error) => {
                     eprintln!("migration handoff admission failed: {error}");
-                    return;
+                    std::process::exit(STARTUP_ADMISSION_EXIT_CODE);
                 }
             }
+        }
+        #[cfg(feature = "physical-release-evidence")]
+        LaunchMode::PacketEvidence => {
+            if let Err(error) = packet_evidence_transport::run_packet_evidence_proxy() {
+                eprintln!("physical Packet evidence Host control failed: {error}");
+                std::process::exit(70);
+            }
+            return;
         }
     };
     let migration_handoff = launch.is_migration_handoff();
@@ -147,6 +168,7 @@ fn main() {
         .manage(AppLifecycle::default())
         .manage(LiveStreams::default())
         .manage(TrayMenuState::default())
+        .manage(WindowBoundsManager::default())
         .manage(UpdaterSecurityState::default());
     // The explicit handoff instance must coexist with the still-running 0.3.5
     // GUI so it can validate 0.4.0 without asking the user to quit and trigger
@@ -219,7 +241,8 @@ fn main() {
         open_profile_externally,
         geoip_database_status,
         update_geoip_database,
-        migrate_legacy_cfw_profiles,
+        preview_legacy_cfw_profile_migration,
+        commit_legacy_cfw_profile_migration,
         set_system_proxy_enabled,
         system_proxy_state,
         set_tun_enabled,
@@ -272,6 +295,14 @@ fn main() {
             app.set_menu(build_app_menu(app.handle())?)?;
             run_launch_preflight(app.handle()).map_err(std::io::Error::other)?;
 
+            #[cfg(feature = "physical-release-evidence")]
+            if !app.state::<LaunchContext>().is_migration_handoff()
+                && let Err(error) =
+                    packet_evidence_transport::run_packet_evidence_transaction(app.handle().clone())
+            {
+                eprintln!("physical Packet evidence control is unavailable: {error}");
+            }
+
             if app.state::<LaunchContext>().is_migration_handoff() {
                 prepare_migration_handoff_window(app.handle()).map_err(std::io::Error::other)?;
                 app.state::<LaunchContext>()
@@ -279,6 +310,9 @@ fn main() {
                     .map_err(std::io::Error::other)?;
             } else {
                 build_tray(app.handle())?;
+                if let Err(error) = initialize_window_bounds(app.handle()) {
+                    emit_startup_error(app.handle(), "window_bounds_restore_failed", error);
+                }
                 if let Err(error) = apply_silent_start(app.handle()) {
                     emit_startup_error(app.handle(), "silent_start_failed", error);
                 }
@@ -287,6 +321,11 @@ fn main() {
         })
         .on_menu_event(|app, event| handle_app_menu_event(app, event.id().as_ref()))
         .on_window_event(|window, event| {
+            if let Err(error) =
+                handle_window_bounds_event(window.app_handle(), window.label(), event)
+            {
+                emit_startup_error(window.app_handle(), "window_bounds_schedule_failed", error);
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 if let Err(error) = window.hide() {

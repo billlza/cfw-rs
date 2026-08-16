@@ -471,6 +471,17 @@ input::placeholder {
   padding: 0;
 }
 
+.cfw-content.cfw-content-migration {
+  overflow-y: auto;
+}
+
+.cfw-content-migration .cfw-migration-banner {
+  max-height: none;
+  flex: none;
+  align-items: start;
+  overflow: visible;
+}
+
 /* The migration surface is intentionally scoped to General. It may shrink and
    scroll within the existing 850x603 window, but never changes the cleared
    dashboard rows or the page/navigation geometry. */

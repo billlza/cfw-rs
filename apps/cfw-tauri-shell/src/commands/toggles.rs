@@ -22,16 +22,17 @@ use cfw_core::{SettingsStore, UiPreferences};
 use cfw_engine_api::EngineSnapshot;
 use cfw_engine_api::{EngineMode, EngineState};
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use super::controller::{controller_client, ipc_error};
-use super::settings::UiSettingsSnapshot;
+use super::settings::{UiSettingsSnapshot, settings_snapshot_with_live_status};
 #[cfg(test)]
 use crate::engine::switch_transition;
 use crate::engine::{
     EngineStatusPayload, ManagedEngine, apply_admitted_engine_mode, serialized_switch_transition,
 };
 use crate::legacy::LegacyRetirementGate;
+use crate::window_state::WindowBoundsManager;
 use crate::{commands::ManagedProfiles, settings_store};
 
 /// Loopback host the projected mixed inbound listens on. Changing it requires a
@@ -362,7 +363,10 @@ fn parse_restore_dns_servers(servers: &str) -> Result<RestoreDnsRequest, String>
 /// that only the transactional Login Item command may change, so resetting it
 /// here would leave the stored preference and the system state disagreeing.
 #[tauri::command]
-pub(crate) fn reset_settings_snapshot() -> Result<UiSettingsSnapshot, String> {
+pub(crate) fn reset_settings_snapshot(
+    app: AppHandle,
+    window_bounds: State<'_, WindowBoundsManager>,
+) -> Result<UiSettingsSnapshot, String> {
     let store = settings_store()?;
     if !store
         .legacy_retirement_completed()
@@ -377,7 +381,9 @@ pub(crate) fn reset_settings_snapshot() -> Result<UiSettingsSnapshot, String> {
         launch_at_login: current.launch_at_login,
         ..UiPreferences::default()
     };
-    write_defaults(&store, defaults)
+    window_bounds.commit_retention(&app, defaults.retain_window_bounds, || {
+        write_defaults(&store, defaults)
+    })
 }
 
 fn write_defaults(
@@ -387,13 +393,11 @@ fn write_defaults(
     store
         .write(&preferences)
         .map_err(|error| error.to_string())?;
-    store.snapshot().map_err(|error| error.to_string())
+    settings_snapshot_with_live_status(store)
 }
 
 fn settings_snapshot() -> Result<UiSettingsSnapshot, String> {
-    settings_store()?
-        .snapshot()
-        .map_err(|error| error.to_string())
+    settings_snapshot_with_live_status(&settings_store()?)
 }
 
 #[cfg(test)]

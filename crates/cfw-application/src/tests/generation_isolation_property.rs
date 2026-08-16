@@ -309,7 +309,11 @@ async fn run_permutation(perm: &[Step]) -> Result<(), String> {
 
         let max_generation_before = max_observed_generation(&backend);
 
-        if step.cancel && target_mode != EngineMode::Off {
+        // Reaffirming the already-active mode does not enqueue a new native
+        // operation. There is therefore no accepted waiter to cancel; drive
+        // the request normally instead of waiting for an operation that can
+        // never appear.
+        if step.cancel && target_mode != EngineMode::Off && !is_reaffirm {
             cancel_after_acceptance(&coordinator, &backend, target_mode).await;
         } else {
             let _dropped = coordinator

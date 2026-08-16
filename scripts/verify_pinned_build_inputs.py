@@ -19,6 +19,11 @@ to the tracked release configuration without invoking any toolchain or the netwo
 * known legacy/partial patch digests are rejected;
 * the verified Go module inputs (module sums and go.mod/go.sum digests) are present
   and well formed;
+* the Android packet LAN peer's complete source tree, reproducible Linux/arm64
+  build and verification scripts, bounded TCP contract, held-descriptor artifact
+  identity, and fixed shell-owned deployment layout are independently pinned;
+* the ADB runtime path, version, and executable digest are pinned independently
+  and match the Android admission source constants exactly;
 * the pinned libbox Go build tag list is exactly the pinned value, is well formed,
   and contains every tag the engine start path requires — including the tags whose
   omission would make ``box.New`` fail on every start;
@@ -33,13 +38,75 @@ Any unavailable, missing, malformed, wrong, or partial input fails closed.
 
 from __future__ import annotations
 
+import ast
+import errno
 import hashlib
 import json
+import math
+import os
 import re
+import stat
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+if __package__:
+    from .hash_artifact import build_manifest
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from hash_artifact import build_manifest
 
 MANIFEST_RELATIVE_PATH = "scripts/pinned_build_inputs.json"
+MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024
+MAX_PINNED_MANIFEST_BYTES = 512 * 1024
+MAX_NATIVE_LOCK_BYTES = 256 * 1024
+PINNED_MANIFEST_FIELDS = frozenset(
+    {
+        "artifactBindings",
+        "buildScripts",
+        "cargoDeny",
+        "combinedDiffSha256",
+        "combinedDiffSha256Key",
+        "dependencyPinsPath",
+        "description",
+        "gomobileCommit",
+        "gomobileCommitKey",
+        "libboxBuildTags",
+        "nativeLockPath",
+        "packetEvidenceEndpoint",
+        "packetLanPeer",
+        "patches",
+        "physicalCollectorModule",
+        "rejectedPatchDigests",
+        "runtimeTools",
+        "schema",
+        "singBoxCommit",
+        "singBoxCommitKey",
+        "sourceContract",
+        "tauriCli",
+        "tools",
+        "verifiedGoModuleInputKeys",
+        "xcodegen",
+    }
+)
+NATIVE_LOCK_FIELDS = frozenset(
+    {"go", "gomobile", "singBox", "singBoxForAppleReference"}
+)
+NATIVE_LOCK_SING_BOX_FIELDS = frozenset(
+    {
+        "androidReferenceCommit",
+        "combinedDiffSha256",
+        "commit",
+        "dnsFailoverPatch",
+        "rawPacketPatch",
+        "securityPatch",
+        "tag",
+    }
+)
+NATIVE_LOCK_SECURITY_PATCH_FIELDS = frozenset(
+    {"patchedDiffSha256", "patchedGoModSha256", "patchedGoSumSha256", "path", "sha256"}
+)
+NATIVE_LOCK_PATCH_FIELDS = frozenset({"path", "sha256"})
+NATIVE_LOCK_APPLE_REFERENCE_FIELDS = frozenset({"commit"})
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 _ENV_LINE_RE = re.compile(r"\A([A-Za-z_][A-Za-z0-9_]*)=(.*)\Z")
 _NETWORK_RECURSION_RE = re.compile(
@@ -47,30 +114,552 @@ _NETWORK_RECURSION_RE = re.compile(
     r"(?<![A-Za-z])wget(?![A-Za-z])|go\s+get|go\s+install|GOPROXY\s*=\s*https?",
     re.IGNORECASE,
 )
+_PACKET_ENDPOINT_BINARY_SHA256 = (
+    "fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1"
+)
+_PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256 = (
+    "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996"
+)
+_PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256 = (
+    "6527983cf9b072ab99ecd820778ccb56c9d91d79e07fc4d558715c4ce8657049"
+)
+_PACKET_ENDPOINT_RESOLVER_CONFIG_SHA256 = (
+    "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62"
+)
+_PACKET_ENDPOINT_SUDOERS_SHA256 = (
+    "a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411"
+)
+_PACKET_ENDPOINT_KNOWN_HOSTS_SHA256 = (
+    "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba"
+)
+_PACKET_ENDPOINT_POLICY_SHA256 = (
+    "50cd366157c4297a7cc4d52e13ff8c4e176551567de38d44a905f67820981920"
+)
+_PACKET_ENDPOINT_SOURCE_PATHS = frozenset(
+    {
+        "tools/packet-evidence-endpoint/go.mod",
+        "tools/packet-evidence-endpoint/install-endpoint.sh",
+        "tools/packet-evidence-endpoint/main.go",
+        "tools/packet-evidence-endpoint/main_test.go",
+        "tools/packet-evidence-endpoint/packet-evidence-capture.sudoers",
+        "tools/packet-evidence-endpoint/packet-evidence-endpoint.service",
+        "tools/packet-evidence-endpoint/packet-evidence-resolv.conf",
+        "tools/packet-evidence-endpoint/README.md",
+        "scripts/physical_capture/packet_endpoints.json",
+        "scripts/physical_capture/packet_known_hosts",
+    }
+)
+_PACKET_ENDPOINT_BUILD_FRAGMENTS = (
+    "GOTOOLCHAIN=local",
+    "CGO_ENABLED=0",
+    "GOOS=linux",
+    "GOARCH=amd64",
+    "target/toolchains/go-1.26.5/bin/go",
+    "-C tools/packet-evidence-endpoint",
+    "-trimpath",
+    "-ldflags='-s -w -buildid='",
+    "-o ../../target/packet-evidence-endpoint-linux-amd64",
+    _PACKET_ENDPOINT_BINARY_SHA256,
+)
+_PACKET_LAN_PEER_ARTIFACT_SHA256 = (
+    "873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17"
+)
+_PACKET_LAN_PEER_ARTIFACT_SIZE = 2359422
+_ADB_RUNTIME_TOOL_PATH = "/Users/bill/Library/Android/sdk/platform-tools/adb"
+_ADB_RUNTIME_TOOL_VERSION = "37.0.0-14910828"
+_ADB_RUNTIME_TOOL_SHA256 = (
+    "5759ea07285e5a5b66d84f489c118a3fa3998e69cd37725e5a3dc7cbe0597278"
+)
+_ANDROID_LAN_PEER_SOURCE_PATH = "scripts/physical_capture/android_lan_peer.py"
+_ANDROID_LAN_PEER_SOURCE_SHA256 = (
+    "97b775aeba9f8959cddb907c7c2aa9e6e694ae3ffc0819dd5edda6be0293f60b"
+)
+_ANDROID_LAN_PEER_SOURCE_SIZE = 135593
+_PACKET_LAN_PEER_SOURCE_TREE_SHA256 = (
+    "dc5bf2f5853b986acd3953809d68a0f75aac8bef1d682ba988ec3f7c5fa13c60"
+)
+_PACKET_LAN_PEER_BUILD_SCRIPT_SHA256 = (
+    "c3fb49c83d98a710a15874afe83a3606b3f50f1f65b01c76dbb03edfcc9b43d8"
+)
+_PACKET_LAN_PEER_VERIFY_SCRIPT_SHA256 = (
+    "831ec6e34d35cbe799bae9ab8874d34c5ddd7034be19584c45ceac3731f9248d"
+)
+_PACKET_LAN_PEER_SOURCE_FILES = (
+    (
+        "README.md",
+        "b84a4528927d8b7ceb707203a35d8052579717fb19a9b380a4828147b38b3547",
+        2035,
+        "0644",
+    ),
+    (
+        "go.mod",
+        "f21defb110ca4cb0d36b3591c6214532f3e5fa9926fbe4565ce4d9edce92b8a7",
+        70,
+        "0644",
+    ),
+    (
+        "main.go",
+        "fb6dd50acaa306f9664ef1e89929041459bf68b3ec13feee8166dcc8bf588b4b",
+        7757,
+        "0644",
+    ),
+    (
+        "main_test.go",
+        "ef4b6eff3f31f4d17345bf0da67726f1c2f6b776c15ab2691bbb3710487ca87e",
+        10813,
+        "0644",
+    ),
+)
+_PACKET_LAN_PEER_BUILD_FRAGMENTS = (
+    'source "$repo_root/scripts/dependency_pins.env"',
+    'source "$repo_root/scripts/release_toolchain_contract.sh"',
+    'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
+    'source_root="$repo_root/tools/packet-lan-peer"',
+    'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
+    "GOTOOLCHAIN=local",
+    "GOFLAGS=-mod=readonly",
+    "GOPROXY=off",
+    "GOSUMDB=sum.golang.org",
+    "GOVCS='*:off'",
+    "CGO_ENABLED=0",
+    "GOOS=linux",
+    "GOARCH=arm64",
+    "-buildvcs=false",
+    "-trimpath",
+    "-ldflags='-s -w -buildid='",
+    '/usr/bin/cmp -s "$first" "$second"',
+    '/bin/chmod 0555 "$artifact_staging"',
+    '/bin/mv -fh "$artifact_staging" "$artifact"',
+)
+_PACKET_LAN_PEER_VERIFY_FRAGMENTS = (
+    'source "$repo_root/scripts/dependency_pins.env"',
+    'source "$repo_root/scripts/release_toolchain_contract.sh"',
+    'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
+    'source_root="$repo_root/tools/packet-lan-peer"',
+    'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
+    "expected_artifact_sha256=873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17",
+    "expected_artifact_size=2359422",
+    "expected_artifact_mode=555",
+    "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
+    "GOTOOLCHAIN=local",
+    "GOFLAGS=-mod=readonly",
+    "GOPROXY=off",
+    "GOSUMDB=sum.golang.org",
+    "GOVCS='*:off'",
+    "CGO_ENABLED=0 GOOS=linux GOARCH=arm64",
+    'expected_imports="$(printf',
+    "net\\.(ListenPacket|ListenUDP)",
+    '"$go_bin" -C "$source_root" test -count=1 ./...',
+    '"$go_bin" -C "$source_root" vet ./...',
+    '"$go_bin" -C "$source_root" test -race -count=1 ./...',
+    '"$repo_root/scripts/build_packet_lan_peer.sh"',
+    '"$go_bin" version -m "$artifact"',
+    '"$go_bin" tool buildid "$artifact"',
+    'artifact_sha256="$(/usr/bin/shasum -a 256 "$artifact"',
+    '"$artifact_mode" != "$expected_artifact_mode"',
+    '"$artifact_size" != "$expected_artifact_size"',
+    '"$artifact_sha256" != "$expected_artifact_sha256"',
+)
+_PHYSICAL_COLLECTOR_GO_MOD_SHA256 = (
+    "30e04725fc86f48fbdc371e02914e7c06fa7177763c560091333297ae52795dd"
+)
+_PHYSICAL_COLLECTOR_GO_SUM_SHA256 = (
+    "5c71b0dca9d0be45b65ab07b1a7386475f72d454c9638d60c36494a75fbc35ec"
+)
+_PHYSICAL_COLLECTOR_MODULE_FRAGMENTS = (
+    "google.golang.org/grpc v1.82.1",
+    "golang.org/x/text v0.39.0",
+)
 
 
 class PinnedInputError(RuntimeError):
     """Raised when any pinned build input cannot be proven correct."""
 
 
-def _read_text(path: Path, description: str) -> str:
-    if path.is_symlink() or not path.is_file():
-        raise PinnedInputError(f"{description} is missing or is not a regular file: {path}")
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _open_directory_beneath(
+    root_descriptor: int,
+    components: tuple[str, ...],
+    directory_flags: int,
+    description: str,
+) -> tuple[int, os.stat_result]:
+    """Open one repository-relative directory chain without following links."""
+    descriptor = os.dup(root_descriptor)
     try:
-        return path.read_text(encoding="utf-8")
+        opened = os.fstat(descriptor)
+        for component in components:
+            try:
+                before = os.stat(
+                    component,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+                next_descriptor = os.open(
+                    component,
+                    directory_flags,
+                    dir_fd=descriptor,
+                )
+            except OSError as error:
+                if error.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
+                    raise PinnedInputError(
+                        f"{description} parent is missing, a symlink, or not a directory"
+                    ) from error
+                raise PinnedInputError(
+                    f"{description} parent cannot be opened securely: {error}"
+                ) from error
+            try:
+                next_opened = os.fstat(next_descriptor)
+                if (
+                    not stat.S_ISDIR(before.st_mode)
+                    or not stat.S_ISDIR(next_opened.st_mode)
+                    or _file_identity(before) != _file_identity(next_opened)
+                ):
+                    raise PinnedInputError(
+                        f"{description} parent changed while it was opened"
+                    )
+            except BaseException:
+                os.close(next_descriptor)
+                raise
+            os.close(descriptor)
+            descriptor = next_descriptor
+            opened = next_opened
+        if not stat.S_ISDIR(opened.st_mode):
+            raise PinnedInputError(f"{description} parent is not a directory")
+        return descriptor, opened
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def read_repository_regular_file(
+    repository: Path,
+    relative: str,
+    description: str,
+    *,
+    maximum_size: int,
+    expected_uid: int | None = None,
+    expected_mode: int | None = None,
+    expected_size: int | None = None,
+    expected_sha256: str | None = None,
+) -> bytes:
+    """Read one repository file through a root-anchored held descriptor chain."""
+    if type(maximum_size) is not int or maximum_size < 1:
+        raise PinnedInputError(f"{description} has no positive byte bound")
+    if expected_uid is None:
+        expected_uid = os.geteuid()
+    if not repository.is_absolute():
+        raise PinnedInputError(f"{description} repository root must be absolute")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None:
+        raise PinnedInputError(f"{description} requires O_NOFOLLOW and O_DIRECTORY")
+    candidate = Path(relative)
+    _safe_repository_path(repository, relative, description)
+    parent_components = tuple(candidate.parts[:-1])
+    filename = candidate.parts[-1]
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    directory_flags = os.O_RDONLY | nofollow | directory
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    try:
+        repository_before = os.stat(repository, follow_symlinks=False)
+        root_descriptor = os.open(repository, directory_flags)
     except OSError as error:
-        raise PinnedInputError(f"{description} cannot be read: {error}") from error
+        if error.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
+            raise PinnedInputError(
+                f"{description} repository root is missing, a symlink, or not a directory"
+            ) from error
+        raise PinnedInputError(
+            f"{description} repository root cannot be opened securely: {error}"
+        ) from error
+
+    try:
+        repository_opened = os.fstat(root_descriptor)
+        if (
+            not stat.S_ISDIR(repository_before.st_mode)
+            or not stat.S_ISDIR(repository_opened.st_mode)
+            or _file_identity(repository_before) != _file_identity(repository_opened)
+        ):
+            raise PinnedInputError(
+                f"{description} repository root changed while it was opened"
+            )
+        parent_descriptor, parent_opened = _open_directory_beneath(
+            root_descriptor,
+            parent_components,
+            directory_flags,
+            description,
+        )
+        try:
+            path_before = os.stat(filename, dir_fd=parent_descriptor, follow_symlinks=False)
+            descriptor = os.open(filename, flags, dir_fd=parent_descriptor)
+        except OSError as error:
+            os.close(parent_descriptor)
+            if error.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
+                raise PinnedInputError(
+                    f"{description} is missing, a symlink, or has an unsafe path"
+                ) from error
+            raise PinnedInputError(
+                f"{description} cannot be opened securely: {error}"
+            ) from error
+
+        try:
+            try:
+                opened = os.fstat(descriptor)
+                if _file_identity(path_before) != _file_identity(opened):
+                    raise PinnedInputError(f"{description} changed while it was opened")
+                if not stat.S_ISREG(opened.st_mode):
+                    raise PinnedInputError(f"{description} is not a regular file")
+                if opened.st_nlink != 1:
+                    raise PinnedInputError(f"{description} must have exactly one hard link")
+                if opened.st_uid != expected_uid:
+                    raise PinnedInputError(
+                        f"{description} is not owned by the effective user"
+                    )
+                if expected_mode is None and opened.st_mode & 0o022:
+                    raise PinnedInputError(
+                        f"{description} is writable by group or other users"
+                    )
+                if (
+                    expected_mode is not None
+                    and stat.S_IMODE(opened.st_mode) != expected_mode
+                ):
+                    raise PinnedInputError(
+                        f"{description} mode is not {expected_mode:04o}"
+                    )
+                if expected_size is not None and opened.st_size != expected_size:
+                    raise PinnedInputError(
+                        f"{description} size is {opened.st_size}, expected {expected_size}"
+                    )
+                if opened.st_size > maximum_size:
+                    raise PinnedInputError(
+                        f"{description} exceeds its {maximum_size}-byte bound"
+                    )
+
+                digest = hashlib.sha256()
+                chunks: list[bytes] = []
+                remaining = opened.st_size
+                while remaining:
+                    try:
+                        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                    except BlockingIOError as error:
+                        raise PinnedInputError(
+                            f"{description} could not be read as a regular file"
+                        ) from error
+                    if not chunk:
+                        raise PinnedInputError(
+                            f"{description} ended before its observed size"
+                        )
+                    chunks.append(chunk)
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if os.read(descriptor, 1):
+                    raise PinnedInputError(f"{description} exceeds its observed size")
+                after = os.fstat(descriptor)
+            except OSError as error:
+                raise PinnedInputError(
+                    f"{description} cannot be read securely: {error}"
+                ) from error
+            finally:
+                os.close(descriptor)
+
+            try:
+                path_after = os.stat(
+                    filename,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                parent_after = os.fstat(parent_descriptor)
+            except OSError as error:
+                raise PinnedInputError(
+                    f"{description} path changed after it was read: {error}"
+                ) from error
+
+            fresh_parent_descriptor, fresh_parent = _open_directory_beneath(
+                root_descriptor,
+                parent_components,
+                directory_flags,
+                description,
+            )
+            try:
+                current_path_before = os.stat(
+                    filename,
+                    dir_fd=fresh_parent_descriptor,
+                    follow_symlinks=False,
+                )
+                current_descriptor = os.open(
+                    filename,
+                    flags,
+                    dir_fd=fresh_parent_descriptor,
+                )
+                try:
+                    current_opened = os.fstat(current_descriptor)
+                finally:
+                    os.close(current_descriptor)
+                current_path_after = os.stat(
+                    filename,
+                    dir_fd=fresh_parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise PinnedInputError(
+                    f"{description} current path cannot be rebound securely: {error}"
+                ) from error
+            finally:
+                os.close(fresh_parent_descriptor)
+
+            try:
+                repository_after = os.fstat(root_descriptor)
+                repository_rebound = os.stat(repository, follow_symlinks=False)
+            except OSError as error:
+                raise PinnedInputError(
+                    f"{description} repository root changed after it was read: {error}"
+                ) from error
+        finally:
+            os.close(parent_descriptor)
+    finally:
+        os.close(root_descriptor)
+    if (
+        _file_identity(repository_before) != _file_identity(repository_opened)
+        or _file_identity(repository_opened) != _file_identity(repository_after)
+        or _file_identity(repository_after) != _file_identity(repository_rebound)
+        or _file_identity(parent_opened) != _file_identity(parent_after)
+        or _file_identity(parent_after) != _file_identity(fresh_parent)
+        or _file_identity(opened) != _file_identity(after)
+        or _file_identity(after) != _file_identity(path_after)
+        or _file_identity(path_after) != _file_identity(current_path_before)
+        or _file_identity(current_path_before) != _file_identity(current_opened)
+        or _file_identity(current_opened) != _file_identity(current_path_after)
+    ):
+        raise PinnedInputError(
+            f"{description} repository, parent, path, or metadata changed while it was read"
+        )
+    if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
+        raise PinnedInputError(f"{description} SHA-256 differs from its pin")
+    return b"".join(chunks)
+
+
+def _read_bytes(
+    repository: Path,
+    relative: str,
+    description: str,
+    *,
+    maximum_size: int = MAX_CONTROL_FILE_BYTES,
+) -> bytes:
+    return read_repository_regular_file(
+        repository,
+        relative,
+        description,
+        maximum_size=maximum_size,
+    )
+
+
+def _read_text(
+    repository: Path,
+    relative: str,
+    description: str,
+    *,
+    maximum_size: int = MAX_CONTROL_FILE_BYTES,
+) -> str:
+    body = _read_bytes(
+        repository,
+        relative,
+        description,
+        maximum_size=maximum_size,
+    )
+    try:
+        return body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise PinnedInputError(f"{description} is not strict UTF-8") from error
+
+
+def _load_strict_json(
+    text: str,
+    description: str,
+    *,
+    expected_fields: frozenset[str],
+) -> dict:
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise PinnedInputError(
+                    f"{description} contains duplicate JSON field {key!r}"
+                )
+            value[key] = item
+        return value
+
+    def reject_nonfinite(value: str) -> None:
+        raise PinnedInputError(
+            f"{description} contains non-finite JSON number {value!r}"
+        )
+
+    def parse_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            reject_nonfinite(value)
+        raise PinnedInputError(
+            f"{description} contains unsupported floating-point JSON number {value!r}"
+        )
+
+    def parse_bounded_int(value: str) -> int:
+        digits = value.removeprefix("-")
+        if len(digits) > 19:
+            raise PinnedInputError(
+                f"{description} contains an out-of-range JSON integer"
+            )
+        parsed = int(value, 10)
+        if not -(2**63) <= parsed <= 2**63 - 1:
+            raise PinnedInputError(
+                f"{description} contains an out-of-range JSON integer"
+            )
+        return parsed
+
+    try:
+        document = json.loads(
+            text,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_nonfinite,
+            parse_float=parse_finite_float,
+            parse_int=parse_bounded_int,
+        )
+    except PinnedInputError:
+        raise
+    except (json.JSONDecodeError, ValueError, RecursionError) as error:
+        raise PinnedInputError(f"{description} is malformed: {error}") from error
+    if not isinstance(document, dict) or set(document) != expected_fields:
+        raise PinnedInputError(f"{description} does not have its exact top-level shape")
+    return document
 
 
 def _load_manifest(repository: Path) -> dict:
-    manifest_path = repository / MANIFEST_RELATIVE_PATH
-    text = _read_text(manifest_path, "pinned-input manifest")
-    try:
-        manifest = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise PinnedInputError(f"pinned-input manifest is malformed: {error}") from error
-    if not isinstance(manifest, dict) or manifest.get("schema") != "cfw-pinned-build-inputs-v1":
+    text = _read_text(
+        repository,
+        MANIFEST_RELATIVE_PATH,
+        "pinned-input manifest",
+        maximum_size=MAX_PINNED_MANIFEST_BYTES,
+    )
+    manifest = _load_strict_json(
+        text,
+        "pinned-input manifest",
+        expected_fields=PINNED_MANIFEST_FIELDS,
+    )
+    if manifest.get("schema") != "cfw-pinned-build-inputs-v1":
         raise PinnedInputError("pinned-input manifest has an unsupported schema")
+    if not isinstance(manifest.get("description"), str) or not manifest["description"]:
+        raise PinnedInputError("pinned-input manifest description is empty or malformed")
     return manifest
 
 
@@ -106,12 +695,40 @@ def _require_sha256(value: str, description: str) -> str:
 
 
 def _safe_repository_path(repository: Path, relative: str, description: str) -> Path:
-    candidate = Path(relative)
-    if candidate.is_absolute() or not candidate.parts:
+    if (
+        type(relative) is not str
+        or not relative
+        or "\0" in relative
+        or "\\" in relative
+    ):
+        raise PinnedInputError(f"{description} path is not canonical: {relative!r}")
+    candidate = PurePosixPath(relative)
+    if (
+        candidate.is_absolute()
+        or not candidate.parts
+        or candidate.as_posix() != relative
+    ):
         raise PinnedInputError(f"{description} path is not repository-relative: {relative!r}")
     if any(part in ("", ".", "..") for part in candidate.parts):
         raise PinnedInputError(f"{description} path has an unsafe component: {relative!r}")
     return repository.joinpath(*candidate.parts)
+
+
+def _json_values_identical(actual: object, expected: object) -> bool:
+    """Compare JSON values without accepting bool/int or int/float aliases."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _json_values_identical(actual[key], value)
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _json_values_identical(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected)
+        )
+    return actual == expected
 
 
 def _verify_tools(manifest: dict, env: dict[str, str]) -> None:
@@ -123,6 +740,707 @@ def _verify_tools(manifest: dict, env: dict[str, str]) -> None:
         if actual != expected:
             raise PinnedInputError(
                 f"pinned tool {key} must be {expected!r} but dependency_pins.env has {actual!r}"
+            )
+
+
+def _is_loaded_name(node: ast.AST, name: str) -> bool:
+    return isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == name
+
+
+def _is_str_call_for(node: ast.AST, name: str) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "str"
+        and len(node.args) == 1
+        and not node.keywords
+        and _is_loaded_name(node.args[0], name)
+    )
+
+
+def _verify_android_admission_adb_uses(module: ast.Module) -> None:
+    functions = {
+        name: [
+            node
+            for node in module.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ]
+        for name in ("_fixed_spec", "_validate_host_inputs")
+    }
+    if any(len(matches) != 1 for matches in functions.values()) or any(
+        isinstance(matches[0], ast.AsyncFunctionDef) for matches in functions.values()
+    ):
+        raise PinnedInputError(
+            "Android LAN peer admission must retain unique synchronous ADB boundary functions"
+        )
+
+    fixed_spec = functions["_fixed_spec"][0]
+    assert isinstance(fixed_spec, ast.FunctionDef)
+    prefix_assignments = [
+        node
+        for node in ast.walk(fixed_spec)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "prefix"
+    ]
+    prefix_bindings = [
+        node
+        for node in ast.walk(fixed_spec)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        and node.id == "prefix"
+    ]
+    if len(prefix_assignments) != 3 or len(prefix_bindings) != 3:
+        raise PinnedInputError(
+            "Android LAN peer fixed command constructor must retain three exact prefix branches"
+        )
+
+    branches: set[str] = set()
+    for assignment in prefix_assignments:
+        value = assignment.value
+        if not isinstance(value, ast.Tuple) or not value.elts:
+            raise PinnedInputError(
+                "Android LAN peer fixed command prefixes must be exact tuples"
+            )
+        first = value.elts[0]
+        if not (
+            _is_str_call_for(first, "ADB")
+            or _is_loaded_name(first, "adb_path")
+        ):
+            raise PinnedInputError(
+                "Android LAN peer fixed command prefixes must use the pinned or private ADB client"
+            )
+        tail = value.elts[1:]
+        if (
+            len(tail) == 3
+            and isinstance(tail[0], ast.Constant)
+            and tail[0].value == "-L"
+            and isinstance(tail[1], ast.JoinedStr)
+            and isinstance(tail[2], ast.Constant)
+            and tail[2].value == "-d"
+        ):
+            branches.add("inventory")
+        elif (
+            len(tail) == 4
+            and isinstance(tail[0], ast.Constant)
+            and tail[0].value == "-L"
+            and isinstance(tail[1], ast.JoinedStr)
+            and isinstance(tail[2], ast.Constant)
+            and tail[2].value == "-t"
+            and isinstance(tail[3], ast.Call)
+            and isinstance(tail[3].func, ast.Name)
+            and tail[3].func.id == "str"
+            and len(tail[3].args) == 1
+            and not tail[3].keywords
+            and isinstance(tail[3].args[0], ast.Attribute)
+            and tail[3].args[0].attr == "transport_id"
+            and _is_loaded_name(tail[3].args[0].value, "selector")
+        ):
+            branches.add("transport")
+        elif (
+            len(tail) == 2
+            and isinstance(tail[0], ast.Constant)
+            and tail[0].value == "-L"
+            and isinstance(tail[1], ast.JoinedStr)
+        ):
+            branches.add("default")
+        else:
+            raise PinnedInputError(
+                "Android LAN peer fixed command prefix arguments differ from policy"
+            )
+    if branches != {"inventory", "transport", "default"}:
+        raise PinnedInputError(
+            "Android LAN peer fixed command prefix branches are duplicated or incomplete"
+        )
+
+    returns = [node for node in ast.walk(fixed_spec) if isinstance(node, ast.Return)]
+    if (
+        len(returns) != 1
+        or not isinstance(returns[0].value, ast.Call)
+        or not isinstance(returns[0].value.func, ast.Name)
+        or returns[0].value.func.id != "CommandSpec"
+    ):
+        raise PinnedInputError(
+            "Android LAN peer fixed command constructor must return one CommandSpec"
+        )
+    argv_keywords = [
+        keyword
+        for keyword in returns[0].value.keywords
+        if keyword.arg == "argv"
+    ]
+    if len(argv_keywords) != 1:
+        raise PinnedInputError(
+            "Android LAN peer fixed command constructor must set one argv tuple"
+        )
+    argv = argv_keywords[0].value
+    if not (
+        isinstance(argv, ast.Tuple)
+        and len(argv.elts) == 2
+        and isinstance(argv.elts[0], ast.Starred)
+        and _is_loaded_name(argv.elts[0].value, "prefix")
+        and isinstance(argv.elts[1], ast.Starred)
+        and _is_loaded_name(argv.elts[1].value, "arguments")
+    ):
+        raise PinnedInputError(
+            "Android LAN peer CommandSpec argv must consume only the fixed prefix and arguments"
+        )
+
+    validate_inputs = functions["_validate_host_inputs"][0]
+    assert isinstance(validate_inputs, ast.FunctionDef)
+    adb_reads = []
+    for node in ast.walk(validate_inputs):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_read_pinned_file"
+            and node.args
+            and _is_loaded_name(node.args[0], "ADB")
+        ):
+            continue
+        expected_digests = [
+            keyword.value
+            for keyword in node.keywords
+            if keyword.arg == "expected_sha256"
+        ]
+        if len(expected_digests) == 1 and _is_loaded_name(
+            expected_digests[0], "ADB_SHA256"
+        ):
+            adb_reads.append(node)
+    if len(adb_reads) != 1:
+        raise PinnedInputError(
+            "Android LAN peer host validation must hash the pinned ADB path with ADB_SHA256"
+        )
+
+
+def _extract_android_admission_constants(source: str) -> dict[str, str]:
+    try:
+        module = ast.parse(source)
+    except SyntaxError as error:
+        raise PinnedInputError(
+            f"Android LAN peer admission source is malformed: {error}"
+        ) from error
+
+    wanted = {"ADB", "ADB_VERSION", "ADB_SHA256"}
+    assignments: dict[str, ast.AST] = {}
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            rebound = {
+                target.id
+                for target in node.targets
+                if isinstance(target, ast.Name) and target.id in wanted
+            }
+            if rebound:
+                raise PinnedInputError(
+                    "Android LAN peer admission constants have a non-Final reassignment"
+                )
+            continue
+        if isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name) and node.target.id in wanted:
+                raise PinnedInputError(
+                    "Android LAN peer admission constants have a non-Final reassignment"
+                )
+            continue
+        if not isinstance(node, ast.AnnAssign) or not isinstance(
+            node.target, ast.Name
+        ):
+            continue
+        name = node.target.id
+        if name not in wanted:
+            continue
+        if (
+            name in assignments
+            or node.value is None
+            or not isinstance(node.annotation, ast.Name)
+            or node.annotation.id != "Final"
+        ):
+            raise PinnedInputError(
+                f"Android LAN peer admission constant {name} is duplicated, empty, or not Final"
+            )
+        assignments[name] = node.value
+    if set(assignments) != wanted:
+        missing = ", ".join(sorted(wanted - set(assignments)))
+        raise PinnedInputError(
+            f"Android LAN peer admission constants are incomplete: {missing}"
+        )
+    binding_counts = {name: 0 for name in wanted}
+    for node in ast.walk(module):
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and node.id in wanted
+        ):
+            binding_counts[node.id] += 1
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in wanted:
+                binding_counts[node.name] += 1
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name.split(".", 1)[0]
+                if bound_name in wanted:
+                    binding_counts[bound_name] += 1
+        elif isinstance(node, ast.ExceptHandler) and node.name in wanted:
+            binding_counts[node.name] += 1
+        elif isinstance(node, ast.arg) and node.arg in wanted:
+            binding_counts[node.arg] += 1
+        elif (
+            type(node).__name__ in {"MatchAs", "MatchStar"}
+            and getattr(node, "name", None) in wanted
+        ):
+            binding_counts[node.name] += 1
+    rebound = sorted(name for name, count in binding_counts.items() if count != 1)
+    if rebound:
+        raise PinnedInputError(
+            "Android LAN peer admission constants must each have exactly one "
+            f"source binding: {', '.join(rebound)}"
+        )
+
+    _verify_android_admission_adb_uses(module)
+
+    adb_value = assignments["ADB"]
+    if not (
+        isinstance(adb_value, ast.Call)
+        and isinstance(adb_value.func, ast.Name)
+        and adb_value.func.id == "Path"
+        and len(adb_value.args) == 1
+        and not adb_value.keywords
+        and isinstance(adb_value.args[0], ast.Constant)
+        and type(adb_value.args[0].value) is str
+    ):
+        raise PinnedInputError(
+            "Android LAN peer ADB constant must be a literal Path"
+        )
+
+    extracted = {"path": adb_value.args[0].value}
+    for constant_name, field_name in (
+        ("ADB_VERSION", "version"),
+        ("ADB_SHA256", "sha256"),
+    ):
+        value = assignments[constant_name]
+        if not (
+            isinstance(value, ast.Constant) and type(value.value) is str
+        ):
+            raise PinnedInputError(
+                f"Android LAN peer {constant_name} must be a string literal"
+            )
+        extracted[field_name] = value.value
+    return extracted
+
+
+def _verify_runtime_tools(manifest: dict, repository: Path) -> None:
+    expected = {
+        "adb": {
+            "schema": "cfw-runtime-tool-pin-v1",
+            "path": _ADB_RUNTIME_TOOL_PATH,
+            "version": _ADB_RUNTIME_TOOL_VERSION,
+            "sha256": _ADB_RUNTIME_TOOL_SHA256,
+            "verificationPhase": "android-lan-peer-admission",
+            "sourceBinding": {
+                "path": _ANDROID_LAN_PEER_SOURCE_PATH,
+                "sha256": _ANDROID_LAN_PEER_SOURCE_SHA256,
+                "size": _ANDROID_LAN_PEER_SOURCE_SIZE,
+                "mode": "0644",
+                "pathConstant": "ADB",
+                "versionConstant": "ADB_VERSION",
+                "sha256Constant": "ADB_SHA256",
+            },
+        }
+    }
+    runtime_tools = manifest.get("runtimeTools")
+    if not _json_values_identical(runtime_tools, expected):
+        raise PinnedInputError(
+            "runtime-tool pin contract is missing, malformed, or differs from policy"
+        )
+
+    source_bytes = read_repository_regular_file(
+        repository,
+        _ANDROID_LAN_PEER_SOURCE_PATH,
+        "Android LAN peer admission source",
+        maximum_size=_ANDROID_LAN_PEER_SOURCE_SIZE,
+        expected_uid=os.geteuid(),
+        expected_mode=0o644,
+        expected_size=_ANDROID_LAN_PEER_SOURCE_SIZE,
+        expected_sha256=_ANDROID_LAN_PEER_SOURCE_SHA256,
+    )
+    try:
+        source = source_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise PinnedInputError(
+            "Android LAN peer admission source is not canonical UTF-8"
+        ) from error
+    observed = _extract_android_admission_constants(source)
+    pinned = expected["adb"]
+    if observed != {
+        "path": pinned["path"],
+        "version": pinned["version"],
+        "sha256": pinned["sha256"],
+    }:
+        raise PinnedInputError(
+            "Android LAN peer admission ADB constants differ from the runtime-tool pin"
+        )
+
+
+def _verify_packet_evidence_endpoint(
+    manifest: dict, env: dict[str, str], repository: Path
+) -> None:
+    spec = manifest.get("packetEvidenceEndpoint")
+    expected_fields = {
+        "goVersionKey",
+        "goVersion",
+        "goos",
+        "goarch",
+        "cgoEnabled",
+        "binarySha256",
+        "transportPort",
+        "dnsPort",
+        "readmePath",
+        "requiredBuildFragments",
+        "sourceFiles",
+    }
+    if not isinstance(spec, dict) or set(spec) != expected_fields:
+        raise PinnedInputError(
+            "packet evidence endpoint pinned-input contract is missing or has unknown fields"
+        )
+    if (
+        spec["goVersionKey"] != "GO_VERSION"
+        or spec["goVersion"] != _require_env(env, "GO_VERSION")
+        or spec["goos"] != "linux"
+        or spec["goarch"] != "amd64"
+        or spec["cgoEnabled"] != "0"
+        or spec["transportPort"] != 44333
+        or spec["dnsPort"] != 53
+        or spec["binarySha256"] != _PACKET_ENDPOINT_BINARY_SHA256
+        or spec["readmePath"] != "tools/packet-evidence-endpoint/README.md"
+        or spec["requiredBuildFragments"]
+        != list(_PACKET_ENDPOINT_BUILD_FRAGMENTS)
+    ):
+        raise PinnedInputError(
+            "packet evidence endpoint build target, ports, or binary digest drifted"
+        )
+
+    source_files = spec["sourceFiles"]
+    if not isinstance(source_files, list) or len(source_files) != len(
+        _PACKET_ENDPOINT_SOURCE_PATHS
+    ):
+        raise PinnedInputError(
+            "packet evidence endpoint must bind the exact source, test, service, policy, host-key, and README set"
+        )
+    observed: dict[str, str] = {}
+    for index, entry in enumerate(source_files):
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+            raise PinnedInputError(
+                f"packet evidence endpoint sourceFiles[{index}] is malformed"
+            )
+        relative = entry["path"]
+        digest = entry["sha256"]
+        if not isinstance(relative, str) or relative in observed:
+            raise PinnedInputError(
+                "packet evidence endpoint source paths are invalid or duplicated"
+            )
+        if not isinstance(digest, str):
+            raise PinnedInputError(
+                f"packet evidence endpoint source digest is malformed for {relative!r}"
+            )
+        _require_sha256(digest, f"packet evidence endpoint source digest for {relative}")
+        actual = hashlib.sha256(
+            _read_bytes(
+                repository,
+                relative,
+                f"packet evidence endpoint source {relative}",
+            )
+        ).hexdigest()
+        if actual != digest:
+            raise PinnedInputError(
+                f"packet evidence endpoint source digest drifted for {relative!r}"
+            )
+        observed[relative] = digest
+    if set(observed) != _PACKET_ENDPOINT_SOURCE_PATHS:
+        raise PinnedInputError(
+            "packet evidence endpoint must bind the exact source, test, unit, and README set"
+        )
+    if (
+        observed["tools/packet-evidence-endpoint/packet-evidence-endpoint.service"]
+        != _PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256
+    ):
+        raise PinnedInputError(
+            "packet evidence endpoint systemd unit differs from the packet policy"
+        )
+    if (
+        observed["tools/packet-evidence-endpoint/install-endpoint.sh"]
+        != _PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256
+    ):
+        raise PinnedInputError(
+            "packet evidence endpoint installer differs from the packet policy"
+        )
+    if (
+        observed["tools/packet-evidence-endpoint/packet-evidence-resolv.conf"]
+        != _PACKET_ENDPOINT_RESOLVER_CONFIG_SHA256
+    ):
+        raise PinnedInputError(
+            "packet evidence endpoint resolver config differs from the packet policy"
+        )
+    if (
+        observed["tools/packet-evidence-endpoint/packet-evidence-capture.sudoers"]
+        != _PACKET_ENDPOINT_SUDOERS_SHA256
+    ):
+        raise PinnedInputError(
+            "packet evidence endpoint sudoers policy differs from the packet policy"
+        )
+    if (
+        observed["scripts/physical_capture/packet_known_hosts"]
+        != _PACKET_ENDPOINT_KNOWN_HOSTS_SHA256
+    ):
+        raise PinnedInputError(
+            "packet evidence endpoint known-hosts bytes differ from the packet policy"
+        )
+    if (
+        observed["scripts/physical_capture/packet_endpoints.json"]
+        != _PACKET_ENDPOINT_POLICY_SHA256
+    ):
+        raise PinnedInputError(
+            "packet evidence endpoint instance policy differs from its whole-file pin"
+        )
+    readme = _read_text(
+        repository,
+        spec["readmePath"],
+        "packet evidence endpoint README",
+    )
+    for fragment in _PACKET_ENDPOINT_BUILD_FRAGMENTS:
+        if fragment not in readme:
+            raise PinnedInputError(
+                f"packet evidence endpoint README lacks build binding {fragment!r}"
+            )
+
+
+def _packet_lan_peer_script_contract(
+    path: str,
+    sha256: str,
+    size: int,
+    fragments: tuple[str, ...],
+) -> dict[str, object]:
+    return {
+        "path": path,
+        "sha256": sha256,
+        "size": size,
+        "mode": "0755",
+        "requiredFragments": list(fragments),
+    }
+
+
+def _verify_packet_lan_peer_script(
+    repository: Path,
+    contract: dict[str, object],
+    description: str,
+) -> None:
+    relative = contract["path"]
+    assert isinstance(relative, str)
+    size = contract["size"]
+    digest = contract["sha256"]
+    mode = contract["mode"]
+    if (
+        type(size) is not int
+        or size < 1
+        or not isinstance(digest, str)
+        or not isinstance(mode, str)
+        or not re.fullmatch(r"0[0-7]{3}", mode)
+    ):
+        raise PinnedInputError(f"{description} has malformed file identity")
+    _require_sha256(digest, f"{description} digest")
+    body = read_repository_regular_file(
+        repository,
+        relative,
+        description,
+        maximum_size=size,
+        expected_mode=int(mode, 8),
+        expected_size=size,
+        expected_sha256=digest,
+    )
+    try:
+        script = body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise PinnedInputError(f"{description} is not strict UTF-8") from error
+    for fragment in contract["requiredFragments"]:
+        assert isinstance(fragment, str)
+        if fragment not in script:
+            raise PinnedInputError(
+                f"{description} lacks required pinned fragment {fragment!r}"
+            )
+
+
+def _verify_packet_lan_peer(
+    manifest: dict, env: dict[str, str], repository: Path
+) -> None:
+    source_files = [
+        {"path": path, "sha256": sha256, "size": size, "mode": mode}
+        for path, sha256, size, mode in _PACKET_LAN_PEER_SOURCE_FILES
+    ]
+    expected = {
+        "schema": "cfw-packet-lan-peer-build-input-v1",
+        "goToolchain": {
+            "versionKey": "GO_VERSION",
+            "version": _require_env(env, "GO_VERSION"),
+            "goos": "linux",
+            "goarch": "arm64",
+            "cgoEnabled": "0",
+        },
+        "source": {
+            "root": "tools/packet-lan-peer",
+            "treeAlgorithm": "sha256-tree-v2",
+            "treeSha256": _PACKET_LAN_PEER_SOURCE_TREE_SHA256,
+            "rootMode": "0755",
+            "files": source_files,
+        },
+        "artifact": {
+            "path": "target/packet-lan-peer-linux-arm64",
+            "sha256": _PACKET_LAN_PEER_ARTIFACT_SHA256,
+            "size": _PACKET_LAN_PEER_ARTIFACT_SIZE,
+            "fileType": "regular",
+            "linkCount": 1,
+            "hostOwner": "effective-uid",
+            "hostMode": "0555",
+        },
+        "protocol": {
+            "network": "tcp4",
+            "listenAddress": ":44333",
+            "port": 44333,
+            "maximumConnections": 8,
+            "maximumRequestBytes": 64,
+            "readDeadlineSeconds": 5,
+            "responseBytes": 0,
+        },
+        "androidDeployment": {
+            "directory": "/data/local/tmp/cfw-release-evidence-v040",
+            "directoryMode": "0700",
+            "binaryPath": (
+                "/data/local/tmp/cfw-release-evidence-v040/"
+                "packet-lan-peer-linux-arm64"
+            ),
+            "binaryMode": "0500",
+            "uid": 2000,
+            "gid": 2000,
+        },
+        "buildScript": _packet_lan_peer_script_contract(
+            "scripts/build_packet_lan_peer.sh",
+            _PACKET_LAN_PEER_BUILD_SCRIPT_SHA256,
+            4933,
+            _PACKET_LAN_PEER_BUILD_FRAGMENTS,
+        ),
+        "verifyScript": _packet_lan_peer_script_contract(
+            "scripts/verify_packet_lan_peer.sh",
+            _PACKET_LAN_PEER_VERIFY_SCRIPT_SHA256,
+            7357,
+            _PACKET_LAN_PEER_VERIFY_FRAGMENTS,
+        ),
+    }
+    spec = manifest.get("packetLanPeer")
+    if not _json_values_identical(spec, expected):
+        raise PinnedInputError(
+            "packet LAN peer build-input contract is missing, malformed, or differs from policy"
+        )
+
+    source = expected["source"]
+    assert isinstance(source, dict)
+    source_root_relative = source["root"]
+    assert isinstance(source_root_relative, str)
+    source_root = _safe_repository_path(
+        repository, source_root_relative, "packet LAN peer source root"
+    )
+    try:
+        source_manifest = build_manifest(source_root, algorithm="sha256-tree-v2")
+    except (OSError, ValueError) as error:
+        raise PinnedInputError(
+            f"packet LAN peer source tree cannot be securely hashed: {error}"
+        ) from error
+    expected_tree = {
+        "algorithm": "sha256-tree-v2",
+        "root": "packet-lan-peer",
+        "rootMode": "0755",
+        "sha256": _PACKET_LAN_PEER_SOURCE_TREE_SHA256,
+        "entries": [
+            {
+                "path": entry["path"],
+                "type": "file",
+                "size": entry["size"],
+                "sha256": entry["sha256"],
+                "mode": entry["mode"],
+            }
+            for entry in source_files
+        ],
+    }
+    if not _json_values_identical(source_manifest, expected_tree):
+        raise PinnedInputError(
+            "packet LAN peer source tree digest, file set, size, type, or mode drifted"
+        )
+
+    _verify_packet_lan_peer_script(
+        repository, expected["buildScript"], "packet LAN peer build script"
+    )
+    _verify_packet_lan_peer_script(
+        repository, expected["verifyScript"], "packet LAN peer verification script"
+    )
+    artifact = expected["artifact"]
+    assert isinstance(artifact, dict)
+    artifact_relative = artifact["path"]
+    assert isinstance(artifact_relative, str)
+    read_repository_regular_file(
+        repository,
+        artifact_relative,
+        "packet LAN peer artifact",
+        maximum_size=_PACKET_LAN_PEER_ARTIFACT_SIZE,
+        expected_uid=os.geteuid(),
+        expected_mode=0o555,
+        expected_size=_PACKET_LAN_PEER_ARTIFACT_SIZE,
+        expected_sha256=_PACKET_LAN_PEER_ARTIFACT_SHA256,
+    )
+
+
+def _verify_physical_collector_module(
+    manifest: dict, env: dict[str, str], repository: Path
+) -> None:
+    spec = manifest.get("physicalCollectorModule")
+    expected_fields = {
+        "goVersionKey",
+        "goVersion",
+        "goModPath",
+        "goModSha256",
+        "goSumPath",
+        "goSumSha256",
+        "requiredModuleFragments",
+    }
+    if not isinstance(spec, dict) or set(spec) != expected_fields:
+        raise PinnedInputError(
+            "pinned-input manifest has no exact physical-collector module binding"
+        )
+    if (
+        spec["goVersionKey"] != "GO_VERSION"
+        or spec["goVersion"] != env.get("GO_VERSION")
+        or spec["goModPath"] != "tools/physical-collector/go.mod"
+        or spec["goSumPath"] != "tools/physical-collector/go.sum"
+        or spec["goModSha256"] != _PHYSICAL_COLLECTOR_GO_MOD_SHA256
+        or spec["goSumSha256"] != _PHYSICAL_COLLECTOR_GO_SUM_SHA256
+        or spec["requiredModuleFragments"]
+        != list(_PHYSICAL_COLLECTOR_MODULE_FRAGMENTS)
+    ):
+        raise PinnedInputError("physical-collector module pins differ from policy")
+    go_mod = _read_bytes(
+        repository, spec["goModPath"], "physical-collector go.mod"
+    )
+    go_sum = _read_bytes(
+        repository, spec["goSumPath"], "physical-collector go.sum"
+    )
+    if hashlib.sha256(go_mod).hexdigest() != spec["goModSha256"]:
+        raise PinnedInputError("physical-collector go.mod digest drifted")
+    if hashlib.sha256(go_sum).hexdigest() != spec["goSumSha256"]:
+        raise PinnedInputError("physical-collector go.sum digest drifted")
+    try:
+        go_mod_text = go_mod.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise PinnedInputError("physical-collector go.mod is not UTF-8") from error
+    for fragment in _PHYSICAL_COLLECTOR_MODULE_FRAGMENTS:
+        if fragment not in go_mod_text:
+            raise PinnedInputError(
+                f"physical-collector go.mod lacks required module {fragment!r}"
             )
 
 
@@ -139,7 +1457,8 @@ def _verify_cargo_deny(manifest: dict, repository: Path) -> None:
     ):
         raise PinnedInputError("cargo-deny CI binding is incomplete")
     workflow = _read_text(
-        _safe_repository_path(repository, workflow_relative, "cargo-deny CI workflow"),
+        repository,
+        workflow_relative,
         "cargo-deny CI workflow",
     )
     for fragment in fragments:
@@ -186,15 +1505,9 @@ def _verify_xcodegen(manifest: dict, env: dict[str, str], repository: Path) -> N
         )
 
     patch_relative = _require_env(env, patch_path_key)
-    patch_path = _safe_repository_path(repository, patch_relative, "XcodeGen patch")
-    if patch_path.is_symlink() or not patch_path.is_file():
-        raise PinnedInputError(
-            f"XcodeGen patch is missing or not a regular file: {patch_relative}"
-        )
-    try:
-        actual_patch_sha = hashlib.sha256(patch_path.read_bytes()).hexdigest()
-    except OSError as error:
-        raise PinnedInputError(f"XcodeGen patch cannot be read: {error}") from error
+    actual_patch_sha = hashlib.sha256(
+        _read_bytes(repository, patch_relative, "XcodeGen patch")
+    ).hexdigest()
     if actual_patch_sha != expected_patch_sha:
         raise PinnedInputError(
             f"XcodeGen patch file digest {actual_patch_sha} differs from the pinned "
@@ -210,7 +1523,8 @@ def _verify_xcodegen(manifest: dict, env: dict[str, str], repository: Path) -> N
     ):
         raise PinnedInputError("XcodeGen bootstrap binding is incomplete")
     bootstrap = _read_text(
-        _safe_repository_path(repository, bootstrap_relative, "XcodeGen bootstrap"),
+        repository,
+        bootstrap_relative,
         "XcodeGen bootstrap",
     )
     for fragment in fragments:
@@ -276,24 +1590,13 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
             f"Tauri Cargo cache contract digest {cache_contract_key} is "
             f"{cache_contract_env} but must be {cache_contract_expected}"
         )
-    cache_contract_path = _safe_repository_path(
-        repository,
-        cache_contract_relative,
-        "Tauri Cargo cache contract",
-    )
-    if cache_contract_path.is_symlink() or not cache_contract_path.is_file():
-        raise PinnedInputError(
-            "Tauri Cargo cache contract is missing or not a regular file: "
-            f"{cache_contract_relative}"
+    computed_cache_contract_sha = hashlib.sha256(
+        _read_bytes(
+            repository,
+            cache_contract_relative,
+            "Tauri Cargo cache contract",
         )
-    try:
-        computed_cache_contract_sha = hashlib.sha256(
-            cache_contract_path.read_bytes()
-        ).hexdigest()
-    except OSError as error:
-        raise PinnedInputError(
-            f"Tauri Cargo cache contract cannot be read: {error}"
-        ) from error
+    ).hexdigest()
     if computed_cache_contract_sha != cache_contract_expected:
         raise PinnedInputError(
             "Tauri Cargo cache contract file digest "
@@ -314,15 +1617,9 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
     if not isinstance(patch_path_key, str):
         raise PinnedInputError("Tauri CLI lock patch has no path binding")
     patch_relative = _require_env(env, patch_path_key)
-    patch_path = _safe_repository_path(repository, patch_relative, "Tauri CLI lock patch")
-    if patch_path.is_symlink() or not patch_path.is_file():
-        raise PinnedInputError(
-            f"Tauri CLI lock patch is missing or not a regular file: {patch_relative}"
-        )
-    try:
-        computed_patch_sha = hashlib.sha256(patch_path.read_bytes()).hexdigest()
-    except OSError as error:
-        raise PinnedInputError(f"Tauri CLI lock patch cannot be read: {error}") from error
+    computed_patch_sha = hashlib.sha256(
+        _read_bytes(repository, patch_relative, "Tauri CLI lock patch")
+    ).hexdigest()
     if computed_patch_sha != spec["lockPatchSha256"]:
         raise PinnedInputError(
             f"Tauri CLI lock patch digest {computed_patch_sha} differs from the pinned "
@@ -334,7 +1631,8 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
     if not isinstance(installer_relative, str) or not isinstance(fragments, list) or not fragments:
         raise PinnedInputError("Tauri CLI installer binding is incomplete")
     installer = _read_text(
-        _safe_repository_path(repository, installer_relative, "Tauri CLI installer"),
+        repository,
+        installer_relative,
         "Tauri CLI installer",
     )
     for fragment in fragments:
@@ -427,7 +1725,8 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
     if not isinstance(workflow_relative, str) or not isinstance(required_ci_fragment, str):
         raise PinnedInputError("Tauri CLI CI binding is incomplete")
     workflow = _read_text(
-        _safe_repository_path(repository, workflow_relative, "CI workflow"),
+        repository,
+        workflow_relative,
         "CI workflow",
     )
     if required_ci_fragment not in workflow:
@@ -492,13 +1791,9 @@ def _verify_patches(manifest: dict, env: dict[str, str], repository: Path) -> li
             raise PinnedInputError(f"patch {name} pins a rejected/legacy digest: {env_sha}")
 
         relative = _require_env(env, path_key)
-        patch_path = _safe_repository_path(repository, relative, name)
-        if patch_path.is_symlink() or not patch_path.is_file():
-            raise PinnedInputError(f"patch {name} file is missing or not regular: {relative}")
-        try:
-            computed = hashlib.sha256(patch_path.read_bytes()).hexdigest()
-        except OSError as error:
-            raise PinnedInputError(f"patch {name} file cannot be read: {error}") from error
+        computed = hashlib.sha256(
+            _read_bytes(repository, relative, f"patch {name} file")
+        ).hexdigest()
         if computed != expected:
             raise PinnedInputError(
                 f"patch {name} file digest {computed} differs from the pinned {expected}"
@@ -626,7 +1921,8 @@ def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: P
         if not all(isinstance(item, str) and item for item in (tag, relative, trigger, reason)):
             raise PinnedInputError("libbox tag source binding is incomplete")
         text = _read_text(
-            _safe_repository_path(repository, relative, "libbox tag source binding"),
+            repository,
+            relative,
             f"libbox tag source binding {relative}",
         )
         present = trigger in text
@@ -646,12 +1942,17 @@ def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -
     relative = manifest.get("nativeLockPath")
     if not isinstance(relative, str):
         raise PinnedInputError("pinned-input manifest has no native lock path")
-    lock_path = _safe_repository_path(repository, relative, "native dependency lock")
-    text = _read_text(lock_path, "native dependency lock")
-    try:
-        lock = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise PinnedInputError(f"native dependency lock is malformed: {error}") from error
+    text = _read_text(
+        repository,
+        relative,
+        "native dependency lock",
+        maximum_size=MAX_NATIVE_LOCK_BYTES,
+    )
+    lock = _load_strict_json(
+        text,
+        "native dependency lock",
+        expected_fields=NATIVE_LOCK_FIELDS,
+    )
 
     def _expect(actual: object, expected: str, label: str) -> None:
         if actual != expected:
@@ -660,12 +1961,32 @@ def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -
             )
 
     sing_box = lock.get("singBox")
-    if not isinstance(lock, dict) or not isinstance(sing_box, dict):
+    if not isinstance(sing_box, dict):
         raise PinnedInputError("native dependency lock has no singBox table")
+    if set(sing_box) != NATIVE_LOCK_SING_BOX_FIELDS:
+        raise PinnedInputError("native dependency lock singBox table has an inexact shape")
     _expect(lock.get("go"), _require_env(env, "GO_VERSION"), "go")
     _expect(lock.get("gomobile"), _require_env(env, "GOMOBILE_VERSION"), "gomobile")
     _expect(sing_box.get("tag"), _require_env(env, "SING_BOX_VERSION"), "singBox.tag")
     _expect(sing_box.get("commit"), _require_env(env, "SING_BOX_COMMIT"), "singBox.commit")
+    _expect(
+        sing_box.get("androidReferenceCommit"),
+        _require_env(env, "SING_BOX_ANDROID_REFERENCE_COMMIT"),
+        "singBox.androidReferenceCommit",
+    )
+    apple_reference = lock.get("singBoxForAppleReference")
+    if (
+        not isinstance(apple_reference, dict)
+        or set(apple_reference) != NATIVE_LOCK_APPLE_REFERENCE_FIELDS
+    ):
+        raise PinnedInputError(
+            "native dependency lock singBoxForAppleReference table has an inexact shape"
+        )
+    _expect(
+        apple_reference.get("commit"),
+        _require_env(env, "SING_BOX_APPLE_REFERENCE_COMMIT"),
+        "singBoxForAppleReference.commit",
+    )
     _expect(
         sing_box.get("combinedDiffSha256"),
         _require_env(env, "SING_BOX_COMBINED_DIFF_SHA256"),
@@ -678,7 +1999,12 @@ def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -
     }
     for lock_key, (path_key, sha_key) in lock_patches.items():
         entry = sing_box.get(lock_key)
-        if not isinstance(entry, dict):
+        expected_fields = (
+            NATIVE_LOCK_SECURITY_PATCH_FIELDS
+            if lock_key == "securityPatch"
+            else NATIVE_LOCK_PATCH_FIELDS
+        )
+        if not isinstance(entry, dict) or set(entry) != expected_fields:
             raise PinnedInputError(f"native dependency lock has no {lock_key} entry")
         _expect(entry.get("path"), _require_env(env, path_key), f"singBox.{lock_key}.path")
         _expect(entry.get("sha256"), _require_env(env, sha_key), f"singBox.{lock_key}.sha256")
@@ -700,7 +2026,8 @@ def _verify_build_scripts(manifest: dict, repository: Path) -> None:
     build_scripts = manifest.get("buildScripts") or {}
     for relative, rules in build_scripts.items():
         text = _read_text(
-            _safe_repository_path(repository, relative, "build script"),
+            repository,
+            relative,
             f"build script {relative}",
         )
         for reference in rules.get("requirePinReferences", []):
@@ -718,7 +2045,8 @@ def _verify_build_scripts(manifest: dict, repository: Path) -> None:
     artifact_bindings = manifest.get("artifactBindings") or {}
     for relative, bindings in artifact_bindings.items():
         text = _read_text(
-            _safe_repository_path(repository, relative, "build script"),
+            repository,
+            relative,
             f"build script {relative}",
         )
         for binding in bindings:
@@ -731,17 +2059,21 @@ def _verify_build_scripts(manifest: dict, repository: Path) -> None:
 def verify(repository: Path) -> None:
     """Verify all pinned build inputs for the repository. Raises PinnedInputError."""
     manifest = _load_manifest(repository)
+    dependency_pins_path = manifest.get("dependencyPinsPath")
+    if not isinstance(dependency_pins_path, str):
+        raise PinnedInputError("pinned-input manifest has no dependency pins path")
     env = _parse_env(
         _read_text(
-            _safe_repository_path(
-                repository,
-                manifest.get("dependencyPinsPath", "scripts/dependency_pins.env"),
-                "dependency pins",
-            ),
+            repository,
+            dependency_pins_path,
             "dependency_pins.env",
         )
     )
     _verify_tools(manifest, env)
+    _verify_runtime_tools(manifest, repository)
+    _verify_packet_evidence_endpoint(manifest, env, repository)
+    _verify_packet_lan_peer(manifest, env, repository)
+    _verify_physical_collector_module(manifest, env, repository)
     _verify_cargo_deny(manifest, repository)
     _verify_xcodegen(manifest, env, repository)
     _verify_tauri_cli(manifest, env, repository)
@@ -765,6 +2097,10 @@ def main() -> int:
     print(
         "pinned build inputs verified: Rust/cargo-deny/Node/Go/gomobile/govulncheck/"
         "Tauri CLI/sing-box versions, checksum-bound Tauri CLI local-source installation, "
+        "packet evidence endpoint source/service/sudoers/identity/known-hosts and "
+        "reproducible Linux artifact binding, Android packet LAN peer source/tree/"
+        "script/protocol/deployment/held-artifact binding, ADB runtime-tool source "
+        "binding, physical-collector module graph, "
         "XcodeGen patch/source binding, sing-box and gomobile commits, three libbox patch "
         "digests, combined diff, Go module inputs, "
         "libbox build tags required by the engine start path, native lock binding, "

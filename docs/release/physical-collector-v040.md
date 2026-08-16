@@ -2,24 +2,39 @@
 
 This record binds the v0.4.0 production collector trust root and its external
 control plane. It does not grant `Signed_Installed_Verified`, replace the
-same-machine two-clean-OS requirement, or authorize validation build 40002.
+same-machine two-clean-OS requirement, or authorize validation build 40004.
 
 ## Source and image binding
 
 - Collector contract: `physical-collector-v1`, receipt v3, PS256.
 - Reviewed source-closure SHA-256:
-  `2439c826b23fc1c7f33f5d6003c9aa790268737d1da62db3577adcaa59e15caa`.
-- Cloud Build ID: `0ca20d11-880c-40aa-bb88-460c4d08836d` in
+  `efe0e7a16d67406aff50bb3439e59d4fad1c9dbb6f06ab7437a7d6b84ce44545`.
+
+The lifecycle-v4 72-subject contract changes the collector source closure.
+Therefore the digest, image, revisions, and trust-policy activation recorded
+below are historical for the preceding lifecycle-v3 source and do not
+authorize a new production nonce or receipt. Before physical collection, the
+new source digest must be reviewed, built into an immutable image, deployed to
+both private services during a fail-closed maintenance window, and rebound in
+the checked-in trust policy with fresh HSM/Binary Authorization evidence. This
+document must not be updated to claim that deployment until those external
+steps actually occur.
+- Cloud Build ID: `66ec6a46-723f-4075-8f80-a4c4c635b3a7` in
   `asia-east1`; source-closure verification, `go test ./...`, `go vet ./...`,
   image build and push all completed successfully under the dedicated builder
   service account.
 - Immutable OCI image:
-  `asia-east1-docker.pkg.dev/cfw-release-evidence-20260730/physical-evidence-control/physical-collector@sha256:0fb9e2281730c6534101cfed26d31c04f718e3517a00c9e1bdb51dcf3c7bedd2`.
+  `asia-east1-docker.pkg.dev/cfw-release-evidence-20260730/physical-evidence-control/physical-collector@sha256:6b78b06d7640568099d815b3c3485c3a00bc92eac1972721ce8be01384dde759`.
 - On-demand scan:
-  `projects/cfw-release-evidence-20260730/locations/asia/scans/b3bd8346-74a9-4b69-8674-d34298266def`;
+  `projects/cfw-release-evidence-20260730/locations/asia/scans/28c9f7de-8d15-40de-8cfa-226c71c7e51e`;
   the result contained no vulnerability occurrences.
-- Original activated trust-policy v2 SHA-256:
-  `f7a3e459384537c5b74ac8766dc6e2874a1dce95342e7be288d1ce5989b2ad61`.
+- Current activated trust-policy v3 SHA-256:
+  `907e7f11c9510eb541537a077290c43cf2121b5047d777339a4c1f3debf9bec3`.
+
+The original source closure `2439c826...`, image `0fb9e228...`, build
+`0ca20d11-...`, scan `b3bd8346-...`, and trust-policy v2 digest
+`f7a3e459...` remain historical activation evidence; none is accepted by the
+current source-pinned client.
 
 The build pushes a tag only as an upload handle. Binary Authorization and Cloud
 Run use the immutable digest above; no service is deployed from a mutable tag.
@@ -64,7 +79,7 @@ version under the existing grant.
 - Artifact Analysis note and Binary Authorization attestor:
   `physical-collector-v040`.
 - Deployment attestation occurrence:
-  `projects/cfw-release-evidence-20260730/occurrences/e10980bd-5fda-4d7f-99df-1607266760b4`.
+  `projects/cfw-release-evidence-20260730/occurrences/44cdf0f1-8477-4602-b5da-034b972ff01d`.
 - The occurrence was PAE-encoded, signed by the separate Cloud HSM ECDSA P-256
   key `collector-deploy-attestor-v040/cryptoKeyVersions/1`, and validated during
   creation. All temporary signing, occurrence-write, attestor-verifier and
@@ -77,10 +92,10 @@ version under the existing grant.
 ## Runtime and replay ledger
 
 - Nonce issuer: `physical-nonce-issuer-v040`, active revision
-  `physical-nonce-issuer-v040-00002-fp4`, runtime identity
+  `physical-nonce-issuer-v040-00008-b58`, runtime identity
   `physical-nonce-issuer@cfw-release-evidence-20260730.iam.gserviceaccount.com`.
 - Receipt signer: `physical-receipt-signer-v040`, active revision
-  `physical-receipt-signer-v040-00002-q2b`, runtime identity
+  `physical-receipt-signer-v040-00008-gh7`, runtime identity
   `physical-receipt-signer@cfw-release-evidence-20260730.iam.gserviceaccount.com`.
 - Both services are private Cloud Run services in `asia-east1`, use the exact
   image digest, enforce Binary Authorization, scale from zero to at most one
@@ -103,26 +118,27 @@ version under the existing grant.
 
 ## Single-machine policy transition
 
-Repository source now defines trust-policy schema v3 with exact SHA-256
+The single-machine evidence profile was first activated in trust-policy schema
+v3 with SHA-256
 `ed8538dbf11f49555a917617b3f20911801364c4853b05f9704fec99729293d0`.
-Its signed `evidence_profile` authorizes only aggregate schema v5,
+Its `evidence_profile` authorizes only aggregate schema v5,
 `physical-evidence-aggregator-v5-single-machine`, the two pinned OS/build
 lanes, one-machine/two-clean-OS topology, distinct sealed boot environments,
 the fixed machine/boot identity schemes, and a 3-hour-per-OS internal-release
-soak. The image and HSM key do not need
-to change because receipt v3 already signs the server-owned trust-policy hash.
+soak. That policy digest and the following revisions are retained as historical
+activation evidence.
 
 The transition was activated on 2026-08-01 through a fail-closed maintenance
 window: the receipt signer was disabled first, then the nonce issuer; both were
 changed to the exact v3 policy digest while disabled; a fresh fixed-challenge
 KMS preflight was independently verified with the checked-in RSA public key;
-then signer and issuer were re-enabled in that order. The active revisions are:
+then signer and issuer were re-enabled in that order. Those revisions were:
 
 - receipt signer `physical-receipt-signer-v040-00005-2tl`;
 - nonce issuer `physical-nonce-issuer-v040-00005-dct`.
 
-Both serve 100 percent of traffic from the unchanged immutable image digest,
-retain Binary Authorization `default`, and report
+Both served 100 percent of traffic from the then-current immutable image
+digest, retained Binary Authorization `default`, and reported
 `CFW_PRODUCTION_RECEIPTS_ENABLED=true` with the exact v3 policy hash. The
 activation preflight issued at `2026-08-01T07:12:34Z` reached `COMMITTED` with
 signature SHA-256
@@ -135,9 +151,181 @@ or receipt.
 Authenticated malformed nonce/receipt documents returned HTTP 400, proving
 that both enabled schema gates were reached without issuing a production nonce
 or receipt. Anonymous requests returned the platform's HTTP 404 privacy
-response, and each IAM policy still grants `roles/run.invoker` only to the
-named release operator. The original v2 hash and revision IDs above remain
-historical evidence and are not rewritten as v5 activation.
+response. The original v2 hash and revision IDs above remain historical
+evidence and are not rewritten as v5 activation.
+
+## Dependency security refresh activation
+
+On 2026-08-02 the collector dependency closure was rebuilt after upgrading
+`google.golang.org/grpc` to `1.82.1` and `golang.org/x/text` to `0.39.0`.
+Local `go test`, race detection, `go vet`, and `govulncheck` reported no
+reachable vulnerability. Cloud Build
+`66ec6a46-723f-4075-8f80-a4c4c635b3a7` independently rechecked source closure
+`efe0e7a16d67406aff50bb3439e59d4fad1c9dbb6f06ab7437a7d6b84ce44545`,
+tests, and vet before producing image digest
+`6b78b06d7640568099d815b3c3485c3a00bc92eac1972721ce8be01384dde759`.
+The Asia on-demand scan returned an empty vulnerability occurrence list, and
+Cloud HSM deploy-attestor version 1 created and validated Binary Authorization
+occurrence `44cdf0f1-8477-4602-b5da-034b972ff01d`. All temporary token-creator,
+KMS signer, occurrence-writer, note-attacher, and attestor-verifier grants were
+removed and their resource policies were read back afterward.
+
+Activation used a fail-closed maintenance window. The receipt signer was first
+set to `CFW_PRODUCTION_RECEIPTS_ENABLED=false` and its newly ready revision was
+required to be the sole 100-percent traffic target. The nonce issuer was then
+disabled and verified in the same way. While both production routes were
+disabled, the signer and issuer were moved to the exact immutable image,
+trust-policy, source, and executable binding. Each new revision was required to
+preserve its role-specific service account, Binary Authorization `default`,
+private invocation policy, gen2 runtime, resource limits, scaling, timeout, and
+reviewed concurrency. Authenticated health checks then proved process startup.
+The signer fixed empty-body KMS preflight was committed and independently
+verified locally. Only after those checks passed was the signer enabled and
+verified, followed by the issuer. Authenticated malformed and anonymous probes
+were completed before the source-pinned endpoint policy was updated to the
+final revisions. No valid nonce or receipt request was sent during activation.
+The disabled-state and enabled-state signature SHA-256 values were
+`5313e17e17b63140c205ba8a3bb3578c1b3a3309b3241496959a7097ae472b69`
+and `82cdc2f5e8bdab9b9e8ecd20d2a199a185120985eaf85d824cf5a9e133870a3b`.
+Both verified as RSA-PSS/SHA-256 with a 32-byte salt over the fixed challenge.
+They created only committed `kms-ledger-preflight-v1` records.
+
+The fixed-challenge preflight proves only that the configured signer can create,
+claim, sign, and commit a `kms-ledger-preflight-v1` record with the pinned HSM
+key. Its RSA-PSS signature covers only
+`cfw-physical-collector-kms-preflight-v1`; it does not independently bind the
+serving image, trust-policy/source/executable environment, runtime service
+account, Binary Authorization setting, traffic, scaling, or concurrency. Those
+properties require a separate exact Cloud Run service, revision, IAM, and
+traffic description gate. The issuer has no non-production route that exercises
+its Firestore create path, so activation intentionally makes no claim of a live
+issuer-ledger write without a production nonce.
+
+The current revisions are receipt signer
+`physical-receipt-signer-v040-00008-gh7` and nonce issuer
+`physical-nonce-issuer-v040-00008-b58`. Each has one 100-percent traffic target,
+uses the immutable new digest and exact configured policy SHA-256
+`907e7f11c9510eb541537a077290c43cf2121b5047d777339a4c1f3debf9bec3`,
+retains Binary Authorization `default`, its role-specific service account,
+gen2, 512 MiB/1 CPU, zero minimum and one maximum instance. Signer concurrency
+remains 1 and issuer concurrency remains its reviewed value 8. Authenticated
+malformed documents return HTTP 400 from the enabled schema gates; anonymous
+requests are denied by Cloud Run with HTTP 403. No production nonce or receipt
+was created during the refresh.
+
+Rollback is forward-only and fail closed. Traffic must never be routed directly
+to `physical-receipt-signer-v040-00005-2tl`,
+`physical-nonce-issuer-v040-00005-dct`, or any other historical revision whose
+immutable configuration has production receipt handling enabled. If any image,
+environment, readiness, preflight, traffic, IAM, or probe check fails, the
+operator must first create or retain a signer revision with production handling
+disabled and verify it as the sole 100-percent latest traffic target, then do
+the same for the issuer. The endpoint policy remains pinned to the last accepted
+production revisions so clients fail before send. An image or policy rollback
+must itself use fresh production-disabled revisions with internally matching
+image/source/executable/policy bindings and must pass the complete deployment,
+preflight, and source-pin review before either service can be re-enabled. If the
+disabled traffic state cannot be proven, revoke the dedicated client's signer
+invoker grant first, then the issuer grant, and quarantine all involved
+revisions and audit records. Ambiguous KMS, ledger, or HTTP outcomes are never
+automatically retried.
+
+## Local invocation identity
+
+The physical-capture client uses the dedicated service account
+`physical-release-client@cfw-release-evidence-20260730.iam.gserviceaccount.com`.
+It has `roles/run.invoker` only on the nonce-issuer and receipt-signer Cloud Run
+services. The named release operator has
+`roles/iam.serviceAccountTokenCreator` only on this service account, so local
+capture can mint an ID token for the exact Cloud Run audience without receiving
+project-wide editor, deployer, KMS, Firestore, or service-account-key access.
+The former direct user `roles/run.invoker` bindings were removed from both
+services after the impersonation preflight succeeded.
+
+The source-pinned endpoint policy SHA-256 is
+`76e5a84232c92f1332ad29abe31c2d8111a9ff151821b58b10ac3b760873ee5f`.
+Before either POST, the client requires the fixed active revision, sole 100
+percent traffic target, origin and audience, then impersonates the dedicated
+identity and locally verifies the JWT audience. The activation checks confirmed
+both active revisions, both exact-audience tokens, and enabled schema gates
+without sending a valid nonce or receipt request.
+
+## Adversarial v3 collection boundary
+
+The local collector contract now admits only `adversarial-clients-v3` and the
+exact 138-subject set derived from the checked-in baseline plus 32-case table.
+The pre-nonce producer in `scripts/physical_capture/adversarial.py` executes
+source-selected absolute binaries through the session-owned observation
+boundary with one case at a time, bounded streams and timeouts, process-group
+cancellation, and mandatory reset verification for destructive cases. The
+post-nonce path cannot execute a command; it reopens only the RAW_COMPLETED
+manifest and materializes the 33 transcripts before composing the report. A
+crash after nonce receipt may be retried: an already-published transcript is
+accepted only after a bounded descriptor-relative reopen proves exact byte,
+size, and digest equality with the transcript rederived from the frozen
+observations. A mismatch fails closed; pre-nonce capture remains one-shot.
+
+The installed controller and its five Foundation requirement variants are separate from the app
+UI and are not bundled as a runtime feature. The fixed build/install script
+requires the product signing identity, permits a genuinely non-product or
+ad-hoc wrong-Team variant, and requires a distinct same-Team non-Developer-ID
+Apple identity for the designated-requirement case. That variant must pass a
+reduced Apple-anchor/Team/bundle/App-Group requirement and fail the complete
+Developer-ID certificate/OID listener requirement with the real `codesign`
+requirement-mismatch exit status. The script compiles every identity variant
+with distinct code bytes, verifies every signature, and rejects any repeated
+binary digest. The controller also retains the exact client-visible
+`global_authority_interrupted` transport code; any unavailable/timeout result is
+not accepted as an identity rejection. No XPC debug method, caller-selected
+payload/path, or plaintext secret logging is added to the product.
+
+This source contract is not physical evidence. The controller executes the
+baseline, the five Foundation signing-requirement variants, and the three raw
+protocol rejection cases (`oversize-message`, `deep-message`, and
+`noncanonical-message`) through the public XPC API. The remaining 24 cases are
+wired to fixed root-owned paths below
+`.../Adversarial/PhysicalFixtures/<fixture-id>/<case-id>/CFWAdversarialFixture`;
+the five external identity fixtures must also have distinct executable byte
+digests, as required by the final matrix. Direct
+fixtures receive only `execute|reset` plus the source-owned case ID, while the
+UID, audit/login, journal, fast-user-switching, and secret-canary groups use
+fixed `sudo -n` argv. An installed fixture therefore runs the normal signature,
+Authority-log, state, isolation, and reset validators. A missing external
+fixture or unavailable physical OS precondition returns canonical
+`cfw-adversarial-precondition-unavailable-v1` with exit 69. That typed failure
+is never archived as an observation, report/raw subject, PASS, or receipt
+binding.
+
+The source tree now contains one exact ten-controller SwiftPM closure for:
+root-owned UID launcher (1), isolated audit-session controller (2), PID-reuse
+controller (1), isolated console-session controller (1), Authority replay
+controller (3), root-owned journal snapshot controller (4), bounded Authority
+load controller (3), signed owner-liveness controller (2), fast-user-switch
+controller (1), and root-owned secret-canary scanner (6). A shared support
+target owns canonical output, public Authority XPC driving, kernel process/audit
+observations, bounded command execution, state validation, and canary scanning;
+each executable target remains a thin, closed case dispatcher. The installer
+rebuilds every case with a compile-time case marker, signs and installs it at
+the fixed root-owned path, verifies the exact SwiftPM product/target/path and
+Host requirement, and rejects ownership, mode, hard-link, or digest reuse.
+
+The UID rejection, isolated inherited-audit rejection/evidence, operation
+prepare-cancel-replay, bounded read saturation, bounded PID-reuse observation,
+and canary injection/scan drivers use real OS or installed Authority boundaries.
+They emit no caller-authored pass flag. Provider ticket redemption, owner
+liveness, journal stop/snapshot/restore, inactive-console, event-queue,
+mutating-in-flight, and fast-user-switch cases still require their exact
+role-signed executable or physical login/launchd precondition; until that
+precondition is present they return only the typed exit-69 diagnostic and
+cannot satisfy the matrix. The public SDK
+does not expose `NSXPCConnection.auditToken`; `current()` is available only
+inside an exported-object call, and direct audit-token member probes fail to
+compile for the release target. Foundation instead documents that a listener
+signing-requirement mismatch is rejected before its delegate runs. The product
+therefore keeps that OS gate as the single identity boundary, and the
+production scanner rejects direct member access plus private selector or
+`unsafeBitCast` workarounds. Until all 32 cases run on both clean-OS lanes and
+their resets validate, the physical release gate remains open.
 
 ## Audit retention and operational boundary
 

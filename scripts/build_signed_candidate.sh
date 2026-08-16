@@ -3,8 +3,64 @@
 # This script never installs or launches the app and never changes network,
 # proxy, DNS, helper, launchd, or Network Extension runtime state.
 set -euo pipefail
+umask 022
+
+unset PYTHONPATH PYTHONHOME BASH_ENV ENV CDPATH \
+  DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_FRAMEWORK_PATH \
+  DYLD_FALLBACK_LIBRARY_PATH
+rustc_path="$(command -v rustc 2>/dev/null || true)"
+[[ -n "$rustc_path" && -x "$rustc_path" ]] || {
+  echo "error: pinned Rust compiler is unavailable before the release PATH is sealed" >&2
+  exit 1
+}
+rust_toolchain_bin="$(dirname "$rustc_path")"
+export PATH="$rust_toolchain_bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+readonly python_bin="/opt/homebrew/bin/python3"
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+[[ -x "$python_bin" ]] || die "pinned Python interpreter is unavailable: $python_bin"
+
+run_isolated_python_script() {
+  local script="$1"
+  shift
+  [[ "$script" == "$repo_root/scripts/"* && -f "$script" && ! -L "$script" ]] ||
+    die "isolated Python entrypoint is not a reviewed repository script: $script"
+  PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -c '
+import os
+import runpy
+import stat
+import sys
+
+repository = os.path.realpath(sys.argv.pop(1))
+requested_script = sys.argv.pop(1)
+scripts_directory = os.path.join(repository, "scripts")
+script = os.path.realpath(requested_script)
+metadata = os.lstat(requested_script)
+if (
+    os.path.dirname(script) != scripts_directory
+    or not stat.S_ISREG(metadata.st_mode)
+    or metadata.st_nlink != 1
+    or os.path.islink(requested_script)
+):
+    raise RuntimeError("isolated Python entrypoint escaped the reviewed scripts directory")
+sys.path[:0] = [scripts_directory, repository]
+runpy.run_path(script, run_name="__main__")
+' "$repo_root" "$script" "$@"
+}
+
+source_identity_start="$(run_isolated_python_script \
+  "$repo_root/scripts/repository_source_identity.py" --require-clean)" ||
+  die "signed candidate builds require a clean release repository"
+read -r repository_commit release_source_sha256 <<<"$source_identity_start"
+[[ -n "$repository_commit" && -n "$release_source_sha256" ]] ||
+  die "release source identity is incomplete"
+
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/release_toolchain_contract.sh
@@ -21,12 +77,7 @@ readonly candidate_base="$repo_root/target/candidates/0.4.0"
 readonly toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 readonly tauri_bin="$toolchain_root/tauri-cli-$TAURI_CLI_VERSION/bin/cargo-tauri"
 
-die() {
-  echo "error: $*" >&2
-  exit 1
-}
-
-cfw_require_supported_python
+cfw_require_supported_python "$python_bin"
 
 require_regular_file() {
   local path="$1"
@@ -48,7 +99,7 @@ esac
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "signed candidates require Apple Silicon macOS"
 : "${CFW_BUILD_NUMBER:?set the explicit positive integer candidate build number}"
-PYTHONDONTWRITEBYTECODE=1 python3 -B - "$repo_root" "$CFW_BUILD_NUMBER" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B - "$repo_root" "$CFW_BUILD_NUMBER" <<'PY'
 import sys
 
 sys.path.insert(0, sys.argv[1] + "/scripts")
@@ -63,8 +114,7 @@ else
   build_root="$candidate_base/release-build/$CFW_BUILD_NUMBER"
   final_root="$candidate_base/signed"
   validated_review="$candidate_base/review/validated-candidate.json"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
-    "$repo_root/scripts/validated_candidate_evidence.py" \
+  run_isolated_python_script "$repo_root/scripts/validated_candidate_evidence.py" \
     "$validated_review" \
     --final-build-number "$CFW_BUILD_NUMBER"
 fi
@@ -91,13 +141,6 @@ readonly host_profile_sha256 host_profile_size
   die "host provisioning profile identity is malformed"
 security find-identity -v -p codesigning | grep -Fq "\"$MACOS_SIGN_IDENTITY\"" ||
   die "the requested Developer ID identity is unavailable"
-source_identity_start="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/repository_source_identity.py" --require-clean)" ||
-  die "signed candidate builds require a clean release repository"
-read -r repository_commit release_source_sha256 <<<"$source_identity_start"
-[[ -n "$repository_commit" && -n "$release_source_sha256" ]] ||
-  die "release source identity is incomplete"
-
 for parent in "$repo_root/target" "$repo_root/target/candidates" "$candidate_base"; do
   [[ ! -L "$parent" ]] || die "candidate parent must not be a symlink: $parent"
   mkdir -p "$parent"
@@ -136,7 +179,7 @@ export CFW_RELEASE_SOURCE_SHA256="$release_source_sha256"
 ui_dependencies_tree_observed_start="$(
   cfw_verify_ui_dependencies_tree "$repo_root" "$toolchain_root"
 )"
-toolchain_binding_start="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
+toolchain_binding_start="$(run_isolated_python_script \
   "$repo_root/scripts/candidate_artifact_binding.py" --repository "$repo_root")" ||
   die "cannot derive the canonical candidate toolchain binding"
 read -r \
@@ -171,13 +214,13 @@ for product in \
   CFWNativeBridge.framework \
   CFWProxyAgent.app \
   com.bill.clashformac.packet-tunnel.systemextension; do
-  PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
+  run_isolated_python_script "$repo_root/scripts/verify_artifact_manifest.py" \
     "$native_products/$product" \
     "$native_products/$product.manifest.json" \
     --metadata "buildNumber=$CFW_BUILD_NUMBER" \
     --metadata "signingMode=developer-id"
 done
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
+run_isolated_python_script "$repo_root/scripts/verify_artifact_manifest.py" \
   "$native_products/CFWLegacyTombstone" \
   "$native_products/CFWLegacyTombstone.manifest.json" \
   --metadata "buildNumber=$CFW_BUILD_NUMBER" \
@@ -188,7 +231,7 @@ unset CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTFLAGS
 export CARGO_NET_OFFLINE=true
 export CARGO_TARGET_DIR="$cargo_target"
 export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
-tauri_override="$(python3 - "$CFW_BUILD_NUMBER" "$native_products" <<'PY'
+tauri_override="$("$python_bin" -I -S -B - "$CFW_BUILD_NUMBER" "$native_products" <<'PY'
 import json
 import sys
 
@@ -229,17 +272,17 @@ ui_dependencies_tree_observed_end="$(
 )"
 [[ "$ui_dependencies_tree_observed_end" == "$ui_dependencies_tree_observed_start" ]] ||
   die "UI dependency tree changed while the signed candidate was building"
-toolchain_binding_end="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
+toolchain_binding_end="$(run_isolated_python_script \
   "$repo_root/scripts/candidate_artifact_binding.py" --repository "$repo_root")" ||
   die "cannot re-observe the canonical candidate toolchain binding"
 [[ "$toolchain_binding_end" == "$toolchain_binding_start" ]] ||
   die "release toolchain changed while the signed candidate was building"
-source_identity_after_build="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
+source_identity_after_build="$(run_isolated_python_script \
   "$repo_root/scripts/repository_source_identity.py" --require-clean)" ||
   die "release repository changed while the signed candidate was building"
 [[ "$source_identity_after_build" == "$source_identity_start" ]] ||
   die "release source identity changed while the signed candidate was building"
-python3 "$repo_root/scripts/hash_artifact.py" \
+run_isolated_python_script "$repo_root/scripts/hash_artifact.py" \
   "$built_app" \
   --output "$pre_sign_manifest" \
   --metadata "artifactKind=pre-sign-application-v1" \
@@ -262,7 +305,7 @@ host_executable_sha256="$(sha256_file "$built_app/Contents/MacOS/clash-for-mac")
 readonly pre_sign_manifest_sha256 host_executable_sha256
 [[ "$pre_sign_manifest_sha256" =~ ^[0-9a-f]{64}$ && "$host_executable_sha256" =~ ^[0-9a-f]{64}$ ]] ||
   die "pre-sign application identity is malformed"
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
+run_isolated_python_script "$repo_root/scripts/verify_artifact_manifest.py" \
   "$built_app" \
   "$pre_sign_manifest" \
   --metadata "buildNumber=$CFW_BUILD_NUMBER" \
@@ -273,7 +316,7 @@ staged_app="$staging/Clash for Mac.app"
 [[ "$(sha256_file "$pre_sign_manifest")" == "$pre_sign_manifest_sha256" ]] ||
   die "pre-sign manifest changed before staging"
 /usr/bin/ditto --noqtn "$built_app" "$staged_app"
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
+run_isolated_python_script "$repo_root/scripts/verify_artifact_manifest.py" \
   "$staged_app" \
   "$pre_sign_manifest" \
   --metadata "buildNumber=$CFW_BUILD_NUMBER" \
@@ -296,18 +339,15 @@ plutil -lint "$decoded_host_profile" >/dev/null ||
   die "the staged Host provisioning profile is not a valid plist"
 security find-identity -v -p codesigning >"$host_signing_identities" ||
   die "cannot query the codesigning identities"
-(
-  cd "$repo_root"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B -m scripts.host_release_entitlements \
-    --decoded-profile "$decoded_host_profile" \
-    --reviewed-entitlements "$repo_root/native/macos/Config/Host.entitlements" \
-    --tauri-entitlements "$repo_root/apps/cfw-tauri-shell/macos/entitlements.plist" \
-    --signing-identities "$host_signing_identities" \
-    --signing-identity "$MACOS_SIGN_IDENTITY" \
-    --expected-team-id "$expected_team_id" \
-    --expected-bundle-id "$expected_app_id" \
-    --output "$host_release_xcent"
-)
+run_isolated_python_script "$repo_root/scripts/host_release_entitlements.py" \
+  --decoded-profile "$decoded_host_profile" \
+  --reviewed-entitlements "$repo_root/native/macos/Config/Host.entitlements" \
+  --tauri-entitlements "$repo_root/apps/cfw-tauri-shell/macos/entitlements.plist" \
+  --signing-identities "$host_signing_identities" \
+  --signing-identity "$MACOS_SIGN_IDENTITY" \
+  --expected-team-id "$expected_team_id" \
+  --expected-bundle-id "$expected_app_id" \
+  --output "$host_release_xcent"
 require_regular_file "$host_release_xcent"
 plutil -lint "$host_release_xcent" >/dev/null ||
   die "the generated Host release xcent is not a valid plist"
@@ -325,7 +365,7 @@ require_regular_file "$staged_app/Contents/embedded.provisionprofile"
   die "staged Host provisioning profile differs from the validated input"
 [[ "$(sha256_file "$pre_sign_manifest")" == "$pre_sign_manifest_sha256" ]] ||
   die "pre-sign manifest changed before Host signing"
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
+run_isolated_python_script "$repo_root/scripts/verify_artifact_manifest.py" \
   "$staged_app" \
   "$pre_sign_manifest" \
   --added-file \
@@ -360,8 +400,7 @@ codesign --verify --deep --strict --verbose=4 "$staged_app"
 "$repo_root/scripts/verify_release_app.sh" --pre-notary "$staged_app" "$native_products"
 /bin/rm "$decoded_host_profile" "$host_signing_identities" "$host_release_xcent"
 
-PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/notarization_transaction.py" \
+run_isolated_python_script "$repo_root/scripts/notarization_transaction.py" \
   --build-kind "$build_kind" \
   --build-number "$CFW_BUILD_NUMBER" \
   --staged-app "$staged_app" \

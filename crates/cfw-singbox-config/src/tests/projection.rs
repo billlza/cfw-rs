@@ -2,8 +2,10 @@ use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::{
-    AuthenticatedDnsServer, ConfigError, CredentialSlot, DEFAULT_CLASH_API_PORT, EngineSettings,
-    MIN_CLASH_API_PORT, ProjectionMode, TUNNEL_ADDRESS_PLAN, ValidatedSingBoxProfile,
+    AuthenticatedDnsServer, ConfigError, CredentialSlot, DEFAULT_CLASH_API_PORT,
+    DirectIpv4HostRoutes, EngineSettings, MIN_CLASH_API_PORT, ProjectionMode,
+    RELEASE_PACKET_TRANSPORT_IPV4, ReleaseDnsEvidenceCase, ReleasePacketEvidenceCase,
+    TUNNEL_ADDRESS_PLAN, ValidatedSingBoxProfile,
 };
 
 const SS_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -353,6 +355,188 @@ fn ordinary_dns_is_authenticated_and_detoured_in_both_modes_while_bootstrap_is_e
 }
 
 #[test]
+fn application_injects_a_collision_free_selector_for_implicit_multi_remote_profiles() {
+    let profile = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[
+          {{"type":"shadowsocks","tag":"cfw-proxy-selector","server":"first.example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{SS_ID}","kind":"shadowsocks_password"}}}},
+          {{"type":"shadowsocks","tag":"second","server":"second.example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{SS_ID_2}","kind":"shadowsocks_password"}}}}
+        ]}}"#
+    ))
+    .expect("implicit multi-remote profile");
+
+    for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
+        let projected = profile
+            .project(PROFILE_ID, mode, &EngineSettings::default())
+            .expect("selector projection");
+        let config: serde_json::Value =
+            serde_json::from_str(projected.as_json()).expect("projected selector JSON");
+        let outbounds = config["outbounds"].as_array().expect("runtime outbounds");
+        assert_eq!(outbounds.len(), 3);
+        assert_eq!(outbounds[2]["type"], "selector");
+        assert_eq!(outbounds[2]["tag"], "cfw-proxy-selector-2");
+        assert_eq!(
+            outbounds[2]["outbounds"],
+            serde_json::json!(["cfw-proxy-selector", "second"])
+        );
+        assert_eq!(outbounds[2]["default"], "cfw-proxy-selector");
+        assert_eq!(outbounds[2]["interrupt_exist_connections"], false);
+        assert_eq!(config["route"]["final"], "cfw-proxy-selector-2");
+        for server in config["dns"]["servers"]
+            .as_array()
+            .expect("DNS servers")
+            .iter()
+            .filter(|server| server["type"] == "https")
+        {
+            assert_eq!(server["detour"], "cfw-proxy-selector-2");
+        }
+        assert_eq!(projected.credential_slots().len(), 2);
+        assert_eq!(
+            projected.credential_slots()[0].json_pointer(),
+            "/outbounds/0/password"
+        );
+        assert_eq!(
+            projected.credential_slots()[1].json_pointer(),
+            "/outbounds/1/password"
+        );
+    }
+}
+
+#[test]
+fn explicit_profile_route_is_never_replaced_by_the_application_selector() {
+    let profile = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[
+          {{"type":"shadowsocks","tag":"first","server":"first.example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{SS_ID}","kind":"shadowsocks_password"}}}},
+          {{"type":"shadowsocks","tag":"second","server":"second.example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{SS_ID_2}","kind":"shadowsocks_password"}}}}
+        ],"route":{{"final":"second"}}}}"#
+    ))
+    .expect("explicit multi-remote profile");
+    let projected = profile
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
+        .expect("explicit route projection");
+    let config: serde_json::Value =
+        serde_json::from_str(projected.as_json()).expect("projected explicit route JSON");
+    assert_eq!(config["outbounds"].as_array().expect("outbounds").len(), 2);
+    assert_eq!(config["route"]["final"], "second");
+    assert!(projected.as_json().contains(r#""detour":"second""#));
+    assert!(!projected.as_json().contains(r#""type":"selector""#));
+}
+
+#[test]
+fn vmess_legacy_protocol_alter_id_reaches_the_runtime_projection() {
+    let profile = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[{{"type":"vmess","tag":"vmess","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"alter_id":1}}]}}"#
+    ))
+    .expect("VMess legacy protocol profile");
+    let projected = profile
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
+        .expect("VMess projection");
+    let config: serde_json::Value =
+        serde_json::from_str(projected.as_json()).expect("projected VMess JSON");
+    assert_eq!(config["outbounds"][0]["alter_id"], 1);
+}
+
+#[test]
+fn release_dns_evidence_is_a_closed_udp53_tunnel_projection() {
+    let cases = [
+        (
+            ReleaseDnsEvidenceCase::PrimaryIpv4,
+            "34.80.107.183",
+            "cfw-release-dns-primary-ipv4",
+        ),
+        (
+            ReleaseDnsEvidenceCase::PrimaryIpv6,
+            "2600:1900:4030:5afb:0:1::",
+            "cfw-release-dns-primary-ipv6",
+        ),
+        (
+            ReleaseDnsEvidenceCase::SecondaryIpv4,
+            "35.200.12.109",
+            "cfw-release-dns-secondary-ipv4",
+        ),
+        (
+            ReleaseDnsEvidenceCase::SecondaryIpv6,
+            "2600:1900:4050:8de::",
+            "cfw-release-dns-secondary-ipv6",
+        ),
+    ];
+    let mut digests = std::collections::BTreeSet::new();
+    for (case, address, tag) in cases {
+        let profile = ValidatedSingBoxProfile::release_dns_evidence(case);
+        assert_eq!(
+            profile.as_json(),
+            ValidatedSingBoxProfile::direct().as_json()
+        );
+        assert_eq!(
+            profile
+                .project(
+                    PROFILE_ID,
+                    ProjectionMode::SystemProxy,
+                    &EngineSettings::default(),
+                )
+                .expect_err("evidence projection is never a system proxy"),
+            ConfigError::InvalidReleaseDnsEvidenceMode
+        );
+        let projected = profile
+            .project(
+                PROFILE_ID,
+                ProjectionMode::Tunnel,
+                &EngineSettings::default(),
+            )
+            .expect("fixed release DNS projection");
+        let config: serde_json::Value =
+            serde_json::from_str(projected.as_json()).expect("projected config");
+        let servers = config["dns"]["servers"].as_array().expect("DNS servers");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0]["type"], "udp");
+        assert_eq!(servers[0]["server"], address);
+        assert_eq!(servers[0]["server_port"], 53);
+        assert_eq!(servers[0]["tag"], tag);
+        assert_eq!(servers[0]["detour"], "direct");
+        assert!(servers[0].get("path").is_none());
+        assert!(servers[0].get("tls").is_none());
+        assert_eq!(config["dns"]["rules"][0]["server"], tag);
+        assert_eq!(config["dns"]["final"], tag);
+        assert_eq!(
+            config["route"]["default_domain_resolver"],
+            serde_json::json!({ "server": tag })
+        );
+        assert!(!projected.as_json().contains("cfw-bootstrap-dns"));
+        assert!(!projected.as_json().contains("cfw-authenticated-dns"));
+        assert!(digests.insert(projected.digest().to_owned()));
+    }
+    assert_eq!(digests.len(), 4);
+}
+
+#[test]
+fn release_dns_evidence_rejects_ipv6_disabled_settings_for_every_case() {
+    let settings = EngineSettings {
+        enable_ipv6: false,
+        ..EngineSettings::default()
+    };
+    for case in [
+        ReleaseDnsEvidenceCase::PrimaryIpv4,
+        ReleaseDnsEvidenceCase::PrimaryIpv6,
+        ReleaseDnsEvidenceCase::SecondaryIpv4,
+        ReleaseDnsEvidenceCase::SecondaryIpv6,
+    ] {
+        assert_eq!(
+            ValidatedSingBoxProfile::release_dns_evidence(case)
+                .project(PROFILE_ID, ProjectionMode::Tunnel, &settings)
+                .expect_err("release DNS evidence keeps the active IPv6 matrix exact"),
+            ConfigError::InvalidReleaseDnsEvidenceMode
+        );
+    }
+}
+
+#[test]
 fn domain_named_proxy_endpoint_uses_the_bounded_bootstrap_pair_in_both_modes() {
     let profile = shadowsocks_profile(SS_ID);
     for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
@@ -596,6 +780,105 @@ fn tunnel_identity_binds_os_network_options_beyond_config_json() {
         bypass_changed.configuration_digest()
     );
     assert_ne!(baseline.digest(), bypass_changed.digest());
+}
+
+#[test]
+fn release_packet_direct_host_route_is_closed_source_owned_and_identity_bound() {
+    assert_eq!(
+        ValidatedSingBoxProfile::parse(
+            r#"{"outbounds":[{"type":"direct","tag":"direct"}],"direct_ipv4_hosts":["35.194.216.98"]}"#,
+        )
+        .expect_err("an imported profile cannot request a host route"),
+        ConfigError::UnsupportedTopLevelKey("direct_ipv4_hosts".to_owned())
+    );
+
+    let ordinary = ValidatedSingBoxProfile::direct()
+        .project(
+            PROFILE_ID,
+            ProjectionMode::Tunnel,
+            &EngineSettings::default(),
+        )
+        .expect("ordinary tunnel");
+    assert!(ordinary.direct_ipv4_hosts().is_empty());
+
+    let included =
+        ValidatedSingBoxProfile::release_packet_evidence(ReleasePacketEvidenceCase::IncludedRoutes)
+            .project(
+                PROFILE_ID,
+                ProjectionMode::Tunnel,
+                &EngineSettings::default(),
+            )
+            .expect("included-routes projection");
+    let excluded =
+        ValidatedSingBoxProfile::release_packet_evidence(ReleasePacketEvidenceCase::ExcludedRoutes)
+            .project(
+                PROFILE_ID,
+                ProjectionMode::Tunnel,
+                &EngineSettings::default(),
+            )
+            .expect("excluded-routes projection");
+
+    assert!(included.direct_ipv4_hosts().is_empty());
+    assert_eq!(
+        excluded.direct_ipv4_hosts().as_slice(),
+        &[RELEASE_PACKET_TRANSPORT_IPV4]
+    );
+    assert_eq!(included.as_json(), excluded.as_json());
+    assert_eq!(
+        included.configuration_digest(),
+        excluded.configuration_digest()
+    );
+    assert_ne!(included.digest(), excluded.digest());
+
+    for case in ReleasePacketEvidenceCase::ALL {
+        let projected = ValidatedSingBoxProfile::release_packet_evidence(case)
+            .project(
+                PROFILE_ID,
+                ProjectionMode::Tunnel,
+                &EngineSettings::default(),
+            )
+            .expect("fixed Packet projection");
+        assert_eq!(
+            projected.direct_ipv4_hosts().is_empty(),
+            case != ReleasePacketEvidenceCase::ExcludedRoutes
+        );
+    }
+
+    assert_eq!(
+        ValidatedSingBoxProfile::release_packet_evidence(ReleasePacketEvidenceCase::ExcludedRoutes)
+            .project(
+                PROFILE_ID,
+                ProjectionMode::SystemProxy,
+                &EngineSettings::default(),
+            )
+            .expect_err("Packet evidence cannot project into System Proxy"),
+        ConfigError::InvalidReleasePacketEvidenceMode
+    );
+}
+
+#[test]
+fn direct_ipv4_host_route_wire_value_rejects_duplicates_and_noncanonical_inputs() {
+    let empty: DirectIpv4HostRoutes = serde_json::from_str("[]").expect("empty route set");
+    assert!(empty.is_empty());
+    let exact: DirectIpv4HostRoutes =
+        serde_json::from_str(r#"["35.194.216.98"]"#).expect("exact route set");
+    assert_eq!(exact.as_slice(), &[RELEASE_PACKET_TRANSPORT_IPV4]);
+    assert_eq!(
+        serde_json::to_string(&exact).expect("canonical routes"),
+        r#"["35.194.216.98"]"#
+    );
+
+    for invalid in [
+        r#"["35.194.216.98","35.194.216.98"]"#,
+        r#"["035.194.216.98"]"#,
+        r#"["35.194.216.99"]"#,
+        r#"["35.194.216.98","1.1.1.1"]"#,
+    ] {
+        assert!(
+            serde_json::from_str::<DirectIpv4HostRoutes>(invalid).is_err(),
+            "accepted {invalid}"
+        );
+    }
 }
 
 #[test]

@@ -84,6 +84,25 @@ class RepositorySourceIdentityTests(unittest.TestCase):
         self.assertEqual(release_source_digest(self.root), before)
         require_clean_repository(self.root)
 
+    def test_packet_endpoint_and_collector_bytes_are_in_release_source_digest(self) -> None:
+        endpoint = self.root / "tools/packet-evidence-endpoint/main.go"
+        collector = self.root / "tools/physical-collector/main.go"
+        endpoint.parent.mkdir(parents=True)
+        collector.parent.mkdir(parents=True)
+        endpoint.write_text("package main\n", encoding="utf-8")
+        collector.write_text("package main\n", encoding="utf-8")
+        git(self.root, "add", "tools")
+        git(self.root, "commit", "-q", "-m", "add release tools")
+        baseline = release_source_digest(self.root)
+
+        for path in (endpoint, collector):
+            with self.subTest(path=path.relative_to(self.root).as_posix()):
+                original = path.read_bytes()
+                path.write_bytes(original + b"// changed\n")
+                self.assertNotEqual(release_source_digest(self.root), baseline)
+                path.write_bytes(original)
+                self.assertEqual(release_source_digest(self.root), baseline)
+
     def test_historical_identity_uses_target_commits_literal_path_closure(self) -> None:
         policy = self.root / "scripts/repository_source_identity.py"
         policy.parent.mkdir()

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use serde_json::{Map, Value, json};
@@ -11,12 +12,22 @@ pub(crate) struct DomainResolverTags<'a> {
     pub(crate) fallback_server: &'a str,
 }
 
+#[derive(Debug)]
+pub(crate) struct RuntimeOutboundProjection {
+    pub(crate) outbounds: Vec<Value>,
+    pub(crate) credential_slots: Vec<CredentialSlot>,
+    pub(crate) selected_outbound: String,
+    pub(crate) injected_route_final: Option<String>,
+}
+
+const APP_SELECTOR_TAG: &str = "cfw-proxy-selector";
+
 impl ProfileDocument {
     pub(crate) fn runtime_outbounds(
         &self,
         bootstrap_resolver: DomainResolverTags<'_>,
-    ) -> Result<(Vec<Value>, Vec<CredentialSlot>), ConfigError> {
-        let mut outbounds = Vec::with_capacity(self.outbounds.len());
+    ) -> Result<RuntimeOutboundProjection, ConfigError> {
+        let mut outbounds = Vec::with_capacity(self.outbounds.len() + 1);
         let mut slots = Vec::new();
         for (index, outbound) in self.outbounds.iter().enumerate() {
             let (projected, mut outbound_slots) =
@@ -24,7 +35,58 @@ impl ProfileDocument {
             outbounds.push(projected);
             slots.append(&mut outbound_slots);
         }
-        Ok((outbounds, slots))
+
+        let profile_final = self.effective_final_outbound_tag().to_owned();
+        let remote_tags = self
+            .outbounds
+            .iter()
+            .filter(|outbound| outbound.is_remote())
+            .map(|outbound| outbound.tag().to_owned())
+            .collect::<Vec<_>>();
+        let has_explicit_final = self
+            .route
+            .as_ref()
+            .and_then(|route| route.final_tag.as_ref())
+            .is_some();
+        let inject_selector =
+            !has_explicit_final && self.outbounds[0].is_remote() && remote_tags.len() >= 2;
+        let injected_route_final = inject_selector.then(|| self.selector_tag());
+        if let Some(selector_tag) = injected_route_final.as_ref() {
+            outbounds.push(json!({
+                "type": "selector",
+                "tag": selector_tag,
+                "outbounds": remote_tags,
+                "default": profile_final,
+                "interrupt_exist_connections": false,
+            }));
+        }
+        let selected_outbound = injected_route_final
+            .clone()
+            .unwrap_or_else(|| profile_final.clone());
+        Ok(RuntimeOutboundProjection {
+            outbounds,
+            credential_slots: slots,
+            selected_outbound,
+            injected_route_final,
+        })
+    }
+
+    fn selector_tag(&self) -> String {
+        let profile_tags = self
+            .outbounds
+            .iter()
+            .map(ProfileOutbound::tag)
+            .collect::<BTreeSet<_>>();
+        if !profile_tags.contains(APP_SELECTOR_TAG) {
+            return APP_SELECTOR_TAG.to_owned();
+        }
+        for suffix in 2..=self.outbounds.len() + 1 {
+            let candidate = format!("{APP_SELECTOR_TAG}-{suffix}");
+            if !profile_tags.contains(candidate.as_str()) {
+                return candidate;
+            }
+        }
+        unreachable!("a bounded selector tag search must find a free tag")
     }
 }
 
@@ -62,6 +124,7 @@ impl ProfileOutbound {
                 server,
                 server_port,
                 credential_ref,
+                alter_id,
                 security,
                 tls,
                 transport,
@@ -70,6 +133,9 @@ impl ProfileOutbound {
                     remote_outbound("vmess", tag, server, *server_port, bootstrap_resolver);
                 object.insert("uuid".into(), Value::String(String::new()));
                 object.insert("security".into(), serde_json::to_value(security)?);
+                if alter_id.is_legacy() {
+                    object.insert("alter_id".into(), Value::from(1));
+                }
                 insert_tls_transport(&mut object, tls.as_ref(), transport.as_ref())?;
                 (
                     object,

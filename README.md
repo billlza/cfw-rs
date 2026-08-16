@@ -114,10 +114,10 @@ Release inputs are recorded in
 - Go 1.26.5
 - SagerNet gomobile v0.1.13
 - cargo-deny 0.20.2
-- sing-box/libbox v1.13.14 at
-  `25a600db24f7680ad9806ce5427bd0ab8afe1114`
+- sing-box/libbox v1.13.15 at
+  `3708fa18766cda1f11b77f6ed9c7bd61688f17df`
 - Apple provider reference at
-  `794eb1741f91765a91f1513e5639296503f072b2`
+  `afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa`
 
 The Apple provider repository is semantic reference material only. In
 particular, code that obtains a packet-flow file descriptor through KVC is not

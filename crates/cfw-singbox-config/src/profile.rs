@@ -45,6 +45,8 @@ pub(crate) enum ProfileOutbound {
         server: String,
         server_port: u16,
         credential_ref: CredentialRef,
+        #[serde(default, skip_serializing_if = "VmessAlterId::is_aead")]
+        alter_id: VmessAlterId,
         #[serde(default, skip_serializing_if = "VmessSecurity::is_auto")]
         security: VmessSecurity,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -121,6 +123,45 @@ pub(crate) enum VmessSecurity {
     Aes128Gcm,
     #[serde(rename = "chacha20-poly1305")]
     Chacha20Poly1305,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub(crate) enum VmessAlterId {
+    #[default]
+    Aead,
+    Legacy,
+}
+
+impl VmessAlterId {
+    pub(crate) fn is_aead(&self) -> bool {
+        *self == Self::Aead
+    }
+
+    pub(crate) fn is_legacy(&self) -> bool {
+        *self == Self::Legacy
+    }
+}
+
+impl TryFrom<u8> for VmessAlterId {
+    type Error = String;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Aead),
+            1 => Ok(Self::Legacy),
+            _ => Err("VMess alter_id must be 0 (AEAD) or 1 (legacy protocol)".to_owned()),
+        }
+    }
+}
+
+impl From<VmessAlterId> for u8 {
+    fn from(value: VmessAlterId) -> Self {
+        match value {
+            VmessAlterId::Aead => 0,
+            VmessAlterId::Legacy => 1,
+        }
+    }
 }
 
 impl VmessSecurity {

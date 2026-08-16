@@ -11,6 +11,8 @@ import {
   newCutoverState,
   normalizeBootPayload,
   normalizeCutoverPreparation,
+  normalizeLegacyProfileMigrationOutcome,
+  normalizeLegacyProfileMigrationPreview,
   normalizeMigrationHandoffStatus,
   normalizeRetirementStatus,
   unverifiableRetirementStatus,
@@ -160,6 +162,56 @@ test("handoff status is closed, bounded and reload-safe", () => {
     { state: "failed", code: "migration_handoff_failed", message: "x".repeat(513) },
   ]) {
     assert.throws(() => normalizeMigrationHandoffStatus(invalid), /invalid|too long/u);
+  }
+});
+
+test("legacy profile migration preview and outcome are closed and secret-free", () => {
+  const preview = normalizeLegacyProfileMigrationPreview({
+    status: "ready",
+    preview_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    name: "Migrated profile",
+    source_host: "subscription.example",
+    legacy_bytes: 494575,
+    active: true,
+  });
+  assert.equal(preview.preview_id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  assert.deepEqual(
+    normalizeLegacyProfileMigrationPreview({ status: "no_active_profile" }),
+    { status: "no_active_profile" },
+  );
+  assert.throws(
+    () => normalizeLegacyProfileMigrationPreview({
+      status: "ready",
+      preview_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      name: "x",
+      source_host: "subscription.example?token=secret",
+      legacy_bytes: 1,
+      active: true,
+    }),
+    /invalid/u,
+  );
+  assert.deepEqual(
+    normalizeLegacyProfileMigrationOutcome({
+      id: "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb",
+      name: "Migrated profile",
+      bytes: 2048,
+      digest: "c".repeat(64),
+      reused: false,
+      selected: true,
+    }).selected,
+    true,
+  );
+  for (const invalid of [
+    { status: "ready", preview_id: "not-a-uuid", name: "x", source_host: "example.com", legacy_bytes: 1, active: true },
+    { status: "ready", preview_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "x", source_host: "example.com", legacy_bytes: 999999, active: true },
+  ]) {
+    assert.throws(() => normalizeLegacyProfileMigrationPreview(invalid), /invalid/u);
+  }
+  for (const invalid of [
+    { id: "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb", name: "x", bytes: 1, digest: "x", reused: false, selected: false },
+    { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", name: "x", bytes: 1, digest: "c".repeat(64), reused: false, selected: true },
+  ]) {
+    assert.throws(() => normalizeLegacyProfileMigrationOutcome(invalid), /invalid/u);
   }
 });
 
@@ -313,6 +365,16 @@ test("migration CSS computes a non-clipping long action at the compact 850x603 b
     /\.cfw-migration-confirm input\[type="checkbox"\]:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)[^}]*outline-offset:\s*2px/su,
   );
   assert.match(styles, /@media \(max-width: 900px\), \(max-height: 620px\)/u);
+  assert.match(
+    styles,
+    /\.cfw-content\.cfw-content-migration\s*\{[^}]*overflow-y:\s*auto/su,
+    "the whole migration view must scroll instead of clipping the setup action",
+  );
+  assert.match(
+    styles,
+    /\.cfw-content-migration \.cfw-migration-banner\s*\{[^}]*max-height:\s*none[^}]*overflow:\s*visible/su,
+    "the migration banner must not retain the compact clipping boundary",
+  );
   assert.doesNotMatch(styles, /\.cfw-row\s*\{[^}]*migration/u);
 });
 

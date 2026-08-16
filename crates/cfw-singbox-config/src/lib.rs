@@ -10,6 +10,8 @@ mod profile;
 mod profile_projection;
 mod profile_validation;
 mod projection;
+mod release_dns;
+mod release_packet;
 mod validation;
 
 pub use controller::{
@@ -23,8 +25,12 @@ pub use credentials::{
 pub use error::ConfigError;
 pub use profile::MAX_OUTBOUNDS;
 pub use projection::{
-    AuthenticatedDnsServer, EngineSettings, ProjectedConfig, ProjectionMode, TUNNEL_ADDRESS_PLAN,
-    TunnelAddressPlan,
+    AuthenticatedDnsServer, DEFAULT_MIXED_PORT, EngineSettings, ProjectedConfig, ProjectionMode,
+    TUNNEL_ADDRESS_PLAN, TunnelAddressPlan,
+};
+pub use release_dns::ReleaseDnsEvidenceCase;
+pub use release_packet::{
+    DirectIpv4HostRoutes, RELEASE_PACKET_TRANSPORT_IPV4, ReleasePacketEvidenceCase,
 };
 pub use validation::{
     MAX_ENGINE_CONFIG_BYTES, MAX_PROFILE_BYTES, MAX_PROFILE_NODES, ValidatedSingBoxProfile,

@@ -42,7 +42,7 @@ impl LaunchRecoveryFailureCategory {
                 "The migration session could not verify the installed, signed, notarized 0.4.0 app. Reinstall the release in /Applications and ensure Gatekeeper is enabled, then reopen Recovery; no recovery action ran."
             }
             Self::Recovery => {
-                "The interrupted pre-network cutover could not safely restore the recorded legacy process/network state or durably clear its journal. Do not change either app or network settings; review the local migration log, then retry Recovery."
+                "The interrupted pre-network cutover could not prove the legacy network intact, durably seal NetworkRetiring, or safely finish the journal-bound legacy GUI exit. Do not relaunch the legacy app or change network settings; review the local migration log, then retry Recovery."
             }
             Self::ActiveProof => {
                 "The journal says the replacement was active, but the current native owner, context, digest, and readiness proof does not match. Keep the app open, review the local migration log, then select Recover Replacement."
@@ -89,7 +89,7 @@ impl LaunchRecoveryFailure {
 pub(super) fn require_pre_network_launch_recovery<Admission, Recovery>(
     migration_handoff: bool,
     require_admission: Admission,
-    resume_recovery: Recovery,
+    seal_recovery: Recovery,
 ) -> Result<(), LaunchRecoveryFailure>
 where
     Admission: FnOnce() -> Result<(), String>,
@@ -104,7 +104,7 @@ where
     require_admission().map_err(|cause| {
         LaunchRecoveryFailure::new(LaunchRecoveryFailureCategory::Admission, cause)
     })?;
-    resume_recovery()
+    seal_recovery()
         .map_err(|cause| LaunchRecoveryFailure::new(LaunchRecoveryFailureCategory::Recovery, cause))
 }
 
@@ -125,9 +125,15 @@ pub(super) fn run_launch_preflight(app: &AppHandle) -> Result<(), String> {
                 match require_pre_network_launch_recovery(
                     launch.is_migration_handoff(),
                     super::admission::require_canonical_handoff_candidate,
-                    || super::recovery::resume_pre_network_cutover_if_intact(&journal, &store),
+                    || {
+                        super::recovery::seal_pre_network_cutover_for_recovery(&journal, &store)
+                    },
                 ) {
-                    Ok(()) => LegacyRetirementStatus::AwaitingConfirmation,
+                    Ok(()) => LegacyRetirementStatus::RecoveryStartRequired {
+                        target: journal.target,
+                        message: "the confirmed one-way cutover was safely sealed as NetworkRetiring and the journal-bound legacy GUI exited; use Recover Replacement to finish without relaunching the legacy app"
+                            .into(),
+                    },
                     Err(failure) => {
                         recovery_required_status(journal.phase, journal.target, failure)
                     }
@@ -318,38 +324,70 @@ fn finalize_legacy_data_state(
     legacy_settings: Option<&cfw_core::LegacySettingsMigration>,
     preferences: &UiPreferences,
 ) -> Result<(), String> {
-    if !retirement_completed {
-        store
-            .commit_legacy_retirement()
-            .map_err(|error| format!("failed to persist legacy retirement marker: {error}"))?;
-    }
-
-    let snapshot = if retirement_completed {
-        store.snapshot().map_err(|error| error.to_string())?
-    } else {
-        ProfileRepository::new(store.paths().legacy_profiles_dir.clone())
-            .clear_managed_profiles()
-            .map_err(|error| format!("failed to clear managed legacy profiles: {error}"))?;
-        reconcile_main_app_login_item(preferences)?;
-        let snapshot = sanitize_legacy_preferences(store, preferences.clone())?;
-        if let Some(migration) = legacy_settings {
-            migration
-                .remove_source(store.paths())
-                .map_err(|error| format!("failed to remove migrated legacy settings: {error}"))?;
-        }
-        snapshot
-    };
-
-    remove_managed_path(&store.paths().legacy_cores_dir)?;
-    remove_managed_path(&store.paths().legacy_helpers_dir)?;
-    remove_managed_path(&store.paths().legacy_profiles_dir)?;
-    for path in legacy_managed_files(store) {
-        remove_managed_path(&path)?;
-    }
-    verify_privileged_artifacts_are_gone(store.paths().legacy_cores_dir.as_path())?;
-    require_retired_managed_paths_absent(store)?;
+    let snapshot = complete_legacy_data_retirement(
+        retirement_completed,
+        || {
+            ProfileRepository::new(store.paths().legacy_profiles_dir.clone())
+                .clear_managed_profiles()
+                .map_err(|error| format!("failed to clear managed legacy profiles: {error}"))?;
+            reconcile_main_app_login_item(preferences)?;
+            sanitize_legacy_preferences(store, preferences.clone())
+        },
+        || {
+            if let Some(migration) = legacy_settings {
+                migration
+                    .remove_source(store.paths())
+                    .map_err(|error| format!("failed to remove migrated legacy settings: {error}"))
+            } else {
+                require_path_absent(&store.paths().legacy_settings_file, "legacy settings file")
+            }
+        },
+        || {
+            store
+                .commit_legacy_retirement()
+                .map_err(|error| format!("failed to persist legacy retirement marker: {error}"))
+        },
+        || {
+            remove_managed_path(&store.paths().legacy_cores_dir)?;
+            remove_managed_path(&store.paths().legacy_helpers_dir)?;
+            remove_managed_path(&store.paths().legacy_profiles_dir)?;
+            for path in legacy_managed_files(store) {
+                remove_managed_path(&path)?;
+            }
+            verify_privileged_artifacts_are_gone(store.paths().legacy_cores_dir.as_path())?;
+            require_retired_managed_paths_absent(store)
+        },
+    )?;
     app.emit("cfw://settings-changed", snapshot)
         .map_err(|error| format!("failed to publish migrated settings: {error}"))
+}
+
+/// Completes the durable data-retirement transaction in dependency order.
+///
+/// The source removal is the irreversible migration boundary and must be
+/// directory-durable before the completion marker is committed. Everything
+/// before and after that marker is intentionally idempotent: this also repairs
+/// installations created by older builds that wrote the marker before cleanup.
+fn complete_legacy_data_retirement<Snapshot, Prepare, RemoveSource, CommitMarker, FinishCleanup>(
+    retirement_completed: bool,
+    prepare: Prepare,
+    remove_source: RemoveSource,
+    commit_marker: CommitMarker,
+    finish_cleanup: FinishCleanup,
+) -> Result<Snapshot, String>
+where
+    Prepare: FnOnce() -> Result<Snapshot, String>,
+    RemoveSource: FnOnce() -> Result<(), String>,
+    CommitMarker: FnOnce() -> Result<(), String>,
+    FinishCleanup: FnOnce() -> Result<(), String>,
+{
+    let snapshot = prepare()?;
+    remove_source()?;
+    if !retirement_completed {
+        commit_marker()?;
+    }
+    finish_cleanup()?;
+    Ok(snapshot)
 }
 
 pub(super) fn require_retired_managed_paths_absent(store: &SettingsStore) -> Result<(), String> {
@@ -465,4 +503,175 @@ pub(super) fn remove_managed_path(path: &Path) -> Result<(), String> {
 pub(super) fn emit_engine_snapshot_refresh(app: &AppHandle) -> Result<(), String> {
     app.emit("cfw://engine-snapshot", serde_json::Value::Null)
         .map_err(|error| format!("failed to publish engine snapshot refresh: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::complete_legacy_data_retirement;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FaultAfter {
+        Prepare(usize),
+        SourceRemoval,
+        MarkerCommit,
+        Cleanup(usize),
+    }
+
+    #[derive(Debug)]
+    struct DurableCleanupState {
+        prepared: [bool; 3],
+        source_present: bool,
+        marker_present: bool,
+        cleanup_present: [bool; 4],
+        marker_commits: usize,
+    }
+
+    impl Default for DurableCleanupState {
+        fn default() -> Self {
+            Self {
+                prepared: [false; 3],
+                source_present: true,
+                marker_present: false,
+                cleanup_present: [true; 4],
+                marker_commits: 0,
+            }
+        }
+    }
+
+    fn run_cleanup_transaction(
+        state: &RefCell<DurableCleanupState>,
+        fault: Option<FaultAfter>,
+    ) -> Result<(), String> {
+        let marker_present = state.borrow().marker_present;
+        complete_legacy_data_retirement(
+            marker_present,
+            || {
+                for index in 0..3 {
+                    state.borrow_mut().prepared[index] = true;
+                    if fault == Some(FaultAfter::Prepare(index)) {
+                        return Err(format!("fault after prepare step {index}"));
+                    }
+                }
+                Ok(())
+            },
+            || {
+                state.borrow_mut().source_present = false;
+                if fault == Some(FaultAfter::SourceRemoval) {
+                    Err("fault after source removal".into())
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                let mut state = state.borrow_mut();
+                state.marker_present = true;
+                state.marker_commits += 1;
+                if fault == Some(FaultAfter::MarkerCommit) {
+                    Err("fault after marker commit".into())
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                for index in 0..4 {
+                    state.borrow_mut().cleanup_present[index] = false;
+                    if fault == Some(FaultAfter::Cleanup(index)) {
+                        return Err(format!("fault after cleanup step {index}"));
+                    }
+                }
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn retirement_marker_is_committed_only_after_legacy_source_removal() {
+        let operations = RefCell::new(Vec::new());
+        complete_legacy_data_retirement(
+            false,
+            || {
+                operations.borrow_mut().push("prepare");
+                Ok(())
+            },
+            || {
+                operations.borrow_mut().push("remove-source");
+                Ok(())
+            },
+            || {
+                operations.borrow_mut().push("commit-marker");
+                Ok(())
+            },
+            || {
+                operations.borrow_mut().push("finish-cleanup");
+                Ok(())
+            },
+        )
+        .expect("retirement sequence");
+        assert_eq!(
+            operations.into_inner(),
+            [
+                "prepare",
+                "remove-source",
+                "commit-marker",
+                "finish-cleanup"
+            ]
+        );
+    }
+
+    #[test]
+    fn every_cleanup_fault_converges_on_retry_without_marker_source_split_brain() {
+        let faults = [
+            FaultAfter::Prepare(0),
+            FaultAfter::Prepare(1),
+            FaultAfter::Prepare(2),
+            FaultAfter::SourceRemoval,
+            FaultAfter::MarkerCommit,
+            FaultAfter::Cleanup(0),
+            FaultAfter::Cleanup(1),
+            FaultAfter::Cleanup(2),
+            FaultAfter::Cleanup(3),
+        ];
+
+        for fault in faults {
+            let state = RefCell::new(DurableCleanupState::default());
+            assert!(
+                run_cleanup_transaction(&state, Some(fault)).is_err(),
+                "{fault:?} must interrupt the first attempt"
+            );
+            {
+                let durable = state.borrow();
+                assert!(
+                    !durable.marker_present || !durable.source_present,
+                    "the marker must never be committed ahead of source removal after {fault:?}"
+                );
+            }
+
+            run_cleanup_transaction(&state, None)
+                .unwrap_or_else(|error| panic!("retry after {fault:?} failed: {error}"));
+            let durable = state.borrow();
+            assert_eq!(durable.prepared, [true; 3], "{fault:?}");
+            assert!(!durable.source_present, "{fault:?}");
+            assert!(durable.marker_present, "{fault:?}");
+            assert_eq!(durable.cleanup_present, [false; 4], "{fault:?}");
+            assert_eq!(durable.marker_commits, 1, "{fault:?}");
+        }
+    }
+
+    #[test]
+    fn marker_present_retry_repairs_legacy_source_and_remaining_cleanup() {
+        let state = RefCell::new(DurableCleanupState {
+            marker_present: true,
+            ..DurableCleanupState::default()
+        });
+
+        run_cleanup_transaction(&state, None).expect("repair old marker-first state");
+        let durable = state.borrow();
+        assert_eq!(durable.prepared, [true; 3]);
+        assert!(!durable.source_present);
+        assert!(durable.marker_present);
+        assert_eq!(durable.cleanup_present, [false; 4]);
+        assert_eq!(durable.marker_commits, 0);
+    }
 }

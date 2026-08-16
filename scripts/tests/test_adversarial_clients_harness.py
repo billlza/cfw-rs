@@ -37,7 +37,7 @@ class AdversarialMatrixTests(unittest.TestCase):
     def test_full_matrix_reopens_signature_and_transcript_bytes(self) -> None:
         result = self.validate()
         self.assertEqual(len(self.document["cases"]), len(REQUIRED_CASES))
-        self.assertEqual(len(result["artifacts"]), len(REQUIRED_CASES) + 3)
+        self.assertEqual(len(result["artifacts"]), 138)
 
     def test_schema_versions_require_json_integers(self) -> None:
         for invalid in (2.0, True):
@@ -45,7 +45,7 @@ class AdversarialMatrixTests(unittest.TestCase):
                 document = copy.deepcopy(self.document)
                 document["schema_version"] = invalid
                 with ArtifactReader(self.root) as artifacts, self.assertRaisesRegex(
-                    AdversarialMatrixError, "schema_version must be 2"
+                    AdversarialMatrixError, "schema_version must be 3"
                 ):
                     validate_adversarial_matrix(document, artifacts)
 
@@ -57,7 +57,7 @@ class AdversarialMatrixTests(unittest.TestCase):
                     transcript["schema_version"] = invalid
                     self.fixture.rewrite_json(case["artifact"], transcript)
                     with self.assertRaisesRegex(
-                        AdversarialMatrixError, "transcript schema_version must be 1"
+                        AdversarialMatrixError, "transcript source binding differs"
                     ):
                         self.validate()
         finally:
@@ -70,48 +70,48 @@ class AdversarialMatrixTests(unittest.TestCase):
 
     def test_transcript_authorization_outcome_cannot_be_declared(self) -> None:
         case, raw = self.transcript(0)
-        raw["events"][1]["outcome"] = "authorized"
+        raw["decision"]["accepted"] = not raw["decision"]["accepted"]
         self.fixture.rewrite_json(case["artifact"], raw)
-        with self.assertRaisesRegex(AdversarialMatrixError, "required outcome"):
+        with self.assertRaisesRegex(AdversarialMatrixError, "decision differs"):
             self.validate()
 
     def test_transcript_exit_code_must_correspond_to_denial(self) -> None:
         case, raw = self.transcript(0)
-        raw["exit_code"] = 0
+        raw["exit_code"] = 1
         self.fixture.rewrite_json(case["artifact"], raw)
         with self.assertRaisesRegex(AdversarialMatrixError, "exit_code differs"):
             self.validate()
 
-    def test_case_must_use_expected_client_signature(self) -> None:
-        self.document["cases"][0]["client"] = (
-            "denied" if self.document["cases"][0]["client"] == "allowed" else "allowed"
-        )
-        with self.assertRaisesRegex(AdversarialMatrixError, "category/client binding"):
+    def test_case_cannot_declare_a_different_source_category(self) -> None:
+        self.document["cases"][0]["category"] = "identity"
+        with self.assertRaisesRegex(AdversarialMatrixError, "entry category differs"):
             self.validate()
 
     def test_client_signature_evidence_must_match_binary(self) -> None:
-        identity = self.document["signing"]["allowed_client"]
-        path = self.root / identity["evidence_artifact"]["path"]
+        case, transcript = self.transcript(0)
+        descriptor = transcript["client_signature_artifact"]
+        path = self.root / descriptor["path"]
         raw = json.loads(path.read_text(encoding="utf-8"))
         raw["binary_sha256"] = "f" * 64
-        self.fixture.rewrite_json(identity["evidence_artifact"], raw)
-        with self.assertRaisesRegex(AdversarialMatrixError, "binary_sha256 differs"):
+        self.fixture.rewrite_json(descriptor, raw)
+        self.fixture.rewrite_json(case["artifact"], transcript)
+        with self.assertRaisesRegex(AdversarialMatrixError, "transcript peer differs"):
             self.validate()
 
-    def test_reused_request_nonce_fails(self) -> None:
+    def test_transcript_request_digest_cannot_differ_from_observation(self) -> None:
         first_case, first = self.transcript(0)
         second_case, second = self.transcript(1)
         self.assertNotEqual(first_case["id"], second_case["id"])
-        second["request_nonce"] = first["request_nonce"]
+        second["request_sha256"] = first["request_sha256"]
         self.fixture.rewrite_json(second_case["artifact"], second)
-        with self.assertRaisesRegex(AdversarialMatrixError, "nonce is reused"):
+        with self.assertRaisesRegex(AdversarialMatrixError, "request_sha256 differs"):
             self.validate()
 
     def test_transcript_candidate_binding_mismatch_fails(self) -> None:
         case, raw = self.transcript(0)
         raw["proof"]["candidate"]["app_manifest_sha256"] = "e" * 64
         self.fixture.rewrite_json(case["artifact"], raw)
-        with self.assertRaisesRegex(AdversarialMatrixError, "proof differs"):
+        with self.assertRaisesRegex(AdversarialMatrixError, "source binding differs"):
             self.validate()
 
     def test_replayed_transcript_artifact_fails(self) -> None:

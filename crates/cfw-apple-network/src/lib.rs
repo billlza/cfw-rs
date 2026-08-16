@@ -378,7 +378,7 @@ impl NativeBridge for MissingNativeBridge {
 mod tests {
     use std::sync::Mutex;
 
-    use cfw_engine_api::{EngineOwner, TunnelNetworkOptions};
+    use cfw_engine_api::{DirectIpv4HostRoutes, EngineOwner, TunnelNetworkOptions};
 
     use super::*;
 
@@ -504,6 +504,7 @@ mod tests {
             tunnel_options: Some(TunnelNetworkOptions {
                 ipv6_enabled: true,
                 bypass_private_networks: true,
+                direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
                 mtu: 1_500,
             }),
         }

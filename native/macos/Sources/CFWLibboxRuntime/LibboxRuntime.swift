@@ -38,6 +38,7 @@ public enum LibboxRuntimeError: Error, Equatable, Sendable {
   case serverCreationFailed(String)
   case serviceStartFailed(String)
   case serviceStartCleanupFailed(start: String, cleanup: String)
+  case invalidRuntimeEndpoints
   case serviceNotRunning(state: Int32, message: String)
   case serviceStopFailed(String)
 }
@@ -87,11 +88,108 @@ extension LibboxRuntimeError: LocalizedError {
       return "libbox service startup failed: \(message)"
     case .serviceStartCleanupFailed(let start, let cleanup):
       return "libbox startup failed (\(start)); cleanup also failed (\(cleanup))."
+    case .invalidRuntimeEndpoints:
+      return
+        "The libbox configuration does not contain the exact application-owned loopback endpoints."
     case .serviceNotRunning(let state, let message):
       return "libbox runtime state is \(state): \(message)"
     case .serviceStopFailed(let message):
       return "libbox service stop failed: \(message)"
     }
+  }
+}
+
+public struct LibboxLoopbackTCPEndpoint: Equatable, Sendable {
+  public let host: String
+  public let port: UInt16
+
+  public init(host: String, port: UInt16) throws {
+    guard host == "127.0.0.1", port > 0 else {
+      throw LibboxRuntimeError.invalidRuntimeEndpoints
+    }
+    self.host = host
+    self.port = port
+  }
+}
+
+/// Exact local listeners admitted by one source-built libbox start.
+///
+/// The receipt is derived from the same configuration bytes passed to libbox
+/// and is returned only after the runtime reports Started. A separate TCP
+/// connect could hit a foreign process and cannot establish ownership.
+public struct LibboxRuntimeStartReceipt: Equatable, Sendable {
+  public let mixedListener: LibboxLoopbackTCPEndpoint?
+  public let controllerListener: LibboxLoopbackTCPEndpoint
+
+  public static func parse(
+    configuration: Data,
+    role: LibboxRuntimeRole
+  ) throws -> LibboxRuntimeStartReceipt {
+    guard configuration.count <= Int(NativeProtocolConstants.maximumConfigurationBytes),
+      let root = try? JSONSerialization.jsonObject(with: configuration) as? [String: Any],
+      let experimental = root["experimental"] as? [String: Any],
+      let clashAPI = experimental["clash_api"] as? [String: Any],
+      let controllerText = clashAPI["external_controller"] as? String,
+      let secret = clashAPI["secret"] as? String,
+      !secret.isEmpty
+    else {
+      throw LibboxRuntimeError.invalidRuntimeEndpoints
+    }
+    let controller = try parseController(controllerText)
+    let inbounds = root["inbounds"] as? [[String: Any]] ?? []
+    let mixed = inbounds.filter { inbound in
+      inbound["type"] as? String == "mixed"
+        && inbound["tag"] as? String == "cfw-system-proxy"
+    }
+    switch role {
+    case .systemProxy:
+      guard mixed.count == 1,
+        let host = mixed[0]["listen"] as? String,
+        let port = exactPort(mixed[0]["listen_port"]),
+        let mixedListener = try? LibboxLoopbackTCPEndpoint(host: host, port: port),
+        mixedListener.port != controller.port
+      else {
+        throw LibboxRuntimeError.invalidRuntimeEndpoints
+      }
+      return LibboxRuntimeStartReceipt(
+        mixedListener: mixedListener,
+        controllerListener: controller
+      )
+    case .packetTunnel:
+      guard mixed.isEmpty else {
+        throw LibboxRuntimeError.invalidRuntimeEndpoints
+      }
+      return LibboxRuntimeStartReceipt(
+        mixedListener: nil,
+        controllerListener: controller
+      )
+    }
+  }
+
+  private static func parseController(
+    _ value: String
+  ) throws -> LibboxLoopbackTCPEndpoint {
+    let components = value.split(separator: ":", omittingEmptySubsequences: false)
+    guard components.count == 2,
+      components[0] == "127.0.0.1",
+      let port = UInt16(components[1]),
+      port > 0
+    else {
+      throw LibboxRuntimeError.invalidRuntimeEndpoints
+    }
+    return try LibboxLoopbackTCPEndpoint(host: "127.0.0.1", port: port)
+  }
+
+  private static func exactPort(_ value: Any?) -> UInt16? {
+    guard let number = value as? NSNumber,
+      CFGetTypeID(number) != CFBooleanGetTypeID(),
+      number.int64Value > 0,
+      number.int64Value <= Int64(UInt16.max),
+      Double(number.int64Value) == number.doubleValue
+    else {
+      return nil
+    }
+    return UInt16(number.int64Value)
   }
 }
 
@@ -190,9 +288,28 @@ public struct LibboxRuntimeDirectories: Equatable, Sendable {
 public protocol LibboxServiceRuntime: AnyObject {
   /// Takes ownership of packetFileDescriptor on every path when one is supplied.
   func start(configuration: Data, packetFileDescriptor: Int32?) throws
+  func startReceipt(
+    configuration: Data,
+    packetFileDescriptor: Int32?,
+    role: LibboxRuntimeRole
+  ) throws -> LibboxRuntimeStartReceipt
   func stop() throws
   func healthCheck() throws
   func resetNetwork()
+}
+
+extension LibboxServiceRuntime {
+  public func startReceipt(
+    configuration: Data,
+    packetFileDescriptor: Int32?,
+    role: LibboxRuntimeRole
+  ) throws -> LibboxRuntimeStartReceipt {
+    try start(configuration: configuration, packetFileDescriptor: packetFileDescriptor)
+    return try LibboxRuntimeStartReceipt.parse(
+      configuration: configuration,
+      role: role
+    )
+  }
 }
 
 public protocol LibboxServiceRuntimeFactory: Sendable {

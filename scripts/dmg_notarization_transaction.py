@@ -21,8 +21,19 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import sys
 from typing import Any, Callable
 import uuid
+
+if not __package__:
+    # Isolated mode deliberately removes the script directory from sys.path.
+    # Re-add only this file's resolved, repository-owned sibling directory so
+    # direct `-I -S` execution can import the reviewed transaction modules
+    # without accepting PYTHONPATH, site packages, or the caller's directory.
+    _SCRIPT_DIRECTORY = Path(__file__).resolve().parent
+    if _SCRIPT_DIRECTORY.name != "scripts":
+        raise RuntimeError("DMG transaction is not located in the reviewed scripts directory")
+    sys.path.insert(0, str(_SCRIPT_DIRECTORY))
 
 if __package__:
     from .gatekeeper_assessment import (
@@ -993,6 +1004,14 @@ def _command_ok(
             f"{role.value}_failed",
             f"{role.value} command failed",
             exit_code=result.returncode,
+        )
+    diagnostics = "\n".join(
+        stream for stream in (result.stdout, result.stderr) if stream
+    )
+    if re.search(r"(?im)\b(?:warning|error)\b", diagnostics):
+        raise TransactionError(
+            f"{role.value}_diagnostic_failed",
+            f"{role.value} command emitted a warning or error diagnostic",
         )
     return result
 

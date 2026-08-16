@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -844,6 +845,23 @@ class GatekeeperEvidenceTests(unittest.TestCase):
 
 
 class GatekeeperReleaseScriptWiringTests(unittest.TestCase):
+    def test_dmg_transaction_self_check_runs_in_isolated_python(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-B",
+                str(REPOSITORY / "scripts/dmg_notarization_transaction.py"),
+                "self-check",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"LC_ALL": "C", "LANG": "C"},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_every_release_assessment_uses_the_enabled_state_gate(self) -> None:
         release_app = (REPOSITORY / "scripts/verify_release_app.sh").read_text(
             encoding="utf-8"

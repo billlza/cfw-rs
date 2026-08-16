@@ -13,6 +13,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_release_authority_gate.py
 
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_pinned_build_inputs.py
 
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_physical_capture_readiness.py
+
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_production_boundary_removal.py
 
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_native_product_graph.py
@@ -77,14 +79,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'from scripts.publication.final_candidat
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/sealed_evidence_manifest.py self-check
 
 # The production composer is deliberately distinct from the generic fixture-
-# capable validators. Its source-bound self-check fixes the 40002 -> 40003
+# capable validators. Its source-bound self-check fixes the 40004 -> 40005
 # sequence and proves that the requirements-derived nine-capability inventory
 # is complete before any physical or publication evidence is considered.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/production_release_evidence.py self-check
 
 for fragment in \
-  'VALIDATION_BUILD = "40002"' \
-  'FINAL_BUILD = "40003"' \
+  'VALIDATION_BUILD = "40004"' \
+  'FINAL_BUILD = "40005"' \
   'prepare_physical_candidate_manifest' \
   'seal_production_evidence' \
   'require_clean=True' \

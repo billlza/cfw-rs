@@ -35,41 +35,120 @@ TOCTOU-visible mutation fails the entire physical level.
 
 ## Harness recomputation
 
-- Packet schema v3 binds one bounded `.pcap` or `.pcapng` plus one signed
-  capture-provenance artifact per required case. The parser accepts only DLT
+- Packet schema v4 requires four distinct proof-free pre-nonce artifacts for
+  every one of the 13 cases: a typed product-state observation, one bounded
+  `.pcap` or `.pcapng`, capture provenance, and a send-attempt receipt. The two
+  absence cases also require a later restored-state observation, so a valid
+  matrix freezes 54 subjects in `raw/observation-manifest.json`; the later
+  report carries the nonce proof but none of those retained documents does.
+  Post-nonce materialization accepts a `NONCE_RECEIVED` session, reopens that
+  exact manifest, and derives token, marker, timing and command fields from its
+  bytes. It cannot rerun a command, accept replacement material, or recover a
+  deleted state observation from a legal pcap. The parser accepts only DLT
   NULL, Ethernet (including bounded VLAN/QinQ), RAW, LOOP, SLL, and SLL2; then
   decodes IPv4/IPv6 and TCP/UDP lengths before interpreting application data.
-  Fragmented IP is rejected. DNS proof requires an A/AAAA question at the
-  signed resolver endpoint. QUIC proof requires UDP, the QUIC fixed bit, a
+  Fragmented IP is rejected. DNS proof requires three exact A/AAAA queries and
+  their three authoritative, non-recursive TTL-zero responses at the
+  source-pinned resolver endpoint. The product trigger is `getaddrinfo`; its
+  local FakeIP result is retained but is not treated as the authoritative
+  endpoint response. QUIC proof requires UDP, the QUIC fixed bit, a
   source-pinned v1 or v2 version that matches signed provenance, and bounded
   DCID/SCID fields; GREASE/private versions and TCP fallback to the same
   endpoint/window are rejected. Tokens count only in decoded TCP/UDP application
   data, DNS names, or QUIC connection IDs, never link/IP headers, pcapng
   options, report text, or metadata. This proves QUIC transport only and does
   not claim HTTP/3 application semantics.
-- Every absence case additionally binds a signed raw send-attempt artifact. It
-  proves successful submission of the exact token hash and byte count to the
-  same local/remote endpoint tuple using an independently bound send-command
-  digest, within the marker-bounded capture window. The attempt receipt binds
-  the finalized capture-provenance digest and is recorded only after capture
-  completion/signing; the packet report is signed after that recording. The
-  collector run receipt then signs the report and both raw descriptors. Markers
-  without this causal attempt receipt cannot prove stop-cleanup or
-  IPv6-disabled absence.
-- Capture provenance binds interface name/index/link type, capture point,
-  independently named capture-command/capture-filter digests, endpoint tuple,
-  and collection/signing times. The report binds those capture digests and the
-  distinct send-command digest; they are never treated as interchangeable.
-  Classic pcap has no interface-name field, so its DLT and endpoint tuple come
-  from packet bytes while interface identity/capture point remain an attestation
-  by the source-pinned collector. With pcapng, an available IDB interface name
-  is also cross-checked byte-for-byte against that signed provenance.
-- Lifecycle v3 probes reference raw command/event documents. Candidate, run,
-  machine, physical hardware model, machine-identity scheme, distinct sealed
-  boot-environment digest, macOS build, operation context, command, exit code,
-  ordered event sequence, and structured attributes must all match the fixed matrix. Raw
-  lifecycle event schema v1 and lifecycle report v2 are rejected; there is no
-  compatibility path that can silently omit the v3 evidence described below.
+- The product-state artifact retains the exact raw `/usr/bin/log show` NDJSON
+  and `/usr/bin/codesign -d --verbose=4` output. It accepts only subsystem
+  `com.bill.clashformac`, category `release-observation`, prefix
+  `cfw-release-observation-v1 ` and canonical
+  `cfw-product-observation-event-v1` bytes from the installed Host executable.
+  Candidate version/build, process PID/start, monotonic per-process sequence,
+  desired mode, phase, configuration digest, generation, owner, readiness and
+  IPv6 state are checked against the case. `stop-cleanup` requires exact Off;
+  `ipv6-disabled-absence` requires a ready exact Packet Tunnel owner with IPv6
+  disabled. Both cases require a distinct later restart/re-enable product event
+  after the absence interval and before the end marker.
+- Every case binds three non-overlapping `start`/`target`/`end` sender commands,
+  each with its own kernel-selected local tuple, exact argv and output receipt,
+  token digest, route and interface observation, and authenticated Host stage.
+  The fixed Host transaction proves strictly increasing baseline/test/restore
+  generations and observation sequences; effective restored state must equal
+  baseline. Local capture is one binary-stdout `pktap,all` DLT_RAW stream with
+  a source-derived tuple/token BPF. Remote DNS capture also binds the dedicated
+  service-account unique ID, ephemeral RSA-3072 generation and public-key
+  receipts, two-minute OS Login key-import receipt, strict known-hosts file,
+  IAP-only `gcloud compute ssh` argv, exact
+  digest-bound `sudo tcpdump -c 6 -w -` command, 6/6/0 diagnostics, and the
+  declared GCE transmit-checksum-offload context. The IAP role must be read
+  from each IAP TCP tunnel instance resource policy (not Compute instance or
+  project IAM), where condition `destination.port == 22` is mandatory. The
+  route-selected send interface and independently captured pcap endpoint/DLT
+  must agree. No
+  handwritten interface, command digest, state JSON or success declaration can
+  satisfy the contract.
+- `scripts/physical_capture/packet.py` contains the closed Unified Log reader,
+  fixed route/interface/tcpdump/send specifications and bounded dedicated
+  sender. The receive-only peer source, tests, service unit and reproducible
+  build instructions live in `tools/packet-evidence-endpoint/`; the pinned
+  Linux/amd64 artifact digest is
+  `fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1`
+  and the exact systemd unit digest is
+  `7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996`.
+  The only supported Debian installation transaction is
+  `install-endpoint.sh`, digest
+  `6527983cf9b072ab99ecd820778ccb56c9d91d79e07fc4d558715c4ce8657049`;
+  its fixed GCE metadata resolver configuration has digest
+  `b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62`.
+  The installed capture sudoers rule and local strict known-hosts bytes have
+  digests `a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411`
+  and `3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba`.
+  `scripts/pinned_build_inputs.json` and its offline verifier bind those bytes,
+  fixed TCP/UDP port 44333, UDP-only DNS port 53, CGO-disabled Linux/amd64
+  build, source, tests, unit, resolver, installer, sudoers, endpoint identity
+  policy and known-hosts file; the generated target binary is not tracked.
+  The three GCE identities and twelve non-LAN case projections are pinned. The
+  Host-owned DNS transaction and remote stream capture now have closed source
+  paths, but the complete matrix entry still refuses collection because the
+  controlled Android LAN peer is not provisioned or identity-pinned.
+  It accepts no caller-supplied endpoint, profile, product state, pcap, or
+  manual SSH result as a substitute. This is an explicit physical-run blocker,
+  not a fixture fallback, and no physical candidate Packet evidence has been
+  collected by this provisioning work.
+- Lifecycle v4 has one exact 72-subject raw contract. Before nonce issuance it
+  retains 32 `<probe>:observation` documents of kind
+  `lifecycle-observation` plus the eight special trace/packet/pixel artifacts
+  below. Those 40 subjects are the only lifecycle entries admitted to the
+  immutable `RAW_COMPLETED` observation manifest, and none may contain a
+  `proof` or `run_nonce` field. After nonce receipt, the deterministic
+  materializer reopens only that frozen manifest and emits 32
+  `lifecycle-event` v3 documents. Each event binds the nonce proof and exactly
+  one retained observation descriptor; it contains no duplicated outcome that
+  could drift from the observation. The final receipt must contain all 72
+  subjects exactly once with unique paths and digests. Lifecycle report v3,
+  proof-event v2, observation/event kind relabelling, missing observations,
+  and added subjects are rejected without a compatibility path.
+- The five identity probes are part of those same 32 pre-nonce observations,
+  not an extra five-subject side channel. One fixed `verify_release_app.sh`
+  execution produces their five distinct `lifecycle-observation` documents.
+  Each binds the complete final candidate, run ID, lifecycle environment,
+  probe ID, common verifier-batch digest, fixed command summary, exit status,
+  original bounded stdout/stderr and timestamps. The validator rejects
+  path/hash reuse, cross-run or cross-batch splicing, and any identity
+  observation whose candidate/run/environment differs from its later event.
+  Therefore the arithmetic remains 40 pre-nonce plus 32 post-nonce equals 72;
+  it is not 77.
+- `scripts/physical_capture/lifecycle.py` owns the two phases. Non-identity
+  capture accepts output only from the fixed root-owned installed
+  `CFWLifecycleProbe`; special outputs are copied from fixed root-owned paths
+  and must byte-match the descriptors declared by that probe. Missing,
+  writable, non-canonical, proof-bearing, or command/time/exit-mismatched
+  output blocks before `RAW_COMPLETED`. Post-nonce event publication is
+  crash-safe only by exact write-or-reopen: an existing byte-identical event is
+  accepted on retry, while any mismatch blocks without replacement. The
+  lifecycle-v4 Go collector source and trust-policy/image deployment must be
+  rebound before a production nonce is authorized; local contract tests are
+  not deployment evidence.
 - `renderer-ready-v2` additionally references a raw renderer trace. It binds
   exactly two distinct live process identities, the release Team ID and Host
   signing identifier, executable digest, Code Directory hash, designated-
@@ -104,14 +183,71 @@ TOCTOU-visible mutation fails the entire physical level.
   pixel-buffer digest. The validator recomputes the exact byte count, opacity,
   and a minimum non-blank color set from the pixel bytes. Metadata, a screenshot
   hash, or a UI declaration without the retained pixels is insufficient.
-- Performance reports reference raw samples and control events. Percentiles,
-  throughput ratio, switch count/resource growth, soak duration, and crash count
-  are recomputed from raw arrays, records, and timestamps. Declared summaries
-  cannot substitute for samples.
-- Adversarial reports reference separately captured client-signature evidence
-  plus baseline and per-case transcripts. Client binary/signature identity,
-  request nonce, command, exit code, authorization decision, denial code,
-  cleanup, and secret-observation result are checked against the fixed case.
+- Performance v3 binds exactly three proof-free pre-nonce subjects: a
+  `performance-sample-ledger`, a durable shaping intent, and an independently
+  query-verified shaping restoration. Every sample retains the fixed command
+  argv/output and observer-executable digest, wall plus monotonic time, signed
+  Host OSLog operation/generation/terminal mode, and the exact live PID/start/
+  Team/identifier/CDHash/designated-requirement roster. The validator requires
+  exact 20-sample latency/throughput/resource series, 20 recoveries for each of
+  three fixed weak-network profiles, 101 alternating terminal switch records,
+  37 five-minute soak heartbeats, 13 fifteen-minute real-traffic probes, and an
+  empty covering DiagnosticReports/Unified Log crash delta. Percentiles,
+  throughput ratio, switch growth, and soak duration are recomputed. The
+  shaping intent also proves PF was already enabled by the host; collection
+  blocks instead of silently loading ineffective dummynet rules or taking
+  ownership of the machine-wide PF enable state. The
+  post-nonce materializer reopens only the frozen manifest and cannot rerun a
+  command or replace a missing restoration.
+- Adversarial v3 is a source-pinned baseline plus exactly 32 cases. Every case
+  binds four distinct raw subjects: a proof-free pre-nonce case observation,
+  independent client and installed-Authority code-signature observations, and
+  a post-nonce transcript derived only by reopening the frozen observation
+  manifest. The six secret-surface cases bind a fifth raw coverage manifest,
+  for an exact signed set of 138 adversarial subjects. Report entries cannot
+  declare their own expected result: category, role, precondition, product
+  event, accepted bit, stable code, state relation, cleanup state, isolation
+  mode, and reset requirement all come from the checked-in case table.
+  Its post-nonce transcript publication is retryable only as exact
+  write-or-reopen: a destination left by an interrupted attempt is accepted
+  solely when bounded secure reread bytes and SHA-256 equal the transcript
+  rederived from the frozen manifest. Observation timestamps therefore remain
+  the frozen pre-nonce values; conflicting prior bytes fail the run.
+- The ten identity cases require ten distinct executable paths and byte
+  digests. Wrong Team accepts a real non-product Team or ad-hoc signature;
+  wrong bundle, designated requirement, and entitlement retain the other
+  relevant baseline signing facts. The designated-requirement variant is a
+  valid, launchable Apple-signed binary from the product Team with the exact
+  Host identifier and App Group, but it uses a non-Developer-ID identity. Its
+  reduced Team/bundle/entitlement requirement must pass while the listener's
+  complete Developer-ID certificate/OID requirement fails. Foundation
+  signing-gate rejections are proven by the exact listener requirement, the
+  actual failed `codesign -R=...` exit status, connection invalidation before
+  export, the actual client-visible `global_authority_interrupted` transport
+  code, and zero accepted product events. They do not relabel an unavailable
+  service as an identity denial or invent a server delegate callback that macOS
+  never delivers.
+  Post-listener policy and operation denials instead require the matching
+  product-owned Unified Log envelope, actual kernel peer PID/euid/audit
+  session, connection-identity digest, raw request SHA-256, actual stable code,
+  and pre/post Authority state digests.
+- Secret probes retain only a fresh one-way canary SHA-256 and complete,
+  canonical per-location coverage entries. Plaintext canaries, locations, and
+  secret-bearing output are not evidence fields. Any unreadable or excluded
+  location, nonzero match count, missing surface, or disagreement on the one
+  canary digest fails the matrix. Privileged identity, journal, fast-user-
+  switching, and secret cases have explicit isolation/reset contracts; a
+  failed reset stops the batch before another case can run.
+
+Foundation's public SDK exposes `NSXPCConnection.current()` only while an
+exported-object method is running and does not expose an `auditToken` member.
+Compilation probes against the release deployment target therefore reject both
+`connection.auditToken` and `NSXPCConnection.current()?.auditToken`. The public
+listener API is the identity boundary: its SDK contract rejects peers that do
+not satisfy the installed signing requirement before consulting the delegate.
+The production-boundary scan rejects direct member access, selector lookup, and
+`unsafeBitCast` protocols for the private audit-token accessor, so the product
+cannot replace this gate with PID/path lookup or undocumented SPI.
 
 Each report carries proof schema v3 with the same candidate identity, final
 `artifact_hash_manifest_sha256`, collector source/tool digests, exact KMS key
@@ -156,11 +292,13 @@ At the start of each OS run, create the private run context with the sole
 supported producer:
 
 ```sh
-/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_collector_request.py initialize \
-  --candidate "$PWD/target/candidates/0.4.0/release/final-candidate/physical-collector-candidate.json" \
-  --run-id run-40003-macos15 \
+/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py initialize \
+  --lane macos15 \
+  --attempt 01 \
   --confirm-clean-install \
-  --output /absolute/private/path/run-context.json
+  --network-profile controlled-ethernet \
+  --uplink-mbps 1000 \
+  --power-source ac
 ```
 
 The producer exposes no machine, model, OS-version, OS-build, or boot-volume
@@ -185,22 +323,44 @@ local observation time, or after any proof-bearing report was signed. This is a
 local controlled-operator guard; the receipt schema does not independently
 carry or remotely attest that derived issue time.
 
-After raw measurement completes, create the exact nonce request from the saved
-context. After the private nonce issuer responds, materialize the final proof-
-bearing report/raw JSON, prepare the strict descriptor binding document, and
-create the receipt request. Neither command performs a network call or accepts
-an identity override:
+Capture uses the exact source-owned producer order. Each successful command
+records one immutable producer checkpoint; the fourth command freezes the
+complete raw union. A checkpoint is reusable only when every retained file
+still matches its path, size, kind, and SHA-256. An uncheckpointed partial
+namespace cannot be resumed and forces attempt abandonment, except for the
+separate fixed performance-shaping recovery transaction:
+
+The next bounded attempt is admitted only after the prior abandonment binding
+has one and only one strictly reopened closure record. Performance recovery is
+not inferred from `restored: true`: its v3 record is bound to the same archive,
+context, shaping intent and journal predecessor, captures the fixed
+`sudo -n -v` preflight, uses a contiguous maximum of three attempts, and
+revalidates every fixed restore/query command, digest, timestamp and
+empty-state output.
 
 ```sh
-/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_collector_request.py nonce-request \
-  --context /absolute/private/path/run-context.json \
-  --output /absolute/private/path/nonce-request.json
+/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py collect \
+  --lane macos15 --attempt 01 --harness lifecycle
+/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py collect \
+  --lane macos15 --attempt 01 --harness adversarial
+/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py collect \
+  --lane macos15 --attempt 01 --harness packet
+/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py collect \
+  --lane macos15 --attempt 01 --harness performance
+/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py finalize \
+  --lane macos15 --attempt 01
+```
 
-/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_collector_request.py receipt-request \
-  --context /absolute/private/path/run-context.json \
-  --nonce-response /absolute/private/path/nonce-response.json \
-  --bindings /absolute/private/path/receipt-bindings.json \
-  --output /absolute/private/path/receipt-request.json
+`finalize` owns both one-shot Cloud Run POSTs. It archives and journals each
+request before sending, never retries an outcome-unknown attempt, derives the
+proof only after nonce receipt, then reopens and validates the four report/raw
+sets before receipt signing and run-record finalization. Repeat the same fixed
+flow with `--lane current-macos` on macOS 26.6. Once both lanes are finalized,
+publish the aggregate without a caller-supplied evidence path:
+
+```sh
+/opt/homebrew/bin/python3 -I -S -B scripts/physical_capture/collector.py publish \
+  --macos15-attempt 01 --current-macos-attempt 01
 ```
 
 ## Private operational manifests and public upload boundary
@@ -214,7 +374,8 @@ private archive.
 The existing public publication-evidence bundle is not expanded with either
 private manifest, the physical aggregate, packet captures, lifecycle events,
 renderer/Network Extension/power traces, WKWebView pixels, performance samples,
-adversarial transcripts, capture provenance, machine hashes, internal evidence
+adversarial observations/signatures/transcripts/coverage manifests, capture
+provenance, machine hashes, internal evidence
 paths, or physical collection timestamps. Publication authorization consumes
 the private sealed manifest before creating the public bundle; it does not copy
 that manifest into the bundle.

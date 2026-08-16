@@ -62,6 +62,7 @@ from scripts.tests.physical_evidence_fixture import (
     XCFRAMEWORK_MANIFEST_SHA,
     XCFRAMEWORK_SHA,
     final_artifact_hash_manifest,
+    fixture_packet_policy,
 )
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 
@@ -77,13 +78,15 @@ OBSERVED_AT = "2026-08-01T00:00:00Z"
 def build_final_candidate_binding(*args, **kwargs):
     kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
     kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
-    return _build_final_candidate_binding(*args, **kwargs)
+    with fixture_packet_policy():
+        return _build_final_candidate_binding(*args, **kwargs)
 
 
 def validate_final_candidate_binding(*args, **kwargs):
     kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
     kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
-    return _validate_final_candidate_binding(*args, **kwargs)
+    with fixture_packet_policy():
+        return _validate_final_candidate_binding(*args, **kwargs)
 
 
 def _sha(rng: random.Random) -> str:

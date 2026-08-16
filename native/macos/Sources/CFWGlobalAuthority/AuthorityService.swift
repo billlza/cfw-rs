@@ -115,6 +115,18 @@ public final class GlobalAuthorityServiceCore: @unchecked Sendable {
 
   public var currentRevision: UInt64 { lock.withLock { reducer.revision } }
 
+  fileprivate func releaseObservationState() -> (
+    state: AuthorityState, revision: UInt64, leaseOwnerUID: uid_t?
+  ) {
+    lock.withLock {
+      (
+        state: reducer.state,
+        revision: reducer.revision,
+        leaseOwnerUID: reducer.lease.map { uid_t($0.operation.ownerUID) }
+      )
+    }
+  }
+
   /// True once the current owner has durably attested a stop. Used by the liveness
   /// supervisor to escalate an elapsed stop timeout to Quarantined.
   public var ownerHasAttestedStopped: Bool { lock.withLock { reducer.ownerStopped } }
@@ -1020,6 +1032,8 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
   CFWGlobalAuthorityXPCProtocol, @unchecked Sendable
 {
   public typealias Reauthorize = @Sendable () throws -> PeerIdentity
+  public typealias RecordOperationDecision =
+    @Sendable (ReleaseObservationAuthenticatedDecision) throws -> Void
 
   private let peerID: UUID
   private let initialPeer: PeerIdentity
@@ -1028,6 +1042,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
   private let concurrency: AuthorityConcurrencyGate
   private let events: AuthorityEventHub
   private let liveness: AuthorityLivenessSupervisor
+  private let recordOperationDecision: RecordOperationDecision
 
   public init(
     peerID: UUID, peer: PeerIdentity,
@@ -1035,7 +1050,8 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     core: GlobalAuthorityServiceCore,
     concurrency: AuthorityConcurrencyGate,
     events: AuthorityEventHub,
-    liveness: AuthorityLivenessSupervisor? = nil
+    liveness: AuthorityLivenessSupervisor? = nil,
+    recordOperationDecision: @escaping RecordOperationDecision = { _ in }
   ) {
     self.peerID = peerID
     initialPeer = peer
@@ -1046,6 +1062,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     self.liveness =
       liveness
       ?? AuthorityLivenessSupervisor(core: core, events: events)
+    self.recordOperationDecision = recordOperationDecision
   }
 
   public func handshake(
@@ -1099,6 +1116,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     _ request: Data,
     reply: @escaping (Data?, Data?, Data?, NSError?) -> Void
   ) {
+    let preObservation = core.releaseObservationState()
     do {
       let envelope = try decode(request, expected: .redeemTunnelTicket)
       let peer = try reauthorize()
@@ -1131,7 +1149,9 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
       }
       reply(response, configurationData, secretData, nil)
     } catch {
-      reply(nil, nil, nil, xpcError(error))
+      let observationError = recordRejectedOperation(
+        request: request, error: error, preObservation: preObservation)
+      reply(nil, nil, nil, observationError ?? xpcError(error))
     }
   }
 
@@ -1152,6 +1172,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
   public func beginStop(
     _ request: Data, reply: @escaping (Data?, NSError?) -> Void
   ) {
+    let preObservation = core.releaseObservationState()
     do {
       let envelope = try decode(request, expected: .beginStop)
       let peer = try reauthorize()
@@ -1176,7 +1197,9 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
       }
       reply(result.0, nil)
     } catch {
-      reply(nil, xpcError(error))
+      let observationError = recordRejectedOperation(
+        request: request, error: error, preObservation: preObservation)
+      reply(nil, observationError ?? xpcError(error))
     }
   }
 
@@ -1239,6 +1262,7 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
   public func snapshot(
     _ request: Data, reply: @escaping (Data?, NSError?) -> Void
   ) {
+    let preObservation = core.releaseObservationState()
     do {
       let envelope = try decode(request, expected: .snapshot)
       let peer = try reauthorize()
@@ -1252,7 +1276,9 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
       }
       reply(response, nil)
     } catch {
-      reply(nil, xpcError(error))
+      let observationError = recordRejectedOperation(
+        request: request, error: error, preObservation: preObservation)
+      reply(nil, observationError ?? xpcError(error))
     }
   }
 
@@ -1273,11 +1299,14 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     reply: @escaping (Data?, NSError?) -> Void,
     body: (AuthorityRequestEnvelope) throws -> Data
   ) {
+    let preObservation = core.releaseObservationState()
     do {
       let envelope = try decode(request, expected: expected)
       reply(try concurrency.withRead { try body(envelope) }, nil)
     } catch {
-      reply(nil, xpcError(error))
+      let observationError = recordRejectedOperation(
+        request: request, error: error, preObservation: preObservation)
+      reply(nil, observationError ?? xpcError(error))
     }
   }
 
@@ -1286,12 +1315,15 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     reply: @escaping (Data?, NSError?) -> Void,
     body: (AuthorityRequestEnvelope, PeerIdentity) throws -> Data
   ) {
+    let preObservation = core.releaseObservationState()
     do {
       let envelope = try decode(request, expected: expected)
       let peer = try reauthorize()
       reply(try concurrency.withMutation { try body(envelope, peer) }, nil)
     } catch {
-      reply(nil, xpcError(error))
+      let observationError = recordRejectedOperation(
+        request: request, error: error, preObservation: preObservation)
+      reply(nil, observationError ?? xpcError(error))
     }
   }
 
@@ -1337,6 +1369,51 @@ public final class AuthenticatedAuthorityPeerService: NSObject,
     case .attestStopped: .attestStopped
     case .cancelPrepared: .cancelPrepared
     case .snapshot: .snapshot
+    }
+  }
+
+  private func recordRejectedOperation(
+    request: Data,
+    error: Error,
+    preObservation: (state: AuthorityState, revision: UInt64, leaseOwnerUID: uid_t?)
+  ) -> NSError? {
+    do {
+      let postObservation = core.releaseObservationState()
+      let outcome: ReleaseObservationOutcome
+      if let domain = error as? AuthorityDomainError {
+        outcome = try ReleaseObservationOutcome(authorityErrorCode: domain.code)
+      } else if error is GlobalAuthorityAuthorizationError {
+        outcome = .globalAuthorityIdentityRejected
+      } else {
+        outcome = .invalidMessage
+      }
+      let preDigest = try ReleaseObservationLogger.authorityStateSHA256(
+        state: preObservation.state,
+        revision: preObservation.revision,
+        leaseOwnerUID: preObservation.leaseOwnerUID)
+      let postDigest = try ReleaseObservationLogger.authorityStateSHA256(
+        state: postObservation.state,
+        revision: postObservation.revision,
+        leaseOwnerUID: postObservation.leaseOwnerUID)
+      let requestDigest = SHA256.hash(data: request).map {
+        String(format: "%02x", $0)
+      }.joined()
+      let payload = try ReleaseObservationAuthenticatedDecision(
+        role: initialPeer.role,
+        peerPID: initialPeer.pid,
+        effectiveUserIdentifier: initialPeer.euid,
+        auditSessionIdentifier: initialPeer.auditSessionID,
+        connectionIdentitySHA256: initialPeer.connectionIdentityDigest.hex,
+        requestSHA256: requestDigest,
+        accepted: false,
+        actualCode: outcome,
+        preStateSHA256: preDigest,
+        postStateSHA256: postDigest,
+        cleanupState: postObservation.state)
+      try recordOperationDecision(payload)
+      return nil
+    } catch {
+      return AuthorityXPCErrorContract.error(.globalAuthorityInterrupted)
     }
   }
 
@@ -1571,15 +1648,41 @@ public final class AuthenticatedGlobalAuthorityListenerDelegate: NSObject,
     let euid = connection.effectiveUserIdentifier
     let auditSessionID = UInt32(
       bitPattern: connection.auditSessionIdentifier)
+    let preObservation = core.releaseObservationState()
     var admittedPeer: PeerIdentity?
+    let admitted = AuthorityConnectionAdmission.authorizeBeforeExport(
+      authorize: {
+        try authorize(role, pid, euid, auditSessionID, core.leaseOwnerUID)
+      },
+      export: { admittedPeer = $0 })
+    let postObservation = core.releaseObservationState()
+    guard admitted, let peer = admittedPeer else {
+      guard
+        recordPeerAuthorizationDecision(
+          pid: pid,
+          euid: euid,
+          auditSessionID: auditSessionID,
+          peer: nil,
+          preObservation: preObservation,
+          postObservation: postObservation)
+      else {
+        fputs("global authority release observation failed\n", stderr)
+        connection.invalidate()
+        return false
+      }
+      connection.invalidate()
+      return false
+    }
     guard
-      AuthorityConnectionAdmission.authorizeBeforeExport(
-        authorize: {
-          try authorize(role, pid, euid, auditSessionID, core.leaseOwnerUID)
-        },
-        export: { admittedPeer = $0 }
-      ), let peer = admittedPeer
+      recordPeerAuthorizationDecision(
+        pid: pid,
+        euid: euid,
+        auditSessionID: auditSessionID,
+        peer: peer,
+        preObservation: preObservation,
+        postObservation: postObservation)
     else {
+      fputs("global authority release observation failed\n", stderr)
       connection.invalidate()
       return false
     }
@@ -1592,7 +1695,10 @@ public final class AuthenticatedGlobalAuthorityListenerDelegate: NSObject,
           peer.role, peer.pid, peer.euid, peer.auditSessionID,
           core.leaseOwnerUID)
       }, core: core, concurrency: concurrency, events: events,
-      liveness: livenessRuntime.supervisor)
+      liveness: livenessRuntime.supervisor,
+      recordOperationDecision: {
+        try ReleaseObservationLogger.emitAuthorityOperationDecision($0)
+      })
     connection.remoteObjectInterface = NSXPCInterface(
       with: CFWGlobalAuthorityEventSinkProtocol.self)
     let sink = connection.remoteObjectProxy as? CFWGlobalAuthorityEventSinkProtocol
@@ -1612,5 +1718,41 @@ public final class AuthenticatedGlobalAuthorityListenerDelegate: NSObject,
     connection.invalidationHandler = { termination.terminate() }
     connection.activate()
     return true
+  }
+
+  private func recordPeerAuthorizationDecision(
+    pid: pid_t,
+    euid: uid_t,
+    auditSessionID: UInt32,
+    peer: PeerIdentity?,
+    preObservation: (state: AuthorityState, revision: UInt64, leaseOwnerUID: uid_t?),
+    postObservation: (state: AuthorityState, revision: UInt64, leaseOwnerUID: uid_t?)
+  ) -> Bool {
+    do {
+      let preDigest = try ReleaseObservationLogger.authorityStateSHA256(
+        state: preObservation.state,
+        revision: preObservation.revision,
+        leaseOwnerUID: preObservation.leaseOwnerUID)
+      let postDigest = try ReleaseObservationLogger.authorityStateSHA256(
+        state: postObservation.state,
+        revision: postObservation.revision,
+        leaseOwnerUID: postObservation.leaseOwnerUID)
+      let accepted = peer != nil
+      let decision = try ReleaseObservationPeerDecision(
+        role: role,
+        peerPID: pid,
+        effectiveUserIdentifier: UInt32(euid),
+        auditSessionIdentifier: auditSessionID,
+        connectionIdentitySHA256: peer?.connectionIdentityDigest.hex,
+        accepted: accepted,
+        actualCode: accepted ? .accepted : .globalAuthorityIdentityRejected,
+        preStateSHA256: preDigest,
+        postStateSHA256: postDigest,
+        cleanupState: postObservation.state)
+      try ReleaseObservationLogger.emitAuthorityPeerDecision(decision)
+      return true
+    } catch {
+      return false
+    }
   }
 }

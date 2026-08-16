@@ -1,0 +1,1 @@
+sa_116706315441516966425 ALL=(root) NOPASSWD: sha256:c97881e39b54571829ec22b98cfa9c2348c7449a92fd761ebee7826b47ef4616 /usr/bin/tcpdump -i ens4 -n -U -s 0 -c 6 -w - udp and port 53

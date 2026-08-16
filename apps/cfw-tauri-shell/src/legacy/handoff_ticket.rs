@@ -573,30 +573,14 @@ pub(super) fn identity_exists(expected: &ProcessIdentity) -> Result<bool, String
     Ok(observe_exact_process(expected.pid, &expected.executable)?.as_ref() == Some(expected))
 }
 
-pub(super) fn identity_is_stopped(expected: &ProcessIdentity) -> Result<bool, String> {
-    let Some(observed) = observe_kernel_process(expected.pid, &expected.executable)? else {
-        return Err("persisted process identity no longer exists".into());
-    };
-    if &observed.identity != expected {
-        return Err("persisted process identity changed during state observation".into());
-    }
-    Ok(observed.status == 4) // SSTOP from <sys/proc.h>.
-}
-
 fn observe_exact_process(pid: u32, executable: &Path) -> Result<Option<ProcessIdentity>, String> {
-    Ok(observe_kernel_process(pid, executable)?.map(|observed| observed.identity))
-}
-
-#[derive(Debug)]
-struct KernelProcessObservation {
-    identity: ProcessIdentity,
-    status: u32,
+    observe_kernel_process(pid, executable)
 }
 
 fn observe_kernel_process(
     pid: u32,
     expected_executable: &Path,
-) -> Result<Option<KernelProcessObservation>, String> {
+) -> Result<Option<ProcessIdentity>, String> {
     let Ok(pid_signed) = libc::pid_t::try_from(pid) else {
         return Err("process PID is outside Darwin's signed PID range".into());
     };
@@ -643,18 +627,15 @@ fn observe_kernel_process(
     if !same_process_incarnation(&before, &after) {
         return Err("process identity changed during kernel observation".into());
     }
-    Ok(Some(KernelProcessObservation {
-        identity: ProcessIdentity {
-            uid: after.pbi_uid,
-            pid: after.pbi_pid,
-            start_identity: ProcessStartIdentity {
-                seconds: after.pbi_start_tvsec,
-                microseconds: u32::try_from(after.pbi_start_tvusec)
-                    .map_err(|_| "kernel process start microseconds overflowed".to_owned())?,
-            },
-            executable,
+    Ok(Some(ProcessIdentity {
+        uid: after.pbi_uid,
+        pid: after.pbi_pid,
+        start_identity: ProcessStartIdentity {
+            seconds: after.pbi_start_tvsec,
+            microseconds: u32::try_from(after.pbi_start_tvusec)
+                .map_err(|_| "kernel process start microseconds overflowed".to_owned())?,
         },
-        status: after.pbi_status,
+        executable,
     }))
 }
 

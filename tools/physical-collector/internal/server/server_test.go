@@ -10,6 +10,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -336,13 +338,13 @@ func preparedSigningRequest(t *testing.T) (*memoryLedger, *Service, contract.Non
 
 func testRequests() (contract.NonceRequest, contract.ReceiptRequest) {
 	candidate := contract.Candidate{
-		Version: contract.ProductVersion, BuildNumber: "40003",
+		Version: contract.ProductVersion, BuildNumber: "40005",
 		AppManifestSHA256: serverSHA("app"), SignedAppTreeSHA256: serverSHA("tree"),
 		ArtifactHashManifestSHA256: serverSHA("artifacts"), BuiltAt: "2026-07-29T00:00:00Z",
 	}
 	intent := contract.RunIntent{
 		OS: "macos15", MacOSVersion: "15.7.8", MacOSBuild: "24G824",
-		MachineSHA256: serverSHA("machine"), CleanInstall: true, RunID: "run-40003-macos15",
+		MachineSHA256: serverSHA("machine"), CleanInstall: true, RunID: "run-40005-macos15",
 	}
 	receipt := contract.ReceiptRequest{
 		SchemaVersion: contract.RequestSchemaVersion, Candidate: candidate,
@@ -353,10 +355,10 @@ func testRequests() (contract.NonceRequest, contract.ReceiptRequest) {
 		},
 	}
 	reportSpecs := []struct{ harness, version, kind string }{
-		{"lifecycle", "lifecycle-matrix-v3", "lifecycle-report"},
-		{"packet", "packet-evidence-v3", "packet-report"},
-		{"performance", "performance-gates-v2", "performance-report"},
-		{"adversarial", "adversarial-clients-v2", "adversarial-report"},
+		{"lifecycle", "lifecycle-matrix-v4", "lifecycle-report"},
+		{"packet", "packet-evidence-v4", "packet-report"},
+		{"performance", "performance-gates-v3", "performance-report"},
+		{"adversarial", "adversarial-clients-v3", "adversarial-report"},
 	}
 	for index, spec := range reportSpecs {
 		receipt.Reports = append(receipt.Reports, contract.ReportBinding{
@@ -365,24 +367,67 @@ func testRequests() (contract.NonceRequest, contract.ReceiptRequest) {
 			Descriptor: serverDescriptor(spec.kind, "reports/"+spec.harness+".json", index),
 		})
 	}
-	lifecycle := []struct{ subject, kind, file string }{
-		{"renderer-ready-v2:trace", "renderer-ready-trace", "renderer.json"},
-		{"network-extension-approval:trace", "network-extension-trace", "ne-approval.json"},
-		{"network-extension-denial:trace", "network-extension-trace", "ne-denial.json"},
-		{"network-extension-pending:trace", "network-extension-trace", "ne-pending.json"},
-		{"sleep-wake:trace", "sleep-wake-trace", "sleep.json"},
-		{"sleep-wake:packet", "packet-pcap", "sleep.pcap"},
-		{"wkwebview-850x603:metadata", "wkwebview-metadata", "pixels.json"},
-		{"wkwebview-850x603:pixels", "wkwebview-rgba", "pixels.rgba"},
+	lifecycleSubjects := make([]string, 0, len(contract.RequiredLifecycleSubjects()))
+	for subject := range contract.RequiredLifecycleSubjects() {
+		lifecycleSubjects = append(lifecycleSubjects, subject)
 	}
-	for index, raw := range lifecycle {
-		receipt.RawArtifacts = append(receipt.RawArtifacts, contract.RawArtifactBinding{Harness: "lifecycle", Subject: raw.subject, Descriptor: serverDescriptor(raw.kind, "raw/lifecycle/"+raw.file, 100+index)})
+	sort.Strings(lifecycleSubjects)
+	for index, subject := range lifecycleSubjects {
+		allowedKinds, ok := contract.ExpectedLifecycleArtifactKinds(subject)
+		if !ok {
+			panic("source-pinned lifecycle subject lacks an artifact kind")
+		}
+		kinds := make([]string, 0, len(allowedKinds))
+		for kind := range allowedKinds {
+			kinds = append(kinds, kind)
+		}
+		sort.Strings(kinds)
+		kind := kinds[0]
+		suffix := ".json"
+		if kind == "packet-pcap" {
+			suffix = ".pcap"
+		} else if kind == "wkwebview-rgba" {
+			suffix = ".rgba"
+		}
+		file := strings.ReplaceAll(subject, ":", "-") + suffix
+		receipt.RawArtifacts = append(receipt.RawArtifacts, contract.RawArtifactBinding{Harness: "lifecycle", Subject: subject, Descriptor: serverDescriptor(kind, "raw/lifecycle/"+file, 100+index)})
+	}
+	packetCases := []string{
+		"tcp-ipv4", "tcp-ipv6", "udp", "quic",
+		"dns-a-primary", "dns-a-secondary", "dns-aaaa-primary", "dns-aaaa-secondary",
+		"lan-bypass", "included-routes", "excluded-routes", "stop-cleanup",
+		"ipv6-disabled-absence",
+	}
+	for index, caseID := range packetCases {
+		base := 200 + index*4
+		receipt.RawArtifacts = append(receipt.RawArtifacts,
+			contract.RawArtifactBinding{Harness: "packet", Subject: caseID, Descriptor: serverDescriptor("packet-pcap", "raw/packet/"+caseID+".pcap", base)},
+			contract.RawArtifactBinding{Harness: "packet", Subject: caseID + ":product-state", Descriptor: serverDescriptor("packet-product-state-observation", "raw/packet/"+caseID+"-state.json", base+1)},
+			contract.RawArtifactBinding{Harness: "packet", Subject: caseID + ":capture-provenance", Descriptor: serverDescriptor("packet-capture-provenance", "raw/packet/"+caseID+"-provenance.json", base+2)},
+			contract.RawArtifactBinding{Harness: "packet", Subject: caseID + ":send-attempt", Descriptor: serverDescriptor("packet-send-attempt", "raw/packet/"+caseID+"-attempt.json", base+3)},
+		)
 	}
 	receipt.RawArtifacts = append(receipt.RawArtifacts,
-		contract.RawArtifactBinding{Harness: "packet", Subject: "tcp-ipv4", Descriptor: serverDescriptor("packet-pcap", "raw/packet/tcp.pcap", 200)},
-		contract.RawArtifactBinding{Harness: "performance", Subject: "measurements", Descriptor: serverDescriptor("performance-samples", "raw/performance/samples.json", 201)},
-		contract.RawArtifactBinding{Harness: "adversarial", Subject: "baseline", Descriptor: serverDescriptor("adversarial-transcript", "raw/adversarial/baseline.json", 202)},
+		contract.RawArtifactBinding{Harness: "performance", Subject: "sample-ledger", Descriptor: serverDescriptor("performance-sample-ledger", "raw/performance/sample-ledger.json", 300)},
+		contract.RawArtifactBinding{Harness: "performance", Subject: "shaping-intent", Descriptor: serverDescriptor("performance-shaping-transaction", "raw/performance/shaping-intent.json", 301)},
+		contract.RawArtifactBinding{Harness: "performance", Subject: "shaping-restoration", Descriptor: serverDescriptor("performance-shaping-transaction", "raw/performance/shaping-restoration.json", 302)},
 	)
+	adversarialSubjects := make([]string, 0, len(contract.RequiredAdversarialSubjects()))
+	for subject := range contract.RequiredAdversarialSubjects() {
+		adversarialSubjects = append(adversarialSubjects, subject)
+	}
+	sort.Strings(adversarialSubjects)
+	for index, subject := range adversarialSubjects {
+		kind, ok := contract.ExpectedAdversarialArtifactKind(subject)
+		if !ok {
+			panic("source-pinned adversarial subject lacks an artifact kind")
+		}
+		file := strings.ReplaceAll(subject, ":", "-") + ".json"
+		receipt.RawArtifacts = append(receipt.RawArtifacts, contract.RawArtifactBinding{
+			Harness: "adversarial", Subject: subject,
+			Descriptor: serverDescriptor(kind, "raw/adversarial/"+file, 400+index),
+		})
+	}
 	return contract.NonceRequest{SchemaVersion: contract.RequestSchemaVersion, Candidate: candidate, Run: intent}, receipt
 }
 

@@ -64,6 +64,7 @@ pub(crate) fn start_request(
             ProjectionMode::Tunnel => Some(TunnelNetworkOptions {
                 ipv6_enabled: settings.enable_ipv6,
                 bypass_private_networks: settings.bypass_private_networks,
+                direct_ipv4_hosts: projected.direct_ipv4_hosts(),
                 mtu: settings.tunnel_mtu,
             }),
         },

@@ -81,10 +81,10 @@ COPYFILE_DISABLE=1 /bin/cp -R "$source_root/.git" "$staging/checkout/.git"
 security_patch_path="$(libbox_security_patch_path "$repo_root")"
 raw_packet_patch_path="$(libbox_raw_packet_patch_path "$repo_root")"
 dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")"
-# The security dependency patch contains two intentionally zero-context scalar
-# replacements so the patch artifact itself remains whitespace-clean. This is safe
-# only because libbox_validate_upstream_source has already pinned the exact commit
-# and exact go.mod/go.sum digests before this point.
+# The security dependency patch is emitted with zero-context scalar replacements
+# so the regenerated module-version patch stays deterministic. This is safe only
+# because libbox_validate_upstream_source has already pinned the exact commit and
+# exact go.mod/go.sum digests before this point.
 git -C "$staging/checkout" apply --unidiff-zero --check \
   "$security_patch_path" \
   "$raw_packet_patch_path" \

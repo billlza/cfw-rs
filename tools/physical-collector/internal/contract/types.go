@@ -7,9 +7,11 @@ const (
 	SignatureAlgorithm   = "PS256"
 	CollectorVersion     = "physical-collector-v1"
 
-	MaxRequestBytes      = 1 << 20
-	MaxJSONDepth         = 32
-	MaxArtifactCount     = 512
+	MaxRequestBytes = 1 << 20
+	MaxJSONDepth    = 32
+	// Four reports plus 265 required raw subjects, with at most two optional
+	// Packet restore observations. A 272nd descriptor is never source-pinned.
+	MaxArtifactCount     = 271
 	MaxArtifactBytes     = 256 * 1024 * 1024
 	MaxRelativePathBytes = 512
 )

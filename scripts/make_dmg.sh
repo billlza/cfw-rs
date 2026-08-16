@@ -3,6 +3,15 @@
 # Gatekeeper-assess the DMG. No unsigned or partially verified fallback exists.
 set -euo pipefail
 umask 077
+unset PYTHONPATH PYTHONHOME BASH_ENV ENV CDPATH \
+  DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_FRAMEWORK_PATH \
+  DYLD_FALLBACK_LIBRARY_PATH
+export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+readonly python_bin="/opt/homebrew/bin/python3"
+[[ -x "$python_bin" ]] || {
+  echo "error: pinned Python interpreter is unavailable: $python_bin" >&2
+  exit 1
+}
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/release_toolchain_contract.sh
@@ -98,7 +107,7 @@ if [[ -n "$recovery_submission_id" ]]; then
   exit 0
 fi
 
-PYTHONDONTWRITEBYTECODE=1 python3 -B \
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B \
   "$repo_root/scripts/dmg_notarization_transaction.py" preflight \
   --repository "$repo_root" \
   --release-root "$output_root" \
@@ -141,7 +150,7 @@ signature_details="$(/usr/bin/codesign -d --verbose=4 "$staged_dmg" 2>&1)"
   die "DMG secure signing timestamp is missing"
 [[ "$signature_details" != *"Signature=adhoc"* ]] || die "ad-hoc DMG signature is forbidden"
 
-PYTHONDONTWRITEBYTECODE=1 python3 -B \
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B \
   "$repo_root/scripts/dmg_notarization_transaction.py" start \
   --repository "$repo_root" \
   --release-root "$output_root" \

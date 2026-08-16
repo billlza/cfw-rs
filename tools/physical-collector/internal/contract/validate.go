@@ -30,10 +30,10 @@ var requiredOS = map[string]struct {
 }
 
 var expectedHarnessVersions = map[string]string{
-	"lifecycle":   "lifecycle-matrix-v3",
-	"packet":      "packet-evidence-v3",
-	"performance": "performance-gates-v2",
-	"adversarial": "adversarial-clients-v2",
+	"lifecycle":   "lifecycle-matrix-v4",
+	"packet":      "packet-evidence-v4",
+	"performance": "performance-gates-v3",
+	"adversarial": "adversarial-clients-v3",
 }
 
 var reportKinds = map[string]string{
@@ -50,38 +50,84 @@ type artifactKind struct {
 }
 
 var artifactKinds = map[string]artifactKind{
-	"packet-report":             {suffix: ".json", maximum: 1 << 20, report: true},
-	"lifecycle-report":          {suffix: ".json", maximum: 1 << 20, report: true},
-	"performance-report":        {suffix: ".json", maximum: 1 << 20, report: true},
-	"adversarial-report":        {suffix: ".json", maximum: 1 << 20, report: true},
-	"packet-pcap":               {suffix: ".pcap", maximum: 32 << 20},
-	"packet-pcapng":             {suffix: ".pcapng", maximum: 32 << 20},
-	"packet-capture-provenance": {suffix: ".json", maximum: 256 << 10},
-	"packet-send-attempt":       {suffix: ".json", maximum: 256 << 10},
-	"lifecycle-event":           {suffix: ".json", maximum: 1 << 20},
-	"renderer-ready-trace":      {suffix: ".json", maximum: 1 << 20},
-	"network-extension-trace":   {suffix: ".json", maximum: 1 << 20},
-	"sleep-wake-trace":          {suffix: ".json", maximum: 1 << 20},
-	"wkwebview-metadata":        {suffix: ".json", maximum: 256 << 10},
-	"wkwebview-rgba":            {suffix: ".rgba", maximum: 16 << 20},
-	"performance-samples":       {suffix: ".json", maximum: 16 << 20},
-	"adversarial-transcript":    {suffix: ".json", maximum: 1 << 20},
-	"client-signature-evidence": {suffix: ".json", maximum: 256 << 10},
+	"packet-report":                     {suffix: ".json", maximum: 1 << 20, report: true},
+	"lifecycle-report":                  {suffix: ".json", maximum: 1 << 20, report: true},
+	"performance-report":                {suffix: ".json", maximum: 1 << 20, report: true},
+	"adversarial-report":                {suffix: ".json", maximum: 1 << 20, report: true},
+	"packet-pcap":                       {suffix: ".pcap", maximum: 32 << 20},
+	"packet-pcapng":                     {suffix: ".pcapng", maximum: 32 << 20},
+	"packet-product-state-observation":  {suffix: ".json", maximum: 1 << 20},
+	"packet-capture-provenance":         {suffix: ".json", maximum: 256 << 10},
+	"packet-send-attempt":               {suffix: ".json", maximum: 256 << 10},
+	"lifecycle-observation":             {suffix: ".json", maximum: 1 << 20},
+	"lifecycle-event":                   {suffix: ".json", maximum: 1 << 20},
+	"renderer-ready-trace":              {suffix: ".json", maximum: 1 << 20},
+	"network-extension-trace":           {suffix: ".json", maximum: 1 << 20},
+	"sleep-wake-trace":                  {suffix: ".json", maximum: 1 << 20},
+	"wkwebview-metadata":                {suffix: ".json", maximum: 256 << 10},
+	"wkwebview-rgba":                    {suffix: ".rgba", maximum: 16 << 20},
+	"performance-sample-ledger":         {suffix: ".json", maximum: 64 << 20},
+	"performance-shaping-transaction":   {suffix: ".json", maximum: 16 << 20},
+	"adversarial-case-observation":      {suffix: ".json", maximum: 1 << 20},
+	"adversarial-secret-coverage":       {suffix: ".json", maximum: 1 << 20},
+	"adversarial-signature-observation": {suffix: ".json", maximum: 256 << 10},
+	"adversarial-transcript":            {suffix: ".json", maximum: 1 << 20},
 }
 
 var rawKindsByHarness = map[string]map[string]struct{}{
 	"lifecycle": setOf(
-		"lifecycle-event", "renderer-ready-trace", "network-extension-trace",
+		"lifecycle-observation", "lifecycle-event", "renderer-ready-trace", "network-extension-trace",
 		"sleep-wake-trace", "packet-pcap", "wkwebview-metadata", "wkwebview-rgba",
 	),
 	"packet": setOf(
-		"packet-pcap", "packet-pcapng", "packet-capture-provenance", "packet-send-attempt",
+		"packet-pcap", "packet-pcapng", "packet-product-state-observation",
+		"packet-capture-provenance", "packet-send-attempt",
 	),
-	"performance": setOf("performance-samples"),
-	"adversarial": setOf("adversarial-transcript", "client-signature-evidence"),
+	"performance": setOf(
+		"performance-sample-ledger", "performance-shaping-transaction",
+	),
+	"adversarial": setOf(
+		"adversarial-case-observation", "adversarial-secret-coverage",
+		"adversarial-signature-observation", "adversarial-transcript",
+	),
 }
 
-var requiredLifecycleSubjects = setOf(
+var lifecycleProbeIDs = []string{
+	"inside-out-signatures",
+	"team-id",
+	"bundle-identifiers",
+	"entitlements",
+	"provisioning",
+	"daemon-registration-approval",
+	"daemon-registration-denial",
+	"system-extension-approval",
+	"system-extension-pending",
+	"system-extension-restart",
+	"network-extension-approval",
+	"network-extension-denial",
+	"network-extension-pending",
+	"renderer-ready-v2",
+	"upgrade",
+	"replacement",
+	"downgrade-refusal",
+	"install-cleanup",
+	"uninstall-cleanup",
+	"login",
+	"logout",
+	"lock",
+	"fast-user-switching",
+	"concurrent-starts",
+	"cancellation",
+	"sleep-wake",
+	"wkwebview-850x603",
+	"reboot-recovery",
+	"host-crash",
+	"global-authority-crash",
+	"proxy-agent-crash",
+	"provider-crash",
+}
+
+var lifecycleSpecialSubjects = setOf(
 	"renderer-ready-v2:trace",
 	"network-extension-approval:trace",
 	"network-extension-denial:trace",
@@ -91,6 +137,172 @@ var requiredLifecycleSubjects = setOf(
 	"wkwebview-850x603:metadata",
 	"wkwebview-850x603:pixels",
 )
+
+func makeRequiredLifecycleSubjects() map[string]struct{} {
+	result := make(map[string]struct{}, len(lifecycleProbeIDs)*2+len(lifecycleSpecialSubjects))
+	for _, probeID := range lifecycleProbeIDs {
+		result[probeID] = struct{}{}
+		result[probeID+":observation"] = struct{}{}
+	}
+	for subject := range lifecycleSpecialSubjects {
+		result[subject] = struct{}{}
+	}
+	return result
+}
+
+var requiredLifecycleSubjects = makeRequiredLifecycleSubjects()
+
+func RequiredLifecycleSubjects() map[string]struct{} {
+	result := make(map[string]struct{}, len(requiredLifecycleSubjects))
+	for subject := range requiredLifecycleSubjects {
+		result[subject] = struct{}{}
+	}
+	return result
+}
+
+func ExpectedLifecycleArtifactKinds(subject string) (map[string]struct{}, bool) {
+	kinds, ok := expectedLifecycleKinds(subject)
+	if !ok {
+		return nil, false
+	}
+	result := make(map[string]struct{}, len(kinds))
+	for kind := range kinds {
+		result[kind] = struct{}{}
+	}
+	return result, true
+}
+
+func lifecycleProbeSubject(subject string) bool {
+	for _, probeID := range lifecycleProbeIDs {
+		if subject == probeID {
+			return true
+		}
+	}
+	return false
+}
+
+func expectedLifecycleKinds(subject string) (map[string]struct{}, bool) {
+	if _, required := requiredLifecycleSubjects[subject]; !required {
+		return nil, false
+	}
+	switch subject {
+	case "renderer-ready-v2:trace":
+		return setOf("renderer-ready-trace"), true
+	case "network-extension-approval:trace", "network-extension-denial:trace", "network-extension-pending:trace":
+		return setOf("network-extension-trace"), true
+	case "sleep-wake:trace":
+		return setOf("sleep-wake-trace"), true
+	case "sleep-wake:packet":
+		return setOf("packet-pcap", "packet-pcapng"), true
+	case "wkwebview-850x603:metadata":
+		return setOf("wkwebview-metadata"), true
+	case "wkwebview-850x603:pixels":
+		return setOf("wkwebview-rgba"), true
+	default:
+		if strings.HasSuffix(subject, ":observation") && lifecycleProbeSubject(strings.TrimSuffix(subject, ":observation")) {
+			return setOf("lifecycle-observation"), true
+		}
+		if lifecycleProbeSubject(subject) {
+			return setOf("lifecycle-event"), true
+		}
+		return nil, false
+	}
+}
+
+var packetCaseIDs = []string{
+	"tcp-ipv4", "tcp-ipv6", "udp", "quic",
+	"dns-a-primary", "dns-a-secondary", "dns-aaaa-primary", "dns-aaaa-secondary",
+	"lan-bypass", "included-routes", "excluded-routes", "stop-cleanup",
+	"ipv6-disabled-absence",
+}
+
+func requiredPacketSubjects() map[string]struct{} {
+	result := make(map[string]struct{}, len(packetCaseIDs)*4)
+	for _, caseID := range packetCaseIDs {
+		result[caseID] = struct{}{}
+		result[caseID+":product-state"] = struct{}{}
+		result[caseID+":capture-provenance"] = struct{}{}
+		result[caseID+":send-attempt"] = struct{}{}
+	}
+	return result
+}
+
+var optionalPacketSubjects = setOf(
+	"stop-cleanup:restore-state", "ipv6-disabled-absence:restore-state",
+)
+
+var requiredPerformanceSubjects = setOf(
+	"sample-ledger", "shaping-intent", "shaping-restoration",
+)
+
+func expectedPerformanceKind(subject string) (string, bool) {
+	if _, ok := requiredPerformanceSubjects[subject]; !ok {
+		return "", false
+	}
+	if subject == "sample-ledger" {
+		return "performance-sample-ledger", true
+	}
+	return "performance-shaping-transaction", true
+}
+
+var adversarialCaseIDs = []string{
+	"authority-journal-symlink", "authority-journal-tamper", "authority-journal-truncation",
+	"deep-message", "duplicate-redemption", "event-queue-saturation",
+	"fast-user-switching-race", "heartbeat-loss", "in-flight-saturation",
+	"inactive-console-user", "late-callback", "noncanonical-message", "oversize-message",
+	"replay-cursor-rollback", "replayed-operation", "replayed-start-ticket", "request-flood",
+	"same-team-unknown-bundle", "secret-extraction-crash-records", "secret-extraction-evidence",
+	"secret-extraction-journal", "secret-extraction-logs", "secret-extraction-preferences",
+	"secret-extraction-snapshots", "stale-audit-evidence", "stale-pid-evidence",
+	"wrong-audit-session", "wrong-bundle-identifier", "wrong-designated-requirement",
+	"wrong-entitlement", "wrong-team-id", "wrong-uid",
+}
+
+var adversarialSecretCaseIDs = setOf(
+	"secret-extraction-crash-records", "secret-extraction-evidence",
+	"secret-extraction-journal", "secret-extraction-logs",
+	"secret-extraction-preferences", "secret-extraction-snapshots",
+)
+
+func makeRequiredAdversarialSubjects() map[string]struct{} {
+	result := make(map[string]struct{}, (len(adversarialCaseIDs)+1)*4+len(adversarialSecretCaseIDs))
+	for _, caseID := range append([]string{"baseline"}, adversarialCaseIDs...) {
+		result[caseID] = struct{}{}
+		result["observation:"+caseID] = struct{}{}
+		result["client-signature:"+caseID] = struct{}{}
+		result["server-signature:"+caseID] = struct{}{}
+		if _, secret := adversarialSecretCaseIDs[caseID]; secret {
+			result["secret-coverage:"+caseID] = struct{}{}
+		}
+	}
+	return result
+}
+
+var requiredAdversarialSubjects = makeRequiredAdversarialSubjects()
+
+func RequiredAdversarialSubjects() map[string]struct{} {
+	result := make(map[string]struct{}, len(requiredAdversarialSubjects))
+	for subject := range requiredAdversarialSubjects {
+		result[subject] = struct{}{}
+	}
+	return result
+}
+
+func ExpectedAdversarialArtifactKind(subject string) (string, bool) {
+	if _, required := requiredAdversarialSubjects[subject]; !required {
+		return "", false
+	}
+	switch {
+	case strings.HasPrefix(subject, "observation:"):
+		return "adversarial-case-observation", true
+	case strings.HasPrefix(subject, "client-signature:"), strings.HasPrefix(subject, "server-signature:"):
+		return "adversarial-signature-observation", true
+	case strings.HasPrefix(subject, "secret-coverage:"):
+		return "adversarial-secret-coverage", true
+	default:
+		return "adversarial-transcript", true
+	}
+}
 
 var stableMatrixGA = time.Date(2026, 7, 27, 0, 0, 0, 0, time.UTC)
 
@@ -276,6 +488,9 @@ func validateBindings(
 	seenRaw := make(map[string]struct{})
 	harnessCounts := make(map[string]int)
 	lifecycleSubjects := make(map[string]struct{})
+	packetSubjects := make(map[string]struct{})
+	performanceSubjects := make(map[string]struct{})
+	adversarialSubjects := make(map[string]struct{})
 	for _, artifact := range raw {
 		allowedKinds, ok := rawKindsByHarness[artifact.Harness]
 		if !ok {
@@ -283,6 +498,27 @@ func validateBindings(
 		}
 		if _, ok := allowedKinds[artifact.Descriptor.Kind]; !ok {
 			return fmt.Errorf("raw artifact kind %q is invalid for harness %q", artifact.Descriptor.Kind, artifact.Harness)
+		}
+		if artifact.Harness == "adversarial" {
+			expectedKind, required := ExpectedAdversarialArtifactKind(artifact.Subject)
+			if !required || artifact.Descriptor.Kind != expectedKind {
+				return fmt.Errorf("raw adversarial subject %q has an invalid artifact kind", artifact.Subject)
+			}
+		}
+		if artifact.Harness == "performance" {
+			expectedKind, required := expectedPerformanceKind(artifact.Subject)
+			if !required || artifact.Descriptor.Kind != expectedKind {
+				return fmt.Errorf("raw performance subject %q has an invalid artifact kind", artifact.Subject)
+			}
+		}
+		if artifact.Harness == "lifecycle" {
+			expectedKinds, required := expectedLifecycleKinds(artifact.Subject)
+			if !required {
+				return fmt.Errorf("raw lifecycle subject %q is not source-pinned", artifact.Subject)
+			}
+			if _, valid := expectedKinds[artifact.Descriptor.Kind]; !valid {
+				return fmt.Errorf("raw lifecycle subject %q has an invalid artifact kind", artifact.Subject)
+			}
 		}
 		if err := boundedPrintable(artifact.Subject, 256); err != nil {
 			return fmt.Errorf("raw artifact subject: %w", err)
@@ -295,6 +531,12 @@ func validateBindings(
 		harnessCounts[artifact.Harness]++
 		if artifact.Harness == "lifecycle" {
 			lifecycleSubjects[artifact.Subject] = struct{}{}
+		} else if artifact.Harness == "packet" {
+			packetSubjects[artifact.Subject] = struct{}{}
+		} else if artifact.Harness == "performance" {
+			performanceSubjects[artifact.Subject] = struct{}{}
+		} else if artifact.Harness == "adversarial" {
+			adversarialSubjects[artifact.Subject] = struct{}{}
 		}
 		if err := validateDescriptor(artifact.Descriptor); err != nil {
 			return fmt.Errorf("raw artifact %q descriptor: %w", artifact.Subject, err)
@@ -311,6 +553,44 @@ func validateBindings(
 	for subject := range requiredLifecycleSubjects {
 		if _, ok := lifecycleSubjects[subject]; !ok {
 			return fmt.Errorf("raw artifacts omit required lifecycle subject %q", subject)
+		}
+	}
+	for subject := range lifecycleSubjects {
+		if _, required := requiredLifecycleSubjects[subject]; !required {
+			return fmt.Errorf("raw artifacts contain unknown lifecycle subject %q", subject)
+		}
+	}
+	for subject := range requiredPacketSubjects() {
+		if _, ok := packetSubjects[subject]; !ok {
+			return fmt.Errorf("raw artifacts omit required packet subject %q", subject)
+		}
+	}
+	for subject := range packetSubjects {
+		if _, required := requiredPacketSubjects()[subject]; required {
+			continue
+		}
+		if _, optional := optionalPacketSubjects[subject]; !optional {
+			return fmt.Errorf("raw artifacts contain unknown packet subject %q", subject)
+		}
+	}
+	for subject := range requiredAdversarialSubjects {
+		if _, ok := adversarialSubjects[subject]; !ok {
+			return fmt.Errorf("raw artifacts omit required adversarial subject %q", subject)
+		}
+	}
+	for subject := range requiredPerformanceSubjects {
+		if _, ok := performanceSubjects[subject]; !ok {
+			return fmt.Errorf("raw artifacts omit required performance subject %q", subject)
+		}
+	}
+	for subject := range performanceSubjects {
+		if _, required := requiredPerformanceSubjects[subject]; !required {
+			return fmt.Errorf("raw artifacts contain unknown performance subject %q", subject)
+		}
+	}
+	for subject := range adversarialSubjects {
+		if _, required := requiredAdversarialSubjects[subject]; !required {
+			return fmt.Errorf("raw artifacts contain unknown adversarial subject %q", subject)
 		}
 	}
 	if totalBytes > MaxArtifactBytes {

@@ -38,6 +38,7 @@ RELEASE_PATHS = (
     "native",
     "rust-toolchain.toml",
     "scripts",
+    "tools",
 )
 
 

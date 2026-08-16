@@ -14,10 +14,29 @@ import sys
 from typing import Any, Callable, Sequence
 
 if __package__:
-    from .adversarial_clients import HARNESS_VERSION as ADVERSARIAL_VERSION
-    from .lifecycle_matrix import HARNESS_VERSION as LIFECYCLE_VERSION
-    from .packet_evidence import HARNESS_VERSION as PACKET_VERSION
+    from .adversarial_clients import (
+        ADVERSARIAL_RAW_KINDS,
+        HARNESS_VERSION as ADVERSARIAL_VERSION,
+        REQUIRED_RAW_SUBJECTS as REQUIRED_ADVERSARIAL_RAW_SUBJECTS,
+        expected_raw_kind as expected_adversarial_raw_kind,
+    )
+    from .lifecycle_matrix import (
+        EXPECTED_LIFECYCLE_RAW_SUBJECTS,
+        HARNESS_VERSION as LIFECYCLE_VERSION,
+        LifecycleMatrixError,
+        expected_lifecycle_raw_kinds,
+    )
+    from .packet_evidence import (
+        EXPECTED_PACKET_RAW_SUBJECTS,
+        HARNESS_VERSION as PACKET_VERSION,
+        OPTIONAL_PACKET_RAW_SUBJECTS,
+    )
     from .performance_gates import HARNESS_VERSION as PERFORMANCE_VERSION
+    from .performance_ledger import (
+        LEDGER_KIND as PERFORMANCE_LEDGER_KIND,
+        REQUIRED_PERFORMANCE_SUBJECTS,
+        SHAPING_KIND as PERFORMANCE_SHAPING_KIND,
+    )
     from .physical_machine_identity import (
         PhysicalMachineIdentityError,
         collect_boot_environment_sha256,
@@ -25,7 +44,7 @@ if __package__:
     )
     from .raw_artifacts import (
         EVIDENCE_PROFILE,
-        MAX_ARTIFACT_COUNT,
+        MAX_RECEIPT_ARTIFACT_COUNT,
         MAX_TOTAL_ARTIFACT_BYTES,
         RawArtifactError,
         canonical_json,
@@ -40,10 +59,29 @@ if __package__:
 else:  # pragma: no cover - direct script entrypoint
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from adversarial_clients import HARNESS_VERSION as ADVERSARIAL_VERSION  # type: ignore
-    from lifecycle_matrix import HARNESS_VERSION as LIFECYCLE_VERSION  # type: ignore
-    from packet_evidence import HARNESS_VERSION as PACKET_VERSION  # type: ignore
+    from adversarial_clients import (  # type: ignore
+        ADVERSARIAL_RAW_KINDS,
+        HARNESS_VERSION as ADVERSARIAL_VERSION,
+        REQUIRED_RAW_SUBJECTS as REQUIRED_ADVERSARIAL_RAW_SUBJECTS,
+        expected_raw_kind as expected_adversarial_raw_kind,
+    )
+    from lifecycle_matrix import (  # type: ignore
+        EXPECTED_LIFECYCLE_RAW_SUBJECTS,
+        HARNESS_VERSION as LIFECYCLE_VERSION,
+        LifecycleMatrixError,
+        expected_lifecycle_raw_kinds,
+    )
+    from packet_evidence import (  # type: ignore
+        EXPECTED_PACKET_RAW_SUBJECTS,
+        HARNESS_VERSION as PACKET_VERSION,
+        OPTIONAL_PACKET_RAW_SUBJECTS,
+    )
     from performance_gates import HARNESS_VERSION as PERFORMANCE_VERSION  # type: ignore
+    from performance_ledger import (  # type: ignore
+        LEDGER_KIND as PERFORMANCE_LEDGER_KIND,
+        REQUIRED_PERFORMANCE_SUBJECTS,
+        SHAPING_KIND as PERFORMANCE_SHAPING_KIND,
+    )
     from physical_machine_identity import (  # type: ignore
         PhysicalMachineIdentityError,
         collect_boot_environment_sha256,
@@ -51,7 +89,7 @@ else:  # pragma: no cover - direct script entrypoint
     )
     from raw_artifacts import (  # type: ignore
         EVIDENCE_PROFILE,
-        MAX_ARTIFACT_COUNT,
+        MAX_RECEIPT_ARTIFACT_COUNT,
         MAX_TOTAL_ARTIFACT_BYTES,
         RawArtifactError,
         canonical_json,
@@ -72,7 +110,7 @@ CONTEXT_DOCUMENT = "cfw-physical-run-context-v1"
 CONTEXT_SCHEMA_VERSION = 1
 COLLECTOR_REQUEST_SCHEMA_VERSION = 1
 PRODUCT_VERSION = "0.4.0"
-FINAL_RELEASE_BUILD = "40003"
+FINAL_RELEASE_BUILD = "40005"
 MAX_INPUT_BYTES = 8 * 1024 * 1024
 MAX_COLLECTOR_REQUEST_BYTES = 1 << 20
 PRODUCTION_NONCE_TTL = timedelta(hours=6)
@@ -141,11 +179,10 @@ EXPECTED_REPORTS = {
     "performance": (PERFORMANCE_VERSION, "performance-report"),
 }
 RAW_KINDS_BY_HARNESS = {
-    "adversarial": frozenset(
-        {"adversarial-transcript", "client-signature-evidence"}
-    ),
+    "adversarial": ADVERSARIAL_RAW_KINDS,
     "lifecycle": frozenset(
         {
+            "lifecycle-observation",
             "lifecycle-event",
             "network-extension-trace",
             "packet-pcap",
@@ -160,23 +197,15 @@ RAW_KINDS_BY_HARNESS = {
             "packet-capture-provenance",
             "packet-pcap",
             "packet-pcapng",
+            "packet-product-state-observation",
             "packet-send-attempt",
         }
     ),
-    "performance": frozenset({"performance-samples"}),
+    "performance": frozenset(
+        {PERFORMANCE_LEDGER_KIND, PERFORMANCE_SHAPING_KIND}
+    ),
 }
-REQUIRED_LIFECYCLE_SUBJECTS = frozenset(
-    {
-        "renderer-ready-v2:trace",
-        "network-extension-approval:trace",
-        "network-extension-denial:trace",
-        "network-extension-pending:trace",
-        "sleep-wake:trace",
-        "sleep-wake:packet",
-        "wkwebview-850x603:metadata",
-        "wkwebview-850x603:pixels",
-    }
-)
+REQUIRED_LIFECYCLE_SUBJECTS = EXPECTED_LIFECYCLE_RAW_SUBJECTS
 MACOS_BUILD_RE = re.compile(r"^[0-9]{2}[A-Z][0-9]{1,5}$")
 UTC_TIMESTAMP_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
@@ -207,6 +236,16 @@ def _timestamp(value: Any, label: str) -> datetime:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _observation_time(value: datetime | None) -> datetime:
+    if value is None:
+        return _now()
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise PhysicalCollectorRequestError(
+            "collector observation time must be timezone-aware"
+        )
+    return value.astimezone(timezone.utc)
 
 
 def _format_timestamp(value: datetime) -> str:
@@ -495,9 +534,10 @@ def _validated_receipt_bindings(
         )
     if not isinstance(raw_artifacts, list) or not raw_artifacts:
         raise PhysicalCollectorRequestError("physical raw-artifact bindings are absent")
-    if len(raw_reports) + len(raw_artifacts) > MAX_ARTIFACT_COUNT:
+    if len(raw_reports) + len(raw_artifacts) > MAX_RECEIPT_ARTIFACT_COUNT:
         raise PhysicalCollectorRequestError(
-            f"physical receipt exceeds {MAX_ARTIFACT_COUNT} artifact descriptors"
+            "physical receipt exceeds "
+            f"{MAX_RECEIPT_ARTIFACT_COUNT} artifact descriptors"
         )
 
     seen_harnesses: set[str] = set()
@@ -581,6 +621,9 @@ def _validated_receipt_bindings(
     seen_raw_subjects: set[tuple[str, str]] = set()
     raw_harness_counts = {harness: 0 for harness in EXPECTED_REPORTS}
     lifecycle_subjects: set[str] = set()
+    packet_subjects: set[str] = set()
+    performance_subjects: set[str] = set()
+    adversarial_subjects: set[str] = set()
     for index, value in enumerate(raw_artifacts):
         label = f"bindings.raw_artifacts[{index}]"
         binding = exact_object(value, RAW_ARTIFACT_BINDING_FIELDS, label)
@@ -599,10 +642,44 @@ def _validated_receipt_bindings(
             expected_kinds=RAW_KINDS_BY_HARNESS[harness],
             label=f"{label}.descriptor",
         ).as_dict()
+        if (
+            harness == "adversarial"
+            and descriptor["kind"] != expected_adversarial_raw_kind(subject)
+        ):
+            raise PhysicalCollectorRequestError(
+                f"{label}.descriptor kind differs from its adversarial subject"
+            )
+        if harness == "performance":
+            expected_performance_kind = (
+                PERFORMANCE_LEDGER_KIND
+                if subject == "sample-ledger"
+                else PERFORMANCE_SHAPING_KIND
+            )
+            if descriptor["kind"] != expected_performance_kind:
+                raise PhysicalCollectorRequestError(
+                    f"{label}.descriptor kind differs from its performance subject"
+                )
+        if harness == "lifecycle":
+            try:
+                expected_lifecycle_kinds = expected_lifecycle_raw_kinds(subject)
+            except LifecycleMatrixError as error:
+                raise PhysicalCollectorRequestError(
+                    f"{label}.subject is not part of the exact lifecycle matrix"
+                ) from error
+            if descriptor["kind"] not in expected_lifecycle_kinds:
+                raise PhysicalCollectorRequestError(
+                    f"{label}.descriptor kind differs from its lifecycle subject"
+                )
         record_descriptor(descriptor, label)
         raw_harness_counts[harness] += 1
         if harness == "lifecycle":
             lifecycle_subjects.add(subject)
+        elif harness == "packet":
+            packet_subjects.add(subject)
+        elif harness == "performance":
+            performance_subjects.add(subject)
+        elif harness == "adversarial":
+            adversarial_subjects.add(subject)
         raw_bindings.append(
             {"harness": harness, "subject": subject, "descriptor": descriptor}
         )
@@ -614,11 +691,23 @@ def _validated_receipt_bindings(
             "physical raw artifacts omit harnesses: "
             f"{sorted(missing_raw_harnesses)}"
         )
-    missing_lifecycle = REQUIRED_LIFECYCLE_SUBJECTS - lifecycle_subjects
-    if missing_lifecycle:
+    if lifecycle_subjects != REQUIRED_LIFECYCLE_SUBJECTS:
         raise PhysicalCollectorRequestError(
-            "physical raw artifacts omit lifecycle subjects: "
-            f"{sorted(missing_lifecycle)}"
+            "physical raw artifacts have an incomplete or unknown lifecycle subject set"
+        )
+    if not EXPECTED_PACKET_RAW_SUBJECTS <= packet_subjects or not packet_subjects <= (
+        EXPECTED_PACKET_RAW_SUBJECTS | OPTIONAL_PACKET_RAW_SUBJECTS
+    ):
+        raise PhysicalCollectorRequestError(
+            "physical raw artifacts have an incomplete or unknown packet subject set"
+        )
+    if adversarial_subjects != REQUIRED_ADVERSARIAL_RAW_SUBJECTS:
+        raise PhysicalCollectorRequestError(
+            "physical raw artifacts have an incomplete or unknown adversarial subject set"
+        )
+    if performance_subjects != REQUIRED_PERFORMANCE_SUBJECTS:
+        raise PhysicalCollectorRequestError(
+            "physical raw artifacts have an incomplete or unknown performance subject set"
         )
     return (
         material["captured_at"],
@@ -626,6 +715,52 @@ def _validated_receipt_bindings(
         sorted(reports, key=lambda entry: entry["harness"]),
         sorted(raw_bindings, key=lambda entry: (entry["harness"], entry["subject"])),
     )
+
+
+def validate_nonce_response(
+    nonce_response: Any,
+    *,
+    observed_at: datetime | None = None,
+) -> tuple[dict[str, Any], datetime]:
+    """Validate one live nonce response and derive its server issue time.
+
+    The issue time is derived from the source-pinned TTL because receipt schema
+    v1 intentionally carries only ``expires_at``.  Callers use it to prove that
+    immutable local observations completed before the nonce was issued.
+    """
+
+    try:
+        nonce = exact_object(
+            nonce_response, NONCE_RESPONSE_FIELDS, "collector nonce response"
+        )
+        run_nonce = require_sha256(
+            nonce["run_nonce"], "collector nonce response.run_nonce"
+        )
+    except RawArtifactError as error:
+        raise PhysicalCollectorRequestError(str(error)) from error
+    if (
+        type(nonce["schema_version"]) is not int
+        or nonce["schema_version"] != COLLECTOR_REQUEST_SCHEMA_VERSION
+    ):
+        raise PhysicalCollectorRequestError(
+            "collector nonce response schema is unsupported"
+        )
+    expires_at = _timestamp(
+        nonce["expires_at"], "collector nonce response.expires_at"
+    )
+    now = _observation_time(observed_at)
+    if expires_at <= now:
+        raise PhysicalCollectorRequestError("collector nonce response is expired")
+    nonce_issued_at = expires_at - PRODUCTION_NONCE_TTL
+    if nonce_issued_at > now:
+        raise PhysicalCollectorRequestError(
+            "collector nonce response has a future issue time"
+        )
+    return {
+        "schema_version": COLLECTOR_REQUEST_SCHEMA_VERSION,
+        "run_nonce": run_nonce,
+        "expires_at": nonce["expires_at"],
+    }, nonce_issued_at
 
 
 def build_receipt_request(
@@ -637,24 +772,10 @@ def build_receipt_request(
     observed_at: datetime | None = None,
 ) -> dict[str, Any]:
     validated = validate_context(context, runner=runner)
-    nonce = exact_object(
-        nonce_response, NONCE_RESPONSE_FIELDS, "collector nonce response"
+    nonce, nonce_issued_at = validate_nonce_response(
+        nonce_response, observed_at=observed_at
     )
-    if (
-        type(nonce["schema_version"]) is not int
-        or nonce["schema_version"] != COLLECTOR_REQUEST_SCHEMA_VERSION
-    ):
-        raise PhysicalCollectorRequestError("collector nonce response schema is unsupported")
-    run_nonce = require_sha256(nonce["run_nonce"], "collector nonce response.run_nonce")
-    expires_at = _timestamp(nonce["expires_at"], "collector nonce response.expires_at")
-    now = _now() if observed_at is None else observed_at.astimezone(timezone.utc)
-    if expires_at <= now:
-        raise PhysicalCollectorRequestError("collector nonce response is expired")
-    nonce_issued_at = expires_at - PRODUCTION_NONCE_TTL
-    if nonce_issued_at > now:
-        raise PhysicalCollectorRequestError(
-            "collector nonce response has a future issue time"
-        )
+    now = _observation_time(observed_at)
     material = exact_object(bindings, BINDINGS_FIELDS, "physical receipt bindings")
     if type(material["schema_version"]) is not int or material["schema_version"] != 1:
         raise PhysicalCollectorRequestError("physical receipt bindings schema is unsupported")
@@ -682,7 +803,7 @@ def build_receipt_request(
             "captured_at": captured_at,
             "completed_at": completed_at,
             "run_id": run["run_id"],
-            "run_nonce": run_nonce,
+            "run_nonce": nonce["run_nonce"],
         },
         "reports": reports,
         "raw_artifacts": raw_artifacts,
@@ -737,7 +858,7 @@ def self_check() -> None:
         or EVIDENCE_PROFILE["aggregator_version"]
         != "physical-evidence-aggregator-v5-single-machine"
         or EVIDENCE_PROFILE["soak_hours_per_run"] != 3
-        or FINAL_RELEASE_BUILD != "40003"
+        or FINAL_RELEASE_BUILD != "40005"
         or PINNED_RUNS != expected_runs
         or set(EXPECTED_REPORTS) != set(RAW_KINDS_BY_HARNESS)
         or MAX_COLLECTOR_REQUEST_BYTES != 1 << 20

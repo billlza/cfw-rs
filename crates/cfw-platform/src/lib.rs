@@ -7,18 +7,30 @@
 
 use serde::{Deserialize, Serialize};
 
+mod bounded_command;
 mod launchctl;
+mod legacy_observation;
 mod legacy_proxy;
 mod legacy_service;
 mod login_item;
 mod network_observation;
+mod release_security;
 
 #[cfg(target_os = "macos")]
 mod sysproxy_sc;
 
+pub use legacy_observation::{observe_legacy_process_table, observe_legacy_tcp_listener_table};
 pub use legacy_proxy::{LegacyProxyCutoverPlan, LegacyProxyServiceIdentity};
-pub use legacy_service::LegacyServiceRetirement;
-pub use network_observation::{NetworkProxyProtocolObservation, NetworkServiceObservation};
+pub use legacy_service::{
+    LegacyServiceJobObservation, LegacyServiceJobProgram, LegacyServiceRetirement,
+};
+pub use network_observation::{
+    NetworkProxyProtocolObservation, NetworkRoutingObservation, NetworkServiceObservation,
+};
+pub use release_security::{
+    ReleaseSecurityCommandOutput, ReleaseSignedComponent, assess_release_application,
+    inspect_release_signature, observe_gatekeeper_status, verify_release_signature,
+};
 
 /// Registration state reported by `SMAppService`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

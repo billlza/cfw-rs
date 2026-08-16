@@ -100,7 +100,7 @@ const listened = dashboardMatches(/listen\("([a-z][a-z0-9:/-]+)"/gu);
 
 test("every command the dashboard invokes exists in generate_handler!", () => {
   const handlers = handlerCommands();
-  assert.equal(handlers.size, 80, "the release command surface is 80 commands");
+  assert.equal(handlers.size, 81, "the release command surface is 81 commands");
   const missing = [...invoked.keys()].filter((command) => !handlers.has(command));
   assert.deepEqual(missing, [], `dashboard invokes commands that do not exist: ${missing.join(", ")}`);
 });
@@ -174,4 +174,27 @@ test("every profile menu item has a handler", () => {
   const handled = new Set([...app.matchAll(/case "([a-z-]+)":/gu)].map((match) => match[1]));
   const dead = items.filter((item) => !handled.has(item));
   assert.deepEqual(dead, [], `profile menu items with no handler: ${dead.join(", ")}`);
+});
+
+test("direct controller mutations are guarded by verified engine activity", () => {
+  const app = dashboardSources.find(({ file }) => file.endsWith("app.js")).source;
+  const guardedCommands = new Map([
+    ["set_proxy_mode", 500],
+    ["select_proxy", 800],
+    ["update_proxy_provider", 900],
+    ["update_rule_provider", 900],
+    ["health_check_proxy_provider", 700],
+    ["close_connection", 700],
+    ["dns_query", 700],
+  ]);
+
+  for (const [command, maximumDistance] of guardedCommands) {
+    const invocation = app.indexOf(`invoke("${command}"`);
+    assert.notEqual(invocation, -1, `${command} must remain in the renderer contract`);
+    const guard = app.lastIndexOf("controllerActionAllowed(", invocation);
+    assert.ok(
+      guard >= 0 && invocation - guard <= maximumDistance,
+      `${command} must be guarded before the renderer can invoke it`,
+    );
+  }
 });

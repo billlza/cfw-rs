@@ -59,7 +59,15 @@ PS256_HASH_BYTES = 32
 PS256_SALT_BYTES = 32
 PS256_EM_BITS = 3071
 
-MAX_ARTIFACT_COUNT = 512
+# One receipt contains 4 reports plus 265 required raw subjects; the two
+# optional Packet restore observations raise the only valid maximum to 271.
+# One production aggregate reader holds two maximal runs plus the aggregate
+# root descriptor itself: 1 + (2 * 271) = 543.  Keep the receipt and reader
+# domains distinct so neither a 272nd receipt descriptor nor a valid two-run
+# archive is accidentally admitted/rejected by the other's bound.
+REQUIRED_RECEIPT_ARTIFACT_COUNT = 269
+MAX_RECEIPT_ARTIFACT_COUNT = 271
+MAX_ARTIFACT_COUNT = 543
 MAX_TOTAL_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_RELATIVE_PATH_BYTES = 512
 MAX_JSON_DEPTH = 32
@@ -118,17 +126,22 @@ ARTIFACT_KINDS: dict[str, ArtifactKindSpec] = {
     "adversarial-report": ArtifactKindSpec(".json", REPORT_MAX_BYTES),
     "packet-pcap": ArtifactKindSpec(".pcap", 32 * 1024 * 1024),
     "packet-pcapng": ArtifactKindSpec(".pcapng", 32 * 1024 * 1024),
+    "packet-product-state-observation": ArtifactKindSpec(".json", 1 * 1024 * 1024),
     "packet-capture-provenance": ArtifactKindSpec(".json", 256 * 1024),
     "packet-send-attempt": ArtifactKindSpec(".json", 256 * 1024),
+    "lifecycle-observation": ArtifactKindSpec(".json", 1 * 1024 * 1024),
     "lifecycle-event": ArtifactKindSpec(".json", 1 * 1024 * 1024),
     "renderer-ready-trace": ArtifactKindSpec(".json", 1 * 1024 * 1024),
     "network-extension-trace": ArtifactKindSpec(".json", 1 * 1024 * 1024),
     "sleep-wake-trace": ArtifactKindSpec(".json", 1 * 1024 * 1024),
     "wkwebview-metadata": ArtifactKindSpec(".json", 256 * 1024),
     "wkwebview-rgba": ArtifactKindSpec(".rgba", 16 * 1024 * 1024),
-    "performance-samples": ArtifactKindSpec(".json", 16 * 1024 * 1024),
+    "performance-sample-ledger": ArtifactKindSpec(".json", 64 * 1024 * 1024),
+    "performance-shaping-transaction": ArtifactKindSpec(".json", 16 * 1024 * 1024),
+    "adversarial-case-observation": ArtifactKindSpec(".json", 1 * 1024 * 1024),
+    "adversarial-secret-coverage": ArtifactKindSpec(".json", 1 * 1024 * 1024),
+    "adversarial-signature-observation": ArtifactKindSpec(".json", 256 * 1024),
     "adversarial-transcript": ArtifactKindSpec(".json", 1 * 1024 * 1024),
-    "client-signature-evidence": ArtifactKindSpec(".json", 256 * 1024),
 }
 
 DESCRIPTOR_FIELDS = {"kind", "path", "size", "sha256"}
@@ -154,7 +167,7 @@ RELEASE_TRUST_POLICY_PATH = Path(__file__).with_name(
 )
 # Updated only together with the canonical policy file after the external HSM
 # attestation, collector source closure, and immutable image digest are reviewed.
-RELEASE_TRUST_POLICY_SHA256 = "ed8538dbf11f49555a917617b3f20911801364c4853b05f9704fec99729293d0"
+RELEASE_TRUST_POLICY_SHA256 = "907e7f11c9510eb541537a077290c43cf2121b5047d777339a4c1f3debf9bec3"
 
 
 class RawArtifactError(ValueError):

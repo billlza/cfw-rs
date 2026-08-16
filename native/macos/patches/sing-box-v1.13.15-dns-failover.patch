@@ -1,5 +1,5 @@
 diff --git a/adapter/dns.go b/adapter/dns.go
-index 23fbc9de..fbb417eb 100644
+index 23fbc9def440275f8e597d8a40f178004f1f4a95..fbb417ebf52b12eadf8c042a369e9c0f4e152246 100644
 --- a/adapter/dns.go
 +++ b/adapter/dns.go
 @@ -31,12 +31,13 @@ type DNSClient interface {
@@ -49,7 +49,7 @@ index 23fbc9de..fbb417eb 100644
  }
  
 diff --git a/adapter/network.go b/adapter/network.go
-index 14fe46c8..da679fe0 100644
+index 14fe46c8b6139d68ce22fe535402f80d5405941f..da679fe0d74e16382ccfec816a39a3377808e30b 100644
 --- a/adapter/network.go
 +++ b/adapter/network.go
 @@ -35,14 +35,15 @@ type NetworkManager interface {
@@ -77,7 +77,7 @@ index 14fe46c8..da679fe0 100644
  
  type InterfaceUpdateListener interface {
 diff --git a/common/dialer/dialer.go b/common/dialer/dialer.go
-index 2ba559f9..3c0677cf 100644
+index 2ba559f9e0173b0f697141c46653bceca63e6c7d..3c0677cfb5a0b1580397cd1656987d3dc845cae9 100644
 --- a/common/dialer/dialer.go
 +++ b/common/dialer/dialer.go
 @@ -63,17 +63,27 @@ func NewWithOptions(options Options) (N.Dialer, error) {
@@ -152,7 +152,7 @@ index 2ba559f9..3c0677cf 100644
  			resolveFallbackDelay,
  		)
 diff --git a/common/dialer/resolve.go b/common/dialer/resolve.go
-index 21fe38d5..9c13cbd5 100644
+index 21fe38d5cf9ba135abfa6bda053460ee7ccb15b8..9c13cbd5c59f4d0880017645473b8f901a8b1f82 100644
 --- a/common/dialer/resolve.go
 +++ b/common/dialer/resolve.go
 @@ -32,40 +32,43 @@ type ParallelInterfaceResolveDialer interface {
@@ -240,7 +240,7 @@ index 21fe38d5..9c13cbd5 100644
  
  func (d *resolveDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 diff --git a/dns/router.go b/dns/router.go
-index 4f18959b..1e205157 100644
+index 4f18959b7cc37bf8091dcbdc81d9723ed4342190..1e2051574584c2c53cf006e33078a72569162ce8 100644
 --- a/dns/router.go
 +++ b/dns/router.go
 @@ -207,6 +207,8 @@ func (r *Router) matchDNS(ctx context.Context, allowFakeIP bool, ruleIndex int,
@@ -418,7 +418,7 @@ index 4f18959b..1e205157 100644
  		if question.Qtype == mDNS.TypeA || question.Qtype == mDNS.TypeAAAA || question.Qtype == mDNS.TypeHTTPS {
 diff --git a/dns/router_retry_test.go b/dns/router_retry_test.go
 new file mode 100644
-index 00000000..5c09f075
+index 0000000000000000000000000000000000000000..5c09f075e5a9ca48580c2be79a6f6331666592a3
 --- /dev/null
 +++ b/dns/router_retry_test.go
 @@ -0,0 +1,618 @@
@@ -1041,7 +1041,7 @@ index 00000000..5c09f075
 +	return message
 +}
 diff --git a/dns/transport_adapter.go b/dns/transport_adapter.go
-index 47345709..7f83d0da 100644
+index 4734570978fec974c9806654099ee3bc32d75476..7f83d0daebb7aedb1dd76c2078c984350e167ce7 100644
 --- a/dns/transport_adapter.go
 +++ b/dns/transport_adapter.go
 @@ -30,6 +30,9 @@ func NewTransportAdapterWithLocalOptions(transportType string, transportTag stri
@@ -1066,7 +1066,7 @@ index 47345709..7f83d0da 100644
  		dependencies = append(dependencies, remoteOptions.LegacyAddressResolver)
 diff --git a/option/domain_resolver_fallback_test.go b/option/domain_resolver_fallback_test.go
 new file mode 100644
-index 00000000..64627255
+index 0000000000000000000000000000000000000000..646272557f9f54541d88184a1a6b5ee988316116
 --- /dev/null
 +++ b/option/domain_resolver_fallback_test.go
 @@ -0,0 +1,36 @@
@@ -1107,7 +1107,7 @@ index 00000000..64627255
 +	}
 +}
 diff --git a/option/outbound.go b/option/outbound.go
-index 6676a3e9..3064f24c 100644
+index 6676a3e92362955ffe3dcb102f2b02efb9edb49a..3064f24c8067512b21a414ba78a7f432c261f478 100644
 --- a/option/outbound.go
 +++ b/option/outbound.go
 @@ -93,11 +93,12 @@ type DialerOptions struct {
@@ -1157,20 +1157,23 @@ index 6676a3e9..3064f24c 100644
  }
  
 diff --git a/protocol/tailscale/dns_transport.go b/protocol/tailscale/dns_transport.go
-index 4195235c..7f930f69 100644
+index 9edbfbc46f760919f49aa7e19f76180724f61e03..19f4caf9bceb731ff6a19af3b6a5bb38e2883edb 100644
 --- a/protocol/tailscale/dns_transport.go
 +++ b/protocol/tailscale/dns_transport.go
-@@ -169,7 +169,7 @@ func (t *DNSTransport) createResolver(directDialer func() N.Dialer, resolver *dn
+@@ -170,9 +170,9 @@ func (t *DNSTransport) createResolver(directDialer func() N.Dialer, resolver *dn
  	}
  	if len(resolver.BootstrapResolution) > 0 {
  		bootstrapTransport := transport.NewUDPRaw(t.logger, t.TransportAdapter, myDialer, M.SocksaddrFrom(resolver.BootstrapResolution[0], 53))
 -		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", adapter.DNSQueryOptions{Transport: bootstrapTransport}, 0)
 +		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", "", adapter.DNSQueryOptions{Transport: bootstrapTransport}, 0)
+ 	} else {
+-		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", t.endpoint.queryOptions, 0)
++		myDialer = dialer.NewResolveDialer(t.ctx, myDialer, false, "", "", t.endpoint.queryOptions, 0)
  	}
- 	if serverAddr := M.ParseSocksaddr(resolver.Addr); serverAddr.IsValid() {
- 		if serverAddr.Port == 0 {
+ 	if isHTTPScheme {
+ 		serverAddr := M.ParseSocksaddrHostPortStr(serverURL.Hostname(), serverURL.Port())
 diff --git a/route/network.go b/route/network.go
-index 03e94879..408f30e6 100644
+index 03e94879bf834e14905d71d26d66fc152718c24c..408f30e6a3d504d309c62de3f40db1583394f4dd 100644
 --- a/route/network.go
 +++ b/route/network.go
 @@ -74,9 +74,10 @@ func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options

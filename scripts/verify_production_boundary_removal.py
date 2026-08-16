@@ -265,6 +265,12 @@ _STRUCTURAL_RULES: tuple[tuple[str, re.Pattern[str], frozenset[str], re.Pattern[
         None,
     ),
     (
+        "private NSXPCConnection audit-token access",
+        re.compile(r"\.\s*auditToken\b"),
+        frozenset({"swift", "objc"}),
+        None,
+    ),
+    (
         "direct Tunnel payload transport",
         re.compile(r"\bTunnelStartPayloadCodec\s*\."),
         frozenset({"swift", "objc"}),

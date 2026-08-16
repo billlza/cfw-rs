@@ -57,9 +57,9 @@ def _write(repository: Path, relative: str, data: bytes = b"evidence\n") -> Path
 
 
 def _context(repository: Path) -> ProductionContext:
-    ci_path = "target/candidates/0.4.0/validation/40002/evidence/unsigned-ci-lanes.json"
+    ci_path = "target/candidates/0.4.0/validation/40004/evidence/unsigned-ci-lanes.json"
     validation_manifest = (
-        "target/candidates/0.4.0/validation/40002/signed/"
+        "target/candidates/0.4.0/validation/40004/signed/"
         "Clash for Mac.app.manifest.json"
     )
     receipt_path = repository / "target/notarization-receipt.json"
@@ -98,7 +98,7 @@ class ProductionOrchestratorIdentityTests(unittest.TestCase):
     def test_release_identity_has_no_caller_selected_builds(self) -> None:
         self.assertEqual(
             (PRODUCT_VERSION, VALIDATION_BUILD, FINAL_BUILD),
-            ("0.4.0", "40002", "40003"),
+            ("0.4.0", "40004", "40005"),
         )
         signature = inspect.signature(seal_production_evidence)
         self.assertEqual(tuple(signature.parameters), ("repository",))
@@ -193,7 +193,7 @@ class ProductionOrchestratorDerivationTests(unittest.TestCase):
             paths = (
                 "target/candidates/0.4.0/signed/Clash for Mac.app.manifest.json",
                 "target/native-dependencies/Libbox.xcframework.manifest.json",
-                "target/candidates/0.4.0/signed/Clash.for.Mac_0.4.0_40003_notary.zip",
+                "target/candidates/0.4.0/signed/Clash.for.Mac_0.4.0_40005_notary.zip",
                 "target/candidates/0.4.0/signed/notarization.json",
                 "target/candidates/0.4.0/signed/notarization-log.json",
                 "target/candidates/0.4.0/signed/gatekeeper.json",
@@ -224,12 +224,12 @@ class ProductionOrchestratorDerivationTests(unittest.TestCase):
             )
             _write(
                 repository,
-                "target/candidates/0.4.0/notary-attempts/release/40003/intent.json",
+                "target/candidates/0.4.0/notary-attempts/release/40005/intent.json",
                 b"intent\n",
             )
             _write(
                 repository,
-                "target/candidates/0.4.0/notary-attempts/release/40003/events/00000000.json",
+                "target/candidates/0.4.0/notary-attempts/release/40005/events/00000000.json",
                 b"event\n",
             )
             first = _physical_candidate_hash_manifest(context)
@@ -246,7 +246,7 @@ class ProductionOrchestratorDerivationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(collector_candidate["version"], "0.4.0")
-            self.assertEqual(collector_candidate["build_number"], "40003")
+            self.assertEqual(collector_candidate["build_number"], "40005")
             self.assertEqual(
                 collector_candidate["artifact_hash_manifest_sha256"],
                 first["sha256"],

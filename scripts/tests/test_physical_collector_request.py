@@ -8,6 +8,26 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
+from scripts.harness.adversarial_clients import (
+    HARNESS_VERSION as ADVERSARIAL_VERSION,
+    REQUIRED_RAW_SUBJECTS as REQUIRED_ADVERSARIAL_RAW_SUBJECTS,
+    expected_raw_kind as expected_adversarial_raw_kind,
+)
+from scripts.harness.lifecycle_matrix import (
+    EXPECTED_LIFECYCLE_RAW_SUBJECTS,
+    HARNESS_VERSION as LIFECYCLE_VERSION,
+    IDENTITY_OBSERVATION_SUBJECTS,
+    expected_lifecycle_raw_kinds,
+)
+from scripts.harness.packet_evidence import EXPECTED_PACKET_RAW_SUBJECTS
+from scripts.harness.performance_gates import HARNESS_VERSION as PERFORMANCE_VERSION
+from scripts.harness.performance_ledger import (
+    LEDGER_KIND as PERFORMANCE_LEDGER_KIND,
+    LEDGER_SUBJECT as PERFORMANCE_LEDGER_SUBJECT,
+    SHAPING_INTENT_SUBJECT,
+    SHAPING_KIND as PERFORMANCE_SHAPING_KIND,
+    SHAPING_RESTORATION_SUBJECT,
+)
 from scripts.harness.physical_collector_request import (
     PhysicalCollectorRequestError,
     build_nonce_request,
@@ -15,9 +35,15 @@ from scripts.harness.physical_collector_request import (
     initialize_context,
     self_check,
     validate_context,
+    validate_nonce_response,
 )
 from scripts.harness.physical_machine_identity import PhysicalMachineIdentityError
-from scripts.harness.raw_artifacts import RawArtifactError, canonical_json
+from scripts.harness.raw_artifacts import (
+    MAX_RECEIPT_ARTIFACT_COUNT,
+    REQUIRED_RECEIPT_ARTIFACT_COUNT,
+    RawArtifactError,
+    canonical_json,
+)
 
 
 PLATFORM_UUID = "01234567-89AB-CDEF-0123-456789ABCDEF"
@@ -32,7 +58,7 @@ REQUEST_SCRIPT = (
 def _candidate() -> dict:
     return {
         "version": "0.4.0",
-        "build_number": "40003",
+        "build_number": "40005",
         "app_manifest_sha256": "a" * 64,
         "signed_app_tree_sha256": "b" * 64,
         "artifact_hash_manifest_sha256": "c" * 64,
@@ -55,10 +81,10 @@ def _bindings(
     completed_at: str = "2026-07-29T04:00:00Z",
 ) -> dict:
     report_contract = (
-        ("adversarial", "adversarial-clients-v2", "adversarial-report"),
-        ("lifecycle", "lifecycle-matrix-v3", "lifecycle-report"),
-        ("packet", "packet-evidence-v3", "packet-report"),
-        ("performance", "performance-gates-v2", "performance-report"),
+        ("adversarial", ADVERSARIAL_VERSION, "adversarial-report"),
+        ("lifecycle", LIFECYCLE_VERSION, "lifecycle-report"),
+        ("packet", "packet-evidence-v4", "packet-report"),
+        ("performance", PERFORMANCE_VERSION, "performance-report"),
     )
     reports = [
         {
@@ -73,19 +99,17 @@ def _bindings(
         }
         for index, (harness, version, kind) in enumerate(report_contract, start=1)
     ]
-    lifecycle_contract = (
-        ("renderer-ready-v2:trace", "renderer-ready-trace", ".json"),
-        ("network-extension-approval:trace", "network-extension-trace", ".json"),
-        ("network-extension-denial:trace", "network-extension-trace", ".json"),
-        ("network-extension-pending:trace", "network-extension-trace", ".json"),
-        ("sleep-wake:trace", "sleep-wake-trace", ".json"),
-        ("sleep-wake:packet", "packet-pcap", ".pcap"),
-        ("wkwebview-850x603:metadata", "wkwebview-metadata", ".json"),
-        ("wkwebview-850x603:pixels", "wkwebview-rgba", ".rgba"),
+    lifecycle_contract = tuple(
+        (
+            subject,
+            sorted(expected_lifecycle_raw_kinds(subject))[0],
+        )
+        for subject in sorted(EXPECTED_LIFECYCLE_RAW_SUBJECTS)
     )
     raw_artifacts = []
     identity = len(reports) + 1
-    for subject, kind, suffix in lifecycle_contract:
+    for subject, kind in lifecycle_contract:
+        suffix = ".pcap" if kind == "packet-pcap" else ".rgba" if kind == "wkwebview-rgba" else ".json"
         raw_artifacts.append(
             {
                 "harness": "lifecycle",
@@ -98,10 +122,32 @@ def _bindings(
             }
         )
         identity += 1
+    for subject in sorted(EXPECTED_PACKET_RAW_SUBJECTS):
+        if ":" not in subject:
+            kind = "packet-pcap"
+            suffix = ".pcap"
+        else:
+            suffix_name = subject.rsplit(":", 1)[1]
+            kind = {
+                "product-state": "packet-product-state-observation",
+                "capture-provenance": "packet-capture-provenance",
+                "send-attempt": "packet-send-attempt",
+            }[suffix_name]
+            suffix = ".json"
+        raw_artifacts.append(
+            {
+                "harness": "packet",
+                "subject": subject,
+                "descriptor": _descriptor(
+                    kind, f"raw/packet/{subject.replace(':', '-')}{suffix}", identity
+                ),
+            }
+        )
+        identity += 1
     for harness, subject, kind, suffix in (
-        ("packet", "tcp-ipv4", "packet-pcap", ".pcap"),
-        ("performance", "samples", "performance-samples", ".json"),
-        ("adversarial", "baseline", "adversarial-transcript", ".json"),
+        ("performance", PERFORMANCE_LEDGER_SUBJECT, PERFORMANCE_LEDGER_KIND, ".json"),
+        ("performance", SHAPING_INTENT_SUBJECT, PERFORMANCE_SHAPING_KIND, ".json"),
+        ("performance", SHAPING_RESTORATION_SUBJECT, PERFORMANCE_SHAPING_KIND, ".json"),
     ):
         raw_artifacts.append(
             {
@@ -113,6 +159,19 @@ def _bindings(
             }
         )
         identity += 1
+    for subject in sorted(REQUIRED_ADVERSARIAL_RAW_SUBJECTS):
+        raw_artifacts.append(
+            {
+                "harness": "adversarial",
+                "subject": subject,
+                "descriptor": _descriptor(
+                    expected_adversarial_raw_kind(subject),
+                    f"raw/adversarial/{subject.replace(':', '-')}.json",
+                    identity,
+                ),
+            }
+        )
+        identity += 1
     return {
         "schema_version": 1,
         "captured_at": captured_at,
@@ -120,6 +179,31 @@ def _bindings(
         "reports": reports,
         "raw_artifacts": raw_artifacts,
     }
+
+
+def _with_optional_packet_restores(bindings: dict) -> dict:
+    result = copy.deepcopy(bindings)
+    identity = max(
+        int(binding["descriptor"]["sha256"], 16)
+        for binding in result["raw_artifacts"]
+    ) + 1
+    for subject in (
+        "stop-cleanup:restore-state",
+        "ipv6-disabled-absence:restore-state",
+    ):
+        result["raw_artifacts"].append(
+            {
+                "harness": "packet",
+                "subject": subject,
+                "descriptor": _descriptor(
+                    "packet-product-state-observation",
+                    f"raw/packet/{subject.replace(':', '-')}.json",
+                    identity,
+                ),
+            }
+        )
+        identity += 1
+    return result
 
 
 def _runner(
@@ -176,7 +260,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         self.runner = _runner()
         self.context = initialize_context(
             _candidate(),
-            run_id="run-40003-macos15",
+            run_id="run-40005-macos15",
             clean_install_confirmed=True,
             runner=self.runner,
             observed_at=self.observed_at,
@@ -238,15 +322,17 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         ):
             initialize_context(
                 _candidate(),
-                run_id="run-40003-macos15",
+                run_id="run-40005-macos15",
                 clean_install_confirmed=False,
                 runner=self.runner,
                 observed_at=self.observed_at,
             )
 
-    def test_initialize_requires_final_40003_build_with_signed_64_bit_bound(self) -> None:
+    def test_initialize_requires_final_40005_build_with_signed_64_bit_bound(self) -> None:
         for build_number, message in (
-            ("40002", "must be final release build 40003"),
+            ("40002", "must be final release build 40005"),
+            ("40003", "must be final release build 40005"),
+            ("40004", "must be final release build 40005"),
             (str(2**63), "signed 64-bit"),
             ("9" * 5_000, "signed 64-bit"),
         ):
@@ -320,6 +406,26 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
             ),
         )
         self.assertLessEqual(len(canonical_json(request)) + 1, 1 << 20)
+
+    def test_nonce_validation_exposes_only_the_derived_issue_time(self) -> None:
+        nonce = {
+            "schema_version": 1,
+            "run_nonce": "d" * 64,
+            "expires_at": "2026-07-29T10:00:00Z",
+        }
+        normalized, issued_at = validate_nonce_response(
+            nonce, observed_at=self.observed_at
+        )
+        self.assertEqual(normalized, nonce)
+        self.assertEqual(
+            issued_at, datetime(2026, 7, 29, 4, 0, tzinfo=timezone.utc)
+        )
+        with self.assertRaisesRegex(
+            PhysicalCollectorRequestError, "timezone-aware"
+        ):
+            validate_nonce_response(
+                nonce, observed_at=datetime(2026, 7, 29, 4, 0)
+            )
 
     def test_receipt_bindings_cannot_predate_context(self) -> None:
         nonce = {
@@ -413,6 +519,125 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
                 observed_at=self.observed_at,
             )
 
+    def test_receipt_requires_all_identity_observation_subjects(self) -> None:
+        nonce = {
+            "schema_version": 1,
+            "run_nonce": "d" * 64,
+            "expires_at": "2026-07-29T10:00:00Z",
+        }
+        for subject in sorted(IDENTITY_OBSERVATION_SUBJECTS):
+            bindings = _bindings()
+            bindings["raw_artifacts"] = [
+                item
+                for item in bindings["raw_artifacts"]
+                if item["subject"] != subject
+            ]
+            with self.subTest(subject=subject), self.assertRaisesRegex(
+                PhysicalCollectorRequestError, "lifecycle subject set"
+            ):
+                build_receipt_request(
+                    self.context,
+                    nonce,
+                    bindings,
+                    runner=self.runner,
+                    observed_at=self.observed_at,
+                )
+
+    def test_receipt_rejects_unknown_lifecycle_subject_and_wrong_kind(self) -> None:
+        nonce = {
+            "schema_version": 1,
+            "run_nonce": "d" * 64,
+            "expires_at": "2026-07-29T10:00:00Z",
+        }
+        unknown = _bindings()
+        unknown["raw_artifacts"].append(
+            {
+                "harness": "lifecycle",
+                "subject": "invented-success",
+                "descriptor": _descriptor(
+                    "lifecycle-event",
+                    "raw/lifecycle/invented-success.json",
+                    999,
+                ),
+            }
+        )
+        with self.assertRaisesRegex(
+            PhysicalCollectorRequestError,
+            "exact lifecycle matrix",
+        ):
+            build_receipt_request(
+                self.context,
+                nonce,
+                unknown,
+                runner=self.runner,
+                observed_at=self.observed_at,
+            )
+
+        wrong_kind = _bindings()
+        lifecycle_event = next(
+            binding
+            for binding in wrong_kind["raw_artifacts"]
+            if binding["harness"] == "lifecycle"
+            and binding["subject"] == "bundle-identifiers"
+        )
+        lifecycle_event["descriptor"]["kind"] = "network-extension-trace"
+        with self.assertRaisesRegex(
+            PhysicalCollectorRequestError,
+            "kind differs from its lifecycle subject",
+        ):
+            build_receipt_request(
+                self.context,
+                nonce,
+                wrong_kind,
+                runner=self.runner,
+                observed_at=self.observed_at,
+            )
+
+    def test_receipt_requires_exact_adversarial_subjects_and_kinds(self) -> None:
+        nonce = {
+            "schema_version": 1,
+            "run_nonce": "d" * 64,
+            "expires_at": "2026-07-29T10:00:00Z",
+        }
+        missing = _bindings()
+        missing["raw_artifacts"] = [
+            item
+            for item in missing["raw_artifacts"]
+            if not (
+                item["harness"] == "adversarial"
+                and item["subject"] == "observation:wrong-team-id"
+            )
+        ]
+        with self.assertRaisesRegex(
+            PhysicalCollectorRequestError, "adversarial subject set"
+        ):
+            build_receipt_request(
+                self.context,
+                nonce,
+                missing,
+                runner=self.runner,
+                observed_at=self.observed_at,
+            )
+
+        wrong_kind = _bindings()
+        target = next(
+            item
+            for item in wrong_kind["raw_artifacts"]
+            if item["harness"] == "adversarial"
+            and item["subject"] == "observation:wrong-team-id"
+        )
+        target["descriptor"]["kind"] = "adversarial-transcript"
+        with self.assertRaisesRegex(
+            PhysicalCollectorRequestError, "differs from its adversarial subject"
+        ):
+            build_receipt_request(
+                self.context,
+                nonce,
+                wrong_kind,
+                runner=self.runner,
+                observed_at=self.observed_at,
+            )
+
     def test_receipt_descriptor_count_byte_and_request_bounds_fail_closed(self) -> None:
         nonce = {
             "schema_version": 1,
@@ -420,9 +645,50 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
             "expires_at": "2026-07-29T10:00:00Z",
         }
 
+        required = _bindings()
+        self.assertEqual(
+            len(required["reports"]) + len(required["raw_artifacts"]),
+            REQUIRED_RECEIPT_ARTIFACT_COUNT,
+        )
+        maximum = _with_optional_packet_restores(required)
+        self.assertEqual(
+            len(maximum["reports"]) + len(maximum["raw_artifacts"]),
+            MAX_RECEIPT_ARTIFACT_COUNT,
+        )
+        build_receipt_request(
+            self.context,
+            nonce,
+            maximum,
+            runner=self.runner,
+            observed_at=self.observed_at,
+        )
+        one_too_many = copy.deepcopy(maximum)
+        one_too_many["raw_artifacts"].append(
+            {
+                "harness": "packet",
+                "subject": "not-source-pinned",
+                "descriptor": _descriptor(
+                    "packet-product-state-observation",
+                    "raw/packet/not-source-pinned.json",
+                    10_000,
+                ),
+            }
+        )
+        with self.assertRaisesRegex(
+            PhysicalCollectorRequestError,
+            f"exceeds {MAX_RECEIPT_ARTIFACT_COUNT}",
+        ):
+            build_receipt_request(
+                self.context,
+                nonce,
+                one_too_many,
+                runner=self.runner,
+                observed_at=self.observed_at,
+            )
+
         wrong_kind = _bindings()
         wrong_kind["raw_artifacts"][0]["descriptor"]["kind"] = (
-            "performance-samples"
+            "not-an-artifact-kind"
         )
         with self.assertRaisesRegex(RawArtifactError, "allowed artifact kind"):
             build_receipt_request(
@@ -446,10 +712,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
                 observed_at=self.observed_at,
             )
 
-        too_many = _bindings()
-        too_many["raw_artifacts"].extend(
-            copy.deepcopy(too_many["raw_artifacts"][0]) for _ in range(512)
-        )
+        too_many = copy.deepcopy(one_too_many)
         with self.assertRaisesRegex(PhysicalCollectorRequestError, "descriptors"):
             build_receipt_request(
                 self.context,
@@ -460,19 +723,14 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
             )
 
         too_many_bytes = _bindings()
-        for index in range(17):
-            too_many_bytes["raw_artifacts"].append(
-                {
-                    "harness": "performance",
-                    "subject": f"extra-samples-{index}",
-                    "descriptor": {
-                        "kind": "performance-samples",
-                        "path": f"raw/performance/extra-samples-{index}.json",
-                        "size": 16 * 1024 * 1024,
-                        "sha256": f"{100 + index:064x}",
-                    },
-                }
-            )
+        oversized_pcaps = [
+            binding
+            for binding in too_many_bytes["raw_artifacts"]
+            if binding["descriptor"]["kind"] == "packet-pcap"
+        ][:9]
+        self.assertEqual(len(oversized_pcaps), 9)
+        for binding in oversized_pcaps:
+            binding["descriptor"]["size"] = 32 * 1024 * 1024
         with self.assertRaisesRegex(PhysicalCollectorRequestError, "artifact bytes"):
             build_receipt_request(
                 self.context,

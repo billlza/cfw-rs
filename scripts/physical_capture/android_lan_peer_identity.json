@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "document": "cfw-android-lan-peer-source-identity-v1",
+  "network": {
+    "interface_name": "wlan0",
+    "ipv4": "172.20.10.2"
+  },
+  "identity_sha256": "7db9a43d88a58b544b006fba4b7b14f426e122bcc798a81ccb91dce071e77ce3",
+  "identity": {
+    "schema_version": 1,
+    "document": "cfw-android-lan-peer-identity-v1",
+    "role": "packet-lan-peer",
+    "platform": "android",
+    "transport": "adb-usb",
+    "listener_address": "0.0.0.0",
+    "listener_port": 44333,
+    "serial_sha256": "4915dd610bd3a7be080fa2cce1964541063dbb17692670c596eef86855baf404",
+    "build_fingerprint_sha256": "2773e1a3d4c012c5e667254e51ede70ce77b5cbe80dff98fe33f4eab780f73b3",
+    "boot_id_sha256": "b6af18090e49442773e06e0398f02406a8c36cb7f3b1c7c740d4485660a5d483",
+    "verified_boot_state": "green",
+    "vbmeta_device_state": "locked",
+    "flash_locked": true,
+    "abi": "arm64-v8a",
+    "network_interface_name": "wlan0",
+    "ipv4": "172.20.10.2",
+    "deployment": {
+      "directory_path": "/data/local/tmp/cfw-release-evidence-v040",
+      "directory_uid": 2000,
+      "directory_gid": 2000,
+      "directory_mode": "0700",
+      "binary_path": "/data/local/tmp/cfw-release-evidence-v040/packet-lan-peer-linux-arm64",
+      "binary_sha256": "873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17",
+      "binary_size": 2359422,
+      "binary_uid": 2000,
+      "binary_gid": 2000,
+      "binary_mode": "0500"
+    },
+    "process_uid": 2000,
+    "process_gid": 2000
+  }
+}

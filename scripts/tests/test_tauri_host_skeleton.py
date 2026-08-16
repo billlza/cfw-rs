@@ -10,6 +10,8 @@ from unittest import mock
 
 from scripts.verify_candidate_bundle import (
     CandidateError,
+    enumerate_bundle,
+    verify_macho,
     verify_unsigned_host_skeleton,
 )
 
@@ -91,11 +93,40 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
 
+    def test_candidate_verifier_rejects_non_distribution_macho_mode(self) -> None:
+        binary = self.root / "host-binary"
+        binary.write_bytes(b"fixture")
+        binary.chmod(0o700)
+
+        with self.assertRaisesRegex(CandidateError, "mode must be 0755"):
+            verify_macho(binary)
+
+    def test_candidate_verifier_rejects_non_distribution_bundle_modes(self) -> None:
+        bundle = self.root / "Bundle.app"
+        bundle.mkdir()
+        bundle.chmod(0o755)
+        resource = bundle / "resource.txt"
+        resource.write_bytes(b"fixture")
+        resource.chmod(0o600)
+        with self.assertRaisesRegex(CandidateError, "file mode must be 0644 or 0755"):
+            enumerate_bundle(bundle)
+
+        resource.chmod(0o644)
+        nested = bundle / "Contents"
+        nested.mkdir()
+        nested.chmod(0o700)
+        with self.assertRaisesRegex(CandidateError, "directory mode must be 0755"):
+            enumerate_bundle(bundle)
+
     def test_runner_invokes_tauri_without_no_sign(self) -> None:
         completed = self.run_contract()
         self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         arguments = completed.stdout.decode()
-        self.assertIn("[build]\n[--bundles]\n[app]\n[--ci]\n[--config]\n", arguments)
+        self.assertIn(
+            "[build]\n[--bundles]\n[app]\n[--ci]\n"
+            "[--features]\n[physical-release-evidence]\n[--config]\n",
+            arguments,
+        )
         self.assertNotIn("--no-sign", arguments)
 
     def test_runner_isolated_from_readonly_caller_variables_without_errexit(self) -> None:
@@ -118,6 +149,8 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
             "[--bundles]\n"
             "[app]\n"
             "[--ci]\n"
+            "[--features]\n"
+            "[physical-release-evidence]\n"
             "[--config]\n"
             f"[{self.override}]\n"
         )

@@ -3,10 +3,11 @@ use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use cfw_singbox_config::{CredentialKind, CredentialRef, ValidatedSingBoxProfile};
+use cfw_singbox_config::{CredentialKind, CredentialRef, MAX_OUTBOUNDS, ValidatedSingBoxProfile};
 use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -14,6 +15,9 @@ mod clash;
 mod yaml;
 
 const SUPPORTED_URI_SCHEMES: &[&str] = &["ss", "vmess", "vless", "trojan", "hysteria2", "hy2"];
+// The pinned macOS sing-box build uses Go's 64-bit `int` for AlterId.
+// Source values are normalized to the closed stored 0/1 representation below.
+const MAX_SOURCE_VMESS_ALTER_ID: u64 = i64::MAX as u64;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ImportedCredential {
@@ -51,6 +55,7 @@ struct OutboundCollector {
     outbounds: Vec<Value>,
     credentials: Vec<ImportedCredential>,
     used_tags: BTreeSet<String>,
+    credential_namespace: Option<Uuid>,
 }
 
 #[derive(Debug, Default)]
@@ -70,7 +75,7 @@ struct VmessPayload {
     port: serde_json::Value,
     id: String,
     #[serde(default)]
-    aid: String,
+    aid: VmessAid,
     #[serde(default)]
     scy: String,
     #[serde(default)]
@@ -91,7 +96,50 @@ struct VmessPayload {
     service_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum VmessAid {
+    Text(String),
+    Integer(u64),
+}
+
+impl Default for VmessAid {
+    fn default() -> Self {
+        Self::Integer(0)
+    }
+}
+
+impl VmessAid {
+    fn parse(&self) -> Result<u8, String> {
+        match self {
+            Self::Text(value) => parse_vmess_alter_id(value, "vmess URI aid"),
+            Self::Integer(value) => normalize_vmess_alter_id(*value, "vmess URI aid"),
+        }
+    }
+}
+
 pub(crate) fn import_subscription_document(body: &str) -> Result<ImportedSubscription, String> {
+    import_subscription_document_with_collector(body, OutboundCollector::default())
+}
+
+/// Converts a subscription with stable, secret-free credential reference IDs.
+/// The namespace is owned by the migration candidate and is never derived from
+/// credential material, so retries reproduce the same profile identity without
+/// retaining secrets between preview and commit.
+pub(crate) fn import_subscription_document_with_credential_namespace(
+    body: &str,
+    namespace: Uuid,
+) -> Result<ImportedSubscription, String> {
+    import_subscription_document_with_collector(
+        body,
+        OutboundCollector::with_credential_namespace(namespace),
+    )
+}
+
+fn import_subscription_document_with_collector(
+    body: &str,
+    mut collector: OutboundCollector,
+) -> Result<ImportedSubscription, String> {
     if let Ok(profile) = ValidatedSingBoxProfile::parse(body) {
         return Ok(ImportedSubscription {
             profile,
@@ -100,12 +148,11 @@ pub(crate) fn import_subscription_document(body: &str) -> Result<ImportedSubscri
     }
 
     if looks_like_clash_yaml(body) {
-        return clash::import_clash_document(body);
+        return clash::import_clash_document(body, collector);
     }
 
     let candidate = decode_uri_bundle_base64(body).unwrap_or_else(|| body.trim().to_owned());
     let entries = collect_uri_entries(&candidate)?;
-    let mut collector = OutboundCollector::default();
     for (index, entry) in entries.iter().enumerate() {
         collector.push_entry(entry, index)?;
     }
@@ -174,6 +221,11 @@ fn collect_uri_entries(body: &str) -> Result<Vec<String>, String> {
                 sanitized_token(&scheme)
             ));
         }
+        if entries.len() == MAX_OUTBOUNDS {
+            return Err(format!(
+                "subscription URI bundle has more than {MAX_OUTBOUNDS} entries"
+            ));
+        }
         entries.push(trimmed.to_owned());
     }
     if entries.is_empty() {
@@ -186,6 +238,13 @@ fn collect_uri_entries(body: &str) -> Result<Vec<String>, String> {
 }
 
 impl OutboundCollector {
+    fn with_credential_namespace(namespace: Uuid) -> Self {
+        Self {
+            credential_namespace: Some(namespace),
+            ..Self::default()
+        }
+    }
+
     fn push_entry(&mut self, entry: &str, index: usize) -> Result<(), String> {
         let scheme = entry
             .split("://")
@@ -247,7 +306,7 @@ impl OutboundCollector {
             CredentialKind::ShadowsocksPassword,
             decode_url_component(password)?,
         );
-        let tag = self.unique_tag(tag.unwrap_or_else(|| format!("ss-{index}")));
+        let tag = self.unique_tag(tag.unwrap_or_else(|| format!("ss-{index}")))?;
         Ok(json!({
             "type": "shadowsocks",
             "tag": tag,
@@ -270,12 +329,10 @@ impl OutboundCollector {
         .map_err(|_| "vmess URI payload is not UTF-8".to_owned())?;
         let payload: VmessPayload = serde_json::from_str(&payload)
             .map_err(|error| format!("vmess URI payload is invalid JSON: {error}"))?;
-        if !payload.aid.is_empty() && payload.aid != "0" {
-            return Err("vmess alterId is unsupported; only aid=0 is accepted".into());
-        }
+        let alter_id = payload.aid.parse()?;
         let reference = self.push_secret(CredentialKind::VmessUuid, payload.id.clone());
         let tag =
-            self.unique_tag(non_empty(payload.ps).unwrap_or_else(|| format!("vmess-{index}")));
+            self.unique_tag(non_empty(payload.ps).unwrap_or_else(|| format!("vmess-{index}")))?;
         let server_port = parse_port_value(&payload.port)?;
         let tls = match payload.tls.to_ascii_lowercase().as_str() {
             "" | "none" => None,
@@ -309,6 +366,9 @@ impl OutboundCollector {
             "server_port": server_port,
             "credential_ref": credential_ref_json(&reference),
         });
+        if alter_id != 0 {
+            outbound["alter_id"] = Value::from(alter_id);
+        }
         if let Some(security) = normalize_vmess_security(payload.scy.as_str())? {
             outbound["security"] = Value::String(security);
         }
@@ -329,7 +389,7 @@ impl OutboundCollector {
             decode_url_component(url.username())?,
         );
         let tag =
-            self.unique_tag(decoded_fragment(&url).unwrap_or_else(|| format!("vless-{index}")));
+            self.unique_tag(decoded_fragment(&url).unwrap_or_else(|| format!("vless-{index}")))?;
         let server = host_string(&url)?;
         let security = query.get("security").map(String::as_str).unwrap_or("none");
         let tls = match security {
@@ -402,7 +462,7 @@ impl OutboundCollector {
             decode_url_component(url.username())?,
         );
         let tag =
-            self.unique_tag(decoded_fragment(&url).unwrap_or_else(|| format!("trojan-{index}")));
+            self.unique_tag(decoded_fragment(&url).unwrap_or_else(|| format!("trojan-{index}")))?;
         let transport = transport_from_parts(
             query.get("type").map(String::as_str).unwrap_or("tcp"),
             query.get("path").cloned(),
@@ -439,7 +499,8 @@ impl OutboundCollector {
             CredentialKind::Hysteria2Password,
             decode_url_component(url.username())?,
         );
-        let tag = self.unique_tag(decoded_fragment(&url).unwrap_or_else(|| format!("hy2-{index}")));
+        let tag =
+            self.unique_tag(decoded_fragment(&url).unwrap_or_else(|| format!("hy2-{index}")))?;
         let tls = tls_json(build_tls_parts(
             true,
             query.get("sni").cloned().unwrap_or_else(|| server.clone()),
@@ -481,7 +542,12 @@ impl OutboundCollector {
     }
 
     fn push_secret(&mut self, kind: CredentialKind, secret: String) -> CredentialRef {
-        let reference = CredentialRef::new(Uuid::new_v4().hyphenated().to_string(), kind)
+        let id = self
+            .credential_namespace
+            .as_ref()
+            .map(|namespace| deterministic_credential_uuid(namespace, self.credentials.len(), kind))
+            .unwrap_or_else(Uuid::new_v4);
+        let reference = CredentialRef::new(id.hyphenated().to_string(), kind)
             .expect("generated credential UUID must stay canonical");
         self.credentials.push(ImportedCredential {
             reference: reference.clone(),
@@ -490,21 +556,23 @@ impl OutboundCollector {
         reference
     }
 
-    fn unique_tag(&mut self, preferred: String) -> String {
-        let sanitized = preferred.trim().replace('\n', " ");
-        if sanitized.is_empty() {
-            return self.unique_tag("proxy".into());
-        }
+    fn unique_tag(&mut self, preferred: String) -> Result<String, String> {
+        let sanitized = match preferred.trim().replace('\n', " ") {
+            value if value.is_empty() => "proxy".to_owned(),
+            value => value,
+        };
         if self.used_tags.insert(sanitized.clone()) {
-            return sanitized;
+            return Ok(sanitized);
         }
-        for suffix in 2..=10_000 {
+        for suffix in 2..=MAX_OUTBOUNDS {
             let candidate = format!("{sanitized}-{suffix}");
             if self.used_tags.insert(candidate.clone()) {
-                return candidate;
+                return Ok(candidate);
             }
         }
-        unreachable!("bounded duplicate suffix search must terminate");
+        Err(format!(
+            "subscription cannot assign a unique outbound tag within the {MAX_OUTBOUNDS}-entry limit"
+        ))
     }
 
     /// Encodes the collected outbounds and runs the result through the
@@ -518,6 +586,32 @@ impl OutboundCollector {
             profile,
             credentials: self.credentials,
         })
+    }
+}
+
+fn deterministic_credential_uuid(namespace: &Uuid, index: usize, kind: CredentialKind) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"cfw-legacy-credential-reference-v1\0");
+    hasher.update(namespace.as_bytes());
+    hasher.update([0]);
+    hasher.update(index.to_be_bytes());
+    hasher.update([credential_kind_discriminant(kind)]);
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn credential_kind_discriminant(kind: CredentialKind) -> u8 {
+    match kind {
+        CredentialKind::ShadowsocksPassword => 1,
+        CredentialKind::VmessUuid => 2,
+        CredentialKind::VlessUuid => 3,
+        CredentialKind::TrojanPassword => 4,
+        CredentialKind::Hysteria2Password => 5,
+        CredentialKind::Hysteria2ObfsPassword => 6,
     }
 }
 
@@ -632,6 +726,35 @@ fn normalize_vmess_security(security: &str) -> Result<Option<String>, String> {
             sanitized_token(other)
         )),
     }
+}
+
+fn parse_vmess_alter_id(value: &str, field: &str) -> Result<u8, String> {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return Err(format!(
+            "{field} must be a canonical non-negative decimal integer no greater than {MAX_SOURCE_VMESS_ALTER_ID}"
+        ));
+    }
+    let value = value.parse::<u64>().map_err(|_| {
+        format!(
+            "{field} must be a canonical non-negative decimal integer no greater than {MAX_SOURCE_VMESS_ALTER_ID}"
+        )
+    })?;
+    normalize_vmess_alter_id(value, field)
+}
+
+fn normalize_vmess_alter_id(value: u64, field: &str) -> Result<u8, String> {
+    if value > MAX_SOURCE_VMESS_ALTER_ID {
+        return Err(format!(
+            "{field} must be no greater than {MAX_SOURCE_VMESS_ALTER_ID}"
+        ));
+    }
+    // The pinned sing-box VMess contract treats every positive alter ID as
+    // the same legacy protocol mode. Keep the stored profile closed to 0/1 so
+    // equivalent source spellings cannot create different canonical state.
+    Ok(u8::from(value != 0))
 }
 
 fn normalize_vless_flow(flow: &str) -> Result<String, String> {
@@ -804,7 +927,101 @@ fn credential_ref_json(reference: &CredentialRef) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
+    use cfw_singbox_config::{EngineSettings, ProjectionMode};
+
     use super::*;
+
+    const SYNTHETIC_VM_UUID: &str = "00000000-0000-4000-8000-000000000001";
+    const SYNTHETIC_PROFILE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+    fn vmess_uri_with_aid(aid: Option<Value>) -> String {
+        let mut payload = json!({
+            "ps": "Synthetic VMess",
+            "add": "vmess.example.com",
+            "port": 443,
+            "id": SYNTHETIC_VM_UUID,
+        });
+        if let Some(aid) = aid {
+            payload
+                .as_object_mut()
+                .expect("VMess fixture payload must be an object")
+                .insert("aid".into(), aid);
+        }
+        format!("vmess://{}", STANDARD.encode(payload.to_string()))
+    }
+
+    fn clash_vmess_with_alter_id(value: Option<&str>) -> String {
+        let alter_id = value
+            .map(|value| format!("    alterId: {value}\n"))
+            .unwrap_or_default();
+        format!(
+            "proxies:\n  - name: Synthetic VMess\n    type: vmess\n    server: vmess.example.com\n    port: 443\n    uuid: {SYNTHETIC_VM_UUID}\n{alter_id}"
+        )
+    }
+
+    fn assert_single_vmess_alter_id(document: &str, expected: u8) {
+        let imported = import_subscription_document(document).expect("valid VMess fixture");
+        assert_eq!(imported.credentials.len(), 1);
+        let profile: Value =
+            serde_json::from_str(imported.profile.as_json()).expect("canonical profile JSON");
+        let outbound = &profile["outbounds"][0];
+        assert_eq!(outbound["type"], "vmess");
+        if expected == 0 {
+            assert!(
+                outbound.get("alter_id").is_none(),
+                "AEAD alter_id must remain the omitted canonical default"
+            );
+        } else {
+            assert_eq!(outbound["alter_id"], expected);
+        }
+
+        let projected = imported
+            .profile
+            .project(
+                SYNTHETIC_PROFILE_ID,
+                ProjectionMode::SystemProxy,
+                &EngineSettings::default(),
+            )
+            .expect("runtime VMess projection");
+        let runtime: Value =
+            serde_json::from_str(projected.as_json()).expect("runtime projection JSON");
+        let runtime_vmess = runtime["outbounds"]
+            .as_array()
+            .expect("runtime outbounds")
+            .iter()
+            .find(|outbound| outbound["type"] == "vmess")
+            .expect("runtime VMess outbound");
+        if expected == 0 {
+            assert!(
+                runtime_vmess.get("alter_id").is_none(),
+                "AEAD runtime alter_id must remain omitted"
+            );
+        } else {
+            assert_eq!(runtime_vmess["alter_id"], expected);
+        }
+    }
+
+    fn synthetic_46_node_clash_fixture() -> String {
+        let mut document = String::from("proxies:\n");
+        for index in 0..34_u16 {
+            writeln!(
+                document,
+                "  - name: SS-{index:02}\n    type: ss\n    server: ss-{index:02}.example.com\n    port: {}\n    cipher: aes-256-gcm\n    password: synthetic-ss-secret-{index:02}",
+                10_000 + index
+            )
+            .expect("write synthetic Shadowsocks fixture");
+        }
+        for index in 0..12_u16 {
+            writeln!(
+                document,
+                "  - name: VMess-{index:02}\n    type: vmess\n    server: vmess-{index:02}.example.com\n    port: 443\n    uuid: 00000000-0000-4000-8000-{index:012x}\n    alterId: 1\n    cipher: auto"
+            )
+            .expect("write synthetic VMess fixture");
+        }
+        document
+    }
 
     #[test]
     fn passes_through_typed_sing_box_json_without_credentials() {
@@ -816,6 +1033,202 @@ mod tests {
             r#"{"outbounds":[{"tag":"direct","type":"direct"}]}"#
         );
         assert!(imported.credentials.is_empty());
+    }
+
+    #[test]
+    fn vmess_uri_aid_normalizes_positive_legacy_values_and_rejects_noncanonical_input() {
+        for (aid, expected) in [
+            (None, 0),
+            (Some(json!(0)), 0),
+            (Some(json!("0")), 0),
+            (Some(json!(1)), 1),
+            (Some(json!("1")), 1),
+            (Some(json!(2)), 1),
+            (Some(json!("2")), 1),
+            (Some(json!(64)), 1),
+            (Some(json!("64")), 1),
+            (Some(json!(256)), 1),
+            (Some(json!(u32::MAX)), 1),
+            (Some(json!(u32::MAX.to_string())), 1),
+            (Some(json!(u64::from(u32::MAX) + 1)), 1),
+            (Some(json!((u64::from(u32::MAX) + 1).to_string())), 1),
+            (Some(json!(i64::MAX)), 1),
+            (Some(json!(i64::MAX.to_string())), 1),
+        ] {
+            assert_single_vmess_alter_id(&vmess_uri_with_aid(aid), expected);
+        }
+
+        for (label, aid) in [
+            ("null", Value::Null),
+            ("empty", json!("")),
+            ("leading zero", json!("01")),
+            ("plus", json!("+1")),
+            ("negative string", json!("-1")),
+            ("negative number", json!(-1)),
+            ("over bound number", json!(i64::MAX as u64 + 1)),
+            (
+                "over bound string",
+                json!((i64::MAX as u64 + 1).to_string()),
+            ),
+            ("overflow string", json!("18446744073709551616")),
+            ("float", json!(1.0)),
+            ("boolean", json!(true)),
+            ("mapping", json!({ "value": 1 })),
+            ("sequence", json!([1])),
+        ] {
+            let error =
+                import_subscription_document(&vmess_uri_with_aid(Some(aid))).expect_err(label);
+            assert!(
+                error.contains("vmess URI aid") || error.contains("vmess URI payload"),
+                "{label}: {error}"
+            );
+            assert!(!error.contains(SYNTHETIC_VM_UUID), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn clash_vmess_alter_id_normalizes_positive_legacy_values_and_rejects_noncanonical_input() {
+        for (value, expected) in [
+            (None, 0),
+            (Some("0"), 0),
+            (Some("\"0\""), 0),
+            (Some("1"), 1),
+            (Some("\"1\""), 1),
+            (Some("2"), 1),
+            (Some("\"2\""), 1),
+            (Some("64"), 1),
+            (Some("\"64\""), 1),
+            (Some("256"), 1),
+            (Some("4294967295"), 1),
+            (Some("\"4294967295\""), 1),
+            (Some("4294967296"), 1),
+            (Some("\"4294967296\""), 1),
+            (Some("9223372036854775807"), 1),
+            (Some("\"9223372036854775807\""), 1),
+        ] {
+            assert_single_vmess_alter_id(&clash_vmess_with_alter_id(value), expected);
+        }
+
+        for (label, value) in [
+            ("null", "null"),
+            ("empty", "\"\""),
+            ("leading zero", "01"),
+            ("plus", "+1"),
+            ("negative", "-1"),
+            ("over bound", "9223372036854775808"),
+            ("quoted over bound", "\"9223372036854775808\""),
+            ("overflow", "\"18446744073709551616\""),
+            ("float", "1.0"),
+            ("boolean", "true"),
+            ("mapping", "{ value: 1 }"),
+            ("sequence", "[1]"),
+        ] {
+            let error = import_subscription_document(&clash_vmess_with_alter_id(Some(value)))
+                .expect_err(label);
+            assert!(error.contains("proxies[0].alterId"), "{label}: {error}");
+            assert!(!error.contains(SYNTHETIC_VM_UUID), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn synthetic_46_node_legacy_fixture_preserves_vmess_and_projects_one_selector() {
+        let imported = import_subscription_document(&synthetic_46_node_clash_fixture())
+            .expect("46-node synthetic Clash fixture");
+        assert_eq!(imported.credentials.len(), 46);
+        assert_eq!(
+            imported
+                .credentials
+                .iter()
+                .filter(|credential| {
+                    credential.reference.kind() == CredentialKind::ShadowsocksPassword
+                })
+                .count(),
+            34
+        );
+        assert_eq!(
+            imported
+                .credentials
+                .iter()
+                .filter(|credential| credential.reference.kind() == CredentialKind::VmessUuid)
+                .count(),
+            12
+        );
+
+        let profile: Value =
+            serde_json::from_str(imported.profile.as_json()).expect("canonical 46-node profile");
+        let profile_outbounds = profile["outbounds"].as_array().expect("profile outbounds");
+        assert_eq!(profile_outbounds.len(), 46);
+        assert_eq!(
+            profile_outbounds
+                .iter()
+                .filter(|outbound| outbound["type"] == "shadowsocks")
+                .count(),
+            34
+        );
+        assert_eq!(
+            profile_outbounds
+                .iter()
+                .filter(|outbound| { outbound["type"] == "vmess" && outbound["alter_id"] == 1 })
+                .count(),
+            12
+        );
+        assert!(!imported.profile.as_json().contains("synthetic-ss-secret"));
+
+        let expected_tags = profile_outbounds
+            .iter()
+            .map(|outbound| outbound["tag"].clone())
+            .collect::<Vec<_>>();
+        for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
+            let projected = imported
+                .profile
+                .project(SYNTHETIC_PROFILE_ID, mode, &EngineSettings::default())
+                .expect("runtime projection for 46-node fixture");
+            assert_eq!(projected.credential_slots().len(), 46);
+            let runtime: Value =
+                serde_json::from_str(projected.as_json()).expect("runtime projection JSON");
+            let runtime_outbounds = runtime["outbounds"].as_array().expect("runtime outbounds");
+            assert_eq!(runtime_outbounds.len(), 47);
+            assert_eq!(
+                runtime_outbounds
+                    .iter()
+                    .filter(|outbound| { outbound["type"] == "vmess" && outbound["alter_id"] == 1 })
+                    .count(),
+                12
+            );
+            assert_eq!(
+                runtime_outbounds
+                    .iter()
+                    .filter(|outbound| outbound["type"] == "selector")
+                    .count(),
+                1
+            );
+            let selector = runtime_outbounds
+                .iter()
+                .find(|outbound| outbound["type"] == "selector")
+                .expect("app-owned selector");
+            let selector_tag = selector["tag"].as_str().expect("selector tag");
+            assert_eq!(selector["outbounds"], Value::Array(expected_tags.clone()));
+            assert_eq!(
+                selector["outbounds"]
+                    .as_array()
+                    .expect("selector options")
+                    .len(),
+                46
+            );
+            assert_eq!(runtime["route"]["final"], selector_tag);
+            let authenticated_dns = runtime["dns"]["servers"]
+                .as_array()
+                .expect("DNS servers")
+                .iter()
+                .filter(|server| server["type"] == "https")
+                .collect::<Vec<_>>();
+            assert!(!authenticated_dns.is_empty());
+            assert!(
+                authenticated_dns
+                    .iter()
+                    .all(|server| server["detour"] == selector_tag)
+            );
+        }
     }
 
     #[test]
@@ -838,6 +1251,63 @@ mod tests {
             CredentialKind::TrojanPassword
         );
         assert_eq!(imported.credentials[1].secret, "hunter2");
+    }
+
+    #[test]
+    fn uri_bundle_enforces_the_outbound_limit_before_conversion() {
+        let entry = "ss://YWVzLTI1Ni1nY206c2VjcmV0@example.com:8388#Repeated";
+        let at_limit = std::iter::repeat_n(entry, MAX_OUTBOUNDS)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let imported = import_subscription_document(&at_limit).expect("URI bundle at limit");
+        let profile: Value =
+            serde_json::from_str(imported.profile.as_json()).expect("canonical JSON");
+        let outbounds = profile["outbounds"].as_array().expect("outbounds array");
+        assert_eq!(outbounds.len(), MAX_OUTBOUNDS);
+        assert_eq!(outbounds[0]["tag"], "Repeated");
+        assert_eq!(outbounds[MAX_OUTBOUNDS - 1]["tag"], "Repeated-128");
+
+        let over_limit = format!("{at_limit}\n{entry}");
+        let error = import_subscription_document(&over_limit).expect_err("129th URI must fail");
+        assert_eq!(
+            error,
+            format!("subscription URI bundle has more than {MAX_OUTBOUNDS} entries")
+        );
+    }
+
+    #[test]
+    fn migration_credential_references_are_stable_and_namespace_bound() {
+        let body = "trojan://hunter2@trojan.example.com:443?sni=trojan.example.com#Work";
+        let namespace =
+            Uuid::parse_str("aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa").expect("migration namespace");
+        let other_namespace = Uuid::parse_str("bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb")
+            .expect("other migration namespace");
+        let first = import_subscription_document_with_credential_namespace(body, namespace)
+            .expect("first deterministic import");
+        let replay = import_subscription_document_with_credential_namespace(body, namespace)
+            .expect("deterministic replay");
+        let other = import_subscription_document_with_credential_namespace(body, other_namespace)
+            .expect("other candidate import");
+
+        assert_eq!(first.profile, replay.profile);
+        assert_eq!(
+            first.credentials[0].reference,
+            replay.credentials[0].reference
+        );
+        assert_ne!(
+            first.credentials[0].reference,
+            other.credentials[0].reference
+        );
+        assert_ne!(first.profile.digest(), other.profile.digest());
+        assert_eq!(
+            first.credentials[0]
+                .reference
+                .id()
+                .parse::<Uuid>()
+                .expect("credential UUID")
+                .get_version_num(),
+            5
+        );
     }
 
     #[test]

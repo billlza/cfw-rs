@@ -4,7 +4,10 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 import plistlib
+import re
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -253,11 +256,76 @@ class HostReleaseEntitlementTests(unittest.TestCase):
 
 
 class SignedCandidateWiringTests(unittest.TestCase):
+    def test_signed_candidate_uses_distribution_umask(self) -> None:
+        source = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("\numask 022\n", source)
+        self.assertNotIn("\numask 077\n", source)
+
+    def isolated_runner_bootstrap(self) -> str:
+        source = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r'PYTHONDONTWRITEBYTECODE=1 "\$python_bin" -I -S -B -c \'\n'
+            r'(?P<bootstrap>.*?)\n\' "\$repo_root" "\$script" "\$@"',
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        return match.group("bootstrap") if match is not None else ""
+
+    def test_isolated_runner_supports_repository_package_imports(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-B",
+                "-c",
+                self.isolated_runner_bootstrap(),
+                str(REPOSITORY),
+                str(REPOSITORY / "scripts/host_release_entitlements.py"),
+                "--help",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--decoded-profile", completed.stdout)
+
+    def test_isolated_runner_rejects_entrypoint_outside_repository_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            outside = Path(temporary_directory) / "outside.py"
+            outside.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-B",
+                    "-c",
+                    self.isolated_runner_bootstrap(),
+                    str(REPOSITORY),
+                    str(outside),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("escaped the reviewed scripts directory", completed.stderr)
+
     def test_final_host_signature_uses_generated_release_xcent(self) -> None:
         source = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
             encoding="utf-8"
         )
-        generation = source.index("-m scripts.host_release_entitlements")
+        generation = source.index("scripts/host_release_entitlements.py")
         final_signing = source.index("\ncodesign \\\n  --force", generation)
 
         self.assertLess(generation, final_signing)

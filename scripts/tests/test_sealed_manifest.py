@@ -21,6 +21,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.evidence_manifest import KIND_LEVEL, LEVEL_ORDER, REQUIRED_BINDINGS
 from scripts.publication.common import PublicationError, canonical_json
@@ -72,6 +73,7 @@ from scripts.tests.physical_evidence_fixture import (
     XCFRAMEWORK_MANIFEST_SHA,
     XCFRAMEWORK_SHA,
     final_artifact_hash_manifest,
+    fixture_packet_policy,
 )
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 from scripts.tests.test_sealed_closure import _request as _closure_request
@@ -90,23 +92,27 @@ CAPABILITIES = CAPABILITY_IDS
 def build_final_candidate_binding(*args, **kwargs):
     kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
     kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
-    return _build_final_candidate_binding(*args, **kwargs)
+    with fixture_packet_policy():
+        return _build_final_candidate_binding(*args, **kwargs)
 
 
 def build_sealed_evidence_manifest(*args, **kwargs):
     kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
     kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
-    return _build_sealed_evidence_manifest(*args, **kwargs)
+    with fixture_packet_policy():
+        return _build_sealed_evidence_manifest(*args, **kwargs)
 
 
 def validate_sealed_evidence_manifest(*args, **kwargs):
     kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
     kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
-    return _validate_sealed_evidence_manifest(*args, **kwargs)
+    with fixture_packet_policy():
+        return _validate_sealed_evidence_manifest(*args, **kwargs)
 
 
 def authorize_publication_artifacts(*args, **kwargs):
-    return _authorize_publication_artifacts(*args, **kwargs)
+    with fixture_packet_policy():
+        return _authorize_publication_artifacts(*args, **kwargs)
 
 
 def digest(label: str) -> str:
@@ -164,10 +170,16 @@ def inner_manifest(
     }
 
 
-def source_gates(*, commit: str = COMMIT) -> dict:
+def source_gates(
+    *,
+    commit: str = COMMIT,
+    release_source: str = RELEASE_SOURCE,
+) -> dict:
     return {
         "schema_version": SOURCE_GATE_SCHEMA_VERSION,
         "document": SOURCE_GATE_DOCUMENT,
+        "repository_commit": commit,
+        "release_source_sha256": release_source,
         "gates": [
             {
                 "id": identifier,
@@ -176,6 +188,7 @@ def source_gates(*, commit: str = COMMIT) -> dict:
                 "exit_code": 0,
                 "log_sha256": digest(f"source-gate-log-{identifier}"),
                 "commit": commit,
+                "release_source_sha256": release_source,
             }
             for identifier, script in sorted(REQUIRED_SOURCE_GATES.items())
         ]
@@ -454,7 +467,13 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
     ) -> None:
         manifest = self.build(request(3, self.workspace))
         manifest["fixture"] = False
-        with self.assertRaisesRegex(PublicationError, "source-pinned policy"):
+        with patch(
+            "scripts.publication.sealed_manifest.current_identity",
+            return_value={
+                "repositoryCommit": COMMIT,
+                "releaseSourceSha256": RELEASE_SOURCE,
+            },
+        ), self.assertRaisesRegex(PublicationError, "source-pinned policy"):
             authorize_publication_artifacts(
                 REPOSITORY, manifest, workspace_root=self.workspace
             )
@@ -644,6 +663,63 @@ class SealedManifestBindingTests(_CleanWorkspace):
         payload = request(0, self.workspace)
         payload["p0_source"]["gates"][0]["commit"] = "b" * 40
         with self.assertRaisesRegex(PublicationError, "different commit"):
+            self.build(payload)
+
+    def test_stale_source_gate_release_source_is_rejected(self) -> None:
+        payload = request(1, self.workspace)
+        payload["p0_source"]["release_source_sha256"] = "e" * 64
+        for gate in payload["p0_source"]["gates"]:
+            gate["release_source_sha256"] = "e" * 64
+        with self.assertRaisesRegex(PublicationError, "different release sources"):
+            self.build(payload)
+
+    def test_non_fixture_seal_rechecks_current_clean_release_source(self) -> None:
+        payload = request(0, self.workspace)
+        with patch(
+            "scripts.publication.sealed_manifest.current_identity",
+            return_value={
+                "repositoryCommit": COMMIT,
+                "releaseSourceSha256": RELEASE_SOURCE,
+            },
+        ) as identity, patch(
+            "scripts.publication.sealed_manifest._inner_manifest",
+            return_value=({}, [], []),
+        ):
+            manifest = build_sealed_evidence_manifest(
+                REPOSITORY,
+                payload,
+                fixture=False,
+                workspace_root=self.workspace,
+            )
+        identity.assert_called_once_with(REPOSITORY, require_clean=True)
+        self.assertEqual(manifest["bindings"]["release_source_sha256"], RELEASE_SOURCE)
+
+        with patch(
+            "scripts.publication.sealed_manifest.current_identity",
+            return_value={
+                "repositoryCommit": COMMIT,
+                "releaseSourceSha256": "e" * 64,
+            },
+        ), patch(
+            "scripts.publication.sealed_manifest._inner_manifest",
+            return_value=({}, [], []),
+        ), self.assertRaisesRegex(PublicationError, "different release source"):
+            build_sealed_evidence_manifest(
+                REPOSITORY,
+                payload,
+                fixture=False,
+                workspace_root=self.workspace,
+            )
+
+    def test_legacy_source_gate_schema_without_source_binding_is_rejected(self) -> None:
+        payload = request(0, self.workspace)
+        payload["p0_source"]["schema_version"] = 1
+        payload["p0_source"]["document"] = "p0-source-gates-v1"
+        payload["p0_source"].pop("repository_commit")
+        payload["p0_source"].pop("release_source_sha256")
+        for gate in payload["p0_source"]["gates"]:
+            gate.pop("release_source_sha256")
+        with self.assertRaisesRegex(PublicationError, "field set|schema"):
             self.build(payload)
 
     def test_stale_ci_toolchain_is_rejected(self) -> None:

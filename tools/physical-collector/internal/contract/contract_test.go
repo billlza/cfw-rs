@@ -3,6 +3,7 @@ package contract
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +78,105 @@ func TestBuildReceiptPayloadUsesOnlyServerBindingAndSorts(t *testing.T) {
 	}
 }
 
+func TestBuildReceiptPayloadIncludesIdentityObservationSubjects(t *testing.T) {
+	t.Parallel()
+	request := validReceiptRequest()
+	probes := []string{
+		"inside-out-signatures",
+		"team-id",
+		"bundle-identifiers",
+		"entitlements",
+		"provisioning",
+	}
+	payload, err := BuildReceiptPayload(
+		request,
+		testBinding(),
+		mustTime(t, "2026-07-29T04:00:00Z"),
+	)
+	if err != nil {
+		t.Fatalf("identity observation subjects were rejected: %v", err)
+	}
+	seen := make(map[string]bool)
+	for _, artifact := range payload.RawArtifacts {
+		seen[artifact.Subject] = true
+	}
+	for _, probe := range probes {
+		if !seen[probe+":observation"] {
+			t.Fatalf("receipt omitted identity observation subject %q", probe)
+		}
+	}
+}
+
+func TestLifecycleV4RequiresExactSeventyTwoSubjectClosure(t *testing.T) {
+	t.Parallel()
+	request := validReceiptRequest()
+	seen := make(map[string]string)
+	for _, artifact := range request.RawArtifacts {
+		if artifact.Harness == "lifecycle" {
+			seen[artifact.Subject] = artifact.Descriptor.Kind
+		}
+	}
+	if len(seen) != 72 {
+		t.Fatalf("lifecycle raw closure has %d subjects, want 72", len(seen))
+	}
+	for _, probeID := range lifecycleProbeIDs {
+		if seen[probeID] != "lifecycle-event" {
+			t.Fatalf("probe %q lacks its proof-bound lifecycle event", probeID)
+		}
+		if seen[probeID+":observation"] != "lifecycle-observation" {
+			t.Fatalf("probe %q lacks its proof-free lifecycle observation", probeID)
+		}
+	}
+}
+
+func TestReceiptArtifactCountAccepts269And271ButRejects272(t *testing.T) {
+	t.Parallel()
+	required := validReceiptRequest()
+	if got := len(required.Reports) + len(required.RawArtifacts); got != 269 {
+		t.Fatalf("required receipt has %d descriptors, want 269", got)
+	}
+	if _, err := BuildReceiptPayload(required, testBinding(), mustTime(t, "2026-07-29T04:00:00Z")); err != nil {
+		t.Fatalf("required 269-descriptor receipt was rejected: %v", err)
+	}
+	maximum := validReceiptRequest()
+	for index, subject := range []string{
+		"stop-cleanup:restore-state",
+		"ipv6-disabled-absence:restore-state",
+	} {
+		maximum.RawArtifacts = append(maximum.RawArtifacts, RawArtifactBinding{
+			Harness: "packet",
+			Subject: subject,
+			Descriptor: testDescriptor(
+				"packet-product-state-observation",
+				"raw/packet/"+strings.ReplaceAll(subject, ":", "-")+".json",
+				900+index,
+			),
+		})
+	}
+	if got := len(maximum.Reports) + len(maximum.RawArtifacts); got != MaxArtifactCount {
+		t.Fatalf("maximal receipt has %d descriptors, want %d", got, MaxArtifactCount)
+	}
+	if _, err := BuildReceiptPayload(maximum, testBinding(), mustTime(t, "2026-07-29T04:00:00Z")); err != nil {
+		t.Fatalf("maximal 271-descriptor receipt was rejected: %v", err)
+	}
+	oneTooMany := maximum
+	oneTooMany.RawArtifacts = append(append([]RawArtifactBinding(nil), maximum.RawArtifacts...), RawArtifactBinding{
+		Harness: "packet",
+		Subject: "not-source-pinned",
+		Descriptor: testDescriptor(
+			"packet-product-state-observation",
+			"raw/packet/not-source-pinned.json",
+			999,
+		),
+	})
+	if got := len(oneTooMany.Reports) + len(oneTooMany.RawArtifacts); got != 272 {
+		t.Fatalf("overflow receipt has %d descriptors, want 272", got)
+	}
+	if _, err := BuildReceiptPayload(oneTooMany, testBinding(), mustTime(t, "2026-07-29T04:00:00Z")); err == nil || !strings.Contains(err.Error(), "exceeds 271") {
+		t.Fatalf("272-descriptor receipt did not fail at the exact bound: %v", err)
+	}
+}
+
 func TestBuildReceiptPayloadRejectsAttackMutations(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -87,12 +187,59 @@ func TestBuildReceiptPayloadRejectsAttackMutations(t *testing.T) {
 		{name: "not-clean", mutate: func(request *ReceiptRequest) { request.Run.CleanInstall = false }},
 		{name: "nonce-not-256-bit", mutate: func(request *ReceiptRequest) { request.Run.RunNonce = "0" }},
 		{name: "report-tool-substitution", mutate: func(request *ReceiptRequest) { request.Reports[0].ToolVersion = "attacker-v1" }},
+		{name: "retired-lifecycle-v3", mutate: func(request *ReceiptRequest) {
+			for index, report := range request.Reports {
+				if report.Harness == "lifecycle" {
+					request.Reports[index].ToolVersion = "lifecycle-matrix-v3"
+					return
+				}
+			}
+		}},
 		{name: "path-traversal", mutate: func(request *ReceiptRequest) { request.RawArtifacts[0].Descriptor.Path = "../escape.json" }},
 		{name: "digest-reuse", mutate: func(request *ReceiptRequest) {
 			request.RawArtifacts[1].Descriptor.SHA256 = request.RawArtifacts[0].Descriptor.SHA256
 		}},
 		{name: "kind-cross-harness", mutate: func(request *ReceiptRequest) { request.RawArtifacts[0].Descriptor.Kind = "adversarial-transcript" }},
+		{name: "wrong-lifecycle-kind", mutate: func(request *ReceiptRequest) { request.RawArtifacts[0].Descriptor.Kind = "network-extension-trace" }},
 		{name: "missing-lifecycle-proof", mutate: func(request *ReceiptRequest) { request.RawArtifacts = request.RawArtifacts[1:] }},
+		{name: "lifecycle-observation-relabeled-as-event", mutate: func(request *ReceiptRequest) {
+			for index, artifact := range request.RawArtifacts {
+				if artifact.Harness == "lifecycle" && artifact.Subject == "team-id:observation" {
+					request.RawArtifacts[index].Descriptor.Kind = "lifecycle-event"
+					return
+				}
+			}
+		}},
+		{name: "missing-lifecycle-observation", mutate: func(request *ReceiptRequest) {
+			for index, artifact := range request.RawArtifacts {
+				if artifact.Harness == "lifecycle" && artifact.Subject == "login:observation" {
+					request.RawArtifacts = append(request.RawArtifacts[:index], request.RawArtifacts[index+1:]...)
+					return
+				}
+			}
+		}},
+		{name: "unknown-lifecycle-subject", mutate: func(request *ReceiptRequest) {
+			request.RawArtifacts = append(request.RawArtifacts, RawArtifactBinding{
+				Harness: "lifecycle", Subject: "invented-success",
+				Descriptor: testDescriptor("lifecycle-event", "raw/lifecycle/invented-success.json", 999),
+			})
+		}},
+		{name: "missing-adversarial-precondition", mutate: func(request *ReceiptRequest) {
+			for index, artifact := range request.RawArtifacts {
+				if artifact.Harness == "adversarial" && artifact.Subject == "observation:wrong-team-id" {
+					request.RawArtifacts = append(request.RawArtifacts[:index], request.RawArtifacts[index+1:]...)
+					return
+				}
+			}
+		}},
+		{name: "adversarial-subject-kind-mismatch", mutate: func(request *ReceiptRequest) {
+			for index, artifact := range request.RawArtifacts {
+				if artifact.Harness == "adversarial" && artifact.Subject == "observation:wrong-team-id" {
+					request.RawArtifacts[index].Descriptor.Kind = "adversarial-transcript"
+					return
+				}
+			}
+		}},
 		{name: "future-completion", mutate: func(request *ReceiptRequest) { request.Run.CompletedAt = "2026-07-29T05:00:00Z" }},
 	}
 	for _, test := range tests {
@@ -109,7 +256,7 @@ func TestBuildReceiptPayloadRejectsAttackMutations(t *testing.T) {
 
 func validReceiptRequest() ReceiptRequest {
 	candidate := Candidate{
-		Version: ProductVersion, BuildNumber: "40003",
+		Version: ProductVersion, BuildNumber: "40005",
 		AppManifestSHA256: testSHA("app"), SignedAppTreeSHA256: testSHA("tree"),
 		ArtifactHashManifestSHA256: testSHA("artifacts"), BuiltAt: "2026-07-29T00:00:00Z",
 	}
@@ -117,15 +264,15 @@ func validReceiptRequest() ReceiptRequest {
 		OS: "macos15", MacOSVersion: "15.7.8", MacOSBuild: "24G824",
 		MachineSHA256: testSHA("machine"), CleanInstall: true,
 		CapturedAt: "2026-07-29T01:00:00Z", CompletedAt: "2026-07-29T03:00:00Z",
-		RunID: "run-40003-macos15", RunNonce: testSHA("nonce"),
+		RunID: "run-40005-macos15", RunNonce: testSHA("nonce"),
 	}
 	harnesses := []struct {
 		name, version, kind string
 	}{
-		{"lifecycle", "lifecycle-matrix-v3", "lifecycle-report"},
-		{"packet", "packet-evidence-v3", "packet-report"},
-		{"performance", "performance-gates-v2", "performance-report"},
-		{"adversarial", "adversarial-clients-v2", "adversarial-report"},
+		{"lifecycle", "lifecycle-matrix-v4", "lifecycle-report"},
+		{"packet", "packet-evidence-v4", "packet-report"},
+		{"performance", "performance-gates-v3", "performance-report"},
+		{"adversarial", "adversarial-clients-v3", "adversarial-report"},
 	}
 	reports := make([]ReportBinding, 0, len(harnesses))
 	for index, harness := range harnesses {
@@ -135,28 +282,59 @@ func validReceiptRequest() ReceiptRequest {
 			Descriptor: testDescriptor(harness.kind, "reports/"+harness.name+".json", index),
 		})
 	}
-	lifecycle := []struct{ subject, kind, file string }{
-		{"renderer-ready-v2:trace", "renderer-ready-trace", "renderer.json"},
-		{"network-extension-approval:trace", "network-extension-trace", "ne-approval.json"},
-		{"network-extension-denial:trace", "network-extension-trace", "ne-denial.json"},
-		{"network-extension-pending:trace", "network-extension-trace", "ne-pending.json"},
-		{"sleep-wake:trace", "sleep-wake-trace", "sleep-wake.json"},
-		{"sleep-wake:packet", "packet-pcap", "sleep-wake.pcap"},
-		{"wkwebview-850x603:metadata", "wkwebview-metadata", "pixels.json"},
-		{"wkwebview-850x603:pixels", "wkwebview-rgba", "pixels.rgba"},
+	lifecycleSubjects := make([]string, 0, len(requiredLifecycleSubjects))
+	for subject := range requiredLifecycleSubjects {
+		lifecycleSubjects = append(lifecycleSubjects, subject)
 	}
-	raw := make([]RawArtifactBinding, 0, len(lifecycle)+3)
-	for index, artifact := range lifecycle {
+	sort.Strings(lifecycleSubjects)
+	raw := make([]RawArtifactBinding, 0, len(lifecycleSubjects)+3)
+	for index, subject := range lifecycleSubjects {
+		allowedKinds, ok := expectedLifecycleKinds(subject)
+		if !ok {
+			panic("source-pinned lifecycle subject has no artifact kind: " + subject)
+		}
+		kinds := make([]string, 0, len(allowedKinds))
+		for kind := range allowedKinds {
+			kinds = append(kinds, kind)
+		}
+		sort.Strings(kinds)
+		kind := kinds[0]
+		file := strings.ReplaceAll(subject, ":", "-") + artifactKinds[kind].suffix
 		raw = append(raw, RawArtifactBinding{
-			Harness: "lifecycle", Subject: artifact.subject,
-			Descriptor: testDescriptor(artifact.kind, "raw/lifecycle/"+artifact.file, 100+index),
+			Harness: "lifecycle", Subject: subject,
+			Descriptor: testDescriptor(kind, "raw/lifecycle/"+file, 100+index),
 		})
 	}
+	for index, caseID := range packetCaseIDs {
+		base := 200 + index*4
+		raw = append(raw,
+			RawArtifactBinding{Harness: "packet", Subject: caseID, Descriptor: testDescriptor("packet-pcap", "raw/packet/"+caseID+".pcap", base)},
+			RawArtifactBinding{Harness: "packet", Subject: caseID + ":product-state", Descriptor: testDescriptor("packet-product-state-observation", "raw/packet/"+caseID+"-state.json", base+1)},
+			RawArtifactBinding{Harness: "packet", Subject: caseID + ":capture-provenance", Descriptor: testDescriptor("packet-capture-provenance", "raw/packet/"+caseID+"-provenance.json", base+2)},
+			RawArtifactBinding{Harness: "packet", Subject: caseID + ":send-attempt", Descriptor: testDescriptor("packet-send-attempt", "raw/packet/"+caseID+"-attempt.json", base+3)},
+		)
+	}
 	raw = append(raw,
-		RawArtifactBinding{Harness: "packet", Subject: "tcp-ipv4", Descriptor: testDescriptor("packet-pcap", "raw/packet/tcp-ipv4.pcap", 200)},
-		RawArtifactBinding{Harness: "performance", Subject: "measurements", Descriptor: testDescriptor("performance-samples", "raw/performance/samples.json", 201)},
-		RawArtifactBinding{Harness: "adversarial", Subject: "baseline", Descriptor: testDescriptor("adversarial-transcript", "raw/adversarial/baseline.json", 202)},
+		RawArtifactBinding{Harness: "performance", Subject: "sample-ledger", Descriptor: testDescriptor("performance-sample-ledger", "raw/performance/sample-ledger.json", 300)},
+		RawArtifactBinding{Harness: "performance", Subject: "shaping-intent", Descriptor: testDescriptor("performance-shaping-transaction", "raw/performance/shaping-intent.json", 301)},
+		RawArtifactBinding{Harness: "performance", Subject: "shaping-restoration", Descriptor: testDescriptor("performance-shaping-transaction", "raw/performance/shaping-restoration.json", 302)},
 	)
+	adversarialSubjects := make([]string, 0, len(RequiredAdversarialSubjects()))
+	for subject := range RequiredAdversarialSubjects() {
+		adversarialSubjects = append(adversarialSubjects, subject)
+	}
+	sort.Strings(adversarialSubjects)
+	for index, subject := range adversarialSubjects {
+		kind, ok := ExpectedAdversarialArtifactKind(subject)
+		if !ok {
+			panic("source-pinned adversarial subject has no artifact kind: " + subject)
+		}
+		file := strings.ReplaceAll(subject, ":", "-") + ".json"
+		raw = append(raw, RawArtifactBinding{
+			Harness: "adversarial", Subject: subject,
+			Descriptor: testDescriptor(kind, "raw/adversarial/"+file, 400+index),
+		})
+	}
 	return ReceiptRequest{SchemaVersion: RequestSchemaVersion, Candidate: candidate, Run: run, Reports: reports, RawArtifacts: raw}
 }
 

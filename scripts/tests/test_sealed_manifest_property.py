@@ -54,6 +54,7 @@ from scripts.tests.test_physical_evidence_aggregator import (
     PHYSICAL_EVIDENCE_ROOT,
     PHYSICAL_TRUST_POLICY,
 )
+from scripts.tests.physical_evidence_fixture import fixture_packet_policy
 from scripts.tests.test_sealed_manifest import (
     COMMIT,
     REPOSITORY,
@@ -66,20 +67,25 @@ from scripts.tests.test_sealed_manifest import (
 
 ACCEPT_CASES = 120
 REJECT_CASES = 200
+
+
 def build_sealed_evidence_manifest(*args, **kwargs):
     kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
     kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
-    return _build_sealed_evidence_manifest(*args, **kwargs)
+    with fixture_packet_policy():
+        return _build_sealed_evidence_manifest(*args, **kwargs)
 
 
 def validate_sealed_evidence_manifest(*args, **kwargs):
     kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
     kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
-    return _validate_sealed_evidence_manifest(*args, **kwargs)
+    with fixture_packet_policy():
+        return _validate_sealed_evidence_manifest(*args, **kwargs)
 
 
 def authorize_publication_artifacts(*args, **kwargs):
-    return _authorize_publication_artifacts(*args, **kwargs)
+    with fixture_packet_policy():
+        return _authorize_publication_artifacts(*args, **kwargs)
 
 
 def _commit(rng: random.Random) -> str:

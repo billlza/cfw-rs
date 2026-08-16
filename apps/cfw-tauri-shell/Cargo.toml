@@ -6,6 +6,9 @@ license.workspace = true
 build = "build.rs"
 autobins = false
 
+[features]
+physical-release-evidence = []
+
 [[bin]]
 name = "clash-for-mac"
 path = "src/main.rs"
@@ -30,21 +33,25 @@ saphyr-parser.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tauri = { version = "=2.11.5", features = ["tray-icon"] }
 tauri-plugin-single-instance = "=2.4.3"
 thiserror.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["io-util", "net"] }
 tokio-tungstenite.workspace = true
 urlencoding.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]
+cc = "=1.4.0"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 tauri-build = { version = "=2.6.3", features = [] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "=0.10.1"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication"] }
+security-framework = { version = "=3.7.0", default-features = false }

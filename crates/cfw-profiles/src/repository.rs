@@ -6,15 +6,31 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::envelope::{
-    decode, encode, encode_with_timestamp, normalize_name, profile_file_name,
+    decode, encode, encode_with_timestamp, normalize_name, normalize_source_url, profile_file_name,
     profile_id_from_file_name, validate_profile_id,
 };
+use crate::selected_replace::{self, SelectedProfileReplaceIntent};
 use crate::selection::{ProfileSelection, decode as decode_selection, encode as encode_selection};
 use crate::storage::RepositoryDirectory;
 use crate::storage::ensure_entry_capacity;
 use crate::{
-    MAX_REPOSITORY_BYTES, MAX_REPOSITORY_CREDENTIAL_REFERENCES, ProfileError, SELECTION_FILE_NAME,
+    MAX_REPOSITORY_BYTES, MAX_REPOSITORY_CREDENTIAL_REFERENCES, ProfileError,
+    SELECTED_REPLACE_FILE_NAME, SELECTION_FILE_NAME,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectedReplaceRecovery {
+    None,
+    Aborted,
+    Committed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectedReplaceState {
+    Previous,
+    ReplacementProfileWithPreviousSelection,
+    Replacement,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProfileImportResult {
@@ -22,6 +38,12 @@ pub struct ProfileImportResult {
     pub name: String,
     pub bytes: usize,
     pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactProfileImportOutcome {
+    pub profile: ProfileImportResult,
+    pub created: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -76,6 +98,18 @@ pub struct LockedProfileCredentialSnapshot {
     _directory: RepositoryDirectory,
 }
 
+/// Holds the repository's cross-process exclusive lock across a credential
+/// vault prepare and the profile commit that makes that audience live.
+///
+/// Credential garbage collection takes the same lock before re-reading its
+/// repository snapshot and committing a vault deletion. Keeping this guard
+/// alive across vault provisioning closes the otherwise unsafe window where a
+/// prepared audience could be collected before its profile becomes visible.
+pub struct LockedCredentialProfileMutation {
+    repository: ProfileRepository,
+    directory: RepositoryDirectory,
+}
+
 /// Selected profile plus the repository's cross-process exclusive lock. This
 /// guard closes the gap between destructive legacy retirement validation and
 /// starting the exact profile that was validated.
@@ -93,6 +127,48 @@ impl LockedSelectedProfile {
 impl LockedProfileCredentialSnapshot {
     pub fn snapshot(&self) -> &ProfileCredentialSnapshot {
         &self.snapshot
+    }
+}
+
+impl LockedCredentialProfileMutation {
+    /// Commits one exact-ID import and then releases the repository lock.
+    pub fn commit_exact_import(
+        self,
+        id: &str,
+        name: Option<&str>,
+        profile: &ValidatedSingBoxProfile,
+        source_url: Option<&str>,
+    ) -> Result<ExactProfileImportOutcome, ProfileError> {
+        self.repository
+            .import_with_id_and_source_outcome_in_directory(
+                &self.directory,
+                id,
+                name,
+                profile,
+                source_url,
+            )
+    }
+
+    /// Commits one compare-and-swap replacement and then releases the lock.
+    pub fn commit_replace_if_unchanged(
+        self,
+        expected: &StoredProfile,
+        name: Option<&str>,
+        profile: &ValidatedSingBoxProfile,
+        source_url: Option<&str>,
+    ) -> Result<(ProfileImportResult, StoredProfile), ProfileError> {
+        validate_stored_profile(expected)?;
+        self.repository.replace_with_timestamp_in_directory(
+            &self.directory,
+            ProfileReplacement {
+                id: &expected.record.id,
+                name,
+                profile,
+                source_url,
+                created_epoch_secs: None,
+                expected: Some(expected),
+            },
+        )
     }
 }
 
@@ -115,6 +191,15 @@ struct CredentialSnapshotIdentity<'a> {
     schema_version: u16,
     catalog: &'a [ProfileCredentialCatalogEntry],
     selected_profile_id: Option<&'a str>,
+}
+
+struct ProfileReplacement<'a> {
+    id: &'a str,
+    name: Option<&'a str>,
+    profile: &'a ValidatedSingBoxProfile,
+    source_url: Option<&'a str>,
+    created_epoch_secs: Option<u64>,
+    expected: Option<&'a StoredProfile>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,12 +232,76 @@ impl ProfileRepository {
         profile: &ValidatedSingBoxProfile,
         source_url: Option<&str>,
     ) -> Result<ProfileImportResult, ProfileError> {
+        let id = Uuid::new_v4().hyphenated().to_string();
+        self.import_with_id_and_source(&id, name, profile, source_url)
+    }
+
+    /// Imports one profile under an exact caller-owned UUID.
+    ///
+    /// Migration credentials are bound to the profile UUID and digest, so a
+    /// retry must reuse the same identity. An exact replay returns the existing
+    /// record. Reusing the UUID with any different name, profile, or source URL
+    /// is an explicit conflict and never overwrites the durable entry.
+    pub fn import_with_id_and_source(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        profile: &ValidatedSingBoxProfile,
+        source_url: Option<&str>,
+    ) -> Result<ProfileImportResult, ProfileError> {
+        self.import_with_id_and_source_outcome(id, name, profile, source_url)
+            .map(|outcome| outcome.profile)
+    }
+
+    /// Exact-ID import with a lock-bound created/replayed disposition.
+    /// Callers must use this outcome instead of a separate preflight `load`
+    /// when compensating a newly created entry after a surrounding transaction.
+    pub fn import_with_id_and_source_outcome(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        profile: &ValidatedSingBoxProfile,
+        source_url: Option<&str>,
+    ) -> Result<ExactProfileImportOutcome, ProfileError> {
         let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
+        self.recover_repository(&directory)?;
+        self.import_with_id_and_source_outcome_in_directory(
+            &directory, id, name, profile, source_url,
+        )
+    }
+
+    fn import_with_id_and_source_outcome_in_directory(
+        &self,
+        directory: &RepositoryDirectory,
+        id: &str,
+        name: Option<&str>,
+        profile: &ValidatedSingBoxProfile,
+        source_url: Option<&str>,
+    ) -> Result<ExactProfileImportOutcome, ProfileError> {
+        let id = validate_profile_id(id)?;
+        let name = normalize_name(name.unwrap_or("Local profile"))?;
         // Do not add new state alongside a corrupt, legacy, or interrupted
         // entry. The one-way migration API is the only path that clears those.
-        let existing = self.read_all(&directory)?;
+        let existing = self.read_all(directory)?;
+        if existing.records.iter().any(|record| record.id == id) {
+            let current = self.decode(id, directory.open_profile_file(id)?)?;
+            if current.record.name == name
+                && current.profile == *profile
+                && current.source_url.as_deref() == source_url
+            {
+                return Ok(ExactProfileImportOutcome {
+                    profile: ProfileImportResult {
+                        id: id.to_owned(),
+                        name,
+                        bytes: profile.as_json().len(),
+                        digest: profile.digest().to_string(),
+                    },
+                    created: false,
+                });
+            }
+            return Err(ProfileError::AlreadyExists(id.to_owned()));
+        }
         let prospective_bindings = credential_binding_count(&existing.credential_catalog)?
             .checked_add(profile.credential_references().len())
             .ok_or(ProfileError::TooManyCredentialReferences)?;
@@ -162,16 +311,17 @@ impl ProfileRepository {
         // is already full; otherwise the 4,097th entry would be committed and
         // only discovered by a later operation.
         ensure_entry_capacity(existing.records.len())?;
-        let id = Uuid::new_v4().hyphenated().to_string();
-        let name = normalize_name(name.unwrap_or("Local profile"))?;
-        let bytes = encode(&id, &name, profile, source_url)?;
+        let bytes = encode(id, &name, profile, source_url)?;
         ensure_repository_bytes(existing.stored_bytes, bytes.len())?;
-        directory.write_new_atomic(&profile_file_name(&id), &bytes)?;
-        Ok(ProfileImportResult {
-            id,
-            name,
-            bytes: profile.as_json().len(),
-            digest: profile.digest().to_string(),
+        directory.write_new_atomic(&profile_file_name(id), &bytes)?;
+        Ok(ExactProfileImportOutcome {
+            profile: ProfileImportResult {
+                id: id.to_owned(),
+                name,
+                bytes: profile.as_json().len(),
+                digest: profile.digest().to_string(),
+            },
+            created: true,
         })
     }
 
@@ -189,7 +339,32 @@ impl ProfileRepository {
         profile: &ValidatedSingBoxProfile,
         source_url: Option<&str>,
     ) -> Result<ProfileImportResult, ProfileError> {
-        self.replace_with_timestamp(id, name, profile, source_url, None)
+        self.replace_with_timestamp(id, name, profile, source_url, None, None)
+            .map(|(result, _stored)| result)
+    }
+
+    /// Replaces a profile only when its complete stored identity still matches
+    /// the caller's pre-I/O snapshot.
+    ///
+    /// Subscription fetches happen outside the repository lock. This compare-
+    /// and-swap boundary prevents a delayed response from overwriting a newer
+    /// document, name, source URL, or credential-reference set.
+    pub fn replace_if_unchanged(
+        &self,
+        expected: &StoredProfile,
+        name: Option<&str>,
+        profile: &ValidatedSingBoxProfile,
+        source_url: Option<&str>,
+    ) -> Result<(ProfileImportResult, StoredProfile), ProfileError> {
+        validate_stored_profile(expected)?;
+        self.replace_with_timestamp(
+            &expected.record.id,
+            name,
+            profile,
+            source_url,
+            None,
+            Some(expected),
+        )
     }
 
     /// Restores a previously loaded profile after a surrounding transaction
@@ -197,16 +372,32 @@ impl ProfileRepository {
     /// timestamp as well as identity, name, profile, source URL, credentials,
     /// and selected digest.
     pub fn restore(&self, stored: &StoredProfile) -> Result<ProfileImportResult, ProfileError> {
-        if stored.record.digest != stored.profile.digest()
-            || stored.record.bytes != stored.profile.as_json().len()
-        {
-            return Err(ProfileError::DigestMismatch {
+        validate_stored_profile(stored)?;
+        self.replace_with_timestamp(
+            &stored.record.id,
+            Some(&stored.record.name),
+            &stored.profile,
+            stored.source_url.as_deref(),
+            Some(stored.record.created_epoch_secs),
+            None,
+        )
+        .map(|(result, _stored)| result)
+    }
+
+    /// Restores a prior snapshot only if the transaction's replacement is
+    /// still current. A failed vault operation must never roll the repository
+    /// back over a newer user edit or subscription response.
+    pub fn restore_if_unchanged(
+        &self,
+        expected_current: &StoredProfile,
+        stored: &StoredProfile,
+    ) -> Result<ProfileImportResult, ProfileError> {
+        validate_stored_profile(expected_current)?;
+        validate_stored_profile(stored)?;
+        if expected_current.record.id != stored.record.id {
+            return Err(ProfileError::ProfileChanged {
                 id: stored.record.id.clone(),
             });
-        }
-        let normalized_name = normalize_name(&stored.record.name)?;
-        if normalized_name != stored.record.name {
-            return Err(ProfileError::InvalidName);
         }
         self.replace_with_timestamp(
             &stored.record.id,
@@ -214,7 +405,9 @@ impl ProfileRepository {
             &stored.profile,
             stored.source_url.as_deref(),
             Some(stored.record.created_epoch_secs),
+            Some(expected_current),
         )
+        .map(|(result, _stored)| result)
     }
 
     fn replace_with_timestamp(
@@ -224,15 +417,45 @@ impl ProfileRepository {
         profile: &ValidatedSingBoxProfile,
         source_url: Option<&str>,
         created_epoch_secs: Option<u64>,
-    ) -> Result<ProfileImportResult, ProfileError> {
-        let id = validate_profile_id(id)?;
+        expected: Option<&StoredProfile>,
+    ) -> Result<(ProfileImportResult, StoredProfile), ProfileError> {
         let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
-        let existing = self.read_all(&directory)?;
+        self.recover_repository(&directory)?;
+        self.replace_with_timestamp_in_directory(
+            &directory,
+            ProfileReplacement {
+                id,
+                name,
+                profile,
+                source_url,
+                created_epoch_secs,
+                expected,
+            },
+        )
+    }
+
+    fn replace_with_timestamp_in_directory(
+        &self,
+        directory: &RepositoryDirectory,
+        replacement: ProfileReplacement<'_>,
+    ) -> Result<(ProfileImportResult, StoredProfile), ProfileError> {
+        let ProfileReplacement {
+            id,
+            name,
+            profile,
+            source_url,
+            created_epoch_secs,
+            expected,
+        } = replacement;
+        let id = validate_profile_id(id)?;
+        let existing = self.read_all(directory)?;
         let file = directory.open_profile_file(id)?;
         let replaced_bytes = file.metadata()?.len();
         let current = self.decode(id, file)?;
+        if expected.is_some_and(|expected| expected != &current) {
+            return Err(ProfileError::ProfileChanged { id: id.to_owned() });
+        }
         let existing_bindings = credential_binding_count(&existing.credential_catalog)?;
         let prospective_bindings = existing_bindings
             .checked_sub(current.profile.credential_references().len())
@@ -243,10 +466,13 @@ impl ProfileRepository {
             Some(name) => normalize_name(name)?,
             None => current.record.name.clone(),
         };
-        let bytes = match created_epoch_secs {
-            Some(timestamp) => encode_with_timestamp(id, &name, profile, source_url, timestamp)?,
-            None => encode(id, &name, profile, source_url)?,
+        let timestamp = match created_epoch_secs {
+            Some(timestamp) => timestamp,
+            None => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
         };
+        let bytes = encode_with_timestamp(id, &name, profile, source_url, timestamp)?;
         ensure_repository_bytes(
             existing.stored_bytes.saturating_sub(replaced_bytes),
             bytes.len(),
@@ -257,16 +483,103 @@ impl ProfileRepository {
             .filter(|selection| selection.profile_id() == id)
             .map(|_| ProfileSelection::new(id, profile.digest()))
             .transpose()?;
-        directory.write_replace_atomic(&profile_file_name(id), &bytes)?;
-        if let Some(selection) = selection {
-            directory.write_replace_atomic(SELECTION_FILE_NAME, &encode_selection(&selection)?)?;
-        }
-        Ok(ProfileImportResult {
+        let result = ProfileImportResult {
             id: id.to_owned(),
-            name,
+            name: name.clone(),
             bytes: profile.as_json().len(),
             digest: profile.digest().to_string(),
-        })
+        };
+        let stored = StoredProfile {
+            record: ProfileRecord {
+                id: id.to_owned(),
+                name,
+                bytes: profile.as_json().len(),
+                digest: profile.digest().to_string(),
+                created_epoch_secs: timestamp,
+            },
+            profile: profile.clone(),
+            source_url: source_url.map(ToOwned::to_owned),
+        };
+
+        let replacement_changes_selected_digest =
+            selection.is_some() && current.record.digest != stored.record.digest;
+        if replacement_changes_selected_digest {
+            let intent = SelectedProfileReplaceIntent::new(
+                id,
+                &current.record.digest,
+                &stored.record.digest,
+                &stored_envelope_digest(&current)?,
+                &sha256_hex(&bytes),
+            )?;
+            let intent_bytes = intent.encode()?;
+            let prospective_bytes = existing
+                .stored_bytes
+                .saturating_sub(replaced_bytes)
+                .saturating_add(bytes.len() as u64);
+            ensure_repository_bytes(prospective_bytes, intent_bytes.len())?;
+            if let Err(operation) =
+                directory.write_new_atomic(SELECTED_REPLACE_FILE_NAME, &intent_bytes)
+            {
+                return match self.recover_after_selected_replace_error(directory, &operation)? {
+                    SelectedReplaceRecovery::None | SelectedReplaceRecovery::Aborted => {
+                        Err(operation)
+                    }
+                    SelectedReplaceRecovery::Committed => {
+                        Err(ProfileError::SelectedReplaceRecovery {
+                            operation: operation.to_string(),
+                            recovery:
+                                "an unstarted replacement was unexpectedly reported committed"
+                                    .into(),
+                        })
+                    }
+                };
+            }
+
+            if let Err(operation) = directory.write_replace_atomic(&profile_file_name(id), &bytes) {
+                return match self.recover_after_selected_replace_error(directory, &operation)? {
+                    SelectedReplaceRecovery::Committed => Ok((result, stored)),
+                    SelectedReplaceRecovery::Aborted => Err(operation),
+                    SelectedReplaceRecovery::None => Err(ProfileError::SelectedReplaceRecovery {
+                        operation: operation.to_string(),
+                        recovery: "replacement intent disappeared before recovery".into(),
+                    }),
+                };
+            }
+
+            let selection = selection.expect("selected digest change has selection metadata");
+            if let Err(operation) =
+                directory.write_replace_atomic(SELECTION_FILE_NAME, &encode_selection(&selection)?)
+            {
+                return match self.recover_after_selected_replace_error(directory, &operation)? {
+                    SelectedReplaceRecovery::Committed => Ok((result, stored)),
+                    SelectedReplaceRecovery::Aborted | SelectedReplaceRecovery::None => {
+                        Err(ProfileError::SelectedReplaceRecovery {
+                            operation: operation.to_string(),
+                            recovery:
+                                "profile replacement committed but selection did not roll forward"
+                                    .into(),
+                        })
+                    }
+                };
+            }
+
+            if let Err(operation) = self.finish_selected_replace(directory) {
+                return match self.recover_after_selected_replace_error(directory, &operation)? {
+                    SelectedReplaceRecovery::Committed | SelectedReplaceRecovery::None => {
+                        Ok((result, stored))
+                    }
+                    SelectedReplaceRecovery::Aborted => {
+                        Err(ProfileError::SelectedReplaceRecovery {
+                            operation: operation.to_string(),
+                            recovery: "replacement cleanup reverted after both commits".into(),
+                        })
+                    }
+                };
+            }
+        } else {
+            directory.write_replace_atomic(&profile_file_name(id), &bytes)?;
+        }
+        Ok((result, stored))
     }
 
     /// Renames a profile and/or rebinds its subscription URL without touching
@@ -280,7 +593,7 @@ impl ProfileRepository {
         let id = validate_profile_id(id)?;
         let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
+        self.recover_repository(&directory)?;
         let existing = self.read_all(&directory)?;
         let file = directory.open_profile_file(id)?;
         let replaced_bytes = file.metadata()?.len();
@@ -324,6 +637,7 @@ impl ProfileRepository {
             return Ok(None);
         };
         directory.lock_exclusive()?;
+        self.recover_repository(&directory)?;
         let file_name = profile_file_name(id);
         if directory.entry_exists(&file_name)? {
             Ok(Some(file_name))
@@ -340,7 +654,7 @@ impl ProfileRepository {
             });
         };
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
+        self.recover_repository(&directory)?;
         self.read_all(&directory)
             .map(|snapshot| ProfileRepositorySnapshot {
                 profiles: snapshot.records,
@@ -358,7 +672,7 @@ impl ProfileRepository {
             return build_credential_snapshot(&[], None);
         };
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
+        self.recover_repository(&directory)?;
         let snapshot = self.read_all(&directory)?;
         build_credential_snapshot(&snapshot.credential_catalog, snapshot.selection.as_ref())
     }
@@ -368,7 +682,7 @@ impl ProfileRepository {
     ) -> Result<LockedProfileCredentialSnapshot, ProfileError> {
         let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
+        self.recover_repository(&directory)?;
         let snapshot = self.read_all(&directory)?;
         let snapshot =
             build_credential_snapshot(&snapshot.credential_catalog, snapshot.selection.as_ref())?;
@@ -376,6 +690,143 @@ impl ProfileRepository {
             snapshot,
             _directory: directory,
         })
+    }
+
+    /// Begins a credential-bearing profile mutation under the same
+    /// cross-process lock used by credential garbage-collection commits.
+    pub fn begin_credential_profile_mutation(
+        &self,
+    ) -> Result<LockedCredentialProfileMutation, ProfileError> {
+        let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
+        directory.lock_exclusive()?;
+        self.recover_repository(&directory)?;
+        Ok(LockedCredentialProfileMutation {
+            repository: self.clone(),
+            directory,
+        })
+    }
+
+    fn recover_repository(&self, directory: &RepositoryDirectory) -> Result<(), ProfileError> {
+        directory.recover_owned_temporaries()?;
+        self.recover_selected_replace(directory).map(|_| ())
+    }
+
+    fn recover_selected_replace(
+        &self,
+        directory: &RepositoryDirectory,
+    ) -> Result<SelectedReplaceRecovery, ProfileError> {
+        if !directory.entry_exists(SELECTED_REPLACE_FILE_NAME)? {
+            return Ok(SelectedReplaceRecovery::None);
+        }
+        let intent = selected_replace::decode(directory.open_selected_replace_file()?)?;
+        match self.selected_replace_state(directory, &intent)? {
+            SelectedReplaceState::Previous => {
+                self.finish_selected_replace(directory)?;
+                Ok(SelectedReplaceRecovery::Aborted)
+            }
+            SelectedReplaceState::ReplacementProfileWithPreviousSelection => {
+                let selection = ProfileSelection::new(
+                    intent.profile_id(),
+                    intent.replacement_profile_digest(),
+                )?;
+                directory
+                    .write_replace_atomic(SELECTION_FILE_NAME, &encode_selection(&selection)?)?;
+                if self.selected_replace_state(directory, &intent)?
+                    != SelectedReplaceState::Replacement
+                {
+                    return Err(ProfileError::SelectedReplaceConflict(
+                        "selection roll-forward did not produce the exact replacement state".into(),
+                    ));
+                }
+                self.finish_selected_replace(directory)?;
+                Ok(SelectedReplaceRecovery::Committed)
+            }
+            SelectedReplaceState::Replacement => {
+                self.finish_selected_replace(directory)?;
+                Ok(SelectedReplaceRecovery::Committed)
+            }
+        }
+    }
+
+    fn recover_after_selected_replace_error(
+        &self,
+        directory: &RepositoryDirectory,
+        operation: &ProfileError,
+    ) -> Result<SelectedReplaceRecovery, ProfileError> {
+        directory
+            .recover_owned_temporaries()
+            .and_then(|_| self.recover_selected_replace(directory))
+            .map_err(|recovery| ProfileError::SelectedReplaceRecovery {
+                operation: operation.to_string(),
+                recovery: recovery.to_string(),
+            })
+    }
+
+    fn selected_replace_state(
+        &self,
+        directory: &RepositoryDirectory,
+        intent: &SelectedProfileReplaceIntent,
+    ) -> Result<SelectedReplaceState, ProfileError> {
+        let current = self
+            .decode(
+                intent.profile_id(),
+                directory
+                    .open_profile_file(intent.profile_id())
+                    .map_err(|error| {
+                        ProfileError::SelectedReplaceConflict(format!(
+                            "replacement profile is unavailable: {error}"
+                        ))
+                    })?,
+            )
+            .map_err(|error| {
+                ProfileError::SelectedReplaceConflict(format!(
+                    "replacement profile is unreadable: {error}"
+                ))
+            })?;
+        let selection = decode_selection(directory.open_selection_file().map_err(|error| {
+            ProfileError::SelectedReplaceConflict(format!(
+                "selected-profile metadata is unavailable: {error}"
+            ))
+        })?)
+        .map_err(|error| {
+            ProfileError::SelectedReplaceConflict(format!(
+                "selected-profile metadata is unreadable: {error}"
+            ))
+        })?;
+        if selection.profile_id() != intent.profile_id() {
+            return Err(ProfileError::SelectedReplaceConflict(
+                "selected profile identity changed while replacement intent was pending".into(),
+            ));
+        }
+
+        let current_envelope_digest = stored_envelope_digest(&current)?;
+        let current_profile_digest = current.record.digest.as_str();
+        let selected_profile_digest = selection.profile_digest();
+        if current_envelope_digest == intent.previous_envelope_digest()
+            && current_profile_digest == intent.previous_profile_digest()
+            && selected_profile_digest == intent.previous_profile_digest()
+        {
+            Ok(SelectedReplaceState::Previous)
+        } else if current_envelope_digest == intent.replacement_envelope_digest()
+            && current_profile_digest == intent.replacement_profile_digest()
+            && selected_profile_digest == intent.previous_profile_digest()
+        {
+            Ok(SelectedReplaceState::ReplacementProfileWithPreviousSelection)
+        } else if current_envelope_digest == intent.replacement_envelope_digest()
+            && current_profile_digest == intent.replacement_profile_digest()
+            && selected_profile_digest == intent.replacement_profile_digest()
+        {
+            Ok(SelectedReplaceState::Replacement)
+        } else {
+            Err(ProfileError::SelectedReplaceConflict(
+                "profile envelope and selection do not match an allowed transaction phase".into(),
+            ))
+        }
+    }
+
+    fn finish_selected_replace(&self, directory: &RepositoryDirectory) -> Result<(), ProfileError> {
+        directory.unlink(SELECTED_REPLACE_FILE_NAME)?;
+        directory.sync_committed(SELECTED_REPLACE_FILE_NAME)
     }
 
     fn read_all(
@@ -492,7 +943,7 @@ impl ProfileRepository {
             return Ok(None);
         };
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
+        self.recover_repository(&directory)?;
         match directory.open_profile_file(id) {
             Ok(file) => self.decode(id, file).map(Some),
             Err(ProfileError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -507,7 +958,7 @@ impl ProfileRepository {
             return Ok(None);
         };
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
+        self.recover_repository(&directory)?;
         let snapshot = self.read_all(&directory)?;
         let Some(selection) = snapshot.selection else {
             return Ok(None);
@@ -523,7 +974,7 @@ impl ProfileRepository {
     pub fn lock_selected(&self) -> Result<LockedSelectedProfile, ProfileError> {
         let directory = RepositoryDirectory::open_or_create(&self.profiles_dir)?;
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
+        self.recover_repository(&directory)?;
         let snapshot = self.read_all(&directory)?;
         let selection = snapshot.selection.ok_or(ProfileError::NoSelectedProfile)?;
         let file = directory.open_profile_file(selection.profile_id())?;
@@ -540,7 +991,7 @@ impl ProfileRepository {
             return Err(ProfileError::SelectedProfileMissing(id.to_owned()));
         };
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
+        self.recover_repository(&directory)?;
 
         // Selecting a known-good profile is also the explicit recovery path
         // for malformed or stale selection metadata. Profile envelopes remain
@@ -565,7 +1016,7 @@ impl ProfileRepository {
             return Ok(false);
         };
         directory.lock_exclusive()?;
-        directory.recover_owned_temporaries()?;
+        self.recover_repository(&directory)?;
         let snapshot = self.read_all(&directory)?;
         if snapshot
             .selection
@@ -641,6 +1092,38 @@ impl ProfileRepository {
     }
 }
 
+fn validate_stored_profile(stored: &StoredProfile) -> Result<(), ProfileError> {
+    validate_profile_id(&stored.record.id)?;
+    if stored.record.digest != stored.profile.digest()
+        || stored.record.bytes != stored.profile.as_json().len()
+    {
+        return Err(ProfileError::DigestMismatch {
+            id: stored.record.id.clone(),
+        });
+    }
+    if normalize_name(&stored.record.name)? != stored.record.name {
+        return Err(ProfileError::InvalidName);
+    }
+    if let Some(source_url) = stored.source_url.as_deref()
+        && normalize_source_url(source_url)? != source_url
+    {
+        return Err(ProfileError::InvalidSourceUrl);
+    }
+    Ok(())
+}
+
+fn stored_envelope_digest(stored: &StoredProfile) -> Result<String, ProfileError> {
+    validate_stored_profile(stored)?;
+    let bytes = encode_with_timestamp(
+        &stored.record.id,
+        &stored.record.name,
+        &stored.profile,
+        stored.source_url.as_deref(),
+        stored.record.created_epoch_secs,
+    )?;
+    Ok(sha256_hex(&bytes))
+}
+
 fn build_credential_snapshot(
     catalog: &[ProfileCredentialCatalogEntry],
     selection: Option<&ProfileSelection>,
@@ -693,8 +1176,87 @@ fn ensure_credential_reference_capacity(actual: usize) -> Result<(), ProfileErro
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_credential_reference_capacity, ensure_repository_bytes};
-    use crate::{MAX_REPOSITORY_BYTES, MAX_REPOSITORY_CREDENTIAL_REFERENCES, ProfileError};
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::path::{Path, PathBuf};
+
+    use uuid::Uuid;
+
+    use super::{
+        ProfileRepository, SelectedProfileReplaceIntent, StoredProfile,
+        ensure_credential_reference_capacity, ensure_repository_bytes, sha256_hex,
+        stored_envelope_digest,
+    };
+    use crate::envelope::{encode_with_timestamp, profile_file_name};
+    use crate::selection::{ProfileSelection, encode as encode_selection};
+    use crate::{
+        MAX_REPOSITORY_BYTES, MAX_REPOSITORY_CREDENTIAL_REFERENCES, ProfileError,
+        SELECTED_REPLACE_FILE_NAME, SELECTION_FILE_NAME, ValidatedSingBoxProfile,
+    };
+
+    fn repository(name: &str) -> (PathBuf, ProfileRepository) {
+        let root = std::env::temp_dir().join(format!(
+            "cfw-selected-replace-{name}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let repository = ProfileRepository::new(root.join("profiles"));
+        (root, repository)
+    }
+
+    fn profile(tag: &str) -> ValidatedSingBoxProfile {
+        ValidatedSingBoxProfile::parse(&format!(
+            r#"{{"route":{{"final":"{tag}"}},"outbounds":[{{"tag":"{tag}","type":"direct"}}]}}"#
+        ))
+        .expect("valid profile")
+    }
+
+    fn write_private(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).expect("write test repository entry");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .expect("set private test entry mode");
+    }
+
+    fn stage_selected_replace(
+        root: &Path,
+        original: &StoredProfile,
+        replacement: &ValidatedSingBoxProfile,
+    ) -> (SelectedProfileReplaceIntent, Vec<u8>) {
+        let replacement_bytes = encode_with_timestamp(
+            &original.record.id,
+            "Replacement",
+            replacement,
+            original.source_url.as_deref(),
+            original.record.created_epoch_secs + 1,
+        )
+        .expect("replacement envelope");
+        let intent = SelectedProfileReplaceIntent::new(
+            &original.record.id,
+            &original.record.digest,
+            replacement.digest(),
+            &stored_envelope_digest(original).expect("original envelope digest"),
+            &sha256_hex(&replacement_bytes),
+        )
+        .expect("replacement intent");
+        write_private(
+            &root.join("profiles").join(SELECTED_REPLACE_FILE_NAME),
+            &intent.encode().expect("intent bytes"),
+        );
+        (intent, replacement_bytes)
+    }
+
+    fn selected_fixture(name: &str) -> (PathBuf, ProfileRepository, StoredProfile) {
+        let (root, repository) = repository(name);
+        let imported = repository
+            .import(Some("Original"), &profile("direct-original"))
+            .expect("import original");
+        repository.select(&imported.id).expect("select original");
+        let original = repository
+            .load_selected()
+            .expect("load selected")
+            .expect("selected original");
+        (root, repository, original)
+    }
 
     #[test]
     fn aggregate_repository_limit_is_checked_before_a_new_write() {
@@ -718,5 +1280,315 @@ mod tests {
             ensure_credential_reference_capacity(MAX_REPOSITORY_CREDENTIAL_REFERENCES + 1),
             Err(ProfileError::TooManyCredentialReferences)
         ));
+    }
+
+    #[test]
+    fn selected_replace_recovery_aborts_an_untouched_intent_idempotently() {
+        let (root, repository, original) = selected_fixture("old-old");
+        stage_selected_replace(&root, &original, &profile("direct-replacement"));
+
+        assert_eq!(
+            repository
+                .load_selected()
+                .expect("recover untouched intent")
+                .expect("selected original"),
+            original
+        );
+        assert!(
+            !root
+                .join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists()
+        );
+        assert_eq!(
+            repository
+                .load_selected()
+                .expect("repeat recovered read")
+                .expect("selected original"),
+            original
+        );
+        fs::remove_dir_all(root).expect("remove test repository");
+    }
+
+    #[test]
+    fn selected_replace_recovery_rolls_selection_forward_after_profile_commit() {
+        let (root, repository, original) = selected_fixture("new-old");
+        let replacement = profile("direct-replacement");
+        let (_intent, replacement_bytes) = stage_selected_replace(&root, &original, &replacement);
+        write_private(
+            &root
+                .join("profiles")
+                .join(profile_file_name(&original.record.id)),
+            &replacement_bytes,
+        );
+
+        let recovered = repository
+            .load_selected()
+            .expect("roll selection forward")
+            .expect("selected replacement");
+        assert_eq!(recovered.profile, replacement);
+        assert_eq!(recovered.record.name, "Replacement");
+        assert!(
+            !root
+                .join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists()
+        );
+        assert_eq!(
+            repository
+                .load_selected()
+                .expect("repeat recovered read")
+                .expect("selected replacement"),
+            recovered
+        );
+        fs::remove_dir_all(root).expect("remove test repository");
+    }
+
+    #[test]
+    fn selected_replace_recovery_cleans_an_already_committed_intent() {
+        let (root, repository, original) = selected_fixture("new-new");
+        let replacement = profile("direct-replacement");
+        let (_intent, replacement_bytes) = stage_selected_replace(&root, &original, &replacement);
+        write_private(
+            &root
+                .join("profiles")
+                .join(profile_file_name(&original.record.id)),
+            &replacement_bytes,
+        );
+        let replacement_selection =
+            ProfileSelection::new(&original.record.id, replacement.digest())
+                .expect("replacement selection");
+        write_private(
+            &root.join("profiles").join(SELECTION_FILE_NAME),
+            &encode_selection(&replacement_selection).expect("selection bytes"),
+        );
+
+        assert_eq!(
+            repository
+                .load_selected()
+                .expect("clean committed intent")
+                .expect("selected replacement")
+                .profile,
+            replacement
+        );
+        assert!(
+            !root
+                .join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists()
+        );
+        fs::remove_dir_all(root).expect("remove test repository");
+    }
+
+    #[test]
+    fn selected_replace_recovery_never_overwrites_a_different_selection() {
+        let (root, repository, original) = selected_fixture("selection-changed");
+        let other = repository
+            .import(Some("Other"), &profile("direct-other"))
+            .expect("import other profile");
+        let replacement = profile("direct-replacement");
+        let (_intent, replacement_bytes) = stage_selected_replace(&root, &original, &replacement);
+        write_private(
+            &root
+                .join("profiles")
+                .join(profile_file_name(&original.record.id)),
+            &replacement_bytes,
+        );
+        let other_selection =
+            ProfileSelection::new(&other.id, &other.digest).expect("other selection");
+        let other_selection_bytes = encode_selection(&other_selection).expect("selection bytes");
+        write_private(
+            &root.join("profiles").join(SELECTION_FILE_NAME),
+            &other_selection_bytes,
+        );
+
+        assert!(matches!(
+            repository.snapshot(),
+            Err(ProfileError::SelectedReplaceConflict(_))
+        ));
+        assert_eq!(
+            fs::read(root.join("profiles").join(SELECTION_FILE_NAME))
+                .expect("read preserved selection"),
+            other_selection_bytes
+        );
+        assert!(
+            root.join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists()
+        );
+        fs::remove_dir_all(root).expect("remove test repository");
+    }
+
+    #[test]
+    fn selected_replace_recovery_preserves_intent_when_required_state_is_missing() {
+        let (root, repository, original) = selected_fixture("missing-selection");
+        stage_selected_replace(&root, &original, &profile("direct-replacement"));
+        fs::remove_file(root.join("profiles").join(SELECTION_FILE_NAME))
+            .expect("remove selection for fault fixture");
+
+        assert!(matches!(
+            repository.load_selected(),
+            Err(ProfileError::SelectedReplaceConflict(_))
+        ));
+        assert!(
+            root.join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists()
+        );
+        fs::remove_dir_all(root).expect("remove test repository");
+    }
+
+    #[test]
+    fn selected_replace_recovery_rejects_a_missing_or_third_profile_envelope() {
+        let (missing_root, missing_repository, missing_original) =
+            selected_fixture("missing-profile");
+        stage_selected_replace(
+            &missing_root,
+            &missing_original,
+            &profile("direct-replacement"),
+        );
+        fs::remove_file(
+            missing_root
+                .join("profiles")
+                .join(profile_file_name(&missing_original.record.id)),
+        )
+        .expect("remove profile for fault fixture");
+        assert!(matches!(
+            missing_repository.snapshot(),
+            Err(ProfileError::SelectedReplaceConflict(_))
+        ));
+        assert!(
+            missing_root
+                .join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists()
+        );
+        fs::remove_dir_all(missing_root).expect("remove missing-profile repository");
+
+        let (third_root, third_repository, third_original) = selected_fixture("third-profile");
+        stage_selected_replace(&third_root, &third_original, &profile("direct-replacement"));
+        let third_bytes = encode_with_timestamp(
+            &third_original.record.id,
+            "Unexpected third state",
+            &profile("direct-third"),
+            third_original.source_url.as_deref(),
+            third_original.record.created_epoch_secs + 2,
+        )
+        .expect("third envelope");
+        write_private(
+            &third_root
+                .join("profiles")
+                .join(profile_file_name(&third_original.record.id)),
+            &third_bytes,
+        );
+        assert!(matches!(
+            third_repository.snapshot(),
+            Err(ProfileError::SelectedReplaceConflict(_))
+        ));
+        assert!(
+            third_root
+                .join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists()
+        );
+        fs::remove_dir_all(third_root).expect("remove third-profile repository");
+    }
+
+    #[test]
+    fn same_content_metadata_replace_needs_no_multi_file_intent() {
+        let (root, repository, original) = selected_fixture("metadata-only");
+        repository
+            .replace(
+                &original.record.id,
+                Some("Renamed without content change"),
+                &original.profile,
+                Some("https://example.com/rebound"),
+            )
+            .expect("metadata-only selected replacement");
+
+        let selected = repository
+            .load_selected()
+            .expect("load metadata replacement")
+            .expect("selected profile");
+        assert_eq!(selected.record.name, "Renamed without content change");
+        assert_eq!(selected.record.digest, original.record.digest);
+        assert_eq!(
+            selected.source_url.as_deref(),
+            Some("https://example.com/rebound")
+        );
+        assert!(
+            !root
+                .join("profiles")
+                .join(SELECTED_REPLACE_FILE_NAME)
+                .exists()
+        );
+        fs::remove_dir_all(root).expect("remove test repository");
+    }
+
+    #[test]
+    fn selected_replace_intent_must_be_private_canonical_and_bounded() {
+        let (mode_root, mode_repository, mode_original) = selected_fixture("intent-mode");
+        stage_selected_replace(&mode_root, &mode_original, &profile("direct-replacement"));
+        let mode_path = mode_root.join("profiles").join(SELECTED_REPLACE_FILE_NAME);
+        fs::set_permissions(&mode_path, fs::Permissions::from_mode(0o644))
+            .expect("weaken intent mode for fixture");
+        assert!(matches!(
+            mode_repository.snapshot(),
+            Err(ProfileError::UnsafeSelectedReplaceFile)
+        ));
+        fs::remove_dir_all(mode_root).expect("remove mode repository");
+
+        let (canonical_root, canonical_repository, canonical_original) =
+            selected_fixture("intent-canonical");
+        stage_selected_replace(
+            &canonical_root,
+            &canonical_original,
+            &profile("direct-replacement"),
+        );
+        let canonical_path = canonical_root
+            .join("profiles")
+            .join(SELECTED_REPLACE_FILE_NAME);
+        let mut noncanonical = fs::read(&canonical_path).expect("read canonical intent");
+        noncanonical.push(b'\n');
+        write_private(&canonical_path, &noncanonical);
+        assert!(matches!(
+            canonical_repository.snapshot(),
+            Err(ProfileError::InvalidSelectedReplace(_))
+        ));
+        fs::remove_dir_all(canonical_root).expect("remove canonical repository");
+
+        let (size_root, size_repository, size_original) = selected_fixture("intent-size");
+        stage_selected_replace(&size_root, &size_original, &profile("direct-replacement"));
+        write_private(
+            &size_root.join("profiles").join(SELECTED_REPLACE_FILE_NAME),
+            &vec![b'x'; crate::MAX_SELECTED_REPLACE_BYTES + 1],
+        );
+        assert!(matches!(
+            size_repository.snapshot(),
+            Err(ProfileError::SelectedReplaceTooLarge { .. })
+        ));
+        fs::remove_dir_all(size_root).expect("remove size repository");
+    }
+
+    #[test]
+    fn selected_replace_intent_symlink_is_never_followed() {
+        let (root, repository, _original) = selected_fixture("intent-symlink");
+        let target = root.join("outside-intent");
+        write_private(&target, b"not an intent");
+        symlink(
+            &target,
+            root.join("profiles").join(SELECTED_REPLACE_FILE_NAME),
+        )
+        .expect("create intent symlink fixture");
+
+        assert!(matches!(
+            repository.snapshot(),
+            Err(ProfileError::UnsafeSelectedReplaceFile)
+        ));
+        assert_eq!(
+            fs::read(&target).expect("read symlink target"),
+            b"not an intent"
+        );
+        fs::remove_dir_all(root).expect("remove symlink repository");
     }
 }

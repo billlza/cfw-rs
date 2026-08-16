@@ -168,7 +168,7 @@ struct TicketOnlyTunnelStartTests {
       "schemaVersion", "slot", "installationID", "epoch", "generation",
       "byteCount", "sha256", "identitySha256", "credentialSlots",
       "credentialProfileID", "credentialProfileDigest",
-      "ipv6Enabled", "bypassPrivateNetworks", "mtu",
+      "ipv6Enabled", "bypassPrivateNetworks", "directIPv4Hosts", "mtu",
     ]
     #expect(Set(providerConfig.keys).isSubset(of: allowedKeys))
 

@@ -7,6 +7,28 @@ const HANDOFF_FAILURE_CODES = new Set([
 const MAX_RECEIPT_TTL_MILLIS = 5 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const UUID_V5 = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const SHA256 = /^[0-9a-f]{64}$/u;
+
+function isSafeSourceHost(value) {
+  if (typeof value !== "string" || !value || value.length > 253
+    || value !== value.trim()
+    || /[\s\x00-\x1f\x7f/?#@%\\]/u.test(value)) {
+    return false;
+  }
+  const hostForUrl = value.includes(":") && !value.startsWith("[") ? `[${value}]` : value;
+  try {
+    const parsed = new URL(`https://${hostForUrl}/`);
+    if (parsed.username || parsed.password || parsed.port
+      || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      return false;
+    }
+    const parsedHost = parsed.hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+    return parsedHost === value.replace(/^\[|\]$/gu, "").toLowerCase();
+  } catch {
+    return false;
+  }
+}
 
 function exactKeys(value, expected) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -25,6 +47,69 @@ function boundedMessage(value, label) {
 function boundedProductField(value, label) {
   if (typeof value !== "string" || !value.trim() || value.length > 128) {
     throw new TypeError(`${label} is invalid`);
+  }
+  return value;
+}
+
+export function normalizeLegacyProfileMigrationPreview(value) {
+  if (value?.status === "no_active_profile") {
+    if (!exactKeys(value, ["status"])) throw new TypeError("legacy profile preview fields are invalid");
+    return { status: value.status };
+  }
+  if (value?.status === "not_subscription") {
+    if (!exactKeys(value, ["legacy_bytes", "name", "reason", "status"])) {
+      throw new TypeError("legacy profile preview fields are invalid");
+    }
+    return {
+      status: value.status,
+      name: boundedProductField(value.name, "legacy profile name"),
+      legacy_bytes: boundedLegacyBytes(value.legacy_bytes),
+      reason: boundedMessage(value.reason, "legacy profile migration reason"),
+    };
+  }
+  if (value?.status === "ready") {
+    if (!exactKeys(value, ["active", "legacy_bytes", "name", "preview_id", "source_host", "status"])
+      || value.active !== true
+      || typeof value.preview_id !== "string"
+      || !UUID_V4.test(value.preview_id)
+      || !isSafeSourceHost(value.source_host)) {
+      throw new TypeError("legacy profile preview is invalid");
+    }
+    return {
+      status: value.status,
+      preview_id: value.preview_id,
+      name: boundedProductField(value.name, "legacy profile name"),
+      source_host: value.source_host,
+      legacy_bytes: boundedLegacyBytes(value.legacy_bytes),
+      active: true,
+    };
+  }
+  throw new TypeError("legacy profile preview status is invalid");
+}
+
+export function normalizeLegacyProfileMigrationOutcome(value) {
+  if (!exactKeys(value, ["bytes", "digest", "id", "name", "reused", "selected"])
+    || typeof value.id !== "string"
+    || !UUID_V5.test(value.id)
+    || typeof value.digest !== "string"
+    || !SHA256.test(value.digest)
+    || typeof value.reused !== "boolean"
+    || value.selected !== true) {
+    throw new TypeError("legacy profile migration outcome is invalid");
+  }
+  return {
+    id: value.id,
+    name: boundedProductField(value.name, "migrated profile name"),
+    bytes: boundedLegacyBytes(value.bytes),
+    digest: value.digest,
+    reused: value.reused,
+    selected: true,
+  };
+}
+
+function boundedLegacyBytes(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 512 * 1024) {
+    throw new TypeError("legacy profile byte count is invalid");
   }
   return value;
 }

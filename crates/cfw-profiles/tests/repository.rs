@@ -101,6 +101,58 @@ fn import_list_load_and_delete_round_trip_is_private_and_atomic() {
 }
 
 #[test]
+fn exact_id_import_is_idempotent_and_never_overwrites_a_conflict() {
+    let (root, repository) = repository("exact-id-import");
+    let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let original = profile();
+    let imported = repository
+        .import_with_id_and_source_outcome(
+            id,
+            Some("Migrated subscription"),
+            &original,
+            Some("https://subscription.example/profile"),
+        )
+        .expect("first exact import");
+    assert!(imported.created);
+    let replayed = repository
+        .import_with_id_and_source_outcome(
+            id,
+            Some("Migrated subscription"),
+            &original,
+            Some("https://subscription.example/profile"),
+        )
+        .expect("exact replay");
+    assert!(!replayed.created);
+    assert_eq!(replayed.profile, imported.profile);
+
+    for conflict in [
+        repository.import_with_id_and_source(
+            id,
+            Some("Different name"),
+            &original,
+            Some("https://subscription.example/profile"),
+        ),
+        repository.import_with_id_and_source(
+            id,
+            Some("Migrated subscription"),
+            &ValidatedSingBoxProfile::parse(r#"{"outbounds":[{"tag":"block","type":"block"}]}"#)
+                .expect("different valid profile"),
+            Some("https://subscription.example/profile"),
+        ),
+        repository.import_with_id_and_source(
+            id,
+            Some("Migrated subscription"),
+            &original,
+            Some("https://subscription.example/other"),
+        ),
+    ] {
+        assert!(matches!(conflict, Err(ProfileError::AlreadyExists(existing)) if existing == id));
+    }
+    assert_eq!(repository.list().expect("single exact profile").len(), 1);
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
 fn credential_snapshot_is_stable_and_preserves_cross_profile_reference_ownership() {
     const SHARED: &str = "11111111-1111-4111-8111-111111111111";
     const ROTATED: &str = "22222222-2222-4222-8222-222222222222";
@@ -234,6 +286,63 @@ fn locked_credential_snapshot_blocks_profile_mutation_until_native_commit_finish
         .credential_snapshot()
         .expect("post-commit snapshot");
     assert_ne!(after.snapshot_digest, expected_digest);
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn locked_credential_profile_mutation_blocks_gc_reread_until_audience_commit() {
+    const PROFILE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const REFERENCE_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let (root, repository) = repository("credential-mutation-lock");
+    let stale_preview_snapshot = repository
+        .credential_snapshot()
+        .expect("pre-provision credential snapshot");
+    let mutation = repository
+        .begin_credential_profile_mutation()
+        .expect("credential profile mutation lock");
+
+    let gc_repository = repository.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let gc_reread = std::thread::spawn(move || {
+        let locked = gc_repository
+            .lock_credential_snapshot()
+            .expect("competing GC snapshot lock");
+        sender
+            .send(locked.snapshot().clone())
+            .expect("send GC snapshot");
+    });
+
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_millis(50)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    let imported = mutation
+        .commit_exact_import(
+            PROFILE_ID,
+            Some("Vault prepared"),
+            &credential_profile(REFERENCE_ID),
+            Some("https://subscription.example/profile"),
+        )
+        .expect("commit prepared audience");
+    assert!(imported.created);
+
+    let current = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("GC reread unblocked after profile commit");
+    gc_reread.join().expect("GC reread thread");
+    assert_ne!(
+        current.snapshot_digest, stale_preview_snapshot.snapshot_digest,
+        "a GC commit bound to the pre-provision snapshot must fail closed"
+    );
+    let live = current
+        .catalog
+        .iter()
+        .find(|entry| entry.audience.profile_id() == PROFILE_ID)
+        .expect("new audience is live when GC acquires the lock");
+    assert_eq!(live.audience.profile_digest(), imported.profile.digest);
+    assert_eq!(live.references.len(), 1);
+    assert_eq!(live.references[0].id(), REFERENCE_ID);
+
     fs::remove_dir_all(root).expect("remove test directory");
 }
 
@@ -742,6 +851,131 @@ fn rollback_restore_preserves_the_complete_loaded_profile_identity() {
             .expect("restored selected profile"),
         original
     );
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn conditional_replace_rejects_rebound_sources_and_out_of_order_responses() {
+    let (root, repository) = repository("conditional-replace");
+    let imported = repository
+        .import_with_source(
+            Some("Remote"),
+            &credential_profile("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            Some("https://example.com/original"),
+        )
+        .expect("import remote profile");
+    let before_rebind = repository
+        .load(&imported.id)
+        .expect("load before rebind")
+        .expect("stored profile");
+    repository
+        .update_metadata(
+            &imported.id,
+            Some("Rebound"),
+            Some("https://example.com/rebound"),
+        )
+        .expect("rebind subscription source");
+
+    let stale_response = credential_profile("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    assert!(matches!(
+        repository.replace_if_unchanged(
+            &before_rebind,
+            None,
+            &stale_response,
+            Some("https://example.com/original")
+        ),
+        Err(ProfileError::ProfileChanged { ref id }) if id == &imported.id
+    ));
+    let rebound = repository
+        .load(&imported.id)
+        .expect("load after stale response")
+        .expect("stored profile");
+    assert_eq!(rebound.record.name, "Rebound");
+    assert_eq!(
+        rebound.source_url.as_deref(),
+        Some("https://example.com/rebound")
+    );
+    assert_eq!(rebound.profile, before_rebind.profile);
+
+    let first_fetch_snapshot = rebound.clone();
+    let second_fetch_snapshot = rebound.clone();
+    let newest_response = credential_profile("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+    let older_response = credential_profile("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+    repository
+        .replace_if_unchanged(
+            &second_fetch_snapshot,
+            None,
+            &newest_response,
+            second_fetch_snapshot.source_url.as_deref(),
+        )
+        .expect("newest response commits first");
+    assert!(matches!(
+        repository.replace_if_unchanged(
+            &first_fetch_snapshot,
+            None,
+            &older_response,
+            first_fetch_snapshot.source_url.as_deref()
+        ),
+        Err(ProfileError::ProfileChanged { ref id }) if id == &imported.id
+    ));
+    assert_eq!(
+        repository
+            .load(&imported.id)
+            .expect("load after out-of-order response")
+            .expect("stored profile")
+            .profile,
+        newest_response
+    );
+
+    fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[test]
+fn conditional_restore_never_overwrites_a_newer_edit() {
+    let (root, repository) = repository("conditional-restore");
+    let imported = repository
+        .import_with_source(
+            Some("Remote"),
+            &credential_profile("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            Some("https://example.com/original"),
+        )
+        .expect("import remote profile");
+    let original = repository
+        .load(&imported.id)
+        .expect("load original")
+        .expect("stored profile");
+    let replacement = credential_profile("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    let (_result, committed) = repository
+        .replace_if_unchanged(
+            &original,
+            None,
+            &replacement,
+            Some("https://example.com/replacement"),
+        )
+        .expect("commit replacement");
+    repository
+        .update_metadata(
+            &imported.id,
+            Some("Edited after commit"),
+            Some("https://example.com/edited"),
+        )
+        .expect("edit replacement before rollback");
+
+    assert!(matches!(
+        repository.restore_if_unchanged(&committed, &original),
+        Err(ProfileError::ProfileChanged { ref id }) if id == &imported.id
+    ));
+    let current = repository
+        .load(&imported.id)
+        .expect("load after rejected rollback")
+        .expect("stored profile");
+    assert_eq!(current.record.name, "Edited after commit");
+    assert_eq!(
+        current.source_url.as_deref(),
+        Some("https://example.com/edited")
+    );
+    assert_eq!(current.profile, replacement);
+
     fs::remove_dir_all(root).expect("remove test directory");
 }
 

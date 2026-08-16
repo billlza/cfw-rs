@@ -2,15 +2,15 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::process::Command;
 
-const CANONICAL_BUNDLE: &str = "/Applications/Clash for Mac.app";
-const CANONICAL_EXECUTABLE: &str = "/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac";
+use cfw_platform::{
+    ReleaseSignedComponent, assess_release_application, inspect_release_signature,
+    observe_gatekeeper_status, verify_release_signature,
+};
+
 const RELEASE_VERSION: &str = "0.4.0";
 const RELEASE_TEAM_ID: &str = "YKUPL7Z869";
-const MAX_COMMAND_OUTPUT: usize = 1024 * 1024;
 const MAX_BUNDLE_ENTRIES: usize = 4096;
-const GLOBAL_AUTHORITY_RELATIVE: &str = "Contents/Library/HelperTools/CFWGlobalAuthority";
 const GLOBAL_AUTHORITY_IDENTIFIER: &str = "com.bill.clashformac.global-authority";
 
 const FRAMEWORK_ROOT: &str = "Contents/Frameworks/CFWNativeBridge.framework";
@@ -48,36 +48,30 @@ enum SymlinkTargetKind {
     Directory,
 }
 
-const SIGNED_COMPONENTS: &[&str] = &[
-    "Contents/MacOS/clash-for-mac",
-    "Contents/Frameworks/CFWNativeBridge.framework",
-    "Contents/Library/HelperTools/CFWGlobalAuthority",
-    "Contents/Library/LoginItems/CFWProxyAgent.app",
-    "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension",
-    "Contents/Library/HelperTools/cfw-helper-tombstone",
-];
-
-/// Release identity boundary for every operation that can freeze the old GUI
+/// Release identity boundary for every operation that can exit the old GUI
 /// or retire any part of the old network. This intentionally fails for local,
 /// unsigned, ad-hoc, relocated, writable, or partially installed builds.
 pub(crate) fn require_canonical_handoff_candidate() -> Result<(), String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("cannot resolve the running executable: {error}"))?;
-    if executable != Path::new(CANONICAL_EXECUTABLE) {
+    let canonical_executable = ReleaseSignedComponent::MainExecutable.path();
+    let canonical_bundle = ReleaseSignedComponent::Application.path();
+    if executable != canonical_executable {
         return Err(format!(
-            "migration handoff requires the installed {RELEASE_VERSION} executable at {CANONICAL_EXECUTABLE}"
+            "migration handoff requires the installed {RELEASE_VERSION} executable at {}",
+            canonical_executable.display()
         ));
     }
     require_secure_regular(&executable, "running executable")?;
     for directory in [
-        Path::new(CANONICAL_BUNDLE),
+        canonical_bundle,
         Path::new("/Applications/Clash for Mac.app/Contents"),
         Path::new("/Applications/Clash for Mac.app/Contents/MacOS"),
     ] {
         require_secure_directory(directory)?;
     }
 
-    let info_path = Path::new(CANONICAL_BUNDLE).join("Contents/Info.plist");
+    let info_path = canonical_bundle.join("Contents/Info.plist");
     require_secure_regular(&info_path, "installed Info.plist")?;
     let info = plist::Value::from_file(&info_path)
         .map_err(|error| format!("installed Info.plist is invalid: {error}"))?;
@@ -100,18 +94,18 @@ pub(crate) fn require_canonical_handoff_candidate() -> Result<(), String> {
         return Err("installed bundle version, identifier, or build number is not the 0.4.0 release contract".into());
     }
 
-    validate_installed_bundle_tree(Path::new(CANONICAL_BUNDLE))?;
-    for relative in SIGNED_COMPONENTS {
-        let path = Path::new(CANONICAL_BUNDLE).join(relative);
-        require_secure_regular_or_bundle(&path, relative)?;
-        let details = verify_developer_id_signature(&path)?;
-        if *relative == GLOBAL_AUTHORITY_RELATIVE && !global_authority_details_are_release(&details)
+    validate_installed_bundle_tree(canonical_bundle)?;
+    for component in ReleaseSignedComponent::NESTED {
+        require_secure_regular_or_bundle(component.path(), component.label())?;
+        let details = verify_developer_id_signature(component)?;
+        if component == ReleaseSignedComponent::GlobalAuthority
+            && !global_authority_details_are_release(&details)
         {
             return Err("CFWGlobalAuthority does not have its exact release identifier".into());
         }
     }
-    let application_signature = verify_developer_id_signature(Path::new(CANONICAL_BUNDLE))?;
-    verify_gatekeeper_assessment(Path::new(CANONICAL_BUNDLE), &application_signature)?;
+    let application_signature = verify_developer_id_signature(ReleaseSignedComponent::Application)?;
+    verify_gatekeeper_assessment(&application_signature)?;
     Ok(())
 }
 
@@ -167,24 +161,28 @@ fn require_secure_regular_or_bundle(path: &Path, label: &str) -> Result<(), Stri
     }
 }
 
-fn verify_developer_id_signature(path: &Path) -> Result<String, String> {
-    let rendered = path
-        .to_str()
-        .ok_or_else(|| "signed component path is not UTF-8".to_owned())?;
-    run_checked(
-        "/usr/bin/codesign",
-        &["--verify", "--strict", "--verbose=4", rendered],
-        "code signature verification",
-    )?;
-    let details = run_checked(
-        "/usr/bin/codesign",
-        &["--display", "--verbose=4", rendered],
-        "code signature identity inspection",
-    )?;
+fn verify_developer_id_signature(component: ReleaseSignedComponent) -> Result<String, String> {
+    let verification = verify_release_signature(component)
+        .map_err(|error| format!("failed to run code signature verification: {error}"))?;
+    if !verification.success() {
+        return Err(format!(
+            "code signature verification failed: {}",
+            verification.combined().trim()
+        ));
+    }
+    let inspection = inspect_release_signature(component)
+        .map_err(|error| format!("failed to run code signature identity inspection: {error}"))?;
+    if !inspection.success() {
+        return Err(format!(
+            "code signature identity inspection failed: {}",
+            inspection.combined().trim()
+        ));
+    }
+    let details = inspection.combined().to_owned();
     if !signature_details_are_release(&details) {
         return Err(format!(
             "signed component {} is not timestamped Developer ID Team {RELEASE_TEAM_ID}",
-            path.display()
+            component.path().display()
         ));
     }
     Ok(details)
@@ -210,77 +208,31 @@ fn global_authority_details_are_release(details: &str) -> bool {
         .eq([GLOBAL_AUTHORITY_IDENTIFIER])
 }
 
-fn run_checked(program: &str, args: &[&str], label: &str) -> Result<String, String> {
-    let output = run_bounded(program, args, label)?;
-    if !output.success {
-        return Err(format!("{label} failed: {}", output.combined.trim()));
-    }
-    Ok(output.combined)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BoundedCommandOutput {
-    success: bool,
-    combined: String,
-}
-
-fn run_bounded(program: &str, args: &[&str], label: &str) -> Result<BoundedCommandOutput, String> {
-    let output = security_command(program)
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run {label}: {error}"))?;
-    if output.stdout.len() > MAX_COMMAND_OUTPUT || output.stderr.len() > MAX_COMMAND_OUTPUT {
-        return Err(format!("{label} output exceeded its bound"));
-    }
-    let mut combined =
-        String::from_utf8(output.stdout).map_err(|_| format!("{label} stdout is not UTF-8"))?;
-    combined.push_str(
-        &String::from_utf8(output.stderr).map_err(|_| format!("{label} stderr is not UTF-8"))?,
-    );
-    Ok(BoundedCommandOutput {
-        success: output.status.success(),
-        combined,
-    })
-}
-
-fn security_command(program: &str) -> Command {
-    let mut command = Command::new(program);
-    command
-        .env_clear()
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-    command
-}
-
-fn verify_gatekeeper_assessment(target: &Path, codesign_details: &str) -> Result<(), String> {
+fn verify_gatekeeper_assessment(codesign_details: &str) -> Result<(), String> {
     let authority = release_leaf_authority(codesign_details)?;
-    let before = run_bounded(
-        "/usr/sbin/spctl",
-        &["--status"],
-        "Gatekeeper status before assessment",
-    )?;
-    validate_gatekeeper_status(&before, "before assessment")?;
-    let rendered = target
+    let before = observe_gatekeeper_status()
+        .map_err(|error| format!("failed to observe Gatekeeper before assessment: {error}"))?;
+    validate_gatekeeper_status(before.success(), before.combined(), "before assessment")?;
+    let rendered = ReleaseSignedComponent::Application
+        .path()
         .to_str()
         .ok_or_else(|| "Gatekeeper target path is not UTF-8".to_owned())?;
-    let assessment = run_bounded(
-        "/usr/sbin/spctl",
-        &["--assess", "--type", "execute", "--verbose=4", rendered],
-        "Gatekeeper assessment",
+    let assessment = assess_release_application()
+        .map_err(|error| format!("failed to run Gatekeeper assessment: {error}"))?;
+    validate_gatekeeper_assessment_output(
+        assessment.success(),
+        assessment.combined(),
+        rendered,
+        &authority,
     )?;
-    validate_gatekeeper_assessment_output(&assessment, rendered, &authority)?;
-    let after = run_bounded(
-        "/usr/sbin/spctl",
-        &["--status"],
-        "Gatekeeper status after assessment",
-    )?;
-    validate_gatekeeper_status(&after, "after assessment")
+    let after = observe_gatekeeper_status()
+        .map_err(|error| format!("failed to observe Gatekeeper after assessment: {error}"))?;
+    validate_gatekeeper_status(after.success(), after.combined(), "after assessment")
 }
 
-fn validate_gatekeeper_status(output: &BoundedCommandOutput, phase: &str) -> Result<(), String> {
-    let lines = nonempty_trimmed_lines(&output.combined);
-    if !output.success || lines.as_slice() != ["assessments enabled"] {
+fn validate_gatekeeper_status(success: bool, combined: &str, phase: &str) -> Result<(), String> {
+    let lines = nonempty_trimmed_lines(combined);
+    if !success || lines.as_slice() != ["assessments enabled"] {
         return Err(format!(
             "Gatekeeper is not provably enabled {phase}: {lines:?}"
         ));
@@ -289,12 +241,13 @@ fn validate_gatekeeper_status(output: &BoundedCommandOutput, phase: &str) -> Res
 }
 
 fn validate_gatekeeper_assessment_output(
-    output: &BoundedCommandOutput,
+    success: bool,
+    combined: &str,
     target: &str,
     authority: &str,
 ) -> Result<(), String> {
-    let lines = nonempty_trimmed_lines(&output.combined);
-    if !output.success {
+    let lines = nonempty_trimmed_lines(combined);
+    if !success {
         return Err(format!("Gatekeeper assessment failed: {lines:?}"));
     }
     if lines.iter().any(|line| {
@@ -520,32 +473,22 @@ mod tests {
     #[test]
     fn gatekeeper_policy_requires_enabled_notarized_output_and_matching_origin() {
         let authority = "Developer ID Application: Example (YKUPL7Z869)";
-        let enabled = BoundedCommandOutput {
-            success: true,
-            combined: "assessments enabled\n".into(),
-        };
-        assert!(validate_gatekeeper_status(&enabled, "test").is_ok());
-        let without_origin = BoundedCommandOutput {
-            success: true,
-            combined: "/Applications/Clash for Mac.app: accepted\nsource=Notarized Developer ID\n"
-                .into(),
-        };
+        assert!(validate_gatekeeper_status(true, "assessments enabled\n", "test").is_ok());
         assert!(
             validate_gatekeeper_assessment_output(
-                &without_origin,
+                true,
+                "/Applications/Clash for Mac.app: accepted\nsource=Notarized Developer ID\n",
                 "/Applications/Clash for Mac.app",
                 authority,
             )
             .is_ok()
         );
-        let with_origin = BoundedCommandOutput {
-            success: true,
-            combined: format!(
-                "/Applications/Clash for Mac.app: accepted\nsource=Notarized Developer ID\norigin={authority}\n"
-            ),
-        };
+        let with_origin = format!(
+            "/Applications/Clash for Mac.app: accepted\nsource=Notarized Developer ID\norigin={authority}\n"
+        );
         assert!(
             validate_gatekeeper_assessment_output(
+                true,
                 &with_origin,
                 "/Applications/Clash for Mac.app",
                 authority,
@@ -556,16 +499,7 @@ mod tests {
             "assessments disabled\n",
             "assessments enabled\nwarning: bypassed\n",
         ] {
-            assert!(
-                validate_gatekeeper_status(
-                    &BoundedCommandOutput {
-                        success: true,
-                        combined: invalid.into(),
-                    },
-                    "test",
-                )
-                .is_err()
-            );
+            assert!(validate_gatekeeper_status(true, invalid, "test").is_err());
         }
         for invalid in [
             "/Applications/Clash for Mac.app: accepted\nsource=Developer ID\n",
@@ -575,10 +509,8 @@ mod tests {
         ] {
             assert!(
                 validate_gatekeeper_assessment_output(
-                    &BoundedCommandOutput {
-                        success: true,
-                        combined: invalid.into(),
-                    },
+                    true,
+                    invalid,
                     "/Applications/Clash for Mac.app",
                     authority,
                 )
@@ -588,25 +520,17 @@ mod tests {
     }
 
     #[test]
-    fn security_commands_use_only_the_fixed_c_locale_and_system_path() {
-        let command = security_command("/usr/sbin/spctl");
-        let environment = command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
+    fn release_security_accepts_only_the_closed_component_enum() {
+        assert_eq!(ReleaseSignedComponent::NESTED.len(), 6);
         assert_eq!(
-            environment,
-            std::collections::BTreeMap::from([
-                ("LANG".into(), Some("C".into())),
-                ("LC_ALL".into(), Some("C".into())),
-                ("PATH".into(), Some("/usr/bin:/bin:/usr/sbin:/sbin".into())),
-            ])
+            ReleaseSignedComponent::Application.path(),
+            Path::new("/Applications/Clash for Mac.app")
         );
+        assert!(ReleaseSignedComponent::NESTED.iter().all(|component| {
+            component
+                .path()
+                .starts_with(ReleaseSignedComponent::Application.path())
+        }));
     }
 
     fn create_framework_fixture(root: &Path) -> PathBuf {

@@ -6,6 +6,7 @@ import calendar
 from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
+import hashlib
 import ipaddress
 import struct
 from typing import Iterable
@@ -16,7 +17,6 @@ MAX_CAPTURE_BLOCKS = 200_000
 MAX_SNAPLEN = 262_144
 MAX_PACKET_BYTES = 262_144
 MAX_REASSEMBLED_FLOW_BYTES = 1 * 1024 * 1024
-MAX_DNS_RECORDS = 64
 MAX_IPV6_EXTENSION_HEADERS = 8
 MAX_VLAN_TAGS = 2
 
@@ -38,6 +38,10 @@ DARWIN_AF_INET6 = 30
 QUIC_VERSION_1 = 0x00000001
 QUIC_VERSION_2 = 0x6B3343CF
 SUPPORTED_QUIC_VERSIONS = frozenset({QUIC_VERSION_1, QUIC_VERSION_2})
+DNS_TTL = 0
+DNS_A_ADDRESS = "192.0.2.1"
+DNS_AAAA_ADDRESS = "2001:db8::1"
+DNS_RESPONSE_DIGEST_DOMAIN = b"cfw-packet-dns-responses-v1\0"
 
 
 class PacketCaptureError(ValueError):
@@ -72,11 +76,34 @@ class CaptureProof:
     observation_ms: int
     started_at: Fraction
     ended_at: Fraction
+    start_event_started_at: Fraction
+    start_event_ended_at: Fraction
+    target_started_at: Fraction | None
+    target_ended_at: Fraction | None
+    end_event_started_at: Fraction
+    end_event_ended_at: Fraction
+    total_record_count: int
     packet_count: int
     token_occurrences: int
     link_type: int
     interface_name: str | None
     quic_version: int | None
+    dns_response_count: int | None
+    dns_answer_type: str | None
+    dns_answer_address: str | None
+    dns_ttl: int | None
+    dns_responses_sha256: str | None
+
+
+@dataclass(frozen=True)
+class StagedCaptureEndpoint:
+    """One exact sender-stage flow retained by Packet provenance."""
+
+    stage: str
+    local_address: str
+    local_port: int
+    remote_address: str
+    remote_port: int
 
 
 @dataclass(frozen=True)
@@ -104,6 +131,15 @@ class TransportPacket:
     sequence: int | None
     link_type: int
     interface_id: int
+
+
+@dataclass(frozen=True)
+class DnsMessage:
+    identifier: int
+    is_response: bool
+    question_name: str
+    question_type: int
+    answer_address: str | None
 
 
 def _parse_options(
@@ -535,12 +571,14 @@ def _token_offsets(data: bytes, token: bytes) -> list[int]:
         start = found + 1
 
 
-def _tcp_token_times(packets: Iterable[TransportPacket], token: bytes) -> list[Fraction]:
+def _tcp_token_windows(
+    packets: Iterable[TransportPacket], token: bytes
+) -> list[tuple[Fraction, Fraction]]:
     flows: dict[tuple[str, str, int, int], list[TransportPacket]] = {}
     for packet in packets:
         key = (packet.source, packet.destination, packet.source_port, packet.destination_port)
         flows.setdefault(key, []).append(packet)
-    occurrences: list[Fraction] = []
+    occurrences: list[tuple[Fraction, Fraction]] = []
     for segments in flows.values():
         nonempty = [segment for segment in segments if segment.payload]
         if not nonempty:
@@ -570,8 +608,15 @@ def _tcp_token_times(packets: Iterable[TransportPacket], token: bytes) -> list[F
             stream.extend(suffix)
             timestamps.extend([segment.timestamp] * len(suffix))
             cursor = max(cursor, sequence + len(segment.payload))
-        occurrences.extend(timestamps[offset] for offset in _token_offsets(bytes(stream), token))
+        occurrences.extend(
+            (timestamps[offset], timestamps[offset + len(token) - 1])
+            for offset in _token_offsets(bytes(stream), token)
+        )
     return occurrences
+
+
+def _tcp_token_times(packets: Iterable[TransportPacket], token: bytes) -> list[Fraction]:
+    return [started_at for started_at, _ended_at in _tcp_token_windows(packets, token)]
 
 
 def _dns_name(data: bytes, offset: int, *, depth: int = 0) -> tuple[str, int]:
@@ -607,41 +652,88 @@ def _dns_name(data: bytes, offset: int, *, depth: int = 0) -> tuple[str, int]:
         offset += 1 + length
 
 
-def _dns_names(data: bytes, expected_type: int) -> list[str]:
+def _dns_message(data: bytes, family: str) -> DnsMessage:
     if len(data) < 12:
         raise PacketCaptureError("DNS header is truncated")
-    _identifier, _flags, questions, answers, authority, additional = struct.unpack_from(
+    identifier, flags, questions, answers, authority, additional = struct.unpack_from(
         "!HHHHHH", data, 0
     )
-    if questions < 1 or sum((questions, answers, authority, additional)) > MAX_DNS_RECORDS:
-        raise PacketCaptureError("DNS record count is outside the accepted bound")
-    names: list[str] = []
+    expected_type = 1 if family == "ipv4" else 28
     offset = 12
-    matched_question = False
-    for _ in range(questions):
-        name, offset = _dns_name(data, offset)
-        if offset + 4 > len(data):
-            raise PacketCaptureError("DNS question is truncated")
-        record_type, record_class = struct.unpack_from("!HH", data, offset)
-        offset += 4
-        if record_class != 1:
-            raise PacketCaptureError("DNS question class is not IN")
-        if record_type == expected_type:
-            matched_question = True
-        names.append(name)
-    for _ in range(answers + authority + additional):
-        name, offset = _dns_name(data, offset)
-        if offset + 10 > len(data):
-            raise PacketCaptureError("DNS resource record is truncated")
-        _record_type, _record_class, _ttl, length = struct.unpack_from("!HHIH", data, offset)
-        offset += 10
-        if offset + length > len(data):
-            raise PacketCaptureError("DNS resource data is truncated")
-        names.append(name)
-        offset += length
-    if offset != len(data) or not matched_question:
-        raise PacketCaptureError("DNS message does not contain the required A/AAAA question")
-    return names
+    question_name, offset = _dns_name(data, offset)
+    if offset + 4 > len(data):
+        raise PacketCaptureError("DNS question is truncated")
+    question_type, question_class = struct.unpack_from("!HH", data, offset)
+    offset += 4
+    if question_type != expected_type or question_class != 1:
+        raise PacketCaptureError(
+            "DNS message does not contain the required A/AAAA question"
+        )
+    if flags == 0x0000 and (questions, answers, authority, additional) == (1, 0, 0, 0):
+        if offset != len(data):
+            raise PacketCaptureError("DNS query has trailing records or bytes")
+        return DnsMessage(identifier, False, question_name, question_type, None)
+    if flags != 0x8400 or (questions, answers, authority, additional) != (1, 1, 0, 0):
+        raise PacketCaptureError("DNS response is not exact authoritative non-recursive data")
+    answer_name, offset = _dns_name(data, offset)
+    if offset + 10 > len(data):
+        raise PacketCaptureError("DNS answer header is truncated")
+    record_type, record_class, ttl, length = struct.unpack_from("!HHIH", data, offset)
+    offset += 10
+    expected_length = 4 if family == "ipv4" else 16
+    if (
+        answer_name != question_name
+        or record_type != expected_type
+        or record_class != 1
+        or ttl != DNS_TTL
+        or length != expected_length
+        or offset + length != len(data)
+    ):
+        raise PacketCaptureError("DNS answer owner/type/class/TTL/length differs")
+    try:
+        answer_address = str(ipaddress.ip_address(data[offset : offset + length]))
+    except ValueError as error:  # pragma: no cover - exact lengths are guarded above
+        raise PacketCaptureError("DNS answer address is invalid") from error
+    expected_answer = DNS_A_ADDRESS if family == "ipv4" else DNS_AAAA_ADDRESS
+    if answer_address != expected_answer:
+        raise PacketCaptureError("DNS answer address differs from the fixed contract")
+    return DnsMessage(identifier, True, question_name, question_type, answer_address)
+
+
+def _dns_response_for_token(
+    packets: list[TransportPacket], family: str, token: bytes
+) -> tuple[Fraction, Fraction, bytes]:
+    expected_name = f"{token.decode('ascii').lower()}.evidence.test"
+    queries: list[tuple[TransportPacket, DnsMessage]] = []
+    responses: list[tuple[TransportPacket, DnsMessage]] = []
+    for packet in packets:
+        if packet.family != family or packet.protocol != "udp":
+            continue
+        message = _dns_message(packet.payload, family)
+        if message.question_name != expected_name:
+            continue
+        if message.is_response:
+            if packet.source_port != 53:
+                raise PacketCaptureError("DNS response direction/port is invalid")
+            responses.append((packet, message))
+        else:
+            if packet.destination_port != 53:
+                raise PacketCaptureError("DNS query direction/port is invalid")
+            queries.append((packet, message))
+    if len(queries) != 1 or len(responses) != 1:
+        raise PacketCaptureError(
+            "DNS token must have exactly one query and one authoritative response"
+        )
+    query_packet, query = queries[0]
+    response_packet, response = responses[0]
+    if (
+        query.identifier != response.identifier
+        or query.question_type != response.question_type
+        or response.answer_address is None
+        or response_packet.timestamp <= query_packet.timestamp
+    ):
+        raise PacketCaptureError("DNS query/response transaction is not causal and exact")
+    return query_packet.timestamp, response_packet.timestamp, response_packet.payload
 
 
 def _quic_connection_ids(data: bytes) -> tuple[int, bytes, bytes]:
@@ -677,15 +769,10 @@ def _events_for_token(
             if packet.protocol == "udp" and token in packet.payload
         ]
     if protocol == "dns":
-        expected_type = 1 if family == "ipv4" else 28
-        result: list[Fraction] = []
-        for packet in matching:
-            if packet.protocol != "udp":
-                continue
-            names = _dns_names(packet.payload, expected_type)
-            if any(token.decode("ascii").lower() in name for name in names):
-                result.append(packet.timestamp)
-        return result
+        _query_at, response_at, _response = _dns_response_for_token(
+            matching, family, token
+        )
+        return [response_at]
     if protocol == "quic":
         result = []
         for packet in matching:
@@ -694,6 +781,37 @@ def _events_for_token(
             _version, dcid, scid = _quic_connection_ids(packet.payload)
             if token in dcid or token in scid:
                 result.append(packet.timestamp)
+        return result
+    raise PacketCaptureError(f"unsupported evidence protocol: {protocol!r}")
+
+
+def _event_windows_for_token(
+    packets: list[TransportPacket], protocol: str, family: str, token: bytes
+) -> list[tuple[Fraction, Fraction]]:
+    matching = [packet for packet in packets if packet.family == family]
+    if protocol == "tcp":
+        return _tcp_token_windows(
+            (packet for packet in matching if packet.protocol == "tcp"), token
+        )
+    if protocol == "udp":
+        return [
+            (packet.timestamp, packet.timestamp)
+            for packet in matching
+            if packet.protocol == "udp" and token in packet.payload
+        ]
+    if protocol == "dns":
+        query_at, response_at, _response = _dns_response_for_token(
+            matching, family, token
+        )
+        return [(query_at, response_at)]
+    if protocol == "quic":
+        result: list[tuple[Fraction, Fraction]] = []
+        for packet in matching:
+            if packet.protocol != "udp":
+                continue
+            _version, dcid, scid = _quic_connection_ids(packet.payload)
+            if token in dcid or token in scid:
+                result.append((packet.timestamp, packet.timestamp))
         return result
     raise PacketCaptureError(f"unsupported evidence protocol: {protocol!r}")
 
@@ -768,26 +886,62 @@ def validate_capture_tokens(
             )
     elif expected_quic_version is not None:
         raise PacketCaptureError("non-QUIC evidence declares a QUIC version")
-    starts = _events_for_token(selected, protocol, family, start_marker)
-    ends = _events_for_token(selected, protocol, family, end_marker)
-    if len(starts) != 1 or len(ends) != 1:
+    start_windows = _event_windows_for_token(
+        selected, protocol, family, start_marker
+    )
+    end_windows = _event_windows_for_token(selected, protocol, family, end_marker)
+    if len(start_windows) != 1 or len(end_windows) != 1:
         raise PacketCaptureError("capture window markers must each occur exactly once")
-    started_at = starts[0]
-    ended_at = ends[0]
+    start_event_started_at, start_event_ended_at = start_windows[0]
+    end_event_started_at, end_event_ended_at = end_windows[0]
+    started_at = start_event_ended_at
+    ended_at = end_event_ended_at
     if ended_at <= started_at:
         raise PacketCaptureError("capture window end marker does not follow its start marker")
     duration_ms = (ended_at - started_at) * 1000
     observation_ms = duration_ms.numerator // duration_ms.denominator
-    if observation_ms < 1_000 or observation_ms > 600_000:
-        raise PacketCaptureError("capture observation window is outside 1s..10min")
+    if observation_ms < 1_000 or observation_ms > 30_000:
+        raise PacketCaptureError("capture observation window is outside 1s..30s")
     if declared_observation_ms != observation_ms:
         raise PacketCaptureError("declared observation_ms differs from capture timestamps")
     window = [packet for packet in selected if started_at <= packet.timestamp <= ended_at]
-    occurrences = len(_events_for_token(window, protocol, family, token))
+    target_windows = _event_windows_for_token(window, protocol, family, token)
+    occurrences = len(target_windows)
     if expect_token and occurrences < 1:
         raise PacketCaptureError("required unique token is absent from decoded application data")
     if not expect_token and occurrences != 0:
         raise PacketCaptureError("forbidden unique token is present in decoded application data")
+    dns_response_count: int | None = None
+    dns_answer_type: str | None = None
+    dns_answer_address: str | None = None
+    dns_ttl: int | None = None
+    dns_responses_sha256: str | None = None
+    target_started_at = (
+        min(started_at for started_at, _ended_at in target_windows)
+        if target_windows
+        else None
+    )
+    target_ended_at = (
+        max(ended_at for _started_at, ended_at in target_windows)
+        if target_windows
+        else None
+    )
+    if protocol == "dns":
+        if not expect_token:
+            raise PacketCaptureError("DNS evidence requires successful resolution proof")
+        responses = [
+            _dns_response_for_token(selected, family, evidence_token)[2]
+            for evidence_token in (start_marker, token, end_marker)
+        ]
+        digest = hashlib.sha256(DNS_RESPONSE_DIGEST_DOMAIN)
+        for response in responses:
+            digest.update(len(response).to_bytes(4, "big"))
+            digest.update(response)
+        dns_response_count = len(responses)
+        dns_answer_type = "A" if family == "ipv4" else "AAAA"
+        dns_answer_address = DNS_A_ADDRESS if family == "ipv4" else DNS_AAAA_ADDRESS
+        dns_ttl = DNS_TTL
+        dns_responses_sha256 = digest.hexdigest()
     if protocol == "quic" and any(
         packet.protocol == "tcp"
         and packet.family == family
@@ -810,12 +964,314 @@ def validate_capture_tokens(
         observation_ms=observation_ms,
         started_at=started_at,
         ended_at=ended_at,
+        start_event_started_at=start_event_started_at,
+        start_event_ended_at=start_event_ended_at,
+        target_started_at=target_started_at,
+        target_ended_at=target_ended_at,
+        end_event_started_at=end_event_started_at,
+        end_event_ended_at=end_event_ended_at,
+        total_record_count=len(capture.records),
         packet_count=len(window),
         token_occurrences=occurrences,
         link_type=interface.link_type,
         interface_name=interface.name,
         quic_version=expected_quic_version,
+        dns_response_count=dns_response_count,
+        dns_answer_type=dns_answer_type,
+        dns_answer_address=dns_answer_address,
+        dns_ttl=dns_ttl,
+        dns_responses_sha256=dns_responses_sha256,
     )
+
+
+def validate_staged_capture_tokens(
+    data: bytes,
+    kind: str,
+    *,
+    protocol: str,
+    family: str,
+    endpoints: tuple[StagedCaptureEndpoint, StagedCaptureEndpoint, StagedCaptureEndpoint],
+    expected_link_type: int,
+    expected_interface_name: str,
+    expected_quic_version: int | None,
+    token: bytes,
+    start_marker: bytes,
+    end_marker: bytes,
+    expect_token: bool,
+    declared_observation_ms: int,
+) -> CaptureProof:
+    """Validate a marker window whose three source-owned sends have own tuples.
+
+    The capture remains one immutable independent-vantage artifact.  Only the
+    sender tuple may change as the signed Host moves through baseline, test and
+    restored state; each token is evaluated against its own exact flow.
+    """
+
+    if tuple(endpoint.stage for endpoint in endpoints) != ("start", "target", "end"):
+        raise PacketCaptureError("staged capture endpoints are not start/target/end")
+    capture = parse_packet_capture(data, kind)
+    if not capture.interfaces or any(
+        interface.link_type != expected_link_type for interface in capture.interfaces
+    ):
+        raise PacketCaptureError("capture link type differs from signed provenance")
+    named = {interface.name for interface in capture.interfaces if interface.name is not None}
+    if named and named != {expected_interface_name}:
+        raise PacketCaptureError("pcapng interface name differs from signed provenance")
+    expected_version = 4 if family == "ipv4" else 6
+    normalized: list[StagedCaptureEndpoint] = []
+    for endpoint in endpoints:
+        try:
+            local = ipaddress.ip_address(endpoint.local_address)
+            remote = ipaddress.ip_address(endpoint.remote_address)
+        except ValueError as error:
+            raise PacketCaptureError("staged capture endpoint address is invalid") from error
+        if (
+            local.version != expected_version
+            or remote.version != expected_version
+            or not 1 <= endpoint.local_port <= 65535
+            or not 1 <= endpoint.remote_port <= 65535
+        ):
+            raise PacketCaptureError("staged capture endpoint family/port is invalid")
+        normalized.append(
+            StagedCaptureEndpoint(
+                endpoint.stage,
+                str(local),
+                endpoint.local_port,
+                str(remote),
+                endpoint.remote_port,
+            )
+        )
+    network = [_decode_network(record) for record in capture.records]
+    transports = [_decode_transport(packet) for packet in network]
+    stage_packets: dict[str, list[TransportPacket]] = {}
+    for endpoint in normalized:
+        stage_packets[endpoint.stage] = [
+            packet
+            for packet in transports
+            if packet.family == family
+            and _matches_flow(
+                packet,
+                local_address=endpoint.local_address,
+                local_port=endpoint.local_port,
+                remote_address=endpoint.remote_address,
+                remote_port=endpoint.remote_port,
+            )
+        ]
+    start_windows = _event_windows_for_token(
+        stage_packets["start"], protocol, family, start_marker
+    )
+    end_windows = _event_windows_for_token(
+        stage_packets["end"], protocol, family, end_marker
+    )
+    if len(start_windows) != 1 or len(end_windows) != 1:
+        raise PacketCaptureError("capture window markers must each occur exactly once")
+    start_event_started_at, start_event_ended_at = start_windows[0]
+    end_event_started_at, end_event_ended_at = end_windows[0]
+    started_at = start_event_ended_at
+    ended_at = end_event_ended_at
+    if ended_at <= started_at:
+        raise PacketCaptureError("capture window end marker does not follow its start marker")
+    duration_ms = (ended_at - started_at) * 1000
+    observation_ms = duration_ms.numerator // duration_ms.denominator
+    if not 1_000 <= observation_ms <= 30_000:
+        raise PacketCaptureError("capture observation window is outside 1s..30s")
+    if declared_observation_ms != observation_ms:
+        raise PacketCaptureError("declared observation_ms differs from capture timestamps")
+    target_window = [
+        packet
+        for packet in stage_packets["target"]
+        if started_at <= packet.timestamp <= ended_at
+    ]
+    target_windows = _event_windows_for_token(
+        target_window, protocol, family, token
+    )
+    occurrences = len(target_windows)
+    if expect_token and occurrences < 1:
+        raise PacketCaptureError("required unique token is absent from decoded application data")
+    if not expect_token and occurrences != 0:
+        raise PacketCaptureError("forbidden unique token is present from the required vantage")
+    selected_window = [
+        packet
+        for packets in stage_packets.values()
+        for packet in packets
+        if started_at <= packet.timestamp <= ended_at
+    ]
+    if not selected_window:
+        raise PacketCaptureError("staged capture contains no marker-bounded packets")
+    expected_transport = "tcp" if protocol == "tcp" else "udp"
+    if any(packet.protocol != expected_transport for packet in selected_window):
+        raise PacketCaptureError(
+            f"{protocol.upper()} evidence contains a transport fallback"
+        )
+    if protocol == "quic":
+        if expected_quic_version not in SUPPORTED_QUIC_VERSIONS:
+            raise PacketCaptureError("signed QUIC version is not an accepted v1/v2 version")
+        versions = {
+            _quic_connection_ids(packet.payload)[0]
+            for packet in selected_window
+            if packet.protocol == "udp"
+        }
+        if versions != {expected_quic_version}:
+            raise PacketCaptureError("captured QUIC version differs from signed provenance")
+    elif expected_quic_version is not None:
+        raise PacketCaptureError("non-QUIC evidence declares a QUIC version")
+    dns_response_count: int | None = None
+    dns_answer_type: str | None = None
+    dns_answer_address: str | None = None
+    dns_ttl: int | None = None
+    dns_responses_sha256: str | None = None
+    target_started_at = (
+        min(started_at for started_at, _ended_at in target_windows)
+        if target_windows
+        else None
+    )
+    target_ended_at = (
+        max(ended_at for _started_at, ended_at in target_windows)
+        if target_windows
+        else None
+    )
+    if protocol == "dns":
+        if not expect_token:
+            raise PacketCaptureError("DNS evidence requires successful resolution proof")
+        response_values = []
+        for stage, evidence_token in (
+            ("start", start_marker),
+            ("target", token),
+            ("end", end_marker),
+        ):
+            _query_at, _response_at, response = _dns_response_for_token(
+                stage_packets[stage], family, evidence_token
+            )
+            response_values.append(response)
+        digest = hashlib.sha256(DNS_RESPONSE_DIGEST_DOMAIN)
+        for response in response_values:
+            digest.update(len(response).to_bytes(4, "big"))
+            digest.update(response)
+        dns_response_count = len(response_values)
+        dns_answer_type = "A" if family == "ipv4" else "AAAA"
+        dns_answer_address = DNS_A_ADDRESS if family == "ipv4" else DNS_AAAA_ADDRESS
+        dns_ttl = DNS_TTL
+        dns_responses_sha256 = digest.hexdigest()
+    used_interfaces = {packet.interface_id for packet in selected_window}
+    if len(used_interfaces) != 1:
+        raise PacketCaptureError("evidence window spans multiple capture interfaces")
+    interface = capture.interfaces[next(iter(used_interfaces))]
+    return CaptureProof(
+        observation_ms=observation_ms,
+        started_at=started_at,
+        ended_at=ended_at,
+        start_event_started_at=start_event_started_at,
+        start_event_ended_at=start_event_ended_at,
+        target_started_at=target_started_at,
+        target_ended_at=target_ended_at,
+        end_event_started_at=end_event_started_at,
+        end_event_ended_at=end_event_ended_at,
+        total_record_count=len(capture.records),
+        packet_count=len(selected_window),
+        token_occurrences=occurrences,
+        link_type=interface.link_type,
+        interface_name=interface.name,
+        quic_version=expected_quic_version,
+        dns_response_count=dns_response_count,
+        dns_answer_type=dns_answer_type,
+        dns_answer_address=dns_answer_address,
+        dns_ttl=dns_ttl,
+        dns_responses_sha256=dns_responses_sha256,
+    )
+
+
+def dns_stage_endpoints(
+    data: bytes,
+    kind: str,
+    *,
+    family: str,
+    remote_address: str,
+    tokens: tuple[bytes, bytes, bytes],
+) -> tuple[StagedCaptureEndpoint, StagedCaptureEndpoint, StagedCaptureEndpoint]:
+    """Derive exact client tuples from the independent remote DNS pcap."""
+
+    try:
+        remote = str(ipaddress.ip_address(remote_address))
+    except ValueError as error:
+        raise PacketCaptureError("remote DNS endpoint address is invalid") from error
+    expected_version = 4 if family == "ipv4" else 6
+    if ipaddress.ip_address(remote).version != expected_version:
+        raise PacketCaptureError("remote DNS endpoint family differs")
+    parsed = parse_packet_capture(data, kind)
+    transports = [
+        _decode_transport(_decode_network(record)) for record in parsed.records
+    ]
+    endpoints: list[StagedCaptureEndpoint] = []
+    for stage, token in zip(("start", "target", "end"), tokens, strict=True):
+        expected_name = f"{token.decode('ascii')}.evidence.test"
+        matches: list[TransportPacket] = []
+        for packet in transports:
+            if (
+                packet.family != family
+                or packet.protocol != "udp"
+                or packet.destination != remote
+                or packet.destination_port != 53
+            ):
+                continue
+            try:
+                message = _dns_message(packet.payload, family)
+            except PacketCaptureError:
+                continue
+            if not message.is_response and message.question_name == expected_name:
+                matches.append(packet)
+        if len(matches) != 1:
+            raise PacketCaptureError(
+                f"remote DNS pcap does not contain one exact {stage} query"
+            )
+        packet = matches[0]
+        endpoints.append(
+            StagedCaptureEndpoint(
+                stage=stage,
+                local_address=packet.source,
+                local_port=packet.source_port,
+                remote_address=packet.destination,
+                remote_port=packet.destination_port,
+            )
+        )
+    return endpoints[0], endpoints[1], endpoints[2]
+
+
+def staged_marker_window(
+    data: bytes,
+    kind: str,
+    *,
+    protocol: str,
+    family: str,
+    endpoints: tuple[StagedCaptureEndpoint, StagedCaptureEndpoint, StagedCaptureEndpoint],
+    start_marker: bytes,
+    end_marker: bytes,
+) -> tuple[Fraction, Fraction]:
+    """Return the exact unique marker timestamps for producer provenance."""
+
+    if tuple(endpoint.stage for endpoint in endpoints) != ("start", "target", "end"):
+        raise PacketCaptureError("staged marker endpoints are not ordered")
+    capture = parse_packet_capture(data, kind)
+    transports = [_decode_transport(_decode_network(record)) for record in capture.records]
+
+    def selected(endpoint: StagedCaptureEndpoint) -> list[TransportPacket]:
+        return [
+            packet
+            for packet in transports
+            if packet.family == family
+            and _matches_flow(
+                packet,
+                local_address=endpoint.local_address,
+                local_port=endpoint.local_port,
+                remote_address=endpoint.remote_address,
+                remote_port=endpoint.remote_port,
+            )
+        ]
+
+    starts = _events_for_token(selected(endpoints[0]), protocol, family, start_marker)
+    ends = _events_for_token(selected(endpoints[2]), protocol, family, end_marker)
+    if len(starts) != 1 or len(ends) != 1 or ends[0] <= starts[0]:
+        raise PacketCaptureError("staged capture markers are absent, repeated, or reversed")
+    return starts[0], ends[0]
 
 
 def timestamp_fraction(value: str) -> Fraction:

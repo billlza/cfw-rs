@@ -258,6 +258,7 @@ libbox_verify_xcframework_artifact() {
     --metadata "gomobileVersion=$GOMOBILE_VERSION" \
     --metadata "gomobileCommit=$GOMOBILE_COMMIT" \
     --metadata "gomobileModuleSum=$GOMOBILE_MODULE_SUM" \
+    --metadata "archiveDeterminism=zeroArDate-v1" \
     --metadata "headerNormalization=angleBracketFrameworkImports-v1" \
     --metadata "platform=$LIBBOX_APPLE_PLATFORM" \
     --metadata "buildTags=$LIBBOX_BUILD_TAGS" \

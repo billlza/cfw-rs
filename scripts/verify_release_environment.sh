@@ -20,6 +20,8 @@ verify_release_workspace_has_no_key_material "$repo_root"
 "$repo_root/scripts/assert_apple_silicon.sh"
 cfw_require_supported_python
 PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_version_contract.py"
+PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  "$repo_root/scripts/verify_physical_capture_readiness.py"
 
 macos_major="$(sw_vers -productVersion | cut -d. -f1)"
 if (( macos_major < 15 )); then

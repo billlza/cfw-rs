@@ -2,8 +2,8 @@
 
 This module is the missing orchestration boundary between the existing strict
 validators.  It has no fixture mode, caller-selected build numbers, optional
-evidence, or success override.  The fixed 40002 validation candidate must be
-approved before the fixed 40003 final candidate, and every request field is
+evidence, or success override.  The fixed 40004 validation candidate must be
+approved before the fixed 40005 final candidate, and every request field is
 derived by reopening canonical release artifacts.
 
 The workflow is intentionally layered. ``prepare_physical_candidate_manifest``
@@ -105,8 +105,8 @@ from scripts.verify_notary_log import NotaryLogError, validate_files as validate
 
 
 PRODUCT_VERSION = RELEASE_VERSION
-VALIDATION_BUILD = "40002"
-FINAL_BUILD = "40003"
+VALIDATION_BUILD = "40004"
+FINAL_BUILD = "40005"
 
 CANDIDATE_ROOT = Path("target/candidates/0.4.0")
 FINAL_NATIVE_PRODUCTS = CANDIDATE_ROOT / "release-build" / FINAL_BUILD / "native-products"
@@ -312,9 +312,13 @@ def _production_context(repository: Path) -> ProductionContext:
             expected_source_identity=source_identity,
         )
     except (OSError, SourceIdentityError, ValidatedCandidateError, ValueError) as error:
-        raise PublicationError(f"validated 40002 candidate is unavailable: {error}") from error
+        raise PublicationError(
+            f"validated {VALIDATION_BUILD} candidate is unavailable: {error}"
+        ) from error
     if review["product"] != {"version": PRODUCT_VERSION, "build_number": VALIDATION_BUILD}:
-        raise PublicationError("validated candidate is not exactly build 40002")
+        raise PublicationError(
+            f"validated candidate is not exactly build {VALIDATION_BUILD}"
+        )
 
     candidate = review["candidate"]
     ci_path = repository.joinpath(*safe_relative(candidate["ci_evidence_path"]).parts)
@@ -329,7 +333,9 @@ def _production_context(repository: Path) -> ProductionContext:
             source_identity["releaseSourceSha256"],
         )
     except (OSError, ValueError) as error:
-        raise PublicationError(f"validated 40002 CI/toolchain evidence failed: {error}") from error
+        raise PublicationError(
+            f"validated {VALIDATION_BUILD} CI/toolchain evidence failed: {error}"
+        ) from error
     ci_document = _load_strict_json(ci_path, canonical=True)
 
     app = _path(repository, SIGNED_APP)
@@ -345,10 +351,12 @@ def _production_context(repository: Path) -> ProductionContext:
             team_id=TEAM_ID,
         )
     except (OSError, ValueError) as error:
-        raise PublicationError(f"final 40003 app manifest failed: {error}") from error
+        raise PublicationError(f"final {FINAL_BUILD} app manifest failed: {error}") from error
     identity = bundle_build_identity(app)
     if identity.product_version != PRODUCT_VERSION or identity.build_version != FINAL_BUILD:
-        raise PublicationError("final signed application is not exactly 0.4.0 build 40003")
+        raise PublicationError(
+            f"final signed application is not exactly {PRODUCT_VERSION} build {FINAL_BUILD}"
+        )
     _validate_release_application(repository)
 
     publication_root = _path(repository, PUBLICATION_ROOT)
@@ -363,7 +371,9 @@ def _production_context(repository: Path) -> ProductionContext:
         "version": PRODUCT_VERSION,
         "build_number": FINAL_BUILD,
     }:
-        raise PublicationError("publication closure is not for final build 40003")
+        raise PublicationError(
+            f"publication closure is not for final build {FINAL_BUILD}"
+        )
     if machine["app"]["sha256"] != app_manifest["sha256"]:
         raise PublicationError("publication closure and final app manifest bind different trees")
 
@@ -952,7 +962,8 @@ def _require_physical_candidate_binding(
     }
     if any(physical_candidate[key] != value for key, value in expected.items()):
         raise PublicationError(
-            "physical aggregate does not bind the exact receipt-prepared 40003 candidate"
+            "physical aggregate does not bind the exact receipt-prepared "
+            f"{FINAL_BUILD} candidate"
         )
 
 
@@ -1047,6 +1058,7 @@ def seal_production_evidence(repository: Path) -> dict[str, Any]:
         context.repository,
         source_document,
         context.source_identity["repositoryCommit"],
+        context.source_identity["releaseSourceSha256"],
     )
     if source_failures:
         raise PublicationError(f"P0 source gates are not all passing: {source_failures}")
@@ -1056,7 +1068,9 @@ def seal_production_evidence(repository: Path) -> dict[str, Any]:
         context.source_identity["releaseSourceSha256"],
     )
     if ci_failures:
-        raise PublicationError(f"validated 40002 CI lanes are not all passing: {ci_failures}")
+        raise PublicationError(
+            f"validated {VALIDATION_BUILD} CI lanes are not all passing: {ci_failures}"
+        )
 
     physical_path = _path(context.repository, PHYSICAL_EVIDENCE_INPUT)
     physical_document = _load_strict_json(physical_path, canonical=True)
@@ -1190,7 +1204,7 @@ def seal_production_evidence(repository: Path) -> dict[str, Any]:
 
 
 def self_check(repository: Path) -> None:
-    if (PRODUCT_VERSION, VALIDATION_BUILD, FINAL_BUILD) != ("0.4.0", "40002", "40003"):
+    if (PRODUCT_VERSION, VALIDATION_BUILD, FINAL_BUILD) != ("0.4.0", "40004", "40005"):
         raise PublicationError("production release build identity drifted")
     if len(CAPABILITY_IDS) != 9:
         raise PublicationError("production release capability inventory is not fixed to nine")

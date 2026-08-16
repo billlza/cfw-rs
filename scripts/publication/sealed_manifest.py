@@ -8,6 +8,7 @@ black box, into one canonical, self-sealing, immutable document:
   ``scripts/verify_production_boundary_removal.py``,
   ``scripts/verify_native_product_graph.py``,
   ``scripts/verify_pinned_build_inputs.py``,
+  ``scripts/verify_physical_capture_readiness.py``,
   ``scripts/verify_build_boundaries.sh``,
   ``scripts/release_workspace_secret_gate.sh``) recorded as content-addressed
   command results bound to one commit;
@@ -142,6 +143,10 @@ from scripts.release_capability_inventory import (  # noqa: E402
     require_complete_capability_set,
     require_fixed_evidence_mapping,
 )
+from scripts.repository_source_identity import (  # noqa: E402
+    SourceIdentityError,
+    current_identity,
+)
 
 
 SCHEMA_VERSION = 1
@@ -173,8 +178,8 @@ RESULT_STATUSES = frozenset(
 MACOS_MIN = "15.0"
 ARCH = "arm64"
 LICENSE = "GPL-3.0-or-later"
-SOURCE_GATE_SCHEMA_VERSION = 1
-SOURCE_GATE_DOCUMENT = "p0-source-gates-v1"
+SOURCE_GATE_SCHEMA_VERSION = 2
+SOURCE_GATE_DOCUMENT = "p0-source-gates-v2"
 
 # The evidence hierarchy is imported from the canonical Evidence_Manifest so the
 # level names can never drift: Source_Implemented < Unsigned_CI_Verified <
@@ -221,6 +226,7 @@ REQUIRED_SOURCE_GATES: dict[str, str] = {
     "production-boundary-removal": "scripts/verify_production_boundary_removal.py",
     "native-product-graph": "scripts/verify_native_product_graph.py",
     "pinned-build-inputs": "scripts/verify_pinned_build_inputs.py",
+    "physical-capture-readiness": "scripts/verify_physical_capture_readiness.py",
     "build-script-boundary": "scripts/verify_build_boundaries.sh",
     "workspace-secret-gate": "scripts/release_workspace_secret_gate.sh",
 }
@@ -465,11 +471,20 @@ def _result_set(
 
 
 def _source_gate_document(
-    repository: Path, value: object, commit: str
+    repository: Path,
+    value: object,
+    commit: str,
+    expected_release_source_sha256: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     payload = require_exact_keys(
         value,
-        {"schema_version", "document", "gates"},
+        {
+            "schema_version",
+            "document",
+            "repository_commit",
+            "release_source_sha256",
+            "gates",
+        },
         "p0 source gate document",
     )
     if (
@@ -478,14 +493,37 @@ def _source_gate_document(
         or payload["document"] != SOURCE_GATE_DOCUMENT
     ):
         raise PublicationError("p0 source gate document has an unsupported schema")
+    document_commit = _require_commit(
+        payload["repository_commit"], "p0 source gate repository commit"
+    )
+    if document_commit != commit:
+        raise PublicationError("p0 source gate document is bound to a different commit")
+    release_source_sha256 = require_sha256(
+        payload["release_source_sha256"], "p0 source gate release_source_sha256"
+    )
+    if (
+        expected_release_source_sha256 is not None
+        and release_source_sha256 != expected_release_source_sha256
+    ):
+        raise PublicationError(
+            "p0 source gate document is bound to a different release source"
+        )
     gates, failures = _result_set(
         payload["gates"],
         "p0 source gate",
-        {"id", "script", "status", "exit_code", "log_sha256", "commit"},
+        {
+            "id",
+            "script",
+            "status",
+            "exit_code",
+            "log_sha256",
+            "commit",
+            "release_source_sha256",
+        },
         tuple(REQUIRED_SOURCE_GATES),
         commit,
         None,
-        None,
+        release_source_sha256,
     )
     for gate in gates:
         expected = REQUIRED_SOURCE_GATES[gate["id"]]
@@ -500,6 +538,8 @@ def _source_gate_document(
     return {
         "schema_version": SOURCE_GATE_SCHEMA_VERSION,
         "document": SOURCE_GATE_DOCUMENT,
+        "repository_commit": document_commit,
+        "release_source_sha256": release_source_sha256,
         "gates": gates,
     }, failures
 
@@ -566,9 +606,15 @@ def validate_source_gate_document(
     repository: Path,
     value: object,
     commit: str,
+    expected_release_source_sha256: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Public composition boundary for the fixed P0 source-gate document."""
-    return _source_gate_document(repository, value, commit)
+    return _source_gate_document(
+        repository,
+        value,
+        commit,
+        expected_release_source_sha256,
+    )
 
 
 def validate_ci_lane_document(
@@ -1087,7 +1133,11 @@ def build_sealed_evidence_manifest(
         source_document, failures = _source_gate_document(repository, payload["p0_source"], commit)
         gates["p0_source"] = _gate(
             PASSED if not failures else FAILED,
-            {"gates": len(source_document["gates"]), "failed": failures},
+            {
+                "release_source_sha256": source_document["release_source_sha256"],
+                "gates": len(source_document["gates"]),
+                "failed": failures,
+            },
         )
     if payload["unsigned_ci"] is None:
         gates["unsigned_ci"] = _gate(NOT_RUN, None)
@@ -1102,6 +1152,38 @@ def build_sealed_evidence_manifest(
                 "failed": failures,
             },
         )
+    if (
+        source_document is not None
+        and ci_document is not None
+        and source_document["release_source_sha256"]
+        != ci_document["release_source_sha256"]
+    ):
+        raise PublicationError(
+            "P0 source gates and unsigned CI bind different release sources"
+        )
+    if not fixture:
+        try:
+            observed_source = current_identity(repository, require_clean=True)
+        except (OSError, SourceIdentityError) as error:
+            raise PublicationError(
+                "non-fixture sealing requires one clean release source identity"
+            ) from error
+        if observed_source["repositoryCommit"] != commit:
+            raise PublicationError(
+                "non-fixture sealing request is bound to a different repository commit"
+            )
+        for label, document in (
+            ("P0 source gates", source_document),
+            ("unsigned CI", ci_document),
+        ):
+            if (
+                document is not None
+                and document["release_source_sha256"]
+                != observed_source["releaseSourceSha256"]
+            ):
+                raise PublicationError(
+                    f"non-fixture {label} bind a different release source"
+                )
     if payload["signed_installed"] is None:
         gates["signed_installed"] = _gate(NOT_RUN, None)
     else:
@@ -1154,7 +1236,9 @@ def build_sealed_evidence_manifest(
     bindings = {
         "commit": commit,
         "release_source_sha256": (
-            None if ci_document is None else ci_document["release_source_sha256"]
+            source_document["release_source_sha256"]
+            if source_document is not None
+            else None if ci_document is None else ci_document["release_source_sha256"]
         ),
         "product": product,
         "identity": identity,

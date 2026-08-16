@@ -6,5 +6,6 @@ mod lifecycle;
 mod mode_cycle_integration;
 mod off_barrier;
 mod off_ordering_property;
+mod restart_spec;
 mod support;
 mod transitions;

@@ -8,23 +8,26 @@ use std::path::{Path, PathBuf};
 
 use cfw_engine_api::{CutoverPreflightRequest, EngineCommandContext, EngineMode};
 use cfw_platform::LegacyProxyServiceIdentity;
+use cfw_singbox_config::EngineSettings;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::gui_handoff::LegacyGuiIdentity;
-#[cfg(test)]
-use super::handoff_ticket::ProcessStartIdentity;
+use super::network_fingerprint::LegacyNetworkJournalIdentity;
 use super::process_cleanup::ProcessRecord;
+use super::runtime_plan::LegacyRuntimePlanKind;
 
 const JOURNAL_FILE: &str = "legacy-cutover-journal-v1.json";
 const TEMPORARY_FILE: &str = ".legacy-cutover-journal-v1.tmp";
-const SCHEMA_VERSION: u16 = 1;
+const SCHEMA_VERSION: u16 = 3;
 const MAX_JOURNAL_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum CutoverPhase {
     Prepared,
+    /// Schema-stable historical name: the journal-bound legacy GUI has exited,
+    /// but the legacy network is still intact and no network mutation is sealed.
     GuiStopped,
     NetworkRetiring,
     LegacyRetired,
@@ -44,7 +47,12 @@ pub(super) struct CutoverJournal {
     pub(super) context: EngineCommandContext,
     pub(super) system_proxy_digest: String,
     pub(super) tunnel_digest: String,
-    pub(super) legacy_interface: Option<String>,
+    /// Exact non-secret engine inputs used to produce both replacement
+    /// projections. The per-process controller secret is intentionally not
+    /// persisted and is regenerated when a recovery process starts.
+    pub(super) replacement_settings: EngineSettings,
+    pub(super) runtime_kind: LegacyRuntimePlanKind,
+    pub(super) legacy_tunnel: Option<LegacyNetworkJournalIdentity>,
     pub(super) legacy_process: Option<ProcessRecord>,
     pub(super) legacy_session: Option<LegacySessionJournalIdentity>,
     pub(super) legacy_proxy_services: Vec<LegacyProxyServiceIdentity>,
@@ -62,7 +70,7 @@ pub(super) struct LegacySessionJournalIdentity {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct LegacyNetworkJournalInput {
-    pub(super) interface: Option<String>,
+    pub(super) tunnel: Option<LegacyNetworkJournalIdentity>,
     pub(super) process: Option<ProcessRecord>,
     pub(super) session: Option<LegacySessionJournalIdentity>,
     pub(super) proxy_services: Vec<LegacyProxyServiceIdentity>,
@@ -74,6 +82,8 @@ impl CutoverJournal {
         profile_id: impl Into<String>,
         profile_digest: impl Into<String>,
         request: &CutoverPreflightRequest,
+        replacement_settings: EngineSettings,
+        runtime_kind: LegacyRuntimePlanKind,
         legacy: LegacyNetworkJournalInput,
         legacy_gui: Option<LegacyGuiIdentity>,
     ) -> Result<Self, String> {
@@ -87,7 +97,9 @@ impl CutoverJournal {
             context: request.system_proxy_request().context.clone(),
             system_proxy_digest: request.system_proxy_request().config_digest.clone(),
             tunnel_digest: request.tunnel_request().config_digest.clone(),
-            legacy_interface: legacy.interface,
+            replacement_settings,
+            runtime_kind,
+            legacy_tunnel: legacy.tunnel,
             legacy_process: legacy.process,
             legacy_session: legacy.session,
             legacy_proxy_services: legacy.proxy_services,
@@ -103,6 +115,7 @@ impl CutoverJournal {
         profile_id: &str,
         profile_digest: &str,
         request: &CutoverPreflightRequest,
+        replacement_settings: &EngineSettings,
     ) -> bool {
         self.target == request.target()
             && self.profile_id == profile_id
@@ -113,9 +126,34 @@ impl CutoverJournal {
             && request.system_proxy_request().context.generation >= self.context.generation
             && self.system_proxy_digest == request.system_proxy_request().config_digest
             && self.tunnel_digest == request.tunnel_request().config_digest
+            && &self.replacement_settings == replacement_settings
     }
 
     fn validate(&self) -> Result<(), String> {
+        let runtime_identity_valid = match self.runtime_kind {
+            LegacyRuntimePlanKind::LiveOwned { service_job } => {
+                matches!(
+                    service_job,
+                    cfw_platform::LegacyServiceJobObservation::LoadedActive {
+                        program: cfw_platform::LegacyServiceJobProgram::LegacyHelper
+                    }
+                ) && self.legacy_process.is_some()
+                    && self.legacy_session.is_some()
+                    && self.legacy_gui.is_some()
+            }
+            LegacyRuntimePlanKind::DormantRegistered { service_job } => {
+                matches!(
+                    service_job,
+                    cfw_platform::LegacyServiceJobObservation::LoadedInactive {
+                        program: cfw_platform::LegacyServiceJobProgram::LegacyHelper
+                            | cfw_platform::LegacyServiceJobProgram::RetirementTombstone
+                    }
+                ) && self.has_no_legacy_runtime_identity()
+            }
+            LegacyRuntimePlanKind::OfflineUpgrade | LegacyRuntimePlanKind::FreshInstall => {
+                self.has_no_legacy_runtime_identity()
+            }
+        };
         if self.schema_version != SCHEMA_VERSION
             || !canonical_uuid(&self.operation_id)
             || !canonical_uuid(&self.profile_id)
@@ -126,13 +164,13 @@ impl CutoverJournal {
             || !sha256_digest(&self.profile_digest)
             || !sha256_digest(&self.system_proxy_digest)
             || !sha256_digest(&self.tunnel_digest)
-            || self.legacy_interface.as_ref().is_some_and(|interface| {
-                !interface.strip_prefix("utun").is_some_and(|suffix| {
-                    !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
-                })
-            })
+            || validate_replacement_settings(&self.replacement_settings).is_err()
+            || self
+                .legacy_tunnel
+                .as_ref()
+                .is_some_and(|tunnel| tunnel.validate().is_err())
             || self.legacy_process.is_some() != self.legacy_session.is_some()
-            || self.legacy_interface.is_some() && self.legacy_process.is_none()
+            || self.legacy_tunnel.is_some() && self.legacy_process.is_none()
             || self.legacy_process.as_ref().is_some_and(|process| {
                 process.uid != 0
                     || process.pid == 0
@@ -171,16 +209,20 @@ impl CutoverJournal {
                     || legacy_gui.executable
                         != Path::new("/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac")
             })
-            || self.legacy_gui.is_none()
-                && (self.legacy_interface.is_some()
-                    || self.legacy_process.is_some()
-                    || self.legacy_session.is_some()
-                    || !self.legacy_proxy_services.is_empty()
-                    || self.legacy_proxy_port.is_some())
+            || !runtime_identity_valid
         {
             return Err("legacy cutover journal identity is invalid".into());
         }
         Ok(())
+    }
+
+    fn has_no_legacy_runtime_identity(&self) -> bool {
+        self.legacy_tunnel.is_none()
+            && self.legacy_process.is_none()
+            && self.legacy_session.is_none()
+            && self.legacy_proxy_services.is_empty()
+            && self.legacy_proxy_port.is_none()
+            && self.legacy_gui.is_none()
     }
 
     fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
@@ -338,40 +380,13 @@ impl CutoverJournalStore {
         }
     }
 
-    pub(super) fn abandon_pre_network(&self, expected: CutoverPhase) -> Result<(), String> {
-        if !matches!(expected, CutoverPhase::Prepared | CutoverPhase::GuiStopped) {
-            return Err("only a pre-network cutover journal can be abandoned".into());
-        }
-        let directory = Directory::open_or_create(&self.root)?;
-        directory.lock()?;
-        let journal = directory
-            .read_journal()?
-            .ok_or_else(|| "legacy cutover journal is missing".to_owned())?;
-        if journal.phase != expected {
-            return Err(format!(
-                "legacy cutover journal is {:?}, expected {expected:?}",
-                journal.phase
-            ));
-        }
-        let name = CString::new(JOURNAL_FILE).expect("fixed name");
-        if unsafe { libc::unlinkat(directory.file.as_raw_fd(), name.as_ptr(), 0) } == -1 {
-            return Err(format!(
-                "failed to abandon pre-network cutover journal: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        directory
-            .file
-            .sync_all()
-            .map_err(|error| format!("failed to fsync journal abandonment: {error}"))
-    }
-
     pub(super) fn rebind_recovery_request(
         &self,
         expected: CutoverPhase,
         profile_id: &str,
         profile_digest: &str,
         request: &CutoverPreflightRequest,
+        replacement_settings: &EngineSettings,
     ) -> Result<CutoverJournal, String> {
         if !matches!(
             expected,
@@ -387,7 +402,12 @@ impl CutoverJournalStore {
             .read_journal()?
             .ok_or_else(|| "legacy cutover journal is missing".to_owned())?;
         if journal.phase != expected
-            || !journal.matches_recovery_projection(profile_id, profile_digest, request)
+            || !journal.matches_recovery_projection(
+                profile_id,
+                profile_digest,
+                request,
+                replacement_settings,
+            )
         {
             return Err("recovery profile, projection, lineage, or phase does not match the persisted cutover".into());
         }
@@ -401,6 +421,7 @@ fn valid_transition(expected: CutoverPhase, next: CutoverPhase) -> bool {
     matches!(
         (expected, next),
         (CutoverPhase::Prepared, CutoverPhase::GuiStopped)
+            | (CutoverPhase::Prepared, CutoverPhase::NetworkRetiring)
             | (CutoverPhase::GuiStopped, CutoverPhase::NetworkRetiring)
             | (CutoverPhase::NetworkRetiring, CutoverPhase::LegacyRetired)
             | (CutoverPhase::LegacyRetired, CutoverPhase::ReplacementActive)
@@ -675,6 +696,22 @@ fn canonical_uuid(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
 }
 
+fn validate_replacement_settings(settings: &EngineSettings) -> Result<(), String> {
+    if settings.mixed_port == 0 {
+        return Err("replacement mixed proxy port must be nonzero".into());
+    }
+    settings
+        .clash_api_endpoint()
+        .map_err(|error| format!("replacement controller endpoint is invalid: {error}"))?;
+    if !(1_280..=9_000).contains(&settings.tunnel_mtu) {
+        return Err(format!(
+            "replacement tunnel MTU {} is outside the supported range",
+            settings.tunnel_mtu
+        ));
+    }
+    Ok(())
+}
+
 fn sha256_digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -685,7 +722,7 @@ fn sha256_digest(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cfw_engine_api::{EngineStartRequest, TunnelNetworkOptions};
+    use cfw_engine_api::{DirectIpv4HostRoutes, EngineStartRequest, TunnelNetworkOptions};
 
     fn request() -> CutoverPreflightRequest {
         let context = EngineCommandContext {
@@ -717,6 +754,7 @@ mod tests {
             tunnel_options: Some(TunnelNetworkOptions {
                 ipv6_enabled: true,
                 bypass_private_networks: true,
+                direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
                 mtu: 1500,
             }),
         };
@@ -731,18 +769,10 @@ mod tests {
             "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             "33".repeat(32),
             &request(),
+            EngineSettings::default(),
+            LegacyRuntimePlanKind::FreshInstall,
             LegacyNetworkJournalInput::default(),
-            Some(LegacyGuiIdentity {
-                uid: unsafe { libc::geteuid() },
-                pid: 42,
-                start_identity: ProcessStartIdentity {
-                    seconds: 1_721_599_857,
-                    microseconds: 123_456,
-                },
-                executable: PathBuf::from(
-                    "/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac",
-                ),
-            }),
+            None,
         )
         .expect("journal");
         store.write_prepared(&journal).expect("write prepared");
@@ -753,22 +783,75 @@ mod tests {
         );
         assert_eq!(
             store
-                .advance(CutoverPhase::Prepared, CutoverPhase::GuiStopped)
+                .advance(CutoverPhase::Prepared, CutoverPhase::NetworkRetiring)
                 .expect("advance")
                 .phase,
-            CutoverPhase::GuiStopped
+            CutoverPhase::NetworkRetiring
         );
         assert!(
             store
-                .advance(CutoverPhase::Prepared, CutoverPhase::GuiStopped)
+                .advance(CutoverPhase::Prepared, CutoverPhase::NetworkRetiring)
                 .is_err()
         );
         store
-            .advance(CutoverPhase::GuiStopped, CutoverPhase::NetworkRetiring)
-            .expect("network retiring");
-        store
             .advance(CutoverPhase::NetworkRetiring, CutoverPhase::LegacyRetired)
             .expect("legacy retired");
+    }
+
+    #[test]
+    fn replacement_settings_are_source_bound_and_survive_journal_round_trip() {
+        let root = tempfile::tempdir().expect("temp");
+        let store = CutoverJournalStore::new(root.path());
+        let settings = EngineSettings {
+            mixed_port: 7891,
+            controller_port: 9091,
+            ..EngineSettings::default()
+        };
+        let journal = CutoverJournal::prepared(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "33".repeat(32),
+            &request(),
+            settings.clone(),
+            LegacyRuntimePlanKind::FreshInstall,
+            LegacyNetworkJournalInput::default(),
+            None,
+        )
+        .expect("journal");
+        store.write_prepared(&journal).expect("write prepared");
+        let loaded = store.load().expect("load").expect("journal");
+        assert_eq!(loaded.replacement_settings, settings);
+        assert!(loaded.matches_recovery_projection(
+            &loaded.profile_id,
+            &loaded.profile_digest,
+            &request(),
+            &settings,
+        ));
+        let different = EngineSettings {
+            mixed_port: 7892,
+            ..settings
+        };
+        assert!(!loaded.matches_recovery_projection(
+            &loaded.profile_id,
+            &loaded.profile_digest,
+            &request(),
+            &different,
+        ));
+    }
+
+    #[test]
+    fn replacement_settings_validation_rejects_unusable_persisted_endpoints() {
+        let mut journal = CutoverJournal::prepared(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "33".repeat(32),
+            &request(),
+            EngineSettings::default(),
+            LegacyRuntimePlanKind::FreshInstall,
+            LegacyNetworkJournalInput::default(),
+            None,
+        )
+        .expect("journal");
+        journal.replacement_settings.controller_port = journal.replacement_settings.mixed_port;
+        assert!(journal.validate().is_err());
     }
 
     #[test]
@@ -779,31 +862,25 @@ mod tests {
             "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             "33".repeat(32),
             &request(),
+            EngineSettings::default(),
+            LegacyRuntimePlanKind::FreshInstall,
             LegacyNetworkJournalInput::default(),
-            Some(LegacyGuiIdentity {
-                uid: unsafe { libc::geteuid() },
-                pid: 42,
-                start_identity: ProcessStartIdentity {
-                    seconds: 1_721_599_857,
-                    microseconds: 123_456,
-                },
-                executable: PathBuf::from(
-                    "/Applications/Clash for Mac.app/Contents/MacOS/clash-for-mac",
-                ),
-            }),
+            None,
         )
         .expect("journal");
         store.write_prepared(&journal).expect("write prepared");
 
         let failure = store
-            .advance_with_directory_sync(CutoverPhase::Prepared, CutoverPhase::GuiStopped, |_| {
-                Err(std::io::Error::other("injected directory fsync failure"))
-            })
+            .advance_with_directory_sync(
+                CutoverPhase::Prepared,
+                CutoverPhase::NetworkRetiring,
+                |_| Err(std::io::Error::other("injected directory fsync failure")),
+            )
             .expect_err("directory fsync must remain commit-uncertain");
         assert!(failure.commit_is_uncertain());
         match failure {
             JournalAdvanceError::CommitUncertain(state) => {
-                assert_eq!(state.intended.phase, CutoverPhase::GuiStopped);
+                assert_eq!(state.intended.phase, CutoverPhase::NetworkRetiring);
                 assert_eq!(state.persisted, Ok(Some(state.intended.clone())));
                 assert!(state.detail.contains("injected directory fsync failure"));
             }
@@ -811,9 +888,40 @@ mod tests {
         }
         assert_eq!(
             store.load().expect("load").expect("journal").phase,
-            CutoverPhase::GuiStopped,
-            "the lock-bound reread must expose the renamed phase; callers keep the GUI stopped"
+            CutoverPhase::NetworkRetiring,
+            "the lock-bound reread exposes the sealed phase for idempotent recovery"
         );
+    }
+
+    #[test]
+    fn pre_network_crash_states_converge_to_one_way_recovery_without_gui_relaunch() {
+        for phase in [CutoverPhase::Prepared, CutoverPhase::GuiStopped] {
+            let root = tempfile::tempdir().expect("temp");
+            let store = CutoverJournalStore::new(root.path());
+            let journal = CutoverJournal::prepared(
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "33".repeat(32),
+                &request(),
+                EngineSettings::default(),
+                LegacyRuntimePlanKind::FreshInstall,
+                LegacyNetworkJournalInput::default(),
+                None,
+            )
+            .expect("journal");
+            store.write_prepared(&journal).expect("write prepared");
+            if phase == CutoverPhase::GuiStopped {
+                store
+                    .advance(CutoverPhase::Prepared, CutoverPhase::GuiStopped)
+                    .expect("materialize old-schema GUI phase");
+            }
+            assert_eq!(
+                store
+                    .advance(phase, CutoverPhase::NetworkRetiring)
+                    .expect("seal retry")
+                    .phase,
+                CutoverPhase::NetworkRetiring
+            );
+        }
     }
 
     #[test]
@@ -833,6 +941,8 @@ mod tests {
             "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             "33".repeat(32),
             &request(),
+            EngineSettings::default(),
+            LegacyRuntimePlanKind::FreshInstall,
             LegacyNetworkJournalInput::default(),
             None,
         )
@@ -840,7 +950,12 @@ mod tests {
         assert!(journal.legacy_gui.is_none());
 
         let mut inconsistent = journal;
-        inconsistent.legacy_interface = Some("utun7".into());
+        inconsistent.legacy_tunnel = Some(LegacyNetworkJournalIdentity {
+            interface: "utun7".into(),
+            route_digest: "11".repeat(32),
+            route_count: 1,
+            scoped_dns_resolvers: 0,
+        });
         assert!(inconsistent.validate().is_err());
     }
 }

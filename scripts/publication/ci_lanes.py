@@ -286,7 +286,7 @@ APPLE_PIN_KEYS = ("XCODE_VERSION", "XCODE_BUILD_VERSION", "MACOS_DEPLOYMENT_TARG
 def _pins(repository: Path) -> dict[str, str]:
     try:
         return pinned._parse_env(
-            pinned._read_text(repository / PINS_RELATIVE, "dependency_pins.env")
+            pinned._read_text(repository, PINS_RELATIVE, "dependency_pins.env")
         )
     except pinned.PinnedInputError as error:
         raise PublicationError(f"cannot read the pinned toolchain set: {error}") from error

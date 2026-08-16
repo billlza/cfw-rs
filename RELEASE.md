@@ -25,8 +25,8 @@ the earlier missing-link placeholders:
   ProxyAgent, and Provider. Each direction applies an exact public code-signing
   requirement before exporting its typed protocol.
 
-The libbox input is upstream sing-box `v1.13.14` at commit
-`25a600db24f7680ad9806ce5427bd0ab8afe1114` plus three digest-pinned repository
+The libbox input is upstream sing-box `v1.13.15` at commit
+`3708fa18766cda1f11b77f6ed9c7bd61688f17df` plus three digest-pinned repository
 patches: security dependency updates, the public raw-packet adapter, and bounded
 DNS failover. The exact combined diff and patched `go.mod`/`go.sum` digests are
 release inputs in `scripts/dependency_pins.env` and
@@ -213,6 +213,42 @@ TCPv6, UDP/QUIC, DNS A/AAAA, LAN bypass, included routes, and excluded routes.
 A connected VPN status or an existing `utun` interface is not data-plane
 evidence.
 
+The receive-only Packet peer under `tools/packet-evidence-endpoint/` is bound
+to the repository-pinned Go toolchain and reproducible Linux/amd64 digest
+`fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1`.
+Its sole Debian installation transaction is the pinned
+`install-endpoint.sh` digest
+`6527983cf9b072ab99ecd820778ccb56c9d91d79e07fc4d558715c4ce8657049`;
+the systemd unit, fixed GCE resolver, and exact capture sudoers bytes have
+digests `7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996`,
+`b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62`,
+and `a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411`.
+Do not commit its generated target binary. The reviewed endpoint and
+known-hosts policies now bind the three concrete GCE instances, external
+addresses, image and service identities, separate primary/secondary DNS SSH
+host keys, the dedicated non-admin capture service account, instance-scoped OS
+Login/IAP port-22 grants, and strict streamed `tcpdump -c 6 -w -` command. DNS
+is UDP-only: the product trigger is `getaddrinfo`, while the independent remote
+pcap must contain each exact query and authoritative response. A local FakeIP
+answer is not accepted as the endpoint answer.
+
+The IAP grant lives on each IAP TCP tunnel instance resource policy, not on the
+Compute instance or project IAM policy. Its only admitted binding is the fixed
+capture service account with `roles/iap.tunnelResourceAccessor`, title
+`packet-capture-ssh-only`, and condition `destination.port == 22`.
+
+This provisioning is not physical candidate evidence. Packet collection still
+fails before a probe because the controlled Android LAN peer binary, ADB tool,
+and admission source are pinned but no live device/network identity has been
+captured and the admission lease is not yet consumed by the `lan-bypass`
+producer. The closed Host baseline/test/restore transaction and DNS
+remote-stream capture are implemented, but no physical candidate Packet
+evidence has been collected. The Android peer uses a separate non-root,
+fixed-port, TCP-only linux/arm64 bounded read/discard binary; the wider GCE
+TCP/UDP/DNS executable is not admissible for LAN proof. A syntactically legal
+pcap, live endpoint, or manual SSH capture cannot substitute for the frozen
+product-state, route/interface, capture, send, and restore receipts.
+
 Required network conditions:
 
 - 100 ms latency, 1% loss, 10 Mbps;
@@ -227,6 +263,37 @@ The run must prove the role-scoped XPC identity policy with the installed
 Developer ID identities and prove that revocation or connection loss reaches a
 truthful Off or Quarantined terminal state. Unit tests of those state machines
 do not replace the installed-process run.
+
+The lifecycle lane is schema v4 with an exact 72-subject receipt contract. Its
+pre-nonce phase retains 32 distinct `lifecycle-observation` documents plus
+eight special trace/packet/pixel artifacts, all proof-free, and freezes those
+40 subjects at `RAW_COMPLETED`. Only after nonce receipt may the deterministic
+materializer emit the 32 `lifecycle-event` v3 artifacts, each referencing one
+frozen observation. The five identity observations are included in the 32;
+they are not five additional subjects. Report v3, event v2, a pre-nonce
+`proof`/`run_nonce`, missing or relabelled observations, duplicate paths or
+digests, and a 272nd receipt descriptor all fail closed. An interrupted
+post-nonce materialization may reuse only byte-identical existing event files;
+it never replaces them or regenerates timestamps.
+
+The adversarial lane is schema v3: one baseline plus 32 source-pinned cases and
+exactly 138 receipt-bound raw subjects. Each case retains a proof-free
+precondition observation, independent client and installed-Authority signature
+observations, the actual server/boundary decision and raw request digest, and a
+post-nonce transcript derived only from the frozen RAW_COMPLETED manifest. The
+six secret cases additionally require complete one-way-canary coverage
+manifests; plaintext canaries are never evidence. Privileged, journal, FUS, and
+secret cases must prove reset to their isolated pre-state, and the collector
+must stop at the first cleanup failure. The fixed controller currently closes
+only the baseline and Foundation signing-requirement variants; the remaining
+root-owned physical scenarios remain release blockers and must not be
+represented by declared expected output or a debug XPC method. The isolated
+designated-requirement variant must be signed by a valid same-Team Apple
+identity that preserves the exact Host identifier and App Group while failing
+only the listener's Developer-ID certificate/OID clauses. The SDK does not
+expose an `NSXPCConnection.auditToken` member; Foundation's documented
+pre-delegate listener requirement remains the single peer-identity gate, and
+private selector or `unsafeBitCast` substitutes are forbidden.
 
 System Proxy apply/restore uses
 `SCPreferencesCreateWithAuthorization` from the non-root ProxyAgent. The signed
@@ -367,11 +434,11 @@ stapled:
 
 ```bash
 scripts/prepare_publication_evidence.py review-template \
-  --libbox-source target/sources/sing-box-v1.13.14-patched
+  --libbox-source target/sources/sing-box-v1.13.15-patched
 
 # Resolve every item in component-review.json and every source blocker, then:
 scripts/prepare_publication_evidence.py prepare \
-  --libbox-source target/sources/sing-box-v1.13.14-patched \
+  --libbox-source target/sources/sing-box-v1.13.15-patched \
   --reviewed-components target/candidates/0.4.0/review/component-review.json
 
 python3 scripts/publication_evidence.py draft \
@@ -391,18 +458,20 @@ scripts/release_publication_gate.sh \
   "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
 ```
 
-### Fixed 40002 to 40003 physical-candidate evidence sequence
+### Fixed 40004 to 40005 physical-candidate evidence sequence
 
 The production evidence composer has no fixture, path, output, build-number, or
 success-override option. Run this sequence exactly once from one clean release
-commit:
+commit. The collector source changed after builds `40002` and `40003` were
+defined, so those candidates and their evidence are retired and must not be
+renamed, relabelled, or reused:
 
-1. build, notarize, install, and exercise validation build `40002`; preserve its
+1. build, notarize, install, and exercise validation build `40004`; preserve its
    fixed CI/toolchain, app-manifest, notarization, and runtime-recovery records;
 2. have a human reviewer approve those exact bytes in
    `target/candidates/0.4.0/review/validated-candidate.json`;
 3. build, sign inside-out, notarize, staple, and Gatekeeper-verify final build
-   `40003` from the same clean source identity;
+   `40005` from the same clean source identity;
 4. freeze the signed/notarized runtime candidate before collection:
 
    ```bash
@@ -431,6 +500,12 @@ commit:
    reported crash on each pinned OS. This duration and timestamp/crash-list
    evidence model are approved only for the small internal distribution; they
    are neither a remote liveness attestation nor a public-GA stability claim;
+   before requesting either nonce, redeploy and rebind the lifecycle-v4 Go
+   collector source/image/trust policy and install the reviewed root-owned
+   lifecycle probe. The previously deployed collector digest and revisions do
+   not authorize this changed 72-subject contract; local tests or a root-owned
+   binary without the reviewed source/image binding are not production
+   evidence;
 6. after both OS-run archives are complete, seal the runtime evidence:
 
    ```bash
@@ -513,7 +588,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 40002. No updater key, Apple notarization key, local private key, or older
+build 40004. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable

@@ -172,8 +172,8 @@ python3 -B scripts/verify_native_product_graph.py
 python3 -B scripts/verify_release_authority_gate.py .
 python3 -B scripts/verify_production_boundary_removal.py .
 
-export CFW_BUILD_NUMBER=40002
-export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.4.0/validation-40002/native-products"
+export CFW_BUILD_NUMBER=40004
+export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.4.0/validation-40004/native-products"
 ./scripts/build_native_products.sh --unsigned
 
 cd native/macos
@@ -226,20 +226,20 @@ Apple references:
 
 ## libbox composition and remaining evidence
 
-`Dependencies.lock.json` pins sing-box `v1.13.14` at commit
-`25a600db24f7680ad9806ce5427bd0ab8afe1114`, Go `1.26.5`, and gomobile
+`Dependencies.lock.json` pins sing-box `v1.13.15` at commit
+`3708fa18766cda1f11b77f6ed9c7bd61688f17df`, Go `1.26.5`, and gomobile
 `v0.1.13` at commit `9f03b8f25789099c5c8abef4a02085da783ba923`. The
 materialization step applies three digest-pinned patches in a
 fixed order:
 
-1. `sing-box-v1.13.14-security-dependencies.patch` updates the pinned Go module
+1. `sing-box-v1.13.15-security-dependencies.patch` updates the pinned Go module
    graph, including go-chi `v5.3.0` and the recorded `x/crypto`, `x/net`,
    `x/sys`, gRPC, and toolchain support versions.
-2. `sing-box-v1.13.14-raw-packet-tun.patch` adds the explicit Darwin raw-packet
+2. `sing-box-v1.13.15-raw-packet-tun.patch` adds the explicit Darwin raw-packet
    contract. It accepts only a connected `AF_UNIX/SOCK_DGRAM` descriptor,
    validates MTU/routing/GSO constraints, transfers descriptor ownership, and
    presents headerless IP datagrams to sing-tun.
-3. `sing-box-v1.13.14-dns-failover.patch` implements the bounded primary/fallback
+3. `sing-box-v1.13.15-dns-failover.patch` implements the bounded primary/fallback
    resolver contract required by the closed product projection.
 
 `LibboxPacketEngineFactory` and `LibboxProxyEngineFactory` now construct

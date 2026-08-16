@@ -1,5 +1,5 @@
 diff --git a/daemon/started_service.go b/daemon/started_service.go
-index 3af0ea5a..4ff8e381 100644
+index 3af0ea5afa85c5de5e019b38b5da38f9279dae9f..4ff8e3811d336d829ea43dfd2a40f6ac8d50cb1b 100644
 --- a/daemon/started_service.go
 +++ b/daemon/started_service.go
 @@ -177,8 +177,12 @@ func (s *StartedService) StartOrReloadService(profileContent string, options *Ov
@@ -50,7 +50,7 @@ index 3af0ea5a..4ff8e381 100644
  		return os.ErrInvalid
 diff --git a/daemon/started_service_test.go b/daemon/started_service_test.go
 new file mode 100644
-index 00000000..7afdf7a9
+index 0000000000000000000000000000000000000000..7afdf7a9a7bf6ae63a916e96d5cf3fd675b476b5
 --- /dev/null
 +++ b/daemon/started_service_test.go
 @@ -0,0 +1,31 @@
@@ -86,7 +86,7 @@ index 00000000..7afdf7a9
 +	}
 +}
 diff --git a/experimental/libbox/command_server.go b/experimental/libbox/command_server.go
-index 7eca1194..1ecf9a1f 100644
+index 7eca119487288de36a36a618639c5593bf4d593b..1ecf9a1f0b982a8b7b4ed817176f578595879805 100644
 --- a/experimental/libbox/command_server.go
 +++ b/experimental/libbox/command_server.go
 @@ -169,6 +169,27 @@ type OverrideOptions struct {
@@ -118,7 +118,7 @@ index 7eca1194..1ecf9a1f 100644
  	return s.StartedService.StartOrReloadService(configContent, &daemon.OverrideOptions{
  		AutoRedirect:   options.AutoRedirect,
 diff --git a/experimental/libbox/command_types.go b/experimental/libbox/command_types.go
-index b811aaf4..85cc3f94 100644
+index b811aaf46061f6b4494afc07fd9ac6666c6e77d8..85cc3f9444e9130a49b5b0c9ff242c42134d2df5 100644
 --- a/experimental/libbox/command_types.go
 +++ b/experimental/libbox/command_types.go
 @@ -103,7 +103,11 @@ type Connections struct {
@@ -135,7 +135,7 @@ index b811aaf4..85cc3f94 100644
  		connectionMap: make(map[string]*Connection),
  	}
 diff --git a/experimental/libbox/platform.go b/experimental/libbox/platform.go
-index b82121b7..3eb6e058 100644
+index b82121b7ba21fe837b4e4bcab9b9e39f87d98c4b..3eb6e0588932f4ba973495c25e0a29a81b79ba47 100644
 --- a/experimental/libbox/platform.go
 +++ b/experimental/libbox/platform.go
 @@ -6,6 +6,10 @@ type PlatformInterface interface {
@@ -151,7 +151,7 @@ index b82121b7..3eb6e058 100644
  	FindConnectionOwner(ipProtocol int32, sourceAddress string, sourcePort int32, destinationAddress string, destinationPort int32) (*ConnectionOwner, error)
 diff --git a/experimental/libbox/raw_packet_tun.go b/experimental/libbox/raw_packet_tun.go
 new file mode 100644
-index 00000000..76e7e7e8
+index 0000000000000000000000000000000000000000..76e7e7e8e0a5bf8626d9a2eccf86e2395ae8b878
 --- /dev/null
 +++ b/experimental/libbox/raw_packet_tun.go
 @@ -0,0 +1,14 @@
@@ -171,7 +171,7 @@ index 00000000..76e7e7e8
 +)
 diff --git a/experimental/libbox/raw_packet_tun_darwin.go b/experimental/libbox/raw_packet_tun_darwin.go
 new file mode 100644
-index 00000000..cd899a61
+index 0000000000000000000000000000000000000000..1690c299000d86d791afdaa7f0935032434ddf24
 --- /dev/null
 +++ b/experimental/libbox/raw_packet_tun_darwin.go
 @@ -0,0 +1,242 @@
@@ -419,7 +419,7 @@ index 00000000..cd899a61
 +}
 diff --git a/experimental/libbox/raw_packet_tun_darwin_test.go b/experimental/libbox/raw_packet_tun_darwin_test.go
 new file mode 100644
-index 00000000..cf0fa9a2
+index 0000000000000000000000000000000000000000..2f6a56550126da46fb57370c2221a3e640a1212a
 --- /dev/null
 +++ b/experimental/libbox/raw_packet_tun_darwin_test.go
 @@ -0,0 +1,303 @@
@@ -728,7 +728,7 @@ index 00000000..cf0fa9a2
 +}
 diff --git a/experimental/libbox/raw_packet_tun_other.go b/experimental/libbox/raw_packet_tun_other.go
 new file mode 100644
-index 00000000..7acd788c
+index 0000000000000000000000000000000000000000..7acd788c1fefcb08af97392dd83d945a6d45ff20
 --- /dev/null
 +++ b/experimental/libbox/raw_packet_tun_other.go
 @@ -0,0 +1,19 @@
@@ -752,7 +752,7 @@ index 00000000..7acd788c
 +	return nil, fmt.Errorf("%w", errRawPacketTunUnsupported)
 +}
 diff --git a/experimental/libbox/service.go b/experimental/libbox/service.go
-index 37fd56c9..2b08aec4 100644
+index 37fd56c98038a067b3fb98b21d8c60b5fd81d1d3..2b08aec41516c648365efd155ec08593af81047f 100644
 --- a/experimental/libbox/service.go
 +++ b/experimental/libbox/service.go
 @@ -64,7 +64,22 @@ func (w *platformInterfaceWrapper) OpenInterface(options *tun.Options, platformO

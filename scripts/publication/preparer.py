@@ -466,19 +466,16 @@ def _blocker_document(
         for record in shipped_records
         if record["source_evidence"]["method"] == "missing-source"
     ]
-    copyright_blockers = [
+    copyright_noassertion = [
         {
             "id": record["id"],
             "name": record["name"],
             "version": record["version"],
             "ecosystem": record["id"].split(":", 1)[0],
-            "reason": (
-                "component copyright attribution requires human legal confirmation; "
-                "license boilerplate is not treated as package copyright"
-            ),
+            "status": "informational-no-objective-attribution",
         }
         for record in shipped_records
-        if not record["copyright_text"].strip()
+        if record["copyright_text"] == "NOASSERTION"
     ]
     build_tools = [
         {
@@ -494,6 +491,9 @@ def _blocker_document(
         for record in records
         if seeds[record["id"]].external_build_tool
     ]
+    build_tool_license_blockers = [
+        item for item in build_tools if item["license_metadata_status"] != "automatic"
+    ]
     return {
         "schema_version": 1,
         "product": {"name": PRODUCT_NAME, "version": RELEASE_VERSION},
@@ -502,13 +502,17 @@ def _blocker_document(
         "external_build_tool_count": len(build_tools),
         "automatic_license_count": len(shipped_records) - len(license_blockers),
         "license_review_required_count": len(license_blockers),
-        "copyright_review_required_count": len(copyright_blockers),
+        "external_build_tool_license_review_required_count": len(
+            build_tool_license_blockers
+        ),
+        "copyright_noassertion_count": len(copyright_noassertion),
         "corresponding_source_missing_count": len(source_blockers),
         "external_nonredistributable_prerequisite_count": sum(
             item["name"] in {"swift", "xcode"} for item in build_tools
         ),
         "license_review_required": license_blockers,
-        "copyright_review_required": copyright_blockers,
+        "external_build_tool_license_review_required": build_tool_license_blockers,
+        "copyright_noassertion": copyright_noassertion,
         "corresponding_source_missing": source_blockers,
         "external_build_tools": build_tools,
     }
@@ -531,7 +535,7 @@ def write_review_template(repository: Path, libbox_source: Path, output: Path) -
                 "name": seed.name,
                 "version": seed.version,
                 "purl": seed.purl,
-                "copyright_text": "",
+                "copyright_text": "NOASSERTION",
                 "license_resolution": resolve_license(seed),
                 "source_override": None,
                 "source_evidence": source_input_evidence(repository, seed, seed.source_root),

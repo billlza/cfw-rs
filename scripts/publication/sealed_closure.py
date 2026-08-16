@@ -128,9 +128,15 @@ def derive_supply_chain(repository: Path) -> dict[str, Any]:
         raise PublicationError(f"pinned supply-chain inputs failed: {error}") from error
 
     manifest = pinned._load_manifest(repository)
+    dependency_pins_relative = manifest.get(
+        "dependencyPinsPath", "scripts/dependency_pins.env"
+    )
+    if not isinstance(dependency_pins_relative, str):
+        raise PublicationError("dependency pins path is not a repository-relative string")
     env = pinned._parse_env(
         pinned._read_text(
-            repository / manifest.get("dependencyPinsPath", "scripts/dependency_pins.env"),
+            repository,
+            dependency_pins_relative,
             "dependency_pins.env",
         )
     )

@@ -120,7 +120,8 @@ PY
       -u APPLE_CERTIFICATE \
       -u APPLE_CERTIFICATE_PASSWORD \
       -u APPLE_SIGNING_IDENTITY \
-      "$contract_tauri_host_bin" build --bundles app --ci --config \
+      "$contract_tauri_host_bin" build --bundles app --ci \
+      --features physical-release-evidence --config \
       "$contract_tauri_host_config_override"
   )
 }

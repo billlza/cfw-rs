@@ -41,6 +41,14 @@ private enum FakeRegistrationError: Error { case denied }
   #expect(controller.registrationStatus() == .enabled)
 }
 
+@Test func authorityRegistrationRepairsNotFoundServiceRecord() throws {
+  let service = FakeAuthorityDaemonService([.notFound, .enabled])
+  let controller = SMGlobalAuthorityServiceController(service: service)
+  try controller.ensureRegistered()
+  #expect(service.registerCalls == 1)
+  #expect(controller.registrationStatus() == .enabled)
+}
+
 @Test func authorityRegistrationMapsApprovalAbsenceAndFailureToStableErrors() {
   let cases: [(FakeAuthorityDaemonService, GlobalAuthorityRegistrationError)] = [
     (FakeAuthorityDaemonService([.requiresApproval]), .approvalRequired),

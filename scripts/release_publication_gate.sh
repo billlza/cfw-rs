@@ -4,6 +4,11 @@
 # access; evidence preparation is an explicit earlier release phase.
 set -euo pipefail
 
+unset PYTHONPATH PYTHONHOME BASH_ENV ENV CDPATH \
+  DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_FRAMEWORK_PATH \
+  DYLD_FALLBACK_LIBRARY_PATH
+export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 publication_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 publication_signed_app="$publication_repo_root/target/candidates/0.4.0/signed/Clash for Mac.app"
 publication_evidence_root="$publication_repo_root/target/candidates/0.4.0/release/publication"

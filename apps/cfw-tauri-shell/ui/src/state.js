@@ -27,6 +27,11 @@ export const defaultSettings = {
 export const defaultSettingsSnapshot = {
   persisted: false,
   settings: { ...defaultSettings },
+  launch_at_login: {
+    persisted_intent: false,
+    live_status: "unknown",
+    matches_persisted_intent: false,
+  },
 };
 
 export const THEME_OPTIONS = [
@@ -53,16 +58,24 @@ export const defaultEngineStatus = {
   tunnelActive: false,
   systemProxyAvailable: false,
   tunnelAvailable: false,
+  providerManagementAvailable: false,
   availabilityReason: null,
   cutoverReady: false,
   cutoverReason: null,
   generation: 0,
   configDigest: null,
+  runtimeIdentity: null,
 };
 
 export const state = {
   payload: { product: { name: "Clash for Mac", version: null } },
   settingsSnapshot: defaultSettingsSnapshot,
+  settingsUnavailableReason: null,
+  launchAtLogin: {
+    persistedIntent: false,
+    liveStatus: "unknown",
+    matchesPersistedIntent: false,
+  },
   platform: null,
   // Engine status envelope (`engine_snapshot`), validated against its runtime
   // identity before it is allowed to claim an active data plane.
@@ -157,6 +170,11 @@ export const state = {
     rows: new Map(),
   },
   profiles: [],
+  // A failed repository snapshot is distinct from a successfully read empty
+  // repository. Migration and projection may only interpret the latter as
+  // "no selected profile".
+  profilesUnavailableReason: null,
+  legacyProfileMigrationPreview: null,
   profileInspector: null,
   /** @type {{ id: string, x: number, y: number } | null} */
   profileContextMenu: null,
@@ -199,4 +217,30 @@ export const runtime = {
   globalEventsBound: false,
   connectionRowEls: null,
   delayTestGeneration: 0,
+  // Monotonically changes whenever the verified engine runtime identity
+  // changes. Controller-backed async work captures this value together with
+  // the native generation/config digest and may publish only while all three
+  // still match.
+  engineIdentityEpoch: 0,
+  engineStatusRequestId: 0,
+  // Proxy mode and selector writes share one native-controller lane. The
+  // per-resource epoch coalesces rapid duplicate intent, while the single
+  // queue preserves native write order across mode and selector mutations.
+  controllerMutationEpoch: 0,
+  controllerMutationRunning: false,
+  controllerMutationQueue: [],
+  controllerMutationLatestByLane: new Map(),
+  controllerMutationPendingByLane: new Map(),
+  connectionsLiveStream: {
+    binding: null,
+    intentEpoch: 0,
+    desiredRunning: false,
+    operation: Promise.resolve(),
+  },
+  logLiveStream: {
+    binding: null,
+    intentEpoch: 0,
+    desiredRunning: false,
+    operation: Promise.resolve(),
+  },
 };

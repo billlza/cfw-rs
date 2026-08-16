@@ -1,10 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use cfw_core::LegacyControlSession;
-use cfw_platform::{LegacyServiceRetirement, MacOsPlatformService};
+use cfw_platform::{
+    LegacyServiceRetirement, MacOsPlatformService, observe_legacy_process_table,
+    observe_legacy_tcp_listener_table,
+};
 use serde::{Deserialize, Serialize};
 
 const LEGACY_HELPER_BINARY: &str = "/Library/PrivilegedHelperTools/com.bill.clashformac.helper";
@@ -63,7 +65,7 @@ pub(super) struct ProcessRecord {
 }
 
 pub(super) fn managed_processes(cores_dir: &Path) -> Result<Vec<ProcessRecord>, String> {
-    let output = command_output("/bin/ps", &["-axo", "uid=,pid=,lstart=,command="])?;
+    let output = observe_legacy_process_table().map_err(|error| error.to_string())?;
     output
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -77,15 +79,6 @@ pub(super) fn managed_processes(cores_dir: &Path) -> Result<Vec<ProcessRecord>, 
                 Ok(records)
             }
         })
-}
-
-pub(super) fn require_unique_root_managed_process(
-    cores_dir: &Path,
-    app_home: &Path,
-    config_file: &Path,
-) -> Result<ProcessRecord, String> {
-    let records = managed_processes(cores_dir)?;
-    validate_unique_root_managed_process(&records, app_home, config_file)
 }
 
 pub(super) fn validate_unique_root_managed_process(
@@ -131,7 +124,7 @@ pub(super) fn verify_process_listens_on_ports(
     if ports.is_empty() || ports.contains(&0) {
         return Err("legacy listener ownership requires non-zero ports".into());
     }
-    let output = command_output("/usr/sbin/netstat", &["-anv", "-p", "tcp"])?;
+    let output = observe_legacy_tcp_listener_table().map_err(|error| error.to_string())?;
     let expected_process = format!(
         "{}:{}",
         process
@@ -228,24 +221,6 @@ fn command_uses_exact_executable(command: &str, executable: &Path) -> bool {
     command
         .strip_prefix(executable.as_ref())
         .is_some_and(|remaining| remaining.is_empty() || remaining.starts_with(' '))
-}
-
-fn command_output(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to execute {program}: {error}"))?;
-    if output.stdout.len() > 1024 * 1024 || output.stderr.len() > 64 * 1024 {
-        return Err(format!("{program} output exceeded its safety bound"));
-    }
-    if !output.status.success() {
-        return Err(format!(
-            "{program} failed with status {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 pub(super) fn verify_privileged_artifacts_are_gone(cores_dir: &Path) -> Result<(), String> {

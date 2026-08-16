@@ -626,6 +626,7 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             "gomobileVersion=$GOMOBILE_VERSION",
             "gomobileCommit=$GOMOBILE_COMMIT",
             "gomobileModuleSum=$GOMOBILE_MODULE_SUM",
+            "archiveDeterminism=zeroArDate-v1",
             "headerNormalization=angleBracketFrameworkImports-v1",
             "platform=$LIBBOX_APPLE_PLATFORM",
             "buildTags=$LIBBOX_BUILD_TAGS",
@@ -667,10 +668,12 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         for fragment in (
-            "const LIBBOX_METADATA_KEYS: [&str; 22]",
+            "const LIBBOX_METADATA_KEYS: [&str; 23]",
             '"goToolchainTreeSha256"',
             '"goToolsTreeSha256"',
             '"goModuleCacheTreeSha256"',
+            '"archiveDeterminism"',
+            '"zeroArDate-v1"',
             "actual_metadata_keys != expected_metadata_keys",
             "CFW_GO_TOOLCHAIN_TREE_SHA256",
             "CFW_GO_TOOLS_TREE_SHA256",

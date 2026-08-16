@@ -92,18 +92,6 @@ def _repository() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _commit(repository: Path) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise PublicationError("cannot resolve the repository commit for the sealed manifest")
-    return result.stdout.strip()
-
-
 def command_collect_source_gates(arguments: argparse.Namespace) -> None:
     """Run the repository P0 source/boundary gates and record their exact results.
 
@@ -112,7 +100,14 @@ def command_collect_source_gates(arguments: argparse.Namespace) -> None:
     a non-passing result; nothing is converted into success.
     """
     repository = _repository()
-    commit = _commit(repository)
+    try:
+        source_identity = current_identity(repository, require_clean=True)
+    except (OSError, SourceIdentityError) as error:
+        raise PublicationError(
+            "P0 source gates require one clean, readable release source identity"
+        ) from error
+    commit = source_identity["repositoryCommit"]
+    release_source_sha256 = source_identity["releaseSourceSha256"]
     gates = []
     for identifier in sorted(REQUIRED_SOURCE_GATES):
         script = REQUIRED_SOURCE_GATES[identifier]
@@ -150,11 +145,22 @@ def command_collect_source_gates(arguments: argparse.Namespace) -> None:
                 "exit_code": exit_code,
                 "log_sha256": hashlib.sha256(output).hexdigest(),
                 "commit": commit,
+                "release_source_sha256": release_source_sha256,
             }
         )
+    try:
+        completed_identity = current_identity(repository, require_clean=True)
+    except (OSError, SourceIdentityError) as error:
+        raise PublicationError(
+            "release source changed or became unreadable while P0 gates ran"
+        ) from error
+    if completed_identity != source_identity:
+        raise PublicationError("release source identity changed while P0 gates ran")
     document = {
         "schema_version": SOURCE_GATE_SCHEMA_VERSION,
         "document": SOURCE_GATE_DOCUMENT,
+        "repository_commit": commit,
+        "release_source_sha256": release_source_sha256,
         "gates": gates,
     }
     output_path = arguments.output
@@ -166,6 +172,8 @@ def command_collect_source_gates(arguments: argparse.Namespace) -> None:
         f"p0 source gate record written: {output_path.resolve(strict=True)} "
         f"gates={len(gates)} failed={failed}"
     )
+    if failed:
+        raise PublicationError(f"P0 source gates did not pass: {failed}")
 
 
 def command_ci_toolchain_binding(_arguments: argparse.Namespace) -> None:

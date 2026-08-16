@@ -301,7 +301,9 @@ pub(crate) async fn prepare_legacy_cutover(
 
 #[cfg(test)]
 mod tests {
-    use cfw_engine_api::{EngineCommandContext, EngineStartRequest, TunnelNetworkOptions};
+    use cfw_engine_api::{
+        DirectIpv4HostRoutes, EngineCommandContext, EngineStartRequest, TunnelNetworkOptions,
+    };
 
     use super::*;
 
@@ -335,6 +337,7 @@ mod tests {
             tunnel_options: Some(TunnelNetworkOptions {
                 ipv6_enabled: true,
                 bypass_private_networks: true,
+                direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
                 mtu: 1500,
             }),
         };

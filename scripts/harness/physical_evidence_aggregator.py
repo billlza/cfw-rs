@@ -29,17 +29,21 @@ if __package__:
     )
     from .adversarial_clients import (
         HARNESS_VERSION as ADVERSARIAL_VERSION,
+        REQUIRED_RAW_SUBJECTS as REQUIRED_ADVERSARIAL_RAW_SUBJECTS,
         AdversarialMatrixError,
         validate_adversarial_matrix,
     )
     from .lifecycle_matrix import (
+        EXPECTED_LIFECYCLE_RAW_SUBJECTS,
         HARNESS_VERSION as LIFECYCLE_VERSION,
         MACOS_BUILD_RE,
         LifecycleMatrixError,
         validate_lifecycle_matrix,
     )
     from .packet_evidence import (
+        EXPECTED_PACKET_RAW_SUBJECTS,
         HARNESS_VERSION as PACKET_VERSION,
+        OPTIONAL_PACKET_RAW_SUBJECTS,
         PacketEvidenceError,
         validate_packet_evidence,
     )
@@ -49,6 +53,7 @@ if __package__:
         PerformanceGateError,
         validate_performance_evidence,
     )
+    from .performance_ledger import LEDGER_SUBJECT, REQUIRED_PERFORMANCE_SUBJECTS
     from .raw_artifacts import (
         ArtifactReader,
         CollectorTrustNotConfiguredError,
@@ -86,17 +91,21 @@ else:  # pragma: no cover - direct-script import path
     )
     from adversarial_clients import (  # type: ignore
         HARNESS_VERSION as ADVERSARIAL_VERSION,
+        REQUIRED_RAW_SUBJECTS as REQUIRED_ADVERSARIAL_RAW_SUBJECTS,
         AdversarialMatrixError,
         validate_adversarial_matrix,
     )
     from lifecycle_matrix import (  # type: ignore
+        EXPECTED_LIFECYCLE_RAW_SUBJECTS,
         HARNESS_VERSION as LIFECYCLE_VERSION,
         MACOS_BUILD_RE,
         LifecycleMatrixError,
         validate_lifecycle_matrix,
     )
     from packet_evidence import (  # type: ignore
+        EXPECTED_PACKET_RAW_SUBJECTS,
         HARNESS_VERSION as PACKET_VERSION,
+        OPTIONAL_PACKET_RAW_SUBJECTS,
         PacketEvidenceError,
         validate_packet_evidence,
     )
@@ -105,6 +114,10 @@ else:  # pragma: no cover - direct-script import path
         SOAK_MIN_HOURS,
         PerformanceGateError,
         validate_performance_evidence,
+    )
+    from performance_ledger import (  # type: ignore
+        LEDGER_SUBJECT,
+        REQUIRED_PERFORMANCE_SUBJECTS,
     )
     from raw_artifacts import (  # type: ignore
         ArtifactReader,
@@ -208,20 +221,6 @@ COLLECTOR_FIELDS = {
     "signature",
 }
 REPORT_FIELDS = {"tool_version", "captured_at", "completed_at", "signed_at", "artifact"}
-REQUIRED_LIFECYCLE_RAW_SUBJECTS = frozenset(
-    {
-        "renderer-ready-v2:trace",
-        "network-extension-approval:trace",
-        "network-extension-denial:trace",
-        "network-extension-pending:trace",
-        "sleep-wake:trace",
-        "sleep-wake:packet",
-        "wkwebview-850x603:metadata",
-        "wkwebview-850x603:pixels",
-    }
-)
-
-
 class PhysicalEvidenceError(ValueError):
     """Physical evidence is incomplete, byte-drifted, replayed, or untrusted."""
 
@@ -479,13 +478,44 @@ def _validate_report(
         for binding in result["artifacts"]
     ]
     if harness == "lifecycle":
+        if result.get("identity_candidate") != candidate:
+            raise PhysicalEvidenceError(
+                f"{label} identity observations bind a different complete candidate"
+            )
         subjects = {binding["subject"] for binding in result["artifacts"]}
         if len(subjects) != len(result["artifacts"]):
             raise PhysicalEvidenceError(f"{label} repeats a raw evidence subject")
-        missing = REQUIRED_LIFECYCLE_RAW_SUBJECTS - subjects
-        if missing:
+        if subjects != EXPECTED_LIFECYCLE_RAW_SUBJECTS:
             raise PhysicalEvidenceError(
-                f"{label} omits required private raw evidence: {sorted(missing)}"
+                f"{label} raw evidence differs from the exact lifecycle subject set"
+            )
+    elif harness == "packet":
+        subjects = {binding["subject"] for binding in result["artifacts"]}
+        if len(subjects) != len(result["artifacts"]):
+            raise PhysicalEvidenceError(f"{label} repeats a raw evidence subject")
+        if not EXPECTED_PACKET_RAW_SUBJECTS <= subjects or not subjects <= (
+            EXPECTED_PACKET_RAW_SUBJECTS | OPTIONAL_PACKET_RAW_SUBJECTS
+        ):
+            raise PhysicalEvidenceError(
+                f"{label} has an incomplete or unknown packet raw subject set"
+            )
+    elif harness == "performance":
+        subjects = {binding["subject"] for binding in result["artifacts"]}
+        if (
+            len(subjects) != len(result["artifacts"])
+            or subjects != REQUIRED_PERFORMANCE_SUBJECTS
+        ):
+            raise PhysicalEvidenceError(
+                f"{label} has an incomplete or unknown performance raw subject set"
+            )
+    elif harness == "adversarial":
+        subjects = {binding["subject"] for binding in result["artifacts"]}
+        if (
+            len(subjects) != len(result["artifacts"])
+            or subjects != REQUIRED_ADVERSARIAL_RAW_SUBJECTS
+        ):
+            raise PhysicalEvidenceError(
+                f"{label} has an incomplete or unknown adversarial raw subject set"
             )
     return result, report_binding, raw_bindings
 
@@ -694,8 +724,8 @@ def _validate_run(
     receipt_sha256 = hashlib.sha256(canonical_json(payload)).hexdigest()
 
     # Final-candidate publication binds five categories. Soak is bound directly
-    # to the raw performance-samples bytes; performance itself is bound to its
-    # report document bytes.
+    # to the immutable performance sample-ledger bytes; performance itself is
+    # bound to its report document bytes.
     publication_bindings: list[dict[str, Any]] = []
     category_map = {
         "lifecycle": "installed_matrix",
@@ -720,9 +750,14 @@ def _validate_run(
     performance_raw = [
         entry for entry in raw_bindings if entry["harness"] == "performance"
     ]
-    if len(performance_raw) != 1:
-        raise PhysicalEvidenceError("performance harness must bind exactly one raw sample artifact")
-    soak_descriptor = performance_raw[0]["descriptor"]
+    performance_by_subject = {
+        entry["subject"]: entry["descriptor"] for entry in performance_raw
+    }
+    if set(performance_by_subject) != REQUIRED_PERFORMANCE_SUBJECTS:
+        raise PhysicalEvidenceError(
+            "performance harness must bind its exact ledger/restoration subject set"
+        )
+    soak_descriptor = performance_by_subject[LEDGER_SUBJECT]
     performance_report = next(
         binding for binding in report_bindings if binding["harness"] == "performance"
     )

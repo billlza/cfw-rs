@@ -17,7 +17,7 @@ const GO_TOOLCHAIN_TREE_SHA256_ENV: &str = "CFW_GO_TOOLCHAIN_TREE_SHA256";
 const GO_TOOLS_TREE_SHA256_ENV: &str = "CFW_GO_TOOLS_TREE_SHA256";
 const GO_MODULE_CACHE_TREE_SHA256_ENV: &str = "CFW_GO_MODULE_CACHE_TREE_SHA256";
 
-const LIBBOX_METADATA_KEYS: [&str; 22] = [
+const LIBBOX_METADATA_KEYS: [&str; 23] = [
     "sourceTag",
     "sourceCommit",
     "goVersion",
@@ -27,6 +27,7 @@ const LIBBOX_METADATA_KEYS: [&str; 22] = [
     "gomobileVersion",
     "gomobileCommit",
     "gomobileModuleSum",
+    "archiveDeterminism",
     "headerNormalization",
     "platform",
     "buildTags",
@@ -166,12 +167,56 @@ fn main() {
     println!("cargo:rerun-if-env-changed={GO_TOOLCHAIN_TREE_SHA256_ENV}");
     println!("cargo:rerun-if-env-changed={GO_TOOLS_TREE_SHA256_ENV}");
     println!("cargo:rerun-if-env-changed={GO_MODULE_CACHE_TREE_SHA256_ENV}");
+    println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+    println!("cargo:rerun-if-env-changed=SDKROOT");
+    println!("cargo:rerun-if-changed=/var/db/xcode_select_link");
+    let release_observation_log = manifest_dir.join("src/release_observation_log.c");
+    println!(
+        "cargo:rerun-if-changed={}",
+        release_observation_log.display()
+    );
+    let macos_sdk = macos_sdk_root();
+    let macos_sdk = macos_sdk
+        .to_str()
+        .expect("selected macOS SDK path must be valid UTF-8");
+    let mut release_log = cc::Build::new();
+    release_log
+        .file(release_observation_log)
+        .flag("-isysroot")
+        .flag(macos_sdk)
+        .warnings_into_errors(true)
+        .compile("cfw_release_observation_log");
 
     if std::env::var("PROFILE").as_deref() == Ok("release") {
         verify_release_native_artifacts(repository_root)
             .unwrap_or_else(|error| panic!("native release artifact validation failed: {error}"));
     }
     tauri_build::build()
+}
+
+fn macos_sdk_root() -> PathBuf {
+    let path = if let Some(sdk_root) = std::env::var_os("SDKROOT") {
+        PathBuf::from(sdk_root)
+    } else {
+        let developer = if let Some(developer_dir) = std::env::var_os("DEVELOPER_DIR") {
+            PathBuf::from(developer_dir)
+        } else {
+            fs::read_link("/var/db/xcode_select_link")
+                .expect("xcode-select must identify an Xcode Developer directory")
+        };
+        developer.join("Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")
+    };
+    let canonical = path
+        .canonicalize()
+        .expect("selected macOS SDK path must resolve without ambiguity");
+    if !path.is_absolute()
+        || !canonical.is_dir()
+        || !canonical.join("usr/include/os/log.h").is_file()
+        || !canonical.join("System/Library/Frameworks").is_dir()
+    {
+        panic!("selected macOS SDK is incomplete or noncanonical");
+    }
+    canonical
 }
 
 fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String> {
@@ -331,6 +376,7 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     require_metadata(&manifest, "sourceCommit", &dependency_lock.sing_box.commit)?;
     require_metadata(&manifest, "goVersion", &dependency_lock.go)?;
     require_metadata(&manifest, "gomobileVersion", &dependency_lock.gomobile)?;
+    require_metadata(&manifest, "archiveDeterminism", "zeroArDate-v1")?;
     require_metadata(
         &manifest,
         "headerNormalization",

@@ -1,5 +1,8 @@
 mod cutover;
+mod endpoints;
 mod maintenance;
+#[cfg(feature = "physical-release-evidence")]
+pub mod packet_evidence;
 
 #[cfg(test)]
 mod tests;
@@ -21,9 +24,12 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::ManagedProfiles;
-use crate::legacy::{LegacyRetirementGate, LegacyRetirementStatus};
+use crate::legacy::{
+    LegacyRetirementGate, LegacyRetirementStatus, load_replacement_engine_settings,
+};
 use crate::settings_store;
 use cutover::CutoverPreparationGate;
+use endpoints::select_process_engine_settings;
 pub(crate) use maintenance::{EngineMaintenanceError, EngineMaintenanceLease, ProfileControlError};
 use maintenance::{EngineMaintenanceGate, EngineModeChangeIntent, EngineModeChangeLease};
 
@@ -93,6 +99,7 @@ pub(crate) fn serialized_switch_transition(
 pub(crate) struct EngineCapabilities {
     system_proxy: bool,
     tunnel: bool,
+    provider_management: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,7 +122,7 @@ impl EngineShutdownOutcome {
     }
 }
 
-pub(crate) struct ManagedEngine {
+pub struct ManagedEngine {
     pub(crate) coordinator: EngineModeCoordinator,
     capabilities: EngineCapabilities,
     unavailable_reason: Option<String>,
@@ -256,6 +263,7 @@ impl ManagedEngine {
                 EngineCapabilities {
                     system_proxy: false,
                     tunnel: false,
+                    provider_management: false,
                 },
                 Some(
                     "legacy network remains unchanged while replacement configuration is staged"
@@ -266,6 +274,7 @@ impl ManagedEngine {
                 EngineCapabilities {
                     system_proxy: false,
                     tunnel: false,
+                    provider_management: false,
                 },
                 Some("the explicitly confirmed legacy network cutover is running".to_owned()),
             ),
@@ -273,6 +282,7 @@ impl ManagedEngine {
                 EngineCapabilities {
                     system_proxy: false,
                     tunnel: false,
+                    provider_management: false,
                 },
                 Some(format!(
                     "an interrupted cutover requires explicit replacement recovery: {message}"
@@ -282,6 +292,7 @@ impl ManagedEngine {
                 EngineCapabilities {
                     system_proxy: false,
                     tunnel: false,
+                    provider_management: false,
                 },
                 Some(format!(
                     "legacy network cleanup requires manual intervention: {message}"
@@ -304,10 +315,15 @@ impl ManagedEngine {
 }
 
 pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<ManagedEngine, String> {
-    let controller = EngineControllerAccess::resolve(EngineSettings::default())
-        .map_err(|error| format!("engine settings are unusable: {error}"))?;
     let store = settings_store()?;
     store.ensure_layout().map_err(|error| error.to_string())?;
+    let settings = match load_replacement_engine_settings(&store.paths().app_home)? {
+        Some(settings) => settings,
+        None => select_process_engine_settings(EngineSettings::default())
+            .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))?,
+    };
+    let controller = EngineControllerAccess::resolve(settings)
+        .map_err(|error| format!("engine settings are unusable: {error}"))?;
     let native_available = bridge.is_available();
     let native_failure = bridge.unavailable_reason().map(ToOwned::to_owned);
     let concrete_backend = Arc::new(AppleNetworkBackend::new(bridge));
@@ -345,6 +361,10 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
         capabilities: EngineCapabilities {
             system_proxy: native_available && lineage_failure.is_none(),
             tunnel: native_available && lineage_failure.is_none(),
+            // The pinned sing-box 1.13.15 schema cannot construct proxy or
+            // rule providers. Keep the controller commands as explicit
+            // fail-closed backstops, but do not advertise or probe them.
+            provider_management: false,
         },
         unavailable_reason: lineage_failure.or(native_failure),
         preflight_backend,
@@ -359,12 +379,36 @@ fn spawn_coordinator_task(task: cfw_application::CoordinatorTask) {
 }
 
 pub(crate) fn start_engine_event_forwarder(app: AppHandle) {
-    let mut snapshots = app.state::<ManagedEngine>().coordinator.subscribe();
+    let engine = app.state::<ManagedEngine>();
+    let coordinator = engine.coordinator.clone();
+    let mut snapshots = coordinator.subscribe();
+    let default_ipv6_enabled = engine.engine_settings().enable_ipv6;
+    if let Err(error) = crate::release_observation::emit_engine_snapshot(
+        &snapshots.borrow().clone(),
+        default_ipv6_enabled,
+    ) {
+        eprintln!("failed to publish initial release observation: {error}");
+    }
     tauri::async_runtime::spawn(async move {
         while snapshots.changed().await.is_ok() {
-            let event = EngineEvent::SnapshotChanged {
-                snapshot: snapshots.borrow().clone(),
-            };
+            let snapshot = snapshots.borrow().clone();
+            // Evidence transactions may temporarily use a source-owned settings
+            // variant (notably IPv6-disabled and exact Off). Ask the serialized
+            // actor for the settings it accepted for this exact snapshot instead
+            // of publishing the dashboard's ordinary settings for every state.
+            let ipv6_enabled = coordinator
+                .restart_spec()
+                .await
+                .ok()
+                .flatten()
+                .filter(|spec| spec.matches_ready_snapshot(&snapshot))
+                .map_or(default_ipv6_enabled, |spec| spec.settings().enable_ipv6);
+            if let Err(error) =
+                crate::release_observation::emit_engine_snapshot(&snapshot, ipv6_enabled)
+            {
+                eprintln!("failed to publish release observation: {error}");
+            }
+            let event = EngineEvent::SnapshotChanged { snapshot };
             if let Err(error) = app.emit("cfw://engine-event", event) {
                 eprintln!("failed to publish engine state event: {error}");
             }

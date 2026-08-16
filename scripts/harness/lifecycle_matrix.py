@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import hashlib
 import ipaddress
+import os
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -32,6 +34,7 @@ if __package__:
     from .raw_artifacts import (
         ArtifactReader,
         RawArtifactError,
+        canonical_json,
         exact_object,
         load_json_file,
         parse_proof_binding,
@@ -57,6 +60,7 @@ else:  # pragma: no cover - direct-script import path
     from raw_artifacts import (  # type: ignore
         ArtifactReader,
         RawArtifactError,
+        canonical_json,
         exact_object,
         load_json_file,
         parse_proof_binding,
@@ -65,8 +69,12 @@ else:  # pragma: no cover - direct-script import path
     )
 
 
-SCHEMA_VERSION = 3
-HARNESS_VERSION = "lifecycle-matrix-v3"
+SCHEMA_VERSION = 4
+HARNESS_VERSION = "lifecycle-matrix-v4"
+EVENT_SCHEMA_VERSION = 3
+EVENT_DOCUMENT = "cfw-lifecycle-proof-event-v3"
+OBSERVATION_SCHEMA_VERSION = 1
+OBSERVATION_DOCUMENT = "cfw-lifecycle-observation-v1"
 PRODUCT_VERSION = "0.4.0"
 REQUIRED_ARCHITECTURE = "arm64"
 MAX_REPORT_BYTES = 1 * 1024 * 1024
@@ -143,6 +151,36 @@ PROBE_SPECS: dict[str, tuple[str, int, str, dict[str, Callable[[Any, str], int]]
     "provider-crash": ("crash", 0, "recovery-observed", {}),
 }
 
+IDENTITY_PROBE_IDS = (
+    "inside-out-signatures",
+    "team-id",
+    "bundle-identifiers",
+    "entitlements",
+    "provisioning",
+)
+if {
+    probe_id for probe_id, spec in PROBE_SPECS.items() if spec[0] == "identity"
+} != set(IDENTITY_PROBE_IDS):
+    raise RuntimeError("lifecycle identity probe contract drifted")
+
+IDENTITY_FINAL_BUILD = "40005"
+IDENTITY_OBSERVATION_DOCUMENT = "cfw-physical-identity-observation-v2"
+IDENTITY_OBSERVATION_SCHEMA_VERSION = 2
+IDENTITY_OBSERVATION_MAXIMUM_BYTES = 1024 * 1024
+IDENTITY_VERIFIER_OUTPUT_LIMIT = 384 * 1024
+IDENTITY_VERIFIER_ROLE = "release-identity-verifier"
+IDENTITY_FIXED_COMMAND = (
+    "scripts/verify_release_app.sh",
+    "target/candidates/0.4.0/signed/Clash for Mac.app",
+    "target/candidates/0.4.0/release-build/40005/native-products",
+)
+IDENTITY_FIXED_COMMAND_SHA256 = hashlib.sha256(
+    canonical_json(list(IDENTITY_FIXED_COMMAND))
+).hexdigest()
+IDENTITY_OBSERVATION_SUBJECTS = frozenset(
+    f"{probe_id}:observation" for probe_id in IDENTITY_PROBE_IDS
+)
+
 REQUIRED_PROBES = frozenset(PROBE_SPECS)
 OPERATION_FIELDS = {"operation_id", "installation_id", "epoch", "generation"}
 ENVIRONMENT_FIELDS = {
@@ -157,9 +195,11 @@ ENVIRONMENT_FIELDS = {
     "operation_context",
 }
 PROBE_FIELDS = {"id", "attributes", "artifact"}
-EVENT_DOCUMENT_FIELDS = {
+OBSERVATION_DOCUMENT_FIELDS = {
     "schema_version",
-    "proof",
+    "document",
+    "candidate",
+    "run_id",
     "environment",
     "probe_id",
     "category",
@@ -171,7 +211,96 @@ EVENT_DOCUMENT_FIELDS = {
     "attributes",
     "evidence",
 }
+EVENT_DOCUMENT_FIELDS = {
+    "schema_version",
+    "document",
+    "proof",
+    "probe_id",
+    "observation_artifact",
+}
 EVENT_FIELDS = {"sequence", "type", "probe_id", "observation"}
+IDENTITY_OBSERVATION_FIELDS = {
+    "schema_version",
+    "document",
+    "batch_sha256",
+    "probe_id",
+    "candidate",
+    "run_id",
+    "environment",
+    "command",
+    "started_at",
+    "finished_at",
+}
+IDENTITY_OBSERVATION_CANDIDATE_FIELDS = {
+    "version",
+    "build_number",
+    "app_manifest_sha256",
+    "signed_app_tree_sha256",
+    "artifact_hash_manifest_sha256",
+    "built_at",
+}
+IDENTITY_OBSERVATION_COMMAND_FIELDS = {
+    "role",
+    "command",
+    "command_sha256",
+    "exit_code",
+    "duration_ms",
+    "stdout_sha256",
+    "stderr_sha256",
+    "stdout",
+    "stderr",
+}
+
+LIFECYCLE_EVENT_SUBJECTS = REQUIRED_PROBES
+LIFECYCLE_OBSERVATION_SUBJECTS = frozenset(
+    f"{probe_id}:observation" for probe_id in REQUIRED_PROBES
+)
+LIFECYCLE_SPECIAL_SUBJECTS = frozenset(
+    {
+        "renderer-ready-v2:trace",
+        "network-extension-approval:trace",
+        "network-extension-denial:trace",
+        "network-extension-pending:trace",
+        "sleep-wake:trace",
+        "sleep-wake:packet",
+        "wkwebview-850x603:metadata",
+        "wkwebview-850x603:pixels",
+    }
+)
+EXPECTED_LIFECYCLE_PRE_NONCE_SUBJECTS = frozenset(
+    LIFECYCLE_OBSERVATION_SUBJECTS | LIFECYCLE_SPECIAL_SUBJECTS
+)
+EXPECTED_LIFECYCLE_RAW_SUBJECTS = frozenset(
+    LIFECYCLE_EVENT_SUBJECTS | EXPECTED_LIFECYCLE_PRE_NONCE_SUBJECTS
+)
+
+
+def expected_lifecycle_raw_kinds(subject: str) -> frozenset[str]:
+    """Return the exact artifact kind set for one source-pinned raw subject."""
+
+    if subject not in EXPECTED_LIFECYCLE_RAW_SUBJECTS:
+        raise LifecycleMatrixError("lifecycle raw subject is not source-pinned")
+    if subject in LIFECYCLE_OBSERVATION_SUBJECTS:
+        return frozenset({"lifecycle-observation"})
+    if subject == "renderer-ready-v2:trace":
+        return frozenset({"renderer-ready-trace"})
+    if subject in {
+        "network-extension-approval:trace",
+        "network-extension-denial:trace",
+        "network-extension-pending:trace",
+    }:
+        return frozenset({"network-extension-trace"})
+    if subject == "sleep-wake:trace":
+        return frozenset({"sleep-wake-trace"})
+    if subject == "sleep-wake:packet":
+        return frozenset({"packet-pcap", "packet-pcapng"})
+    if subject == "wkwebview-850x603:metadata":
+        return frozenset({"wkwebview-metadata"})
+    if subject == "wkwebview-850x603:pixels":
+        return frozenset({"wkwebview-rgba"})
+    if subject in LIFECYCLE_EVENT_SUBJECTS:
+        return frozenset({"lifecycle-event"})
+    raise LifecycleMatrixError("lifecycle raw subject kind contract drifted")
 
 SPECIAL_EVIDENCE_PROBES = frozenset(
     {
@@ -261,6 +390,255 @@ def _environment(value: Any, label: str = "environment") -> dict[str, Any]:
         "operation_context": _operation_context(
             environment["operation_context"], f"{label}.operation_context"
         ),
+    }
+
+
+_IDENTITY_DIAGNOSTIC_RE = re.compile(
+    r"(?i)(?:^|[^a-z])(warnings?|errors?)(?:[^a-z]|$)"
+)
+_IDENTITY_CODESIGN_PREFIXES = ("--prepared:", "--validated:")
+_IDENTITY_CODESIGN_SUFFIXES = (
+    ": valid on disk",
+    ": satisfies its Designated Requirement",
+)
+
+
+def parse_lifecycle_environment(
+    value: Any, label: str = "environment"
+) -> dict[str, Any]:
+    """Public strict parser shared by pre-nonce lifecycle adapters."""
+
+    return _environment(value, label)
+
+
+def _identity_verifier_text(value: Any, label: str) -> tuple[str, bytes]:
+    if not isinstance(value, str):
+        raise LifecycleMatrixError(f"{label} must be UTF-8 text")
+    try:
+        data = value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise LifecycleMatrixError(f"{label} contains invalid Unicode") from error
+    if len(data) > IDENTITY_VERIFIER_OUTPUT_LIMIT:
+        raise LifecycleMatrixError(f"{label} exceeds its byte bound")
+    if "\x00" in value:
+        raise LifecycleMatrixError(f"{label} contains a NUL byte")
+    if _IDENTITY_DIAGNOSTIC_RE.search(value) is not None:
+        raise LifecycleMatrixError(f"{label} contains a warning or error diagnostic")
+    return value, data
+
+
+def _identity_candidate_app(stdout: str) -> str:
+    lines = stdout.splitlines()
+    prefix = "release app verified: "
+    app_lines = [line for line in lines if line.startswith(prefix)]
+    if len(app_lines) != 1:
+        raise LifecycleMatrixError(
+            "identity verifier stdout must contain one release-app success line"
+        )
+    app = app_lines[0][len(prefix) :]
+    expected_suffix = "/" + IDENTITY_FIXED_COMMAND[1]
+    if (
+        not os.path.isabs(app)
+        or os.path.normpath(app) != app
+        or not app.endswith(expected_suffix)
+        or len(app) == len(expected_suffix)
+    ):
+        raise LifecycleMatrixError(
+            "identity verifier stdout names a non-final candidate path"
+        )
+    required = {
+        (
+            "identity: YKUPL7Z869 / com.bill.clashformac / "
+            "com.bill.clashformac.packet-tunnel / "
+            "com.bill.clashformac.proxy-agent"
+        ),
+        "platform: arm64 / macOS 15.0+",
+        f"build number: {IDENTITY_FINAL_BUILD}",
+    }
+    for line in required:
+        if lines.count(line) != 1:
+            raise LifecycleMatrixError(
+                "identity verifier stdout is missing a fixed success assertion"
+            )
+    if any(line.startswith("notarization: pre-submission") for line in lines):
+        raise LifecycleMatrixError(
+            "identity verifier observation used the pre-notary command mode"
+        )
+    return app
+
+
+def _identity_codesign_subject(line: str) -> str | None:
+    for prefix in _IDENTITY_CODESIGN_PREFIXES:
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    for suffix in _IDENTITY_CODESIGN_SUFFIXES:
+        if line.endswith(suffix):
+            return line[: -len(suffix)]
+    return None
+
+
+def _validate_identity_codesign_stderr(stderr: str, app: str) -> None:
+    lines = [line for line in stderr.splitlines() if line]
+    for line in lines:
+        subject = _identity_codesign_subject(line)
+        if (
+            subject is None
+            or not os.path.isabs(subject)
+            or os.path.normpath(subject) != subject
+            or (subject != app and not subject.startswith(app + os.sep))
+        ):
+            raise LifecycleMatrixError(
+                "identity verifier stderr contains a non-candidate codesign line"
+            )
+    for required in (
+        f"{app}: valid on disk",
+        f"{app}: satisfies its Designated Requirement",
+    ):
+        if lines.count(required) != 1:
+            raise LifecycleMatrixError(
+                "identity verifier stderr lacks the final app codesign result"
+            )
+
+
+def _identity_observation_command(value: Any) -> dict[str, Any]:
+    command = exact_object(
+        value,
+        IDENTITY_OBSERVATION_COMMAND_FIELDS,
+        "identity observation.command",
+    )
+    stdout, stdout_bytes = _identity_verifier_text(
+        command["stdout"], "identity observation.command.stdout"
+    )
+    stderr, stderr_bytes = _identity_verifier_text(
+        command["stderr"], "identity observation.command.stderr"
+    )
+    app = _identity_candidate_app(stdout)
+    _validate_identity_codesign_stderr(stderr, app)
+    stdout_sha256 = require_sha256(
+        command["stdout_sha256"], "identity observation.command.stdout_sha256"
+    )
+    stderr_sha256 = require_sha256(
+        command["stderr_sha256"], "identity observation.command.stderr_sha256"
+    )
+    duration_ms = command["duration_ms"]
+    if (
+        command["role"] != IDENTITY_VERIFIER_ROLE
+        or command["command"] != list(IDENTITY_FIXED_COMMAND)
+        or command["command_sha256"] != IDENTITY_FIXED_COMMAND_SHA256
+        or type(command["exit_code"]) is not int
+        or command["exit_code"] != 0
+        or type(duration_ms) is not int
+        or duration_ms < 1
+        or duration_ms > 600_000
+        or hashlib.sha256(stdout_bytes).hexdigest() != stdout_sha256
+        or hashlib.sha256(stderr_bytes).hexdigest() != stderr_sha256
+    ):
+        raise LifecycleMatrixError(
+            "identity observation command/output binding differs from the fixed verifier"
+        )
+    return {
+        "role": IDENTITY_VERIFIER_ROLE,
+        "command": list(IDENTITY_FIXED_COMMAND),
+        "command_sha256": IDENTITY_FIXED_COMMAND_SHA256,
+        "exit_code": 0,
+        "duration_ms": duration_ms,
+        "stdout_sha256": stdout_sha256,
+        "stderr_sha256": stderr_sha256,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def validate_identity_observation(
+    value: Any,
+    *,
+    probe_id: str,
+    candidate: dict[str, Any],
+    run_id: str,
+    environment: dict[str, Any],
+    started_at: str,
+    finished_at: str,
+) -> dict[str, Any]:
+    """Validate one retained pre-nonce identity-verifier observation."""
+
+    if probe_id not in IDENTITY_PROBE_IDS:
+        raise LifecycleMatrixError("identity observation probe is not source-pinned")
+    raw = exact_object(
+        value, IDENTITY_OBSERVATION_FIELDS, f"{probe_id}.identity_observation"
+    )
+    if (
+        type(raw["schema_version"]) is not int
+        or raw["schema_version"] != IDENTITY_OBSERVATION_SCHEMA_VERSION
+        or raw["document"] != IDENTITY_OBSERVATION_DOCUMENT
+        or raw["probe_id"] != probe_id
+    ):
+        raise LifecycleMatrixError("identity observation schema/probe binding differs")
+    if raw["run_id"] != require_identifier(
+        run_id, f"{probe_id}.identity_observation.expected_run_id"
+    ):
+        raise LifecycleMatrixError("identity observation run binding differs")
+    observed_candidate = exact_object(
+        raw["candidate"],
+        IDENTITY_OBSERVATION_CANDIDATE_FIELDS,
+        f"{probe_id}.identity_observation.candidate",
+    )
+    proof_candidate = {
+        key: observed_candidate[key]
+        for key in IDENTITY_OBSERVATION_CANDIDATE_FIELDS
+        if key != "built_at"
+    }
+    if (
+        proof_candidate != candidate
+        or observed_candidate["version"] != PRODUCT_VERSION
+        or observed_candidate["build_number"] != IDENTITY_FINAL_BUILD
+    ):
+        raise LifecycleMatrixError("identity observation candidate binding differs")
+    observed_environment = _environment(
+        raw["environment"], f"{probe_id}.identity_observation.environment"
+    )
+    if observed_environment != environment:
+        raise LifecycleMatrixError("identity observation environment binding differs")
+    if raw["started_at"] != started_at or raw["finished_at"] != finished_at:
+        raise LifecycleMatrixError("identity observation timestamps differ from its event")
+    started = _timestamp(started_at, f"{probe_id}.identity_observation.started_at")
+    finished = _timestamp(finished_at, f"{probe_id}.identity_observation.finished_at")
+    built_at = _timestamp(
+        observed_candidate["built_at"],
+        f"{probe_id}.identity_observation.candidate.built_at",
+    )
+    if built_at > started:
+        raise LifecycleMatrixError(
+            "identity observation predates its complete candidate binding"
+        )
+    if not 0 < (finished - started).total_seconds() <= 600:
+        raise LifecycleMatrixError("identity observation duration is outside 0..10min")
+    command = _identity_observation_command(raw["command"])
+    wall_duration_ms = _duration_milliseconds(
+        started,
+        finished,
+        f"{probe_id}.identity_observation timestamps",
+    )
+    if abs(command["duration_ms"] - wall_duration_ms) > 1:
+        raise LifecycleMatrixError(
+            "identity observation command duration differs from its timestamps"
+        )
+    batch_material = {
+        "schema_version": IDENTITY_OBSERVATION_SCHEMA_VERSION,
+        "document": IDENTITY_OBSERVATION_DOCUMENT,
+        "candidate": observed_candidate,
+        "run_id": run_id,
+        "environment": observed_environment,
+        "command": command,
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+    batch_sha256 = hashlib.sha256(canonical_json(batch_material)).hexdigest()
+    if raw["batch_sha256"] != batch_sha256:
+        raise LifecycleMatrixError("identity observation batch digest differs")
+    return {
+        **batch_material,
+        "batch_sha256": batch_sha256,
+        "probe_id": probe_id,
     }
 
 
@@ -383,7 +761,7 @@ def _validate_renderer_ready_evidence(
     value: Any,
     *,
     artifacts: ArtifactReader,
-    proof: dict[str, Any],
+    candidate: dict[str, Any],
     started_at: str,
     finished_at: str,
 ) -> list[dict[str, Any]]:
@@ -397,7 +775,6 @@ def _validate_renderer_ready_evidence(
         trace_value,
         {
             "schema_version",
-            "proof",
             "protocol",
             "candidate_app_tree_sha256",
             "window_label",
@@ -410,11 +787,9 @@ def _validate_renderer_ready_evidence(
     )
     if type(trace["schema_version"]) is not int or trace["schema_version"] != 1:
         raise LifecycleMatrixError("renderer-ready-v2 trace schema_version must be 1")
-    if parse_proof_binding(trace["proof"], "renderer-ready-v2.trace.proof") != proof:
-        raise LifecycleMatrixError("renderer-ready-v2 trace proof binding differs")
     if trace["protocol"] != RENDERER_READY_DOCUMENT or trace["window_label"] != "main":
         raise LifecycleMatrixError("renderer-ready-v2 trace protocol/window binding differs")
-    if trace["candidate_app_tree_sha256"] != proof["candidate"]["signed_app_tree_sha256"]:
+    if trace["candidate_app_tree_sha256"] != candidate["signed_app_tree_sha256"]:
         raise LifecycleMatrixError("renderer-ready-v2 trace candidate app-tree binding differs")
     if trace["started_at"] != started_at or trace["completed_at"] != finished_at:
         raise LifecycleMatrixError("renderer-ready-v2 trace timestamps differ from its probe")
@@ -565,7 +940,7 @@ def _validate_network_extension_evidence(
     *,
     probe_id: str,
     artifacts: ArtifactReader,
-    proof: dict[str, Any],
+    candidate: dict[str, Any],
     started_at: str,
     finished_at: str,
 ) -> list[dict[str, Any]]:
@@ -579,7 +954,6 @@ def _validate_network_extension_evidence(
         trace_value,
         {
             "schema_version",
-            "proof",
             "candidate_app_tree_sha256",
             "probe_id",
             "request_id",
@@ -592,9 +966,7 @@ def _validate_network_extension_evidence(
     )
     if type(trace["schema_version"]) is not int or trace["schema_version"] != 1:
         raise LifecycleMatrixError(f"{probe_id} trace schema_version must be 1")
-    if parse_proof_binding(trace["proof"], f"{probe_id}.trace.proof") != proof:
-        raise LifecycleMatrixError(f"{probe_id} trace proof binding differs")
-    if trace["candidate_app_tree_sha256"] != proof["candidate"]["signed_app_tree_sha256"]:
+    if trace["candidate_app_tree_sha256"] != candidate["signed_app_tree_sha256"]:
         raise LifecycleMatrixError(f"{probe_id} candidate app-tree binding differs")
     if trace["probe_id"] != probe_id:
         raise LifecycleMatrixError(f"{probe_id} trace probe binding differs")
@@ -698,7 +1070,7 @@ def _validate_sleep_wake_evidence(
     value: Any,
     *,
     artifacts: ArtifactReader,
-    proof: dict[str, Any],
+    candidate: dict[str, Any],
     started_at: str,
     finished_at: str,
 ) -> list[dict[str, Any]]:
@@ -716,7 +1088,6 @@ def _validate_sleep_wake_evidence(
         trace_value,
         {
             "schema_version",
-            "proof",
             "probe_id",
             "candidate_app_tree_sha256",
             "interface",
@@ -744,9 +1115,7 @@ def _validate_sleep_wake_evidence(
         or trace["probe_id"] != "sleep-wake"
     ):
         raise LifecycleMatrixError("sleep-wake trace schema/probe binding differs")
-    if parse_proof_binding(trace["proof"], "sleep-wake.trace.proof") != proof:
-        raise LifecycleMatrixError("sleep-wake trace proof binding differs")
-    if trace["candidate_app_tree_sha256"] != proof["candidate"]["signed_app_tree_sha256"]:
+    if trace["candidate_app_tree_sha256"] != candidate["signed_app_tree_sha256"]:
         raise LifecycleMatrixError("sleep-wake candidate app-tree binding differs")
     if trace["started_at"] != started_at or trace["completed_at"] != finished_at:
         raise LifecycleMatrixError("sleep-wake trace timestamps differ from its probe")
@@ -867,7 +1236,7 @@ def _validate_wkwebview_evidence(
     value: Any,
     *,
     artifacts: ArtifactReader,
-    proof: dict[str, Any],
+    candidate: dict[str, Any],
     started_at: str,
     finished_at: str,
 ) -> list[dict[str, Any]]:
@@ -885,7 +1254,6 @@ def _validate_wkwebview_evidence(
         metadata_value,
         {
             "schema_version",
-            "proof",
             "probe_id",
             "candidate_app_tree_sha256",
             "window_label",
@@ -912,9 +1280,7 @@ def _validate_wkwebview_evidence(
         or metadata["probe_id"] != "wkwebview-850x603"
     ):
         raise LifecycleMatrixError("WKWebView metadata schema/probe binding differs")
-    if parse_proof_binding(metadata["proof"], "wkwebview.metadata.proof") != proof:
-        raise LifecycleMatrixError("WKWebView metadata proof binding differs")
-    if metadata["candidate_app_tree_sha256"] != proof["candidate"]["signed_app_tree_sha256"]:
+    if metadata["candidate_app_tree_sha256"] != candidate["signed_app_tree_sha256"]:
         raise LifecycleMatrixError("WKWebView metadata candidate app-tree binding differs")
     if (
         metadata["window_label"] != "main"
@@ -978,7 +1344,7 @@ def _validate_probe_evidence(
     *,
     probe_id: str,
     artifacts: ArtifactReader,
-    proof: dict[str, Any],
+    candidate: dict[str, Any],
     started_at: str,
     finished_at: str,
 ) -> list[dict[str, Any]]:
@@ -990,7 +1356,7 @@ def _validate_probe_evidence(
         return _validate_renderer_ready_evidence(
             value,
             artifacts=artifacts,
-            proof=proof,
+            candidate=candidate,
             started_at=started_at,
             finished_at=finished_at,
         )
@@ -999,7 +1365,7 @@ def _validate_probe_evidence(
             value,
             probe_id=probe_id,
             artifacts=artifacts,
-            proof=proof,
+            candidate=candidate,
             started_at=started_at,
             finished_at=finished_at,
         )
@@ -1007,7 +1373,7 @@ def _validate_probe_evidence(
         return _validate_sleep_wake_evidence(
             value,
             artifacts=artifacts,
-            proof=proof,
+            candidate=candidate,
             started_at=started_at,
             finished_at=finished_at,
         )
@@ -1015,11 +1381,218 @@ def _validate_probe_evidence(
         return _validate_wkwebview_evidence(
             value,
             artifacts=artifacts,
-            proof=proof,
+            candidate=candidate,
             started_at=started_at,
             finished_at=finished_at,
         )
     raise LifecycleMatrixError(f"unsupported special evidence probe: {probe_id}")
+
+
+LIFECYCLE_PROBE_EXECUTABLE = (
+    "/Library/Application Support/Clash for Mac/ReleaseVerification/"
+    "Lifecycle/CFWLifecycleProbe"
+)
+
+
+def lifecycle_probe_command(probe_id: str) -> list[str]:
+    if probe_id not in PROBE_SPECS or probe_id in IDENTITY_PROBE_IDS:
+        raise LifecycleMatrixError("lifecycle probe command is not source-pinned")
+    return [LIFECYCLE_PROBE_EXECUTABLE, "observe", probe_id]
+
+
+def _observation_candidate(value: Any, label: str) -> dict[str, Any]:
+    candidate = exact_object(value, IDENTITY_OBSERVATION_CANDIDATE_FIELDS, label)
+    if (
+        candidate["version"] != PRODUCT_VERSION
+        or candidate["build_number"] != IDENTITY_FINAL_BUILD
+    ):
+        raise LifecycleMatrixError(f"{label} is not the final lifecycle candidate")
+    for field in (
+        "app_manifest_sha256",
+        "signed_app_tree_sha256",
+        "artifact_hash_manifest_sha256",
+    ):
+        require_sha256(candidate[field], f"{label}.{field}")
+    _timestamp(candidate["built_at"], f"{label}.built_at")
+    return dict(candidate)
+
+
+def _validate_standard_observation(
+    value: Any,
+    *,
+    artifacts: ArtifactReader,
+    probe_id: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    raw = exact_object(
+        value,
+        OBSERVATION_DOCUMENT_FIELDS,
+        f"{probe_id}.observation",
+    )
+    if (
+        type(raw["schema_version"]) is not int
+        or raw["schema_version"] != OBSERVATION_SCHEMA_VERSION
+        or raw["document"] != OBSERVATION_DOCUMENT
+    ):
+        raise LifecycleMatrixError(
+            f"{probe_id}.observation schema/document is unsupported"
+        )
+    candidate = _observation_candidate(
+        raw["candidate"], f"{probe_id}.observation.candidate"
+    )
+    run_id = require_identifier(raw["run_id"], f"{probe_id}.observation.run_id")
+    environment = _environment(
+        raw["environment"], f"{probe_id}.observation.environment"
+    )
+    category, expected_exit, terminal_observation, _checks = PROBE_SPECS[probe_id]
+    if raw["probe_id"] != probe_id or raw["category"] != category:
+        raise LifecycleMatrixError(
+            f"{probe_id}.observation case/category binding differs"
+        )
+    if raw["command"] != lifecycle_probe_command(probe_id):
+        raise LifecycleMatrixError(
+            f"{probe_id}.observation command is not the source-pinned helper"
+        )
+    started = _timestamp(raw["started_at"], f"{probe_id}.observation.started_at")
+    finished = _timestamp(raw["finished_at"], f"{probe_id}.observation.finished_at")
+    duration = (finished - started).total_seconds()
+    if duration <= 0 or duration > 600:
+        raise LifecycleMatrixError(
+            f"{probe_id}.observation duration is outside 0..10min"
+        )
+    if raw["exit_code"] != expected_exit:
+        raise LifecycleMatrixError(
+            f"{probe_id}.observation exit_code differs from the required matrix outcome"
+        )
+    _event_sequence(
+        raw["events"],
+        probe_id,
+        terminal_observation,
+        f"{probe_id}.observation.events",
+    )
+    attributes = _attributes(
+        raw["attributes"], probe_id, f"{probe_id}.observation.attributes"
+    )
+    evidence_bindings = _validate_probe_evidence(
+        raw["evidence"],
+        probe_id=probe_id,
+        artifacts=artifacts,
+        candidate=candidate,
+        started_at=raw["started_at"],
+        finished_at=raw["finished_at"],
+    )
+    return (
+        {
+            "candidate": candidate,
+            "run_id": run_id,
+            "environment": environment,
+            "started_at": raw["started_at"],
+            "finished_at": raw["finished_at"],
+            "started_at_dt": started,
+            "finished_at_dt": finished,
+            "attributes": attributes,
+            "identity_batch_sha256": None,
+            "identity_candidate": None,
+        },
+        evidence_bindings,
+    )
+
+
+def validate_lifecycle_observation(
+    value: Any,
+    *,
+    artifacts: ArtifactReader,
+    probe_id: str,
+) -> dict[str, Any]:
+    """Strictly validate one proof-free lifecycle observation and its raw evidence."""
+
+    if probe_id not in PROBE_SPECS:
+        raise LifecycleMatrixError("lifecycle observation probe is not source-pinned")
+    if probe_id in IDENTITY_PROBE_IDS:
+        if not isinstance(value, dict):
+            raise LifecycleMatrixError(f"{probe_id}.observation is not an object")
+        candidate = _observation_candidate(
+            value.get("candidate"), f"{probe_id}.observation.candidate"
+        )
+        run_id = require_identifier(
+            value.get("run_id"), f"{probe_id}.observation.run_id"
+        )
+        environment = _environment(
+            value.get("environment"), f"{probe_id}.observation.environment"
+        )
+        proof_candidate = {
+            key: candidate[key]
+            for key in IDENTITY_OBSERVATION_CANDIDATE_FIELDS
+            if key != "built_at"
+        }
+        parsed_identity = validate_identity_observation(
+            value,
+            probe_id=probe_id,
+            candidate=proof_candidate,
+            run_id=run_id,
+            environment=environment,
+            started_at=value.get("started_at"),
+            finished_at=value.get("finished_at"),
+        )
+        parsed = {
+            "candidate": parsed_identity["candidate"],
+            "run_id": parsed_identity["run_id"],
+            "environment": parsed_identity["environment"],
+            "started_at": parsed_identity["started_at"],
+            "finished_at": parsed_identity["finished_at"],
+            "started_at_dt": _timestamp(
+                parsed_identity["started_at"], f"{probe_id}.started_at"
+            ),
+            "finished_at_dt": _timestamp(
+                parsed_identity["finished_at"], f"{probe_id}.finished_at"
+            ),
+            "attributes": {},
+            "identity_batch_sha256": parsed_identity["batch_sha256"],
+            "identity_candidate": parsed_identity["candidate"],
+        }
+        evidence_bindings: list[dict[str, Any]] = []
+    else:
+        parsed, evidence_bindings = _validate_standard_observation(
+            value,
+            artifacts=artifacts,
+            probe_id=probe_id,
+        )
+    return {**parsed, "artifacts": evidence_bindings}
+
+
+def _validate_lifecycle_observation(
+    value: Any,
+    *,
+    artifacts: ArtifactReader,
+    probe_id: str,
+    proof: dict[str, Any],
+    environment: dict[str, Any],
+    report_attributes: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    validated = validate_lifecycle_observation(
+        value,
+        artifacts=artifacts,
+        probe_id=probe_id,
+    )
+    evidence_bindings = validated["artifacts"]
+    parsed = {key: value for key, value in validated.items() if key != "artifacts"}
+    proof_candidate = {
+        key: parsed["candidate"][key]
+        for key in IDENTITY_OBSERVATION_CANDIDATE_FIELDS
+        if key != "built_at"
+    }
+    if proof_candidate != proof["candidate"] or parsed["run_id"] != proof["run_id"]:
+        raise LifecycleMatrixError(
+            f"{probe_id}.observation candidate/run binding differs from its proof event"
+        )
+    if parsed["environment"] != environment:
+        raise LifecycleMatrixError(
+            f"{probe_id}.observation environment differs from its report"
+        )
+    if parsed["attributes"] != report_attributes:
+        raise LifecycleMatrixError(
+            f"{probe_id}.observation attributes differ from its report"
+        )
+    return parsed, evidence_bindings
 
 
 def _validate_raw_event(
@@ -1030,43 +1603,80 @@ def _validate_raw_event(
     proof: dict[str, Any],
     environment: dict[str, Any],
     report_attributes: dict[str, Any],
-) -> tuple[datetime, datetime, list[dict[str, Any]]]:
+) -> tuple[
+    datetime,
+    datetime,
+    list[dict[str, Any]],
+    str | None,
+    dict[str, Any] | None,
+]:
     raw = exact_object(value, EVENT_DOCUMENT_FIELDS, f"{probe_id}.raw_event")
-    if type(raw["schema_version"]) is not int or raw["schema_version"] != 2:
-        raise LifecycleMatrixError(f"{probe_id}.raw_event schema_version must be 2")
+    if (
+        type(raw["schema_version"]) is not int
+        or raw["schema_version"] != EVENT_SCHEMA_VERSION
+        or raw["document"] != EVENT_DOCUMENT
+    ):
+        raise LifecycleMatrixError(
+            f"{probe_id}.raw_event schema/document must be lifecycle event v3"
+        )
     if parse_proof_binding(raw["proof"], f"{probe_id}.raw_event.proof") != proof:
         raise LifecycleMatrixError(f"{probe_id}.raw_event proof binding differs from its report")
-    if _environment(raw["environment"], f"{probe_id}.raw_event.environment") != environment:
-        raise LifecycleMatrixError(f"{probe_id}.raw_event environment differs from its report")
-    category, expected_exit, observation, _checks = PROBE_SPECS[probe_id]
-    if raw["probe_id"] != probe_id or raw["category"] != category:
-        raise LifecycleMatrixError(f"{probe_id}.raw_event case/category binding differs")
-    _command(
-        raw["command"], proof["collector"]["version"], probe_id, f"{probe_id}.raw_event.command"
+    if raw["probe_id"] != probe_id:
+        raise LifecycleMatrixError(f"{probe_id}.raw_event probe binding differs")
+    descriptor, observation = artifacts.read_json(
+        raw["observation_artifact"],
+        expected_kind="lifecycle-observation",
+        label=f"{probe_id}.raw_event.observation_artifact",
     )
-    started = _timestamp(raw["started_at"], f"{probe_id}.raw_event.started_at")
-    finished = _timestamp(raw["finished_at"], f"{probe_id}.raw_event.finished_at")
-    duration = (finished - started).total_seconds()
-    if duration <= 0 or duration > 600:
-        raise LifecycleMatrixError(f"{probe_id}.raw_event duration is outside 0..10min")
-    if raw["exit_code"] != expected_exit:
-        raise LifecycleMatrixError(
-            f"{probe_id}.raw_event exit_code differs from the required matrix outcome"
-        )
-    _event_sequence(raw["events"], probe_id, observation, f"{probe_id}.raw_event.events")
-    if _attributes(raw["attributes"], probe_id, f"{probe_id}.raw_event.attributes") != (
-        report_attributes
-    ):
-        raise LifecycleMatrixError(f"{probe_id}.raw_event attributes differ from its report")
-    evidence_bindings = _validate_probe_evidence(
-        raw["evidence"],
-        probe_id=probe_id,
+    parsed, evidence_bindings = _validate_lifecycle_observation(
+        observation,
         artifacts=artifacts,
+        probe_id=probe_id,
         proof=proof,
-        started_at=raw["started_at"],
-        finished_at=raw["finished_at"],
+        environment=environment,
+        report_attributes=report_attributes,
     )
-    return started, finished, evidence_bindings
+    bindings = [
+        {
+            "subject": f"{probe_id}:observation",
+            "descriptor": descriptor.as_dict(),
+        },
+        *evidence_bindings,
+    ]
+    return (
+        parsed["started_at_dt"],
+        parsed["finished_at_dt"],
+        bindings,
+        parsed["identity_batch_sha256"],
+        parsed["identity_candidate"],
+    )
+
+
+def validate_lifecycle_event(
+    value: Any,
+    *,
+    artifacts: ArtifactReader,
+    probe_id: str,
+    proof: dict[str, Any],
+    environment: dict[str, Any],
+    report_attributes: dict[str, Any],
+) -> tuple[
+    datetime,
+    datetime,
+    list[dict[str, Any]],
+    str | None,
+    dict[str, Any] | None,
+]:
+    """Validate one lifecycle event through the report validator's same path."""
+
+    return _validate_raw_event(
+        value,
+        artifacts=artifacts,
+        probe_id=probe_id,
+        proof=proof,
+        environment=environment,
+        report_attributes=report_attributes,
+    )
 
 
 def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
@@ -1106,6 +1716,8 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
     bindings: list[dict[str, Any]] = []
     starts: list[datetime] = []
     finishes: list[datetime] = []
+    identity_batches: set[str] = set()
+    identity_candidates: list[dict[str, Any]] = []
     for index, raw_probe in enumerate(probes):
         probe = exact_object(raw_probe, PROBE_FIELDS, f"probes[{index}]")
         probe_id = probe["id"]
@@ -1120,7 +1732,13 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
             expected_kind="lifecycle-event",
             label=f"{probe_id}.artifact",
         )
-        started, finished, evidence_bindings = _validate_raw_event(
+        (
+            started,
+            finished,
+            evidence_bindings,
+            identity_batch_sha256,
+            identity_candidate,
+        ) = _validate_raw_event(
             raw_event,
             artifacts=artifacts,
             probe_id=probe_id,
@@ -1132,8 +1750,28 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         finishes.append(finished)
         bindings.append({"subject": probe_id, "descriptor": descriptor.as_dict()})
         bindings.extend(evidence_bindings)
+        if identity_batch_sha256 is not None:
+            identity_batches.add(identity_batch_sha256)
+        if identity_candidate is not None:
+            identity_candidates.append(identity_candidate)
     if seen != set(REQUIRED_PROBES):
         raise LifecycleMatrixError("lifecycle matrix is missing a required probe")
+    if len(identity_batches) != 1:
+        raise LifecycleMatrixError(
+            "identity observations do not belong to one verifier batch"
+        )
+    if (
+        len(identity_candidates) != len(IDENTITY_PROBE_IDS)
+        or any(candidate != identity_candidates[0] for candidate in identity_candidates)
+    ):
+        raise LifecycleMatrixError(
+            "identity observations do not bind one complete candidate"
+        )
+    subjects = {binding["subject"] for binding in bindings}
+    if len(subjects) != len(bindings) or subjects != EXPECTED_LIFECYCLE_RAW_SUBJECTS:
+        raise LifecycleMatrixError(
+            "lifecycle raw artifact subjects differ from the exact source contract"
+        )
     if not starts or _timestamp(document["captured_at"], "captured_at") != min(starts):
         raise LifecycleMatrixError("captured_at differs from the earliest raw probe event")
     completed_at = _timestamp(document["completed_at"], "completed_at")
@@ -1149,6 +1787,8 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         "probes": sorted(seen),
         "started_at": min(starts),
         "completed_at": completed_at,
+        "identity_batch_sha256": next(iter(identity_batches)),
+        "identity_candidate": identity_candidates[0],
         "artifacts": bindings,
     }
 

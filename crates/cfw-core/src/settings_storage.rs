@@ -33,6 +33,38 @@ pub(crate) struct SecureDirectory {
 }
 
 impl SecureDirectory {
+    pub(crate) fn open_existing(path: &Path) -> Result<Option<Self>, SettingsStoreError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_dir() => {
+                return Err(SettingsStoreError::UnsafeDirectory);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| SettingsStoreError::InvalidPath)?;
+        let descriptor = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor == -1 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_dir()
+            || metadata.uid() != current_uid()
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(SettingsStoreError::UnsafeDirectory);
+        }
+        Ok(Some(Self { file }))
+    }
+
     pub(crate) fn open_or_create(path: &Path) -> Result<Self, SettingsStoreError> {
         match fs::symlink_metadata(path) {
             Ok(metadata) if !metadata.file_type().is_dir() => {

@@ -15,7 +15,7 @@ test items do not imply a signed physical-device release.
       closed direct/block/Shadowsocks/VMess/VLESS-Reality/Trojan/Hysteria2
       schema, with secret-free credential slots
 - [x] Rust `NativeFrameworkBridge` C ABI wired into the production application
-- [x] source-built sing-box `v1.13.14` plus digest-pinned security, raw-packet,
+- [x] source-built sing-box `v1.13.15` plus digest-pinned security, raw-packet,
       and DNS patches linked into ProxyAgent and Packet Tunnel
 - [x] Swift 6 Host Bridge, `SMAppService` registration, System Extension and
       Network Extension control paths, and public bounded packet pump

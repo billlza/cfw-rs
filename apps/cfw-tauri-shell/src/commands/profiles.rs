@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use zeroize::Zeroize;
 
+use super::legacy_profiles::LegacyProfileMigrationAuthority;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct UiProfileRecord {
     id: String,
@@ -45,6 +47,7 @@ pub(crate) struct ManagedProfiles {
     repository: ProfileRepository,
     credential_vault: NativeFrameworkBridge,
     credential_gc_preview: Mutex<Option<CredentialGcAuthority>>,
+    legacy_profile_migration_preview: Mutex<Option<LegacyProfileMigrationAuthority>>,
 }
 
 const CREDENTIAL_GC_PREVIEW_TTL: Duration = Duration::from_secs(5 * 60);
@@ -99,6 +102,7 @@ impl ManagedProfiles {
             repository,
             credential_vault,
             credential_gc_preview: Mutex::new(None),
+            legacy_profile_migration_preview: Mutex::new(None),
         }
     }
 
@@ -108,6 +112,12 @@ impl ManagedProfiles {
 
     pub(crate) fn credential_vault(&self) -> &NativeFrameworkBridge {
         &self.credential_vault
+    }
+
+    pub(super) fn legacy_profile_migration_preview(
+        &self,
+    ) -> &Mutex<Option<LegacyProfileMigrationAuthority>> {
+        &self.legacy_profile_migration_preview
     }
 }
 

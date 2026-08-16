@@ -21,9 +21,9 @@ use cfw_controller::{
     ControllerVersion, ProviderBatchResult, ProvidersSnapshot, ProxyDelayResult, RulesSnapshot,
     StructuredLogEntry, require_provider_management,
 };
-use cfw_engine_api::{EngineSnapshot, EngineState};
+use cfw_engine_api::{EngineOwner, EngineSnapshot, EngineState, RuntimeIdentity};
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use thiserror::Error;
 use tokio_tungstenite::connect_async_with_config;
@@ -140,15 +140,32 @@ fn controller_client_cache() -> &'static Mutex<Option<(ControllerEndpoint, Contr
 /// Only an engine this process observes as active and ready has a controller to
 /// talk to. Every other state fails closed: there is no start path, no probe of
 /// an unknown listener, and no fallback here.
-fn require_running_controller(snapshot: &EngineSnapshot) -> Result<(), ControllerCommandError> {
+fn running_runtime_identity(
+    snapshot: &EngineSnapshot,
+) -> Result<&RuntimeIdentity, ControllerCommandError> {
     match &snapshot.state {
-        EngineState::ProxyActive { runtime } | EngineState::TunnelActive { runtime }
-            if runtime.ready =>
+        EngineState::ProxyActive { runtime }
+            if runtime.ready
+                && runtime.owner == EngineOwner::ProxyAgent
+                && runtime.context.generation == snapshot.generation
+                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()) =>
         {
-            Ok(())
+            Ok(runtime)
+        }
+        EngineState::TunnelActive { runtime }
+            if runtime.ready
+                && runtime.owner == EngineOwner::PacketTunnelSystemExtension
+                && runtime.context.generation == snapshot.generation
+                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()) =>
+        {
+            Ok(runtime)
         }
         _ => Err(ControllerCommandError::EngineNotRunning),
     }
+}
+
+fn require_running_controller(snapshot: &EngineSnapshot) -> Result<(), ControllerCommandError> {
+    running_runtime_identity(snapshot).map(|_| ())
 }
 
 /// reqwest is built with `rustls-no-provider`, so constructing any client — this
@@ -443,6 +460,31 @@ enum StreamKind {
     Logs,
 }
 
+impl StreamKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Connections => CONNECTIONS_STREAM,
+            Self::Logs => REQUEST_LOG_STREAM,
+        }
+    }
+}
+
+/// Native ownership returned by `start_*_stream` and copied onto every event.
+/// The runtime identity is the coordinator's existing attestation; `stream_id`
+/// distinguishes stop/restart within that same runtime generation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct StreamBinding {
+    stream: String,
+    stream_id: u64,
+    runtime: RuntimeIdentity,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StreamEvent<T> {
+    provenance: StreamBinding,
+    payload: T,
+}
+
 #[derive(Default)]
 struct StreamSlot {
     next_id: u64,
@@ -451,12 +493,17 @@ struct StreamSlot {
 
 enum StreamTask {
     Starting {
-        id: u64,
+        binding: StreamBinding,
     },
     Running {
-        id: u64,
+        binding: StreamBinding,
         handle: tauri::async_runtime::JoinHandle<()>,
     },
+}
+
+struct StreamReservation {
+    binding: StreamBinding,
+    start_new: bool,
 }
 
 impl LiveStreams {
@@ -486,22 +533,56 @@ fn lock_stream_slot(
         .map_err(|error| ControllerCommandError::ClientUnavailable(error.to_string()).to_ipc())
 }
 
-/// Reserves a stream for a task that has not yet been attached. `None` means a
-/// live or starting supervisor already owns the stream.
-fn reserve_stream(slot: &Mutex<StreamSlot>) -> Result<Option<u64>, String> {
-    let mut slot = lock_stream_slot(slot)?;
-    if slot.task.is_some() {
-        return Ok(None);
+fn task_binding(task: &StreamTask) -> &StreamBinding {
+    match task {
+        StreamTask::Starting { binding } | StreamTask::Running { binding, .. } => binding,
     }
-    slot.next_id = slot.next_id.wrapping_add(1).max(1);
-    let id = slot.next_id;
-    slot.task = Some(StreamTask::Starting { id });
-    Ok(Some(id))
+}
+
+/// Atomically retains an existing supervisor for the same runtime identity or
+/// aborts/replaces it for a new identity. Ownership is changed under one slot
+/// lock, so Active A -> Active B cannot leave A registered as B's stream.
+fn reserve_stream(
+    slot: &Mutex<StreamSlot>,
+    kind: StreamKind,
+    runtime: RuntimeIdentity,
+) -> Result<StreamReservation, String> {
+    let mut slot = lock_stream_slot(slot)?;
+    if let Some(task) = slot.task.as_ref()
+        && task_binding(task).runtime == runtime
+    {
+        return Ok(StreamReservation {
+            binding: task_binding(task).clone(),
+            start_new: false,
+        });
+    }
+    let next_id = slot.next_id.checked_add(1).ok_or_else(|| {
+        ControllerCommandError::ClientUnavailable(
+            "controller stream identifier space is exhausted".into(),
+        )
+        .to_ipc()
+    })?;
+    if let Some(StreamTask::Running { handle, .. }) = slot.task.take() {
+        handle.abort();
+    }
+    slot.next_id = next_id;
+    let binding = StreamBinding {
+        stream: kind.name().to_owned(),
+        stream_id: slot.next_id,
+        runtime,
+    };
+    slot.task = Some(StreamTask::Starting {
+        binding: binding.clone(),
+    });
+    Ok(StreamReservation {
+        binding,
+        start_new: true,
+    })
 }
 
 fn attach_stream(
     slot: &Mutex<StreamSlot>,
-    id: u64,
+    stream_id: u64,
     handle: tauri::async_runtime::JoinHandle<()>,
 ) -> Result<(), String> {
     let mut slot = match lock_stream_slot(slot) {
@@ -511,8 +592,14 @@ fn attach_stream(
             return Err(error);
         }
     };
-    if matches!(slot.task, Some(StreamTask::Starting { id: current }) if current == id) {
-        slot.task = Some(StreamTask::Running { id, handle });
+    let binding = match slot.task.as_ref() {
+        Some(StreamTask::Starting { binding }) if binding.stream_id == stream_id => {
+            Some(binding.clone())
+        }
+        _ => None,
+    };
+    if let Some(binding) = binding {
+        slot.task = Some(StreamTask::Running { binding, handle });
     } else {
         // Stop or task completion won the race while spawn was being attached.
         handle.abort();
@@ -520,7 +607,7 @@ fn attach_stream(
     Ok(())
 }
 
-fn release_stream(slot: &Mutex<StreamSlot>, id: u64) {
+fn release_stream(slot: &Mutex<StreamSlot>, stream_id: u64) {
     let mut slot = match slot.lock() {
         Ok(slot) => slot,
         Err(error) => {
@@ -529,8 +616,7 @@ fn release_stream(slot: &Mutex<StreamSlot>, id: u64) {
         }
     };
     let owned = match slot.task.as_ref() {
-        Some(StreamTask::Starting { id: current }) => *current == id,
-        Some(StreamTask::Running { id: current, .. }) => *current == id,
+        Some(task) => task_binding(task).stream_id == stream_id,
         None => false,
     };
     if owned {
@@ -538,8 +624,16 @@ fn release_stream(slot: &Mutex<StreamSlot>, id: u64) {
     }
 }
 
-fn stop_stream(slot: &Mutex<StreamSlot>) -> Result<(), String> {
-    let task = lock_stream_slot(slot)?.task.take();
+fn stop_stream(slot: &Mutex<StreamSlot>, expected: &StreamBinding) -> Result<(), String> {
+    let mut slot = lock_stream_slot(slot)?;
+    if !slot
+        .task
+        .as_ref()
+        .is_some_and(|task| task_binding(task) == expected)
+    {
+        return Ok(());
+    }
+    let task = slot.task.take();
     if let Some(StreamTask::Running { handle, .. }) = task {
         handle.abort();
     }
@@ -588,7 +682,7 @@ struct LogFieldPayload {
 pub(crate) fn start_connections_stream(
     app: AppHandle,
     streams: State<'_, LiveStreams>,
-) -> Result<(), String> {
+) -> Result<StreamBinding, String> {
     start_stream(app, &streams, StreamKind::Connections)
 }
 
@@ -596,70 +690,90 @@ pub(crate) fn start_connections_stream(
 pub(crate) fn start_log_stream(
     app: AppHandle,
     streams: State<'_, LiveStreams>,
-) -> Result<(), String> {
+) -> Result<StreamBinding, String> {
     start_stream(app, &streams, StreamKind::Logs)
 }
 
 #[tauri::command]
-pub(crate) fn stop_connections_stream(streams: State<'_, LiveStreams>) -> Result<(), String> {
-    stop_stream(streams.slot(StreamKind::Connections))
+pub(crate) fn stop_connections_stream(
+    expected: StreamBinding,
+    streams: State<'_, LiveStreams>,
+) -> Result<(), String> {
+    stop_stream(streams.slot(StreamKind::Connections), &expected)
 }
 
 #[tauri::command]
-pub(crate) fn stop_log_stream(streams: State<'_, LiveStreams>) -> Result<(), String> {
-    stop_stream(streams.slot(StreamKind::Logs))
+pub(crate) fn stop_log_stream(
+    expected: StreamBinding,
+    streams: State<'_, LiveStreams>,
+) -> Result<(), String> {
+    stop_stream(streams.slot(StreamKind::Logs), &expected)
 }
 
-fn start_stream(app: AppHandle, streams: &LiveStreams, kind: StreamKind) -> Result<(), String> {
-    require_running_controller(&app.state::<ManagedEngine>().coordinator.snapshot())
-        .map_err(|error| error.to_ipc())?;
-    let Some(id) = reserve_stream(streams.slot(kind))? else {
-        return Ok(());
-    };
+fn start_stream(
+    app: AppHandle,
+    streams: &LiveStreams,
+    kind: StreamKind,
+) -> Result<StreamBinding, String> {
+    let snapshot = app.state::<ManagedEngine>().coordinator.snapshot();
+    let runtime = running_runtime_identity(&snapshot)
+        .map_err(|error| error.to_ipc())?
+        .clone();
+    let reservation = reserve_stream(streams.slot(kind), kind, runtime)?;
+    if !reservation.start_new {
+        return Ok(reservation.binding);
+    }
+    let binding = reservation.binding;
+    let stream_id = binding.stream_id;
     let task_app = app.clone();
+    let task_binding = binding.clone();
     let handle = tauri::async_runtime::spawn(async move {
-        supervise_stream(&task_app, kind).await;
-        release_stream(task_app.state::<LiveStreams>().slot(kind), id);
+        supervise_stream(&task_app, kind, &task_binding).await;
+        release_stream(
+            task_app.state::<LiveStreams>().slot(kind),
+            task_binding.stream_id,
+        );
     });
-    attach_stream(streams.slot(kind), id, handle)
+    attach_stream(streams.slot(kind), stream_id, handle)?;
+    Ok(binding)
 }
 
-async fn supervise_stream(app: &AppHandle, kind: StreamKind) {
+async fn supervise_stream(app: &AppHandle, kind: StreamKind, binding: &StreamBinding) {
     let mut last_error: Option<String> = None;
     loop {
-        if !running_controller_available(app) {
+        if !stream_binding_is_current(app, binding) {
             return;
         }
         let result = match kind {
-            StreamKind::Connections => run_connections_stream(app).await,
-            StreamKind::Logs => run_log_stream(app).await,
+            StreamKind::Connections => run_connections_stream(app, binding).await,
+            StreamKind::Logs => run_log_stream(app, binding).await,
         };
-        if !running_controller_available(app) {
+        if !stream_binding_is_current(app, binding) {
             return;
         }
         match result {
             // A clean close while the engine remains active is reconnectable.
             Ok(()) => last_error = None,
-            Err(error) => emit_unique_stream_error(
-                app,
-                match kind {
-                    StreamKind::Connections => CONNECTIONS_STREAM,
-                    StreamKind::Logs => REQUEST_LOG_STREAM,
-                },
-                &mut last_error,
-                error,
-            ),
+            Err(error) => emit_unique_stream_error(app, binding, &mut last_error, error),
         }
         tokio::time::sleep(STREAM_RETRY_INTERVAL).await;
     }
 }
 
-fn running_controller_available(app: &AppHandle) -> bool {
-    require_running_controller(&app.state::<ManagedEngine>().coordinator.snapshot()).is_ok()
+fn stream_binding_is_current(app: &AppHandle, binding: &StreamBinding) -> bool {
+    let snapshot = app.state::<ManagedEngine>().coordinator.snapshot();
+    running_runtime_identity(&snapshot).is_ok_and(|runtime| runtime == &binding.runtime)
 }
 
-async fn run_connections_stream(app: &AppHandle) -> Result<(), String> {
-    let client = client_from_app(app)?;
+fn client_for_stream(app: &AppHandle, binding: &StreamBinding) -> Result<ControllerClient, String> {
+    if !stream_binding_is_current(app, binding) {
+        return Err(ControllerCommandError::EngineNotRunning.to_ipc());
+    }
+    client_from_app(app)
+}
+
+async fn run_connections_stream(app: &AppHandle, binding: &StreamBinding) -> Result<(), String> {
+    let client = client_for_stream(app, binding)?;
     let url = client.connections_stream_url().map_err(ipc_error)?;
     let (socket, _response) =
         connect_async_with_config(url, Some(controller_websocket_config()), false)
@@ -676,12 +790,21 @@ async fn run_connections_stream(app: &AppHandle) -> Result<(), String> {
                 };
                 let message = message.map_err(transport_error)?;
                 if let Some(snapshot) = decode_connections_message(&message)? {
-                    app.emit(CONNECTIONS_SNAPSHOT_EVENT, snapshot)
+                    if !stream_binding_is_current(app, binding) {
+                        return Ok(());
+                    }
+                    app.emit(
+                        CONNECTIONS_SNAPSHOT_EVENT,
+                        StreamEvent {
+                            provenance: binding.clone(),
+                            payload: snapshot,
+                        },
+                    )
                         .map_err(|error| format!("failed to publish connections snapshot: {error}"))?;
                 }
             }
             _ = engine_check.tick() => {
-                if !running_controller_available(app) {
+                if !stream_binding_is_current(app, binding) {
                     return Ok(());
                 }
             }
@@ -689,8 +812,8 @@ async fn run_connections_stream(app: &AppHandle) -> Result<(), String> {
     }
 }
 
-async fn run_log_stream(app: &AppHandle) -> Result<(), String> {
-    let client = client_from_app(app)?;
+async fn run_log_stream(app: &AppHandle, binding: &StreamBinding) -> Result<(), String> {
+    let client = client_for_stream(app, binding)?;
     let url = client
         .logs_stream_url(LOG_STREAM_LEVEL)
         .map_err(ipc_error)?;
@@ -709,12 +832,21 @@ async fn run_log_stream(app: &AppHandle) -> Result<(), String> {
                 };
                 let message = message.map_err(transport_error)?;
                 if let Some(entry) = decode_log_message(&message)? {
-                    app.emit(LOG_LINES_EVENT, vec![log_line_from_structured(entry)])
+                    if !stream_binding_is_current(app, binding) {
+                        return Ok(());
+                    }
+                    app.emit(
+                        LOG_LINES_EVENT,
+                        StreamEvent {
+                            provenance: binding.clone(),
+                            payload: vec![log_line_from_structured(entry)],
+                        },
+                    )
                         .map_err(|error| format!("failed to publish log line: {error}"))?;
                 }
             }
             _ = engine_check.tick() => {
-                if !running_controller_available(app) {
+                if !stream_binding_is_current(app, binding) {
                     return Ok(());
                 }
             }
@@ -874,12 +1006,18 @@ fn stream_error_to_report(last_error: &mut Option<String>, message: String) -> O
 
 fn emit_unique_stream_error(
     app: &AppHandle,
-    stream: &str,
+    binding: &StreamBinding,
     last_error: &mut Option<String>,
     message: String,
 ) {
     if let Some(message) = stream_error_to_report(last_error, message) {
-        let _ = app.emit(STREAM_ERROR_EVENT, stream_error_payload(stream, message));
+        let _ = app.emit(
+            STREAM_ERROR_EVENT,
+            StreamEvent {
+                provenance: binding.clone(),
+                payload: stream_error_payload(&binding.stream, message),
+            },
+        );
     }
 }
 
@@ -893,6 +1031,9 @@ fn stream_error_payload(stream: &str, message: String) -> StreamError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use cfw_application::EngineControllerAccess;
     use cfw_engine_api::{
         EngineCommandContext, EngineMode, EngineOwner, EngineSettings, RuntimeIdentity,
@@ -900,25 +1041,55 @@ mod tests {
 
     use super::*;
 
-    fn runtime(ready: bool) -> RuntimeIdentity {
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn runtime_for(
+        owner: EngineOwner,
+        generation: u64,
+        digest: &str,
+        ready: bool,
+    ) -> RuntimeIdentity {
         RuntimeIdentity {
-            owner: EngineOwner::ProxyAgent,
+            owner,
             context: EngineCommandContext {
                 installation_id: "installation".into(),
                 config_epoch: 1,
-                generation: 7,
+                generation,
             },
-            config_digest: "digest".into(),
+            config_digest: digest.into(),
             ready,
         }
     }
 
+    fn runtime(ready: bool) -> RuntimeIdentity {
+        runtime_for(EngineOwner::ProxyAgent, 7, "digest", ready)
+    }
+
     fn snapshot(state: EngineState) -> EngineSnapshot {
+        let (desired_mode, generation, config_digest) = match &state {
+            EngineState::ProxyActive { runtime } => (
+                EngineMode::SystemProxy,
+                runtime.context.generation,
+                Some(runtime.config_digest.clone()),
+            ),
+            EngineState::TunnelActive { runtime } => (
+                EngineMode::Tunnel,
+                runtime.context.generation,
+                Some(runtime.config_digest.clone()),
+            ),
+            _ => (EngineMode::Off, 7, None),
+        };
         EngineSnapshot {
-            desired_mode: EngineMode::Off,
+            desired_mode,
             state,
-            generation: 7,
-            config_digest: None,
+            generation,
+            config_digest,
         }
     }
 
@@ -956,7 +1127,7 @@ mod tests {
                 runtime: runtime(false),
             },
             EngineState::TunnelActive {
-                runtime: runtime(false),
+                runtime: runtime_for(EngineOwner::PacketTunnelSystemExtension, 7, "digest", false),
             },
         ] {
             let error = require_running_controller(&snapshot(state.clone()))
@@ -972,7 +1143,7 @@ mod tests {
                 runtime: runtime(true),
             },
             EngineState::TunnelActive {
-                runtime: runtime(true),
+                runtime: runtime_for(EngineOwner::PacketTunnelSystemExtension, 7, "digest", true),
             },
         ] {
             require_running_controller(&snapshot(state))
@@ -1121,19 +1292,27 @@ mod tests {
         let connections = streams.slot(StreamKind::Connections);
         let logs = streams.slot(StreamKind::Logs);
 
-        assert!(reserve_stream(connections).expect("first claim").is_some());
+        let first = reserve_stream(connections, StreamKind::Connections, runtime(true))
+            .expect("first claim");
+        assert!(first.start_new);
+        let duplicate = reserve_stream(connections, StreamKind::Connections, runtime(true))
+            .expect("duplicate claim");
+        assert!(!duplicate.start_new);
+        assert_eq!(duplicate.binding, first.binding);
         assert!(
-            reserve_stream(connections)
-                .expect("duplicate claim")
-                .is_none()
+            reserve_stream(logs, StreamKind::Logs, runtime(true))
+                .expect("independent claim")
+                .start_new
         );
-        assert!(reserve_stream(logs).expect("independent claim").is_some());
 
-        stop_stream(connections).expect("stop connections reservation");
-        assert!(
-            reserve_stream(connections)
-                .expect("restart after stop")
-                .is_some()
+        stop_stream(connections, &first.binding).expect("stop connections reservation");
+        let restarted = reserve_stream(connections, StreamKind::Connections, runtime(true))
+            .expect("restart after stop");
+        assert!(restarted.start_new);
+        assert_eq!(
+            restarted.binding.stream_id,
+            first.binding.stream_id + 1,
+            "same-runtime restart must rotate provenance instead of reusing a stopped stream id"
         );
     }
 
@@ -1141,18 +1320,121 @@ mod tests {
     fn stale_stream_completion_cannot_release_a_new_owner() {
         let streams = LiveStreams::default();
         let slot = streams.slot(StreamKind::Connections);
-        let stale_id = reserve_stream(slot).expect("stale reservation").unwrap();
-        stop_stream(slot).expect("cancel stale reservation");
-        let current_id = reserve_stream(slot).expect("current reservation").unwrap();
+        let stale_id = reserve_stream(slot, StreamKind::Connections, runtime(true))
+            .expect("stale reservation")
+            .binding
+            .stream_id;
+        let replacement_runtime = runtime_for(EngineOwner::ProxyAgent, 8, "replacement", true);
+        let current = reserve_stream(slot, StreamKind::Connections, replacement_runtime)
+            .expect("current reservation");
+        let current_id = current.binding.stream_id;
         assert_ne!(stale_id, current_id);
 
         release_stream(slot, stale_id);
-        assert!(
-            reserve_stream(slot)
-                .expect("current ownership check")
-                .is_none(),
-            "a stale completion must not clear the current reservation"
+        let duplicate = reserve_stream(
+            slot,
+            StreamKind::Connections,
+            current.binding.runtime.clone(),
+        )
+        .expect("current ownership check");
+        assert!(!duplicate.start_new);
+        assert_eq!(duplicate.binding, current.binding);
+    }
+
+    #[test]
+    fn stale_stop_cannot_abort_a_replacement_owner() {
+        let streams = LiveStreams::default();
+        let slot = streams.slot(StreamKind::Connections);
+        let runtime_a = reserve_stream(slot, StreamKind::Connections, runtime(true))
+            .expect("runtime A reservation")
+            .binding;
+        let runtime_b = reserve_stream(
+            slot,
+            StreamKind::Connections,
+            runtime_for(EngineOwner::ProxyAgent, 8, "replacement", true),
+        )
+        .expect("runtime B reservation")
+        .binding;
+
+        stop_stream(slot, &runtime_a).expect("stale runtime A stop");
+        let duplicate_b = reserve_stream(slot, StreamKind::Connections, runtime_b.runtime.clone())
+            .expect("runtime B ownership check");
+
+        assert!(!duplicate_b.start_new);
+        assert_eq!(duplicate_b.binding, runtime_b);
+    }
+
+    #[test]
+    fn active_runtime_replacement_allocates_new_provenance() {
+        let streams = LiveStreams::default();
+        let slot = streams.slot(StreamKind::Connections);
+        let first = reserve_stream(slot, StreamKind::Connections, runtime(true))
+            .expect("runtime A reservation");
+        let second = reserve_stream(
+            slot,
+            StreamKind::Connections,
+            runtime_for(EngineOwner::ProxyAgent, 8, "replacement", true),
+        )
+        .expect("runtime B reservation");
+
+        assert!(first.start_new);
+        assert!(second.start_new);
+        assert_ne!(first.binding.stream_id, second.binding.stream_id);
+        assert_ne!(first.binding.runtime, second.binding.runtime);
+
+        let delayed_a = StreamEvent {
+            provenance: first.binding,
+            payload: "delayed-a",
+        };
+        let live_b = StreamEvent {
+            provenance: second.binding,
+            payload: "live-b",
+        };
+        assert_ne!(delayed_a.provenance, live_b.provenance);
+
+        let serialized = serde_json::to_value(live_b).expect("serialize live event");
+        assert_eq!(serialized["provenance"]["stream"], CONNECTIONS_STREAM);
+        assert_eq!(serialized["provenance"]["stream_id"], 2);
+        assert_eq!(
+            serialized["provenance"]["runtime"]["context"]["generation"],
+            8
         );
+        assert_eq!(serialized["payload"], "live-b");
+    }
+
+    #[tokio::test]
+    async fn active_runtime_replacement_aborts_the_running_task() {
+        let streams = LiveStreams::default();
+        let slot = streams.slot(StreamKind::Connections);
+        let runtime_a = reserve_stream(slot, StreamKind::Connections, runtime(true))
+            .expect("runtime A reservation")
+            .binding;
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tauri::async_runtime::spawn(async move {
+            let _drop_flag = DropFlag(task_dropped);
+            let _started = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        attach_stream(slot, runtime_a.stream_id, handle).expect("attach runtime A task");
+        started_rx.await.expect("runtime A task started");
+
+        let replacement = reserve_stream(
+            slot,
+            StreamKind::Connections,
+            runtime_for(EngineOwner::ProxyAgent, 8, "replacement", true),
+        )
+        .expect("runtime B reservation");
+        assert!(replacement.start_new);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("runtime A task was not aborted");
     }
 
     #[test]

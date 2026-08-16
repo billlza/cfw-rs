@@ -384,7 +384,7 @@ async fn host_restart_never_equates_stop_acknowledgement_with_global_off() {
 }
 
 #[tokio::test]
-async fn unavailable_lineage_keeps_query_failure_failed_and_not_safely_off() {
+async fn unavailable_lineage_startup_query_failure_allows_process_exit_without_native_lease() {
     let backend = Arc::new(FakeBackend::default());
     *backend.fail_query.lock().expect("query failure lock") = true;
     let coordinator = EngineModeCoordinator::spawn_journal_unavailable_with(
@@ -407,7 +407,14 @@ async fn unavailable_lineage_keeps_query_failure_failed_and_not_safely_off() {
         coordinator.snapshot().state,
         EngineState::Failed { .. }
     ));
-    assert!(coordinator.shutdown().await.is_err());
+    assert_eq!(
+        coordinator
+            .shutdown()
+            .await
+            .expect("startup failure without a native lease must not trap process exit")
+            .state,
+        EngineState::Off
+    );
     assert_eq!(backend.query_count(), 2);
     assert!(backend.operations().is_empty());
 }

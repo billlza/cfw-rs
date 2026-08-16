@@ -39,7 +39,7 @@ pub enum ControllerError {
         maximum: usize,
     },
     #[error(
-        "controller capability `{capability}` is unsupported by pinned engine sing-box 1.13.14"
+        "controller capability `{capability}` is unsupported by pinned engine sing-box 1.13.15"
     )]
     UnsupportedByPinnedEngine { capability: &'static str },
 }
@@ -51,7 +51,7 @@ fn unsupported_provider_subsystem<T>() -> Result<T, ControllerError> {
 }
 
 /// Fixed capability admission for the pinned engine line. The strict sing-box
-/// 1.13.14 profile schema cannot create proxy or rule providers, while its
+/// 1.13.15 profile schema cannot create proxy or rule providers, while its
 /// clash-compatible endpoints are inert compatibility stubs.
 pub fn require_provider_management() -> Result<(), ControllerError> {
     unsupported_provider_subsystem()
@@ -277,7 +277,7 @@ impl ControllerClient {
     pub async fn health_check_proxy_provider(&self, _name: &str) -> Result<(), ControllerError> {
         // The pinned handler registers this operation as GET, not PUT. Its
         // provider lookup is nevertheless hard-coded to Not Found because the
-        // strict 1.13.14 profile schema cannot construct a provider subsystem;
+        // strict 1.13.15 profile schema cannot construct a provider subsystem;
         // do not send a nominal GET and present the stub as a real capability.
         unsupported_provider_subsystem()
     }
@@ -1084,13 +1084,13 @@ mod tests {
     #[test]
     fn pinned_provider_golden_responses_are_stub_shapes() {
         // Exact bodies emitted by experimental/clashapi/provider.go and
-        // ruleprovider.go in the pinned sing-box 1.13.14 source snapshot.
+        // ruleprovider.go in the pinned sing-box 1.13.15 source snapshot.
         let proxy: PinnedProxyProvidersResponse = serde_json::from_str(include_str!(
-            "../tests/fixtures/sing-box-1.13.14-proxy-providers.json"
+            "../tests/fixtures/sing-box-1.13.15-proxy-providers.json"
         ))
         .expect("pinned proxy-provider response");
         let rules: PinnedRuleProvidersResponse = serde_json::from_str(include_str!(
-            "../tests/fixtures/sing-box-1.13.14-rule-providers.json"
+            "../tests/fixtures/sing-box-1.13.15-rule-providers.json"
         ))
         .expect("pinned rule-provider response");
 
@@ -1110,7 +1110,7 @@ mod tests {
         ));
         assert_eq!(
             error.to_string(),
-            "controller capability `provider management` is unsupported by pinned engine sing-box 1.13.14"
+            "controller capability `provider management` is unsupported by pinned engine sing-box 1.13.15"
         );
     }
 
@@ -1119,7 +1119,7 @@ mod tests {
         // The pinned handler serializes only type/payload/proxy. Absence of a
         // mihomo-only field must survive as None, never a fabricated 0 or -1.
         let snapshot: RulesSnapshot = serde_json::from_str(include_str!(
-            "../tests/fixtures/sing-box-1.13.14-rules.json"
+            "../tests/fixtures/sing-box-1.13.15-rules.json"
         ))
         .unwrap();
         assert_eq!(snapshot.rules.len(), 1);

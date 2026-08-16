@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{ConfigError, CredentialRef, profile::ProfileDocument};
+use crate::{
+    ConfigError, CredentialRef, ReleaseDnsEvidenceCase, ReleasePacketEvidenceCase,
+    profile::ProfileDocument,
+};
 
 pub const MAX_PROFILE_BYTES: usize = 384 * 1024;
 pub const MAX_ENGINE_CONFIG_BYTES: usize = 384 * 1024;
@@ -50,6 +53,14 @@ pub struct ValidatedSingBoxProfile {
     pub(crate) canonical_json: String,
     pub(crate) document: ProfileDocument,
     digest: String,
+    pub(crate) dns_projection: DnsProjection,
+    pub(crate) release_packet_evidence_case: Option<ReleasePacketEvidenceCase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DnsProjection {
+    Ordinary,
+    ReleaseEvidence(ReleaseDnsEvidenceCase),
 }
 
 impl ValidatedSingBoxProfile {
@@ -80,12 +91,38 @@ impl ValidatedSingBoxProfile {
             canonical_json,
             document,
             digest,
+            dns_projection: DnsProjection::Ordinary,
+            release_packet_evidence_case: None,
         })
     }
 
     pub fn direct() -> Self {
         Self::parse(r#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#)
             .expect("built-in direct profile must stay valid")
+    }
+
+    /// Builds the only profile admitted for physical DNS evidence.
+    ///
+    /// It is always credential-free DIRECT. The selected case controls only a
+    /// source-owned DNS projection whose endpoints are not caller inputs.
+    pub fn release_dns_evidence(case: ReleaseDnsEvidenceCase) -> Self {
+        let mut profile = Self::direct();
+        profile.dns_projection = DnsProjection::ReleaseEvidence(case);
+        profile
+    }
+
+    /// Builds the only profile admitted for physical Packet evidence.
+    ///
+    /// It is always credential-free DIRECT. A reviewed case may activate a
+    /// source-owned DNS projection or the single fixed direct IPv4 host route;
+    /// neither can be expressed by ordinary profile JSON.
+    pub fn release_packet_evidence(case: ReleasePacketEvidenceCase) -> Self {
+        let mut profile = Self::direct();
+        profile.release_packet_evidence_case = Some(case);
+        if let Some(dns_case) = case.dns_evidence_case() {
+            profile.dns_projection = DnsProjection::ReleaseEvidence(dns_case);
+        }
+        profile
     }
 
     pub fn as_json(&self) -> &str {

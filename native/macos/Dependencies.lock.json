@@ -2,27 +2,27 @@
   "go": "1.26.5",
   "gomobile": "v0.1.13",
   "singBox": {
-    "commit": "25a600db24f7680ad9806ce5427bd0ab8afe1114",
-    "tag": "v1.13.14",
-    "androidReferenceCommit": "aa686b2f1ac4ca9e888d4d068ce79ee1abd309fc",
+    "commit": "3708fa18766cda1f11b77f6ed9c7bd61688f17df",
+    "tag": "v1.13.15",
+    "androidReferenceCommit": "124a7c13038fcc389e3efbe61504fe6ab14724d9",
     "securityPatch": {
-      "path": "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch",
-      "sha256": "30a6e0a4d45920dda21e5970230150afc56bb046062bdc006884bccaab539857",
-      "patchedDiffSha256": "35498d12299ace40d7defec007a1efd8a82b045cbe3039ad7ad0bf694ea43dae",
-      "patchedGoModSha256": "d2127319e0e5f80c6c1012653c9a728cb1a4ae8041f42ead3e942544dda34847",
-      "patchedGoSumSha256": "277474ed2eed49697578b671a856e810659fcbaf7955a013b540cba404f69472"
+      "path": "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
+      "sha256": "2af9a0d4ec55ddfaeb8656dfe42abba156b20299fcb69da01015eaeb265ec7e2",
+      "patchedDiffSha256": "b1fa2f098c4aebf1bf3a8a5082f99c892a3b1bbaf1dc51664e3a1fde401b7d95",
+      "patchedGoModSha256": "aa0101b194e65676a0abc7207ce20c9f000a30fc7ba6f40e8fde065ae802341d",
+      "patchedGoSumSha256": "97cb91e52f6915aba762ef666065fed3c5e91adaa9a61181a91ca3141193b577"
     },
     "rawPacketPatch": {
-      "path": "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
-      "sha256": "5e578e7f3695116f8e1dfbb3fc7c2fc276c9b8c193428e5fd6fa71dc57fb8d60"
+      "path": "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
+      "sha256": "3367a387fe58b9bb374bb08a7fae9ad2fd46d609e8e9aea49a92a14ec9de4cac"
     },
     "dnsFailoverPatch": {
-      "path": "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",
-      "sha256": "d52fc83c28b5baa919a4d1590a90f7353daaa3120b6ac39aa8e4476133c602d3"
+      "path": "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
+      "sha256": "66a1c6c98457ce7cdbdeb08797f253fae52d4dd1fae6f634159572b4286b6473"
     },
-    "combinedDiffSha256": "25d3d611f1c1bf317e9ec2dc23609f32972bfbeec4b2502131ee1e7dd4e68cfe"
+    "combinedDiffSha256": "8a2b698b8c3a7285b963c3ffc67480b6eed06021c6fe585eccd22513799d2a80"
   },
   "singBoxForAppleReference": {
-    "commit": "794eb1741f91765a91f1513e5639296503f072b2"
+    "commit": "afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa"
   }
 }

@@ -36,6 +36,7 @@ Validates: Requirements 1.2, 4.1, 5.1, 6.5, 7.3, 7.5, 8.1
 from __future__ import annotations
 
 import builtins
+import json
 import shutil
 import tempfile
 import unittest
@@ -245,20 +246,104 @@ _PINNED_INPUTS = (
     "scripts/xcodegen-2.46.0-installed-resources.patch",
     "crates/cfw-release-verifier/src/main.rs",
     ".github/workflows/ci.yml",
-    "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch",
-    "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
-    "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",
+    "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
+    "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
+    "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
     # Sources the pinned libbox build tags are bound to: the controller block and
     # the projection that injects it require `with_clash_api` in the artifact.
     "crates/cfw-singbox-config/src/controller.rs",
     "crates/cfw-singbox-config/src/projection.rs",
 )
-_SECURITY_PATCH = "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch"
+_SECURITY_PATCH = "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch"
 _PINS_ENV = "scripts/dependency_pins.env"
 
 
 def _copy_pinned_tree(destination: Path) -> Path:
     for relative in _PINNED_INPUTS:
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    manifest = json.loads(
+        (REPO_ROOT / "scripts/pinned_build_inputs.json").read_text(encoding="utf-8")
+    )
+    runtime_tools = manifest.get("runtimeTools")
+    if not isinstance(runtime_tools, dict):
+        raise AssertionError("shipped runtime-tool source closure is unavailable")
+    for tool_name, tool in runtime_tools.items():
+        if not isinstance(tool_name, str) or not isinstance(tool, dict):
+            raise AssertionError("shipped runtime-tool entry is malformed")
+        source_binding = tool.get("sourceBinding")
+        if not isinstance(source_binding, dict):
+            raise AssertionError(f"shipped runtime-tool {tool_name} source binding is malformed")
+        relative = source_binding.get("path")
+        if not isinstance(relative, str):
+            raise AssertionError(f"shipped runtime-tool {tool_name} source path is malformed")
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+    lan_peer = manifest.get("packetLanPeer")
+    if not isinstance(lan_peer, dict):
+        raise AssertionError("shipped packet LAN peer closure is unavailable")
+    lan_source = lan_peer.get("source")
+    if not isinstance(lan_source, dict):
+        raise AssertionError("shipped packet LAN peer source closure is malformed")
+    lan_root = lan_source.get("root")
+    lan_files = lan_source.get("files")
+    if not isinstance(lan_root, str) or not isinstance(lan_files, list):
+        raise AssertionError("shipped packet LAN peer source members are malformed")
+    lan_paths: set[str] = set()
+    for entry in lan_files:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            raise AssertionError("shipped packet LAN peer source entry is malformed")
+        lan_paths.add(f"{lan_root}/{entry['path']}")
+    for contract_name in ("buildScript", "verifyScript", "artifact"):
+        contract = lan_peer.get(contract_name)
+        if not isinstance(contract, dict) or not isinstance(contract.get("path"), str):
+            raise AssertionError(f"shipped packet LAN peer {contract_name} is malformed")
+        lan_paths.add(contract["path"])
+    for relative in sorted(lan_paths):
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+    endpoint = manifest.get("packetEvidenceEndpoint")
+    source_files = endpoint.get("sourceFiles") if isinstance(endpoint, dict) else None
+    if not isinstance(source_files, list) or not source_files:
+        raise AssertionError("shipped packet endpoint source closure is unavailable")
+    for entry in source_files:
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+            raise AssertionError("shipped packet endpoint source entry is malformed")
+        relative = entry["path"]
+        if not isinstance(relative, str):
+            raise AssertionError("shipped packet endpoint source path is malformed")
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    collector = manifest.get("physicalCollectorModule")
+    if not isinstance(collector, dict):
+        raise AssertionError("shipped physical collector module binding is unavailable")
+    for key in ("goModPath", "goSumPath"):
+        relative = collector.get(key)
+        if not isinstance(relative, str):
+            raise AssertionError(f"shipped physical collector {key} is malformed")
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    manifest_paths: set[str] = set()
+    for section in ("buildScripts", "artifactBindings"):
+        entries = manifest.get(section)
+        if not isinstance(entries, dict):
+            raise AssertionError(f"shipped pinned-input {section} is malformed")
+        if any(not isinstance(relative, str) for relative in entries):
+            raise AssertionError(f"shipped pinned-input {section} path is malformed")
+        manifest_paths.update(entries)
+    for relative in sorted(manifest_paths):
         source = REPO_ROOT / relative
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -296,7 +381,9 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_pinned_tree(Path(tmp))
             (root / _SECURITY_PATCH).unlink()
-            with self.assertRaisesRegex(PinnedInputError, "missing or not regular"):
+            with self.assertRaisesRegex(
+                PinnedInputError, "missing, a symlink, or has an unsafe path"
+            ):
                 verify_pinned(root)
 
     def test_dropped_engine_start_path_build_tag_fails_closed(self) -> None:

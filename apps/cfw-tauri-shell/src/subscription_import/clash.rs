@@ -34,7 +34,7 @@ use super::yaml::{YamlMapping, YamlScalar, YamlValue, load_single_document};
 use super::{
     ImportedSubscription, OutboundCollector, build_tls_parts, credential_ref_json,
     normalize_shadowsocks_method, normalize_vless_flow, normalize_vmess_security, parse_utls,
-    sanitized_token, tls_json, transport_from_parts,
+    parse_vmess_alter_id, sanitized_token, tls_json, transport_from_parts,
 };
 
 /// Proxy-entry keys that only tune local socket behaviour. They change
@@ -50,7 +50,10 @@ const IGNORED_TUNING_KEYS: &[&str] = &[
 ];
 
 /// Converts one Clash/Mihomo YAML document into a validated subscription.
-pub(super) fn import_clash_document(body: &str) -> Result<ImportedSubscription, String> {
+pub(super) fn import_clash_document(
+    body: &str,
+    mut collector: OutboundCollector,
+) -> Result<ImportedSubscription, String> {
     let root = load_single_document(body)?;
     let YamlValue::Mapping(root) = root else {
         return Err("Clash subscription document must be a YAML mapping".to_owned());
@@ -73,7 +76,6 @@ pub(super) fn import_clash_document(body: &str) -> Result<ImportedSubscription, 
         ));
     }
 
-    let mut collector = OutboundCollector::default();
     for (index, proxy) in proxies.into_iter().enumerate() {
         let context = format!("proxies[{index}]");
         let YamlValue::Mapping(proxy) = proxy else {
@@ -158,7 +160,7 @@ fn convert_shadowsocks(
         CredentialKind::ShadowsocksPassword,
         fields.require_string("password")?,
     );
-    let tag = collector.unique_tag(name);
+    let tag = collector.unique_tag(name)?;
     Ok(json!({
         "type": "shadowsocks",
         "tag": tag,
@@ -176,11 +178,24 @@ fn convert_vmess(
 ) -> Result<Value, String> {
     let server = fields.require_string("server")?;
     let server_port = fields.require_port()?;
-    if let Some(alter_id) = fields.take_string("alterId")?
-        && alter_id != "0"
-    {
-        return Err("vmess alterId is unsupported; only aid=0 is accepted".to_owned());
-    }
+    let alter_id = match fields.take("alterId") {
+        None => 0,
+        Some(YamlValue::Scalar(value)) if !value.is_null() => {
+            parse_vmess_alter_id(value.text(), &format!("{}.alterId", fields.context()))?
+        }
+        Some(YamlValue::Scalar(_)) => {
+            return Err(format!(
+                "{}.alterId must be a non-negative decimal integer",
+                fields.context()
+            ));
+        }
+        Some(_) => {
+            return Err(format!(
+                "{}.alterId must be a scalar value",
+                fields.context()
+            ));
+        }
+    };
     let security = match fields.take_string("cipher")? {
         None => None,
         Some(cipher) => normalize_vmess_security(&cipher)?,
@@ -189,7 +204,7 @@ fn convert_vmess(
         collector.push_secret(CredentialKind::VmessUuid, fields.require_string("uuid")?);
     let tls = collect_tls(fields)?;
     let transport = collect_transport(fields)?;
-    let tag = collector.unique_tag(name);
+    let tag = collector.unique_tag(name)?;
     let mut outbound = json!({
         "type": "vmess",
         "tag": tag,
@@ -197,6 +212,9 @@ fn convert_vmess(
         "server_port": server_port,
         "credential_ref": credential_ref_json(&reference),
     });
+    if alter_id != 0 {
+        outbound["alter_id"] = Value::from(alter_id);
+    }
     if let Some(security) = security {
         outbound["security"] = Value::String(security);
     }
@@ -225,7 +243,7 @@ fn convert_vless(
         collector.push_secret(CredentialKind::VlessUuid, fields.require_string("uuid")?);
     let tls = collect_tls(fields)?;
     let transport = collect_transport(fields)?;
-    let tag = collector.unique_tag(name);
+    let tag = collector.unique_tag(name)?;
     let mut outbound = json!({
         "type": "vless",
         "tag": tag,
@@ -258,7 +276,7 @@ fn convert_trojan(
     );
     let tls = collect_tls(fields)?;
     let transport = collect_transport(fields)?;
-    let tag = collector.unique_tag(name);
+    let tag = collector.unique_tag(name)?;
     let tls = tls.into_required_json(&fields.context, &server)?;
     let mut outbound = json!({
         "type": "trojan",
@@ -320,7 +338,7 @@ fn convert_hysteria2(
         }
     };
     let tls = collect_tls(fields)?;
-    let tag = collector.unique_tag(name);
+    let tag = collector.unique_tag(name)?;
     let tls = tls.into_required_json(&fields.context, &server)?;
     let mut outbound = json!({
         "type": "hysteria2",

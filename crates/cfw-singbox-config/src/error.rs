@@ -46,6 +46,10 @@ pub enum ConfigError {
     InvalidBootstrapDnsServers(String),
     #[error("tunnel authenticated DNS servers are invalid: {0}")]
     InvalidAuthenticatedDnsServers(String),
+    #[error("release DNS evidence projection requires Tunnel mode with IPv6 enabled")]
+    InvalidReleaseDnsEvidenceMode,
+    #[error("release Packet evidence projection requires Tunnel mode")]
+    InvalidReleasePacketEvidenceMode,
 }
 
 impl From<serde_json::Error> for ConfigError {

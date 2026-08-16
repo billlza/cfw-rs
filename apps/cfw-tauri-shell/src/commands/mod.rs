@@ -1,4 +1,6 @@
 mod controller;
+mod imported_credentials;
+mod legacy_profiles;
 mod profiles;
 mod runtime;
 mod settings;
@@ -13,6 +15,9 @@ pub(crate) use controller::{
     rules_snapshot, select_proxy, start_connections_stream, start_log_stream,
     stop_connections_stream, stop_log_stream, test_proxy_delays, update_all_proxy_providers,
     update_all_rule_providers, update_proxy_provider, update_rule_provider,
+};
+pub(crate) use legacy_profiles::{
+    commit_legacy_cfw_profile_migration, preview_legacy_cfw_profile_migration,
 };
 pub(crate) use profiles::{
     ManagedProfiles, build_managed_profiles, cancel_credential_gc, commit_credential_gc,
@@ -33,9 +38,8 @@ pub(crate) use shell_ops::{
     refresh_tray_menu, reveal_home_directory, reveal_logs_directory, toggle_devtools,
 };
 pub(crate) use subscriptions::{
-    import_profile_file, import_profile_url, migrate_legacy_cfw_profiles, open_profile_externally,
-    profile_qrcode_svg, read_profile_text, reveal_profile, save_profile_text, update_profile,
-    update_profile_info,
+    import_profile_file, import_profile_url, open_profile_externally, profile_qrcode_svg,
+    read_profile_text, reveal_profile, save_profile_text, update_profile, update_profile_info,
 };
 pub(crate) use toggles::{
     apply_restore_dns_servers, current_platform_design, reset_settings_snapshot, set_allow_lan,

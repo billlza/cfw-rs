@@ -560,7 +560,8 @@ mod tests {
             let response = match cancel_completion {
                 FakeCancelCompletion::None => unreachable!("no callback was requested"),
                 FakeCancelCompletion::QueryStatusSuccess => format!(
-                    "{{\"schema_version\":4,\"request_id\":\"{request_id}\",\"result\":{{\"kind\":\"status\",\"value\":{{\"status\":\"off\"}}}},\"failure\":null}}"
+                    "{{\"schema_version\":{},\"request_id\":\"{request_id}\",\"result\":{{\"kind\":\"status\",\"value\":{{\"status\":\"off\"}}}},\"failure\":null}}",
+                    cfw_engine_api::ENGINE_PROTOCOL_VERSION
                 ),
             };
             // SAFETY: fake_execute transferred one live callback context, and

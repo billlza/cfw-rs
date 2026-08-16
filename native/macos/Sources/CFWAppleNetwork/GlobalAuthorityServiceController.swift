@@ -62,9 +62,7 @@ public struct SMGlobalAuthorityServiceController: GlobalAuthorityServiceControll
       return
     case .requiresApproval:
       throw GlobalAuthorityRegistrationError.approvalRequired
-    case .notFound:
-      throw GlobalAuthorityRegistrationError.serviceNotFound
-    case .notRegistered:
+    case .notFound, .notRegistered:
       do {
         try service.register()
       } catch {

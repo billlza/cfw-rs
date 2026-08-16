@@ -21,8 +21,9 @@ use saphyr_parser::{Event, Parser, ScalarStyle, Tag};
 use super::sanitized_token;
 
 /// Hard budget on parser events for one subscription document. The transport
-/// layer already caps bodies at `MAX_PROFILE_BYTES` (384 KiB) and every event
-/// consumes input, so a legitimate document stays far below this bound.
+/// layer already caps source bodies at 512 KiB and every event consumes input,
+/// so a legitimate document stays far below this bound. The smaller canonical
+/// profile limit is enforced after conversion.
 const MAX_YAML_EVENTS: usize = 200_000;
 /// Hard budget on container nesting. Clash documents need five levels
 /// (root → proxies → proxy → ws-opts → headers); sixteen leaves headroom

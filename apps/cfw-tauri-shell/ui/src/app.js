@@ -60,12 +60,32 @@ import {
   newCutoverState,
   normalizeBootPayload,
   normalizeCutoverPreparation,
+  normalizeLegacyProfileMigrationOutcome,
+  normalizeLegacyProfileMigrationPreview,
   normalizeRetirementStatus,
   unverifiableRetirementStatus,
 } from "./migration.js";
 
 let migrationHandoffRendererReady = null;
 let criticalMigrationListenersBound = false;
+
+const LOGIN_ITEM_LIVE_STATUSES = new Set([
+  "enabled",
+  "not_registered",
+  "not_found",
+  "requires_approval",
+  "unknown",
+]);
+const SETTINGS_FIELDS = Object.freeze([
+  "check_for_updates",
+  "font_family",
+  "launch_at_login",
+  "retain_window_bounds",
+  "silent_start",
+  "theme",
+]);
+const PROVIDER_CAPABILITY_UNSUPPORTED_PREFIX = "controller capability `provider management` is unsupported";
+const PROVIDER_CAPABILITY_UNAVAILABLE = "Provider management is unavailable in the pinned sing-box 1.13.15 engine.";
 
 /// Reasons the dashboard shows next to a control the 0.4.0 backend refuses.
 /// Each one states what the product does instead, so a disabled switch is never
@@ -87,14 +107,150 @@ const REASONS = Object.freeze({
 /// renderer-owned fields; everything the 0.3.5 file used to carry now lives in
 /// the projected engine configuration and is read, never written, from there.
 function applyPersistedSettings(snapshot) {
-  if (!snapshot?.settings) return;
+  const settings = normalizeSettingsSnapshot(snapshot);
+  const launchAtLogin = normalizeLaunchAtLoginState(snapshot);
   state.settingsSnapshot = snapshot;
-  const settings = snapshot.settings;
-  state.toggles.startAtLogin = Boolean(settings.launch_at_login);
+  state.settingsUnavailableReason = null;
+  state.launchAtLogin = launchAtLogin;
+  state.toggles.startAtLogin = launchAtLogin.liveStatus === "enabled"
+    || launchAtLogin.liveStatus === "requires_approval";
   state.toggles.silentStart = Boolean(settings.silent_start);
   state.toggles.checkForUpdates = Boolean(settings.check_for_updates);
   state.toggles.retainWindowBounds = Boolean(settings.retain_window_bounds);
   applyAppearance(settings);
+}
+
+function resetPersistedSettingsToSafeState() {
+  state.settingsSnapshot = {
+    persisted: defaultSettingsSnapshot.persisted,
+    settings: { ...defaultSettingsSnapshot.settings },
+    launch_at_login: { ...defaultSettingsSnapshot.launch_at_login },
+  };
+  state.launchAtLogin = {
+    persistedIntent: false,
+    liveStatus: "unknown",
+    matchesPersistedIntent: false,
+  };
+  state.toggles.startAtLogin = false;
+  state.toggles.silentStart = false;
+  state.toggles.checkForUpdates = false;
+  state.toggles.retainWindowBounds = defaultSettings.retain_window_bounds;
+  applyAppearance(defaultSettings);
+}
+
+function normalizeSettingsSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new TypeError("settings snapshot is not an object");
+  }
+  const snapshotFields = Object.keys(snapshot).sort();
+  if (snapshotFields.join("\0") !== ["launch_at_login", "persisted", "settings"].join("\0")) {
+    throw new TypeError("settings snapshot field set is invalid");
+  }
+  if (typeof snapshot.persisted !== "boolean") {
+    throw new TypeError("settings persisted flag is not boolean");
+  }
+  const settings = snapshot.settings;
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    throw new TypeError("settings snapshot omitted typed preferences");
+  }
+  if (Object.keys(settings).sort().join("\0") !== SETTINGS_FIELDS.join("\0")) {
+    throw new TypeError("settings preference field set is invalid");
+  }
+  if (!THEME_OPTIONS.some((option) => option.value === settings.theme)) {
+    throw new TypeError("settings theme is invalid");
+  }
+  if (!FONT_OPTIONS.some((option) => option.value === settings.font_family)) {
+    throw new TypeError("settings font family is invalid");
+  }
+  for (const field of [
+    "retain_window_bounds",
+    "launch_at_login",
+    "silent_start",
+    "check_for_updates",
+  ]) {
+    if (typeof settings[field] !== "boolean") {
+      throw new TypeError(`settings ${field} is not boolean`);
+    }
+  }
+  return settings;
+}
+
+function normalizeLaunchAtLoginState(snapshot) {
+  const value = snapshot?.launch_at_login;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("settings snapshot omitted the typed Login Item state");
+  }
+  if (Object.keys(value).sort().join("\0") !== [
+    "live_status",
+    "matches_persisted_intent",
+    "persisted_intent",
+  ].join("\0")) {
+    throw new TypeError("Login Item state field set is invalid");
+  }
+  if (typeof value.persisted_intent !== "boolean") {
+    throw new TypeError("Login Item persisted intent is not boolean");
+  }
+  if (!LOGIN_ITEM_LIVE_STATUSES.has(value.live_status)) {
+    throw new TypeError("Login Item live status is invalid");
+  }
+  if (typeof value.matches_persisted_intent !== "boolean") {
+    throw new TypeError("Login Item synchronization flag is not boolean");
+  }
+  if (value.persisted_intent !== snapshot.settings.launch_at_login) {
+    throw new TypeError("Login Item persisted intent disagrees with settings");
+  }
+  const expectedMatch = value.live_status === "enabled"
+    ? value.persisted_intent
+    : value.live_status === "not_registered" || value.live_status === "not_found"
+      ? !value.persisted_intent
+      : false;
+  if (value.matches_persisted_intent !== expectedMatch) {
+    throw new TypeError("Login Item synchronization flag disagrees with live status");
+  }
+  return {
+    persistedIntent: value.persisted_intent,
+    liveStatus: value.live_status,
+    matchesPersistedIntent: value.matches_persisted_intent,
+  };
+}
+
+function launchAtLoginPresentation() {
+  if (state.settingsUnavailableReason) {
+    return {
+      hint: state.settingsUnavailableReason,
+      reason: state.settingsUnavailableReason,
+    };
+  }
+  const value = state.launchAtLogin;
+  if (value.liveStatus === "unknown") {
+    const reason = "Start at Login is unavailable because macOS returned an unknown Login Item state.";
+    return { hint: reason, reason };
+  }
+  if (value.liveStatus === "requires_approval") {
+    return {
+      hint: "macOS requires approval in System Settings › General › Login Items. Approve it there, or switch Off to cancel registration.",
+      reason: null,
+    };
+  }
+  if (!value.matchesPersistedIntent) {
+    if (value.liveStatus === "enabled") {
+      return {
+        hint: "macOS currently enables this Login Item, while the saved preference says Off. Switching Off reconciles both states.",
+        reason: null,
+      };
+    }
+    const status = value.liveStatus === "not_found" ? "cannot find the signed app" : "reports it is not registered";
+    return {
+      hint: `The saved preference says On, but macOS ${status}. Switching On retries registration without silently changing the preference.`,
+      reason: null,
+    };
+  }
+  return {
+    hint: value.liveStatus === "enabled"
+      ? "Enabled by macOS and requested by the saved preference."
+      : "Disabled by macOS and by the saved preference.",
+    reason: null,
+  };
 }
 
 /// The six renderer-owned preference fields, and nothing else: the preference
@@ -132,10 +288,10 @@ function applyControllerSnapshot(snapshot) {
 
   const config = snapshot.config ?? {};
   const mode = config.mode ? config.mode[0].toUpperCase() + config.mode.slice(1).toLowerCase() : null;
-  if (["Global", "Rule", "Direct"].includes(mode)) state.mode = mode;
+  state.mode = ["Global", "Rule", "Direct"].includes(mode) ? mode : null;
   const allowLan = config["allow-lan"] ?? config.allow_lan;
-  if (typeof allowLan === "boolean") state.toggles.allowLan = allowLan;
-  if (config["log-level"] || config.log_level) state.logLevel = config["log-level"] ?? config.log_level;
+  state.toggles.allowLan = typeof allowLan === "boolean" ? allowLan : false;
+  state.logLevel = config["log-level"] ?? config.log_level ?? null;
 
   const proxyNodes = new Map((snapshot.proxies?.proxies ?? []).map((node) => [node.name, node]));
   const groups = snapshot.proxies?.groups ?? [];
@@ -361,8 +517,10 @@ function renderNav() {
 /// both in the row and in the control's own tooltip.
 function renderToggle(key, label, hint, options = {}) {
   const reason = options.reason ?? null;
-  const disabled = reason || options.disabled;
-  const checked = !reason && state.toggles[key] ? "checked" : "";
+  const allowDisableWhenUnavailable = options.allowDisableWhenUnavailable === true;
+  const checkedState = Boolean(state.toggles[key]);
+  const disabled = options.disabled || (reason && !(allowDisableWhenUnavailable && checkedState));
+  const checked = (!reason || allowDisableWhenUnavailable) && checkedState ? "checked" : "";
   return `
     <label class="toggle-row ${disabled ? "disabled" : ""}">
       <span>
@@ -377,11 +535,14 @@ function renderToggle(key, label, hint, options = {}) {
 
 function renderInlineSwitch(key, label, options = {}) {
   const reason = options.reason ?? null;
-  const disabled = reason || options.disabled;
-  const checked = !reason && state.toggles[key] ? "checked" : "";
+  const allowDisableWhenUnavailable = options.allowDisableWhenUnavailable === true;
+  const checkedState = Boolean(state.toggles[key]);
+  const disabled = options.disabled || (reason && !(allowDisableWhenUnavailable && checkedState));
+  const checked = (!reason || allowDisableWhenUnavailable) && checkedState ? "checked" : "";
+  const title = reason ?? options.title ?? null;
   return `
-    <label class="inline-switch ${disabled ? "disabled" : ""}" ${reason ? `title="${escapeHtml(reason)}"` : ""}>
-      <span class="visually-hidden">${escapeHtml(label)}${reason ? ` — ${escapeHtml(reason)}` : ""}</span>
+    <label class="inline-switch ${disabled ? "disabled" : ""}" ${title ? `title="${escapeHtml(title)}"` : ""}>
+      <span class="visually-hidden">${escapeHtml(label)}${title ? ` — ${escapeHtml(title)}` : ""}</span>
       <input type="checkbox" data-toggle="${escapeHtml(key)}" ${checked} ${disabled ? "disabled" : ""} />
       <i></i>
     </label>
@@ -599,16 +760,29 @@ function renderMigrationBanner() {
     const handoffStatus = state.migrationHandoffStatus;
     const starting = handoffStatus?.state === "in_progress";
     const failure = handoffStatus?.state === "failed" ? handoffStatus.message : null;
+    const profileUnavailable = !recovery && state.profilesUnavailableReason;
+    const selectedProfileMissing = !recovery
+      && !profileUnavailable
+      && !state.profiles.some((profile) => profile.active === true);
     const detail = starting
       ? "The signed migration session is starting. This dashboard will close only after the new window is ready and replacement networking is safely Off."
       : recovery
         ? "A previous one-way cutover was interrupted. Recovery runs in a separate, signed migration session."
-        : "This install has not retired the legacy network yet. The network stays disabled until you complete the one-way cutover, which runs in a separate, signed migration session while the old app keeps running.";
+        : profileUnavailable
+          ? `Profile state could not be verified: ${profileUnavailable}. Open Profiles and reload it before starting migration.`
+          : selectedProfileMissing
+            ? "Import and select a replacement profile on Profiles before starting migration. The legacy network remains unchanged until the signed cutover is explicitly confirmed."
+            : "This install has not retired the legacy network yet. The network stays disabled until you complete the one-way cutover, which runs in a separate, signed migration session while the old app keeps running.";
     const button = starting
       ? "Starting…"
       : failure
         ? (recovery ? "Retry Recovery…" : "Retry Migration…")
-        : (recovery ? "Open Recovery…" : "Start Migration…");
+        : (profileUnavailable || selectedProfileMissing)
+          ? "Open Profiles"
+          : (recovery ? "Open Recovery…" : "Start Migration…");
+    const action = profileUnavailable || selectedProfileMissing
+      ? "open-migration-profiles"
+      : "begin-migration-handoff";
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
@@ -617,7 +791,7 @@ function renderMigrationBanner() {
           ${retirement.message ? `<small>${escapeHtml(retirement.message)}</small>` : ""}
           ${failure ? `<small>${escapeHtml(failure)}</small>` : ""}
         </div>
-        <button type="button" class="cfw-big-button" data-action="begin-migration-handoff" ${starting ? "disabled" : ""}>${button}</button>
+        <button type="button" class="cfw-big-button" data-action="${action}" ${starting ? "disabled" : ""}>${button}</button>
       </div>
     `;
   }
@@ -695,17 +869,26 @@ function renderGeneral() {
   const engineLabel = state.controllerVersion?.version
     ? `sing-box · ${state.controllerVersion.version}`
     : `sing-box · ${engineStateLabel(engine)}`;
-  const tunnelReason = engine.tunnelAvailable ? null : (engine.availabilityReason ?? "The signed Packet Tunnel System Extension has not reported capability.");
-  const proxyReason = engine.systemProxyAvailable ? null : (engine.availabilityReason ?? "The signed ProxyAgent has not reported capability.");
-  const engineMutationDisabled = state.engineMutationBusy ? " disabled" : "";
+  const tunnelCapability = engineToggleCapability("tunMode");
+  const proxyCapability = engineToggleCapability("systemProxy");
+  const tunnelReason = tunnelCapability.available ? null : tunnelCapability.reason;
+  const proxyReason = proxyCapability.available ? null : proxyCapability.reason;
+  const tunnelRetryDisabled = state.engineMutationBusy || !tunnelCapability.available ? " disabled" : "";
+  const proxyRetryDisabled = state.engineMutationBusy || !proxyCapability.available ? " disabled" : "";
+  const launchAtLogin = launchAtLoginPresentation();
   const tunnelRecoveryAction = engine.state === "AwaitingApproval"
-    ? `<button class="cfw-text-button" data-action="retry-tun-mode"${engineMutationDisabled}>Approve…</button>`
+    ? `<button class="cfw-text-button" data-action="retry-tun-mode"${tunnelRetryDisabled}>Approve…</button>`
     : engine.state === "Failed" && engine.desiredMode === "tunnel"
-      ? `<button class="cfw-text-button" data-action="retry-tun-mode"${engineMutationDisabled}>Retry</button>`
+      ? `<button class="cfw-text-button" data-action="retry-tun-mode"${tunnelRetryDisabled}>Retry</button>`
       : "";
   const proxyRecoveryAction = engine.state === "Failed" && engine.desiredMode === "system-proxy"
-    ? `<button class="cfw-text-button" data-action="retry-system-proxy"${engineMutationDisabled}>Retry</button>`
+    ? `<button class="cfw-text-button" data-action="retry-system-proxy"${proxyRetryDisabled}>Retry</button>`
     : "";
+  const migrationBanner = renderMigrationBanner();
+  const projectionError = projection.error ?? "no active profile is selected";
+  const projectionNote = projectionError === "no active profile is selected"
+    ? "No profile selected"
+    : "Projection unreadable";
   return `
     <div class="cfw-general-view">
       <section class="cfw-header">
@@ -716,8 +899,8 @@ function renderGeneral() {
         </div>
       </section>
 
-      <section class="cfw-content">
-        ${renderMigrationBanner()}
+      <section class="cfw-content${migrationBanner ? " cfw-content-migration" : ""}">
+        ${migrationBanner}
         ${engine.availabilityReason ? renderRowReason(engine.availabilityReason) : ""}
         <div class="cfw-row">
           <div class="cfw-row-left">
@@ -729,10 +912,10 @@ function renderGeneral() {
           <div class="cfw-row-right">
             <span class="cfw-link-value">${escapeHtml(listenAddress ?? "unavailable")}</span>
             ${renderRowNote(
-              listenAddress ? "Fixed by the projection" : "Projection unreadable",
+              listenAddress ? "Fixed by the projection" : projectionNote,
               listenAddress
                 ? `The app-owned mixed inbound is projected at ${listenAddress} and is not a user setting in this build.`
-                : `The projected configuration could not be read: ${projection.error ?? "no active profile is selected"}`,
+                : `The projected configuration could not be read: ${projectionError}`,
             )}
           </div>
         </div>
@@ -806,7 +989,11 @@ function renderGeneral() {
             <span class="cfw-link-value">${escapeHtml(tunnelValueLabel(engine))}</span>
             ${tunnelRecoveryAction}
             ${tunnelReason ? renderRowNote("Unavailable", tunnelReason) : ""}
-            ${renderInlineSwitch("tunMode", "TUN Mode", { reason: tunnelReason, disabled: state.engineMutationBusy })}
+            ${renderInlineSwitch("tunMode", "TUN Mode", {
+              reason: tunnelReason,
+              disabled: state.engineMutationBusy,
+              allowDisableWhenUnavailable: true,
+            })}
           </div>
         </div>
 
@@ -828,13 +1015,17 @@ function renderGeneral() {
           <div class="cfw-row-right">
             ${proxyRecoveryAction}
             ${proxyReason ? renderRowNote("Unavailable", proxyReason) : ""}
-            ${renderInlineSwitch("systemProxy", "System Proxy", { reason: proxyReason, disabled: state.engineMutationBusy })}
+            ${renderInlineSwitch("systemProxy", "System Proxy", {
+              reason: proxyReason,
+              disabled: state.engineMutationBusy,
+              allowDisableWhenUnavailable: true,
+            })}
           </div>
         </div>
 
         <div class="cfw-row">
           <div class="cfw-row-left">Start with macOS</div>
-          <div class="cfw-row-right">${renderInlineSwitch("startAtLogin", "Start with macOS")}</div>
+          <div class="cfw-row-right">${renderInlineSwitch("startAtLogin", "Start with macOS", { reason: launchAtLogin.reason, title: launchAtLogin.hint })}</div>
         </div>
       </section>
     </div>
@@ -868,12 +1059,50 @@ function cancelDelayTest() {
   state.toggles.testingDelays = false;
 }
 
+function queueLiveStreamChange(lane, running, commands) {
+  lane.desiredRunning = running;
+  lane.intentEpoch += 1;
+  const intentEpoch = lane.intentEpoch;
+  const operation = lane.operation.then(async () => {
+    if (intentEpoch !== lane.intentEpoch) return false;
+    if (!running) {
+      const token = captureEngineIdentityToken();
+      const expected = lane.binding;
+      lane.binding = null;
+      if (expected) await commands.stop(expected);
+      return intentEpoch === lane.intentEpoch
+        && (expected === null || engineIdentityTokenIsCurrent(token));
+    }
+
+    const token = captureEngineIdentityToken();
+    if (!engineIdentityTokenIsCurrent(token)) return false;
+    const response = await commands.start();
+    const binding = normalizeStreamBinding(response, commands.stream, token.runtimeIdentity);
+    if (intentEpoch !== lane.intentEpoch || !engineIdentityTokenIsCurrent(token)) {
+      if (!lane.desiredRunning) await commands.stop(binding);
+      return false;
+    }
+    lane.binding = binding;
+    return true;
+  });
+  lane.operation = operation.catch(() => {});
+  return operation;
+}
+
 function setConnectionsStreamRunning(running) {
-  return running ? invoke("start_connections_stream") : invoke("stop_connections_stream");
+  return queueLiveStreamChange(runtime.connectionsLiveStream, running, {
+    stream: "connections",
+    start: () => invoke("start_connections_stream"),
+    stop: (expected) => invoke("stop_connections_stream", { expected }),
+  });
 }
 
 function setLogStreamRunning(running) {
-  return running ? invoke("start_log_stream") : invoke("stop_log_stream");
+  return queueLiveStreamChange(runtime.logLiveStream, running, {
+    stream: "request-logs",
+    start: () => invoke("start_log_stream"),
+    stop: (expected) => invoke("stop_log_stream", { expected }),
+  });
 }
 
 function visibleProxyNodeNames() {
@@ -1164,6 +1393,328 @@ function engineIsOff() {
   return state.engine.state === "Off" && state.engine.desiredMode === "off";
 }
 
+function engineToggleCapability(key) {
+  if (key === "systemProxy") {
+    return {
+      available: state.engine.systemProxyAvailable === true,
+      label: "System Proxy",
+      reason: state.engine.availabilityReason
+        ?? "The signed ProxyAgent has not reported capability.",
+    };
+  }
+  if (key === "tunMode") {
+    return {
+      available: state.engine.tunnelAvailable === true,
+      label: "TUN Mode",
+      reason: state.engine.availabilityReason
+        ?? "The signed Packet Tunnel System Extension has not reported capability.",
+    };
+  }
+  return null;
+}
+
+/// Enabling a native network mode requires the corresponding verified
+/// capability. Disabling an already-requested mode is always admitted so a
+/// failed or newly unavailable target never traps the switch On.
+function engineToggleChangeAllowed(key, checked, source) {
+  const capability = engineToggleCapability(key);
+  if (!capability || !checked || capability.available) return true;
+  appendLog("info", source, `${capability.label} cannot be enabled: ${capability.reason}`);
+  return false;
+}
+
+/// Every controller-backed mutation/inspection must use the verified runtime
+/// identity, never desired mode. Engine Off is an expected state, so the guard
+/// records no warning/error and, most importantly, emits no controller IPC.
+function controllerActionAllowed(action, source = "controller") {
+  if (source === "provider" && state.engine.providerManagementAvailable !== true) {
+    state.providerCapabilityError = PROVIDER_CAPABILITY_UNAVAILABLE;
+    appendLog("info", source, `${action} is unavailable: ${PROVIDER_CAPABILITY_UNAVAILABLE}`);
+    return false;
+  }
+  if (state.engine.active) return true;
+  state.controllerStatus = "engine off";
+  appendLog("info", source, `${action} is unavailable while the engine is Off`);
+  return false;
+}
+
+/// Runtime projection is an offline operation owned by the selected profile,
+/// not by the loopback controller. Repository failure and an actually empty
+/// selection remain distinct fail-closed reasons.
+function runtimeProjectionActionAllowed(action, source = "profile") {
+  if (state.profilesUnavailableReason) {
+    appendLog("error", source, `${action} is unavailable because the profile repository could not be read: ${state.profilesUnavailableReason}`);
+    return false;
+  }
+  if (!state.profiles.some((profile) => profile.active === true)) {
+    appendLog("info", source, `${action} requires a selected profile`);
+    return false;
+  }
+  return true;
+}
+
+function captureEngineIdentityToken() {
+  if (!state.engine.active) return null;
+  return Object.freeze({
+    epoch: runtime.engineIdentityEpoch,
+    generation: state.engine.generation,
+    configDigest: state.engine.configDigest,
+    runtimeIdentity: state.engine.runtimeIdentity,
+  });
+}
+
+function runtimeIdentitiesEqual(left, right) {
+  return left !== null
+    && right !== null
+    && left?.owner === right?.owner
+    && left?.ready === true
+    && right?.ready === true
+    && left?.context?.installation_id === right?.context?.installation_id
+    && left?.context?.config_epoch === right?.context?.config_epoch
+    && left?.context?.generation === right?.context?.generation
+    && left?.config_digest === right?.config_digest;
+}
+
+function engineIdentityTokenIsCurrent(token) {
+  return token !== null
+    && state.engine.active
+    && token.epoch === runtime.engineIdentityEpoch
+    && token.generation === state.engine.generation
+    && token.configDigest === state.engine.configDigest
+    && runtimeIdentitiesEqual(token.runtimeIdentity, state.engine.runtimeIdentity);
+}
+
+function engineRuntimeIdentityChanged(previous, next) {
+  return previous.active !== next.active
+    || previous.generation !== next.generation
+    || previous.configDigest !== next.configDigest
+    || previous.mode !== next.mode
+    || (previous.active && next.active
+      && !runtimeIdentitiesEqual(previous.runtimeIdentity, next.runtimeIdentity));
+}
+
+function streamBindingsEqual(left, right) {
+  return left !== null
+    && right !== null
+    && left?.stream === right?.stream
+    && left?.stream_id === right?.stream_id
+    && runtimeIdentitiesEqual(left?.runtime, right?.runtime);
+}
+
+function normalizeStreamBinding(value, expectedStream, expectedRuntime = state.engine.runtimeIdentity) {
+  if (!value
+    || typeof value !== "object"
+    || value.stream !== expectedStream
+    || !Number.isSafeInteger(value.stream_id)
+    || value.stream_id < 1
+    || !runtimeIdentitiesEqual(value.runtime, expectedRuntime)) {
+    throw new TypeError(`${expectedStream} stream binding does not match the active engine runtime`);
+  }
+  return Object.freeze({
+    stream: expectedStream,
+    stream_id: value.stream_id,
+    runtime: expectedRuntime,
+  });
+}
+
+function streamBindingIsCurrent(binding, expectedStream) {
+  return binding !== null
+    && binding?.stream === expectedStream
+    && state.engine.active
+    && runtimeIdentitiesEqual(binding?.runtime, state.engine.runtimeIdentity);
+}
+
+function validatedStreamEventPayload(envelope, binding, expectedStream) {
+  if (!streamBindingIsCurrent(binding, expectedStream)
+    || !envelope
+    || typeof envelope !== "object"
+    || !Object.hasOwn(envelope, "payload")
+    || !streamBindingsEqual(envelope.provenance, binding)) {
+    return undefined;
+  }
+  return envelope.payload;
+}
+
+function controllerModeFromSnapshot(snapshot) {
+  const value = snapshot?.config?.mode;
+  if (typeof value !== "string" || !value.length) return null;
+  const mode = value[0].toUpperCase() + value.slice(1).toLowerCase();
+  return ["Global", "Rule", "Direct"].includes(mode) ? mode : null;
+}
+
+function controllerSelectorFromSnapshot(snapshot, groupName) {
+  const group = (snapshot?.proxies?.groups ?? []).find((item) => item?.name === groupName);
+  if (!group) return null;
+  if (typeof group.now === "string") return group.now;
+  if (typeof group.options?.[0] === "string") return group.options[0];
+  return "DIRECT";
+}
+
+function controllerMutationIsCurrent(entry) {
+  return engineIdentityTokenIsCurrent(entry.token)
+    && runtime.controllerMutationLatestByLane.get(entry.lane) === entry.epoch;
+}
+
+function applyPendingControllerIntents() {
+  for (const pending of runtime.controllerMutationPendingByLane.values()) {
+    if (!engineIdentityTokenIsCurrent(pending.token)) continue;
+    if (pending.kind === "mode") {
+      state.mode = pending.target;
+      continue;
+    }
+    const group = state.proxyGroups.find((item) => item.name === pending.groupName);
+    if (group) group.now = pending.target;
+  }
+}
+
+function invalidateControllerMutationIntents() {
+  runtime.controllerMutationLatestByLane.clear();
+  runtime.controllerMutationPendingByLane.clear();
+  const queued = runtime.controllerMutationQueue.splice(0);
+  for (const entry of queued) entry.resolve(false);
+}
+
+function finishControllerMutationEntry(entry, result) {
+  if (runtime.controllerMutationLatestByLane.get(entry.lane) === entry.epoch) {
+    runtime.controllerMutationLatestByLane.delete(entry.lane);
+  }
+  if (runtime.controllerMutationPendingByLane.get(entry.lane)?.epoch === entry.epoch) {
+    runtime.controllerMutationPendingByLane.delete(entry.lane);
+  }
+  entry.resolve(result);
+  renderPage();
+}
+
+async function drainControllerMutationQueue() {
+  if (runtime.controllerMutationRunning) return;
+  runtime.controllerMutationRunning = true;
+  try {
+    while (runtime.controllerMutationQueue.length) {
+      const entry = runtime.controllerMutationQueue.shift();
+      if (!controllerMutationIsCurrent(entry)) {
+        entry.resolve(false);
+        continue;
+      }
+
+      let mutationError = null;
+      try {
+        await entry.invokeMutation();
+      } catch (error) {
+        mutationError = error;
+      }
+      if (!controllerMutationIsCurrent(entry)) {
+        entry.resolve(false);
+        continue;
+      }
+
+      let observedSnapshot = null;
+      const controllerReadable = await loadControllerSnapshot(
+        false,
+        entry.token,
+        () => controllerMutationIsCurrent(entry),
+        (snapshot) => { observedSnapshot = snapshot; },
+      );
+      if (!controllerMutationIsCurrent(entry)) {
+        entry.resolve(false);
+        continue;
+      }
+
+      const observed = controllerReadable ? entry.readObserved(observedSnapshot) : null;
+      const confirmed = controllerReadable && observed === entry.target;
+      if (runtime.controllerMutationPendingByLane.get(entry.lane)?.epoch === entry.epoch) {
+        runtime.controllerMutationPendingByLane.delete(entry.lane);
+      }
+      if (!confirmed && controllerReadable) entry.publishObserved(observed);
+      applyPendingControllerIntents();
+
+      if (mutationError) {
+        const readback = controllerReadable
+          ? `controller readback reports ${observed ?? "unavailable"}`
+          : "controller readback was unavailable";
+        appendLog("error", entry.source, `${entry.failureLabel}: ${errorText(mutationError)}; ${readback}`);
+        finishControllerMutationEntry(entry, false);
+        continue;
+      }
+      if (!controllerReadable) {
+        appendLog("error", entry.source, `${entry.failureLabel}: controller readback was unavailable`);
+        finishControllerMutationEntry(entry, false);
+        continue;
+      }
+      if (!confirmed) {
+        appendLog("error", entry.source, `${entry.failureLabel}: controller readback reported ${observed ?? "unavailable"}`);
+        finishControllerMutationEntry(entry, false);
+        continue;
+      }
+
+      if (state.toggles.breakOnProxyChange) {
+        await closeConnectionsAfterProxyChange(
+          entry.breakConnectionsReason,
+          entry.token,
+          () => controllerMutationIsCurrent(entry),
+        );
+      }
+      if (!controllerMutationIsCurrent(entry)) {
+        entry.resolve(false);
+        continue;
+      }
+      appendLog("info", entry.source, entry.successMessage);
+      finishControllerMutationEntry(entry, true);
+    }
+  } finally {
+    runtime.controllerMutationRunning = false;
+    if (runtime.controllerMutationQueue.length) void drainControllerMutationQueue();
+  }
+}
+
+function enqueueControllerMutation(specification) {
+  const token = captureEngineIdentityToken();
+  if (!engineIdentityTokenIsCurrent(token)) return Promise.resolve(false);
+  const epoch = runtime.controllerMutationEpoch + 1;
+  runtime.controllerMutationEpoch = epoch;
+  const pending = {
+    epoch,
+    token,
+    lane: specification.lane,
+    kind: specification.kind,
+    target: specification.target,
+    groupName: specification.groupName ?? null,
+  };
+  runtime.controllerMutationLatestByLane.set(specification.lane, epoch);
+  runtime.controllerMutationPendingByLane.set(specification.lane, pending);
+  applyPendingControllerIntents();
+  renderPage();
+
+  return new Promise((resolve) => {
+    runtime.controllerMutationQueue.push({ ...specification, ...pending, resolve });
+    void drainControllerMutationQueue();
+  });
+}
+
+function invalidateEngineBoundState(active) {
+  runtime.engineIdentityEpoch += 1;
+  invalidateControllerMutationIntents();
+  for (const lane of [runtime.connectionsLiveStream, runtime.logLiveStream]) {
+    lane.intentEpoch += 1;
+    lane.desiredRunning = false;
+    lane.binding = null;
+  }
+  cancelDelayTest();
+  clearControllerBackedState();
+  clearProviderBackedState();
+  state.controllerVersion = null;
+  state.controllerStatus = active ? "controller loading" : "engine off";
+}
+
+function recordProviderOperationFailure(action, error) {
+  const message = errorText(error);
+  if (message.startsWith(PROVIDER_CAPABILITY_UNSUPPORTED_PREFIX)) {
+    state.providerCapabilityError = message;
+    appendLog("info", "provider", `${action} is unavailable: ${message}`);
+    return;
+  }
+  appendLog("error", "provider", `${action} failed: ${message}`);
+}
+
 /// Reads one profile so the menu knows whether it has a subscription URL.
 ///
 /// A profile list never carries that URL because it can bear an access token;
@@ -1179,6 +1730,7 @@ async function resolveProfileSource(id) {
     profile.sourceError = null;
   } catch (error) {
     profile.sourceError = errorText(error);
+    appendLog("error", "profile", `Could not read ${profile.name} source metadata: ${profile.sourceError}`);
   }
   return profile.sourceUrl;
 }
@@ -1383,6 +1935,20 @@ function renderGlassOverlays() {
           </div>
         </div>
       `);
+    } else if (dialog.kind === "legacy-profile-migration") {
+      const preview = dialog.payload;
+      parts.push(`
+        <div class="glass-dialog-backdrop" data-glass-dismiss></div>
+        <div class="glass-dialog" role="dialog" aria-label="Migrate legacy subscription">
+          <h3>Migrate selected legacy subscription</h3>
+          <p class="glass-dialog-copy">Convert the ${escapeHtml(formatBytes(preview.legacy_bytes))} legacy YAML snapshot saved on this Mac for “${escapeHtml(preview.name)}”. Migration does not download a newer subscription; ${escapeHtml(preview.source_host)} is retained only as the HTTPS update source. The cached YAML is never executed, and the converted profile and Keychain credentials are validated before selection.</p>
+          ${dialog.error ? `<p class="glass-dialog-copy" role="alert">${escapeHtml(dialog.error)}</p>` : ""}
+          <div class="glass-dialog-actions">
+            <button type="button" class="glass-btn ghost" data-glass-dismiss ${dialog.busy ? "disabled" : ""}>Cancel</button>
+            <button type="button" class="glass-btn" data-glass-legacy-migration-confirm data-preview-id="${escapeHtml(preview.preview_id)}" ${dialog.busy ? "disabled" : ""}>${dialog.busy ? "Migrating…" : "Import and select"}</button>
+          </div>
+        </div>
+      `);
     } else if (dialog.kind === "info") {
       parts.push(`
         <div class="glass-dialog-backdrop" data-glass-dismiss></div>
@@ -1570,12 +2136,22 @@ function bindGlassOverlayEvents() {
     button.addEventListener("click", async () => {
       const name = document.querySelector("[data-glass-dns-name]")?.value?.trim() ?? "";
       const type = document.querySelector("[data-glass-dns-type]")?.value?.trim() || "A";
+      if (!controllerActionAllowed("DNS query", "dns")) {
+        state.glassDialog = { kind: "dns-query", payload: { name, type, result: "Engine is Off; start the engine before querying DNS." } };
+        renderGlassOverlays();
+        return;
+      }
+      const token = captureEngineIdentityToken();
       try {
         const result = await invoke("dns_query", { name, record_type: type, recordType: type });
+        if (!engineIdentityTokenIsCurrent(token)) return;
         state.glassDialog = { kind: "dns-query", payload: { name, type, result: JSON.stringify(result, null, 2) } };
         renderGlassOverlays();
       } catch (error) {
-        state.glassDialog = { kind: "dns-query", payload: { name, type, result: String(error.message ?? error) } };
+        if (!engineIdentityTokenIsCurrent(token)) return;
+        const message = errorText(error);
+        appendLog("error", "dns", `DNS query failed: ${message}`);
+        state.glassDialog = { kind: "dns-query", payload: { name, type, result: message } };
         renderGlassOverlays();
       }
     });
@@ -1586,6 +2162,58 @@ function bindGlassOverlayEvents() {
       closeGlassOverlays();
       state.activePage = "rules";
       await loadRulesSnapshot();
+      renderPage();
+    });
+  });
+
+  document.querySelectorAll("[data-glass-legacy-migration-confirm]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const previewId = event.currentTarget.dataset.previewId;
+      const dialog = state.glassDialog;
+      if (!previewId || dialog?.kind !== "legacy-profile-migration" || dialog.busy) return;
+      dialog.busy = true;
+      dialog.error = null;
+      renderGlassOverlays();
+      let committed = false;
+      try {
+        const outcome = normalizeLegacyProfileMigrationOutcome(
+          await invoke("commit_legacy_cfw_profile_migration", {
+            previewId,
+            confirmed: true,
+          }),
+        );
+        committed = true;
+        await loadProfilesSnapshot();
+        await applyActiveProfile(`migrating ${outcome.name}`);
+        appendLog(
+          "info",
+          "migration",
+          `${outcome.name} ${outcome.reused ? "recovered" : "imported"}, credentials verified, and selected`,
+        );
+        state.legacyProfileMigrationPreview = null;
+        closeGlassOverlays();
+      } catch (error) {
+        const message = errorText(error);
+        appendLog(
+          "error",
+          "migration",
+          `${committed ? "Migrated profile staging failed" : "Legacy profile migration failed"}: ${message}`,
+        );
+        state.legacyProfileMigrationPreview = null;
+        state.glassDialog = {
+          kind: "info",
+          payload: committed
+            ? {
+              title: "Profile migrated; activation failed",
+              body: `${message} Reload Profiles and review the selected staged profile; do not resubmit the consumed preview.`,
+            }
+            : {
+              title: "Legacy migration failed",
+              body: `${message} The one-shot preview is no longer trusted; preview the legacy profile again before retrying.`,
+            },
+        };
+        renderGlassOverlays();
+      }
       renderPage();
     });
   });
@@ -1610,7 +2238,7 @@ function bindGlassOverlayEvents() {
         closeGlassOverlays();
         state.credentialSetup = null;
       } catch (error) {
-        appendLog("warning", "credentials", errorText(error));
+        appendLog("error", "credentials", errorText(error));
       } finally {
         // The secrets leave this renderer as soon as the vault has them.
         for (const entry of batch) entry.secret = "";
@@ -1629,7 +2257,7 @@ function bindGlassOverlayEvents() {
         normalizeGcReceipt(receipt, preview.orphanCount);
         appendLog("info", "credentials", `Removed ${receipt.removed_count} unused credential reference(s)`);
       } catch (error) {
-        appendLog("warning", "credentials", errorText(error));
+        appendLog("error", "credentials", errorText(error));
       } finally {
         // A preview is one-shot on the server: any rejection needs a new one.
         state.credentialGcPreview = null;
@@ -1648,7 +2276,7 @@ function bindGlassOverlayEvents() {
         try {
           await invoke("cancel_credential_gc", { previewId: preview.previewId });
         } catch (error) {
-          appendLog("warning", "credentials", errorText(error));
+          appendLog("error", "credentials", errorText(error));
         }
       }
       renderPage();
@@ -1670,7 +2298,7 @@ function bindGlassOverlayEvents() {
         );
         openProductAboutDialog({ autoCheck: true, phase: "idle", result });
       } catch (error) {
-        appendLog("warning", "updater", `Update check failed: ${errorText(error)}`);
+        appendLog("error", "updater", `Update check failed: ${errorText(error)}`);
         const result = invalidateUpdateAuthorization(error);
         openProductAboutDialog({
           autoCheck: true,
@@ -1692,7 +2320,7 @@ function bindGlassOverlayEvents() {
         invalidateUpdateAuthorization();
         closeGlassOverlays();
       } catch (error) {
-        appendLog("warning", "updater", `Could not open update: ${errorText(error)}`);
+        appendLog("error", "updater", `Could not open update: ${errorText(error)}`);
         const result = invalidateUpdateAuthorization(error);
         openProductAboutDialog({
           autoCheck: true,
@@ -1798,6 +2426,7 @@ async function openCredentialSetup(id) {
       error: null,
     };
   } catch (error) {
+    const message = errorText(error);
     state.credentialSetup = {
       profileId: id,
       profileName: profile.name,
@@ -1805,15 +2434,19 @@ async function openCredentialSetup(id) {
       presentCount: null,
       missing: [],
       vaultAvailable: false,
-      error: errorText(error),
+      error: message,
     };
+    appendLog("error", "credentials", `Could not verify credentials for ${profile.name}: ${message}`);
   }
   if (state.glassDialog?.kind === "credentials") renderGlassOverlays();
 }
 
 function renderProfiles() {
   const engineOff = engineIsOff();
-  const mutationReason = engineOff ? null : REASONS.engineNotOff;
+  const repositoryReason = state.profilesUnavailableReason
+    ? `Profile repository unavailable: ${state.profilesUnavailableReason}`
+    : null;
+  const mutationReason = repositoryReason ?? (engineOff ? null : REASONS.engineNotOff);
   const blocked = mutationReason ? `disabled title="${escapeHtml(mutationReason)}"` : "";
   return `
     <div class="profiles-layout">
@@ -1831,7 +2464,12 @@ function renderProfiles() {
       ${mutationReason ? `<p class="profile-note">${escapeHtml(mutationReason)}</p>` : ""}
 
       <section class="cfw-profile-list">
-        ${state.profiles.length ? state.profiles.map((profile) => `
+        ${repositoryReason ? `
+          <div class="empty-profile-state" role="alert">
+            <p>${escapeHtml(repositoryReason)}</p>
+            <button data-action="reload-dashboard">Reload profile repository</button>
+          </div>
+        ` : state.profiles.length ? state.profiles.map((profile) => `
           <article class="cfw-profile-card ${profile.active ? "active" : ""}" data-profile-card="${escapeHtml(profile.id)}">
             <i></i>
             <div class="profile-card-main">
@@ -1850,7 +2488,7 @@ function renderProfiles() {
         `).join("") : `
           <div class="empty-profile-state">
             <p>No profiles found in the managed profiles directory.</p>
-            <button data-action="migrate-legacy-profiles">Check for legacy CFW profiles</button>
+            <button data-action="migrate-legacy-profiles">Migrate selected legacy subscription</button>
           </div>
         `}
       </section>
@@ -1920,14 +2558,16 @@ function renderProfileInspector() {
 function renderProviders() {
   const updatingAll = state.providerBulkActions.has("update-all-providers");
   const healthAll = state.providerBulkActions.has("health-check-all");
-  const providerUnavailable = Boolean(state.providerCapabilityError);
+  const engineActive = Boolean(state.engine.active);
+  const providerUnavailable = Boolean(state.providerCapabilityError) || !engineActive;
+  const providerUnavailableReason = state.providerCapabilityError ?? "Engine is Off; provider management is unavailable.";
   return `
     <div class="providers-layout">
       <section class="panel toolbar-panel">
         <div>
           <p class="label">Providers</p>
           <h3>Proxy Providers</h3>
-          <p class="muted">${providerUnavailable ? escapeHtml(state.providerCapabilityError) : "Live provider capabilities reported by the running engine controller."}</p>
+          <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : "Live provider capabilities reported by the running engine controller."}</p>
         </div>
         <div class="toolbar-actions">
           <button class="button" data-action="update-all-providers" ${updatingAll || providerUnavailable ? "disabled" : ""}>${updatingAll ? "Updating..." : "Update All"}</button>
@@ -1951,8 +2591,8 @@ function renderProviders() {
                 <p class="muted">${provider.proxies} proxies · ${escapeHtml(provider.health)} · updated ${escapeHtml(provider.updated)}</p>
               </div>
               <div class="row-actions">
-                <button class="button ghost" data-provider-update="${escapeHtml(provider.name)}" ${updating ? "disabled" : ""}>${updating ? "Updating" : "Update"}</button>
-                <button class="button" data-provider-health="${escapeHtml(provider.name)}" ${checking ? "disabled" : ""}>${checking ? "Checking" : "Health Check"}</button>
+                <button class="button ghost" data-provider-update="${escapeHtml(provider.name)}" ${updating || !engineActive ? "disabled" : ""}>${updating ? "Updating" : "Update"}</button>
+                <button class="button" data-provider-health="${escapeHtml(provider.name)}" ${checking || !engineActive ? "disabled" : ""}>${checking ? "Checking" : "Health Check"}</button>
               </div>
             </article>
           `;
@@ -1961,7 +2601,7 @@ function renderProviders() {
             <div>
               <p class="label">Controller</p>
               <h3>${providerUnavailable ? "Proxy provider management unavailable" : "No proxy providers loaded"}</h3>
-              <p class="muted">${providerUnavailable ? escapeHtml(state.providerCapabilityError) : "Driven by the engine controller; no provider rows are invented when the running configuration has none."}</p>
+              <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : "Driven by the engine controller; no provider rows are invented when the running configuration has none."}</p>
             </div>
           </article>
         `}
@@ -1980,7 +2620,7 @@ function renderProviders() {
                 <p class="muted">${provider.rules.toLocaleString()} rules · updated ${escapeHtml(provider.updated)}</p>
               </div>
               <div class="row-actions">
-                <button class="button ghost" data-rule-provider-update="${escapeHtml(provider.name)}" ${updating ? "disabled" : ""}>${updating ? "Updating" : "Update"}</button>
+                <button class="button ghost" data-rule-provider-update="${escapeHtml(provider.name)}" ${updating || !engineActive ? "disabled" : ""}>${updating ? "Updating" : "Update"}</button>
               </div>
             </article>
           `;
@@ -1989,7 +2629,7 @@ function renderProviders() {
             <div>
               <p class="label">Controller</p>
               <h3>${providerUnavailable ? "Rule provider management unavailable" : "No rule providers loaded"}</h3>
-              <p class="muted">${providerUnavailable ? escapeHtml(state.providerCapabilityError) : "Live from the engine controller; it stays empty when the running configuration has no rule providers."}</p>
+              <p class="muted">${providerUnavailable ? escapeHtml(providerUnavailableReason) : "Live from the engine controller; it stays empty when the running configuration has no rule providers."}</p>
             </div>
           </article>
         `}
@@ -2311,14 +2951,14 @@ function renderSettingValue(label, value, hint) {
   `;
 }
 
-function renderSettingSelect(label, value, options, hint, dataAttribute) {
+function renderSettingSelect(label, value, options, hint, dataAttribute, reason = null) {
   return `
-    <label class="setting-row setting-control-row">
+    <label class="setting-row setting-control-row ${reason ? "disabled" : ""}">
       <span>
         <b>${escapeHtml(label)}</b>
-        <small>${escapeHtml(hint)}</small>
+        <small>${escapeHtml(reason ?? hint)}</small>
       </span>
-      <select class="setting-input" ${dataAttribute}>
+      <select class="setting-input" ${dataAttribute} ${reason ? `disabled title="${escapeHtml(reason)}"` : ""}>
         ${options.map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === value ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
       </select>
     </label>
@@ -2347,6 +2987,8 @@ function renderSettings() {
   const projection = state.projection;
   const engine = state.engine;
   const engineOff = engineIsOff();
+  const launchAtLogin = launchAtLoginPresentation();
+  const settingsReason = state.settingsUnavailableReason;
   const listenAddress = projection.mixedPort
     ? `${projection.listenAddress ?? "127.0.0.1"}:${projection.mixedPort}`
     : "unavailable";
@@ -2355,12 +2997,12 @@ function renderSettings() {
       <section class="panel toolbar-panel settings-toolbar">
         <div>
           <p class="label">Preferences</p>
-          <h3>${snapshot.persisted ? "cfw-preferences.json loaded" : "Defaults staged"}</h3>
-          <p class="muted">Appearance, startup and update preferences are the only values this app persists${snapshot.persisted ? "" : "; the file is created on save"}.</p>
+          <h3>${settingsReason ? "Preferences unavailable" : snapshot.persisted ? "cfw-preferences.json loaded" : "Defaults staged"}</h3>
+          <p class="muted">${escapeHtml(settingsReason ?? `Appearance, startup and update preferences are the only values this app persists${snapshot.persisted ? "" : "; the file is created on save"}.`)}</p>
         </div>
         <div class="toolbar-actions">
-          <button class="button ghost danger" data-action="reset-settings">Reset All Settings</button>
-          <button class="button" data-action="save-settings">Save Settings</button>
+          <button class="button ghost danger" data-action="reset-settings" ${settingsReason ? `disabled title="${escapeHtml(settingsReason)}"` : ""}>Reset All Settings</button>
+          <button class="button" data-action="save-settings" ${settingsReason ? `disabled title="${escapeHtml(settingsReason)}"` : ""}>Save Settings</button>
           <button class="button ghost" data-action="reload-settings">Reload From Disk</button>
           <button class="button ghost" data-action="force-quit-app">Force Quit</button>
           <button class="button ghost" data-action="quit-app">Quit</button>
@@ -2368,16 +3010,16 @@ function renderSettings() {
       </section>
 
       ${renderSettingsGroup("General", [
-        renderToggle("startAtLogin", "Start at Login", "Register Clash for Mac as a macOS Login Item."),
-        renderToggle("silentStart", "Silent Start", "Start hidden in the menu bar without a Dock icon."),
-        renderToggle("checkForUpdates", "Check for updates", "Check GitHub for a newer official release at launch."),
-        renderToggle("retainWindowBounds", "Retain window bounds", "Restore the dashboard window position between launches."),
+        renderToggle("startAtLogin", "Start at Login", launchAtLogin.hint, { reason: launchAtLogin.reason }),
+        renderToggle("silentStart", "Silent Start", "Start hidden in the menu bar without a Dock icon.", { reason: settingsReason }),
+        renderToggle("checkForUpdates", "Check for updates", "Check GitHub for a newer official release at launch.", { reason: settingsReason }),
+        renderToggle("retainWindowBounds", "Retain window bounds", "Restore the dashboard window position between launches.", { reason: settingsReason }),
         renderSettingAction("Updates", "GitHub Releases", "Check the official release feed now.", "check-for-updates", "Check for Updates"),
       ])}
 
       ${renderSettingsGroup("Appearance", [
-        renderSettingSelect("Theme", persisted.theme ?? "system", THEME_OPTIONS, "Applied immediately and persisted.", "data-theme-setting"),
-        renderSettingSelect("Font", persisted.font_family ?? "", FONT_OPTIONS, "The preference store accepts these families only.", "data-font-family"),
+        renderSettingSelect("Theme", persisted.theme ?? "system", THEME_OPTIONS, "Applied immediately and persisted.", "data-theme-setting", settingsReason),
+        renderSettingSelect("Font", persisted.font_family ?? "", FONT_OPTIONS, "The preference store accepts these families only.", "data-font-family", settingsReason),
       ])}
 
       ${renderSettingsGroup("Engine", [
@@ -2550,7 +3192,7 @@ function renderPage() {
   const productName = document.getElementById("product-name");
   if (productName) productName.textContent = state.payload.product?.name ?? "Clash for Mac";
   const statusTitle = document.getElementById("status-title");
-  if (statusTitle) statusTitle.textContent = `${page.title} - ${state.mode} Mode`;
+  if (statusTitle) statusTitle.textContent = state.mode ? `${page.title} - ${state.mode} Mode` : page.title;
   document.getElementById("page-title").textContent = page.title;
   document.getElementById("page-summary").textContent = page.summary;
   const running = state.engine.active;
@@ -2596,19 +3238,46 @@ function scheduleRender() {
 /// clash-compatible controller accepts, and it is not a persisted preference, so
 /// nothing is written to the preference store here.
 async function applyProxyMode(mode) {
-  const previous = state.mode;
-  state.mode = mode;
-  try {
-    await invoke("set_proxy_mode", { mode });
-    appendLog("info", "mode", `Proxy mode switched to ${mode}`);
-    if (state.toggles.breakOnProxyChange) {
-      await closeConnectionsAfterProxyChange("mode");
-    }
-  } catch (error) {
-    state.mode = previous;
-    state.controllerStatus = "controller offline";
-    appendLog("warning", "mode", `Proxy mode refused: ${errorText(error)}`);
+  if (!["Global", "Rule", "Direct"].includes(mode)) throw new TypeError("Proxy mode is invalid");
+  if (!controllerActionAllowed(`Proxy mode ${mode}`, "mode")) return;
+  return enqueueControllerMutation({
+    lane: "proxy-mode",
+    kind: "mode",
+    target: mode,
+    source: "mode",
+    failureLabel: `Proxy mode ${mode} was not applied`,
+    successMessage: `Proxy mode switched to ${mode}`,
+    breakConnectionsReason: "mode",
+    invokeMutation: () => invoke("set_proxy_mode", { mode }),
+    readObserved: controllerModeFromSnapshot,
+    publishObserved: (observed) => { state.mode = observed; },
+  });
+}
+
+async function applyProxySelection(groupName, proxyName) {
+  const group = state.proxyGroups.find((item) => item.name === groupName);
+  if (!group) return false;
+  if (!controllerActionAllowed(`Selecting proxy in ${groupName}`, "proxy")) return false;
+  if (!group.options.some((item) => item.name === proxyName)) {
+    appendLog("error", "proxy", "Proxy selection is not an option in the current controller snapshot");
+    return false;
   }
+  return enqueueControllerMutation({
+    lane: `proxy-selector:${groupName}`,
+    kind: "selector",
+    groupName,
+    target: proxyName,
+    source: "proxy",
+    failureLabel: `Proxy selection ${groupName} → ${proxyName} was not applied`,
+    successMessage: `Proxy group ${groupName} switched to ${proxyName}`,
+    breakConnectionsReason: groupName,
+    invokeMutation: () => invoke("select_proxy", { group: groupName, proxy: proxyName }),
+    readObserved: (snapshot) => controllerSelectorFromSnapshot(snapshot, groupName),
+    publishObserved: (observed) => {
+      const current = state.proxyGroups.find((item) => item.name === groupName);
+      if (current && observed !== null) current.now = observed;
+    },
+  });
 }
 
 /// Applies the selected profile.
@@ -2646,7 +3315,7 @@ async function selectProfileById(id) {
       try {
         await invoke("select_profile", { id: previousActiveProfile });
       } catch (rollbackError) {
-        appendLog("warning", "profile", `Rollback selection failed: ${errorText(rollbackError)}`);
+        appendLog("error", "profile", `Rollback selection failed: ${errorText(rollbackError)}`);
       }
     }
     await loadProfilesSnapshot();
@@ -2663,7 +3332,7 @@ function bindPageEvents() {
       try {
         await applyToggle(key, checked, "ui");
       } catch (error) {
-        appendLog("warning", "ui", `${key} refused: ${errorText(error)}`);
+        appendLog("error", "ui", `${key} refused: ${errorText(error)}`);
       }
       renderPage();
     });
@@ -2671,13 +3340,24 @@ function bindPageEvents() {
 
   document.querySelectorAll("[data-theme-setting], [data-font-family]").forEach((input) => {
     input.addEventListener("change", async () => {
+      if (state.settingsUnavailableReason) {
+        appendLog("warning", "settings", state.settingsUnavailableReason);
+        renderPage();
+        return;
+      }
       try {
         const snapshot = await invoke("write_settings_snapshot", { settings: persistedSettingsFromUi() });
         applyPersistedSettings(snapshot);
         appendLog("info", "settings", "Appearance saved");
       } catch (error) {
         appendLog("error", "settings", `Appearance refused: ${errorText(error)}`);
-        await loadSettingsSnapshot().catch(() => null);
+        try {
+          await loadSettingsSnapshot();
+        } catch (refreshError) {
+          resetPersistedSettingsToSafeState();
+          state.settingsUnavailableReason = "Preferences are unavailable because the native settings snapshot could not be verified. Reload from disk before changing them.";
+          appendLog("error", "settings", `Appearance recovery failed: ${errorText(refreshError)}`);
+        }
       }
       renderPage();
     });
@@ -2755,21 +3435,10 @@ function bindPageEvents() {
 
   document.querySelectorAll("[data-group][data-node]").forEach((button) => {
     button.addEventListener("click", async (event) => {
-      const group = state.proxyGroups.find((item) => item.name === event.currentTarget.dataset.group);
-      if (!group) return;
-      const previous = group.now;
-      group.now = event.currentTarget.dataset.node;
-      try {
-        await invoke("select_proxy", { group: group.name, proxy: group.now });
-        appendLog("info", "proxy", `Proxy group ${group.name} switched to ${group.now}`);
-        if (state.toggles.breakOnProxyChange) {
-          await closeConnectionsAfterProxyChange(group.name);
-        }
-      } catch (error) {
-        group.now = previous;
-        state.controllerStatus = "controller offline";
-        appendLog("warning", "proxy", `Proxy selection refused: ${errorText(error)}`);
-      }
+      await applyProxySelection(
+        event.currentTarget.dataset.group,
+        event.currentTarget.dataset.node,
+      );
       renderPage();
     });
   });
@@ -2814,6 +3483,8 @@ function bindPageEvents() {
       const ruleProvider = event.currentTarget.dataset.ruleProviderUpdate;
       const name = proxyProvider ?? ruleProvider;
       const actionKey = providerActionKey(proxyProvider ? "proxy-update" : "rule-update", name);
+      if (!controllerActionAllowed(`${name} provider update`, "provider")) return;
+      const token = captureEngineIdentityToken();
       state.providerActions.add(actionKey);
       renderPage();
       try {
@@ -2822,13 +3493,16 @@ function bindPageEvents() {
         } else {
           await invoke("update_rule_provider", { name: ruleProvider });
         }
-        await loadProvidersSnapshot();
+        if (!engineIdentityTokenIsCurrent(token)) return;
+        await loadProvidersSnapshot(token);
+        if (!engineIdentityTokenIsCurrent(token)) return;
         appendLog("info", "provider", `${name} update requested through the engine controller`);
       } catch (error) {
+        if (!engineIdentityTokenIsCurrent(token)) return;
         state.controllerStatus = "controller offline";
-        appendLog("warning", "provider", `${name} update failed: ${errorText(error)}`);
+        recordProviderOperationFailure(`${name} update`, error);
       } finally {
-        state.providerActions.delete(actionKey);
+        if (engineIdentityTokenIsCurrent(token)) state.providerActions.delete(actionKey);
       }
       renderPage();
     });
@@ -2838,17 +3512,22 @@ function bindPageEvents() {
     button.addEventListener("click", async (event) => {
       const name = event.currentTarget.dataset.providerHealth;
       const actionKey = providerActionKey("proxy-health", name);
+      if (!controllerActionAllowed(`${name} provider health check`, "provider")) return;
+      const token = captureEngineIdentityToken();
       state.providerActions.add(actionKey);
       renderPage();
       try {
         await invoke("health_check_proxy_provider", { name });
-        await loadProvidersSnapshot();
+        if (!engineIdentityTokenIsCurrent(token)) return;
+        await loadProvidersSnapshot(token);
+        if (!engineIdentityTokenIsCurrent(token)) return;
         appendLog("info", "provider", `${name} health check requested through the engine controller`);
       } catch (error) {
+        if (!engineIdentityTokenIsCurrent(token)) return;
         state.controllerStatus = "controller offline";
-        appendLog("warning", "provider", `${name} health check failed: ${errorText(error)}`);
+        recordProviderOperationFailure(`${name} health check`, error);
       } finally {
-        state.providerActions.delete(actionKey);
+        if (engineIdentityTokenIsCurrent(token)) state.providerActions.delete(actionKey);
       }
       renderPage();
     });
@@ -2951,17 +3630,22 @@ function bindPageEvents() {
   document.querySelectorAll("[data-close-connection]").forEach((button) => {
     button.addEventListener("click", async (event) => {
       const id = event.currentTarget.dataset.closeConnection;
+      if (!controllerActionAllowed(`Closing connection ${id}`, "connection")) return;
+      const token = captureEngineIdentityToken();
       state.closingConnectionIds.add(id);
       renderPage();
       try {
         await invoke("close_connection", { id });
-        await loadControllerSnapshot();
+        if (!engineIdentityTokenIsCurrent(token)) return;
+        await loadControllerSnapshot(true, token);
+        if (!engineIdentityTokenIsCurrent(token)) return;
         appendLog("info", "connection", `Connection ${id} closed`);
       } catch (error) {
+        if (!engineIdentityTokenIsCurrent(token)) return;
         state.controllerStatus = "controller offline";
-        appendLog("warning", "connection", `Controller close failed for ${id}: ${errorText(error)}`);
+        appendLog("error", "connection", `Controller close failed for ${id}: ${errorText(error)}`);
       } finally {
-        state.closingConnectionIds.delete(id);
+        if (engineIdentityTokenIsCurrent(token)) state.closingConnectionIds.delete(id);
       }
       renderPage();
     });
@@ -3042,7 +3726,7 @@ function bindGlobalEvents() {
     if (shortcutAction) {
       event.preventDefault();
       shortcutAction().catch((error) => {
-        appendLog("warning", "shortcut", errorText(error));
+        appendLog("error", "shortcut", errorText(error));
         renderPage();
       });
     }
@@ -3052,27 +3736,44 @@ function bindGlobalEvents() {
 /// Session-only view options. The 0.4.0 preference store has no field for them,
 /// so they change what this window shows and are never written to disk.
 const SESSION_TOGGLES = new Set(["breakOnProxyChange", "hideUnavailable", "showProcess"]);
+const PERSISTED_TOGGLES = new Set([
+  "startAtLogin",
+  "silentStart",
+  "checkForUpdates",
+  "retainWindowBounds",
+]);
 
 async function applyToggle(key, checked, source) {
   const isEngineMutation = key === "systemProxy" || key === "tunMode";
+  if (PERSISTED_TOGGLES.has(key) && state.settingsUnavailableReason) {
+    throw new Error(state.settingsUnavailableReason);
+  }
+  if (isEngineMutation && !engineToggleChangeAllowed(key, checked, source)) {
+    renderPage();
+    return false;
+  }
   if (isEngineMutation && state.engineMutationBusy) {
     throw new Error("A network mode change is already in progress");
   }
   const previous = state.toggles[key];
   state.toggles[key] = checked;
+  const engineRequestId = isEngineMutation ? runtime.engineStatusRequestId + 1 : null;
   if (isEngineMutation) {
+    runtime.engineStatusRequestId = engineRequestId;
     state.engineMutationBusy = true;
     renderPage();
   }
   try {
     if (key === "systemProxy") {
       const status = await invoke("set_system_proxy_enabled", { enabled: checked });
+      if (engineRequestId !== runtime.engineStatusRequestId) return false;
       applyEngineStatus(status);
       await loadNetworkDiagnostics();
       await loadRuntimeProjection();
       if (state.engine.systemProxyActive) await loadControllerSnapshotWithRetry(6, 500);
     } else if (key === "tunMode") {
       const status = await invoke("set_tun_enabled", { enabled: checked });
+      if (engineRequestId !== runtime.engineStatusRequestId) return false;
       applyEngineStatus(status);
       await loadRuntimeProjection();
       if (state.engine.tunnelActive) await loadControllerSnapshotWithRetry(12, 500);
@@ -3087,13 +3788,22 @@ async function applyToggle(key, checked, source) {
       applyPersistedSettings(snapshot);
     }
     appendLog("info", source, `${key} changed to ${checked ? "on" : "off"}`);
+    return true;
   } catch (error) {
+    if (isEngineMutation && engineRequestId !== runtime.engineStatusRequestId) return false;
     state.toggles[key] = previous;
+    if (key === "startAtLogin") {
+      try {
+        await loadSettingsSnapshot();
+      } catch (refreshError) {
+        appendLog("error", "settings", `Could not refresh the Login Item state after refusal: ${errorText(refreshError)}`);
+      }
+    }
     if (isEngineMutation) {
       try {
         await loadEngineStatus();
       } catch (refreshError) {
-        appendLog("warning", "engine", `Could not refresh mode state after refusal: ${errorText(refreshError)}`);
+        appendLog("error", "engine", `Could not refresh mode state after refusal: ${errorText(refreshError)}`);
       }
     }
     throw error;
@@ -3106,8 +3816,18 @@ async function applyToggle(key, checked, source) {
 }
 
 export async function handleAction(action) {
+  if (action === "reload-dashboard") {
+    await reloadPayload();
+    return;
+  }
   if (action === "open-settings") {
     state.activePage = "settings";
+  }
+  if (action === "open-migration-profiles") {
+    state.activePage = "profiles";
+    await invoke("open_page", { page: "profiles" });
+    renderPage();
+    return;
   }
   if (action === "begin-migration-handoff") {
     state.migrationHandoffStatus = { state: "in_progress" };
@@ -3240,13 +3960,17 @@ export async function handleAction(action) {
     if (!state.toggles.showProxyFilter) state.proxyFilter = "";
   }
   if (action === "break-proxy-connections") {
+    if (!controllerActionAllowed("Breaking proxy connections", "proxy")) return;
+    const token = captureEngineIdentityToken();
     const count = state.connections.length;
     try {
       await invoke("close_all_connections");
+      if (!engineIdentityTokenIsCurrent(token)) return;
       appendLog("warning", "proxy", `Broke ${count} connection(s)`);
-      await loadControllerSnapshot();
+      await loadControllerSnapshot(true, token);
     } catch (error) {
-      appendLog("warning", "proxy", `Break connections failed: ${errorText(error)}`);
+      if (!engineIdentityTokenIsCurrent(token)) return;
+      appendLog("error", "proxy", `Break connections failed: ${errorText(error)}`);
     }
   }
   if (action === "open-providers") {
@@ -3257,21 +3981,26 @@ export async function handleAction(action) {
     await loadRulesSnapshot();
   }
   if (action === "close-all") {
+    if (!controllerActionAllowed("Closing all connections", "connection")) return;
+    const token = captureEngineIdentityToken();
     const count = state.connections.length;
     state.closingAllConnections = true;
     renderPage();
     try {
       await invoke("close_all_connections");
+      if (!engineIdentityTokenIsCurrent(token)) return;
       appendLog("warning", "connection", `Closed ${count} active connections`);
-      await loadControllerSnapshot();
+      await loadControllerSnapshot(true, token);
     } catch (error) {
+      if (!engineIdentityTokenIsCurrent(token)) return;
       state.controllerStatus = "controller offline";
-      appendLog("warning", "connection", `Controller close-all failed; keeping local rows: ${errorText(error)}`);
+      appendLog("error", "connection", `Controller close-all failed; keeping local rows: ${errorText(error)}`);
     } finally {
-      state.closingAllConnections = false;
+      if (engineIdentityTokenIsCurrent(token)) state.closingAllConnections = false;
     }
   }
   if (action === "delay-test") {
+    if (!controllerActionAllowed("Delay test", "proxy")) return;
     if (state.toggles.testingDelays) {
       cancelDelayTest();
       appendLog("info", "proxy", "Delay test cancelled");
@@ -3352,7 +4081,7 @@ export async function handleAction(action) {
             .map(([kind, count]) => `${count} ${delayFailureLabel(kind).toLowerCase()}`)
             .join(", ");
           appendLog(
-            failed ? "warning" : "info",
+            failed ? "error" : "info",
             "proxy",
             `Delay test (${activeGroup?.name ?? "group"}): ${ok} ok${failed ? `, ${failed} failed${failureSummary ? ` (${failureSummary})` : ""}` : ""} · concurrency ${delayConcurrency()}`,
           );
@@ -3360,7 +4089,7 @@ export async function handleAction(action) {
       } catch (error) {
         if ((runtime.delayTestGeneration ?? 0) === generation) {
           finalizeDelayTestNames(names);
-          appendLog("warning", "proxy", `Delay test failed: ${errorText(error)}`);
+          appendLog("error", "proxy", `Delay test failed: ${errorText(error)}`);
         }
       } finally {
         if ((runtime.delayTestGeneration ?? 0) === generation) {
@@ -3371,8 +4100,9 @@ export async function handleAction(action) {
     }
   }
   if (action === "reload-proxies") {
+    if (!controllerActionAllowed("Reloading proxies", "proxy")) return;
     const live = await loadControllerSnapshot();
-    appendLog(live ? "info" : "warning", "proxy", live ? "Controller snapshot reloaded" : "Controller unavailable; keeping local data");
+    appendLog(live ? "info" : "error", "proxy", live ? "Controller snapshot reloaded" : "Controller unavailable; keeping local data");
   }
   if (action === "copy-proxy-exports") {
     const port = state.projection.mixedPort;
@@ -3416,17 +4146,18 @@ export async function handleAction(action) {
       renderGlassOverlays();
       return;
     } catch (error) {
-      appendLog("warning", "network", errorText(error));
+      appendLog("error", "network", errorText(error));
     }
   }
   if (action === "preview-runtime-config") {
+    if (!runtimeProjectionActionAllowed("Configuration preview")) return;
     try {
       const body = await invoke("read_runtime_config_text");
       state.glassDialog = { kind: "preview-config", payload: body };
       renderGlassOverlays();
       return;
     } catch (error) {
-      appendLog("warning", "engine", `Configuration preview failed: ${errorText(error)}`);
+      appendLog("error", "engine", `Configuration preview failed: ${errorText(error)}`);
     }
   }
   if (action === "dns-query") {
@@ -3461,7 +4192,7 @@ export async function handleAction(action) {
       await invoke("reveal_home_directory");
       appendLog("info", "shell", "Home Directory opened in Finder");
     } catch (error) {
-      appendLog("warning", "shell", `Open Folder failed: ${errorText(error)}`);
+      appendLog("error", "shell", `Open Folder failed: ${errorText(error)}`);
     }
   }
   if (action === "retry-system-proxy") {
@@ -3470,13 +4201,17 @@ export async function handleAction(action) {
   }
   if (action === "retry-tun-mode") {
     try {
-      await applyToggle("tunMode", true, "explicit retry");
+      const admitted = await applyToggle("tunMode", true, "explicit retry");
+      if (!admitted) {
+        renderPage();
+        return;
+      }
       if (state.engine.state === "AwaitingApproval") {
         await invoke("open_login_items_settings");
         appendLog("info", "shell", "Opened System Settings › General › Login Items & Extensions");
       }
     } catch (error) {
-      appendLog("warning", "engine", `TUN retry failed: ${errorText(error)}`);
+      appendLog("error", "engine", `TUN retry failed: ${errorText(error)}`);
     }
     renderPage();
   }
@@ -3496,7 +4231,7 @@ export async function handleAction(action) {
       renderGlassOverlays();
       return;
     } catch (error) {
-      appendLog("warning", "credentials", errorText(error));
+      appendLog("error", "credentials", errorText(error));
     }
   }
   if (action === "update-profile-from-inspector") {
@@ -3558,15 +4293,40 @@ export async function handleAction(action) {
     }
   }
   if (action === "migrate-legacy-profiles") {
-    // This release imports only validated sing-box profiles, so the legacy
-    // Clash documents are reported, never converted. The backend message says
-    // what was found and what to do instead.
+    if (state.profilesUnavailableReason) {
+      appendLog("error", "profile", `Profile repository is unavailable: ${state.profilesUnavailableReason}`);
+      renderPage();
+      return;
+    }
+    if (!engineIsOff()) {
+      appendLog("warning", "profile", REASONS.engineNotOff);
+      renderPage();
+      return;
+    }
     try {
-      const imported = await invoke("migrate_legacy_cfw_profiles");
-      await loadProfilesSnapshot();
-      appendLog("info", "profile", `Imported ${imported.length} legacy profile(s)`);
+      const preview = normalizeLegacyProfileMigrationPreview(
+        await invoke("preview_legacy_cfw_profile_migration"),
+      );
+      state.legacyProfileMigrationPreview = preview.status === "ready" ? preview : null;
+      if (preview.status === "ready") {
+        state.glassDialog = { kind: "legacy-profile-migration", payload: preview, busy: false, error: null };
+      } else if (preview.status === "not_subscription") {
+        state.glassDialog = {
+          kind: "info",
+          payload: { title: "Legacy profile is local", body: preview.reason },
+        };
+      } else {
+        state.glassDialog = {
+          kind: "info",
+          payload: { title: "No selected legacy subscription", body: "The legacy settings file does not select a profile that can be migrated." },
+        };
+      }
+      renderGlassOverlays();
+      return;
     } catch (error) {
-      state.glassDialog = { kind: "info", payload: { title: "Legacy CFW profiles", body: errorText(error) } };
+      const message = errorText(error);
+      appendLog("error", "migration", `Legacy profile preview failed: ${message}`);
+      state.glassDialog = { kind: "info", payload: { title: "Legacy migration failed", body: message } };
       renderGlassOverlays();
       return;
     }
@@ -3592,7 +4352,7 @@ export async function handleAction(action) {
         updated += 1;
       } catch (error) {
         failed += 1;
-        appendLog("warning", "profile", `Update failed for ${profile.name}: ${errorText(error)}`);
+        appendLog("error", "profile", `Update failed for ${profile.name}: ${errorText(error)}`);
       }
     }
     await loadProfilesSnapshot();
@@ -3600,11 +4360,11 @@ export async function handleAction(action) {
       try {
         await applyActiveProfile("Update All");
       } catch (error) {
-        appendLog("warning", "profile", `Active profile reapply failed: ${errorText(error)}`);
+        appendLog("error", "profile", `Active profile reapply failed: ${errorText(error)}`);
       }
     }
     appendLog(
-      failed ? "warning" : "info",
+      failed ? "error" : "info",
       "profile",
       `Update All completed: ${updated} updated${failed ? `, ${failed} failed` : ""}${local ? `, ${local} without a subscription URL` : ""}`,
     );
@@ -3627,6 +4387,8 @@ export async function handleAction(action) {
     state.profileInspector = null;
   }
   if (action === "update-all-providers") {
+    if (!controllerActionAllowed("Update All", "provider")) return;
+    const token = captureEngineIdentityToken();
     state.providerBulkActions.add(action);
     renderPage();
     try {
@@ -3634,61 +4396,82 @@ export async function handleAction(action) {
         invoke("update_all_proxy_providers"),
         invoke("update_all_rule_providers"),
       ]);
-      if (proxyOutcome.status === "rejected") appendLog("warning", "provider", `Proxy provider list failed: ${errorText(proxyOutcome.reason)}`);
-      if (ruleOutcome.status === "rejected") appendLog("warning", "provider", `Rule provider list failed: ${errorText(ruleOutcome.reason)}`);
-      await loadProvidersSnapshot();
+      if (!engineIdentityTokenIsCurrent(token)) return;
+      if (proxyOutcome.status === "rejected") recordProviderOperationFailure("Proxy provider update", proxyOutcome.reason);
+      if (ruleOutcome.status === "rejected") recordProviderOperationFailure("Rule provider update", ruleOutcome.reason);
+      await loadProvidersSnapshot(token);
+      if (!engineIdentityTokenIsCurrent(token)) return;
       if (proxyOutcome.status === "fulfilled" && ruleOutcome.status === "fulfilled") {
         const proxySummary = providerBatchSummary("Proxy providers", proxyOutcome.value);
         const ruleSummary = providerBatchSummary("Rule providers", ruleOutcome.value);
-        const level = providerBatchSucceeded(proxyOutcome.value) && providerBatchSucceeded(ruleOutcome.value) ? "info" : "warning";
+        const level = providerBatchSucceeded(proxyOutcome.value) && providerBatchSucceeded(ruleOutcome.value) ? "info" : "error";
         appendLog(level, "provider", `Update All completed · ${proxySummary} · ${ruleSummary}`);
       } else {
-        appendLog("warning", "provider", "Update All unavailable; the controller rejected the provider capability");
+        appendLog("info", "provider", "Update All did not complete; see the provider result above");
       }
     } catch (error) {
+      if (!engineIdentityTokenIsCurrent(token)) return;
       state.controllerStatus = "controller offline";
-      appendLog("warning", "provider", `Update All failed: ${errorText(error)}`);
+      recordProviderOperationFailure("Update All", error);
     } finally {
-      state.providerBulkActions.delete(action);
-      renderPage();
+      if (engineIdentityTokenIsCurrent(token)) {
+        state.providerBulkActions.delete(action);
+        renderPage();
+      }
     }
   }
   if (action === "health-check-all") {
+    if (!controllerActionAllowed("Health Check All", "provider")) return;
+    const token = captureEngineIdentityToken();
     state.providerBulkActions.add(action);
     renderPage();
     try {
       const proxyProviders = await invoke("health_check_all_proxy_providers");
-      await loadProvidersSnapshot();
-      appendLog(providerBatchSucceeded(proxyProviders) ? "info" : "warning", "provider", providerBatchSummary("Health Check All", proxyProviders));
+      if (!engineIdentityTokenIsCurrent(token)) return;
+      await loadProvidersSnapshot(token);
+      if (!engineIdentityTokenIsCurrent(token)) return;
+      appendLog(providerBatchSucceeded(proxyProviders) ? "info" : "error", "provider", providerBatchSummary("Health Check All", proxyProviders));
     } catch (error) {
+      if (!engineIdentityTokenIsCurrent(token)) return;
       state.controllerStatus = "controller offline";
-      appendLog("warning", "provider", `Health Check All failed: ${errorText(error)}`);
+      recordProviderOperationFailure("Health Check All", error);
     } finally {
-      state.providerBulkActions.delete(action);
-      renderPage();
+      if (engineIdentityTokenIsCurrent(token)) {
+        state.providerBulkActions.delete(action);
+        renderPage();
+      }
     }
   }
   if (action === "flush-fake-ip-cache") {
+    if (!controllerActionAllowed("Fake IP cache flush", "cache")) return;
+    const token = captureEngineIdentityToken();
     try {
       await invoke("flush_fake_ip_cache");
+      if (!engineIdentityTokenIsCurrent(token)) return;
       appendLog("info", "cache", "Fake IP cache flushed through the engine controller");
     } catch (error) {
+      if (!engineIdentityTokenIsCurrent(token)) return;
       state.controllerStatus = "controller offline";
-      appendLog("warning", "cache", `Fake IP cache flush failed: ${errorText(error)}`);
+      appendLog("error", "cache", `Fake IP cache flush failed: ${errorText(error)}`);
     }
   }
   if (action === "reload-rules") {
+    if (!controllerActionAllowed("Rules reload", "rules")) return;
     const loaded = await loadRulesSnapshot();
-    appendLog(loaded ? "info" : "warning", "rules", loaded ? `Loaded ${state.rules.length} controller rules` : "Rules controller endpoint unavailable");
+    appendLog(loaded ? "info" : "error", "rules", loaded ? `Loaded ${state.rules.length} controller rules` : "Rules controller endpoint unavailable");
   }
   if (action === "toggle-log-stream") {
     const pause = !state.logsPaused;
+    if (!pause && !controllerActionAllowed("Starting request logs", "logs")) return;
+    const previous = state.logsPaused;
+    state.logsPaused = pause;
     try {
-      await setLogStreamRunning(!pause);
-      state.logsPaused = pause;
+      const changed = await setLogStreamRunning(!pause);
+      if (!changed) return;
       appendLog("info", "logs", `Request logs ${pause ? "stopped" : "started"}`);
     } catch (error) {
-      appendLog("warning", "logs", `Log stream change failed: ${errorText(error)}`);
+      if (!pause) state.logsPaused = previous;
+      appendLog("error", "logs", `Log stream change failed: ${errorText(error)}`);
     }
   }
   if (action === "clear-logs") {
@@ -3713,17 +4496,21 @@ export async function handleAction(action) {
       await invoke("reveal_logs_directory");
       appendLog("info", "logs", "Logs folder opened in Finder");
     } catch (error) {
-      appendLog("warning", "logs", `Open Folder failed: ${errorText(error)}`);
+      appendLog("error", "logs", `Open Folder failed: ${errorText(error)}`);
     }
   }
   if (action === "toggle-connection-stream") {
     const pause = !state.connectionPaused;
+    if (!pause && !controllerActionAllowed("Starting connection stream", "connections")) return;
+    const previous = state.connectionPaused;
+    state.connectionPaused = pause;
     try {
-      await setConnectionsStreamRunning(!pause);
-      state.connectionPaused = pause;
+      const changed = await setConnectionsStreamRunning(!pause);
+      if (!changed) return;
       appendLog("info", "connections", `Connection stream ${pause ? "stopped" : "started"}`);
     } catch (error) {
-      appendLog("warning", "connections", `Connection stream change failed: ${errorText(error)}`);
+      if (!pause) state.connectionPaused = previous;
+      appendLog("error", "connections", `Connection stream change failed: ${errorText(error)}`);
     }
   }
   if (action === "close-connection-detail") {
@@ -3733,6 +4520,7 @@ export async function handleAction(action) {
     state.connectionSearch = "";
   }
   if (action === "save-settings") {
+    if (state.settingsUnavailableReason) throw new Error(state.settingsUnavailableReason);
     const snapshot = await invoke("write_settings_snapshot", { settings: persistedSettingsFromUi() });
     applyPersistedSettings(snapshot);
     appendLog("info", "settings", "Preferences saved");
@@ -3743,7 +4531,7 @@ export async function handleAction(action) {
       const result = await invoke("check_for_updates");
       await promptAvailableUpdate(result);
     } catch (error) {
-      appendLog("warning", "updater", `Update check failed: ${errorText(error)}`);
+      appendLog("error", "updater", `Update check failed: ${errorText(error)}`);
       const result = invalidateUpdateAuthorization(error);
       openProductAboutDialog({
         autoCheck: true,
@@ -3757,6 +4545,7 @@ export async function handleAction(action) {
     appendLog("info", "settings", "Preferences reloaded from disk");
   }
   if (action === "reset-settings") {
+    if (state.settingsUnavailableReason) throw new Error(state.settingsUnavailableReason);
     // WKWebView often swallows window.confirm — use in-app glass dialog.
     state.glassDialog = { kind: "reset-settings" };
     renderGlassOverlays();
@@ -3788,17 +4577,26 @@ function appendLogLines(lines) {
   state.logs = withLogRows(state.logs, normalized);
 }
 
-async function closeConnectionsAfterProxyChange(reason) {
+async function closeConnectionsAfterProxyChange(
+  reason,
+  token = captureEngineIdentityToken(),
+  publishAllowed = () => true,
+) {
+  if (!engineIdentityTokenIsCurrent(token) || !publishAllowed()) return false;
   const count = state.connections.length;
-  if (!count) return;
+  if (!count) return true;
   try {
     await invoke("close_all_connections");
+    if (!engineIdentityTokenIsCurrent(token) || !publishAllowed()) return false;
     state.connections = [];
     state.connectionStream.rows = new Map();
     appendLog("warning", "connection", `Closed ${count} connection(s) after ${reason} switch`);
+    return true;
   } catch (error) {
+    if (!engineIdentityTokenIsCurrent(token) || !publishAllowed()) return false;
     state.controllerStatus = "controller offline";
-    appendLog("warning", "connection", `Connection cleanup after ${reason} switch failed: ${errorText(error)}`);
+    appendLog("error", "connection", `Connection cleanup after ${reason} switch failed: ${errorText(error)}`);
+    return false;
   }
 }
 
@@ -3810,6 +4608,7 @@ async function openProfileInspector(id, mode, focusKey = null) {
       inspector.svg = await invoke("profile_qrcode_svg", { id });
     } catch (error) {
       inspector.error = errorText(error);
+      appendLog("error", "profile", `Could not render the profile QR code: ${inspector.error}`);
     }
   }
   state.profileInspector = inspector;
@@ -3840,11 +4639,17 @@ async function reloadPayload() {
   await loadRetirementStatus();
   await loadNetworkDiagnostics();
   await loadProfilesSnapshot();
+  // The projection belongs to the active profile, so it must be re-read after
+  // the profile snapshot.  Keeping the previous projection here can make the
+  // General and Settings pages claim a stale port or controller endpoint.
+  await loadRuntimeProjection();
+  const controllerReady = await loadControllerSnapshotWithRetry();
+  if (controllerReady) {
+    await loadProvidersSnapshot();
+    if (state.activePage === "rules") await loadRulesSnapshot();
+  }
+  appendLog("info", "shell", "Dashboard reloaded");
   renderPage();
-  Promise.all([loadControllerSnapshotWithRetry(), loadProvidersSnapshot()]).finally(() => {
-    appendLog("info", "shell", "Dashboard reloaded");
-    renderPage();
-  });
 }
 
 function applyBootPayload(payload) {
@@ -3861,7 +4666,7 @@ function markHandoffStatusUnverifiable(error) {
     code: "migration_handoff_task_failed",
     message: "Migration handoff status could not be verified. Review the application log before retrying.",
   };
-  appendLog("warning", "migration", `Migration handoff state could not be trusted: ${errorText(error)}`);
+  appendLog("error", "migration", `Migration handoff state could not be trusted: ${errorText(error)}`);
 }
 
 async function loadBootPayload() {
@@ -3891,11 +4696,24 @@ async function acknowledgeMigrationHandoffRendererReady() {
 /// Applies an engine status envelope, validating the runtime identity before the
 /// dashboard is allowed to say the network is up.
 function applyEngineStatus(payload) {
+  const previous = state.engine;
+  let next;
   try {
-    state.engine = normalizeEngineStatus(payload);
+    next = normalizeEngineStatus(payload);
   } catch (error) {
-    state.engine = { ...defaultEngineStatus, availabilityReason: errorText(error) };
-    appendLog("warning", "engine", `Engine state could not be trusted: ${errorText(error)}`);
+    next = { ...defaultEngineStatus, availabilityReason: errorText(error) };
+    appendLog("error", "engine", `Engine state could not be trusted: ${errorText(error)}`);
+  }
+  state.engine = next;
+  if (engineRuntimeIdentityChanged(previous, next)) {
+    invalidateEngineBoundState(next.active);
+  } else if (!next.active) {
+    // Off is an expected steady state. Repeated snapshots still clear any
+    // event/request result that arrived between native status reads.
+    clearControllerBackedState();
+    clearProviderBackedState();
+    state.controllerVersion = null;
+    state.controllerStatus = "engine off";
   }
   // Switches express the user's desired mode. Runtime readiness remains a
   // separate label/status dot; pending and failed requests stay switchable Off
@@ -3913,27 +4731,38 @@ function applyEngineStatus(payload) {
 }
 
 async function loadEngineStatus() {
+  const requestId = runtime.engineStatusRequestId + 1;
+  runtime.engineStatusRequestId = requestId;
   try {
-    applyEngineStatus(await invoke("engine_snapshot"));
+    const snapshot = await invoke("engine_snapshot");
+    if (requestId !== runtime.engineStatusRequestId) return false;
+    applyEngineStatus(snapshot);
   } catch (error) {
+    if (requestId !== runtime.engineStatusRequestId) return false;
     state.engine = { ...defaultEngineStatus, availabilityReason: errorText(error) };
-    appendLog("warning", "engine", `Unable to read the engine state: ${errorText(error)}`);
+    invalidateEngineBoundState(false);
+    appendLog("error", "engine", `Unable to read the engine state: ${errorText(error)}`);
   }
   try {
     state.geoipStatus = await invoke("geoip_database_status");
   } catch (error) {
     state.geoipStatus = null;
-    appendLog("warning", "geoip", `Unable to read the GeoIP database status: ${errorText(error)}`);
+    appendLog("error", "geoip", `Unable to read the GeoIP database status: ${errorText(error)}`);
   }
   if (state.engine.active) {
+    const token = captureEngineIdentityToken();
     try {
-      state.controllerVersion = await invoke("controller_version");
-    } catch (_error) {
+      const version = await invoke("controller_version");
+      if (engineIdentityTokenIsCurrent(token)) state.controllerVersion = version;
+    } catch (error) {
+      if (!engineIdentityTokenIsCurrent(token)) return false;
       state.controllerVersion = null;
+      appendLog("error", "controller", `Unable to read the controller version: ${errorText(error)}`);
     }
   } else {
     state.controllerVersion = null;
   }
+  return true;
 }
 
 /// Reads the legacy-retirement state machine so the dashboard can surface the
@@ -3944,7 +4773,7 @@ async function loadRetirementStatus() {
     state.retirement = normalizeRetirementStatus(await invoke("legacy_retirement_status"));
   } catch (error) {
     state.retirement = unverifiableRetirementStatus(errorText(error));
-    appendLog("warning", "engine", `Unable to read the legacy retirement state: ${errorText(error)}`);
+    appendLog("error", "engine", `Unable to read the legacy retirement state: ${errorText(error)}`);
   }
 }
 
@@ -3953,7 +4782,7 @@ async function loadPlatformDesign() {
     state.platform = await invoke("current_platform_design");
   } catch (error) {
     state.platform = null;
-    appendLog("warning", "shell", `Unable to read the platform design: ${errorText(error)}`);
+    appendLog("error", "shell", `Unable to read the platform design: ${errorText(error)}`);
   }
 }
 
@@ -3961,6 +4790,26 @@ async function loadPlatformDesign() {
 /// inbound and controller endpoint instead of a remembered preference. Without a
 /// selected profile there is no projection, which is reported, not invented.
 async function loadRuntimeProjection() {
+  if (state.profilesUnavailableReason) {
+    state.projection = {
+      mixedPort: null,
+      listenAddress: null,
+      controller: null,
+      logLevel: null,
+      error: `profile state is unavailable: ${state.profilesUnavailableReason}`,
+    };
+    return false;
+  }
+  if (!state.profiles.some((profile) => profile.active === true)) {
+    state.projection = {
+      mixedPort: null,
+      listenAddress: null,
+      controller: null,
+      logLevel: null,
+      error: "no active profile is selected",
+    };
+    return false;
+  }
   try {
     const document = JSON.parse(await invoke("read_runtime_config_text"));
     const inbound = (document.inbounds ?? []).find((entry) => entry?.type === "mixed");
@@ -3971,6 +4820,7 @@ async function loadRuntimeProjection() {
       logLevel: document.log?.level ?? null,
       error: null,
     };
+    return true;
   } catch (error) {
     state.projection = {
       mixedPort: null,
@@ -3979,6 +4829,8 @@ async function loadRuntimeProjection() {
       logLevel: null,
       error: errorText(error),
     };
+    appendLog("error", "profile", `Active profile projection could not be read: ${state.projection.error}`);
+    return false;
   }
 }
 
@@ -3992,34 +4844,64 @@ async function loadNetworkDiagnostics() {
     state.networkDiagnostics = await invoke("network_diagnostics");
   } catch (error) {
     state.networkDiagnostics = null;
-    appendLog("warning", "network", `Unable to inspect macOS network services: ${errorText(error)}`);
+    appendLog("error", "network", `Unable to inspect macOS network services: ${errorText(error)}`);
   }
 }
 
-async function loadControllerSnapshot() {
+function resetControllerStateForInactiveEngine() {
+  clearControllerBackedState();
+  clearProviderBackedState();
+  state.controllerStatus = "engine off";
+}
+
+async function loadControllerSnapshot(
+  reportFailure = true,
+  token = captureEngineIdentityToken(),
+  publishAllowed = () => true,
+  observe = null,
+) {
+  if (!engineIdentityTokenIsCurrent(token) || !publishAllowed()) {
+    if (!state.engine.active) resetControllerStateForInactiveEngine();
+    return false;
+  }
   try {
     const snapshot = await invoke("controller_snapshot");
+    if (!engineIdentityTokenIsCurrent(token) || !publishAllowed()) return false;
     if (!snapshot) {
       clearControllerBackedState();
       state.controllerStatus = "controller offline";
+      if (reportFailure) appendLog("error", "controller", "Running engine returned no controller snapshot");
       return false;
     }
+    if (observe) observe(snapshot);
     applyControllerSnapshot(snapshot);
+    applyPendingControllerIntents();
     invoke("refresh_tray_menu").catch((error) => {
-      appendLog("warning", "tray", `Tray refresh failed: ${errorText(error)}`);
+      if (engineIdentityTokenIsCurrent(token) && publishAllowed()) {
+        appendLog("error", "tray", `Tray refresh failed: ${errorText(error)}`);
+      }
     });
     return true;
   } catch (error) {
+    if (!engineIdentityTokenIsCurrent(token) || !publishAllowed()) return false;
     clearControllerBackedState();
     state.controllerStatus = "controller offline";
-    appendLog("warning", "controller", errorText(error));
+    if (reportFailure) appendLog("error", "controller", errorText(error));
     return false;
   }
 }
 
 async function loadControllerSnapshotWithRetry(attempts = 4, delayMs = 600) {
+  const token = captureEngineIdentityToken();
+  if (!engineIdentityTokenIsCurrent(token)) {
+    resetControllerStateForInactiveEngine();
+    return false;
+  }
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (await loadControllerSnapshot()) return true;
+    if (!engineIdentityTokenIsCurrent(token)) return false;
+    const finalAttempt = attempt + 1 === attempts;
+    if (await loadControllerSnapshot(finalAttempt, token)) return true;
+    if (!engineIdentityTokenIsCurrent(token)) return false;
     if (attempt + 1 < attempts) await sleep(delayMs);
   }
   return false;
@@ -4028,29 +4910,69 @@ async function loadControllerSnapshotWithRetry(attempts = 4, delayMs = 600) {
 /// Nothing controller-backed survives an unreachable controller: an empty page
 /// is honest, stale proxy groups are not.
 function clearControllerBackedState() {
+  state.mode = null;
+  state.logLevel = null;
+  state.toggles.allowLan = false;
   state.proxyGroups = [];
+  state.activeProxyGroup = null;
+  state.proxyBlinkNode = null;
   state.connections = [];
   state.rules = [];
-  state.connectionStream.rows = new Map();
+  state.connectionStream = {
+    at: 0,
+    uploadTotal: 0,
+    downloadTotal: 0,
+    rows: new Map(),
+  };
+  state.traffic.upload = 0;
+  state.traffic.download = 0;
+  state.connectionDetailId = null;
+  state.closingConnectionIds.clear();
+  state.closingAllConnections = false;
 }
 
-async function loadProvidersSnapshot() {
+function clearProviderBackedState() {
+  state.providers = [];
+  state.ruleProviders = [];
+  state.providerCapabilityError = null;
+  state.providerActions.clear();
+  state.providerBulkActions.clear();
+}
+
+async function loadProvidersSnapshot(token = captureEngineIdentityToken()) {
+  if (state.engine.providerManagementAvailable !== true) {
+    clearProviderBackedState();
+    state.providerCapabilityError = PROVIDER_CAPABILITY_UNAVAILABLE;
+    return false;
+  }
+  if (!engineIdentityTokenIsCurrent(token)) {
+    if (!state.engine.active) clearProviderBackedState();
+    return false;
+  }
   try {
     const snapshot = await invoke("providers_snapshot");
+    if (!engineIdentityTokenIsCurrent(token)) return false;
     if (!applyProvidersSnapshot(snapshot)) return false;
     return true;
   } catch (error) {
-    state.providers = [];
-    state.ruleProviders = [];
+    if (!engineIdentityTokenIsCurrent(token)) return false;
+    clearProviderBackedState();
     state.providerCapabilityError = errorText(error);
-    appendLog("warning", "provider", state.providerCapabilityError);
+    if (!state.providerCapabilityError.startsWith(PROVIDER_CAPABILITY_UNSUPPORTED_PREFIX)) {
+      appendLog("error", "provider", state.providerCapabilityError);
+    }
     return false;
   }
 }
 
-async function loadRulesSnapshot() {
+async function loadRulesSnapshot(token = captureEngineIdentityToken()) {
+  if (!engineIdentityTokenIsCurrent(token)) {
+    if (!state.engine.active) state.rules = [];
+    return false;
+  }
   try {
     const snapshot = await invoke("rules_snapshot");
+    if (!engineIdentityTokenIsCurrent(token)) return false;
     const rules = Array.isArray(snapshot?.rules) ? snapshot.rules : [];
     state.rules = rules.map((rule) => ({
       index: rule.index == null ? "unavailable" : String(rule.index),
@@ -4064,8 +4986,9 @@ async function loadRulesSnapshot() {
     }));
     return true;
   } catch (error) {
+    if (!engineIdentityTokenIsCurrent(token)) return false;
     state.rules = [];
-    appendLog("warning", "rules", errorText(error));
+    appendLog("error", "rules", errorText(error));
     return false;
   }
 }
@@ -4073,7 +4996,7 @@ async function loadRulesSnapshot() {
 async function loadProfilesSnapshot() {
   try {
     const profiles = await invoke("profiles_snapshot");
-    if (!Array.isArray(profiles)) return false;
+    if (!Array.isArray(profiles)) throw new TypeError("profile snapshot is not an array");
     const known = new Map(state.profiles.map((profile) => [profile.id, profile]));
     state.profiles = profiles.map((profile) => ({
       id: profile.id,
@@ -4090,28 +5013,34 @@ async function loadProfilesSnapshot() {
       sourceUrl: known.get(profile.id)?.sourceUrl,
       sourceError: known.get(profile.id)?.sourceError ?? null,
     }));
+    state.profilesUnavailableReason = null;
     if (state.credentialSetup && !state.profiles.some(({ id }) => id === state.credentialSetup.profileId)) {
       state.credentialSetup = null;
     }
     return true;
   } catch (error) {
     state.profiles = [];
-    appendLog("warning", "profile", errorText(error));
+    state.profilesUnavailableReason = errorText(error);
+    appendLog("error", "profile", state.profilesUnavailableReason);
     return false;
   }
 }
 
 async function startLiveStreams() {
+  const engineEpoch = runtime.engineIdentityEpoch;
   const running = Boolean(state.engine.active);
   const streams = [
     ["connections", () => setConnectionsStreamRunning(running && !state.connectionPaused)],
     ["logs", () => setLogStreamRunning(running && !state.logsPaused)],
   ];
   for (const [name, apply] of streams) {
+    if (engineEpoch !== runtime.engineIdentityEpoch) return;
     try {
       await apply();
+      if (engineEpoch !== runtime.engineIdentityEpoch) return;
     } catch (error) {
-      appendLog("warning", name, `Live stream unavailable: ${errorText(error)}`);
+      if (engineEpoch !== runtime.engineIdentityEpoch) return;
+      appendLog("error", name, `Live stream unavailable: ${errorText(error)}`);
     }
   }
 }
@@ -4124,11 +5053,16 @@ async function bootstrap() {
   await loadPlatformDesign();
   await loadEngineStatus();
   await loadRetirementStatus();
-  await loadRuntimeProjection();
   await loadNetworkDiagnostics();
   await loadProfilesSnapshot();
+  await loadRuntimeProjection();
   renderPage();
-  Promise.all([loadControllerSnapshotWithRetry(), loadProvidersSnapshot()]).finally(renderPage);
+  void (async () => {
+    if (await loadControllerSnapshotWithRetry()) {
+      await loadProvidersSnapshot();
+      if (state.activePage === "rules") await loadRulesSnapshot();
+    }
+  })().finally(renderPage);
 
   document.getElementById("reload-button").addEventListener("click", reloadPayload);
 
@@ -4138,7 +5072,19 @@ async function bootstrap() {
   });
 
   await listen("cfw://settings-changed", async (event) => {
-    if (event.payload) applyPersistedSettings(event.payload);
+    try {
+      applyPersistedSettings(event.payload);
+    } catch (error) {
+      appendLog("error", "settings", `Rejected an invalid settings update: ${errorText(error)}`);
+      try {
+        await loadSettingsSnapshot();
+        appendLog("warning", "settings", "Preferences were recovered from the native store after an invalid update event.");
+      } catch (refreshError) {
+        resetPersistedSettingsToSafeState();
+        state.settingsUnavailableReason = "Preferences are unavailable because the native settings snapshot could not be verified. Reload from disk before changing them.";
+        appendLog("error", "settings", `Native settings recovery failed: ${errorText(refreshError)}`);
+      }
+    }
     await loadEngineStatus();
     await loadRuntimeProjection();
     renderPage();
@@ -4160,7 +5106,13 @@ async function bootstrap() {
 
   await listen("cfw://connections-snapshot", (event) => {
     if (state.connectionPaused) return;
-    applyConnectionsSnapshot(event.payload);
+    const payload = validatedStreamEventPayload(
+      event.payload,
+      runtime.connectionsLiveStream.binding,
+      "connections",
+    );
+    if (payload === undefined) return;
+    applyConnectionsSnapshot(payload);
     updateStatusBar();
     if (state.activePage === "connections") {
       scheduleConnectionsPatch();
@@ -4205,13 +5157,27 @@ async function bootstrap() {
 
   await listen("cfw://log-lines", (event) => {
     if (state.logsPaused) return;
-    appendLogLines(event.payload);
+    const payload = validatedStreamEventPayload(
+      event.payload,
+      runtime.logLiveStream.binding,
+      "request-logs",
+    );
+    if (payload === undefined) return;
+    appendLogLines(payload);
     if (state.activePage === "logs") scheduleLogStreamPatch();
   });
 
   await listen("cfw://stream-error", (event) => {
-    const payload = event.payload ?? {};
-    const level = payload.level ?? "warning";
+    const envelope = event.payload;
+    const stream = envelope?.provenance?.stream;
+    const binding = stream === "connections"
+      ? runtime.connectionsLiveStream.binding
+      : stream === "request-logs"
+        ? runtime.logLiveStream.binding
+        : null;
+    const payload = validatedStreamEventPayload(envelope, binding, stream);
+    if (payload === undefined || payload?.stream !== stream) return;
+    const level = payload.level ?? "error";
     appendLog(level, payload.stream ?? "stream", payload.message ?? "stream unavailable");
     if (state.activePage === "logs") {
       scheduleLogStreamPatch();
@@ -4254,7 +5220,7 @@ async function bootstrap() {
     try {
       applyUpdateInfo(await invoke("check_for_updates"));
     } catch (error) {
-      appendLog("warning", "updater", `Automatic update check failed: ${errorText(error)}`);
+      appendLog("error", "updater", `Automatic update check failed: ${errorText(error)}`);
       invalidateUpdateAuthorization(error);
     }
   }
@@ -4286,6 +5252,10 @@ async function importProfileFromPath(path) {
   }
 }
 
-bootstrap().catch((error) => {
-  document.body.innerHTML = `<pre class="fatal">${escapeHtml(error.stack ?? error.message ?? String(error))}</pre>`;
+export function renderFatalBootstrap() {
+  document.body.innerHTML = `<pre class="fatal">${escapeHtml("Clash for Mac could not start safely (startup_state_unverifiable). Review the application log before retrying.")}</pre>`;
+}
+
+bootstrap().catch(() => {
+  renderFatalBootstrap();
 });

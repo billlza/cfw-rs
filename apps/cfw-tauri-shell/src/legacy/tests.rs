@@ -173,7 +173,11 @@ fn launch_recovery_classifies_pre_network_recovery_without_exposing_its_cause() 
     .expect_err("unproven legacy identity must fail closed");
 
     assert_eq!(failure.category(), LaunchRecoveryFailureCategory::Recovery);
-    assert!(failure.user_message().contains("durably clear"));
+    assert!(
+        failure
+            .user_message()
+            .contains("durably seal NetworkRetiring")
+    );
     assert!(!failure.user_message().contains("secret"));
     assert!(failure.user_message().len() <= 512);
 }

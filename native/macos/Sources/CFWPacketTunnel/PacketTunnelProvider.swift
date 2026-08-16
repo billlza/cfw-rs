@@ -451,6 +451,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     guard slot == .tunnel,
       let ipv6Value = values["ipv6Enabled"] as? String,
       let bypassPrivateNetworksValue = values["bypassPrivateNetworks"] as? String,
+      let directIPv4Hosts = values["directIPv4Hosts"] as? [String],
       let mtuValue = values["mtu"] as? String,
       let mtu = UInt16(mtuValue)
     else {
@@ -477,6 +478,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     return try TunnelNetworkOptions(
       ipv6Enabled: ipv6Enabled,
       bypassPrivateNetworks: bypassPrivateNetworks,
+      directIPv4Hosts: directIPv4Hosts,
       mtu: mtu
     )
   }
@@ -494,8 +496,9 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       subnetMasks: [TunnelAddressPlan.ipv4SubnetMask]
     )
     ipv4.includedRoutes = [.default()]
+    var excludedIPv4Routes: [NEIPv4Route] = []
     if tunnelOptions.bypassPrivateNetworks {
-      ipv4.excludedRoutes = [
+      excludedIPv4Routes = [
         NEIPv4Route(destinationAddress: "127.0.0.0", subnetMask: "255.0.0.0"),
         NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0"),
         NEIPv4Route(destinationAddress: "172.16.0.0", subnetMask: "255.240.0.0"),
@@ -504,6 +507,14 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
         NEIPv4Route(destinationAddress: "224.0.0.0", subnetMask: "240.0.0.0"),
         NEIPv4Route(destinationAddress: "255.255.255.255", subnetMask: "255.255.255.255"),
       ]
+    }
+    excludedIPv4Routes.append(
+      contentsOf: tunnelOptions.directIPv4Hosts.map {
+        NEIPv4Route(destinationAddress: $0, subnetMask: "255.255.255.255")
+      }
+    )
+    if !excludedIPv4Routes.isEmpty {
+      ipv4.excludedRoutes = excludedIPv4Routes
     }
     settings.ipv4Settings = ipv4
 

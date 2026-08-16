@@ -7,16 +7,19 @@ mod migration;
 mod network_fingerprint;
 mod process_cleanup;
 mod recovery;
+mod runtime_plan;
 mod state_gate;
 
 #[cfg(test)]
 mod tests;
 
 use std::future::Future;
+use std::path::Path;
 
 use cfw_engine_api::{
     CutoverPreflightOutcome, EngineEvent, EngineMode, EngineSnapshot, EngineState,
 };
+use cfw_singbox_config::EngineSettings;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::oneshot;
 
@@ -37,7 +40,21 @@ pub(crate) use handoff_ticket::{
 };
 pub(crate) use journal::MigrationHandoffLease;
 
-pub(crate) use state_gate::{LegacyRetirementGate, LegacyRetirementStatus};
+pub use state_gate::LegacyRetirementGate;
+pub(crate) use state_gate::LegacyRetirementStatus;
+
+/// Returns the exact non-secret replacement settings bound to an interrupted
+/// cutover. A completed journal no longer governs a future engine start; a
+/// live recovery phase does, so a restarted process cannot silently choose a
+/// different loopback endpoint or projection input.
+pub(crate) fn load_replacement_engine_settings(
+    app_home: &Path,
+) -> Result<Option<EngineSettings>, String> {
+    let journal = CutoverJournalStore::new(app_home.to_owned()).load()?;
+    Ok(journal.and_then(|journal| {
+        (journal.phase != CutoverPhase::CleanupComplete).then_some(journal.replacement_settings)
+    }))
+}
 
 #[tauri::command]
 pub(crate) fn legacy_retirement_status(
@@ -296,15 +313,17 @@ pub(crate) async fn disable_service_mode(
     let parent = launch
         .handoff_parent_identity()
         .ok_or_else(|| "migration handoff has no ticket-bound parent identity".to_owned())?;
-    let mut legacy_gui = LegacyGuiHandoff::capture(parent, plan.fresh_install_absence_proven())?;
+    let mut legacy_gui = LegacyGuiHandoff::capture(parent, plan.runtime_kind())?;
 
     let journal_store = CutoverJournalStore::new(plan.store.paths().app_home.clone());
     let journal = CutoverJournal::prepared(
         selected.record.id.clone(),
         selected.record.digest.clone(),
         &current_request,
+        authority.settings().clone(),
+        plan.runtime_kind(),
         LegacyNetworkJournalInput {
-            interface: plan.legacy_interface().map(ToOwned::to_owned),
+            tunnel: plan.legacy_tunnel_identity(),
             process: plan.legacy_process().cloned(),
             session: plan.legacy_session_identity().map(
                 |(mixed_port, controller_port, generation)| LegacySessionJournalIdentity {
@@ -325,41 +344,47 @@ pub(crate) async fn disable_service_mode(
     let Some(mut attempt) = retirement.begin_attempt()? else {
         return Err("legacy network is already retired; the cutover receipt was not used".into());
     };
-    legacy_gui.stop()?;
-    if let Err(error) = journal_store.advance(CutoverPhase::Prepared, CutoverPhase::GuiStopped) {
-        if error.commit_is_uncertain() {
-            legacy_gui.seal_legacy_retired();
-            return Err(format!(
-                "legacy GUI remains stopped because the GuiStopped journal rename completed but durability is uncertain; explicit recovery is required: {error}"
-            ));
-        }
-        return Err(format!(
-            "legacy GUI was resumed because its stopped phase could not be persisted: {error}"
-        ));
-    }
-    if let Err(error) =
-        journal_store.advance(CutoverPhase::GuiStopped, CutoverPhase::NetworkRetiring)
+    legacy_gui.verify_before_network_retirement_seal()?;
+    if let Err(error) = journal_store.advance(CutoverPhase::Prepared, CutoverPhase::NetworkRetiring)
     {
         if error.commit_is_uncertain() {
-            legacy_gui.seal_legacy_retired();
             return Err(format!(
-                "legacy GUI remains stopped because the NetworkRetiring journal rename completed but durability is uncertain; explicit recovery is required: {error}"
+                "NetworkRetiring journal commit is durability-uncertain; the legacy GUI and network were not intentionally changed, and explicit recovery is required: {error}"
             ));
         }
         return Err(format!(
-            "legacy GUI was resumed because network-retirement intent could not be persisted: {error}"
+            "network-retirement intent could not be persisted; the legacy GUI and network remain unchanged: {error}"
         ));
     }
-    legacy_gui.seal_legacy_retired();
-    let retired = match plan.retire_network().await {
+    legacy_gui.seal_network_retirement();
+    legacy_gui.terminate_for_network_retirement()?;
+    if let Err(error) = legacy_gui.revalidate_for_network_mutation() {
+        attempt.mark_failed(
+            state_gate::LegacyCleanupAction::Retry,
+            format!("legacy GUI state changed at the network-retirement boundary: {error}"),
+        )?;
+        migration::emit_engine_snapshot_refresh(&app)?;
+        return Err(error);
+    }
+    let retired = match plan
+        .retire_network(|| legacy_gui.revalidate_for_network_mutation())
+        .await
+    {
         Ok(retired) => retired,
         Err(failure) => {
-            debug_assert!(!failure.can_resume_old_gui);
             attempt.mark_failed(failure.error.action(), failure.error.to_string())?;
             migration::emit_engine_snapshot_refresh(&app)?;
             return Err(failure.error.to_string());
         }
     };
+    if let Err(error) = legacy_gui.revalidate_for_network_mutation() {
+        let message = format!(
+            "legacy service was retired, but the journal-bound GUI absence changed before replacement start: {error}"
+        );
+        attempt.mark_failed(state_gate::LegacyCleanupAction::Retry, &message)?;
+        migration::emit_engine_snapshot_refresh(&app)?;
+        return Err(message);
+    }
     let mut journal_warnings = Vec::new();
     if let Err(error) =
         journal_store.advance(CutoverPhase::NetworkRetiring, CutoverPhase::LegacyRetired)
@@ -397,9 +422,9 @@ pub(crate) async fn disable_service_mode(
         return Err(message);
     }
 
-    if let Err(error) = legacy_gui.terminate_after_replacement_active() {
+    if let Err(error) = legacy_gui.verify_terminated_after_replacement_active() {
         journal_warnings.push(format!(
-            "replacement is Active but the stopped legacy GUI could not be terminated safely: {error}"
+            "replacement is Active but the legacy GUI exit could not be reverified safely: {error}"
         ));
     }
 
@@ -463,19 +488,15 @@ pub(crate) async fn recover_legacy_cutover(
         journal.phase,
         CutoverPhase::Prepared | CutoverPhase::GuiStopped
     ) {
-        recovery::resume_pre_network_cutover_if_intact(&journal, &store)?;
-        retirement.apply_launch_preflight(LegacyRetirementStatus::AwaitingConfirmation)?;
-        migration::emit_engine_snapshot_refresh(&app)?;
-        return Ok(());
+        recovery::seal_pre_network_cutover_for_recovery(&journal, &store)?;
+        journal = journal_store
+            .load()?
+            .ok_or_else(|| "sealed legacy cutover journal disappeared".to_owned())?;
     }
     if journal.phase == CutoverPhase::CleanupComplete {
         migration::run_launch_preflight(&app)?;
         return Ok(());
     }
-    if journal.phase == CutoverPhase::NetworkRetiring {
-        recovery::ensure_network_retiring_gui_stopped(&journal)?;
-    }
-
     let Some(mut attempt) = retirement.begin_attempt()? else {
         return Err("legacy cutover recovery is already complete".into());
     };
@@ -491,7 +512,12 @@ pub(crate) async fn recover_legacy_cutover(
         return Err(message.into());
     }
     engine.require_capability(journal.target)?;
-    let settings = engine.engine_settings().clone();
+    let settings = journal.replacement_settings.clone();
+    if &settings != engine.engine_settings() {
+        let message = "recovery engine settings do not match the journal-bound replacement; recovery did not change networking";
+        attempt.mark_failed(state_gate::LegacyCleanupAction::Retry, message)?;
+        return Err(message.into());
+    }
 
     let active_digest = match journal.target {
         EngineMode::SystemProxy => journal.system_proxy_digest.as_str(),
@@ -507,6 +533,9 @@ pub(crate) async fn recover_legacy_cutover(
     .is_ok();
 
     if !replacement_active {
+        if journal.phase == CutoverPhase::NetworkRetiring {
+            recovery::ensure_network_retiring_gui_terminated(&journal)?;
+        }
         normalize_recovery_engine_off(&engine, &selected.record.id, &selected.profile, &settings)
             .await?;
         let request = engine
@@ -524,6 +553,7 @@ pub(crate) async fn recover_legacy_cutover(
             &selected.record.id,
             &selected.record.digest,
             &request,
+            &settings,
         )?;
         let outcome =
             run_native_preflight(engine.preflight_backend.as_ref(), request.clone()).await?;
@@ -569,7 +599,13 @@ pub(crate) async fn recover_legacy_cutover(
                 .advance(CutoverPhase::LegacyRetired, CutoverPhase::ReplacementActive)?;
         }
     } else if journal.phase == CutoverPhase::NetworkRetiring {
-        recovery::finish_network_retirement(&journal, &store).await?;
+        recovery::verify_network_retirement_completed_with_active_replacement(&journal, &store)?;
+        require_replacement_active(
+            engine.coordinator.snapshot(),
+            journal.target,
+            active_digest,
+            &journal.context,
+        )?;
         journal_store.advance(CutoverPhase::NetworkRetiring, CutoverPhase::LegacyRetired)?;
         journal =
             journal_store.advance(CutoverPhase::LegacyRetired, CutoverPhase::ReplacementActive)?;
@@ -579,6 +615,17 @@ pub(crate) async fn recover_legacy_cutover(
     }
 
     debug_assert!(replacement_active);
+    let active_digest = match journal.target {
+        EngineMode::SystemProxy => journal.system_proxy_digest.as_str(),
+        EngineMode::Tunnel => journal.tunnel_digest.as_str(),
+        EngineMode::Off => unreachable!("journal rejects Off"),
+    };
+    require_replacement_active(
+        engine.coordinator.snapshot(),
+        journal.target,
+        active_digest,
+        &journal.context,
+    )?;
     if let Some(legacy_gui) = journal.legacy_gui.as_ref() {
         LegacyGuiHandoff::terminate_persisted_after_replacement_active(legacy_gui)?;
     }

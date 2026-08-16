@@ -12,14 +12,14 @@ pub mod authority_v1;
 
 pub use cfw_singbox_config::{
     AuthenticatedDnsServer, CredentialAudience, CredentialBinding, CredentialKind, CredentialRef,
-    CredentialSecret, CredentialSlot, CredentialTarget, EngineSettings, MAX_CREDENTIAL_SLOTS,
-    ValidatedSingBoxProfile,
+    CredentialSecret, CredentialSlot, CredentialTarget, DirectIpv4HostRoutes, EngineSettings,
+    MAX_CREDENTIAL_SLOTS, ValidatedSingBoxProfile,
 };
 
-// Version 3 adds the closed credential-slot contract. A version 2 native
-// bridge would ignore those slots and could otherwise attempt to start libbox
-// with the deliberately empty credential placeholders.
-pub const ENGINE_PROTOCOL_VERSION: u16 = 4;
+// Version 5 binds the closed direct-IPv4-host route projection into every
+// Tunnel configuration identity. A version 4 native bridge would ignore that
+// route and could otherwise report a mismatched data plane as ready.
+pub const ENGINE_PROTOCOL_VERSION: u16 = 5;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -267,7 +267,7 @@ impl<'a> CredentialProvisionRequest<'a> {
     pub fn new(
         profile_id: impl Into<String>,
         profile: &ValidatedSingBoxProfile,
-        entries: Vec<CredentialProvision<'a>>,
+        mut entries: Vec<CredentialProvision<'a>>,
     ) -> Result<Self, CredentialProvisionRequestError> {
         let audience = CredentialAudience::new(profile_id, profile.digest())
             .map_err(|_| CredentialProvisionRequestError::InvalidAudience)?;
@@ -287,6 +287,7 @@ impl<'a> CredentialProvisionRequest<'a> {
                 return Err(CredentialProvisionRequestError::UnexpectedReference);
             }
         }
+        entries.sort_by(|left, right| left.reference.cmp(right.reference));
         Ok(Self {
             audience,
             required_references: required.into_iter().collect(),
@@ -654,6 +655,8 @@ impl CredentialPresenceRequest {
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum CredentialVaultError {
+    #[error("credential vault outcome is unknown after a boundary timeout")]
+    OutcomeUnknown,
     #[error("credential vault is unavailable")]
     Unavailable,
     #[error("credential vault access was denied")]
@@ -723,6 +726,7 @@ pub trait CredentialVaultProvisioner: Send + Sync + 'static {
 pub struct TunnelNetworkOptions {
     pub ipv6_enabled: bool,
     pub bypass_private_networks: bool,
+    pub direct_ipv4_hosts: DirectIpv4HostRoutes,
     pub mtu: u16,
 }
 
@@ -1356,16 +1360,68 @@ mod tests {
     }
 
     #[test]
-    fn native_bridge_v4_contract_fixtures_decode_in_rust() {
+    fn credential_provisioning_request_canonicalizes_entry_order() {
+        const FIRST_CREDENTIAL_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const SECOND_CREDENTIAL_ID: &str = "22222222-2222-4222-8222-222222222222";
+        let first_reference =
+            CredentialRef::new(FIRST_CREDENTIAL_ID, CredentialKind::TrojanPassword)
+                .expect("canonical first reference");
+        let second_reference =
+            CredentialRef::new(SECOND_CREDENTIAL_ID, CredentialKind::TrojanPassword)
+                .expect("canonical second reference");
+        let profile = ValidatedSingBoxProfile::parse(&format!(
+            r#"{{"outbounds":[{{"type":"trojan","tag":"first","server":"first.example.com","server_port":443,"credential_ref":{{"id":"{FIRST_CREDENTIAL_ID}","kind":"trojan_password"}},"tls":{{"enabled":true,"server_name":"first.example.com"}}}},{{"type":"trojan","tag":"second","server":"second.example.com","server_port":443,"credential_ref":{{"id":"{SECOND_CREDENTIAL_ID}","kind":"trojan_password"}},"tls":{{"enabled":true,"server_name":"second.example.com"}}}}]}}"#
+        ))
+        .expect("typed multi-credential profile");
+        let request = CredentialProvisionRequest::new(
+            PROFILE_ID,
+            &profile,
+            vec![
+                CredentialProvision::new(
+                    &second_reference,
+                    CredentialSecret::new("second-secret").expect("bounded second secret"),
+                ),
+                CredentialProvision::new(
+                    &first_reference,
+                    CredentialSecret::new("first-secret").expect("bounded first secret"),
+                ),
+            ],
+        )
+        .expect("canonical provision request");
+
+        assert_eq!(
+            request
+                .entries()
+                .iter()
+                .map(|entry| entry.reference().id())
+                .collect::<Vec<_>>(),
+            vec![FIRST_CREDENTIAL_ID, SECOND_CREDENTIAL_ID]
+        );
+        assert_eq!(
+            request.required_references(),
+            &[first_reference.clone(), second_reference.clone()]
+        );
+        assert_eq!(
+            request.entries()[0].secret().expose_to_vault(),
+            "first-secret"
+        );
+        assert_eq!(
+            request.entries()[1].secret().expose_to_vault(),
+            "second-secret"
+        );
+    }
+
+    #[test]
+    fn native_bridge_v5_contract_fixtures_decode_in_rust() {
         let query: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v4/query-request.json"
+            "../../../contracts/native-bridge-v5/query-request.json"
         ))
         .expect("query fixture");
         assert_eq!(query.schema_version, ENGINE_PROTOCOL_VERSION);
         assert!(matches!(query.command, NativeBridgeCommand::QueryStatus));
 
         let preview: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v4/gc-preview-request.json"
+            "../../../contracts/native-bridge-v5/gc-preview-request.json"
         ))
         .expect("GC preview fixture");
         let NativeBridgeCommand::PreviewCredentialGarbageCollection { request } = preview.command
@@ -1377,7 +1433,7 @@ mod tests {
         assert_eq!(request.catalog()[0].references().len(), 1);
 
         let response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v4/gc-preview-response.json"
+            "../../../contracts/native-bridge-v5/gc-preview-response.json"
         ))
         .expect("GC preview response fixture");
         let Some(NativeBridgeResult::CredentialGarbageCollectionPreview(preview)) = response.result
@@ -1466,7 +1522,7 @@ mod tests {
 
     #[test]
     fn native_public_query_json_contract_is_unchanged() {
-        let bytes = include_bytes!("../../../contracts/native-bridge-v4/query-request.json");
+        let bytes = include_bytes!("../../../contracts/native-bridge-v5/query-request.json");
         let request: NativeRequestEnvelope =
             serde_json::from_slice(bytes).expect("public query request fixture");
         assert_eq!(

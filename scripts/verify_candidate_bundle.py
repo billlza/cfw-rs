@@ -332,6 +332,11 @@ def verify_unsigned_host_skeleton(app: Path) -> None:
 
 
 def verify_macho(path: Path) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode != 0o755:
+        raise CandidateError(
+            f"Mach-O mode must be 0755 for distribution: {path} ({mode:04o})"
+        )
     architectures = command_output(["lipo", "-archs", str(path)]).strip()
     if architectures != "arm64":
         raise CandidateError(f"Mach-O must be thin arm64: {path} ({architectures})")
@@ -359,6 +364,11 @@ def enumerate_bundle(root: Path) -> list[Path]:
 
     for directory, names, filenames in os.walk(root, followlinks=False, onerror=walk_error):
         directory_path = Path(directory)
+        directory_mode = stat.S_IMODE(directory_path.lstat().st_mode)
+        if directory_mode != 0o755:
+            raise CandidateError(
+                f"bundle directory mode must be 0755: {directory_path} ({directory_mode:04o})"
+            )
         for name in names + filenames:
             path = directory_path / name
             metadata = path.lstat()
@@ -371,6 +381,11 @@ def enumerate_bundle(root: Path) -> list[Path]:
             elif stat.S_ISREG(metadata.st_mode):
                 if metadata.st_nlink != 1:
                     raise CandidateError(f"bundle file has multiple hard links: {path}")
+                file_mode = stat.S_IMODE(metadata.st_mode)
+                if file_mode not in {0o644, 0o755}:
+                    raise CandidateError(
+                        f"bundle file mode must be 0644 or 0755: {path} ({file_mode:04o})"
+                    )
                 files.append(path)
             elif not stat.S_ISDIR(metadata.st_mode):
                 raise CandidateError(f"unsupported special file in bundle: {path}")

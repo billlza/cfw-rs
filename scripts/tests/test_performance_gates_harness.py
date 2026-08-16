@@ -1,156 +1,211 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime, timedelta
-import json
-import tempfile
-import unittest
+import hashlib
 from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
 
 from scripts.harness.performance_gates import (
     PerformanceGateError,
-    percentiles,
     validate_performance_evidence,
 )
-from scripts.harness.raw_artifacts import ArtifactReader
+from scripts.harness.performance_ledger import (
+    PerformanceLedgerError,
+    _log_query_timestamp,
+    _oslog_timestamp,
+)
+from scripts.harness.raw_artifacts import ArtifactReader, load_json_bytes
 from scripts.tests.physical_evidence_fixture import PhysicalEvidenceFixture
 
 
 class PerformanceGateTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.fixture = PhysicalEvidenceFixture(self.root)
-        self.document = self.fixture.report_documents[0]["performance"]
-        self.artifact = self.document["samples_artifact"]
+        self.document = copy.deepcopy(self.fixture.report_documents[0]["performance"])
+        self.ledger_artifact = self.document["ledger_artifact"]
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
+    def read(self, descriptor: dict[str, object]) -> dict[str, object]:
+        data = (self.root / str(descriptor["path"])).read_bytes()
+        value = load_json_bytes(data, "performance test artifact")
+        self.assertIsInstance(value, dict)
+        return value
 
-    def raw(self) -> dict:
-        return json.loads((self.root / self.artifact["path"]).read_text(encoding="utf-8"))
+    def rewrite_ledger(self, ledger: dict[str, object]) -> None:
+        self.fixture.rewrite_json(self.ledger_artifact, ledger)
+        self.document["ledger_artifact"] = self.ledger_artifact
 
-    def validate(self) -> dict:
+    @staticmethod
+    def rewrite_command_stdout(command: dict[str, object], stdout: str) -> None:
+        encoded = stdout.encode("utf-8")
+        command["stdout"] = stdout
+        command["stdout_size"] = len(encoded)
+        command["stdout_sha256"] = hashlib.sha256(encoded).hexdigest()
+
+    def validate(self) -> dict[str, object]:
         with ArtifactReader(self.root) as artifacts:
             return validate_performance_evidence(self.document, artifacts)
 
-    def test_all_summaries_are_recomputed_from_raw_bytes(self) -> None:
+    def test_complete_three_artifact_ledger_passes(self) -> None:
         result = self.validate()
-        self.assertEqual(result["artifacts"][0]["subject"], "measurements")
-        self.assertEqual(percentiles([1.0, 2.0, 3.0]), {"p50": 2.0, "p95": 3.0, "p99": 3.0})
+        self.assertEqual(
+            {entry["subject"] for entry in result["artifacts"]},
+            {"sample-ledger", "shaping-intent", "shaping-restoration"},
+        )
+        self.assertEqual(
+            self.document["soak"],
+            {
+                "duration_hours": 3.005,
+                "heartbeat_count": 37,
+                "traffic_count": 13,
+                "crash_count": 0,
+            },
+        )
 
-    def test_schema_versions_require_json_integers(self) -> None:
-        for invalid in (2.0, True):
-            with self.subTest(scope="report", invalid=invalid):
-                document = copy.deepcopy(self.document)
-                document["schema_version"] = invalid
-                with ArtifactReader(self.root) as artifacts, self.assertRaisesRegex(
-                    PerformanceGateError, "schema_version must be 2"
-                ):
-                    validate_performance_evidence(document, artifacts)
-
-        original = self.raw()
-        try:
-            for invalid in (1.0, True):
-                with self.subTest(scope="samples", invalid=invalid):
-                    raw = copy.deepcopy(original)
-                    raw["schema_version"] = invalid
-                    self.fixture.rewrite_json(self.artifact, raw)
-                    with self.assertRaisesRegex(
-                        PerformanceGateError, "schema_version must be 1"
-                    ):
-                        self.validate()
-        finally:
-            self.fixture.rewrite_json(self.artifact, original)
-
-    def test_declared_percentile_disagrees_with_raw_samples(self) -> None:
-        self.document["latency"]["connect_ms"]["p95"] = 1.0
-        with self.assertRaisesRegex(PerformanceGateError, "does not match the raw"):
+    def test_deleting_any_sample_fails_exact_count(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        ledger["samples"].pop(100)  # type: ignore[index,union-attr]
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "exactly 353 samples"):
             self.validate()
 
-    def test_raw_sample_drift_fails_before_semantics(self) -> None:
-        path = self.root / self.artifact["path"]
+    def test_two_endpoint_fake_three_hour_soak_fails_continuity(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        samples = ledger["samples"]  # type: ignore[index]
+        ledger["samples"] = [  # type: ignore[index]
+            sample
+            for sample in samples  # type: ignore[union-attr]
+            if sample["kind"] not in {"soak-heartbeat", "soak-traffic"}
+            or sample["measurement"]["index"] in {0, 36, 12}
+        ]
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "exactly 353 samples"):
+            self.validate()
+
+    def test_wrong_process_roster_is_rejected(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        sample = ledger["samples"][0]  # type: ignore[index]
+        sample["roster"][0]["pid"] += 1
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "PID set|Host differs|did not find"):
+            self.validate()
+
+    def test_wrong_generation_is_rejected(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        sample = ledger["samples"][0]  # type: ignore[index]
+        sample["generation"] += 1
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "generation.*drifted"):
+            self.validate()
+
+    def test_missing_restoration_artifact_blocks(self) -> None:
+        restoration = self.document["shaping_restoration_artifact"]
+        (self.root / restoration["path"]).unlink()
+        with self.assertRaisesRegex(PerformanceGateError, "cannot be opened|missing|unavailable"):
+            self.validate()
+
+    def test_restoration_query_must_equal_original_state(self) -> None:
+        restoration_descriptor = self.document["shaping_restoration_artifact"]
+        restoration = self.read(restoration_descriptor)
+        command = restoration["transactions"][0]["restoration_queries"][0]  # type: ignore[index]
+        self.rewrite_command_stdout(command, "40001: still active\n")
+        self.fixture.rewrite_json(restoration_descriptor, restoration)
+        ledger = self.read(self.ledger_artifact)
+        ledger["shaping"]["restoration_artifact"] = restoration_descriptor  # type: ignore[index]
+        self.document["shaping_restoration_artifact"] = restoration_descriptor
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "restoration query differs"):
+            self.validate()
+
+    def test_shaping_requires_packet_filter_already_enabled(self) -> None:
+        intent_descriptor = self.document["shaping_intent_artifact"]
+        intent = self.read(intent_descriptor)
+        command = intent["original_state"]["pf_status_query"]  # type: ignore[index]
+        self.rewrite_command_stdout(command, "Status: Disabled\n")
+        self.fixture.rewrite_json(intent_descriptor, intent)
+        ledger = self.read(self.ledger_artifact)
+        ledger["shaping"]["intent_artifact"] = intent_descriptor  # type: ignore[index]
+        self.document["shaping_intent_artifact"] = intent_descriptor
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "not already enabled"):
+            self.validate()
+
+    def test_shaping_effective_pf_rules_must_be_exact(self) -> None:
+        restoration_descriptor = self.document["shaping_restoration_artifact"]
+        restoration = self.read(restoration_descriptor)
+        command = restoration["transactions"][0]["effective_queries"][1]  # type: ignore[index]
+        self.rewrite_command_stdout(
+            command,
+            command["stdout"] + "pass out all\n",  # type: ignore[operator]
+        )
+        self.fixture.rewrite_json(restoration_descriptor, restoration)
+        ledger = self.read(self.ledger_artifact)
+        ledger["shaping"]["restoration_artifact"] = restoration_descriptor  # type: ignore[index]
+        self.document["shaping_restoration_artifact"] = restoration_descriptor
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "exact reviewed PF rules"):
+            self.validate()
+
+    def test_off_generation_may_be_nonzero_after_real_transition(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        off_generations = [
+            sample["generation"]
+            for sample in ledger["samples"]  # type: ignore[index]
+            if sample["mode"] == "off"
+        ]
+        self.assertTrue(any(generation > 0 for generation in off_generations))
+        self.validate()
+
+    def test_runtime_codesign_identity_cannot_be_declared_away(self) -> None:
+        ledger = self.read(self.ledger_artifact)
+        process = ledger["samples"][0]["roster"][0]  # type: ignore[index]
+        process["runtime_signing_command"]["stderr"] = ""
+        process["runtime_signing_command"]["stderr_size"] = 0
+        process["runtime_signing_command"]["stderr_sha256"] = hashlib.sha256(b"").hexdigest()
+        self.rewrite_ledger(ledger)
+        with self.assertRaisesRegex(PerformanceGateError, "runtime code identity differs"):
+            self.validate()
+
+    def test_report_summary_is_recomputed_from_ledger(self) -> None:
+        self.document["throughput"]["ratio_percent"] = 100.0
+        with self.assertRaisesRegex(PerformanceGateError, "throughput summary differs"):
+            self.validate()
+
+    def test_raw_byte_drift_fails_before_semantics(self) -> None:
+        path = self.root / self.ledger_artifact["path"]
         path.write_bytes(path.read_bytes() + b" ")
         with self.assertRaisesRegex(PerformanceGateError, "size does not match"):
             self.validate()
 
-    def test_raw_sample_threshold_violation_fails(self) -> None:
-        raw = self.raw()
-        raw["latency"]["connect_ms"] = [7000.0] * 20
-        self.fixture.rewrite_json(self.artifact, raw)
-        self.document["latency"]["connect_ms"] = percentiles([7000.0] * 20)
-        with self.assertRaisesRegex(PerformanceGateError, "exceeds"):
+    def test_report_signature_must_follow_ledger_completion(self) -> None:
+        self.document["signed_at"] = "2026-07-27T12:00:00Z"
+        with self.assertRaisesRegex(PerformanceGateError, "signed before"):
             self.validate()
 
-    def test_throughput_declaration_is_derived_from_raw_samples(self) -> None:
-        self.document["throughput"]["ratio_percent"] = 99.0
-        with self.assertRaisesRegex(PerformanceGateError, "ratio declaration differs"):
-            self.validate()
 
-    def test_switch_count_is_derived_from_contiguous_raw_records(self) -> None:
-        raw = self.raw()
-        raw["switch_cycle"]["records"][3]["index"] = 9
-        self.fixture.rewrite_json(self.artifact, raw)
-        with self.assertRaisesRegex(PerformanceGateError, "not contiguous"):
-            self.validate()
-
-    def test_soak_duration_is_derived_from_raw_timestamps(self) -> None:
-        raw = self.raw()
-        raw["soak"]["ended_at"] = "2026-07-27T14:00:00Z"
-        self.fixture.rewrite_json(self.artifact, raw)
-        self.document["soak"]["duration_hours"] = 2.0
-        with self.assertRaisesRegex(PerformanceGateError, "fails the gate"):
-            self.validate()
-
-    def test_exact_three_hour_internal_soak_passes(self) -> None:
-        raw = self.raw()
-        raw["soak"]["ended_at"] = "2026-07-27T15:00:00Z"
-        raw["completed_at"] = "2026-07-27T15:00:00Z"
-        self.fixture.rewrite_json(self.artifact, raw)
-        self.document["soak"]["duration_hours"] = 3.0
-        self.document["completed_at"] = "2026-07-27T15:00:00Z"
-        result = self.validate()
-        self.assertEqual(result["completed_at"].isoformat(), "2026-07-27T15:00:00+00:00")
-
-    def test_soak_crash_events_cannot_be_declared_away(self) -> None:
-        raw = self.raw()
-        raw["soak"]["crash_events"] = [
-            {"timestamp": "2026-07-27T13:00:00Z", "code": "providerCrash"}
-        ]
-        self.fixture.rewrite_json(self.artifact, raw)
-        with self.assertRaisesRegex(PerformanceGateError, "crash_count declaration differs"):
-            self.validate()
-
-    def test_raw_candidate_run_binding_mismatch_fails(self) -> None:
-        raw = self.raw()
-        raw["proof"]["run_nonce"] = "e" * 64
-        self.fixture.rewrite_json(self.artifact, raw)
-        with self.assertRaisesRegex(PerformanceGateError, "proof differs"):
-            self.validate()
-
-    def test_raw_completion_must_equal_soak_completion(self) -> None:
-        raw = self.raw()
-        raw["completed_at"] = "2026-07-28T11:59:59Z"
-        self.fixture.rewrite_json(self.artifact, raw)
-        with self.assertRaisesRegex(PerformanceGateError, "soak completion"):
-            self.validate()
-
-    def test_report_signature_must_follow_raw_completion(self) -> None:
-        completed_at = datetime.fromisoformat(
-            self.document["completed_at"].replace("Z", "+00:00")
+class PerformanceTimestampTests(unittest.TestCase):
+    def test_actual_ndjson_oslog_timestamp_shape_is_accepted(self) -> None:
+        parsed = _oslog_timestamp(
+            "2026-08-01 20:04:51.924344+0000", "product log timestamp"
         )
-        self.document["signed_at"] = (
-            completed_at - timedelta(seconds=1)
-        ).isoformat().replace("+00:00", "Z")
-        with self.assertRaisesRegex(PerformanceGateError, "predates raw completion"):
-            self.validate()
+        self.assertEqual(parsed.isoformat(), "2026-08-01T20:04:51.924344+00:00")
 
-    def test_shaping_control_command_failure_fails(self) -> None:
-        raw = self.raw()
-        raw["weak_network"][0]["control"]["command_exit_code"] = 1
-        self.fixture.rewrite_json(self.artifact, raw)
-        with self.assertRaisesRegex(PerformanceGateError, "not zero"):
-            self.validate()
+    def test_non_oslog_timestamp_shape_is_rejected(self) -> None:
+        with self.assertRaisesRegex(PerformanceLedgerError, "OSLog timestamp"):
+            _oslog_timestamp("2026-08-01T20:04:51.924Z", "product log timestamp")
+
+    def test_log_show_cli_boundary_shape_is_accepted(self) -> None:
+        parsed = _log_query_timestamp(
+            "2026-08-01 20:04:51", "product log query end"
+        )
+        self.assertEqual(parsed.isoformat(), "2026-08-01T20:04:51+00:00")
+
+    def test_iso_timestamp_is_not_accepted_as_log_show_cli_boundary(self) -> None:
+        with self.assertRaisesRegex(PerformanceLedgerError, "log-show boundary"):
+            _log_query_timestamp("2026-08-01T20:04:51Z", "product log query end")
 
 
 if __name__ == "__main__":

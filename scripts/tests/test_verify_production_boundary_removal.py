@@ -127,6 +127,8 @@ class ForbiddenPatternDetectionTests(unittest.TestCase):
 
     def test_private_xpc_audit_token_access_is_detected(self) -> None:
         for snippet in (
+            "let token = connection.auditToken\n",
+            "let token = NSXPCConnection.current()?.auditToken\n",
             'let selector = NSSelectorFromString("auditToken")\n',
             (
                 "let accessor = unsafeBitCast(connection, "

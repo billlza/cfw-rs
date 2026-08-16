@@ -34,7 +34,10 @@ from scripts.tests.test_physical_evidence_aggregator import (
     aggregate_fixture,
     fixture as physical_fixture,
 )
-from scripts.tests.physical_evidence_fixture import PhysicalEvidenceFixture
+from scripts.tests.physical_evidence_fixture import (
+    PhysicalEvidenceFixture,
+    fixture_packet_policy,
+)
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 from scripts.tests.gatekeeper_fixture import macos_27_fixture
 
@@ -154,6 +157,9 @@ class _CleanWorkspaceMixin(unittest.TestCase):
     """Provides a clean workspace root with no updater-key file present."""
 
     def setUp(self) -> None:
+        packet_policy = fixture_packet_policy()
+        packet_policy.__enter__()
+        self.addCleanup(packet_policy.__exit__, None, None, None)
         self._tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
@@ -433,9 +439,7 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             physical = PhysicalEvidenceFixture(root)
-            physical.aggregate["candidate"]["built_at"] = "2026-01-01T00:00:00Z"
-            for run_index in range(len(physical.aggregate["runs"])):
-                physical.resign_run(run_index)
+            physical.rebind_candidate_built_at("2026-01-01T00:00:00Z")
             request = _request(
                 physical_evidence=physical.write_aggregate_artifact()
             )
@@ -605,14 +609,14 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
             2,
         )
 
-    def test_soak_binding_is_the_raw_performance_sample_bytes(self) -> None:
+    def test_soak_binding_is_the_raw_performance_ledger_bytes(self) -> None:
         binding = self.build()
         aggregate = aggregate_fixture()
         expected = {}
         for run in aggregate["runs"]:
             report_path = REPOSITORY / run["reports"]["performance"]["artifact"]["path"]
             report = json.loads(report_path.read_text(encoding="utf-8"))
-            expected[run["os"]] = report["samples_artifact"]["sha256"]
+            expected[run["os"]] = report["ledger_artifact"]["sha256"]
         actual = {
             entry["os"]: entry["report_sha256"]
             for entry in binding["report_bindings"]
@@ -625,10 +629,16 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
             root = Path(temporary)
             physical = PhysicalEvidenceFixture(root)
             report = physical.report_documents[0]["performance"]
-            artifact = report["samples_artifact"]
+            artifact = report["ledger_artifact"]
             raw = json.loads((root / artifact["path"]).read_text(encoding="utf-8"))
-            raw["soak"]["ended_at"] = "2026-07-22T12:00:00Z"
-            report["soak"]["duration_hours"] = 12.0
+            raw["samples"] = [
+                sample
+                for sample in raw["samples"]
+                if not (
+                    sample["kind"] == "soak-heartbeat"
+                    and sample["measurement"]["index"] == 18
+                )
+            ]
             physical.rewrite_json(artifact, raw)
             physical.resign_run(0)
             request = _request(

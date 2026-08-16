@@ -42,6 +42,7 @@ class LibboxArtifactContractTests(unittest.TestCase):
             "gomobileVersion": self.pins["GOMOBILE_VERSION"],
             "gomobileCommit": self.pins["GOMOBILE_COMMIT"],
             "gomobileModuleSum": self.pins["GOMOBILE_MODULE_SUM"],
+            "archiveDeterminism": "zeroArDate-v1",
             "headerNormalization": "angleBracketFrameworkImports-v1",
             "platform": self.pins["LIBBOX_APPLE_PLATFORM"],
             "buildTags": self.pins["LIBBOX_BUILD_TAGS"],
@@ -170,6 +171,16 @@ libbox_verify_xcframework_artifact "$1" "$2" "$3" "$4" "$5" "$6"
             lambda document: document.__setitem__("algorithm", "sha256-tree-v2")
         )
         self.assertNotEqual(self.verify().returncode, 0)
+
+    def test_build_script_forces_zero_archive_dates_and_binds_the_policy(self) -> None:
+        build_source = (SCRIPTS / "build_libbox.sh").read_text(encoding="utf-8")
+        contract_source = (SCRIPTS / "libbox_source_contract.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("export ZERO_AR_DATE=1", build_source)
+        binding = '--metadata "archiveDeterminism=zeroArDate-v1"'
+        self.assertIn(binding, build_source)
+        self.assertIn(binding, contract_source)
 
 
 if __name__ == "__main__":

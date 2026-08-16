@@ -16,6 +16,8 @@ from scripts.harness.raw_artifacts import (
     KMS_PROTECTION_LEVEL,
     KMS_SIGNATURE_ALGORITHM,
     MAX_ARTIFACT_COUNT,
+    MAX_RECEIPT_ARTIFACT_COUNT,
+    REQUIRED_RECEIPT_ARTIFACT_COUNT,
     ArtifactReader,
     CollectorTrustNotConfiguredError,
     RawArtifactError,
@@ -441,11 +443,11 @@ class TrustPolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             policy.collector_source_sha256,
-            "2439c826b23fc1c7f33f5d6003c9aa790268737d1da62db3577adcaa59e15caa",
+            "efe0e7a16d67406aff50bb3439e59d4fad1c9dbb6f06ab7437a7d6b84ce44545",
         )
         self.assertEqual(
             policy.collector_executable_sha256,
-            "0fb9e2281730c6534101cfed26d31c04f718e3517a00c9e1bdb51dcf3c7bedd2",
+            "6b78b06d7640568099d815b3c3485c3a00bc92eac1972721ce8be01384dde759",
         )
 
     def test_not_configured_deployment_sentinel_requires_exact_schema_v2(self) -> None:
@@ -627,6 +629,11 @@ class ArtifactReaderSecurityTests(unittest.TestCase):
             parse_descriptor(value, expected_kinds={"lifecycle-event"}, label="artifact")
 
     def test_global_artifact_count_bound(self) -> None:
+        self.assertEqual(REQUIRED_RECEIPT_ARTIFACT_COUNT, 269)
+        self.assertEqual(MAX_RECEIPT_ARTIFACT_COUNT, 271)
+        self.assertEqual(1 + 2 * REQUIRED_RECEIPT_ARTIFACT_COUNT, 539)
+        self.assertEqual(MAX_ARTIFACT_COUNT, 1 + 2 * MAX_RECEIPT_ARTIFACT_COUNT)
+        accepted_boundaries: set[int] = set()
         with ArtifactReader(self.root) as reader:
             for index in range(MAX_ARTIFACT_COUNT + 1):
                 data = f"artifact-{index}".encode()
@@ -644,6 +651,10 @@ class ArtifactReaderSecurityTests(unittest.TestCase):
                         expected_kinds={"lifecycle-event"},
                         label=f"artifact[{index}]",
                     )
+                    if reader.artifact_count in {542, 543}:
+                        accepted_boundaries.add(reader.artifact_count)
+            self.assertEqual(accepted_boundaries, {542, 543})
+            self.assertEqual(reader.artifact_count, 543)
 
     def test_duplicate_json_keys_are_rejected(self) -> None:
         with self.assertRaisesRegex(RawArtifactError, "duplicate field"):

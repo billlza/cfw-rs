@@ -4,7 +4,10 @@ use cfw_engine_api::{
     BackendError, BackendErrorKind, EngineMode, EngineOwner, EngineSnapshot, EngineState,
     NativeEngineStatus,
 };
-use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
+use cfw_singbox_config::{
+    EngineSettings, RELEASE_PACKET_TRANSPORT_IPV4, ReleasePacketEvidenceCase,
+    ValidatedSingBoxProfile,
+};
 
 use crate::{CoordinatorOptions, EngineCoordinatorError, EngineModeCoordinator, EngineOperation};
 
@@ -642,5 +645,56 @@ async fn tunnel_mtu_and_private_bypass_changes_restart_with_new_identity() {
             "install_tunnel",
             "start_tunnel",
         ]
+    );
+}
+
+#[tokio::test]
+async fn release_excluded_route_restarts_with_the_exact_identity_bound_native_option() {
+    let backend = Arc::new(FakeBackend::default());
+    let coordinator = coordinator(backend.clone());
+    let ordinary = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect("ordinary tunnel");
+    let excluded = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            ValidatedSingBoxProfile::release_packet_evidence(
+                ReleasePacketEvidenceCase::ExcludedRoutes,
+            ),
+            EngineSettings::default(),
+        )
+        .await
+        .expect("excluded-route tunnel");
+
+    assert_eq!(excluded.generation, ordinary.generation + 1);
+    let requests = backend.tunnel_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].config_json, requests[1].config_json);
+    assert_eq!(
+        requests[0].config_content_digest,
+        requests[1].config_content_digest
+    );
+    assert_ne!(requests[0].config_digest, requests[1].config_digest);
+    assert!(
+        requests[0]
+            .tunnel_options
+            .expect("ordinary options")
+            .direct_ipv4_hosts
+            .is_empty()
+    );
+    assert_eq!(
+        requests[1]
+            .tunnel_options
+            .expect("release options")
+            .direct_ipv4_hosts
+            .as_slice(),
+        &[RELEASE_PACKET_TRANSPORT_IPV4]
     );
 }

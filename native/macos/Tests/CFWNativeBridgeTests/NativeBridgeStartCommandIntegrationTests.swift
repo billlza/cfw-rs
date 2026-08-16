@@ -656,6 +656,23 @@ private func failureCode(
 
 @Suite(.serialized)
 struct NativeBridgeStartCommandIntegrationTests {
+  @Test func directIPv4HostRouteParticipatesInTheNativeConfigurationIdentity() throws {
+    let ordinary = try startRequest(
+      tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true)
+    )
+    let excluded = try startRequest(
+      tunnelOptions: try TunnelNetworkOptions(
+        ipv6Enabled: true,
+        directIPv4Hosts: [TunnelNetworkOptions.releasePacketTransportIPv4]
+      )
+    )
+
+    #expect(ordinary.configJSON == excluded.configJSON)
+    #expect(ordinary.configContentDigest == excluded.configContentDigest)
+    #expect(ordinary.configDigest != excluded.configDigest)
+    #expect(excluded.tunnelOptions?.directIPv4Hosts == ["35.194.216.98"])
+  }
+
   @Test func preferenceNSErrorMappingPreservesProvenanceAndIgnoresDiagnosticPolicy() {
     #expect(
       NativeBridgeCoordinator.map(AppleNetworkError.preferenceMutationUncertain)

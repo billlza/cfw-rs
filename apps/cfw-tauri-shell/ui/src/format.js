@@ -17,6 +17,7 @@ export const UI_COMMANDS = Object.freeze([
   "close_all_connections",
   "close_connection",
   "commit_credential_gc",
+  "commit_legacy_cfw_profile_migration",
   "controller_snapshot",
   "controller_version",
   "current_platform_design",
@@ -33,13 +34,13 @@ export const UI_COMMANDS = Object.freeze([
   "import_profile_text",
   "import_profile_url",
   "legacy_retirement_status",
-  "migrate_legacy_cfw_profiles",
   "network_diagnostics",
   "open_login_items_settings",
   "open_available_update",
   "open_page",
   "open_profile_externally",
   "preview_credential_gc",
+  "preview_legacy_cfw_profile_migration",
   "prepare_legacy_cutover",
   "profile_credential_presence",
   "profile_credential_requirements",
@@ -177,13 +178,31 @@ function engineMode(value) {
   throw new TypeError("engine mode is invalid");
 }
 
-function validRuntime(runtime, expectedOwner, generation, digest) {
-  return runtime?.ready === true
-    && runtime.owner === expectedOwner
-    && runtime.context?.generation === generation
-    && typeof runtime.config_digest === "string"
-    && runtime.config_digest.length > 0
-    && runtime.config_digest === digest;
+function normalizeRuntimeIdentity(runtime, expectedOwner, generation, digest) {
+  const context = runtime?.context;
+  if (runtime?.ready !== true
+    || runtime.owner !== expectedOwner
+    || !context
+    || typeof context.installation_id !== "string"
+    || context.installation_id.length === 0
+    || !Number.isSafeInteger(context.config_epoch)
+    || context.config_epoch < 1
+    || context.generation !== generation
+    || typeof runtime.config_digest !== "string"
+    || runtime.config_digest.length === 0
+    || runtime.config_digest !== digest) {
+    throw new TypeError("runtime identity does not match the engine snapshot");
+  }
+  return Object.freeze({
+    owner: expectedOwner,
+    context: Object.freeze({
+      installation_id: context.installation_id,
+      config_epoch: context.config_epoch,
+      generation: context.generation,
+    }),
+    config_digest: runtime.config_digest,
+    ready: true,
+  });
 }
 
 /// Normalizes an `engine_snapshot` envelope.
@@ -205,19 +224,26 @@ export function normalizeEngineStatus(value) {
   const configDigest = typeof snapshot.config_digest === "string" ? snapshot.config_digest : null;
   const desiredMode = engineMode(snapshot.desired_mode);
   let mode = "off";
+  let runtimeIdentity = null;
   let reason = typeof value.unavailable_reason === "string" && value.unavailable_reason.trim()
     ? redactDiagnosticText(value.unavailable_reason.trim()).slice(0, 512)
     : null;
 
   if (stateTag === "proxy_active") {
-    if (!validRuntime(snapshot.state.runtime, "proxy_agent", snapshot.generation, configDigest)) {
-      throw new TypeError("proxy runtime identity does not match the engine snapshot");
-    }
+    runtimeIdentity = normalizeRuntimeIdentity(
+      snapshot.state.runtime,
+      "proxy_agent",
+      snapshot.generation,
+      configDigest,
+    );
     mode = "system-proxy";
   } else if (stateTag === "tunnel_active") {
-    if (!validRuntime(snapshot.state.runtime, "packet_tunnel_system_extension", snapshot.generation, configDigest)) {
-      throw new TypeError("tunnel runtime identity does not match the engine snapshot");
-    }
+    runtimeIdentity = normalizeRuntimeIdentity(
+      snapshot.state.runtime,
+      "packet_tunnel_system_extension",
+      snapshot.generation,
+      configDigest,
+    );
     mode = "tunnel";
   } else if (stateTag === "failed" && typeof snapshot.state.error === "string") {
     reason = redactDiagnosticText(snapshot.state.error).slice(0, 512);
@@ -236,11 +262,13 @@ export function normalizeEngineStatus(value) {
     tunnelActive: mode === "tunnel",
     systemProxyAvailable: capabilities.system_proxy === true,
     tunnelAvailable: capabilities.tunnel === true,
+    providerManagementAvailable: capabilities.provider_management === true,
     availabilityReason: reason,
     cutoverReady: value.cutover_ready === true,
     cutoverReason,
     generation: snapshot.generation,
     configDigest,
+    runtimeIdentity,
   };
 }
 

@@ -20,15 +20,16 @@ The machine-readable values live in
 | gomobile/gobind | `v0.1.13` (`9f03b8f25789099c5c8abef4a02085da783ba923`) | embedded Go module identity, module checksum, source tag commit, patched sing-box module graph, and source helper-install pins |
 | govulncheck | `v1.6.0` | embedded Go module identity and module checksum |
 | cargo-deny | `0.20.2` | Rust `1.97.1` locked source install, version identity, and target-aware policy run |
-| sing-box/libbox | `v1.13.14`, `25a600db24f7680ad9806ce5427bd0ab8afe1114` | clean Git checkout plus the repository-owned dependency-security and raw-packet patches, with individual and combined SHA-256 values |
-| Apple provider reference | `794eb1741f91765a91f1513e5639296503f072b2` | Git commit identity; reference only |
+| sing-box/libbox | `v1.13.15`, `3708fa18766cda1f11b77f6ed9c7bd61688f17df` | clean Git checkout plus the repository-owned dependency-security, raw-packet, and DNS-failover patches, with individual and combined SHA-256 values |
+| Android packet LAN peer | Linux/arm64 artifact `873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17` | complete `sha256-tree-v2` source identity, pinned Go target, digest-bound build/verification scripts, two-build byte comparison, and fixed bounded TCP/deployment contract |
+| Apple provider reference | `afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa` | Git commit identity; reference only |
 | deployment | macOS `15.0`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
 
 The pins were verified against the crates.io registry, npm registry, official
 Go and Node.js release indexes, and the upstream XcodeGen and SagerNet Git
 repositories on 2026-07-26. The gomobile v0.1.13 graph alignment, regenerated
-security patch, and source/tool/cache bindings were reviewed on 2026-07-28. The
-exact XcodeGen, sing-box, and gomobile tags resolve to their recorded commits. The Apple
+sing-box v1.13.15 patch series, and source/tool/cache bindings were reviewed on
+2026-08-02. The exact XcodeGen, sing-box, and gomobile tags resolve to their recorded commits. The Apple
 reference commit resolves to upstream `main`; it is not compiled or copied into
 the product.
 
@@ -79,9 +80,39 @@ Network access is isolated to explicit preparation:
    completed module-cache tree.
 6. `scripts/scan_libbox_vulnerabilities.sh` runs the pinned govulncheck against
    the exact patched macOS package graph and the official Go vulnerability DB.
-7. `scripts/build_libbox.sh` sets `GOPROXY=off` and `GOTOOLCHAIN=local`. It
-   refuses a different or unexpectedly modified checkout and invokes the pinned
-   gomobile binder for `macos/arm64` only.
+7. `scripts/build_libbox.sh` sets `GOPROXY=off`, `GOTOOLCHAIN=local`, and
+   `ZERO_AR_DATE=1`. The archive setting removes the wall-clock timestamp from
+   Apple's `__.SYMDEF` member, so independent builds from identical inputs are
+   byte-for-byte reproducible. The script refuses a different or unexpectedly
+   modified checkout and invokes the pinned gomobile binder for `macos/arm64`
+   only.
+8. `scripts/build_packet_lan_peer.sh` builds the controlled Android LAN peer
+   twice in separate empty Go caches with the pinned Go `1.26.5` toolchain,
+   `GOPROXY=off`, `GOTOOLCHAIN=local`, `CGO_ENABLED=0`, `GOOS=linux`, and
+   `GOARCH=arm64`, then publishes only byte-identical output. The independent
+   `packetLanPeer` manifest section binds the four-file source tree
+   (`dc5bf2f5853b986acd3953809d68a0f75aac8bef1d682ba988ec3f7c5fa13c60`),
+   both release scripts, the 2,359,422-byte output, TCP port `44333`, the eight
+   connection/64-byte/five-second limits, and the exact shell-owned Android
+   deployment path and modes. `scripts/verify_packet_lan_peer.sh` separately
+   checks formatting, imports, absence of non-standard dependencies and cgo,
+   unit tests, vet, race tests, target metadata, empty build ID, and the
+   deterministic build. It also compares the just-built artifact directly with
+   the fixed SHA-256, size, and mode. The static pinned-input verifier opens that
+   same target with `O_NOFOLLOW`, holds the descriptor while hashing, and rejects
+   non-regular files, hard links, ownership or mode drift, size or digest drift,
+   and any before/after metadata change.
+9. The independent `runtimeTools.adb` section pins the exact Android platform
+   tool path, `37.0.0-14910828` version, and executable digest. The static gate
+   opens the complete Android admission source through a repository-rooted,
+   no-follow descriptor chain and binds its SHA-256, byte size, owner, mode, and
+   path identity. It then parses (but never imports or executes) those bytes and
+   requires the `ADB`, `ADB_VERSION`, and `ADB_SHA256` literals, the three fixed
+   ADB command-prefix branches, and the host digest check to consume the pinned
+   constants. The admission lane remains responsible for securely hashing the
+   installed executable and checking `adb version` at runtime. Device identity,
+   boot state, interface, IP, process, and socket observations remain live
+   physical evidence; they are not substituted with static build-input values.
 
 The original tag's reachable libbox graph was not accepted as-is: the 2026-07-22
 symbol scan found reachable advisories in `golang.org/x/crypto`,
@@ -92,6 +123,15 @@ same symbol scan reports zero reachable vulnerabilities. It still reports
 `GO-2026-5932` at module scope because `golang.org/x/crypto/openpgp` has no fixed
 version; that package is absent from the scanned import graph.
 
+The v1.13.15 rebase overlap is explicit. The raw-packet patch shares no path
+with the upstream v1.13.14-to-v1.13.15 change set. The DNS patch shares only
+`protocol/tailscale/dns_transport.go`; its rebased hunk preserves upstream's
+new HTTP/HTTPS and direct-address parsing and supplies the added empty fallback
+tag to both `NewResolveDialer` calls. The dependency patch was regenerated from
+the v1.13.15 `go.mod`/`go.sum`, so the upstream sing, sing-tun, sing-quic, and
+Cronet selections remain intact while the approved security versions stay
+exact.
+
 Adding the required `with_clash_api` tag enlarged the scanned import graph. An
 earlier 2026-07-26 rescan exposed `GO-2026-5774`, `GO-2026-5775`, and
 `GO-2026-5777` in `github.com/go-chi/chi/v5@v5.2.5`; the pinned dependency patch
@@ -100,8 +140,9 @@ reports zero vulnerabilities without an ignore or suppression. The upstream
 commit, all three patch byte streams, the combined source diff, and the patched
 module files are
 independently hashed so a release cannot silently substitute either the tag or
-a downstream modification. The raw-packet patch is confined to
-`experimental/libbox`: it adds the libbox side of the public
+a downstream modification. The raw-packet patch is confined to the daemon and
+`experimental/libbox` integration surfaces: it adds the libbox side of the
+public
 `NEPacketTunnelFlow` datagram-adapter contract without modifying `sing-tun` or
 using private Apple APIs.
 
@@ -172,6 +213,11 @@ contains its temporary staging root.
 - final app, System Extension, Agent, updater, and source archive digests.
 
 A locally present or downloaded XCFramework without this provenance is rejected.
+The libbox manifest records `archiveDeterminism=zeroArDate-v1` as exact metadata;
+the verifier requires that binding and rejects missing, changed, or additional
+metadata before the XCFramework can be consumed. This turns the deterministic
+archive policy into a fail-closed artifact contract rather than an ambient
+builder convention.
 The signed/unsigned application manifests bind the canonical toolchain identity
 and every constituent release tree: Go, Go release tools, Go module cache,
 Node.js, the sealed UI dependencies, XcodeGen, and Tauri. The libbox manifest
@@ -199,14 +245,20 @@ the exact locked and shipped closure for:
 component inventory, source-input hashes, package metadata hashes, license-text
 hashes, and the evidence method for each automatic license conclusion. An
 automatic conclusion is accepted only when it recomputes from both package or
-toolchain identity metadata and matching source license text. Ambiguous
-expressions and missing texts remain explicit legal-review blockers.
+toolchain identity metadata and matching source license text. The same rule
+applies to external build tools. A tool that cannot resolve automatically must
+carry an explicit `manual-reviewed` / `human-legal-review` conclusion bound to
+the exact license files, identity metadata, and rationale; `manual-required`
+always blocks. Ambiguous expressions and missing texts therefore remain
+explicit legal-review blockers, including the compound klauspost conclusion
+and the pinned Xcode EULA.
 
-The current exact closure contains 371 components. The generated blocker report
-records 344 automatic license conclusions, 27 components requiring human
-license review, 371 copyright attributions requiring human confirmation, and 8
-components requiring an explicitly prepared corresponding source root. License
-boilerplate is deliberately not misreported as package copyright. The
+The generated report records exact component, automatic-license,
+human-license-review, corresponding-source, external-tool, and informational
+`copyright_noassertion_count` totals. License boilerplate is deliberately not
+misreported as package copyright: when no objective component-level attribution
+is available, the review template records the exact SPDX 2.3 sentinel
+`NOASSERTION`. This is not a license conclusion and is not a blocker. The
 authoritative machine-readable report is
 `target/candidates/0.4.0/review/publication-blockers.json`; these counts must be
 regenerated whenever the locked graph changes.
@@ -215,9 +267,19 @@ After component review and source preparation, the `prepare`, `draft`, and
 `finalize` phases create a versioned SPDX 2.3 SBOM, CycloneDX 1.6 SBOM, reviewed
 license set, deterministic complete-source archive, build graphs, native/libbox
 manifests, signed-app tree manifest, and an outer evidence manifest. Verification
-recomputes all bindings and rejects `NOASSERTION`, missing license text, unknown
-binaries, graph drift, source drift, reverse payloads, symlinks or linked files
-in evidence, and any post-review tampering.
+recomputes all bindings and rejects `NOASSERTION` in license expressions,
+unknown SPDX identifiers or exceptions, malformed `LicenseRef` values, missing
+license text, unknown binaries, graph drift, source drift, reverse payloads,
+symlinks or linked files in evidence, and any post-review tampering. SPDX output
+retains component copyright `NOASSERTION`; CycloneDX omits its optional
+copyright field for those components.
+
+The expression validator uses a fail-closed reviewed subset of SPDX License
+List 3.28.0, pinned to the official list-file digests in code. It admits only
+the local `LicenseRef-<idstring>` form required by this release; unbound
+`DocumentRef-...:LicenseRef-...` expressions are rejected. `WITH` requires a
+reviewed SPDX license on the left and a reviewed exception identifier on the
+right.
 
 Production paths are fixed:
 

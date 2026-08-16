@@ -51,12 +51,17 @@ public protocol ProxyAgentServiceControlling: Sendable {
   func ensureRegistered() throws
 }
 
-public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Sendable {
+public protocol ProxyAgentServicing: Sendable {
+  var registrationStatus: ProxyAgentRegistrationStatus { get }
+  func register() throws
+}
+
+public struct SMProxyAgentService: ProxyAgentServicing {
   public static let launchAgentPlistName = "com.bill.clashformac.proxy-agent.plist"
 
   public init() {}
 
-  public func registrationStatus() -> ProxyAgentRegistrationStatus {
+  public var registrationStatus: ProxyAgentRegistrationStatus {
     switch SMAppService.agent(plistName: Self.launchAgentPlistName).status {
     case .enabled: .enabled
     case .requiresApproval: .requiresApproval
@@ -66,22 +71,42 @@ public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Senda
     }
   }
 
+  public func register() throws {
+    try SMAppService.agent(plistName: Self.launchAgentPlistName).register()
+  }
+}
+
+public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Sendable {
+  private let service: any ProxyAgentServicing
+
+  public init(service: any ProxyAgentServicing = SMProxyAgentService()) {
+    self.service = service
+  }
+
+  public func registrationStatus() -> ProxyAgentRegistrationStatus {
+    service.registrationStatus
+  }
+
   public func ensureRegistered() throws {
-    let service = SMAppService.agent(plistName: Self.launchAgentPlistName)
-    switch registrationStatus() {
+    switch service.registrationStatus {
     case .enabled:
       return
     case .requiresApproval:
       throw ProxyAgentHostError.registrationRequiresApproval
-    case .notFound:
-      throw ProxyAgentHostError.registrationUnavailable
-    case .notRegistered:
+    case .notFound, .notRegistered:
       do {
         try service.register()
       } catch {
-        throw ProxyAgentHostError.registrationFailed(error.localizedDescription)
+        switch service.registrationStatus {
+        case .requiresApproval:
+          throw ProxyAgentHostError.registrationRequiresApproval
+        case .notFound:
+          throw ProxyAgentHostError.registrationUnavailable
+        case .enabled, .notRegistered:
+          throw ProxyAgentHostError.registrationFailed(error.localizedDescription)
+        }
       }
-      switch registrationStatus() {
+      switch service.registrationStatus {
       case .enabled:
         return
       case .requiresApproval:

@@ -1592,6 +1592,7 @@ extension ConfigurationDescriptor {
     return [
       "ipv6Enabled": tunnelOptions.ipv6Enabled ? "true" : "false",
       "bypassPrivateNetworks": tunnelOptions.bypassPrivateNetworks ? "true" : "false",
+      "directIPv4Hosts": tunnelOptions.directIPv4Hosts,
       "mtu": String(tunnelOptions.mtu),
     ]
   }
@@ -1669,6 +1670,7 @@ extension NETunnelProviderManager {
     }
     guard let ipv6Value = configuration["ipv6Enabled"] as? String,
       let bypassPrivateNetworksValue = configuration["bypassPrivateNetworks"] as? String,
+      let directIPv4Hosts = configuration["directIPv4Hosts"] as? [String],
       let mtuValue = configuration["mtu"] as? String,
       let mtu = UInt16(mtuValue)
     else {
@@ -1695,6 +1697,7 @@ extension NETunnelProviderManager {
     return try TunnelNetworkOptions(
       ipv6Enabled: ipv6Enabled,
       bypassPrivateNetworks: bypassPrivateNetworks,
+      directIPv4Hosts: directIPv4Hosts,
       mtu: mtu
     )
   }

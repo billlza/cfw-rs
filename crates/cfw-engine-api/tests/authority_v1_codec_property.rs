@@ -20,7 +20,7 @@
 use cfw_engine_api::authority_v1::*;
 use cfw_engine_api::{
     CredentialAudience, CredentialKind, CredentialRef, CredentialSlot, CredentialTarget,
-    TunnelNetworkOptions,
+    DirectIpv4HostRoutes, TunnelNetworkOptions,
 };
 use uuid::Uuid;
 
@@ -176,6 +176,7 @@ fn configuration_of(
         Some(TunnelNetworkOptions {
             ipv6_enabled: true,
             bypass_private_networks: false,
+            direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
             mtu: choices.mtu as u16,
         })
     } else {

@@ -136,7 +136,7 @@ private enum NativeBridgeRequestShape {
     if let options = request["tunnel_options"], !(options is NSNull) {
       try exactKeys(
         object: options,
-        ["ipv6_enabled", "bypass_private_networks", "mtu"]
+        ["ipv6_enabled", "bypass_private_networks", "direct_ipv4_hosts", "mtu"]
       )
     }
   }

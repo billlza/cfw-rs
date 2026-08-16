@@ -4,7 +4,9 @@ import atexit
 import copy
 from contextlib import redirect_stdout
 from dataclasses import replace
+import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -32,6 +34,7 @@ from scripts.tests.physical_evidence_fixture import (
     SIGNED_TREE as _SIGNED_TREE,
     TEST_POLICY,
     PhysicalEvidenceFixture,
+    fixture_packet_policy,
     ps256_sign,
 )
 
@@ -106,12 +109,17 @@ def foreign_tree_fixture() -> dict:
 
 class PhysicalEvidenceAggregatorTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.packet_policy = fixture_packet_policy()
+        self.packet_policy.__enter__()
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.fixture = PhysicalEvidenceFixture(self.root)
 
     def tearDown(self) -> None:
-        self.temporary.cleanup()
+        try:
+            self.temporary.cleanup()
+        finally:
+            self.packet_policy.__exit__(None, None, None)
 
     def validate(self) -> dict:
         return validate_physical_evidence(
@@ -168,8 +176,48 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
                 "sleep-wake:packet",
                 "wkwebview-850x603:metadata",
                 "wkwebview-850x603:pixels",
+                "inside-out-signatures:observation",
+                "team-id:observation",
+                "bundle-identifiers:observation",
+                "entitlements:observation",
+                "provisioning:observation",
             }.issubset(subjects)
         )
+
+    def test_missing_identity_observation_breaks_aggregate_rebuild(self) -> None:
+        binding = next(
+            item
+            for item in self.fixture.raw_bindings[0]
+            if item["subject"] == "inside-out-signatures:observation"
+        )
+        (self.root / binding["descriptor"]["path"]).unlink()
+        with self.assertRaisesRegex(PhysicalEvidenceError, "cannot be opened"):
+            self.validate()
+
+    def test_resigned_receipt_cannot_hide_tampered_identity_observation(self) -> None:
+        lifecycle = self.fixture.report_documents[0]["lifecycle"]
+        probe = next(item for item in lifecycle["probes"] if item["id"] == "team-id")
+        raw_path = self.root / probe["artifact"]["path"]
+        raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        observation_descriptor = raw["observation_artifact"]
+        observation_path = self.root / observation_descriptor["path"]
+        observation = json.loads(observation_path.read_text(encoding="utf-8"))
+        observation["command"]["stdout"] += "warning: forged success\n"
+        observation["command"]["stdout_sha256"] = hashlib.sha256(
+            observation["command"]["stdout"].encode("utf-8")
+        ).hexdigest()
+        self.fixture.rewrite_json(observation_descriptor, observation)
+        observation_binding = next(
+            item
+            for item in self.fixture.raw_bindings[0]
+            if item["subject"] == "team-id:observation"
+        )
+        observation_binding["descriptor"] = copy.deepcopy(observation_descriptor)
+        self.fixture.rewrite_json(probe["artifact"], raw)
+        self.fixture.resign_run(0)
+
+        with self.assertRaisesRegex(PhysicalEvidenceError, "warning or error"):
+            self.validate()
 
     def test_static_self_check_accepts_the_source_pinned_policy(self) -> None:
         self.assertEqual(self_check(), "configured")
@@ -544,7 +592,7 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
         report = self.fixture.report_documents[0]["performance"]
         report["latency"]["connect_ms"]["p95"] = 1.0
         self.fixture.resign_run(0)
-        with self.assertRaisesRegex(PhysicalEvidenceError, "raw sample bytes"):
+        with self.assertRaisesRegex(PhysicalEvidenceError, "differs from the retained ledger"):
             self.validate()
 
     def test_stale_report_fails(self) -> None:
@@ -572,6 +620,13 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
 
 
 class PhysicalEvidenceLoaderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.packet_policy = fixture_packet_policy()
+        self.packet_policy.__enter__()
+
+    def tearDown(self) -> None:
+        self.packet_policy.__exit__(None, None, None)
+
     def test_aggregate_path_and_root_are_used_for_reopen(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture_value = PhysicalEvidenceFixture(Path(temporary))

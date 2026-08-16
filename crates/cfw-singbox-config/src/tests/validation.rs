@@ -122,6 +122,38 @@ fn typed_remote_outbounds_persist_only_canonical_credential_references() {
 }
 
 #[test]
+fn vmess_alter_id_is_closed_to_the_pinned_zero_or_one_contract() {
+    let profile_with_default = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"alter_id":0}}]}}"#
+    ))
+    .expect("AEAD VMess profile");
+    let profile_without_default = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}}}}]}}"#
+    ))
+    .expect("default AEAD VMess profile");
+    assert_eq!(profile_with_default, profile_without_default);
+    assert!(!profile_with_default.as_json().contains("alter_id"));
+
+    let legacy = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"alter_id":1}}]}}"#
+    ))
+    .expect("legacy-protocol VMess profile");
+    let value: Value = serde_json::from_str(legacy.as_json()).expect("canonical VMess JSON");
+    assert_eq!(value["outbounds"][0]["alter_id"], 1);
+    assert_ne!(legacy.digest(), profile_without_default.digest());
+
+    for invalid in ["-1", "2", "256", "1.5", r#""1""#] {
+        let input = format!(
+            r#"{{"outbounds":[{{"type":"vmess","tag":"proxy","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"alter_id":{invalid}}}]}}"#
+        );
+        assert!(
+            ValidatedSingBoxProfile::parse(&input).is_err(),
+            "accepted invalid alter_id {invalid}"
+        );
+    }
+}
+
+#[test]
 fn cross_layer_typed_profile_fixture_uses_the_native_safe_field_shape() {
     let profile =
         ValidatedSingBoxProfile::parse(include_str!("../../../../contracts/typed-profile-v1.json"))

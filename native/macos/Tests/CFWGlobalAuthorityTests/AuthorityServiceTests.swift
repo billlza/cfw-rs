@@ -27,6 +27,19 @@ private struct ExhaustedServiceJournal: AuthorityJournalCommitting {
   }
 }
 
+private final class OperationObservationBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [ReleaseObservationAuthenticatedDecision] = []
+
+  func append(_ value: ReleaseObservationAuthenticatedDecision) {
+    lock.withLock { values.append(value) }
+  }
+
+  var snapshot: [ReleaseObservationAuthenticatedDecision] {
+    lock.withLock { values }
+  }
+}
+
 private struct ServiceRandomness: AuthorityTicketRandomness {
   func randomBytes(count: Int) throws -> Data { Data(repeating: 0x5a, count: count) }
 }
@@ -182,6 +195,34 @@ private func authorityError(_ value: NSError?) -> AuthorityErrorCode? {
 
   #expect(observed == [.invalidMessage, .invalidMessage, .invalidMessage])
   #expect(objects.journal.count == 0)
+}
+
+@Test func rejectedOperationObservationUsesActualRequestAndStableCode() throws {
+  let journal = ServiceJournal()
+  let core = GlobalAuthorityServiceCore(
+    reducer: try .unEnrolledOff(), journal: journal,
+    randomness: ServiceRandomness(), clock: ServiceClock())
+  let peer = try servicePeer()
+  let observations = OperationObservationBox()
+  let service = AuthenticatedAuthorityPeerService(
+    peerID: UUID(), peer: peer, reauthorize: { peer }, core: core,
+    concurrency: AuthorityConcurrencyGate(), events: AuthorityEventHub(),
+    recordOperationDecision: { observations.append($0) })
+  let request = Data("{}".utf8)
+  var responseError: NSError?
+  service.snapshot(request) { _, error in responseError = error }
+
+  #expect(authorityError(responseError) == .invalidMessage)
+  #expect(observations.snapshot.count == 1)
+  let observation = try #require(observations.snapshot.first)
+  #expect(observation.accepted == false)
+  #expect(observation.actualCode == .invalidMessage)
+  #expect(observation.peerPID == peer.pid)
+  #expect(
+    observation.requestSHA256
+      == SHA256.hash(data: request).map { String(format: "%02x", $0) }.joined())
+  #expect(observation.preStateSHA256 == observation.postStateSHA256)
+  #expect(observation.cleanupState == .off)
 }
 
 @Test func prepareUsesCanonicalCorrelationAndSnapshotContainsNoSecret() throws {

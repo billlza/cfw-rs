@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 public enum NativeProtocolConstants {
-  public static let schemaVersion: UInt16 = 4
+  public static let schemaVersion: UInt16 = 5
   public static let maximumMessageBytes = 1_048_576
   public static let maximumConfigurationBytes: UInt64 = 384 * 1_024
   public static let maximumFailureMessageBytes = 1_024
@@ -174,28 +174,54 @@ public enum ConfigurationSlot: String, Codable, CaseIterable, Sendable {
 public struct TunnelNetworkOptions: Codable, Equatable, Sendable {
   public static let minimumMTU: UInt16 = 1_280
   public static let maximumMTU: UInt16 = 1_500
+  public static let releasePacketTransportIPv4 = "35.194.216.98"
 
   public let ipv6Enabled: Bool
   public let bypassPrivateNetworks: Bool
+  public let directIPv4Hosts: [String]
   public let mtu: UInt16
 
   public init(
     ipv6Enabled: Bool,
     bypassPrivateNetworks: Bool = true,
+    directIPv4Hosts: [String] = [],
     mtu: UInt16 = 1_500
   ) throws {
-    guard mtu >= Self.minimumMTU, mtu <= Self.maximumMTU else {
+    guard mtu >= Self.minimumMTU, mtu <= Self.maximumMTU,
+      directIPv4Hosts.isEmpty
+        || directIPv4Hosts == [Self.releasePacketTransportIPv4]
+    else {
       throw ProtocolValidationError.invalidTunnelOptions
     }
     self.ipv6Enabled = ipv6Enabled
     self.bypassPrivateNetworks = bypassPrivateNetworks
+    self.directIPv4Hosts = directIPv4Hosts
     self.mtu = mtu
   }
 
   private enum CodingKeys: String, CodingKey {
     case ipv6Enabled = "ipv6_enabled"
     case bypassPrivateNetworks = "bypass_private_networks"
+    case directIPv4Hosts = "direct_ipv4_hosts"
     case mtu
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    try self.init(
+      ipv6Enabled: container.decode(Bool.self, forKey: .ipv6Enabled),
+      bypassPrivateNetworks: container.decode(Bool.self, forKey: .bypassPrivateNetworks),
+      directIPv4Hosts: container.decode([String].self, forKey: .directIPv4Hosts),
+      mtu: container.decode(UInt16.self, forKey: .mtu)
+    )
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(ipv6Enabled, forKey: .ipv6Enabled)
+    try container.encode(bypassPrivateNetworks, forKey: .bypassPrivateNetworks)
+    try container.encode(directIPv4Hosts, forKey: .directIPv4Hosts)
+    try container.encode(mtu, forKey: .mtu)
   }
 }
 

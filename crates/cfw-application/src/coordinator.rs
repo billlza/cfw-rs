@@ -8,7 +8,7 @@ use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{
-    EngineCoordinatorError,
+    EngineCoordinatorError, EngineRestartSpec,
     coordinator_actor::{
         Command, CoordinatorRuntime, SetModeCommand, StartupReconciliation, run_coordinator,
     },
@@ -224,6 +224,34 @@ impl EngineModeCoordinator {
                 profile_id,
                 profile,
                 settings,
+                expected_snapshot: None,
+                response: response_tx,
+            })))
+            .map_err(map_send_error)?;
+        response_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)?
+    }
+
+    /// Requests a mode only if the actor still owns the exact observed
+    /// snapshot. This closes the observation-to-apply window for maintenance
+    /// transactions without weakening the ordinary serialized set-mode API.
+    pub async fn set_mode_if_snapshot(
+        &self,
+        expected_snapshot: EngineSnapshot,
+        target: EngineMode,
+        profile_id: String,
+        profile: ValidatedSingBoxProfile,
+        settings: EngineSettings,
+    ) -> Result<EngineSnapshot, EngineCoordinatorError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .try_send(Command::SetMode(Box::new(SetModeCommand {
+                target,
+                profile_id,
+                profile,
+                settings,
+                expected_snapshot: Some(expected_snapshot),
                 response: response_tx,
             })))
             .map_err(map_send_error)?;
@@ -265,6 +293,37 @@ impl EngineModeCoordinator {
 
     pub fn subscribe(&self) -> watch::Receiver<EngineSnapshot> {
         self.snapshots.clone()
+    }
+
+    /// Returns the actor-owned source inputs of the last accepted set-mode
+    /// command. The response is serialized with transitions and is never
+    /// reconstructed from a profile repository or a native status query.
+    pub async fn restart_spec(&self) -> Result<Option<EngineRestartSpec>, EngineCoordinatorError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .try_send(Command::RestartSpec {
+                response: response_tx,
+            })
+            .map_err(map_send_error)?;
+        response_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)?
+    }
+
+    /// Fail-closes the actor after a release-evidence restore cannot be proven.
+    /// Only the existing explicit Off reconciliation may clear this quarantine.
+    pub async fn quarantine_release_evidence_restore(
+        &self,
+    ) -> Result<EngineSnapshot, EngineCoordinatorError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .try_send(Command::QuarantineReleaseEvidenceRestore {
+                response: response_tx,
+            })
+            .map_err(map_send_error)?;
+        response_rx
+            .await
+            .map_err(|_| EngineCoordinatorError::CoordinatorClosed)?
     }
 
     /// Waits until the initial native status has either been reconciled or

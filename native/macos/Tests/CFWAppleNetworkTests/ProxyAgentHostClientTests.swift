@@ -11,6 +11,31 @@ private struct FixedProxyAgentServiceController: ProxyAgentServiceControlling {
   func ensureRegistered() throws {}
 }
 
+private final class FakeProxyAgentService: ProxyAgentServicing, @unchecked Sendable {
+  private(set) var registerCalls = 0
+  var statuses: [ProxyAgentRegistrationStatus]
+  var registerError: (any Error)?
+
+  init(
+    _ statuses: [ProxyAgentRegistrationStatus],
+    registerError: (any Error)? = nil
+  ) {
+    self.statuses = statuses
+    self.registerError = registerError
+  }
+
+  var registrationStatus: ProxyAgentRegistrationStatus {
+    statuses.count > 1 ? statuses.removeFirst() : statuses[0]
+  }
+
+  func register() throws {
+    registerCalls += 1
+    if let registerError { throw registerError }
+  }
+}
+
+private enum ProxyAgentRegistrationTestError: Error { case denied }
+
 private final class ProxyAgentTestCounter: @unchecked Sendable {
   private let lock = NSLock()
   private var value = 0
@@ -59,6 +84,25 @@ private func transport(
 
 @Suite(.serialized)
 struct ProxyAgentHostClientTests {
+  @Test func registrationRepairsNotFoundServiceRecord() throws {
+    let service = FakeProxyAgentService([.notFound, .enabled])
+    let controller = SMProxyAgentServiceController(service: service)
+    try controller.ensureRegistered()
+    #expect(service.registerCalls == 1)
+    #expect(controller.registrationStatus() == .enabled)
+  }
+
+  @Test func registrationKeepsMissingBundleDistinctWhenNotFoundPersists() {
+    let service = FakeProxyAgentService(
+      [.notFound],
+      registerError: ProxyAgentRegistrationTestError.denied
+    )
+    #expect(throws: ProxyAgentHostError.registrationUnavailable) {
+      try SMProxyAgentServiceController(service: service).ensureRegistered()
+    }
+    #expect(service.registerCalls == 1)
+  }
+
   @Test func outstandingReplyRegistryAppliesExactBoundAndReleasesCapacity() throws {
     var registry = BoundedProxyAgentRequestRegistry(maximum: 2)
     let first = try registry.reserve()

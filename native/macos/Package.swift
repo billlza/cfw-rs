@@ -18,6 +18,37 @@ let package = Package(
     .library(name: "CFWPacketTunnel", targets: ["CFWPacketTunnel"]),
     .library(name: "CFWNativeBridge", targets: ["CFWNativeBridge"]),
     .executable(name: "CFWGlobalAuthorityDaemon", targets: ["CFWGlobalAuthorityDaemon"]),
+    .executable(name: "CFWAdversarialProbe", targets: ["CFWAdversarialProbe"]),
+    .executable(
+      name: "CFWAdversarialAuthorityOperationReplayController",
+      targets: ["CFWAdversarialAuthorityOperationReplayController"]),
+    .executable(
+      name: "CFWAdversarialBoundedAuthorityLoadController",
+      targets: ["CFWAdversarialBoundedAuthorityLoadController"]),
+    .executable(
+      name: "CFWAdversarialFastUserSwitchController",
+      targets: ["CFWAdversarialFastUserSwitchController"]),
+    .executable(
+      name: "CFWAdversarialIsolatedAuditSessionController",
+      targets: ["CFWAdversarialIsolatedAuditSessionController"]),
+    .executable(
+      name: "CFWAdversarialIsolatedConsoleSessionController",
+      targets: ["CFWAdversarialIsolatedConsoleSessionController"]),
+    .executable(
+      name: "CFWAdversarialPidReuseWindowController",
+      targets: ["CFWAdversarialPidReuseWindowController"]),
+    .executable(
+      name: "CFWAdversarialRootOwnedAuthorityJournalSnapshot",
+      targets: ["CFWAdversarialRootOwnedAuthorityJournalSnapshot"]),
+    .executable(
+      name: "CFWAdversarialRootOwnedSecretCanaryScanner",
+      targets: ["CFWAdversarialRootOwnedSecretCanaryScanner"]),
+    .executable(
+      name: "CFWAdversarialRootOwnedUidLauncher",
+      targets: ["CFWAdversarialRootOwnedUidLauncher"]),
+    .executable(
+      name: "CFWAdversarialSignedOwnerLivenessController",
+      targets: ["CFWAdversarialSignedOwnerLivenessController"]),
     .executable(name: "CFWProxyAgent", targets: ["CFWProxyAgent"]),
   ],
   targets: [
@@ -41,6 +72,75 @@ let package = Package(
       name: "CFWGlobalAuthorityDaemon",
       dependencies: ["CFWGlobalAuthority"],
       path: "Sources/CFWGlobalAuthorityMain"
+    ),
+    .executableTarget(
+      name: "CFWAdversarialProbe",
+      dependencies: ["CFWSharedProtocol"],
+      path: "PhysicalFixtures/CFWAdversarialProbe",
+      linkerSettings: [
+        .linkedFramework("CryptoKit"),
+        .linkedFramework("Security"),
+      ]
+    ),
+    .target(
+      name: "CFWAdversarialFixtureSupport",
+      dependencies: ["CFWSharedProtocol"],
+      path: "PhysicalFixtures/CFWAdversarialFixtureSupport",
+      linkerSettings: [
+        .linkedFramework("CryptoKit"),
+        .linkedFramework("Security"),
+        .linkedFramework("SystemConfiguration"),
+      ]
+    ),
+    .executableTarget(
+      name: "CFWAdversarialAuthorityOperationReplayController",
+      dependencies: ["CFWAdversarialFixtureSupport"],
+      path: "PhysicalFixtures/CFWAdversarialAuthorityOperationReplayController"
+    ),
+    .executableTarget(
+      name: "CFWAdversarialBoundedAuthorityLoadController",
+      dependencies: ["CFWAdversarialFixtureSupport"],
+      path: "PhysicalFixtures/CFWAdversarialBoundedAuthorityLoadController"
+    ),
+    .executableTarget(
+      name: "CFWAdversarialFastUserSwitchController",
+      dependencies: ["CFWAdversarialFixtureSupport"],
+      path: "PhysicalFixtures/CFWAdversarialFastUserSwitchController"
+    ),
+    .executableTarget(
+      name: "CFWAdversarialIsolatedAuditSessionController",
+      dependencies: ["CFWAdversarialFixtureSupport"],
+      path: "PhysicalFixtures/CFWAdversarialIsolatedAuditSessionController"
+    ),
+    .executableTarget(
+      name: "CFWAdversarialIsolatedConsoleSessionController",
+      dependencies: ["CFWAdversarialFixtureSupport"],
+      path: "PhysicalFixtures/CFWAdversarialIsolatedConsoleSessionController"
+    ),
+    .executableTarget(
+      name: "CFWAdversarialPidReuseWindowController",
+      dependencies: ["CFWAdversarialFixtureSupport"],
+      path: "PhysicalFixtures/CFWAdversarialPidReuseWindowController"
+    ),
+    .executableTarget(
+      name: "CFWAdversarialRootOwnedAuthorityJournalSnapshot",
+      dependencies: ["CFWAdversarialFixtureSupport"],
+      path: "PhysicalFixtures/CFWAdversarialRootOwnedAuthorityJournalSnapshot"
+    ),
+    .executableTarget(
+      name: "CFWAdversarialRootOwnedSecretCanaryScanner",
+      dependencies: ["CFWAdversarialFixtureSupport"],
+      path: "PhysicalFixtures/CFWAdversarialRootOwnedSecretCanaryScanner"
+    ),
+    .executableTarget(
+      name: "CFWAdversarialRootOwnedUidLauncher",
+      dependencies: ["CFWAdversarialFixtureSupport"],
+      path: "PhysicalFixtures/CFWAdversarialRootOwnedUidLauncher"
+    ),
+    .executableTarget(
+      name: "CFWAdversarialSignedOwnerLivenessController",
+      dependencies: ["CFWAdversarialFixtureSupport"],
+      path: "PhysicalFixtures/CFWAdversarialSignedOwnerLivenessController"
     ),
     .target(
       name: "CFWPacketTransport",
@@ -144,6 +244,10 @@ let package = Package(
     .testTarget(
       name: "CFWProxyAgentTests",
       dependencies: ["CFWProxyAgentCore", "CFWSharedProtocol"]
+    ),
+    .testTarget(
+      name: "CFWAdversarialFixtureSupportTests",
+      dependencies: ["CFWAdversarialFixtureSupport", "CFWSharedProtocol"]
     ),
   ],
   swiftLanguageModes: [.v6]

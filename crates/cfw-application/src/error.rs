@@ -139,4 +139,10 @@ pub enum EngineCoordinatorError {
     JournalGenerationMismatch { expected: u64, actual: u64 },
     #[error("engine lineage is invalid: {0}")]
     InvalidLineage(String),
+    #[error("engine snapshot changed before the conditional mode transition")]
+    SnapshotPreconditionChanged,
+    #[error(
+        "release evidence restore is unproven; explicit Off reconciliation is required before another non-Off transition"
+    )]
+    ReleaseEvidenceRestoreUnproven,
 }

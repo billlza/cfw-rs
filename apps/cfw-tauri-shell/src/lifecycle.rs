@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::commands::LiveStreams;
 use crate::engine::{EngineMaintenanceLease, ManagedEngine};
+use crate::window_state::WindowBoundsManager;
 
 #[derive(Default)]
 pub(crate) struct AppLifecycle {
@@ -219,6 +220,7 @@ pub(crate) async fn prepare_handoff_exit(
     app: AppHandle,
     lifecycle_lease: &mut HandoffLifecycleLease,
 ) -> Result<(), String> {
+    flush_window_bounds_for_exit(&app);
     let lifecycle = app.state::<AppLifecycle>();
     let outcome = match app.state::<ManagedEngine>().shutdown_to_completion().await {
         Ok(outcome) => outcome,
@@ -287,6 +289,7 @@ fn start_shutdown(app: AppHandle, exit_code: i32) -> Result<(), String> {
         }
         Err(error) => return Err(error),
     }
+    flush_window_bounds_for_exit(&app);
 
     tauri::async_runtime::spawn(async move {
         let coordinator = app.state::<ManagedEngine>().coordinator.clone();
@@ -320,6 +323,12 @@ fn start_shutdown(app: AppHandle, exit_code: i32) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+fn flush_window_bounds_for_exit(app: &AppHandle) {
+    if let Err(error) = app.state::<WindowBoundsManager>().flush(app) {
+        emit_shutdown_error(app, "window_bounds_flush_failed", error);
+    }
 }
 
 pub(crate) fn request_shutdown(app: AppHandle, exit_code: i32) -> Result<(), String> {

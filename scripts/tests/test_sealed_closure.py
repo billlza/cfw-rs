@@ -22,16 +22,16 @@ REPOSITORY = Path(__file__).resolve().parent.parent.parent
 # files itself, so the derived patch closure is bound to the patch bytes in the
 # repository rather than to the pin table the production code already reads.
 PATCH_PATHS = {
-    "security": "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch",
-    "raw_packet": "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
-    "dns_failover": "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",
+    "security": "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
+    "raw_packet": "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
+    "dns_failover": "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
 }
 # Authoritative digest of the *corrected* raw-packet TUN patch: its hunk header
 # declared 271 added lines while the hunk carried 303, so `git apply` silently
 # dropped four test helpers. Kept as a literal because hashing the file alone
 # would still pass if that patch regressed and the pins were recomputed to match.
 EXPECTED_RAW_PACKET_PATCH_SHA256 = (
-    "5e578e7f3695116f8e1dfbb3fc7c2fc276c9b8c193428e5fd6fa71dc57fb8d60"
+    "3367a387fe58b9bb374bb08a7fae9ad2fd46d609e8e9aea49a92a14ec9de4cac"
 )
 # The combined diff is the full-object-ID digest of the whole working-tree diff
 # of the patched sing-box checkout
@@ -39,7 +39,7 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # be recomputed from the patch files alone. A pinned literal is therefore the
 # only form of this assertion that still fails when a pin drifts.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "25d3d611f1c1bf317e9ec2dc23609f32972bfbeec4b2502131ee1e7dd4e68cfe"
+    "8a2b698b8c3a7285b963c3ffc67480b6eed06021c6fe585eccd22513799d2a80"
 )
 
 
@@ -147,7 +147,7 @@ class DeriveSupplyChainTests(unittest.TestCase):
         self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.26.5")
         self.assertEqual(
             supply_chain["patched_source"]["upstream_commit"],
-            "25a600db24f7680ad9806ce5427bd0ab8afe1114",
+            "3708fa18766cda1f11b77f6ed9c7bd61688f17df",
         )
         patched_source = supply_chain["patched_source"]
 

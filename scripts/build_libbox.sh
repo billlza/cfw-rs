@@ -72,6 +72,10 @@ go_build_cache="$(mktemp -d "$repo_root/target/release-build-cache/libbox.XXXXXX
 trap '/bin/rm -rf -- "$go_build_cache"' EXIT
 export GOCACHE="$go_build_cache"
 export PATH="$gobin:$toolchain_root/go-$GO_VERSION/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Apple's archive tools otherwise stamp the generated c-archive symbol table
+# with the wall clock, making identical libbox inputs produce different bytes.
+# Override any caller value so the release artifact is reproducible.
+export ZERO_AR_DATE=1
 configure_offline_go_environment
 export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
 
@@ -161,6 +165,7 @@ python3 "$repo_root/scripts/hash_artifact.py" \
   --metadata "gomobileVersion=$GOMOBILE_VERSION" \
   --metadata "gomobileCommit=$GOMOBILE_COMMIT" \
   --metadata "gomobileModuleSum=$GOMOBILE_MODULE_SUM" \
+  --metadata "archiveDeterminism=zeroArDate-v1" \
   --metadata "headerNormalization=angleBracketFrameworkImports-v1" \
   --metadata "platform=$LIBBOX_APPLE_PLATFORM" \
   --metadata "buildTags=$LIBBOX_BUILD_TAGS" \

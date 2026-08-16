@@ -13,13 +13,13 @@ function proxyEnvelope(overrides = {}) {
         state: "proxy_active",
         runtime: {
           owner: "proxy_agent",
-          context: { generation: 9 },
+          context: { installation_id: "installation", config_epoch: 4, generation: 9 },
           config_digest: "abc123",
           ready: true,
         },
       },
     },
-    capabilities: { system_proxy: true, tunnel: false },
+    capabilities: { system_proxy: true, tunnel: false, provider_management: false },
     unavailable_reason: "Packet Tunnel is not linked",
     ...overrides,
   };
@@ -32,6 +32,13 @@ test("accepts an identity-bound active proxy snapshot", () => {
   assert.equal(engine.active, true);
   assert.equal(engine.systemProxyActive, true);
   assert.equal(engine.tunnelAvailable, false);
+  assert.equal(engine.providerManagementAvailable, false);
+  assert.deepEqual(engine.runtimeIdentity, {
+    owner: "proxy_agent",
+    context: { installation_id: "installation", config_epoch: 4, generation: 9 },
+    config_digest: "abc123",
+    ready: true,
+  });
   assert.equal(engineStateLabel(engine), "On");
   assert.equal(tunnelValueLabel(engine), "Off");
 });
@@ -52,6 +59,14 @@ test("rejects active state with a mismatched generation, owner, digest or readin
   const notReady = proxyEnvelope();
   notReady.snapshot.state.runtime.ready = false;
   assert.throws(() => normalizeEngineStatus(notReady), /identity/u);
+
+  const missingInstallation = proxyEnvelope();
+  missingInstallation.snapshot.state.runtime.context.installation_id = "";
+  assert.throws(() => normalizeEngineStatus(missingInstallation), /identity/u);
+
+  const unsafeEpoch = proxyEnvelope();
+  unsafeEpoch.snapshot.state.runtime.context.config_epoch = Number.MAX_SAFE_INTEGER + 1;
+  assert.throws(() => normalizeEngineStatus(unsafeEpoch), /identity/u);
 });
 
 test("rejects a malformed envelope instead of assuming Off", () => {

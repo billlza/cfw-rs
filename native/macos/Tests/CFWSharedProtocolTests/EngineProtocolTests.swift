@@ -158,6 +158,34 @@ private func removeEngineProtocolTestDirectory(_ root: URL) {
   }
 }
 
+@Test func tunnelNetworkOptionsAdmitOnlyTheClosedCanonicalDirectIPv4HostSet() throws {
+  let exact = try TunnelNetworkOptions(
+    ipv6Enabled: true,
+    directIPv4Hosts: [TunnelNetworkOptions.releasePacketTransportIPv4]
+  )
+  let encoded = try JSONEncoder().encode(exact)
+  #expect(try JSONDecoder().decode(TunnelNetworkOptions.self, from: encoded) == exact)
+  #expect(String(decoding: encoded, as: UTF8.self).contains("\"direct_ipv4_hosts\""))
+
+  for invalid in [
+    ["35.194.216.98", "35.194.216.98"],
+    ["035.194.216.98"],
+    ["35.194.216.99"],
+    ["35.194.216.98", "1.1.1.1"],
+  ] {
+    #expect(throws: ProtocolValidationError.invalidTunnelOptions) {
+      try TunnelNetworkOptions(ipv6Enabled: true, directIPv4Hosts: invalid)
+    }
+  }
+
+  let missingRouteField = Data(
+    #"{"ipv6_enabled":true,"bypass_private_networks":true,"mtu":1500}"#.utf8
+  )
+  #expect(throws: (any Error).self) {
+    try JSONDecoder().decode(TunnelNetworkOptions.self, from: missingRouteField)
+  }
+}
+
 @Test func commandRejectsConfigurationForWrongMode() throws {
   let installationID = try #require(
     UUID(uuidString: "11111111-1111-1111-1111-111111111111")

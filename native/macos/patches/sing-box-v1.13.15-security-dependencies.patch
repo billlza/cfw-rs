@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 670f4c0f..2de14c98 100644
+index 670f4c0f0eac9c39dab8967db074d9d074a95905..2de14c9819f3cec23437242ffd7a6546d87b243d 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -267,2 +267,2 @@ lib_install:
@@ -8,7 +8,7 @@ index 670f4c0f..2de14c98 100644
 +	go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.13
 +	go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.13
 diff --git a/go.mod b/go.mod
-index 2af986fb..b6b9ea38 100644
+index efa9a7ba0f4e1eec3aedd49d9ff5a3021024bb15..6f2f633fa5ccba068db49d2a2644b4da6647a045 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -3 +3 @@ module github.com/sagernet/sing-box
@@ -55,7 +55,7 @@ index 2af986fb..b6b9ea38 100644
 -	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 +	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 diff --git a/go.sum b/go.sum
-index 86eca25b..a72ac18c 100644
+index 14fe3832265a4d86c9c2cfe68ae297e1fb6361f4..02712dd43979b63ca788c8e3187bec5985a374b4 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -3,2 +3,2 @@ code.pfad.fr/check v1.1.0/go.mod h1:NiUH13DtYsb7xp5wll0U4SXx7KhXQVCtRgdC96IPfoM=

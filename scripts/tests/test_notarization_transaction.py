@@ -30,6 +30,7 @@ from scripts.notarization_transaction import (
     MAX_COMMAND_OUTPUT_BYTES,
     CommandResult,
     CommandRole,
+    CURRENT_MACOS_27_COMPATIBILITY_IDENTITY,
     HostSystemIdentity,
     PreSubmissionPolicyMode,
     TransactionContext,
@@ -444,6 +445,25 @@ class NotarizationReadinessPolicyTests(unittest.TestCase):
                         CommandRole.NOTARY_READINESS_CORROBORATION,
                     ],
                 )
+
+    def test_accepts_the_current_macOS_27_seed_with_exact_corroboration(self) -> None:
+        runner = self._exact_runner()
+        mode = _establish_pre_submission_policy(
+            runner,
+            self.app,
+            lambda: CURRENT_MACOS_27_COMPATIBILITY_IDENTITY,
+        )
+        self.assertIs(
+            mode,
+            PreSubmissionPolicyMode.MACOS_27_26A5388G_COMPATIBILITY,
+        )
+        self.assertEqual(
+            runner.calls,
+            [
+                CommandRole.NOTARY_READINESS,
+                CommandRole.NOTARY_READINESS_CORROBORATION,
+            ],
+        )
 
 
 class ProductionArchiveBuilderTests(unittest.TestCase):

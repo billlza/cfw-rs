@@ -389,6 +389,24 @@ KNOWN_MACOS_27_COMPATIBILITY_IDENTITY = HostSystemIdentity(
     architecture="arm64",
 )
 
+# Apple shipped the same pre-notarization syspolicy false positive on the
+# subsequent macOS 27 seed.  The exact finding and distribution corroboration
+# remain mandatory; only this observed host identity is added to the allowlist.
+CURRENT_MACOS_27_COMPATIBILITY_IDENTITY = HostSystemIdentity(
+    product_name="macOS",
+    product_version="27.0",
+    build_version="26A5406e",
+    kernel_name="Darwin",
+    kernel_release="27.0.0",
+    architecture="arm64",
+)
+KNOWN_MACOS_27_COMPATIBILITY_IDENTITIES = frozenset(
+    {
+        KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
+        CURRENT_MACOS_27_COMPATIBILITY_IDENTITY,
+    }
+)
+
 
 @dataclass(frozen=True)
 class PersistedEvidenceSnapshot:
@@ -3289,10 +3307,10 @@ def _require_exact_macos_27_notary_false_positive(
     identity: HostSystemIdentity,
 ) -> None:
     role = CommandRole.NOTARY_READINESS
-    if identity != KNOWN_MACOS_27_COMPATIBILITY_IDENTITY:
+    if identity not in KNOWN_MACOS_27_COMPATIBILITY_IDENTITIES:
         raise TransactionError(
             "notary-readiness_compatibility_unsupported_host",
-            "notary readiness failed outside the single known host compatibility build",
+            "notary readiness failed outside the allowlisted host compatibility builds",
             exit_code=result.returncode,
         )
     executable = app.resolve() / "Contents/MacOS/clash-for-mac"

@@ -79,14 +79,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'from scripts.publication.final_candidat
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/sealed_evidence_manifest.py self-check
 
 # The production composer is deliberately distinct from the generic fixture-
-# capable validators. Its source-bound self-check fixes the 40020 -> 40021
+# capable validators. Its source-bound self-check fixes the 40021 -> 40022
 # sequence and proves that the requirements-derived nine-capability inventory
 # is complete before any physical or publication evidence is considered.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/production_release_evidence.py self-check
 
 for fragment in \
-  'VALIDATION_BUILD = "40020"' \
-  'FINAL_BUILD = "40021"' \
+  'VALIDATION_BUILD = "40021"' \
+  'FINAL_BUILD = "40022"' \
   'prepare_physical_candidate_manifest' \
   'seal_production_evidence' \
   'require_clean=True' \

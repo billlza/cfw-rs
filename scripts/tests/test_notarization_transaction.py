@@ -26,11 +26,12 @@ import scripts.notarization_transaction as transaction_module
 from scripts.gatekeeper_assessment import validate_evidence as validate_gatekeeper_evidence
 from scripts.hash_artifact import build_manifest
 from scripts.notarization_transaction import (
-    KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
+    MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
+    MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
+    MACOS_27_COMPATIBILITY_IDENTITIES,
     MAX_COMMAND_OUTPUT_BYTES,
     CommandResult,
     CommandRole,
-    CURRENT_MACOS_27_COMPATIBILITY_IDENTITY,
     HostSystemIdentity,
     PreSubmissionPolicyMode,
     TransactionContext,
@@ -432,11 +433,11 @@ class NotarizationReadinessPolicyTests(unittest.TestCase):
                 mode = _establish_pre_submission_policy(
                     runner,
                     self.app,
-                    lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
+                    lambda: MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
                 )
                 self.assertIs(
                     mode,
-                    PreSubmissionPolicyMode.MACOS_27_26A5388G_COMPATIBILITY,
+                    PreSubmissionPolicyMode.MACOS_27_EXACT_BUILD_COMPATIBILITY,
                 )
                 self.assertEqual(
                     runner.calls,
@@ -446,24 +447,32 @@ class NotarizationReadinessPolicyTests(unittest.TestCase):
                     ],
                 )
 
-    def test_accepts_the_current_macOS_27_seed_with_exact_corroboration(self) -> None:
-        runner = self._exact_runner()
-        mode = _establish_pre_submission_policy(
-            runner,
-            self.app,
-            lambda: CURRENT_MACOS_27_COMPATIBILITY_IDENTITY,
-        )
-        self.assertIs(
-            mode,
-            PreSubmissionPolicyMode.MACOS_27_26A5388G_COMPATIBILITY,
-        )
+    def test_accepts_each_reviewed_macOS_27_seed_with_exact_corroboration(
+        self,
+    ) -> None:
         self.assertEqual(
-            runner.calls,
-            [
-                CommandRole.NOTARY_READINESS,
-                CommandRole.NOTARY_READINESS_CORROBORATION,
-            ],
+            {identity.build_version for identity in MACOS_27_COMPATIBILITY_IDENTITIES},
+            {"26A5388g", "26A5406e", "26A5416b"},
         )
+        for identity in MACOS_27_COMPATIBILITY_IDENTITIES:
+            with self.subTest(build_version=identity.build_version):
+                runner = self._exact_runner()
+                mode = _establish_pre_submission_policy(
+                    runner,
+                    self.app,
+                    lambda identity=identity: identity,
+                )
+                self.assertIs(
+                    mode,
+                    PreSubmissionPolicyMode.MACOS_27_EXACT_BUILD_COMPATIBILITY,
+                )
+                self.assertEqual(
+                    runner.calls,
+                    [
+                        CommandRole.NOTARY_READINESS,
+                        CommandRole.NOTARY_READINESS_CORROBORATION,
+                    ],
+                )
 
 
 class ProductionArchiveBuilderTests(unittest.TestCase):
@@ -579,7 +588,7 @@ class HostSystemIdentityReaderTests(unittest.TestCase):
             side_effect=run,
         ):
             identity = production_host_system_identity_reader()
-        self.assertEqual(identity, KNOWN_MACOS_27_COMPATIBILITY_IDENTITY)
+        self.assertEqual(identity, MACOS_27_26A5388G_COMPATIBILITY_IDENTITY)
         self.assertEqual(
             calls,
             [(command, 30) for command in values],
@@ -628,20 +637,24 @@ class NotarizationReadinessPolicyMutationTests(unittest.TestCase):
         )
 
     def test_rejects_every_host_identity_near_match(self) -> None:
-        for field in HostSystemIdentity.__dataclass_fields__:
-            with self.subTest(field=field):
-                runner = self._exact_runner()
-                identity = replace(
-                    KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
-                    **{field: "different"},
-                )
-                with self.assertRaises(TransactionError):
-                    _establish_pre_submission_policy(
-                        runner,
-                        self.app,
-                        lambda identity=identity: identity,
+        for allowed_identity in MACOS_27_COMPATIBILITY_IDENTITIES:
+            for field in HostSystemIdentity.__dataclass_fields__:
+                with self.subTest(
+                    build_version=allowed_identity.build_version,
+                    field=field,
+                ):
+                    runner = self._exact_runner()
+                    identity = replace(
+                        allowed_identity,
+                        **{field: "different"},
                     )
-                self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
+                    with self.assertRaises(TransactionError):
+                        _establish_pre_submission_policy(
+                            runner,
+                            self.app,
+                            lambda identity=identity: identity,
+                        )
+                    self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
 
     def test_rejects_every_notary_finding_and_diagnostic_near_match(self) -> None:
         expected = known_notary_false_positive(self.app)
@@ -700,7 +713,7 @@ class NotarizationReadinessPolicyMutationTests(unittest.TestCase):
                     _establish_pre_submission_policy(
                         runner,
                         self.app,
-                        lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
+                        lambda: MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
                     )
                 self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
 
@@ -748,7 +761,7 @@ class NotarizationReadinessPolicyMutationTests(unittest.TestCase):
                     _establish_pre_submission_policy(
                         runner,
                         self.app,
-                        lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
+                        lambda: MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
                     )
                 self.assertEqual(
                     runner.calls,
@@ -920,7 +933,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         final_app = fixture.execute(
             command_runner=compatibility_runner,
             host_system_identity_reader=(
-                lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY
+                lambda: MACOS_27_26A5416B_COMPATIBILITY_IDENTITY
             ),
         )
         self.assertTrue(final_app.is_dir())
@@ -976,7 +989,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             fixture.execute(
                 command_runner=mismatch_runner,
                 host_system_identity_reader=(
-                    lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY
+                    lambda: MACOS_27_26A5388G_COMPATIBILITY_IDENTITY
                 ),
             )
         self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
@@ -991,6 +1004,57 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             terminal["failure_code"],
             "notary-readiness_finding_mismatch",
         )
+
+    def test_unsupported_beta_host_is_terminal_before_submit_or_recovery(
+        self,
+    ) -> None:
+        fixture = self.fixture
+        work_app = fixture.context.attempt_root / "work/Clash for Mac.app"
+
+        def readiness_runner(
+            role: CommandRole,
+            command: list[str],
+            timeout: float,
+        ) -> CommandResult:
+            fixture.runner.calls.append(role)
+            fixture.runner.command_calls.append((role, tuple(command), timeout))
+            if role is not CommandRole.NOTARY_READINESS:
+                self.fail(f"unexpected command after unsupported host: {role}")
+            return CommandResult(
+                70,
+                json.dumps({"output": [known_notary_false_positive(work_app)]}),
+                single_signature_diagnostic(work_app),
+            )
+
+        unsupported = replace(
+            MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
+            build_version="26A5416c",
+        )
+        with self.assertRaises(TransactionError) as raised:
+            fixture.execute(
+                command_runner=readiness_runner,
+                host_system_identity_reader=lambda: unsupported,
+            )
+        self.assertEqual(
+            raised.exception.code,
+            "notary-readiness_compatibility_unsupported_host",
+        )
+        self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
+        events = sorted((fixture.context.attempt_root / "events").glob("*.json"))
+        terminal = json.loads(events[-1].read_text(encoding="utf-8"))
+        self.assertEqual(terminal["state"], "failed")
+        self.assertEqual(
+            terminal["failure_code"],
+            "notary-readiness_compatibility_unsupported_host",
+        )
+        calls = list(fixture.runner.calls)
+        with self.assertRaises(TransactionError) as repeated:
+            fixture.execute()
+        self.assertEqual(repeated.exception.code, "build_number_claimed")
+        with self.assertRaises(TransactionError) as recovery:
+            fixture.recover()
+        self.assertEqual(recovery.exception.code, "recovery_state_unsupported")
+        self.assertEqual(fixture.runner.calls, calls)
 
     def test_beta_corroboration_near_match_is_persisted_before_submit(self) -> None:
         fixture = self.fixture
@@ -1018,7 +1082,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             fixture.execute(
                 command_runner=mismatch_runner,
                 host_system_identity_reader=(
-                    lambda: KNOWN_MACOS_27_COMPATIBILITY_IDENTITY
+                    lambda: MACOS_27_26A5388G_COMPATIBILITY_IDENTITY
                 ),
             )
         self.assertEqual(
@@ -1172,6 +1236,28 @@ class NotarizationRecoveryTests(unittest.TestCase):
         self.fixture.runner.calls.clear()
         self.fixture.runner.command_calls.clear()
         self.fixture.runner.role_counts.clear()
+
+    def test_historical_attempt_without_global_claim_remains_recoverable(self) -> None:
+        shutil.rmtree(self.fixture.context.build_number_claim)
+        self._reset_runner_observations()
+        final_app = self.fixture.recover()
+        self.assertTrue(final_app.is_dir())
+        self.assertFalse(self.fixture.context.build_number_claim.exists())
+
+    def test_cross_lane_collision_blocks_recovery_before_external_commands(
+        self,
+    ) -> None:
+        opposite = (
+            self.fixture.candidate
+            / "notary-attempts/release"
+            / self.fixture.context.build_number
+        )
+        opposite.mkdir(parents=True, mode=0o700)
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover()
+        self.assertEqual(raised.exception.code, "cross_lane_attempt_exists")
+        self.assertEqual(self.fixture.runner.calls, [])
 
     @staticmethod
     def _clear_runner_observations(fixture: Fixture) -> None:
@@ -7620,28 +7706,38 @@ class ShellCleanupContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         return shell[shell.index("cleanup() {") : shell.index("trap cleanup EXIT")]
 
-    def _run_cleanup(self, *, attempt_exists: bool) -> tuple[bool, bool]:
+    def _run_cleanup(
+        self,
+        *,
+        attempt_exists: bool,
+        claim_exists: bool = False,
+    ) -> tuple[bool, bool, bool]:
         with tempfile.TemporaryDirectory() as temporary:
             candidate = Path(temporary) / "target/candidates/0.4.0"
             staging = candidate / ".signed-stage.fixture"
             build = candidate / "validation/40000"
             attempt = candidate / "notary-attempts/validation/40000"
+            claim = candidate / "notary-build-claims/40000"
             (staging / "Clash for Mac.app").mkdir(parents=True)
             build.mkdir(parents=True)
             if attempt_exists:
                 attempt.mkdir(parents=True)
+            if claim_exists:
+                claim.mkdir(parents=True)
             script = (
                 "set -euo pipefail\n"
                 'candidate_base="$CANDIDATE_BASE"\n'
                 'staging="$STAGING"\n'
                 'build_root="$BUILD_ROOT"\n'
                 'attempt_root="$ATTEMPT_ROOT"\n'
+                'claim_root="$CLAIM_ROOT"\n'
                 "completed=0\n"
                 f"{self._cleanup_source()}\n"
                 "cleanup\n"
                 '[[ -d "$staging" ]] && staging_state=present || staging_state=absent\n'
                 '[[ -d "$build_root" ]] && build_state=present || build_state=absent\n'
-                'printf "%s %s\\n" "$staging_state" "$build_state"\n'
+                '[[ -d "$claim_root" ]] && claim_state=present || claim_state=absent\n'
+                'printf "%s %s %s\\n" "$staging_state" "$build_state" "$claim_state"\n'
             )
             environment = {
                 **os.environ,
@@ -7649,6 +7745,7 @@ class ShellCleanupContractTests(unittest.TestCase):
                 "STAGING": str(staging),
                 "BUILD_ROOT": str(build),
                 "ATTEMPT_ROOT": str(attempt),
+                "CLAIM_ROOT": str(claim),
             }
             completed = subprocess.run(
                 ["/bin/bash", "-c", script],
@@ -7660,14 +7757,28 @@ class ShellCleanupContractTests(unittest.TestCase):
                 env=environment,
             )
             states = completed.stdout.split()
-            self.assertEqual(len(states), 2)
-            return states[0] == "present", states[1] == "present"
+            self.assertEqual(len(states), 3)
+            return tuple(state == "present" for state in states)
 
     def test_claimed_attempt_preserves_staging_and_build_root(self) -> None:
-        self.assertEqual(self._run_cleanup(attempt_exists=True), (True, True))
+        self.assertEqual(
+            self._run_cleanup(attempt_exists=True),
+            (True, True, False),
+        )
 
     def test_pre_attempt_failure_cleans_only_rebuildable_outputs(self) -> None:
-        self.assertEqual(self._run_cleanup(attempt_exists=False), (False, False))
+        self.assertEqual(
+            self._run_cleanup(attempt_exists=False),
+            (False, False, False),
+        )
+
+    def test_claim_only_failure_cleans_outputs_but_preserves_build_tombstone(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self._run_cleanup(attempt_exists=False, claim_exists=True),
+            (False, False, True),
+        )
 
 
 class AttemptConcurrencyTests(unittest.TestCase):
@@ -7684,7 +7795,169 @@ class AttemptConcurrencyTests(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(lambda _index: claim(), range(2)))
-        self.assertEqual(sorted(results), ["attempt_exists", "claimed"])
+        self.assertEqual(sorted(results), ["build_number_claimed", "claimed"])
+
+    def test_claim_in_one_lane_serially_blocks_the_other_lane(self) -> None:
+        for claimed_kind, rejected_kind in (
+            ("validation", "release"),
+            ("release", "validation"),
+        ):
+            with self.subTest(
+                claimed_kind=claimed_kind,
+                rejected_kind=rejected_kind,
+            ):
+                fixture = Fixture()
+                try:
+                    claimed = replace(
+                        fixture.context,
+                        build_kind=claimed_kind,
+                    )
+                    rejected = replace(
+                        fixture.context,
+                        build_kind=rejected_kind,
+                    )
+                    _claim_attempt(claimed)
+                    with self.assertRaises(TransactionError) as raised:
+                        _claim_attempt(rejected)
+                    self.assertEqual(
+                        raised.exception.code,
+                        "build_number_claimed",
+                    )
+                finally:
+                    fixture.close()
+
+    def test_historical_lane_attempt_without_claim_blocks_the_other_lane(
+        self,
+    ) -> None:
+        for historical_kind, requested_kind in (
+            ("validation", "release"),
+            ("release", "validation"),
+        ):
+            with self.subTest(
+                historical_kind=historical_kind,
+                requested_kind=requested_kind,
+            ):
+                fixture = Fixture()
+                try:
+                    attempts = fixture.candidate / "notary-attempts"
+                    historical_lane = attempts / historical_kind
+                    attempts.mkdir(mode=0o700)
+                    historical_lane.mkdir(mode=0o700)
+                    historical_attempt = historical_lane / fixture.context.build_number
+                    historical_attempt.mkdir(mode=0o700)
+                    requested = replace(
+                        fixture.context,
+                        build_kind=requested_kind,
+                    )
+                    with self.assertRaises(TransactionError) as raised:
+                        _claim_attempt(requested)
+                    self.assertEqual(raised.exception.code, "attempt_exists")
+                    self.assertTrue(requested.build_number_claim.is_dir())
+                    self.assertFalse(requested.attempt_root.exists())
+                finally:
+                    fixture.close()
+
+    def test_validation_and_release_lanes_share_one_atomic_build_claim(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        contexts = [
+            fixture.context,
+            replace(fixture.context, build_kind="release"),
+        ]
+        claim_barrier = threading.Barrier(len(contexts))
+        real_mkdir_private = transaction_module._mkdir_private
+
+        def synchronized_mkdir(path: Path, *, exclusive: bool) -> None:
+            if path == fixture.context.build_number_claim:
+                claim_barrier.wait(timeout=5)
+            real_mkdir_private(path, exclusive=exclusive)
+
+        def claim(context: TransactionContext) -> str:
+            try:
+                _claim_attempt(context)
+                return "claimed"
+            except TransactionError as error:
+                return error.code
+
+        with patch.object(
+            transaction_module,
+            "_mkdir_private",
+            side_effect=synchronized_mkdir,
+        ), ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(claim, contexts))
+        self.assertEqual(sorted(results), ["build_number_claimed", "claimed"])
+        attempt_roots = [context.attempt_root for context in contexts]
+        self.assertEqual(sum(path.is_dir() for path in attempt_roots), 1)
+
+    def test_different_build_numbers_can_be_claimed_independently(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        contexts = [
+            fixture.context,
+            replace(
+                fixture.context,
+                build_kind="release",
+                build_number="40001",
+            ),
+        ]
+
+        def claim(context: TransactionContext) -> str:
+            try:
+                _claim_attempt(context)
+                return "claimed"
+            except TransactionError as error:
+                return error.code
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(claim, contexts))
+        self.assertEqual(results, ["claimed", "claimed"])
+
+    def test_claim_survives_a_crash_before_lane_attempt_creation(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        real_mkdir = transaction_module._mkdir_private
+
+        def crash_before_attempt(path: Path, *, exclusive: bool) -> None:
+            if path == fixture.context.attempt_root:
+                raise SimulatedCrash("after-build-number-claim")
+            real_mkdir(path, exclusive=exclusive)
+
+        with patch.object(
+            transaction_module,
+            "_mkdir_private",
+            side_effect=crash_before_attempt,
+        ):
+            with self.assertRaises(SimulatedCrash):
+                _claim_attempt(fixture.context)
+        self.assertTrue(fixture.context.build_number_claim.is_dir())
+        self.assertFalse(fixture.context.attempt_root.exists())
+        for build_kind in ("validation", "release"):
+            with self.subTest(build_kind=build_kind):
+                with self.assertRaises(TransactionError) as raised:
+                    _claim_attempt(
+                        replace(fixture.context, build_kind=build_kind)
+                    )
+                self.assertEqual(raised.exception.code, "build_number_claimed")
+
+    def test_unsafe_claim_roots_fail_closed(self) -> None:
+        for kind in ("file", "symlink", "wrong-mode"):
+            with self.subTest(kind=kind):
+                fixture = Fixture()
+                try:
+                    claims = fixture.candidate / "notary-build-claims"
+                    if kind == "file":
+                        claims.write_bytes(b"not a directory")
+                    elif kind == "symlink":
+                        target = fixture.candidate / "claim-target"
+                        target.mkdir(mode=0o700)
+                        claims.symlink_to(target, target_is_directory=True)
+                    else:
+                        claims.mkdir(mode=0o755)
+                    with self.assertRaises(TransactionError):
+                        _claim_attempt(fixture.context)
+                    self.assertFalse(fixture.context.attempt_root.exists())
+                finally:
+                    fixture.close()
 
     def test_two_complete_transactions_can_submit_the_build_only_once(self) -> None:
         fixture = Fixture()
@@ -7709,8 +7982,47 @@ class AttemptConcurrencyTests(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(run, contexts))
-        self.assertEqual(sorted(results), ["attempt_exists", "published"])
+        self.assertEqual(sorted(results), ["build_number_claimed", "published"])
         self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
+
+    def test_cross_lane_transactions_can_submit_the_build_only_once(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        release_build = fixture.candidate / "release-build/40000"
+        release_native = release_build / "native-products"
+        release_native.mkdir(parents=True)
+        release_staging = fixture.candidate / ".signed-stage.release"
+        release_app = release_staging / "Clash for Mac.app"
+        release_executable = release_app / "Contents/MacOS/clash-for-mac"
+        release_executable.parent.mkdir(parents=True)
+        release_executable.write_bytes(b"signed-app")
+        release_executable.chmod(0o755)
+        contexts = [
+            fixture.context,
+            replace(
+                fixture.context,
+                build_kind="release",
+                staged_app=release_app,
+                native_products=release_native,
+            ),
+        ]
+
+        def run(context: TransactionContext) -> str:
+            try:
+                fixture.execute_context(context)
+                return "published"
+            except TransactionError as error:
+                return error.code
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(run, contexts))
+        self.assertEqual(sorted(results), ["build_number_claimed", "published"])
+        self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
+        loser = contexts[results.index("build_number_claimed")]
+        self.assertIsNotNone(loser.staged_app)
+        if loser.staged_app is None:
+            self.fail("losing context unexpectedly lacks a staged app")
+        self.assertTrue(loser.staged_app.is_dir())
 
 
 class NotarizationCliTests(unittest.TestCase):

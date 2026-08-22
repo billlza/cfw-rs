@@ -479,20 +479,22 @@ scripts/release_publication_gate.sh \
   "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
 ```
 
-### Fixed 40020 to 40021 physical-candidate evidence sequence
+### Fixed 40021 to 40022 physical-candidate evidence sequence
 
 The production evidence composer has no fixture, path, output, build-number, or
 success-override option. Run this sequence exactly once from one clean release
-commit. Build identities through `40019` have already been allocated to older
-source closures or validation attempts, so those candidates and their evidence
-are retired and must not be renamed, relabelled, or reused:
+commit. Build identities through `40020` have already been allocated to older
+source closures or validation attempts. Build `40020` terminated at its
+fail-closed host-compatibility gate before Apple submission and remains an
+immutable retired attempt. Those candidates and their evidence must not be
+renamed, relabelled, or reused:
 
-1. build, notarize, install, and exercise validation build `40020`; preserve its
+1. build, notarize, install, and exercise validation build `40021`; preserve its
    fixed CI/toolchain, app-manifest, notarization, and runtime-recovery records;
 2. have a human reviewer approve those exact bytes in
    `target/candidates/0.4.0/review/validated-candidate.json`;
 3. build, sign inside-out, notarize, staple, and Gatekeeper-verify final build
-   `40021` from the same clean source identity;
+   `40022` from the same clean source identity;
 4. freeze the signed/notarized runtime candidate before collection:
 
    ```bash
@@ -609,7 +611,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 40020. No updater key, Apple notarization key, local private key, or older
+build 40021. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable

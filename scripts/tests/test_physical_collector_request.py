@@ -58,7 +58,7 @@ REQUEST_SCRIPT = (
 def _candidate() -> dict:
     return {
         "version": "0.4.0",
-        "build_number": "40021",
+        "build_number": "40022",
         "app_manifest_sha256": "a" * 64,
         "signed_app_tree_sha256": "b" * 64,
         "artifact_hash_manifest_sha256": "c" * 64,
@@ -260,7 +260,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         self.runner = _runner()
         self.context = initialize_context(
             _candidate(),
-            run_id="run-40021-macos15",
+            run_id="run-40022-macos15",
             clean_install_confirmed=True,
             runner=self.runner,
             observed_at=self.observed_at,
@@ -322,20 +322,21 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         ):
             initialize_context(
                 _candidate(),
-                run_id="run-40021-macos15",
+                run_id="run-40022-macos15",
                 clean_install_confirmed=False,
                 runner=self.runner,
                 observed_at=self.observed_at,
             )
 
-    def test_initialize_requires_final_40021_build_with_signed_64_bit_bound(self) -> None:
+    def test_initialize_requires_final_40022_build_with_signed_64_bit_bound(self) -> None:
         for build_number, message in (
-            ("40002", "must be final release build 40021"),
-            ("40003", "must be final release build 40021"),
-            ("40004", "must be final release build 40021"),
-            ("40005", "must be final release build 40021"),
-            ("40019", "must be final release build 40021"),
-            ("40020", "must be final release build 40021"),
+            ("40002", "must be final release build 40022"),
+            ("40003", "must be final release build 40022"),
+            ("40004", "must be final release build 40022"),
+            ("40005", "must be final release build 40022"),
+            ("40019", "must be final release build 40022"),
+            ("40020", "must be final release build 40022"),
+            ("40021", "must be final release build 40022"),
             (str(2**63), "signed 64-bit"),
             ("9" * 5_000, "signed 64-bit"),
         ):

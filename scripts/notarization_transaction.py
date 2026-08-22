@@ -3,10 +3,11 @@
 
 The build shell owns compilation and inside-out signing.  This module takes the
 already signed Host app and owns the first irreversible remote side effect:
-notary submission.  A build/lane attempt is claimed exactly once, the exact
-submitted app and archive survive every failure, untrusted command output is
-only parsed in memory, and the public ``signed`` directory appears in one
-non-overwriting rename after every verification and manifest is complete.
+notary submission.  A build number is claimed globally exactly once before its
+lane-specific attempt is created.  The exact submitted app and archive survive
+every failure, untrusted command output is only parsed in memory, and the public
+``signed`` directory appears in one non-overwriting rename after every
+verification and manifest is complete.
 """
 
 from __future__ import annotations
@@ -348,7 +349,7 @@ class CommandRole(Enum):
 
 class PreSubmissionPolicyMode(Enum):
     NATIVE = "native"
-    MACOS_27_26A5388G_COMPATIBILITY = "macos-27-26A5388g-compatibility"
+    MACOS_27_EXACT_BUILD_COMPATIBILITY = "macos-27-exact-build-compatibility"
 
 
 class AttemptPhase(Enum):
@@ -380,7 +381,7 @@ class HostSystemIdentity:
     architecture: str
 
 
-KNOWN_MACOS_27_COMPATIBILITY_IDENTITY = HostSystemIdentity(
+MACOS_27_26A5388G_COMPATIBILITY_IDENTITY = HostSystemIdentity(
     product_name="macOS",
     product_version="27.0",
     build_version="26A5388g",
@@ -389,10 +390,10 @@ KNOWN_MACOS_27_COMPATIBILITY_IDENTITY = HostSystemIdentity(
     architecture="arm64",
 )
 
-# Apple shipped the same pre-notarization syspolicy false positive on the
-# subsequent macOS 27 seed.  The exact finding and distribution corroboration
-# remain mandatory; only this observed host identity is added to the allowlist.
-CURRENT_MACOS_27_COMPATIBILITY_IDENTITY = HostSystemIdentity(
+# Apple shipped the same pre-notarization syspolicy false positive on subsequent
+# macOS 27 seeds.  The exact finding and distribution corroboration remain
+# mandatory; only these individually observed host identities are allowlisted.
+MACOS_27_26A5406E_COMPATIBILITY_IDENTITY = HostSystemIdentity(
     product_name="macOS",
     product_version="27.0",
     build_version="26A5406e",
@@ -400,10 +401,19 @@ CURRENT_MACOS_27_COMPATIBILITY_IDENTITY = HostSystemIdentity(
     kernel_release="27.0.0",
     architecture="arm64",
 )
-KNOWN_MACOS_27_COMPATIBILITY_IDENTITIES = frozenset(
+MACOS_27_26A5416B_COMPATIBILITY_IDENTITY = HostSystemIdentity(
+    product_name="macOS",
+    product_version="27.0",
+    build_version="26A5416b",
+    kernel_name="Darwin",
+    kernel_release="27.0.0",
+    architecture="arm64",
+)
+MACOS_27_COMPATIBILITY_IDENTITIES = frozenset(
     {
-        KNOWN_MACOS_27_COMPATIBILITY_IDENTITY,
-        CURRENT_MACOS_27_COMPATIBILITY_IDENTITY,
+        MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
+        MACOS_27_26A5406E_COMPATIBILITY_IDENTITY,
+        MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
     }
 )
 
@@ -539,6 +549,14 @@ class TransactionContext:
             self.candidate_base
             / "notary-attempts"
             / self.build_kind
+            / self.build_number
+        )
+
+    @property
+    def build_number_claim(self) -> Path:
+        return (
+            self.candidate_base
+            / "notary-build-claims"
             / self.build_number
         )
 
@@ -2255,6 +2273,14 @@ def _validate_context(
     expected_native = context.build_root / "native-products"
     if context.native_products != expected_native:
         raise TransactionError("unsafe_native_products", "native products path is not canonical")
+    attempts = context.candidate_base / "notary-attempts"
+    build_attempt_roots = tuple(
+        attempts / build_kind / context.build_number
+        for build_kind in ("validation", "release")
+    )
+    opposite_attempt = next(
+        path for path in build_attempt_roots if path != context.attempt_root
+    )
     if recovery:
         if context.staged_app is not None:
             raise TransactionError(
@@ -2262,6 +2288,11 @@ def _validate_context(
                 "recovery must not accept a new staged application",
             )
         _require_real_directory(context.attempt_root, private=True)
+        if os.path.lexists(opposite_attempt):
+            raise TransactionError(
+                "cross_lane_attempt_exists",
+                "the same build has notarization attempts in both lanes",
+            )
         _require_real_directory(context.attempt_root / "events", private=True)
         direct_sealed_state = (
             (context.attempt_root / "publish-ready").is_dir()
@@ -2287,10 +2318,15 @@ def _validate_context(
                 "recovery attempt has neither work nor publish-ready state",
             )
     else:
-        if os.path.lexists(context.attempt_root):
+        if os.path.lexists(context.build_number_claim):
+            raise TransactionError(
+                "build_number_claimed",
+                "this build number is permanently allocated and must not be resubmitted",
+            )
+        if any(os.path.lexists(path) for path in build_attempt_roots):
             raise TransactionError(
                 "attempt_exists",
-                "this lane/build already has a notarization attempt and must not be resubmitted",
+                "this build already has a notarization attempt and must not be resubmitted",
             )
         if context.staged_app is None or context.staged_app.name != "Clash for Mac.app":
             raise TransactionError("unsafe_staged_app", "staged app name is not canonical")
@@ -2308,8 +2344,28 @@ def _validate_context(
 def _claim_attempt(context: TransactionContext) -> tuple[Path, Path]:
     attempts = context.candidate_base / "notary-attempts"
     lane = attempts / context.build_kind
+    claims = context.candidate_base / "notary-build-claims"
     _mkdir_private(attempts, exclusive=False)
     _mkdir_private(lane, exclusive=False)
+    _mkdir_private(claims, exclusive=False)
+    try:
+        _mkdir_private(context.build_number_claim, exclusive=True)
+    except TransactionError as error:
+        if error.code != "attempt_exists":
+            raise
+        raise TransactionError(
+            "build_number_claimed",
+            "this build number is permanently allocated and must not be resubmitted",
+        ) from error
+    build_attempt_roots = tuple(
+        attempts / build_kind / context.build_number
+        for build_kind in ("validation", "release")
+    )
+    if any(os.path.lexists(path) for path in build_attempt_roots):
+        raise TransactionError(
+            "attempt_exists",
+            "this build already has a notarization attempt and must not be resubmitted",
+        )
     _mkdir_private(context.attempt_root, exclusive=True)
     events = context.attempt_root / "events"
     work = context.attempt_root / "work"
@@ -3307,7 +3363,7 @@ def _require_exact_macos_27_notary_false_positive(
     identity: HostSystemIdentity,
 ) -> None:
     role = CommandRole.NOTARY_READINESS
-    if identity not in KNOWN_MACOS_27_COMPATIBILITY_IDENTITIES:
+    if identity not in MACOS_27_COMPATIBILITY_IDENTITIES:
         raise TransactionError(
             "notary-readiness_compatibility_unsupported_host",
             "notary readiness failed outside the allowlisted host compatibility builds",
@@ -3409,7 +3465,7 @@ def _establish_pre_submission_policy(
         600,
     )
     _require_exact_pre_notary_missing_ticket(corroboration, app)
-    return PreSubmissionPolicyMode.MACOS_27_26A5388G_COMPATIBILITY
+    return PreSubmissionPolicyMode.MACOS_27_EXACT_BUILD_COMPATIBILITY
 
 
 def _require_empty_notary_stderr(

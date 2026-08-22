@@ -99,7 +99,7 @@ from scripts.tests.performance_evidence_fixture import build_performance_report
 
 APP_MANIFEST = "a" * 64
 SIGNED_TREE = "b" * 64
-BUILD_NUMBER = "40021"
+BUILD_NUMBER = "40022"
 BUILT_AT = "2026-07-01T00:00:00Z"
 CAPTURED_AT = "2026-07-27T12:00:00Z"
 PERFORMANCE_COMPLETED_AT = "2026-07-27T15:20:00Z"
@@ -2316,7 +2316,7 @@ class PhysicalEvidenceFixture:
             "com.bill.clashformac.packet-tunnel / "
             "com.bill.clashformac.proxy-agent\n"
             "platform: arm64 / macOS 15.0+\n"
-            "build number: 40021\n"
+            "build number: 40022\n"
         )
         identity_stderr = (
             f"{identity_app}: valid on disk\n"

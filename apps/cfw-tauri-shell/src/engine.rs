@@ -7,16 +7,17 @@ pub mod packet_evidence;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use cfw_apple_network::{
     AppleNetworkBackend, KeychainEngineGenerationStore, NATIVE_BRIDGE_OUTER_WATCHDOG,
     NativeFrameworkBridge,
 };
-use cfw_application::{EngineControllerAccess, EngineModeCoordinator};
+use cfw_application::{EngineControllerAccess, EngineCoordinatorError, EngineModeCoordinator};
 use cfw_engine_api::{
-    CutoverPreflightBackend, EngineBackend, EngineEvent, EngineMode, EngineSnapshot, EngineState,
+    BackendErrorKind, CutoverPreflightBackend, EngineBackend, EngineEvent, EngineMode, EngineOwner,
+    EngineSnapshot, EngineState,
 };
 use cfw_profiles::{ProfileError, ProfileRepository};
 use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
@@ -29,7 +30,7 @@ use crate::legacy::{
 };
 use crate::settings_store;
 use cutover::CutoverPreparationGate;
-use endpoints::select_process_engine_settings;
+use endpoints::{EndpointCandidateCursor, EndpointRole, select_process_engine_settings};
 pub(crate) use maintenance::{EngineMaintenanceError, EngineMaintenanceLease, ProfileControlError};
 use maintenance::{EngineMaintenanceGate, EngineModeChangeIntent, EngineModeChangeLease};
 
@@ -129,24 +130,71 @@ pub struct ManagedEngine {
     pub(crate) preflight_backend: Arc<dyn CutoverPreflightBackend>,
     cutover: CutoverPreparationGate,
     maintenance: EngineMaintenanceGate,
-    /// Engine settings plus the loopback controller they open. The per-run
-    /// controller secret lives here in memory only: it is never persisted, never
-    /// logged, and never published in an engine snapshot.
+    endpoints: Arc<RwLock<EngineEndpointBinding>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EngineEndpointBinding {
     controller: EngineControllerAccess,
+    cursor: EndpointCandidateCursor,
+    active: Option<ActiveControllerBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveControllerBinding {
+    generation: u64,
+    config_digest: String,
+}
+
+pub(crate) struct StagedEndpointRebind {
+    expected: EngineEndpointBinding,
+    replacement: EngineEndpointBinding,
+}
+
+impl StagedEndpointRebind {
+    pub(crate) fn settings(&self) -> &EngineSettings {
+        self.replacement.controller.settings()
+    }
 }
 
 impl ManagedEngine {
     /// The single engine-settings value this process starts modes with, so the
     /// running engine's controller is exactly the one held in memory here.
-    pub(crate) fn engine_settings(&self) -> &EngineSettings {
-        self.controller.settings()
+    pub(crate) fn engine_settings(&self) -> Result<EngineSettings, String> {
+        read_engine_settings(&self.endpoints)
     }
 
     /// The app-owned controller of the engine this process starts. Command
     /// handlers build their client endpoint from here, so a controller host,
     /// port, or secret can never come from user settings or from a profile.
-    pub(crate) fn controller_access(&self) -> &EngineControllerAccess {
-        &self.controller
+    pub(crate) fn controller_access(&self) -> Result<EngineControllerAccess, String> {
+        read_controller_access(&self.endpoints)
+    }
+
+    pub(crate) fn active_controller_access(
+        &self,
+        generation: u64,
+        config_digest: &str,
+    ) -> Result<EngineControllerAccess, String> {
+        read_active_controller_access(&self.endpoints, generation, config_digest)
+    }
+
+    pub(crate) fn record_endpoint_runtime(&self, snapshot: &EngineSnapshot) -> Result<(), String> {
+        record_endpoint_runtime(&self.endpoints, snapshot)
+    }
+
+    pub(crate) fn stage_endpoint_rebind(
+        &self,
+        conflict: BackendErrorKind,
+    ) -> Result<StagedEndpointRebind, String> {
+        stage_endpoint_rebind(&self.endpoints, &self.coordinator, conflict)
+    }
+
+    pub(crate) fn commit_endpoint_rebind(
+        &self,
+        staged: StagedEndpointRebind,
+    ) -> Result<(), String> {
+        commit_endpoint_rebind(&self.endpoints, staged)
     }
 
     pub(crate) async fn begin_mode_change(
@@ -317,8 +365,12 @@ impl ManagedEngine {
 pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<ManagedEngine, String> {
     let store = settings_store()?;
     store.ensure_layout().map_err(|error| error.to_string())?;
-    let settings = match load_replacement_engine_settings(&store.paths().app_home)? {
-        Some(settings) => settings,
+    let (settings, cursor) = match load_replacement_engine_settings(&store.paths().app_home)? {
+        Some(settings) => {
+            let cursor = EndpointCandidateCursor::from_persisted(settings.clone())
+                .map_err(|error| format!("persisted engine endpoints are unusable: {error}"))?;
+            (settings, cursor)
+        }
         None => select_process_engine_settings(EngineSettings::default())
             .map_err(|error| format!("engine loopback endpoints are unavailable: {error}"))?,
     };
@@ -370,7 +422,11 @@ pub(crate) fn build_managed_engine(bridge: NativeFrameworkBridge) -> Result<Mana
         preflight_backend,
         cutover: CutoverPreparationGate::default(),
         maintenance: EngineMaintenanceGate::default(),
-        controller,
+        endpoints: Arc::new(RwLock::new(EngineEndpointBinding {
+            controller,
+            cursor,
+            active: None,
+        })),
     })
 }
 
@@ -382,7 +438,13 @@ pub(crate) fn start_engine_event_forwarder(app: AppHandle) {
     let engine = app.state::<ManagedEngine>();
     let coordinator = engine.coordinator.clone();
     let mut snapshots = coordinator.subscribe();
-    let default_ipv6_enabled = engine.engine_settings().enable_ipv6;
+    let default_ipv6_enabled = match engine.engine_settings() {
+        Ok(settings) => settings.enable_ipv6,
+        Err(error) => {
+            eprintln!("failed to read engine endpoint state: {error}");
+            return;
+        }
+    };
     if let Err(error) = crate::release_observation::emit_engine_snapshot(
         &snapshots.borrow().clone(),
         default_ipv6_enabled,
@@ -446,12 +508,20 @@ pub(crate) async fn apply_admitted_engine_mode(
     let (profile_id, profile) = selected_profile_for_mode(profiles.repository(), mode)
         .map_err(|error| error.to_string())?;
     let coordinator = engine.coordinator.clone();
-    let settings = engine.engine_settings().clone();
+    let endpoints = engine.endpoints.clone();
     let completion = mode_lease.run_to_completion(async move {
-        coordinator
-            .set_mode(mode, profile_id, profile, settings)
-            .await
-            .map_err(|error| error.to_string())
+        set_mode_with_endpoint_rebind(
+            &coordinator,
+            &endpoints,
+            mode,
+            &profile_id,
+            &profile,
+            |conflict| {
+                let staged = stage_endpoint_rebind(&endpoints, &coordinator, conflict)?;
+                commit_endpoint_rebind(&endpoints, staged)
+            },
+        )
+        .await
     });
     let (result, mode_lease) = completion
         .await
@@ -459,6 +529,159 @@ pub(crate) async fn apply_admitted_engine_mode(
     drop(mode_lease);
     result?;
     engine.status_payload(retirement)
+}
+
+async fn set_mode_with_endpoint_rebind(
+    coordinator: &EngineModeCoordinator,
+    endpoints: &RwLock<EngineEndpointBinding>,
+    mode: EngineMode,
+    profile_id: &str,
+    profile: &ValidatedSingBoxProfile,
+    mut rebind: impl FnMut(BackendErrorKind) -> Result<(), String>,
+) -> Result<EngineSnapshot, String> {
+    loop {
+        let settings = read_engine_settings(endpoints)?;
+        match coordinator
+            .set_mode(mode, profile_id.to_owned(), profile.clone(), settings)
+            .await
+        {
+            Ok(snapshot) => {
+                record_endpoint_runtime(endpoints, &snapshot)?;
+                return Ok(snapshot);
+            }
+            Err(EngineCoordinatorError::StartEndpointConflictAfterOff { conflict, .. }) => {
+                rebind(conflict)?;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+fn read_engine_settings(
+    endpoints: &RwLock<EngineEndpointBinding>,
+) -> Result<EngineSettings, String> {
+    endpoints
+        .read()
+        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())
+        .map(|binding| binding.controller.settings().clone())
+}
+
+fn read_controller_access(
+    endpoints: &RwLock<EngineEndpointBinding>,
+) -> Result<EngineControllerAccess, String> {
+    endpoints
+        .read()
+        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())
+        .map(|binding| binding.controller.clone())
+}
+
+fn read_active_controller_access(
+    endpoints: &RwLock<EngineEndpointBinding>,
+    generation: u64,
+    config_digest: &str,
+) -> Result<EngineControllerAccess, String> {
+    let binding = endpoints
+        .read()
+        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())?;
+    let expected = ActiveControllerBinding {
+        generation,
+        config_digest: config_digest.to_owned(),
+    };
+    if binding.active.as_ref() != Some(&expected) {
+        return Err("active engine identity does not match the controller binding".into());
+    }
+    Ok(binding.controller.clone())
+}
+
+fn record_endpoint_runtime(
+    endpoints: &RwLock<EngineEndpointBinding>,
+    snapshot: &EngineSnapshot,
+) -> Result<(), String> {
+    let active = match &snapshot.state {
+        EngineState::Off if snapshot.desired_mode == EngineMode::Off => None,
+        EngineState::AwaitingApproval { .. } if snapshot.desired_mode == EngineMode::Tunnel => None,
+        EngineState::ProxyActive { runtime }
+            if snapshot.desired_mode == EngineMode::SystemProxy
+                && runtime.owner == EngineOwner::ProxyAgent
+                && runtime.ready
+                && runtime.context.generation == snapshot.generation
+                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()) =>
+        {
+            Some(ActiveControllerBinding {
+                generation: runtime.context.generation,
+                config_digest: runtime.config_digest.clone(),
+            })
+        }
+        EngineState::TunnelActive { runtime }
+            if snapshot.desired_mode == EngineMode::Tunnel
+                && runtime.owner == EngineOwner::PacketTunnelSystemExtension
+                && runtime.ready
+                && runtime.context.generation == snapshot.generation
+                && snapshot.config_digest.as_deref() == Some(runtime.config_digest.as_str()) =>
+        {
+            Some(ActiveControllerBinding {
+                generation: runtime.context.generation,
+                config_digest: runtime.config_digest.clone(),
+            })
+        }
+        _ => {
+            return Err(
+                "coordinator returned a state that cannot bind controller access".to_owned(),
+            );
+        }
+    };
+    endpoints
+        .write()
+        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())?
+        .active = active;
+    Ok(())
+}
+
+fn stage_endpoint_rebind(
+    endpoints: &RwLock<EngineEndpointBinding>,
+    coordinator: &EngineModeCoordinator,
+    conflict: BackendErrorKind,
+) -> Result<StagedEndpointRebind, String> {
+    let role = match conflict {
+        BackendErrorKind::MixedEndpointInUse => EndpointRole::Mixed,
+        BackendErrorKind::ControllerEndpointInUse => EndpointRole::Controller,
+        _ => return Err("non-endpoint failure cannot advance the endpoint cursor".into()),
+    };
+    if coordinator.snapshot().state != EngineState::Off {
+        return Err("endpoint rebind requires a proven Off coordinator snapshot".into());
+    }
+    let expected = endpoints
+        .read()
+        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())?
+        .clone();
+    let (settings, cursor) = expected
+        .cursor
+        .advance(role)
+        .map_err(|error| error.to_string())?;
+    let controller = EngineControllerAccess::resolve(settings)
+        .map_err(|error| format!("replacement engine settings are unusable: {error}"))?;
+    Ok(StagedEndpointRebind {
+        expected,
+        replacement: EngineEndpointBinding {
+            controller,
+            cursor,
+            active: None,
+        },
+    })
+}
+
+fn commit_endpoint_rebind(
+    endpoints: &RwLock<EngineEndpointBinding>,
+    staged: StagedEndpointRebind,
+) -> Result<(), String> {
+    let mut current = endpoints
+        .write()
+        .map_err(|_| "engine endpoint state lock is poisoned".to_owned())?;
+    if *current != staged.expected {
+        return Err("engine endpoint state changed before rebind commit".into());
+    }
+    *current = staged.replacement;
+    Ok(())
 }
 
 fn selected_profile_for_mode(

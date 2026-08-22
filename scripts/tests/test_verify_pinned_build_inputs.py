@@ -18,7 +18,7 @@ from scripts.verify_pinned_build_inputs import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKET_ENDPOINT_BINARY_SHA = (
-    "fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1"
+    "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c"
 )
 PACKET_ENDPOINT_PATHS = (
     "tools/packet-evidence-endpoint/go.mod",
@@ -37,7 +37,7 @@ PACKET_ENDPOINT_BUILD_FRAGMENTS = [
     "CGO_ENABLED=0",
     "GOOS=linux",
     "GOARCH=amd64",
-    "target/toolchains/go-1.26.5/bin/go",
+    "target/toolchains/go-1.26.6/bin/go",
     "-C tools/packet-evidence-endpoint",
     "-trimpath",
     "-ldflags='-s -w -buildid='",
@@ -45,7 +45,7 @@ PACKET_ENDPOINT_BUILD_FRAGMENTS = [
     PACKET_ENDPOINT_BINARY_SHA,
 ]
 PACKET_LAN_PEER_ARTIFACT_SHA = (
-    "873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17"
+    "268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c"
 )
 ADB_RUNTIME_TOOL_PATH = "/Users/bill/Library/Android/sdk/platform-tools/adb"
 ADB_RUNTIME_TOOL_VERSION = "37.0.0-14910828"
@@ -58,7 +58,7 @@ SYNTHETIC_ANDROID_ADMISSION_SOURCE = (
     REPO_ROOT / ANDROID_LAN_PEER_SOURCE_PATH
 ).read_bytes()
 PACKET_LAN_PEER_SOURCE_TREE_SHA = (
-    "dc5bf2f5853b986acd3953809d68a0f75aac8bef1d682ba988ec3f7c5fa13c60"
+    "8437dce5e85780a49e882dd1594b188ce0f5188c44b7a020fe7a42d7efaa08a4"
 )
 PACKET_LAN_PEER_SOURCE_ENTRIES = (
     (
@@ -68,7 +68,7 @@ PACKET_LAN_PEER_SOURCE_ENTRIES = (
     ),
     (
         "go.mod",
-        "f21defb110ca4cb0d36b3591c6214532f3e5fa9926fbe4565ce4d9edce92b8a7",
+        "af5ff7973354844d111edb9d303d6543d8aa6dc0afc6ecf439225acc15e1d1fd",
         70,
     ),
     (
@@ -109,7 +109,7 @@ PACKET_LAN_PEER_VERIFY_FRAGMENTS = [
     'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
     'source_root="$repo_root/tools/packet-lan-peer"',
     'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
-    "expected_artifact_sha256=873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17",
+    "expected_artifact_sha256=268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c",
     "expected_artifact_size=2359422",
     "expected_artifact_mode=555",
     "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
@@ -153,15 +153,25 @@ PATCH_BODIES = {
     "security": b"synthetic security dependencies patch body\n",
     "raw": b"synthetic raw packet tun patch body\n",
     "dns": b"synthetic dns failover patch body\n",
+    "endpoint": b"synthetic endpoint conflict patch body\n",
 }
 LEGACY_BODY = b"synthetic legacy partial digest body\n"
 TAURI_LOCK_PATCH_BODY = b"synthetic tauri-cli spin lock patch body\n"
 TAURI_CACHE_CONTRACT_BODY = b"synthetic Tauri Cargo cache contract\n"
+LIBBOX_MODULE_CACHE_CONTRACT_BODY = b"""\
+LIBBOX_MODULE_BUILD_PACKAGES=("./experimental/libbox")
+LIBBOX_GOMOBILE_BIND_PACKAGES=("github.com/sagernet/gomobile/bind")
+LIBBOX_RACE_TEST_PACKAGES=("./dns")
+LIBBOX_TEST_PACKAGES=(".")
+LIBBOX_COMPILE_TEST_PACKAGES=("./route")
+LIBBOX_VET_PACKAGES=(".")
+"""
 XCODEGEN_PATCH_BODY = b"synthetic XcodeGen installed-resource patch body\n"
 
 SECURITY_SHA = _sha(PATCH_BODIES["security"])
 RAW_SHA = _sha(PATCH_BODIES["raw"])
 DNS_SHA = _sha(PATCH_BODIES["dns"])
+ENDPOINT_SHA = _sha(PATCH_BODIES["endpoint"])
 COMBINED_SHA = _sha(b"synthetic combined diff body\n")
 LEGACY_SHA = _sha(LEGACY_BODY)
 TAURI_CRATE_SHA = _sha(b"synthetic official tauri-cli crate archive")
@@ -170,6 +180,7 @@ TAURI_LOCK_PATCH_SHA = _sha(TAURI_LOCK_PATCH_BODY)
 TAURI_PATCHED_LOCK_SHA = _sha(b"synthetic patched tauri-cli Cargo.lock")
 TAURI_SPIN_SHA = _sha(b"synthetic spin crate")
 TAURI_CACHE_CONTRACT_SHA = _sha(TAURI_CACHE_CONTRACT_BODY)
+LIBBOX_MODULE_CACHE_CONTRACT_SHA = _sha(LIBBOX_MODULE_CACHE_CONTRACT_BODY)
 XCODEGEN_PATCH_SHA = _sha(XCODEGEN_PATCH_BODY)
 XCODEGEN_PATCHED_SETTINGS_SHA = _sha(b"synthetic patched SettingsBuilder.swift")
 COMMIT = "3708fa18766cda1f11b77f6ed9c7bd61688f17df"
@@ -178,12 +189,14 @@ APPLE_REFERENCE_COMMIT = "afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa"
 GOMOBILE_COMMIT = "9f03b8f25789099c5c8abef4a02085da783ba923"
 TAURI_PATCH_PATH = "scripts/tauri-cli-spin.patch"
 TAURI_CACHE_CONTRACT_PATH = "scripts/tauri_cargo_cache_contract.py"
+LIBBOX_MODULE_CACHE_CONTRACT_PATH = "scripts/libbox_module_cache_contract.sh"
 XCODEGEN_PATCH_PATH = "scripts/xcodegen-installed-resources.patch"
 
 PATCH_PATHS = {
     "security": "native/macos/patches/security.patch",
     "raw": "native/macos/patches/raw-packet.patch",
     "dns": "native/macos/patches/dns-failover.patch",
+    "endpoint": "native/macos/patches/endpoint-conflict.patch",
 }
 
 BUILD_LIBBOX = """\
@@ -197,6 +210,7 @@ python3 hash_artifact.py "$out" \\
   --metadata "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256" \\
   --metadata "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256" \\
   --metadata "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256" \\
+  --metadata "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256" \\
   --metadata "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
 """
 LIBBOX_ARTIFACT_BINDINGS = [
@@ -218,6 +232,7 @@ LIBBOX_ARTIFACT_BINDINGS = [
     "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256",
     "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
     "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+    "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
     "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256",
     "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
     "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256",
@@ -342,7 +357,7 @@ class Fixture:
             "XCODEGEN_PATCH_SHA256": XCODEGEN_PATCH_SHA,
             "XCODEGEN_PATCHED_SETTINGS_BUILDER_SHA256": XCODEGEN_PATCHED_SETTINGS_SHA,
             "NODE_VERSION": "24.18.0",
-            "GO_VERSION": "1.26.5",
+            "GO_VERSION": "1.26.6",
             "TAURI_CLI_VERSION": "2.11.4",
             "TAURI_CLI_CRATE_SHA256": TAURI_CRATE_SHA,
             "TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256": TAURI_UPSTREAM_LOCK_SHA,
@@ -369,11 +384,15 @@ class Fixture:
             "SING_BOX_RAW_PACKET_PATCH_SHA256": RAW_SHA,
             "SING_BOX_DNS_FAILOVER_PATCH_PATH": PATCH_PATHS["dns"],
             "SING_BOX_DNS_FAILOVER_PATCH_SHA256": DNS_SHA,
+            "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH": PATCH_PATHS["endpoint"],
+            "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256": ENDPOINT_SHA,
             "SING_BOX_PATCHED_DIFF_SHA256": SECURITY_SHA,
             "SING_BOX_COMBINED_DIFF_SHA256": COMBINED_SHA,
             "SING_BOX_PATCHED_GO_MOD_SHA256": _sha(b"patched go.mod"),
             "SING_BOX_PATCHED_GO_SUM_SHA256": _sha(b"patched go.sum"),
             "LIBBOX_BUILD_TAGS": BUILD_TAGS,
+            "LIBBOX_MODULE_CACHE_CONTRACT_PATH": LIBBOX_MODULE_CACHE_CONTRACT_PATH,
+            "LIBBOX_MODULE_CACHE_CONTRACT_SHA256": LIBBOX_MODULE_CACHE_CONTRACT_SHA,
         }
         self.patch_bodies = dict(PATCH_BODIES)
         self.packet_endpoint_files = {
@@ -418,7 +437,7 @@ class Fixture:
                 "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
                 "XCODEGEN_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
                 "NODE_VERSION": "24.18.0",
-                "GO_VERSION": "1.26.5",
+                "GO_VERSION": "1.26.6",
                 "GOMOBILE_VERSION": "v0.1.13",
                 "GOVULNCHECK_VERSION": "v1.6.0",
                 "TAURI_CLI_VERSION": "2.11.4",
@@ -444,7 +463,7 @@ class Fixture:
             },
             "packetEvidenceEndpoint": {
                 "goVersionKey": "GO_VERSION",
-                "goVersion": "1.26.5",
+                "goVersion": "1.26.6",
                 "goos": "linux",
                 "goarch": "amd64",
                 "cgoEnabled": "0",
@@ -462,7 +481,7 @@ class Fixture:
                 "schema": "cfw-packet-lan-peer-build-input-v1",
                 "goToolchain": {
                     "versionKey": "GO_VERSION",
-                    "version": "1.26.5",
+                    "version": "1.26.6",
                     "goos": "linux",
                     "goarch": "arm64",
                     "cgoEnabled": "0",
@@ -523,7 +542,7 @@ class Fixture:
                 "verifyScript": {
                     "path": "scripts/verify_packet_lan_peer.sh",
                     "sha256": (
-                        "831ec6e34d35cbe799bae9ab8874d34c5ddd7034be19584c45ceac3731f9248d"
+                        "eb7c518d3209ccf6486847e9f9042f58796b2192d5fdd733f3b991f640d7309e"
                     ),
                     "size": 7357,
                     "mode": "0755",
@@ -532,7 +551,7 @@ class Fixture:
             },
             "physicalCollectorModule": {
                 "goVersionKey": "GO_VERSION",
-                "goVersion": "1.26.5",
+                "goVersion": "1.26.6",
                 "goModPath": "tools/physical-collector/go.mod",
                 "goModSha256": _sha(
                     self.physical_collector_files["tools/physical-collector/go.mod"]
@@ -674,6 +693,12 @@ class Fixture:
                     "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
                     "sha256": DNS_SHA,
                 },
+                {
+                    "name": "endpoint conflict",
+                    "pathKey": "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+                    "sha256Key": "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+                    "sha256": ENDPOINT_SHA,
+                },
             ],
             "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
             "combinedDiffSha256": COMBINED_SHA,
@@ -685,9 +710,16 @@ class Fixture:
                 "patchedGoSumSha256Key": "SING_BOX_PATCHED_GO_SUM_SHA256",
                 "patchedGoSumSha256": self.env["SING_BOX_PATCHED_GO_SUM_SHA256"],
             },
+            "libboxModuleCacheContract": {
+                "pathKey": "LIBBOX_MODULE_CACHE_CONTRACT_PATH",
+                "path": LIBBOX_MODULE_CACHE_CONTRACT_PATH,
+                "sha256Key": "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+                "sha256": LIBBOX_MODULE_CACHE_CONTRACT_SHA,
+            },
             "verifiedGoModuleInputKeys": [
                 "GOMOBILE_MODULE_SUM",
                 "GOVULNCHECK_MODULE_SUM",
+                "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
                 "SING_BOX_UPSTREAM_GO_MOD_SHA256",
                 "SING_BOX_UPSTREAM_GO_SUM_SHA256",
                 "SING_BOX_PATCHED_GO_MOD_SHA256",
@@ -725,6 +757,7 @@ class Fixture:
                         "$SING_BOX_SECURITY_PATCH_SHA256",
                         "$SING_BOX_RAW_PACKET_PATCH_SHA256",
                         "$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+                        "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
                     ],
                     "forbidNetworkRecursion": True,
                 }
@@ -747,7 +780,7 @@ class Fixture:
             },
         }
         self.lock = {
-            "go": "1.26.5",
+            "go": "1.26.6",
             "gomobile": "v0.1.13",
             "singBox": {
                 "commit": COMMIT,
@@ -762,6 +795,10 @@ class Fixture:
                 },
                 "rawPacketPatch": {"path": PATCH_PATHS["raw"], "sha256": RAW_SHA},
                 "dnsFailoverPatch": {"path": PATCH_PATHS["dns"], "sha256": DNS_SHA},
+                "endpointConflictPatch": {
+                    "path": PATCH_PATHS["endpoint"],
+                    "sha256": ENDPOINT_SHA,
+                },
                 "combinedDiffSha256": COMBINED_SHA,
             },
             "singBoxForAppleReference": {"commit": APPLE_REFERENCE_COMMIT},
@@ -771,6 +808,7 @@ class Fixture:
         self.build_native = BUILD_NATIVE
         self.build_unsigned = BUILD_UNSIGNED
         self.tauri_lock_patch = TAURI_LOCK_PATCH_BODY
+        self.libbox_module_cache_contract = LIBBOX_MODULE_CACHE_CONTRACT_BODY
         self.xcodegen_patch = XCODEGEN_PATCH_BODY
         self.xcodegen_bootstrap = XCODEGEN_BOOTSTRAP
         self.tauri_installer = TAURI_INSTALLER
@@ -841,6 +879,9 @@ class Fixture:
         )
         (root / TAURI_PATCH_PATH).write_bytes(self.tauri_lock_patch)
         (root / TAURI_CACHE_CONTRACT_PATH).write_bytes(TAURI_CACHE_CONTRACT_BODY)
+        (root / LIBBOX_MODULE_CACHE_CONTRACT_PATH).write_bytes(
+            self.libbox_module_cache_contract
+        )
         (root / XCODEGEN_PATCH_PATH).write_bytes(self.xcodegen_patch)
         (root / "scripts/bootstrap_release_toolchain.sh").write_text(
             self.xcodegen_bootstrap, encoding="utf-8"
@@ -1305,6 +1346,26 @@ class PinnedBuildInputsTests(unittest.TestCase):
         del fixture.env["GOMOBILE_MODULE_SUM"]
         self._assert_fails(fixture, "GOMOBILE_MODULE_SUM")
 
+    def test_libbox_module_cache_contract_content_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.libbox_module_cache_contract += b"# unpinned package drift\n"
+        self._assert_fails(fixture, "libbox module cache contract file digest")
+
+    def test_libbox_module_cache_contract_env_digest_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.env["LIBBOX_MODULE_CACHE_CONTRACT_SHA256"] = "a" * 64
+        self._assert_fails(fixture, "libbox module cache contract digest")
+
+    def test_libbox_module_cache_contract_path_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.env["LIBBOX_MODULE_CACHE_CONTRACT_PATH"] = "scripts/other-contract.sh"
+        self._assert_fails(fixture, "libbox module cache contract path")
+
+    def test_missing_libbox_module_cache_contract_binding_fails_closed(self) -> None:
+        fixture = Fixture()
+        del fixture.manifest["libboxModuleCacheContract"]
+        self._assert_fails(fixture, "exact top-level shape")
+
     def test_source_contract_drift_fails(self) -> None:
         fixture = Fixture()
         fixture.env["SING_BOX_PATCHED_GO_MOD_SHA256"] = "a" * 64
@@ -1477,6 +1538,11 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         fixture.env["SING_BOX_DNS_FAILOVER_PATCH_SHA256"] = "a" * 64
         self._assert_fails(fixture, "DNS failover")
+
+    def test_wrong_endpoint_conflict_patch_env_digest_fails(self) -> None:
+        fixture = Fixture()
+        fixture.env["SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"] = "a" * 64
+        self._assert_fails(fixture, "endpoint conflict")
 
     def test_patch_file_content_drift_fails(self) -> None:
         fixture = Fixture()
@@ -1688,7 +1754,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
             root = fixture.write(Path(temporary))
             lock = root / "native/macos/Dependencies.lock.json"
             body = lock.read_text(encoding="utf-8")
-            lock.write_text('{"go":"1.26.5",' + body[1:], encoding="utf-8")
+            lock.write_text('{"go":"1.26.6",' + body[1:], encoding="utf-8")
             with self.assertRaisesRegex(PinnedInputError, "duplicate JSON field 'go'"):
                 self._verify_written_fixture(fixture, root)
 
@@ -1744,6 +1810,11 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture.lock["singBox"]["rawPacketPatch"]["sha256"] = "b" * 64
         self._assert_fails(fixture, "rawPacketPatch")
 
+    def test_endpoint_conflict_native_lock_mismatch_fails(self) -> None:
+        fixture = Fixture()
+        fixture.lock["singBox"]["endpointConflictPatch"]["sha256"] = "b" * 64
+        self._assert_fails(fixture, "endpointConflictPatch")
+
     def test_build_script_missing_pin_reference_fails(self) -> None:
         fixture = Fixture()
         fixture.build_libbox = fixture.build_libbox.replace("$SING_BOX_COMMIT", "3708fa18")
@@ -1770,14 +1841,14 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/orchestrator.py"
         fixture.manifest["artifactBindings"][path] = [
-            'VALIDATION_BUILD = "40004"',
-            'FINAL_BUILD = "40005"',
+            'VALIDATION_BUILD = "40020"',
+            'FINAL_BUILD = "40021"',
             "seal_production_evidence",
             "require_verified=True",
         ]
         fixture.extra_artifact_files[path] = (
-            'VALIDATION_BUILD = "40004"\n'
-            'FINAL_BUILD = "40005"\n'
+            'VALIDATION_BUILD = "40020"\n'
+            'FINAL_BUILD = "40021"\n'
             "def seal_production_evidence():\n"
             "    require_verified=True\n"
         )

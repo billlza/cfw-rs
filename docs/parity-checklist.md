@@ -12,11 +12,11 @@ test items do not imply a signed physical-device release.
 - [x] typed engine modes, states, events, snapshots, and domain errors
 - [x] serialized bounded application coordinator with Off-mediated switching
 - [x] deterministic validated sing-box Proxy/Tunnel projections for the
-      closed direct/block/Shadowsocks/VMess/VLESS-Reality/Trojan/Hysteria2
-      schema, with secret-free credential slots
+      closed direct/block/Shadowsocks/VMess/VLESS-Reality/Trojan/Hysteria2/
+      AnyTLS/TUIC-v5 schema, with secret-free credential slots
 - [x] Rust `NativeFrameworkBridge` C ABI wired into the production application
 - [x] source-built sing-box `v1.13.15` plus digest-pinned security, raw-packet,
-      and DNS patches linked into ProxyAgent and Packet Tunnel
+      DNS, and endpoint-conflict patches linked into ProxyAgent and Packet Tunnel
 - [x] Swift 6 Host Bridge, `SMAppService` registration, System Extension and
       Network Extension control paths, and public bounded packet pump
 - [x] root-context Global Authority with one durable global lease, hash-chained

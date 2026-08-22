@@ -39,8 +39,9 @@
 - Replace Clash YAML/REST/WebSocket configuration with a closed app profile
   schema that projects deterministically to native sing-box JSON.
 - Add closed typed profile schemas for `direct`, `block`, Shadowsocks, VMess,
-  VLESS/Reality, Trojan, and Hysteria2, plus optional `route.final`. Persistent
-  profiles contain canonical `credential_ref` values only; raw credentials,
+  VLESS/Reality, Trojan, Hysteria2, AnyTLS, and TUIC v5, plus optional
+  `route.final`. Persistent profiles contain canonical credential references
+  only, including separate TUIC UUID and password references; raw credentials,
   subscriptions/remote resources, scripts, executable paths, and unknown
   fields are rejected. Runtime projection produces empty secret placeholders
   and closed native injection slots. References are immutable: retries must be
@@ -49,6 +50,30 @@
   Renderer and bridge buffers are redacted and zeroized, present references are
   never re-prompted, and explicit two-phase garbage collection deletes only
   revision-bound orphans after repository revalidation.
+- Enforce a product-owned TLS 1.2-or-newer policy for enabled proxy TLS,
+  authenticated DoH, subscription downloads, and update metadata. Normal
+  negotiation prefers TLS 1.3, QUIC requires TLS 1.3, HTTP stays forbidden,
+  and no retry-based protocol fallback is used. TUIC 0-RTT is explicitly
+  disabled.
+- Import restricted upstream sing-box node-list JSON in addition to Clash Meta
+  YAML and URI bundles, extracting every inline secret into the Keychain-backed
+  vault. Preserve typed VMess/VLESS packet encoding plus HTTP/H2,
+  HTTPUpgrade, and V2Ray QUIC transports, including the bounded Mihomo HTTP
+  method/path/Host subset; reject unknown semantics and full sing-box
+  configurations. Reject V2Ray QUIC without standard enabled TLS and reject
+  Vision combined with transport streams or non-XUDP packet framing.
+- Make subscription refresh references stable for unchanged documents, rotate
+  them only after an explicit immutable-secret conflict, and run exact
+  revision-bound orphan cleanup before and after updates. A post-commit cleanup
+  failure is returned as an explicit pending state instead of a false rollback.
+  Validate the stored profile under the repository lock before any vault write,
+  and enforce reference UUID immutability across profile audiences.
+- Request `Accept-Encoding: identity`, disable reqwest automatic decompression,
+  and reject non-identity response codings while retaining the streamed 512 KiB
+  bound.
+- Keep Global, Rule, and Direct visible while the engine is Off (disabled),
+  preserve the mode switch for valid zero-group snapshots, and display an
+  engine-observed Direct fallback as a read-only route rather than a selector.
 - Add a private, versioned, digest-bound selected-profile record. Proxy and
   Tunnel starts require that selected profile and fail on missing or stale
   selection instead of silently using DIRECT; Off remains independently
@@ -87,12 +112,15 @@
   fetched over bounded HTTPS only, validated into the closed profile schema, and
   projected for both modes before they can be stored; the subscription URL lives
   inside the integrity-checked profile envelope and never appears in a profile
-  listing. Subscription import converts Clash Meta YAML `proxies` lists and
-  node-URI bundles (`ss://`, `vmess://`, `vless://` including Reality,
-  `trojan://`, `hysteria2://`) into that schema at the boundary with bounded,
-  alias-rejecting parsers; extracted secrets go to the credential vault, never
-  into the stored profile, and import errors identify positions and keys
-  instead of echoing document content. The subscription request advertises a
+  listing. Subscription import converts restricted upstream sing-box
+  `outbounds` JSON, Clash Meta YAML `proxies` lists, and node-URI bundles
+  (`ss://`, `vmess://`, `vless://` including Reality,
+  `trojan://`, `hysteria2://`, `anytls://`, `tuic://`) into that schema at the
+  boundary with bounded, alias-rejecting parsers; extracted secrets go to the
+  credential vault, never into the stored profile, and import errors identify
+  positions and keys instead of echoing document content. Hysteria2/TUIC QUIC
+  TLS rejects uTLS and Reality, while AnyTLS retains the standard TLS options.
+  The subscription request advertises a
   Clash Meta client so panels serve the modern protocol set. Requests the
   schema cannot honour — unsupported proxy types, disabled certificate
   verification, plugins, chaining, port hopping — fail the import instead of
@@ -118,9 +146,16 @@
 - Move the workspace to GPL-3.0-or-later and pin the arm64 macOS 15 release
   toolchain and source-built libbox inputs.
 - Upgrade the pinned sing-box/libbox source from v1.13.14 to v1.13.15 and
-  regenerate all three downstream patches and source digests while retaining
+  regenerate all four downstream patches and source digests while retaining
   the upstream DNS-cancellation, UDP-ownership, rule-set descriptor, and
   QUIC/HTTP-upgrade lifecycle fixes.
+- Refresh the pinned libbox `golang.org/x/*` closure after `GO-2026-6179` and
+  `GO-2026-6180` were reported against `x/mod`. The exact tested closure uses
+  `x/mod v0.40.0` with its required `x/crypto`, `x/net`, `x/sync`, `x/sys`,
+  `x/term`, `x/text`, and `x/tools` updates; the sealed module cache and
+  XCFramework are rebuilt from that closure without a vulnerability ignore.
+- Add structured mixed-listener and controller bind-conflict reporting so the
+  application can retry only after cleanup and a proven global Off state.
 - Build libbox with `with_clash_api`. The patched tree enables the clash API
   whenever a platform log writer is installed and the daemon always installs
   one, so the previous artifact failed every engine start in the stub

@@ -14,14 +14,15 @@ The machine-readable values live in
 |---|---|---|
 | Rust | `1.97.1` | `rust-toolchain.toml` and `rustc --version` |
 | Node.js | `24.18.0` LTS | official darwin-arm64 archive SHA-256 |
-| Go | `1.26.5` | official darwin-arm64 archive SHA-256 |
+| Go | `1.26.6` | official darwin-arm64 archive SHA-256 |
 | XcodeGen | `2.46.0` (`8445e778451c7e44237b90281bde622d764b0084`) | official source and `Package.resolved` SHA-256 values, digest-pinned installed-resource patch, isolated resolved-only SwiftPM build, resource-generation probe, temporary-path rejection, and complete installed-tree manifest |
 | Tauri CLI | `2.11.4` | official crate SHA-256, published and patched lock digests, isolated dependency fetch, offline locked install, and complete clean-payload manifest |
 | gomobile/gobind | `v0.1.13` (`9f03b8f25789099c5c8abef4a02085da783ba923`) | embedded Go module identity, module checksum, source tag commit, patched sing-box module graph, and source helper-install pins |
 | govulncheck | `v1.6.0` | embedded Go module identity and module checksum |
 | cargo-deny | `0.20.2` | Rust `1.97.1` locked source install, version identity, and target-aware policy run |
-| sing-box/libbox | `v1.13.15`, `3708fa18766cda1f11b77f6ed9c7bd61688f17df` | clean Git checkout plus the repository-owned dependency-security, raw-packet, and DNS-failover patches, with individual and combined SHA-256 values |
-| Android packet LAN peer | Linux/arm64 artifact `873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17` | complete `sha256-tree-v2` source identity, pinned Go target, digest-bound build/verification scripts, two-build byte comparison, and fixed bounded TCP/deployment contract |
+| sing-box/libbox | `v1.13.15`, `3708fa18766cda1f11b77f6ed9c7bd61688f17df` | clean Git checkout plus the repository-owned dependency-security, raw-packet, DNS-failover, and endpoint-conflict patches, with individual and combined SHA-256 values |
+| iPhone Packet LAN peer (test-only) | signed thin-arm64 app tree `9b70643066177cc6cf2b523411a50965a6c5f433aefcd91918ad2d7e8f371cc7` | source-tree identity, signed executable/profile/entitlements/certificate pins, dual-hash physical-device selection, CoreDevice receipt validation, and exact install/process/uninstall ownership |
+| Legacy Android packet peer (inactive) | Linux/arm64 artifact `268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c` | retained offline regression/build closure; it is not selected by the active Packet endpoint policy |
 | Apple provider reference | `afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa` | Git commit identity; reference only |
 | deployment | macOS `15.0`, arm64 | Cargo build guard, Tauri config, Xcode settings, artifact inspection |
 
@@ -72,7 +73,7 @@ Network access is isolated to explicit preparation:
    content, modes, and internal relative symlinks against the package-lock and
    verified Node tree. UI builds verify this tree before and after execution.
 4. `scripts/materialize_libbox_source.sh` accepts only a clean checkout at the
-   pinned commit, clones it locally without hard links, applies the three
+   pinned commit, clones it locally without hard links, applies the four
    digest-pinned patches in a fixed order, and verifies both the dependency-only
    module diff and the complete source diff.
 5. `scripts/prepare_libbox_modules.sh` accepts only that materialized source,
@@ -86,12 +87,12 @@ Network access is isolated to explicit preparation:
    byte-for-byte reproducible. The script refuses a different or unexpectedly
    modified checkout and invokes the pinned gomobile binder for `macos/arm64`
    only.
-8. `scripts/build_packet_lan_peer.sh` builds the controlled Android LAN peer
-   twice in separate empty Go caches with the pinned Go `1.26.5` toolchain,
+8. `scripts/build_packet_lan_peer.sh` builds the retained legacy Android peer
+   twice in separate empty Go caches with the pinned Go `1.26.6` toolchain,
    `GOPROXY=off`, `GOTOOLCHAIN=local`, `CGO_ENABLED=0`, `GOOS=linux`, and
    `GOARCH=arm64`, then publishes only byte-identical output. The independent
    `packetLanPeer` manifest section binds the four-file source tree
-   (`dc5bf2f5853b986acd3953809d68a0f75aac8bef1d682ba988ec3f7c5fa13c60`),
+   (`8437dce5e85780a49e882dd1594b188ce0f5188c44b7a020fe7a42d7efaa08a4`),
    both release scripts, the 2,359,422-byte output, TCP port `44333`, the eight
    connection/64-byte/five-second limits, and the exact shell-owned Android
    deployment path and modes. `scripts/verify_packet_lan_peer.sh` separately
@@ -102,7 +103,7 @@ Network access is isolated to explicit preparation:
    same target with `O_NOFOLLOW`, holds the descriptor while hashing, and rejects
    non-regular files, hard links, ownership or mode drift, size or digest drift,
    and any before/after metadata change.
-9. The independent `runtimeTools.adb` section pins the exact Android platform
+9. The retained `runtimeTools.adb` section pins the exact Android platform
    tool path, `37.0.0-14910828` version, and executable digest. The static gate
    opens the complete Android admission source through a repository-rooted,
    no-follow descriptor chain and binds its SHA-256, byte size, owner, mode, and
@@ -113,17 +114,37 @@ Network access is isolated to explicit preparation:
    installed executable and checking `adb version` at runtime. Device identity,
    boot state, interface, IP, process, and socket observations remain live
    physical evidence; they are not substituted with static build-input values.
+   This closure is regression-only and is not referenced by the active Packet
+   endpoint policy.
+10. The active iPhone Packet-LAN adapter independently reopens the source
+    identity, signed app tree, executable, profile, minimal entitlements,
+    signing certificate and thin-arm64/iOS build metadata before device
+    mutation. A fresh CoreDevice list must contain exactly one physical iPhone
+    matching both domain-separated device hashes. A dormant wireless list entry
+    is only a selection observation: device details must then prove the exact
+    connected/prepared state, and fresh lock-state receipts must immediately
+    precede the primer and Packet launches. The runtime endpoint is never stored
+    statically; it comes from the session-bound ready receipt and is jointly
+    checked against the Mac sender, pcap and cleanup evidence.
 
 The original tag's reachable libbox graph was not accepted as-is: the 2026-07-22
 symbol scan found reachable advisories in `golang.org/x/crypto`,
 `golang.org/x/net`, `golang.org/x/text`, and `google.golang.org/grpc`. The pinned
 patch raises those modules, `filippo.io/edwards25519`, and their coupled `x/*`
 requirements to the first tested fixed closure. `go mod verify` passes and the
-same symbol scan reports zero reachable vulnerabilities. It still reports
-`GO-2026-5932` at module scope because `golang.org/x/crypto/openpgp` has no fixed
-version; that package is absent from the scanned import graph.
+same symbol scan reports zero reachable vulnerabilities. A fresh 2026-08-23
+database scan subsequently reported `GO-2026-6179` and `GO-2026-6180` against
+the then-pinned `golang.org/x/mod v0.37.0`. Sing-box imports `x/mod/semver`, so
+the dependency patch now pins the fixed `x/mod v0.40.0` and the exact coupled
+MVS closure: `x/crypto v0.55.0`, `x/net v0.58.0`, `x/sync v0.22.0`,
+`x/sys v0.47.0`, `x/term v0.45.0`, `x/text v0.41.0`, and `x/tools v0.49.0`.
+The sealed cache, source tests, and XCFramework were regenerated from this
+closure. The current scan reports zero symbol and imported-package
+vulnerabilities without an ignore. It still reports `GO-2026-5932` at module
+scope because `golang.org/x/crypto/openpgp` has no fixed version; that package
+is absent from the scanned import graph.
 
-The v1.13.15 rebase overlap is explicit. The raw-packet patch shares no path
+The v1.13.15 rebase overlap is explicit. The raw-packet and endpoint-conflict patches share no path
 with the upstream v1.13.14-to-v1.13.15 change set. The DNS patch shares only
 `protocol/tailscale/dns_transport.go`; its rebased hunk preserves upstream's
 new HTTP/HTTPS and direct-address parsing and supplies the added empty fallback
@@ -137,7 +158,7 @@ earlier 2026-07-26 rescan exposed `GO-2026-5774`, `GO-2026-5775`, and
 `GO-2026-5777` in `github.com/go-chi/chi/v5@v5.2.5`; the pinned dependency patch
 now raises that router to `v5.3.0`. The current symbol and imported-package scan
 reports zero vulnerabilities without an ignore or suppression. The upstream
-commit, all three patch byte streams, the combined source diff, and the patched
+commit, all four patch byte streams, the combined source diff, and the patched
 module files are
 independently hashed so a release cannot silently substitute either the tag or
 a downstream modification. The raw-packet patch is confined to the daemon and

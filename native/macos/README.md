@@ -172,8 +172,8 @@ python3 -B scripts/verify_native_product_graph.py
 python3 -B scripts/verify_release_authority_gate.py .
 python3 -B scripts/verify_production_boundary_removal.py .
 
-export CFW_BUILD_NUMBER=40004
-export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.4.0/validation-40004/native-products"
+export CFW_BUILD_NUMBER=40020
+export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.4.0/validation-40020/native-products"
 ./scripts/build_native_products.sh --unsigned
 
 cd native/macos
@@ -227,20 +227,26 @@ Apple references:
 ## libbox composition and remaining evidence
 
 `Dependencies.lock.json` pins sing-box `v1.13.15` at commit
-`3708fa18766cda1f11b77f6ed9c7bd61688f17df`, Go `1.26.5`, and gomobile
+`3708fa18766cda1f11b77f6ed9c7bd61688f17df`, Go `1.26.6`, and gomobile
 `v0.1.13` at commit `9f03b8f25789099c5c8abef4a02085da783ba923`. The
-materialization step applies three digest-pinned patches in a
+materialization step applies four digest-pinned patches in a
 fixed order:
 
 1. `sing-box-v1.13.15-security-dependencies.patch` updates the pinned Go module
-   graph, including go-chi `v5.3.0` and the recorded `x/crypto`, `x/net`,
-   `x/sys`, gRPC, and toolchain support versions.
+   graph, including go-chi `v5.3.0`, `x/crypto v0.55.0`, `x/mod v0.40.0`,
+   `x/net v0.58.0`, `x/sync v0.22.0`, `x/sys v0.47.0`, `x/term v0.45.0`,
+   `x/text v0.41.0`, `x/tools v0.49.0`, gRPC, and their exact coupled
+   requirements. The `x/mod` refresh removes the module-level
+   `GO-2026-6179` and `GO-2026-6180` findings without an ignore.
 2. `sing-box-v1.13.15-raw-packet-tun.patch` adds the explicit Darwin raw-packet
    contract. It accepts only a connected `AF_UNIX/SOCK_DGRAM` descriptor,
    validates MTU/routing/GSO constraints, transfers descriptor ownership, and
    presents headerless IP datagrams to sing-tun.
 3. `sing-box-v1.13.15-dns-failover.patch` implements the bounded primary/fallback
    resolver contract required by the closed product projection.
+4. `sing-box-v1.13.15-endpoint-conflict.patch` reports only exact mixed-listener
+   and controller `EADDRINUSE` failures as structured conflicts while preserving
+   ordinary startup and cleanup failures.
 
 `LibboxPacketEngineFactory` and `LibboxProxyEngineFactory` now construct
 `SourceBuiltLibboxRuntimeFactory`; `project.yml` links the same source-built

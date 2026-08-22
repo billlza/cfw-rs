@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    ConfigError, CredentialAudience, CredentialSlot, DirectIpv4HostRoutes, ValidatedSingBoxProfile,
+    ConfigError, CredentialAudience, CredentialSlot, DirectIpv4HostRoutes,
+    MINIMUM_REMOTE_TLS_VERSION, ValidatedSingBoxProfile,
     controller::{ClashApiEndpoint, DEFAULT_CLASH_API_PORT},
     credentials::validate_slots,
     profile_projection::DomainResolverTags,
@@ -26,6 +27,11 @@ const AUTHENTICATED_DNS_SECONDARY_TAG: &str = "cfw-authenticated-dns-1";
 /// projection crate prevents the selection policy and default settings from
 /// drifting apart.
 pub const DEFAULT_MIXED_PORT: u16 = 7890;
+
+/// Schema of the configuration identity document shared with the macOS engine
+/// owner protocol. This changes whenever fields that cross that boundary gain
+/// new closed vocabulary.
+pub const CONFIGURATION_IDENTITY_SCHEMA_VERSION: u16 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TunnelAddressPlan {
@@ -248,7 +254,8 @@ impl ValidatedSingBoxProfile {
                             "connect_timeout": "5s",
                             "tls": {
                                 "enabled": true,
-                                "server_name": address.server_name.as_str()
+                                "server_name": address.server_name.as_str(),
+                                "min_version": MINIMUM_REMOTE_TLS_VERSION
                             }
                         })
                     },
@@ -389,7 +396,7 @@ impl ValidatedSingBoxProfile {
                 ProjectionMode::Tunnel => "tunnel",
             },
             "network_options": network_options,
-            "schema_version": 5,
+            "schema_version": CONFIGURATION_IDENTITY_SCHEMA_VERSION,
         }));
         let digest = sha256_hex(serde_json::to_string(&identity)?.as_bytes());
         Ok(ProjectedConfig {

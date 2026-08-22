@@ -200,6 +200,7 @@ _PINNED_INPUTS = (
     "native/macos/Dependencies.lock.json",
     "scripts/build_libbox.sh",
     "scripts/libbox_source_contract.sh",
+    "scripts/libbox_module_cache_contract.bash",
     "scripts/build_native_products.sh",
     "scripts/build_unsigned_candidate.sh",
     "scripts/build_signed_candidate.sh",
@@ -249,6 +250,7 @@ _PINNED_INPUTS = (
     "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
     "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
     "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
+    "native/macos/patches/sing-box-v1.13.15-endpoint-conflict.patch",
     # Sources the pinned libbox build tags are bound to: the controller block and
     # the projection that injects it require `with_clash_api` in the artifact.
     "crates/cfw-singbox-config/src/controller.rs",
@@ -362,7 +364,7 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
             env_path = root / _PINS_ENV
             env_path.write_text(
                 env_path.read_text(encoding="utf-8").replace(
-                    "GO_VERSION=1.26.5", "GO_VERSION=1.26.4"
+                    "GO_VERSION=1.26.6", "GO_VERSION=1.26.4"
                 ),
                 encoding="utf-8",
             )

@@ -18,20 +18,20 @@ from scripts.publication.sealed_closure import (
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 
-# The three design-pinned sing-box patches. The supply-chain test hashes these
+# The four design-pinned sing-box patches. The supply-chain test hashes these
 # files itself, so the derived patch closure is bound to the patch bytes in the
 # repository rather than to the pin table the production code already reads.
 PATCH_PATHS = {
     "security": "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
     "raw_packet": "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
     "dns_failover": "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
+    "endpoint_conflict": "native/macos/patches/sing-box-v1.13.15-endpoint-conflict.patch",
 }
-# Authoritative digest of the *corrected* raw-packet TUN patch: its hunk header
-# declared 271 added lines while the hunk carried 303, so `git apply` silently
-# dropped four test helpers. Kept as a literal because hashing the file alone
-# would still pass if that patch regressed and the pins were recomputed to match.
+# Authoritative digest of the raw-packet TUN patch with cleanup ownership retained
+# until Close succeeds. Kept as a literal because hashing the file alone would
+# still pass if the patch regressed and the pins were recomputed to match.
 EXPECTED_RAW_PACKET_PATCH_SHA256 = (
-    "3367a387fe58b9bb374bb08a7fae9ad2fd46d609e8e9aea49a92a14ec9de4cac"
+    "3a40130eb30f471bd5ab17cfce289f43e3600bdadcfc1aadab25a68f9703e124"
 )
 # The combined diff is the full-object-ID digest of the whole working-tree diff
 # of the patched sing-box checkout
@@ -39,7 +39,7 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # be recomputed from the patch files alone. A pinned literal is therefore the
 # only form of this assertion that still fails when a pin drifts.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "8a2b698b8c3a7285b963c3ffc67480b6eed06021c6fe585eccd22513799d2a80"
+    "1ad890f1e17a9ff9af3369bef3329650b4ac0e0fc4f33a4840c5911f1e6a2a7f"
 )
 
 
@@ -144,17 +144,17 @@ class DeriveSupplyChainTests(unittest.TestCase):
     def test_binds_repository_toolchain_and_patched_source(self) -> None:
         supply_chain = derive_supply_chain(REPOSITORY)
         self.assertEqual(supply_chain["toolchain_versions"]["rust"], "1.97.1")
-        self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.26.5")
+        self.assertEqual(supply_chain["toolchain_versions"]["go"], "1.26.6")
         self.assertEqual(
             supply_chain["patched_source"]["upstream_commit"],
             "3708fa18766cda1f11b77f6ed9c7bd61688f17df",
         )
         patched_source = supply_chain["patched_source"]
 
-        # The bound patch closure must be exactly the three patch files that live
+        # The bound patch closure must be exactly the four patch files that live
         # in this repository, hashed from their bytes here.
         on_disk = {name: _file_sha256(path) for name, path in PATCH_PATHS.items()}
-        self.assertEqual(len(patched_source["patch_digests"]), 3)
+        self.assertEqual(len(patched_source["patch_digests"]), 4)
         self.assertEqual(patched_source["patch_digests"], sorted(on_disk.values()))
         # ...and the raw-packet patch must be the corrected revision, not the
         # truncated-hunk one that silently dropped four test helpers.

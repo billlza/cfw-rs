@@ -60,6 +60,7 @@ extension NativeBridgeCoordinator {
       guard pendingStartCleanup.owner == recoveredTransaction.owner,
         pendingStartCleanup.commandContext == recoveredTransaction.commandContext,
         pendingStartCleanup.descriptor == recoveredTransaction.descriptor,
+        pendingFailedStartOff == nil,
         completedStartCleanup == nil
       else {
         throw NativeBridgeExecutionError.failure(
@@ -68,7 +69,9 @@ extension NativeBridgeCoordinator {
         )
       }
     } else {
-      guard pendingStop == nil, completedStartCleanup == nil else {
+      guard pendingStop == nil, pendingFailedStartOff == nil,
+        completedStartCleanup == nil
+      else {
         throw NativeBridgeExecutionError.failure(
           .cleanupUnproven,
           "Startup Tunnel preference recovery conflicts with another cleanup transaction."
@@ -228,7 +231,8 @@ extension NativeBridgeCoordinator {
         return .failure(.busy, error.localizedDescription)
       case .agentFailure(let failure):
         return .failure(
-          failure.isRetryable ? .unavailable : .configurationRejected,
+          endpointConflictCode(failure, allowsMixed: true)
+            ?? (failure.isRetryable ? .unavailable : .configurationRejected),
           error.localizedDescription
         )
       case .registrationFailed, .malformedResponse, .responseMismatch:
@@ -284,7 +288,8 @@ extension NativeBridgeCoordinator {
         return .failure(.cleanupUnproven, message)
       case .providerFailure(let failure):
         return .failure(
-          failure.isRetryable ? .unavailable : .configurationRejected,
+          endpointConflictCode(failure, allowsMixed: false)
+            ?? (failure.isRetryable ? .unavailable : .configurationRejected),
           error.localizedDescription
         )
       case .globalAuthorityUnavailable:
@@ -343,8 +348,10 @@ extension NativeBridgeCoordinator {
         return .failure(code, "Credential Keychain operation failed with status \(status).")
       case .invalidAccessGroup:
         return .failure(.identityRejected, "Credential Keychain access group is invalid.")
+      case .capacityExceeded:
+        return .failure(.resourceExhausted, "Credential vault capacity is exhausted.")
       case .invalidProfileIdentifier, .invalidProfileDigest, .kindMismatch, .duplicateReference,
-        .unexpectedCredential, .capacityExceeded:
+        .unexpectedCredential:
         return .failure(.configurationRejected, "Credential request is invalid.")
       }
     }
@@ -366,6 +373,19 @@ extension NativeBridgeCoordinator {
       return .failure(.identityRejected, error.localizedDescription)
     }
     return .failure(.internal, "Native bridge failed at an explicit internal boundary.")
+  }
+
+  private static func endpointConflictCode(
+    _ failure: EngineFailure,
+    allowsMixed: Bool
+  ) -> NativeBridgeErrorCode? {
+    switch failure.code {
+    case "mixed-endpoint-in-use":
+      !failure.isRetryable && allowsMixed ? .mixedEndpointInUse : .identityRejected
+    case "controller-endpoint-in-use":
+      !failure.isRetryable ? .controllerEndpointInUse : .identityRejected
+    default: nil
+    }
   }
 
   private static func preferenceFailure(

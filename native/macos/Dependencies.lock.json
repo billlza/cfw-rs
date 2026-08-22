@@ -1,5 +1,5 @@
 {
-  "go": "1.26.5",
+  "go": "1.26.6",
   "gomobile": "v0.1.13",
   "singBox": {
     "commit": "3708fa18766cda1f11b77f6ed9c7bd61688f17df",
@@ -7,20 +7,24 @@
     "androidReferenceCommit": "124a7c13038fcc389e3efbe61504fe6ab14724d9",
     "securityPatch": {
       "path": "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
-      "sha256": "2af9a0d4ec55ddfaeb8656dfe42abba156b20299fcb69da01015eaeb265ec7e2",
-      "patchedDiffSha256": "b1fa2f098c4aebf1bf3a8a5082f99c892a3b1bbaf1dc51664e3a1fde401b7d95",
-      "patchedGoModSha256": "aa0101b194e65676a0abc7207ce20c9f000a30fc7ba6f40e8fde065ae802341d",
-      "patchedGoSumSha256": "97cb91e52f6915aba762ef666065fed3c5e91adaa9a61181a91ca3141193b577"
+      "sha256": "529ce3939fa23573e2cceaa4ee209ebd34a75204bd91e999c9bbf843b0867798",
+      "patchedDiffSha256": "0e839490c8c841532b2d13d88c24a94542f3fcb727700e6abf6040a9946e83e4",
+      "patchedGoModSha256": "58dd87dca554127aeb919fc2d5abb1ad1cc51fe72081ea4a7ab4c2d11d027e91",
+      "patchedGoSumSha256": "4c2976095a2cd3ced5b54268bc820d2d9c48c56d7399a3b832966070d011ae88"
     },
     "rawPacketPatch": {
       "path": "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
-      "sha256": "3367a387fe58b9bb374bb08a7fae9ad2fd46d609e8e9aea49a92a14ec9de4cac"
+      "sha256": "3a40130eb30f471bd5ab17cfce289f43e3600bdadcfc1aadab25a68f9703e124"
     },
     "dnsFailoverPatch": {
       "path": "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
       "sha256": "66a1c6c98457ce7cdbdeb08797f253fae52d4dd1fae6f634159572b4286b6473"
     },
-    "combinedDiffSha256": "8a2b698b8c3a7285b963c3ffc67480b6eed06021c6fe585eccd22513799d2a80"
+    "endpointConflictPatch": {
+      "path": "native/macos/patches/sing-box-v1.13.15-endpoint-conflict.patch",
+      "sha256": "5a956c63025b4692db43d2c77ac46de1ae573e0afcc866de9b59704a273b0c02"
+    },
+    "combinedDiffSha256": "1ad890f1e17a9ff9af3369bef3329650b4ac0e0fc4f33a4840c5911f1e6a2a7f"
   },
   "singBoxForAppleReference": {
     "commit": "afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa"

@@ -160,9 +160,9 @@ private func verifyFixture<T: AuthorityV1WireModel>(
     try AuthorityV1Codec.decodeRequest(Data(unsupportedMajor.utf8))
   }
   let unsupportedMinor = text.replacingOccurrences(
-    of: "\"minor\":0", with: "\"minor\":1",
-    options: [], range: text.range(of: "\"minor\":0"))
-  #expect(throws: AuthorityV1ValidationError.unsupportedMinor(1)) {
+    of: "\"minor\":1", with: "\"minor\":0",
+    options: [], range: text.range(of: "\"minor\":1"))
+  #expect(throws: AuthorityV1ValidationError.unsupportedMinor(0)) {
     try AuthorityV1Codec.decodeRequest(Data(unsupportedMinor.utf8))
   }
   let unsupportedFeature = text.replacingOccurrences(

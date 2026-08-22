@@ -31,7 +31,7 @@ CGO_ENABLED=0 \
 GOOS=linux \
 GOARCH=amd64 \
 GOCACHE="$PWD/target/toolchains/go-build-cache" \
-target/toolchains/go-1.26.5/bin/go \
+target/toolchains/go-1.26.6/bin/go \
   -C tools/packet-evidence-endpoint \
   build \
   -trimpath \
@@ -41,7 +41,7 @@ target/toolchains/go-1.26.5/bin/go \
 ```
 
 The reviewed Linux/amd64 artifact from those exact inputs has SHA-256
-`fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1`.
+`c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c`.
 
 The reviewed endpoint policy must bind the resulting SHA-256, each GCE
 instance identity, the exact external IPv4/IPv6 addresses, the SSH host-key
@@ -63,13 +63,13 @@ staged file digests.
 
 The final installer, service unit, resolver configuration, capture sudoers and
 strict known-hosts SHA-256 values are respectively
-`6527983cf9b072ab99ecd820778ccb56c9d91d79e07fc4d558715c4ce8657049`,
+`14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8`,
 `7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996`,
 `b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62`,
 `a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411`,
 and `3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba`.
 The source-pinned endpoint policy SHA-256 is
-`ff52a30f8e595c7d8e01ddae1b32644c0199b551d26c22871bf68a847c1d2aa4`.
+`a487fc3ebc0698b4b5ee0eb40dfd388fc0c5ee0994bbd7ffc698e9f817a272dd`.
 All three endpoint installation transactions and both dedicated remote-capture
 allow/deny preflights succeeded before the instances were stopped. That is
 provisioning evidence only. The IAP grant is attached to each IAP TCP tunnel

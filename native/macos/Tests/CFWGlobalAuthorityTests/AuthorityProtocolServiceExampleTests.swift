@@ -204,7 +204,7 @@ private func redeemEnvelope(
   let futureMajor = try canonicalEnvelope([
     "command": ["kind": "snapshot", "payload": [String: Any]()],
     "major": 2,
-    "minor": 0,
+    "minor": AuthorityV1Limits.minor,
     "request_id": UUID().uuidString.lowercased(),
     "required_feature_bits": 0,
   ])

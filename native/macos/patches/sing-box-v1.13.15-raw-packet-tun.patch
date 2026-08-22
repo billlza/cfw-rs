@@ -1,5 +1,5 @@
 diff --git a/daemon/started_service.go b/daemon/started_service.go
-index 3af0ea5afa85c5de5e019b38b5da38f9279dae9f..4ff8e3811d336d829ea43dfd2a40f6ac8d50cb1b 100644
+index 3af0ea5afa85c5de5e019b38b5da38f9279dae9f..a8b24c54958d10b9f1791ccb2bdcc6ac5a84d9e2 100644
 --- a/daemon/started_service.go
 +++ b/daemon/started_service.go
 @@ -177,8 +177,12 @@ func (s *StartedService) StartOrReloadService(profileContent string, options *Ov
@@ -9,28 +9,29 @@ index 3af0ea5afa85c5de5e019b38b5da38f9279dae9f..4ff8e3811d336d829ea43dfd2a40f6ac
 -		_ = oldInstance.Close()
 +		closeErr := oldInstance.Close()
  		s.serviceAccess.Lock()
-+		s.instance = nil
 +		if closeErr != nil {
 +			return s.updateStatusError(E.Cause(closeErr, "close previous service"))
 +		}
++		s.instance = nil
  	}
  	s.updateStatus(ServiceStatus_STARTING)
  	s.resetLogs()
-@@ -200,6 +204,13 @@ func (s *StartedService) StartOrReloadService(profileContent string, options *Ov
+@@ -200,6 +204,14 @@ func (s *StartedService) StartOrReloadService(profileContent string, options *Ov
  		return nil
  	}
  	if err != nil {
-+		s.instance = nil
 +		s.serviceAccess.Unlock()
 +		closeErr := instance.Close()
 +		s.serviceAccess.Lock()
 +		if closeErr != nil {
 +			err = E.Errors(err, E.Cause(closeErr, "close failed service"))
++		} else {
++			s.instance = nil
 +		}
  		return s.updateStatusError(err)
  	}
  	s.startedAt = time.Now()
-@@ -217,10 +228,16 @@ func (s *StartedService) Close() {
+@@ -217,10 +229,16 @@ func (s *StartedService) Close() {
  	s.connectionEventSubscriber.Close()
  }
  
@@ -48,18 +49,24 @@ index 3af0ea5afa85c5de5e019b38b5da38f9279dae9f..4ff8e3811d336d829ea43dfd2a40f6ac
  	default:
  		s.serviceAccess.Unlock()
  		return os.ErrInvalid
+@@ -230 +247,0 @@ func (s *StartedService) CloseService() error {
+-	s.instance = nil
+@@ -236,0 +254 @@ func (s *StartedService) CloseService() error {
++	s.instance = nil
 diff --git a/daemon/started_service_test.go b/daemon/started_service_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..7afdf7a9a7bf6ae63a916e96d5cf3fd675b476b5
+index 0000000000000000000000000000000000000000..93ebbf164f9bf5a2b7eb9f55362d80d50c2f5a05
 --- /dev/null
 +++ b/daemon/started_service_test.go
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,87 @@
 +package daemon
 +
 +import (
 +	"context"
 +	"errors"
 +	"testing"
++
++	"github.com/sagernet/sing/service"
 +)
 +
 +func TestStartedServiceRuntimeStatusAndFatalCleanup(t *testing.T) {
@@ -84,6 +91,60 @@ index 0000000000000000000000000000000000000000..7afdf7a9a7bf6ae63a916e96d5cf3fd6
 +	if status != ServiceStatus_IDLE || message != "" {
 +		t.Fatalf("unexpected cleaned status: %v %q", status, message)
 +	}
++}
++
++func TestCloseServiceRetainsInstanceWhenCleanupFails(t *testing.T) {
++	startedService := NewStartedService(ServiceOptions{
++		Context: service.ContextWithDefaultRegistry(context.Background()),
++	})
++	defer startedService.Close()
++	instance := newClosedTestInstance(t, startedService)
++	startedService.serviceAccess.Lock()
++	startedService.instance = instance
++	startedService.updateStatus(ServiceStatus_STARTED)
++	startedService.serviceAccess.Unlock()
++
++	if err := startedService.CloseService(); err == nil {
++		t.Fatal("expected cleanup failure")
++	}
++	startedService.serviceAccess.RLock()
++	defer startedService.serviceAccess.RUnlock()
++	if startedService.instance != instance || startedService.serviceStatus.Status != ServiceStatus_FATAL {
++		t.Fatal("failed cleanup released instance ownership or reported a false idle state")
++	}
++}
++
++func TestReloadRetainsPreviousInstanceWhenCleanupFails(t *testing.T) {
++	startedService := NewStartedService(ServiceOptions{
++		Context: service.ContextWithDefaultRegistry(context.Background()),
++	})
++	defer startedService.Close()
++	instance := newClosedTestInstance(t, startedService)
++	startedService.serviceAccess.Lock()
++	startedService.instance = instance
++	startedService.updateStatus(ServiceStatus_STARTED)
++	startedService.serviceAccess.Unlock()
++
++	if err := startedService.StartOrReloadService("{}", nil); err == nil {
++		t.Fatal("expected previous-instance cleanup failure")
++	}
++	startedService.serviceAccess.RLock()
++	defer startedService.serviceAccess.RUnlock()
++	if startedService.instance != instance || startedService.serviceStatus.Status != ServiceStatus_FATAL {
++		t.Fatal("failed replacement cleanup released previous instance ownership")
++	}
++}
++
++func newClosedTestInstance(t *testing.T, service *StartedService) *Instance {
++	t.Helper()
++	instance, err := service.newInstance("{}", nil)
++	if err != nil {
++		t.Fatalf("create test instance: %v", err)
++	}
++	if err := instance.Close(); err != nil {
++		t.Fatalf("close test instance: %v", err)
++	}
++	return instance
 +}
 diff --git a/experimental/libbox/command_server.go b/experimental/libbox/command_server.go
 index 7eca119487288de36a36a618639c5593bf4d593b..1ecf9a1f0b982a8b7b4ed817176f578595879805 100644

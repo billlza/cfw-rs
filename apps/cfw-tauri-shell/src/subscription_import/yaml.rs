@@ -355,11 +355,12 @@ mod tests {
     fn rejects_duplicate_keys_without_echoing_long_content() {
         let error = load_single_document("name: a\nname: b\n")
             .expect_err("duplicate keys must be rejected");
-        assert!(error.contains("duplicate key: name"), "{error}");
+        assert!(error.contains("duplicate key: <redacted>"), "{error}");
+        assert!(!error.contains("name"), "{error}");
         let secret_like = "x".repeat(64);
         let error = load_single_document(&format!("{secret_like}: a\n{secret_like}: b\n"))
             .expect_err("duplicate keys must be rejected");
-        assert!(error.contains("<non-identifier value>"), "{error}");
+        assert!(error.contains("<redacted>"), "{error}");
         assert!(!error.contains(&secret_like), "{error}");
     }
 

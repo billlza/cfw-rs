@@ -305,11 +305,8 @@ function applyControllerSnapshot(snapshot) {
     });
   }
   // Always replace — empty groups must clear stale iKuuu UI after a failed/empty profile.
-  state.proxyGroups = groups.map((group) => ({
-    name: group.name,
-    type: group.kind,
-    now: group.now ?? group.options?.[0] ?? "DIRECT",
-    options: (group.options ?? []).map((name) => {
+  state.proxyGroups = groups.map((group) => {
+    const projectNode = (name) => {
       const node = proxyNodes.get(name);
       const nestedGroup = groupsByName.get(name);
       let delay = latestDelay(node?.history ?? nestedGroup?.history ?? []);
@@ -325,8 +322,22 @@ function applyControllerSnapshot(snapshot) {
         kind: node?.kind ?? node?.type ?? nestedGroup?.kind ?? group.kind ?? "Proxy",
         udp: node?.udp ?? null,
       };
-    }),
-  }));
+    };
+    const options = (group.options ?? []).map(projectNode);
+    const observedOption = options.length === 0
+      && !isManualProxyGroup(group.kind)
+      && typeof group.now === "string"
+      && proxyNodes.has(group.now)
+      ? projectNode(group.now)
+      : null;
+    return {
+      name: group.name,
+      type: group.kind,
+      now: group.now ?? group.options?.[0] ?? "DIRECT",
+      options,
+      observedOption,
+    };
+  });
 
   applyConnectionsSnapshot(snapshot.connections);
   state.controllerStatus = "controller live";
@@ -1198,6 +1209,12 @@ function isManualProxyGroup(type) {
   return ["selector", "relay"].includes(String(type ?? "").toLowerCase());
 }
 
+function freshProxyControllerSnapshotAvailable() {
+  return state.engine.active
+    && state.mode !== null
+    && ["controller live", "controller live stream"].includes(state.controllerStatus);
+}
+
 /** CFW Proxies section toolbar glyphs (Material-style: travel_explore / report / network_check / visibility). */
 function proxyToolIcon(kind) {
   const common = 'width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"';
@@ -1234,7 +1251,7 @@ function renderProxies() {
   const groups = state.proxyGroups
     .map((group) => ({
       ...group,
-      options: group.options.filter((node) => {
+      options: (group.options.length ? group.options : group.observedOption ? [group.observedOption] : []).filter((node) => {
         const matchesFilter = !filter || group.name.toLowerCase().includes(filter) || node.name.toLowerCase().includes(filter);
         const shouldHide = state.toggles.hideUnavailable && isTimedOutProxy(node) && group.now !== node.name;
         return matchesFilter && !shouldHide;
@@ -1251,16 +1268,19 @@ function renderProxies() {
   const hideTimedOut = Boolean(state.toggles.hideUnavailable);
   const showProxiesList = state.toggles.showProxiesList !== false;
   const blinkNode = state.proxyBlinkNode;
-  const controllerLive = state.controllerStatus === "controller live" && state.proxyGroups.length > 0;
-  const emptyMessage = state.controllerStatus === "controller live" && state.proxyGroups.length === 0
+  const controllerLive = freshProxyControllerSnapshotAvailable();
+  const emptyMessage = controllerLive && state.proxyGroups.length === 0
     ? "Active profile has no proxy groups. Switch to a subscription with nodes."
     : "Controller unavailable. No live proxy groups are being displayed.";
-  const modeSwitch = controllerLive ? `
+  const modeUnavailableTitle = controllerLive
+    ? "Switch proxy mode"
+    : "Start the engine and wait for a live controller snapshot to switch mode";
+  const modeSwitch = `
       <div class="mode-switch proxy-mode-header" role="group" aria-label="Proxy mode">
         ${["Global", "Rule", "Direct"].map((mode) => `
-          <button class="${state.mode === mode ? "selected" : ""}" data-mode="${mode}">${mode} <span>${modeIcon(mode)}</span></button>
+          <button class="${state.mode === mode ? "selected" : ""}" data-mode="${mode}" title="${modeUnavailableTitle}" ${controllerLive ? "" : "disabled"}>${mode} <span>${modeIcon(mode)}</span></button>
         `).join("")}
-      </div>` : "";
+      </div>`;
   return `
     <div class="proxy-layout">
       ${modeSwitch}
@@ -2361,6 +2381,13 @@ async function runProfileMenuAction(action, id) {
       const result = await invoke("update_profile", { id });
       await loadProfilesSnapshot();
       appendLog("info", "profile", `${result.name} subscription updated`);
+      if (result.credential_cleanup_pending) {
+        appendLog(
+          "warning",
+          "profile",
+          `${result.name} was updated, but credential cleanup is pending: ${result.credential_cleanup_error}`,
+        );
+      }
       if (wasActive) await applyActiveProfile("profile update");
       return;
     }
@@ -3240,6 +3267,11 @@ function scheduleRender() {
 async function applyProxyMode(mode) {
   if (!["Global", "Rule", "Direct"].includes(mode)) throw new TypeError("Proxy mode is invalid");
   if (!controllerActionAllowed(`Proxy mode ${mode}`, "mode")) return;
+  if (!freshProxyControllerSnapshotAvailable()) {
+    appendLog("info", "mode", `Proxy mode ${mode} requires a fresh controller snapshot`);
+    return false;
+  }
+  const invokeMutation = () => invoke("set_proxy_mode", { mode });
   return enqueueControllerMutation({
     lane: "proxy-mode",
     kind: "mode",
@@ -3248,7 +3280,7 @@ async function applyProxyMode(mode) {
     failureLabel: `Proxy mode ${mode} was not applied`,
     successMessage: `Proxy mode switched to ${mode}`,
     breakConnectionsReason: "mode",
-    invokeMutation: () => invoke("set_proxy_mode", { mode }),
+    invokeMutation,
     readObserved: controllerModeFromSnapshot,
     publishObserved: (observed) => { state.mode = observed; },
   });
@@ -3257,11 +3289,24 @@ async function applyProxyMode(mode) {
 async function applyProxySelection(groupName, proxyName) {
   const group = state.proxyGroups.find((item) => item.name === groupName);
   if (!group) return false;
-  if (!controllerActionAllowed(`Selecting proxy in ${groupName}`, "proxy")) return false;
+  if (!freshProxyControllerSnapshotAvailable()) {
+    if (!state.engine.active) {
+      controllerActionAllowed(`Selecting proxy in ${groupName}`, "proxy");
+    } else {
+      appendLog("info", "proxy", "Proxy selection requires a fresh controller snapshot");
+    }
+    return false;
+  }
+  if (!isManualProxyGroup(group.type)) {
+    appendLog("error", "proxy", "The current proxy group is selected by the engine and is read-only");
+    return false;
+  }
   if (!group.options.some((item) => item.name === proxyName)) {
     appendLog("error", "proxy", "Proxy selection is not an option in the current controller snapshot");
     return false;
   }
+  if (!controllerActionAllowed(`Selecting proxy in ${groupName}`, "proxy")) return false;
+  const invokeMutation = () => invoke("select_proxy", { group: groupName, proxy: proxyName });
   return enqueueControllerMutation({
     lane: `proxy-selector:${groupName}`,
     kind: "selector",
@@ -3271,7 +3316,7 @@ async function applyProxySelection(groupName, proxyName) {
     failureLabel: `Proxy selection ${groupName} → ${proxyName} was not applied`,
     successMessage: `Proxy group ${groupName} switched to ${proxyName}`,
     breakConnectionsReason: groupName,
-    invokeMutation: () => invoke("select_proxy", { group: groupName, proxy: proxyName }),
+    invokeMutation,
     readObserved: (snapshot) => controllerSelectorFromSnapshot(snapshot, groupName),
     publishObserved: (observed) => {
       const current = state.proxyGroups.find((item) => item.name === groupName);
@@ -4340,6 +4385,7 @@ export async function handleAction(action) {
     let updated = 0;
     let failed = 0;
     let local = 0;
+    let cleanupPending = 0;
     // A profile list never carries a subscription URL, so each profile is read
     // once here, on this explicit user action, to find the remote ones.
     for (const profile of [...state.profiles]) {
@@ -4348,8 +4394,16 @@ export async function handleAction(action) {
         continue;
       }
       try {
-        await invoke("update_profile", { id: profile.id });
+        const result = await invoke("update_profile", { id: profile.id });
         updated += 1;
+        if (result.credential_cleanup_pending) {
+          cleanupPending += 1;
+          appendLog(
+            "warning",
+            "profile",
+            `${profile.name} was updated, but credential cleanup is pending: ${result.credential_cleanup_error}`,
+          );
+        }
       } catch (error) {
         failed += 1;
         appendLog("error", "profile", `Update failed for ${profile.name}: ${errorText(error)}`);
@@ -4366,7 +4420,7 @@ export async function handleAction(action) {
     appendLog(
       failed ? "error" : "info",
       "profile",
-      `Update All completed: ${updated} updated${failed ? `, ${failed} failed` : ""}${local ? `, ${local} without a subscription URL` : ""}`,
+      `Update All completed: ${updated} updated${failed ? `, ${failed} failed` : ""}${cleanupPending ? `, ${cleanupPending} cleanup pending` : ""}${local ? `, ${local} without a subscription URL` : ""}`,
     );
   }
   if (action === "save-profile-editor") {

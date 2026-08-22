@@ -16,6 +16,7 @@ mod tests;
 use std::future::Future;
 use std::path::Path;
 
+use cfw_application::EngineCoordinatorError;
 use cfw_engine_api::{
     CutoverPreflightOutcome, EngineEvent, EngineMode, EngineSnapshot, EngineState,
 };
@@ -253,7 +254,7 @@ pub(crate) async fn disable_service_mode(
     let selected = locked_profile.stored();
     if selected.record.id != authority.profile_id()
         || selected.record.digest != authority.profile_digest()
-        || authority.settings() != engine.engine_settings()
+        || authority.settings() != &engine.engine_settings()?
     {
         return Err(
             "CutoverReceiptStale: selected profile or engine settings changed; the legacy VPN was not changed"
@@ -394,24 +395,19 @@ pub(crate) async fn disable_service_mode(
         ));
     }
 
-    let start = engine
-        .coordinator
-        .set_mode(
-            authority.target(),
-            selected.record.id.clone(),
-            selected.profile.clone(),
-            authority.settings().clone(),
-        )
-        .await;
-    let active = match start {
-        Ok(snapshot) => require_replacement_active(
-            snapshot,
-            authority.target(),
-            target_digest(&current_request),
-            &current_request.system_proxy_request().context,
-        ),
-        Err(error) => Err(error.to_string()),
-    };
+    let start_journal = journal_store
+        .load()?
+        .ok_or_else(|| "cutover journal disappeared before replacement start".to_owned())?;
+    let active = start_replacement_with_endpoint_rebind(
+        &engine,
+        &journal_store,
+        start_journal,
+        &selected.record.id,
+        &selected.record.digest,
+        &selected.profile,
+    )
+    .await
+    .map(|_| ());
     if let Err(error) = active {
         let message = format!(
             "legacy network retirement completed, but the replacement failed to become Active: {error}. There is no legacy helper fallback; keep this app open, inspect the engine failure, and reconnect with the staged mode"
@@ -513,7 +509,7 @@ pub(crate) async fn recover_legacy_cutover(
     }
     engine.require_capability(journal.target)?;
     let settings = journal.replacement_settings.clone();
-    if &settings != engine.engine_settings() {
+    if settings != engine.engine_settings()? {
         let message = "recovery engine settings do not match the journal-bound replacement; recovery did not change networking";
         attempt.mark_failed(state_gate::LegacyCleanupAction::Retry, message)?;
         return Err(message.into());
@@ -533,6 +529,11 @@ pub(crate) async fn recover_legacy_cutover(
     .is_ok();
 
     if !replacement_active {
+        if journal.phase == CutoverPhase::ReplacementActive {
+            let message = "a ReplacementActive journal no longer has its exact active runtime; endpoint or generation rebinding is forbidden in this phase";
+            attempt.mark_failed(state_gate::LegacyCleanupAction::Retry, message)?;
+            return Err(message.into());
+        }
         if journal.phase == CutoverPhase::NetworkRetiring {
             recovery::ensure_network_retiring_gui_terminated(&journal)?;
         }
@@ -577,22 +578,17 @@ pub(crate) async fn recover_legacy_cutover(
                 journal.phase
             ));
         }
-        let snapshot = engine
-            .coordinator
-            .set_mode(
-                journal.target,
-                selected.record.id.clone(),
-                selected.profile.clone(),
-                settings.clone(),
-            )
-            .await
-            .map_err(|error| format!("replacement recovery start failed: {error}"))?;
-        require_replacement_active(
-            snapshot,
-            journal.target,
-            target_digest(&request),
-            &request.system_proxy_request().context,
-        )?;
+        let (_, _, rebound_journal) = start_replacement_with_endpoint_rebind(
+            &engine,
+            &journal_store,
+            journal,
+            &selected.record.id,
+            &selected.record.digest,
+            &selected.profile,
+        )
+        .await
+        .map_err(|error| format!("replacement recovery start failed: {error}"))?;
+        journal = rebound_journal;
         replacement_active = true;
         if journal.phase == CutoverPhase::LegacyRetired {
             journal = journal_store
@@ -682,6 +678,130 @@ async fn normalize_recovery_engine_off(
         Ok(())
     } else {
         Err("replacement recovery did not reach exact Off".into())
+    }
+}
+
+async fn start_replacement_with_endpoint_rebind(
+    engine: &ManagedEngine,
+    journal_store: &CutoverJournalStore,
+    mut journal: CutoverJournal,
+    profile_id: &str,
+    profile_digest: &str,
+    profile: &cfw_singbox_config::ValidatedSingBoxProfile,
+) -> Result<
+    (
+        EngineSnapshot,
+        cfw_engine_api::CutoverPreflightRequest,
+        CutoverJournal,
+    ),
+    String,
+> {
+    if !matches!(
+        journal.phase,
+        CutoverPhase::NetworkRetiring | CutoverPhase::LegacyRetired
+    ) {
+        return Err(format!(
+            "replacement endpoint binding cannot start from cutover phase {:?}",
+            journal.phase
+        ));
+    }
+
+    loop {
+        let settings = engine.engine_settings()?;
+        if settings != journal.replacement_settings {
+            return Err(
+                "in-memory replacement endpoints do not match the durable cutover journal".into(),
+            );
+        }
+        let request = engine
+            .coordinator
+            .prepare_cutover(
+                journal.target,
+                profile_id.to_owned(),
+                profile.clone(),
+                settings.clone(),
+            )
+            .await
+            .map_err(|error| format!("replacement projection failed: {error}"))?;
+        if journal.context != request.system_proxy_request().context
+            || journal.system_proxy_digest != request.system_proxy_request().config_digest
+            || journal.tunnel_digest != request.tunnel_request().config_digest
+        {
+            journal = journal_store.rebind_recovery_request(
+                journal.phase,
+                profile_id,
+                profile_digest,
+                &request,
+                &settings,
+            )?;
+        }
+
+        let outcome =
+            run_native_preflight(engine.preflight_backend.as_ref(), request.clone()).await?;
+        validate_outcome_binding(&request, &outcome)?;
+        if !matches!(outcome, CutoverPreflightOutcome::Ready { .. }) {
+            return Err(
+                "System Extension approval is still pending; replacement was not started".into(),
+            );
+        }
+        let final_request = engine
+            .coordinator
+            .prepare_cutover(
+                journal.target,
+                profile_id.to_owned(),
+                profile.clone(),
+                settings.clone(),
+            )
+            .await
+            .map_err(|error| format!("final replacement Off validation failed: {error}"))?;
+        if final_request != request {
+            return Err("replacement projection changed after native preflight".into());
+        }
+
+        match engine
+            .coordinator
+            .set_mode(
+                journal.target,
+                profile_id.to_owned(),
+                profile.clone(),
+                settings,
+            )
+            .await
+        {
+            Ok(snapshot) => {
+                require_replacement_active(
+                    snapshot.clone(),
+                    journal.target,
+                    target_digest(&request),
+                    &request.system_proxy_request().context,
+                )?;
+                engine.record_endpoint_runtime(&snapshot)?;
+                return Ok((snapshot, request, journal));
+            }
+            Err(EngineCoordinatorError::StartEndpointConflictAfterOff { conflict, .. }) => {
+                let staged = engine.stage_endpoint_rebind(conflict)?;
+                let replacement_settings = staged.settings().clone();
+                let rebound_request = engine
+                    .coordinator
+                    .prepare_cutover(
+                        journal.target,
+                        profile_id.to_owned(),
+                        profile.clone(),
+                        replacement_settings.clone(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!("replacement endpoint re-projection failed: {error}")
+                    })?;
+                journal = journal_store.rebind_endpoint_request(
+                    &journal,
+                    &rebound_request,
+                    &replacement_settings,
+                )?;
+                engine.commit_endpoint_rebind(staged)?;
+            }
+            Err(error) => return Err(format!("replacement start failed: {error}")),
+        }
     }
 }
 

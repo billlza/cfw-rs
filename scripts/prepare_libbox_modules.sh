@@ -12,6 +12,7 @@ source "$repo_root/scripts/go_release_environment.sh"
 source "$repo_root/scripts/libbox_source_contract.sh"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
+libbox_load_module_cache_contract "$repo_root"
 source_input="${SING_BOX_SOURCE:-}"
 if [[ -z "$source_input" ]]; then
   echo "error: set SING_BOX_SOURCE to the materialized patched sing-box checkout" >&2
@@ -66,8 +67,7 @@ fi
     exit 1
   fi
   "$go_bin" list -mod=readonly \
-    github.com/sagernet/gomobile/bind \
-    github.com/sagernet/gomobile/bind/objc >/dev/null || {
+    "${LIBBOX_GOMOBILE_BIND_PACKAGES[@]}" >/dev/null || {
     echo "error: module preparation lacks the exact pinned gomobile bind package closure" >&2
     exit 1
   }
@@ -81,7 +81,7 @@ fi
       -deps \
       -mod=readonly \
       -tags "$LIBBOX_BUILD_TAGS" \
-      ./experimental/libbox >/dev/null
+      "${LIBBOX_MODULE_BUILD_PACKAGES[@]}" >/dev/null
   # The deterministic source lane also compiles and runs these packages' test
   # graphs. Seal that exact test-only closure (notably testify) now so the
   # later offline test cannot attempt a network lookup.
@@ -91,7 +91,10 @@ fi
       -test \
       -mod=readonly \
       -tags "$LIBBOX_BUILD_TAGS" \
-      ./dns ./option ./common/dialer ./daemon ./experimental/libbox >/dev/null
+      "${LIBBOX_RACE_TEST_PACKAGES[@]}" \
+      "${LIBBOX_TEST_PACKAGES[@]}" \
+      "${LIBBOX_COMPILE_TEST_PACKAGES[@]}" \
+      "${LIBBOX_VET_PACKAGES[@]}" >/dev/null
   "$go_bin" mod verify
 )
 libbox_validate_patched_source "$repo_root" "$source_root"
@@ -99,9 +102,10 @@ python3 "$repo_root/scripts/hash_artifact.py" \
   "$module_cache" \
   --output "$module_manifest" \
   --algorithm sha256-tree-v2 \
-  --metadata "artifactKind=pinned-go-module-cache-v1" \
+  --metadata "artifactKind=pinned-go-module-cache-v2" \
   --metadata "buildTags=$LIBBOX_BUILD_TAGS" \
   --metadata "goVersion=$GO_VERSION" \
+  --metadata "moduleCacheContractSha256=$LIBBOX_MODULE_CACHE_CONTRACT_SHA256" \
   --metadata "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256" \
   --metadata "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256" \
   --metadata "platform=darwin-arm64" \

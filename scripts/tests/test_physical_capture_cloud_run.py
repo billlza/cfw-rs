@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -9,8 +10,8 @@ import ssl
 import unittest
 from unittest.mock import patch
 
-from scripts.harness.raw_artifacts import canonical_json
-from scripts.physical_capture import cloud_run
+from scripts.harness.raw_artifacts import RawArtifactError, canonical_json
+from scripts.physical_capture import cloud_run, policy as collector_policy
 from scripts.physical_capture.cloud_run import (
     CloudRunClient,
     NonceResponse,
@@ -19,6 +20,8 @@ from scripts.physical_capture.cloud_run import (
     ReceiptResponse,
     load_endpoint_policy,
 )
+from scripts.physical_capture.execution import CommandResult, ProbeExecutionError
+from scripts.physical_capture.policy import PhysicalCapturePolicyError
 
 
 NONCE_ORIGIN = "https://physical-nonce-issuer-v040-z67iamdcvq-de.a.run.app"
@@ -263,7 +266,77 @@ class FakeRunner:
         raise AssertionError(f"unexpected gcloud command: {normalized!r}")
 
 
+def _source_digest_result(stdout: bytes, *, stderr: bytes = b"") -> CommandResult:
+    return CommandResult(
+        role="physical-collector-source-digest",
+        argv_sha256="a" * 64,
+        started_at="2026-08-22T00:00:00.000000Z",
+        completed_at="2026-08-22T00:00:00.001000Z",
+        duration_ms=1,
+        exit_code=0,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+class PhysicalCaptureCollectorPolicyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.policy = collector_policy.load_source_pinned_policy()
+
+    def test_current_source_digest_must_exactly_match_activated_policy(self) -> None:
+        runner_result = _source_digest_result(
+            self.policy.collector_source_sha256.encode("ascii") + b"\n"
+        )
+        with patch.object(
+            collector_policy, "run_fixed_command", return_value=runner_result
+        ) as runner:
+            observed = collector_policy.require_current_collector_source_activation()
+        self.assertEqual(observed, self.policy)
+        spec = runner.call_args.args[0]
+        self.assertEqual(
+            spec.argv,
+            ("/bin/bash", str(collector_policy.COLLECTOR_SOURCE_DIGEST_TOOL)),
+        )
+        self.assertEqual(spec.cwd, collector_policy.COLLECTOR_SOURCE_ROOT)
+        self.assertEqual((spec.stdout_limit, spec.stderr_limit), (65, 4096))
+
+    def test_stale_policy_digest_is_rejected_before_transport(self) -> None:
+        stale = replace(self.policy, collector_source_sha256="0" * 64)
+        result = _source_digest_result(b"1" * 64 + b"\n")
+        with patch.object(
+            collector_policy, "load_source_pinned_policy", return_value=stale
+        ), patch.object(collector_policy, "run_fixed_command", return_value=result):
+            with self.assertRaisesRegex(
+                PhysicalCapturePolicyError, "not activated"
+            ):
+                collector_policy.require_current_collector_source_activation()
+
+    def test_malformed_output_stderr_and_runner_failure_fail_closed(self) -> None:
+        outcomes = (
+            _source_digest_result(b"A" * 64 + b"\n"),
+            _source_digest_result(b"0" * 64),
+            _source_digest_result(b"0" * 64 + b"\n", stderr=b"unexpected\n"),
+            ProbeExecutionError("source digest command failed"),
+        )
+        for outcome in outcomes:
+            with self.subTest(outcome=type(outcome).__name__), patch.object(
+                collector_policy,
+                "run_fixed_command",
+                side_effect=outcome if isinstance(outcome, Exception) else None,
+                return_value=None if isinstance(outcome, Exception) else outcome,
+            ):
+                with self.assertRaises(PhysicalCapturePolicyError):
+                    collector_policy.require_current_collector_source_activation()
+
+
 class PhysicalCaptureCloudRunTests(unittest.TestCase):
+    def setUp(self) -> None:
+        activation = patch.object(
+            cloud_run, "require_current_collector_source_activation", autospec=True
+        )
+        self.require_activation = activation.start()
+        self.addCleanup(activation.stop)
+
     def test_endpoint_policy_is_canonical_source_pinned_and_exact(self) -> None:
         data = cloud_run.ENDPOINT_POLICY_PATH.read_bytes()
         self.assertEqual(hashlib.sha256(data).hexdigest(), cloud_run.ENDPOINT_POLICY_SHA256)
@@ -282,7 +355,7 @@ class PhysicalCaptureCloudRunTests(unittest.TestCase):
         )
         self.assertEqual(
             policy.nonce_issuer.revision,
-            "physical-nonce-issuer-v040-00008-b58",
+            "physical-nonce-issuer-v040-enabled-20260822151852",
         )
         self.assertEqual(
             policy.receipt_signer.origin,
@@ -290,10 +363,50 @@ class PhysicalCaptureCloudRunTests(unittest.TestCase):
         )
         self.assertEqual(
             policy.receipt_signer.revision,
-            "physical-receipt-signer-v040-00008-gh7",
+            "physical-receipt-signer-v040-enabled-20260822151852",
         )
         for endpoint in (policy.nonce_issuer, policy.receipt_signer):
             self.assertEqual(endpoint.audience, endpoint.origin)
+
+    def test_revision_name_requires_bounded_service_prefixed_dns_label(self) -> None:
+        endpoint = {
+            "service": "physical-nonce-issuer-v040",
+            "revision": "physical-nonce-issuer-v040-enabled-release",
+            "origin": NONCE_ORIGIN,
+            "audience": NONCE_ORIGIN,
+            "route": "/v1/nonces",
+            "success_status": 201,
+        }
+        parsed = cloud_run._parse_endpoint("nonce_issuer", endpoint)
+        self.assertEqual(parsed.revision, endpoint["revision"])
+
+        invalid_revisions = (
+            "physical-nonce-issuer-v040",
+            "other-service-enabled-release",
+            "physical-nonce-issuer-v040-Enabled-release",
+            "physical-nonce-issuer-v040-enabled-release-",
+            "physical-nonce-issuer-v040-" + "x" * 64,
+        )
+        for revision in invalid_revisions:
+            with self.subTest(revision=revision), self.assertRaises(
+                RawArtifactError
+            ):
+                cloud_run._parse_endpoint(
+                    "nonce_issuer", {**endpoint, "revision": revision}
+                )
+
+    def test_unactivated_collector_source_fails_before_gcloud_or_https(self) -> None:
+        self.require_activation.side_effect = PhysicalCapturePolicyError(
+            "collector source is stale"
+        )
+        runner = FakeRunner()
+        factory = FakeConnectionFactory(
+            FakeResponse(_nonce_response(), status=201)
+        )
+        with self.assertRaisesRegex(PreSendError, "not activated"):
+            CloudRunClient(command_runner=runner, connection_factory=factory)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(factory.calls, [])
 
     def test_nonce_uses_fixed_revision_token_audience_and_one_https_post(self) -> None:
         runner = FakeRunner()

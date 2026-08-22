@@ -9,13 +9,16 @@ mod packet_evidence_transport;
 mod release_observation;
 mod shell;
 mod subscription_import;
+mod transport_security;
 mod updater;
 mod window_state;
 
 #[cfg(feature = "physical-release-evidence")]
 pub use engine::{ManagedEngine, packet_evidence};
 
-use bootstrap::{LaunchContext, acknowledge_migration_handoff_renderer_ready, boot_payload};
+use bootstrap::{
+    LaunchContext, acknowledge_migration_handoff_renderer_ready, boot_payload, reopen_main_window,
+};
 use cfw_apple_network::NativeFrameworkBridge;
 use cfw_core::SettingsStore;
 use cfw_engine_api::EngineEvent;
@@ -43,10 +46,7 @@ use commands::{
 use engine::{
     build_managed_engine, engine_snapshot, prepare_legacy_cutover, start_engine_event_forwarder,
 };
-use launch::{LaunchMode, parse_launch_mode};
-
-const STARTUP_USAGE_EXIT_CODE: i32 = 64;
-const STARTUP_ADMISSION_EXIT_CODE: i32 = 78;
+use launch::{LaunchMode, STARTUP_ADMISSION_EXIT_CODE, STARTUP_USAGE_EXIT_CODE, parse_launch_mode};
 use legacy::{
     ConsumedHandoffTicket, LegacyRetirementGate, MigrationHandoffLease, begin_migration_handoff,
     disable_service_mode, legacy_retirement_status, recover_legacy_cutover, run_launch_preflight,
@@ -340,8 +340,8 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("failed to build Clash for Mac");
 
-    application.run(|app, event| {
-        if let RunEvent::ExitRequested { api, .. } = event {
+    application.run(|app, event| match event {
+        RunEvent::ExitRequested { api, .. } => {
             let lifecycle = app.state::<AppLifecycle>();
             if !lifecycle.exit_ready() {
                 api.prevent_exit();
@@ -350,6 +350,13 @@ fn main() {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => {
+            if let Err(error) = reopen_main_window(app) {
+                emit_startup_error(app, "window_reopen_rejected", error);
+            }
+        }
+        _ => {}
     });
 }
 

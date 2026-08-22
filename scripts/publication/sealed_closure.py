@@ -9,7 +9,7 @@ supply-chain closure that binds, in one canonical document, the exact:
 * GPL modification notice and third-party notices;
 * reviewed license nodes and the merged SPDX and CycloneDX SBOMs;
 * pinned Go/vulnerability tool identities and the govulncheck reports;
-* the patched sing-box source (upstream commit + three patch digests + the
+* the patched sing-box source (upstream commit + four patch digests + the
   combined diff digest + verified Go module inputs);
 * the source-built ``Libbox.xcframework`` digest;
 * the signed application tree digest;

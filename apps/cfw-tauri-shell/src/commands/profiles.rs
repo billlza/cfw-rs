@@ -8,7 +8,7 @@ use cfw_engine_api::{
     CredentialGarbageCollectionCommitRequest, CredentialGarbageCollectionPreview,
     CredentialGarbageCollectionRequest, CredentialPresence, CredentialPresenceRequest,
     CredentialProfileCatalogEntry, CredentialProvision, CredentialProvisionRequest,
-    CredentialVaultProvisioner, CredentialVaultReceipt,
+    CredentialVaultError, CredentialVaultProvisioner, CredentialVaultReceipt,
 };
 use cfw_profiles::{
     ProfileCredentialSnapshot, ProfileImportResult, ProfileRecord, ProfileRepository,
@@ -155,7 +155,7 @@ pub(crate) fn import_profile_text(
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
     let profile = ValidatedSingBoxProfile::parse(&body).map_err(|error| error.to_string())?;
-    let settings = engine.engine_settings().clone();
+    let settings = engine.engine_settings()?;
     profile
         .project(
             PROJECTION_VALIDATION_PROFILE_ID,
@@ -396,6 +396,62 @@ fn credential_gc_request(
         .map_err(|error| error.to_string())
 }
 
+/// Removes only bindings absent from a fresh repository snapshot. The preview
+/// is validated before a second snapshot is locked across the native CAS, so
+/// this is safe to run automatically before and after a subscription update.
+pub(super) async fn collect_orphaned_credentials_now(
+    repository: &ProfileRepository,
+    vault: &impl CredentialVaultProvisioner,
+) -> Result<u32, String> {
+    let snapshot = repository
+        .credential_snapshot()
+        .map_err(|error| error.to_string())?;
+    let request = credential_gc_request(snapshot)?;
+    let live = request
+        .catalog()
+        .iter()
+        .flat_map(CredentialProfileCatalogEntry::bindings)
+        .collect::<BTreeSet<_>>();
+    let preview = match vault
+        .preview_credential_garbage_collection(request.clone())
+        .await
+    {
+        Ok(preview) => preview,
+        Err(CredentialVaultError::MissingVault) if live.is_empty() => return Ok(0),
+        Err(error) => return Err(error.to_string()),
+    };
+    CredentialGarbageCollectionCommitRequest::new(request, &preview)
+        .map_err(|error| error.to_string())?;
+    if preview
+        .orphan_bindings
+        .iter()
+        .any(|binding| live.contains(binding))
+    {
+        return Err(
+            "credential garbage-collection preview marks a live reference as orphaned".into(),
+        );
+    }
+    if preview.orphan_count == 0 {
+        return Ok(0);
+    }
+
+    let locked = repository
+        .lock_credential_snapshot()
+        .map_err(|error| error.to_string())?;
+    let request = credential_gc_request(locked.snapshot().clone())?;
+    let commit = CredentialGarbageCollectionCommitRequest::new(request, &preview)
+        .map_err(|error| error.to_string())?;
+    let receipt = vault
+        .commit_credential_garbage_collection(commit)
+        .await
+        .map_err(|error| error.to_string())?;
+    receipt.validate().map_err(|error| error.to_string())?;
+    if receipt.deleted_count != preview.orphan_count {
+        return Err("credential garbage-collection receipt does not match the preview".into());
+    }
+    Ok(receipt.deleted_count)
+}
+
 fn credential_requirements(
     repository: &ProfileRepository,
     id: &str,
@@ -451,8 +507,97 @@ fn snapshot_records(snapshot: ProfileRepositorySnapshot) -> Vec<UiProfileRecord>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cfw_engine_api::{
+        CredentialAudience, CredentialBinding, CredentialGarbageCollectionCommitFuture,
+        CredentialGarbageCollectionPreviewFuture, CredentialPresenceFuture,
+        CredentialPresenceRequest, CredentialProvisionRequest, CredentialVaultError,
+        CredentialVaultFuture,
+    };
     use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    struct OrphanGcVault {
+        preview_count: AtomicUsize,
+        commit_count: AtomicUsize,
+        preview_error: Option<CredentialVaultError>,
+        orphan_bindings: Vec<CredentialBinding>,
+        orphan_count: u32,
+        deleted_count: u32,
+        mutate_repository_before_commit: Option<ProfileRepository>,
+    }
+
+    impl OrphanGcVault {
+        fn orphan_binding() -> CredentialBinding {
+            let audience =
+                CredentialAudience::new("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "ab".repeat(32))
+                    .expect("synthetic orphan audience");
+            let reference = CredentialRef::new(
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                cfw_engine_api::CredentialKind::TrojanPassword,
+            )
+            .expect("synthetic orphan reference");
+            CredentialBinding::new(audience, reference)
+        }
+    }
+
+    impl CredentialVaultProvisioner for OrphanGcVault {
+        fn provision_profile_credentials<'a>(
+            &'a self,
+            _request: CredentialProvisionRequest<'a>,
+        ) -> CredentialVaultFuture<'a> {
+            Box::pin(async { Err(CredentialVaultError::Internal) })
+        }
+
+        fn query_profile_credentials(
+            &self,
+            _request: CredentialPresenceRequest,
+        ) -> CredentialPresenceFuture<'_> {
+            Box::pin(async { Err(CredentialVaultError::Internal) })
+        }
+
+        fn preview_credential_garbage_collection(
+            &self,
+            request: CredentialGarbageCollectionRequest,
+        ) -> CredentialGarbageCollectionPreviewFuture<'_> {
+            self.preview_count.fetch_add(1, Ordering::SeqCst);
+            let snapshot_digest = request.snapshot_digest().to_owned();
+            let preview_error = self.preview_error;
+            let orphan_bindings = self.orphan_bindings.clone();
+            let orphan_count = self.orphan_count;
+            if let Some(repository) = &self.mutate_repository_before_commit {
+                repository
+                    .import(Some("Concurrent"), &ValidatedSingBoxProfile::direct())
+                    .expect("concurrent repository mutation");
+            }
+            Box::pin(async move {
+                if let Some(error) = preview_error {
+                    return Err(error);
+                }
+                Ok(CredentialGarbageCollectionPreview {
+                    snapshot_digest,
+                    vault_revision: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into(),
+                    orphan_bindings,
+                    orphan_count,
+                })
+            })
+        }
+
+        fn commit_credential_garbage_collection(
+            &self,
+            request: CredentialGarbageCollectionCommitRequest,
+        ) -> CredentialGarbageCollectionCommitFuture<'_> {
+            self.commit_count.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.expected_orphan_bindings(), self.orphan_bindings);
+            let deleted_count = self.deleted_count;
+            Box::pin(async move {
+                Ok(cfw_engine_api::CredentialGarbageCollectionReceipt {
+                    vault_revision: "dddddddd-dddd-4ddd-8ddd-dddddddddddd".into(),
+                    deleted_count,
+                })
+            })
+        }
+    }
 
     #[test]
     fn profile_snapshot_serialization_exposes_no_path_url_or_credentials() {
@@ -598,5 +743,180 @@ mod tests {
             take_gc_authority(&mut expired, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", now).is_err()
         );
         assert!(expired.is_none(), "expired authority is destroyed");
+    }
+
+    #[tokio::test]
+    async fn automatic_credential_cleanup_revalidates_and_commits_exact_orphans() {
+        let temporary = TempDir::new().expect("temporary repository");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let vault = OrphanGcVault {
+            preview_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+            preview_error: None,
+            orphan_bindings: vec![OrphanGcVault::orphan_binding()],
+            orphan_count: 1,
+            deleted_count: 1,
+            mutate_repository_before_commit: None,
+        };
+
+        assert_eq!(
+            collect_orphaned_credentials_now(&repository, &vault)
+                .await
+                .expect("automatic cleanup"),
+            1
+        );
+        assert_eq!(vault.preview_count.load(Ordering::SeqCst), 1);
+        assert_eq!(vault.commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn automatic_credential_cleanup_accepts_a_missing_empty_vault() {
+        let temporary = TempDir::new().expect("temporary repository");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let vault = OrphanGcVault {
+            preview_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+            preview_error: Some(CredentialVaultError::MissingVault),
+            orphan_bindings: Vec::new(),
+            orphan_count: 0,
+            deleted_count: 0,
+            mutate_repository_before_commit: None,
+        };
+
+        assert_eq!(
+            collect_orphaned_credentials_now(&repository, &vault)
+                .await
+                .expect("an absent vault with no live bindings is already clean"),
+            0
+        );
+        assert_eq!(vault.preview_count.load(Ordering::SeqCst), 1);
+        assert_eq!(vault.commit_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn automatic_credential_cleanup_rejects_a_missing_vault_with_live_bindings() {
+        let temporary = TempDir::new().expect("temporary repository");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let profile = ValidatedSingBoxProfile::parse(
+            r#"{"outbounds":[{"type":"trojan","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","kind":"trojan_password"},"tls":{"enabled":true,"server_name":"proxy.example.com"}}]}"#,
+        )
+        .expect("typed profile");
+        repository
+            .import(Some("Credentials"), &profile)
+            .expect("profile import");
+        let vault = OrphanGcVault {
+            preview_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+            preview_error: Some(CredentialVaultError::MissingVault),
+            orphan_bindings: Vec::new(),
+            orphan_count: 0,
+            deleted_count: 0,
+            mutate_repository_before_commit: None,
+        };
+
+        let error = collect_orphaned_credentials_now(&repository, &vault)
+            .await
+            .expect_err("live references require an existing vault");
+        assert_eq!(error, CredentialVaultError::MissingVault.to_string());
+        assert_eq!(vault.preview_count.load(Ordering::SeqCst), 1);
+        assert_eq!(vault.commit_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn automatic_credential_cleanup_never_commits_a_live_binding_preview() {
+        let temporary = TempDir::new().expect("temporary repository");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let profile = ValidatedSingBoxProfile::parse(
+            r#"{"outbounds":[{"type":"trojan","tag":"proxy","server":"proxy.example.com","server_port":443,"credential_ref":{"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","kind":"trojan_password"},"tls":{"enabled":true,"server_name":"proxy.example.com"}}]}"#,
+        )
+        .expect("typed profile");
+        repository
+            .import(Some("Credentials"), &profile)
+            .expect("profile import");
+        let snapshot = repository
+            .credential_snapshot()
+            .expect("credential snapshot");
+        let entry = snapshot.catalog.first().expect("live catalog entry");
+        let live = CredentialBinding::new(entry.audience.clone(), entry.references[0].clone());
+        let vault = OrphanGcVault {
+            preview_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+            preview_error: None,
+            orphan_bindings: vec![live],
+            orphan_count: 1,
+            deleted_count: 1,
+            mutate_repository_before_commit: None,
+        };
+
+        let error = collect_orphaned_credentials_now(&repository, &vault)
+            .await
+            .expect_err("live binding preview must fail closed");
+        assert!(error.contains("marks a live reference as orphaned"));
+        assert_eq!(vault.commit_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn automatic_credential_cleanup_rejects_a_stale_repository_snapshot() {
+        let temporary = TempDir::new().expect("temporary repository");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let vault = OrphanGcVault {
+            preview_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+            preview_error: None,
+            orphan_bindings: vec![OrphanGcVault::orphan_binding()],
+            orphan_count: 1,
+            deleted_count: 1,
+            mutate_repository_before_commit: Some(repository.clone()),
+        };
+
+        collect_orphaned_credentials_now(&repository, &vault)
+            .await
+            .expect_err("stale repository snapshot must fail closed");
+        assert_eq!(vault.commit_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn automatic_credential_cleanup_rejects_a_mismatched_delete_receipt() {
+        let temporary = TempDir::new().expect("temporary repository");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let vault = OrphanGcVault {
+            preview_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+            preview_error: None,
+            orphan_bindings: vec![OrphanGcVault::orphan_binding()],
+            orphan_count: 1,
+            deleted_count: 0,
+            mutate_repository_before_commit: None,
+        };
+
+        let error = collect_orphaned_credentials_now(&repository, &vault)
+            .await
+            .expect_err("delete receipt mismatch must fail closed");
+        assert!(error.contains("receipt does not match the preview"));
+        assert_eq!(vault.commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn automatic_credential_cleanup_skips_commit_for_zero_orphans() {
+        let temporary = TempDir::new().expect("temporary repository");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let vault = OrphanGcVault {
+            preview_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+            preview_error: None,
+            orphan_bindings: Vec::new(),
+            orphan_count: 0,
+            deleted_count: 0,
+            mutate_repository_before_commit: None,
+        };
+
+        assert_eq!(
+            collect_orphaned_credentials_now(&repository, &vault)
+                .await
+                .expect("zero orphan cleanup"),
+            0
+        );
+        assert_eq!(vault.preview_count.load(Ordering::SeqCst), 1);
+        assert_eq!(vault.commit_count.load(Ordering::SeqCst), 0);
     }
 }

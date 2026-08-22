@@ -154,7 +154,7 @@ pub(crate) fn preview_legacy_cfw_profile_migration(
             })
         }
         LegacyCandidateState::Ready(candidate) => {
-            let settings = engine.engine_settings().clone();
+            let settings = engine.engine_settings()?;
             let namespace = migration_namespace(&candidate.active_profile);
             validated_subscription_import_with_namespace(
                 &candidate.document,
@@ -219,7 +219,7 @@ pub(crate) async fn commit_legacy_cfw_profile_migration(
         );
     }
 
-    let settings = engine.engine_settings().clone();
+    let settings = engine.engine_settings()?;
     let namespace = migration_namespace(&candidate.active_profile);
     let imported =
         validated_subscription_import_with_namespace(&candidate.document, &settings, namespace)?;

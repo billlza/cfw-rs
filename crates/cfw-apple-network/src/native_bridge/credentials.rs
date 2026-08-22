@@ -169,10 +169,10 @@ fn map_vault_error(error: NativeBridgeError) -> CredentialVaultError {
             CredentialVaultError::MigrationRequired
         }
         NativeBridgeErrorCode::CredentialGcConflict => CredentialVaultError::ConcurrentModification,
+        NativeBridgeErrorCode::ResourceExhausted => CredentialVaultError::CapacityExceeded,
         NativeBridgeErrorCode::ConfigurationRejected => CredentialVaultError::InvalidMaterial,
         NativeBridgeErrorCode::IdentityRejected => CredentialVaultError::Corrupt,
         NativeBridgeErrorCode::Busy
-        | NativeBridgeErrorCode::ResourceExhausted
         | NativeBridgeErrorCode::JournalCapacityExhausted
         | NativeBridgeErrorCode::ApprovalDenied
         | NativeBridgeErrorCode::CredentialsUnavailable
@@ -200,6 +200,8 @@ fn map_vault_error(error: NativeBridgeError) -> CredentialVaultError {
         | NativeBridgeErrorCode::SecretBoundsExceeded
         | NativeBridgeErrorCode::SecretLifecycleViolation
         | NativeBridgeErrorCode::JournalCorrupt
+        | NativeBridgeErrorCode::MixedEndpointInUse
+        | NativeBridgeErrorCode::ControllerEndpointInUse
         | NativeBridgeErrorCode::Internal => CredentialVaultError::Internal,
     }
 }
@@ -233,6 +235,13 @@ mod tests {
                 "denied",
             )),
             CredentialVaultError::AccessDenied
+        );
+        assert_eq!(
+            map_vault_error(NativeBridgeError::new(
+                NativeBridgeErrorCode::ResourceExhausted,
+                "vault capacity",
+            )),
+            CredentialVaultError::CapacityExceeded
         );
     }
 

@@ -14,6 +14,13 @@ mod release_dns;
 mod release_packet;
 mod validation;
 
+/// Product-owned minimum for every remote TLS connection emitted by the
+/// runtime projection. Profiles deliberately cannot override this policy.
+/// BCP 195 interoperability floor. TLS 1.3 is negotiated whenever the peer
+/// supports it; rustls does not offer obsolete protocol versions or cipher
+/// suites. QUIC protocols independently require TLS 1.3.
+pub const MINIMUM_REMOTE_TLS_VERSION: &str = "1.2";
+
 pub use controller::{
     CLASH_API_ADDRESS, ClashApiEndpoint, DEFAULT_CLASH_API_PORT, MIN_CLASH_API_PORT,
 };
@@ -25,8 +32,8 @@ pub use credentials::{
 pub use error::ConfigError;
 pub use profile::MAX_OUTBOUNDS;
 pub use projection::{
-    AuthenticatedDnsServer, DEFAULT_MIXED_PORT, EngineSettings, ProjectedConfig, ProjectionMode,
-    TUNNEL_ADDRESS_PLAN, TunnelAddressPlan,
+    AuthenticatedDnsServer, CONFIGURATION_IDENTITY_SCHEMA_VERSION, DEFAULT_MIXED_PORT,
+    EngineSettings, ProjectedConfig, ProjectionMode, TUNNEL_ADDRESS_PLAN, TunnelAddressPlan,
 };
 pub use release_dns::ReleaseDnsEvidenceCase;
 pub use release_packet::{

@@ -59,6 +59,8 @@ pub enum NativeBridgeErrorCode {
     IdentityRejected,
     Timeout,
     Unavailable,
+    MixedEndpointInUse,
+    ControllerEndpointInUse,
     Internal,
 }
 
@@ -110,6 +112,8 @@ impl From<NativeBridgeErrorCode> for BackendErrorKind {
             NativeBridgeErrorCode::IdentityRejected => Self::IdentityRejected,
             NativeBridgeErrorCode::Timeout => Self::Timeout,
             NativeBridgeErrorCode::Unavailable => Self::Unavailable,
+            NativeBridgeErrorCode::MixedEndpointInUse => Self::MixedEndpointInUse,
+            NativeBridgeErrorCode::ControllerEndpointInUse => Self::ControllerEndpointInUse,
             NativeBridgeErrorCode::Internal => Self::Internal,
         }
     }
@@ -163,6 +167,8 @@ impl From<BackendErrorKind> for NativeBridgeErrorCode {
             BackendErrorKind::IdentityRejected => Self::IdentityRejected,
             BackendErrorKind::Timeout => Self::Timeout,
             BackendErrorKind::Unavailable => Self::Unavailable,
+            BackendErrorKind::MixedEndpointInUse => Self::MixedEndpointInUse,
+            BackendErrorKind::ControllerEndpointInUse => Self::ControllerEndpointInUse,
             BackendErrorKind::Internal => Self::Internal,
         }
     }

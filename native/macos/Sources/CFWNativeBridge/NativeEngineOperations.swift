@@ -65,10 +65,11 @@ extension NativeBridgeCoordinator {
           after: originalError,
           cancellationFailure: error)
       }
-      rememberCompletedStartCleanup(
+      let transaction = NativeStopTransaction(
         owner: .systemProxy,
         commandContext: request.context,
         descriptor: descriptor)
+      try await proveFailedStartOff(transaction)
       throw Self.map(originalError)
     }
     do {
@@ -110,17 +111,22 @@ extension NativeBridgeCoordinator {
         "System Proxy \(context) and Authority cancellation is unproven: \(Self.map(error).responseFailure.message)"
       )
     }
-    rememberCompletedStartCleanup(
-      owner: .systemProxy,
-      commandContext: commandContext,
-      descriptor: descriptor)
+    try await proveFailedStartOff(
+      NativeStopTransaction(
+        owner: .systemProxy,
+        commandContext: commandContext,
+        descriptor: descriptor)
+    )
     throw Self.map(originalError)
   }
 
   func stopSystemProxy(_ context: EngineCommandContext) async throws {
     let mutationID = try await beginMutation()
     defer { endMutation(mutationID) }
-    if try acknowledgeCompletedStartCleanup(.systemProxy, context: context) {
+    if try await acknowledgeCompletedStartCleanup(.systemProxy, context: context) {
+      return
+    }
+    if try await resumePendingFailedStartOff(.systemProxy, context: context) {
       return
     }
     try await prepareExplicitStop(.systemProxy, context: context)
@@ -226,13 +232,18 @@ extension NativeBridgeCoordinator {
         commandContext: request.context,
         descriptor: descriptor)
       do {
-        try await reconcilePendingTunnelStartCleanup()
+        try await reconcilePendingTunnelStartCleanup(recordCompletion: false)
       } catch {
         throw NativeBridgeExecutionError.failure(
           .cleanupUnproven,
           "Tunnel start failed and exact preparation cleanup remains unproven: \(Self.map(error).responseFailure.message)"
         )
       }
+      let transaction = NativeStopTransaction(
+        owner: .tunnel,
+        commandContext: request.context,
+        descriptor: descriptor)
+      try await proveFailedStartOff(transaction)
       throw Self.map(originalError)
     }
     do {
@@ -273,10 +284,13 @@ extension NativeBridgeCoordinator {
           return runtime
         }
         if providerSnapshot.state.kind == .failed {
-          throw NativeBridgeExecutionError.failure(
-            .unavailable,
-            "Packet Tunnel entered a failed state before readiness attestation."
-          )
+          guard let failure = providerSnapshot.state.failure else {
+            throw NativeBridgeExecutionError.failure(
+              .identityRejected,
+              "Packet Tunnel returned a failed state without a typed failure."
+            )
+          }
+          throw Self.map(AppleNetworkError.providerFailure(failure))
         }
         try await Task.sleep(for: .milliseconds(100))
       }
@@ -296,7 +310,10 @@ extension NativeBridgeCoordinator {
   func stopTunnel(_ context: EngineCommandContext) async throws {
     let mutationID = try await beginMutation()
     defer { endMutation(mutationID) }
-    if try acknowledgeCompletedStartCleanup(.tunnel, context: context) {
+    if try await acknowledgeCompletedStartCleanup(.tunnel, context: context) {
+      return
+    }
+    if try await resumePendingFailedStartOff(.tunnel, context: context) {
       return
     }
     if let pendingStartCleanup {
@@ -309,11 +326,12 @@ extension NativeBridgeCoordinator {
         )
       }
       do {
-        try await reconcilePendingTunnelStartCleanup()
+        try await reconcilePendingTunnelStartCleanup(recordCompletion: false)
       } catch {
         throw Self.map(error)
       }
-      guard try acknowledgeCompletedStartCleanup(.tunnel, context: context) else {
+      try await proveFailedStartOff(pendingStartCleanup)
+      guard try await acknowledgeCompletedStartCleanup(.tunnel, context: context) else {
         throw NativeBridgeExecutionError.failure(
           .cleanupUnproven,
           "Tunnel failed-start cleanup completed without an exact receipt."
@@ -328,6 +346,7 @@ extension NativeBridgeCoordinator {
   private func requireNoPendingStopBeforeStart() throws {
     guard pendingStop == nil,
       pendingStartCleanup == nil,
+      pendingFailedStartOff == nil,
       completedStartCleanup == nil
     else {
       throw NativeBridgeExecutionError.failure(
@@ -399,7 +418,7 @@ extension NativeBridgeCoordinator {
           descriptor: descriptor)
       }
       do {
-        try await reconcilePendingTunnelStartCleanup()
+        try await reconcilePendingTunnelStartCleanup(recordCompletion: false)
       } catch let error as NativeBridgeExecutionError {
         let localCleanup = await attemptLocalStopAfterOrderingFailure()
         let local = localCleanup.map { " Local stop also failed: \($0)" } ?? ""
@@ -413,6 +432,11 @@ extension NativeBridgeCoordinator {
           "Tunnel start cleanup failed at an untyped boundary."
         )
       }
+      let transaction = NativeStopTransaction(
+        owner: owner,
+        commandContext: commandContext,
+        descriptor: descriptor)
+      try await proveFailedStartOff(transaction)
       throw Self.map(originalError)
     }
 
@@ -588,7 +612,7 @@ extension NativeBridgeCoordinator {
   private func acknowledgeCompletedStartCleanup(
     _ owner: NativeStopOwner,
     context: EngineCommandContext
-  ) throws -> Bool {
+  ) async throws -> Bool {
     guard let receipt = completedStartCleanup else { return false }
     guard receipt.owner == owner,
       receipt.commandContext == context
@@ -598,8 +622,133 @@ extension NativeBridgeCoordinator {
         "The cleanup acknowledgement does not match the failed start generation."
       )
     }
+    try await requireFailedStartGlobalOff(
+      "The failed-start cleanup receipt no longer has a fresh global Off proof.")
     completedStartCleanup = nil
     return true
+  }
+
+  private func resumePendingFailedStartOff(
+    _ owner: NativeStopOwner,
+    context: EngineCommandContext
+  ) async throws -> Bool {
+    guard let transaction = pendingFailedStartOff else { return false }
+    guard transaction.owner == owner,
+      transaction.commandContext == context
+    else {
+      throw NativeBridgeExecutionError.failure(
+        .identityRejected,
+        "The failed-start Off retry does not match the pending generation."
+      )
+    }
+    try await proveFailedStartOff(transaction)
+    guard try await acknowledgeCompletedStartCleanup(owner, context: context) else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "The failed-start Off proof completed without an exact receipt."
+      )
+    }
+    return true
+  }
+
+  private func retainPendingFailedStartOff(
+    _ transaction: NativeStopTransaction
+  ) throws {
+    if let pendingFailedStartOff {
+      guard pendingFailedStartOff.owner == transaction.owner,
+        pendingFailedStartOff.commandContext == transaction.commandContext,
+        pendingFailedStartOff.descriptor == transaction.descriptor
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Failed-start Off proof conflicts with another cleanup transaction."
+        )
+      }
+      return
+    }
+    guard completedStartCleanup == nil else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "Failed-start Off proof conflicts with an unacknowledged cleanup receipt."
+      )
+    }
+    pendingFailedStartOff = transaction
+  }
+
+  private func proveFailedStartOff(
+    _ transaction: NativeStopTransaction
+  ) async throws {
+    try retainPendingFailedStartOff(transaction)
+    guard pendingStartCleanup == nil, pendingStop == nil else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "Failed-start Off proof began before its earlier cleanup phase completed."
+      )
+    }
+    let initial: EngineSnapshot
+    do {
+      initial = try await ownerSnapshot(transaction.owner)
+    } catch {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "Failed-start owner state could not be observed: \(Self.map(error).responseFailure.message)"
+      )
+    }
+    if !Self.isStableOff(initial) {
+      guard initial.state.kind == .failed,
+        initial.configuration == transaction.descriptor
+      else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Failed-start owner state does not match the exact failed generation."
+        )
+      }
+      do {
+        try await stopOwner(transaction)
+      } catch {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Failed-start owner could not advance to Off: \(Self.map(error).responseFailure.message)"
+        )
+      }
+      let stopped: EngineSnapshot
+      do {
+        stopped = try await ownerSnapshot(transaction.owner)
+      } catch {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Stopped failed-start owner could not be observed: \(Self.map(error).responseFailure.message)"
+        )
+      }
+      guard Self.isStableOff(stopped) else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "The exact failed-start owner did not attest Off after cleanup."
+        )
+      }
+    }
+    try await requireFailedStartGlobalOff(
+      "Failed-start cleanup did not reach the independent global Off barrier.")
+    pendingFailedStartOff = nil
+    rememberCompletedStartCleanup(
+      owner: transaction.owner,
+      commandContext: transaction.commandContext,
+      descriptor: transaction.descriptor)
+  }
+
+  private func requireFailedStartGlobalOff(_ context: String) async throws {
+    let status: NativeEngineStatus
+    do {
+      status = try await queryStatus(enforcePreferenceBarrier: false)
+    } catch {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "\(context) Observation failed: \(Self.map(error).responseFailure.message)"
+      )
+    }
+    guard case .off = status else {
+      throw NativeBridgeExecutionError.failure(.cleanupUnproven, context)
+    }
   }
 
   private func drivePendingStop() async throws {

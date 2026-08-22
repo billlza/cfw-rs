@@ -49,7 +49,7 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
         )
         self.candidate = {
             "version": "0.4.0",
-            "build_number": "40005",
+            "build_number": "40021",
             "app_manifest_sha256": _sha256("app"),
             "signed_app_tree_sha256": _sha256("tree"),
             "artifact_hash_manifest_sha256": _sha256("artifacts"),
@@ -84,6 +84,97 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.session.close()
         self.temporary.cleanup()
+
+    def lan_coordinator(self) -> packet._PacketCaseCoordinator:
+        return packet._PacketCaseCoordinator(
+            session=self.session,
+            context=self.context,
+            case_id="lan-bypass",
+            plan=packet.SOURCE_PINNED_ENDPOINTS["lan-bypass"],
+            tokens=("s" * 20, "t" * 20, "e" * 20),
+        )
+
+    def test_consumed_ios_close_failure_is_not_replaced_by_a_second_abort(self) -> None:
+        class ConsumedFailureLease:
+            def __init__(self) -> None:
+                self.is_closed = False
+                self.abort_calls = 0
+
+            def as_document(self) -> dict[str, object]:
+                return {"document": "synthetic-admission"}
+
+            def close_with_receipt(self) -> dict[str, object]:
+                self.is_closed = True
+                raise packet.ios_packet_lan_peer_adapter.IOSPacketLanPeerError(
+                    "synthetic_close_failed", "synthetic terminal cleanup failure"
+                )
+
+            def abort(self) -> dict[str, object]:
+                self.abort_calls += 1
+                raise AssertionError("closed lease must not be aborted again")
+
+        coordinator = self.lan_coordinator()
+        lease = ConsumedFailureLease()
+        coordinator.runtime.ios_peer_lease = lease
+        with self.assertRaises(PacketCaptureAdapterError) as captured:
+            coordinator._close_ios_peer()
+        self.assertEqual(captured.exception.code, "lan_peer_cleanup_failed")
+        self.assertIsNone(coordinator.runtime.ios_peer_lease)
+        coordinator.cleanup()
+        self.assertEqual(lease.abort_calls, 0)
+
+    def test_unexpected_consumed_ios_close_failure_preserves_the_original_cause(self) -> None:
+        failure = OSError("synthetic workspace release failure")
+
+        class ConsumedUnexpectedFailureLease:
+            def __init__(self) -> None:
+                self.is_closed = False
+                self.abort_calls = 0
+
+            def as_document(self) -> dict[str, object]:
+                return {"document": "synthetic-admission"}
+
+            def close_with_receipt(self) -> dict[str, object]:
+                self.is_closed = True
+                raise failure
+
+            def abort(self) -> dict[str, object]:
+                self.abort_calls += 1
+                raise AssertionError("closed lease must not be aborted again")
+
+        coordinator = self.lan_coordinator()
+        lease = ConsumedUnexpectedFailureLease()
+        coordinator.runtime.ios_peer_lease = lease
+        with self.assertRaises(PacketCaptureAdapterError) as captured:
+            coordinator._close_ios_peer()
+        self.assertEqual(captured.exception.code, "lan_peer_cleanup_failed")
+        self.assertIs(captured.exception.__cause__, failure)
+        self.assertIsNone(coordinator.runtime.ios_peer_lease)
+        coordinator.cleanup()
+        self.assertEqual(lease.abort_calls, 0)
+
+    def test_consumed_ios_abort_failure_is_terminal_for_followup_cleanup(self) -> None:
+        class ConsumedAbortFailureLease:
+            def __init__(self) -> None:
+                self.is_closed = False
+                self.abort_calls = 0
+
+            def abort(self) -> dict[str, object]:
+                self.abort_calls += 1
+                self.is_closed = True
+                raise packet.ios_packet_lan_peer_adapter.IOSPacketLanPeerError(
+                    "synthetic_abort_failed", "synthetic terminal abort failure"
+                )
+
+        coordinator = self.lan_coordinator()
+        lease = ConsumedAbortFailureLease()
+        coordinator.runtime.ios_peer_lease = lease
+        with self.assertRaises(PacketCaptureAdapterError) as captured:
+            coordinator.cleanup()
+        self.assertEqual(captured.exception.code, "packet_cleanup_failed")
+        self.assertIsNone(coordinator.runtime.ios_peer_lease)
+        coordinator.cleanup()
+        self.assertEqual(lease.abort_calls, 1)
 
     def event(
         self,
@@ -213,6 +304,7 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
                 port = packet.PACKET_ENDPOINT_DNS_PORT
                 service_id = "dns-primary" if primary else "dns-secondary"
             elif spec.vantage == "lan_segment":
+                remote = None
                 role = "controlled-lan-peer"
                 capture_location = "local-mac"
                 selector = "route-selected-lan"
@@ -220,9 +312,10 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
                 host = host_key = remote_identity = None
                 port = packet.PACKET_ENDPOINT_TRANSPORT_PORT
                 service_id = (
-                    f"android://lan-peer/{packet.SOURCE_ANDROID_LAN_PEER_IDENTITY_SHA256}"
+                    "ios://packet-lan-peer/"
+                    f"{packet.SOURCE_IOS_LAN_PEER_IDENTITY.identity_sha256}"
                 )
-                identity = packet.SOURCE_ANDROID_LAN_PEER_IDENTITY_SHA256
+                identity = packet.SOURCE_IOS_LAN_PEER_IDENTITY.identity_sha256
             elif spec.vantage == "direct_wan":
                 role = "gcp-direct-wan-target"
                 capture_location = "local-mac"
@@ -243,6 +336,11 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
                 identity = _sha256(service_id)
             policy[case_id] = packet.PacketEndpointPlan(
                 remote_address=remote,
+                runtime_endpoint_source=(
+                    packet.ios_packet_lan_peer_adapter.READY_DOCUMENT
+                    if spec.vantage == "lan_segment"
+                    else None
+                ),
                 remote_port=port,
                 local_bind_strategy="route-interface-kernel-ephemeral",
                 local_address_scope=scope,
@@ -253,7 +351,7 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
                 endpoint_service_id=service_id,
                 endpoint_service_identity_sha256=identity,
                 endpoint_binary_sha256=(
-                    packet.android_lan_peer.ARTIFACT_SHA256
+                    packet.SOURCE_IOS_LAN_PEER_IDENTITY.executable_sha256
                     if spec.vantage == "lan_segment"
                     else packet.PACKET_ENDPOINT_BINARY_SHA256
                 ),
@@ -394,7 +492,7 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
                         context=self.context,
                     )
 
-    def test_source_policy_binds_live_gce_and_android_lan_identities(self) -> None:
+    def test_source_policy_binds_declared_gce_and_ios_lan_identities(self) -> None:
         self.assertEqual(
             set(packet.SOURCE_PINNED_ENDPOINTS),
             set(REQUIRED_CASES),
@@ -404,7 +502,7 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
         self.assertEqual(transport.remote_port, packet.PACKET_ENDPOINT_TRANSPORT_PORT)
         self.assertEqual(
             transport.endpoint_service_identity_sha256,
-            "1441266a6fea3eaf0c94f4a6b60ca34bb42e7010c22fcb61cf6f04677eb8e9fa",
+            "7e878c338d56a79e69f91d6c8d7091f8f524912c249e69ebb814b4ae91be76fa",
         )
         self.assertEqual(
             transport.endpoint_service_identity_sha256,
@@ -432,14 +530,35 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
             ],
         )
         lan = packet.SOURCE_PINNED_ENDPOINTS["lan-bypass"]
-        self.assertEqual(lan.remote_address, "172.20.10.2")
-        self.assertEqual(lan.remote_port, packet.android_lan_peer.LISTENER_PORT)
+        self.assertIsNone(lan.remote_address)
         self.assertEqual(
-            lan.endpoint_service_identity_sha256,
-            packet.SOURCE_ANDROID_LAN_PEER_IDENTITY_SHA256,
+            lan.runtime_endpoint_source,
+            packet.ios_packet_lan_peer_adapter.READY_DOCUMENT,
         )
         self.assertEqual(
-            lan.endpoint_binary_sha256, packet.android_lan_peer.ARTIFACT_SHA256
+            lan.remote_port, packet.ios_packet_lan_peer_adapter.LISTENER_PORT
+        )
+        self.assertEqual(
+            lan.endpoint_service_identity_sha256,
+            packet.SOURCE_IOS_LAN_PEER_IDENTITY.identity_sha256,
+        )
+        self.assertEqual(
+            lan.endpoint_binary_sha256,
+            packet.SOURCE_IOS_LAN_PEER_IDENTITY.executable_sha256,
+        )
+
+    def test_source_pin_revalidation_rejects_stale_endpoint_artifact(self) -> None:
+        stale_policy = self.endpoint_policy()
+        stale_policy["tcp-ipv4"] = replace(
+            stale_policy["tcp-ipv4"], endpoint_binary_sha256="0" * 64
+        )
+
+        with patch.object(packet, "_source_endpoint_policy", return_value=stale_policy):
+            with self.assertRaises(PacketCaptureAdapterError) as raised:
+                packet._revalidate_source_pins()
+
+        self.assertEqual(
+            raised.exception.code, "packet_endpoint_artifact_identity_stale"
         )
 
     def test_source_policy_rejects_identity_bytes_without_matching_canonical_hash(self) -> None:

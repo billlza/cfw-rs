@@ -50,6 +50,7 @@ LIFECYCLE_CONTRACT_PATH: Final = "scripts/harness/lifecycle_matrix.py"
 LIFECYCLE_PRODUCER_PATH: Final = "scripts/physical_capture/lifecycle.py"
 ADVERSARIAL_PATH: Final = "scripts/physical_capture/adversarial.py"
 COLLECTOR_PATH: Final = "scripts/physical_capture/collector.py"
+COLLECTOR_POLICY_PATH: Final = "scripts/harness/physical_collector_trust_policy.json"
 SWIFT_PACKAGE_PATH: Final = "native/macos/Package.swift"
 HOST_CARGO_PATH: Final = "apps/cfw-tauri-shell/Cargo.toml"
 HOST_BUILD_PATH: Final = "scripts/tauri_host_skeleton.sh"
@@ -165,6 +166,10 @@ EXPECTED_COLLECTOR_TARGETS: Final = {
         "capture_performance_observations",
     ),
 }
+EXPECTED_COLLECTOR_ACTIVATION: Final = (
+    "scripts.physical_capture.policy",
+    "require_current_collector_source_activation",
+)
 HOST_FEATURE: Final = "physical-release-evidence"
 HOST_PACKET_ENTRYPOINT: Final = "run_packet_evidence_transaction"
 HOST_PACKET_ENGINE_ENTRYPOINT: Final = "run_packet_evidence_staged_transaction"
@@ -596,20 +601,20 @@ def _packet_lease_issues(source: str) -> list[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     required_methods = {
-        "_admit_android_lan_peer",
-        "_revalidate_android_peer_before_capture",
-        "_revalidate_android_peer_after_capture",
-        "_close_android_peer",
+        "_admit_ios_lan_peer",
+        "_revalidate_ios_peer_before_capture",
+        "_revalidate_ios_peer_after_capture",
+        "_close_ios_peer",
     }
     issues = [
-        f"Packet coordinator is missing Android lease method {name}"
+        f"Packet coordinator is missing iPhone lease method {name}"
         for name in sorted(required_methods - set(methods))
     ]
     required_calls = {
-        "_admit_android_lan_peer",
-        "_revalidate_android_peer_before_capture",
-        "_revalidate_android_peer_after_capture",
-        "_close_android_peer",
+        "_admit_ios_lan_peer",
+        "_revalidate_ios_peer_before_capture",
+        "_revalidate_ios_peer_after_capture",
+        "_close_ios_peer",
     }
     observed_calls = {
         node.func.attr
@@ -621,7 +626,7 @@ def _packet_lease_issues(source: str) -> list[str]:
         and node.func.value.id == "self"
     }
     issues.extend(
-        f"Packet coordinator does not call Android lease operation {name}"
+        f"Packet coordinator does not call iPhone lease operation {name}"
         for name in sorted(required_calls - observed_calls)
     )
     return issues
@@ -1060,6 +1065,12 @@ def _collector_issues(source: str) -> tuple[int, list[str]]:
         if name in functions
     ):
         issues.append("collector production flow never freezes the complete raw union")
+    if not _handler_reaches_import(
+        "_initialize", EXPECTED_COLLECTOR_ACTIVATION, functions, imports
+    ):
+        issues.append(
+            "collector initialization does not require the current source closure activation"
+        )
     return main.lineno, issues
 
 
@@ -1490,16 +1501,46 @@ def _parser() -> argparse.ArgumentParser:
     return argparse.ArgumentParser(description=__doc__)
 
 
+def _collector_activation_blocker() -> Blocker | None:
+    def blocker() -> Blocker:
+        return Blocker(
+            "collector_source_closure_unactivated",
+            COLLECTOR_POLICY_PATH,
+            1,
+            "current collector source closure is not activated by the checked-in production policy",
+        )
+
+    source_root = Path(__file__).resolve().parent.parent
+    source_root_text = str(source_root)
+    if source_root_text not in sys.path:
+        sys.path.insert(0, source_root_text)
+    try:
+        from scripts.physical_capture.policy import (
+            PhysicalCapturePolicyError,
+            require_current_collector_source_activation,
+        )
+    except (ImportError, OSError):
+        return blocker()
+    try:
+        require_current_collector_source_activation()
+    except (OSError, PhysicalCapturePolicyError):
+        return blocker()
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     _parser().parse_args(argv)
     try:
-        blockers = analyze_repository(_repository())
+        blockers = list(analyze_repository(_repository()))
     except (OSError, PhysicalCaptureReadinessError) as error:
         print(
             f"error[physical_capture_readiness_unavailable]: {error}",
             file=sys.stderr,
         )
         return 1
+    activation_blocker = _collector_activation_blocker()
+    if activation_blocker is not None:
+        blockers.append(activation_blocker)
     if blockers:
         for blocker in sorted(blockers):
             print(

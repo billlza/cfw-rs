@@ -38,6 +38,7 @@ pub(super) struct FakeBackend {
     /// OS-state query still reports the prior owner. Models a stop whose owner
     /// stopped attestation succeeds while the Global Off barrier stays unproven.
     pub(super) stop_leaves_owner_present: Mutex<bool>,
+    pub(super) start_error_leaves_owner_present: Mutex<bool>,
     pub(super) proxy_start_error: Mutex<Option<BackendErrorKind>>,
     pub(super) tunnel_install_error: Mutex<Option<BackendErrorKind>>,
     pub(super) tunnel_start_error: Mutex<Option<BackendErrorKind>>,
@@ -210,6 +211,21 @@ impl EngineBackend for FakeBackend {
                 .lock()
                 .expect("proxy start error lock")
             {
+                if *self
+                    .start_error_leaves_owner_present
+                    .lock()
+                    .expect("start error owner lock")
+                {
+                    *self.native_status.lock().expect("native status lock") =
+                        NativeEngineStatus::SystemProxy {
+                            runtime: RuntimeIdentity {
+                                owner: EngineOwner::ProxyAgent,
+                                context: request.context.clone(),
+                                config_digest: request.config_digest.clone(),
+                                ready: true,
+                            },
+                        };
+                }
                 return Err(BackendError::new(
                     kind,
                     "proxy start reported a typed backend error",

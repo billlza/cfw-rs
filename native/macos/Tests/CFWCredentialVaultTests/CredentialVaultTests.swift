@@ -119,6 +119,74 @@ private func material(
   )
 }
 
+@Test func modernProtocolReferencesProvisionAndResolveWithoutKindConflation() throws {
+  let store = InMemoryVaultStore()
+  let vault = CredentialVault(testingStore: store)
+  let anytls = reference(firstID, kind: .anytlsPassword)
+  let tuicUUID = reference(secondID, kind: .tuicUUID)
+  let tuicPassword = reference(thirdID, kind: .tuicPassword)
+  let references = [anytls, tuicUUID, tuicPassword]
+  var supplied = try material([
+    (anytls, "anytls-secret"),
+    (tuicUUID, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+    (tuicPassword, "tuic-secret"),
+  ])
+  defer { supplied.erase() }
+
+  _ = try vault.provision(
+    audience: try audience(),
+    requiredReferences: references,
+    material: supplied
+  )
+  #expect(try vault.presence(audience: audience(), of: references).allSatisfy(\.present))
+
+  var resolved = try vault.resolve(
+    audience: audience(),
+    slots: [
+      try CredentialSlot(
+        reference: anytls,
+        target: .anytlsPassword,
+        outboundIndex: 0,
+        jsonPointer: "/outbounds/0/password"
+      ),
+      try CredentialSlot(
+        reference: tuicUUID,
+        target: .tuicUUID,
+        outboundIndex: 1,
+        jsonPointer: "/outbounds/1/uuid"
+      ),
+      try CredentialSlot(
+        reference: tuicPassword,
+        target: .tuicPassword,
+        outboundIndex: 1,
+        jsonPointer: "/outbounds/1/password"
+      ),
+    ]
+  )
+  defer { resolved.erase() }
+  #expect(resolved.entries.map(\.reference) == references)
+  #expect(resolved.entries[0].withSecretBytes { $0 == Data("anytls-secret".utf8) })
+  #expect(
+    resolved.entries[1].withSecretBytes {
+      $0 == Data("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee".utf8)
+    }
+  )
+  #expect(resolved.entries[2].withSecretBytes { $0 == Data("tuic-secret".utf8) })
+
+  let beforeMismatch = store.snapshot()
+  let wrongKind = reference(firstID, kind: .tuicPassword)
+  var mismatched = try material([(wrongKind, "wrong-kind")])
+  defer { mismatched.erase() }
+  #expect(throws: CredentialVaultError.kindMismatch(firstID)) {
+    try vault.provision(
+      audience: audience(),
+      requiredReferences: [anytls],
+      material: mismatched
+    )
+  }
+  #expect(store.snapshot() == beforeMismatch)
+}
+
 @Test func missingRequiredReferenceRollsBackWholeBatch() throws {
   let store = InMemoryVaultStore()
   let vault = CredentialVault(testingStore: store)
@@ -162,6 +230,46 @@ private func material(
   #expect(store.snapshot() == before)
 }
 
+@Test func credentialUUIDIsImmutableAcrossProfileAudiences() throws {
+  let store = InMemoryVaultStore()
+  let vault = CredentialVault(testingStore: store)
+  let first = reference(firstID)
+  let originalAudience = try audience(digest: String(repeating: "11", count: 32))
+  let replacementAudience = try audience(digest: String(repeating: "22", count: 32))
+  let rejectedAudience = try audience(digest: String(repeating: "33", count: 32))
+
+  var original = try material([(first, "stable-secret")])
+  defer { original.erase() }
+  _ = try vault.provision(
+    audience: originalAudience,
+    requiredReferences: [first],
+    material: original
+  )
+
+  var unchanged = try material([(first, "stable-secret")])
+  defer { unchanged.erase() }
+  _ = try vault.provision(
+    audience: replacementAudience,
+    requiredReferences: [first],
+    material: unchanged
+  )
+  #expect(try vault.presence(audience: originalAudience, of: [first]).allSatisfy(\.present))
+  #expect(try vault.presence(audience: replacementAudience, of: [first]).allSatisfy(\.present))
+  let beforeConflict = store.snapshot()
+
+  var changed = try material([(first, "changed-secret")])
+  defer { changed.erase() }
+  #expect(throws: CredentialVaultError.immutableConflict(firstID)) {
+    try vault.provision(
+      audience: rejectedAudience,
+      requiredReferences: [first],
+      material: changed
+    )
+  }
+  #expect(store.snapshot() == beforeConflict)
+  #expect(try vault.presence(audience: rejectedAudience, of: [first]).allSatisfy { !$0.present })
+}
+
 @Test func concurrentProvisionRetriesCASWithoutLosingEitherEntry() async throws {
   let store = InMemoryVaultStore()
   let first = reference(firstID)
@@ -194,7 +302,7 @@ private func material(
   )
 }
 
-@Test func persistedControlCharacterSecretIsCorruptNotPresent() throws {
+@Test func persistedInvalidSecretIsCorruptNotPresent() throws {
   struct Entry: Codable {
     let audience: CredentialAudience
     let reference: CredentialReference
@@ -205,28 +313,34 @@ private func material(
     let revision: UUID
     let entries: [Entry]
   }
-  let revision = UUID()
   let encoder = JSONEncoder()
   encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-  let data = try encoder.encode(
-    Document(
-      schemaVersion: CredentialVaultConstants.schemaVersion,
-      revision: revision,
-      entries: [
-        Entry(
-          audience: try audience(),
-          reference: reference(firstID),
-          secret: Data([0])
-        )
-      ]
+  for (kind, secret) in [
+    (CredentialKind.shadowsocksPassword, Data([0])),
+    (CredentialKind.tuicUUID, Data("not-a-canonical-uuid".utf8)),
+  ] {
+    let revision = UUID()
+    let storedReference = reference(firstID, kind: kind)
+    let data = try encoder.encode(
+      Document(
+        schemaVersion: CredentialVaultConstants.schemaVersion,
+        revision: revision,
+        entries: [
+          Entry(
+            audience: try audience(),
+            reference: storedReference,
+            secret: secret
+          )
+        ]
+      )
     )
-  )
-  let store = InMemoryVaultStore(
-    blob: StoredCredentialVaultBlob(data: data, revision: revision)
-  )
-  let vault = CredentialVault(testingStore: store)
-  #expect(throws: CredentialVaultError.corrupt) {
-    try vault.presence(audience: audience(), of: [reference(firstID)])
+    let store = InMemoryVaultStore(
+      blob: StoredCredentialVaultBlob(data: data, revision: revision)
+    )
+    let vault = CredentialVault(testingStore: store)
+    #expect(throws: CredentialVaultError.corrupt) {
+      try vault.presence(audience: audience(), of: [storedReference])
+    }
   }
 }
 

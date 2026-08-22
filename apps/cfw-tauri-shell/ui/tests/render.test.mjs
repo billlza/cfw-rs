@@ -851,6 +851,142 @@ test("unavailable network capabilities block every enable path but never trap an
   }
 });
 
+test("proxy modes stay discoverable while Off and emit no controller mutation", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const modeMutationsBefore = invocationDetails.filter(
+    (entry) => entry.command === "set_proxy_mode",
+  ).length;
+  const directMode = interactiveElement();
+  directMode.dataset.mode = "Direct";
+  try {
+    await setEngine(OFF_ENGINE);
+    await reloadButton.click();
+    querySelectorAllElements.set("[data-mode]", [directMode]);
+    const html = await renderPage("proxies");
+    for (const mode of ["Global", "Rule", "Direct"]) {
+      const button = html.match(new RegExp(`<button class="[^"]*" data-mode="${mode}"([^>]*)>`, "u"));
+      assert.ok(button, `${mode} must remain discoverable while the engine is Off`);
+      assert.match(button[1], /disabled/u);
+    }
+    assert.doesNotMatch(html, /class="selected" data-mode=/u);
+    await directMode.trigger("click");
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "set_proxy_mode").length,
+      modeMutationsBefore,
+    );
+  } finally {
+    querySelectorAllElements.clear();
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("a fresh zero-group snapshot still exposes the active Direct mode", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  try {
+    const direct = controllerSnapshotWith({ mode: "direct" });
+    direct.proxies = { groups: [], proxies: [] };
+    responses.controller_snapshot = direct;
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+
+    const html = await renderPage("proxies");
+    const button = html.match(/<button class="selected" data-mode="Direct"([^>]*)>/u);
+    assert.ok(button, "Direct must remain visible for a valid profile with zero proxy groups");
+    assert.doesNotMatch(button[1], /disabled/u);
+    assert.match(html, /Active profile has no proxy groups/u);
+  } finally {
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("controller loss clears Direct state until the same engine publishes a fresh snapshot", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  const directMode = interactiveElement();
+  directMode.dataset.mode = "Direct";
+  try {
+    const direct = controllerSnapshotWith({ mode: "direct" });
+    responses.controller_snapshot = direct;
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+
+    responses.controller_snapshot = null;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    assert.equal(state.controllerStatus, "controller offline");
+    assert.equal(state.mode, null);
+    assert.deepEqual(state.proxyGroups, []);
+
+    querySelectorAllElements.set("[data-mode]", [directMode]);
+    const offlineHtml = await renderPage("proxies");
+    assert.match(offlineHtml, /data-mode="Direct"[^>]*disabled/u);
+    const mutationsBefore = invocationDetails.filter(
+      (entry) => entry.command === "set_proxy_mode",
+    ).length;
+    await directMode.trigger("click");
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "set_proxy_mode").length,
+      mutationsBefore,
+    );
+
+    responses.controller_snapshot = direct;
+    await emit("cfw://engine-event", { type: "snapshot_changed" });
+    assert.equal(state.controllerStatus, "controller live");
+    assert.equal(state.mode, "Direct");
+    const recoveredHtml = await renderPage("proxies");
+    const recovered = recoveredHtml.match(/<button class="selected" data-mode="Direct"([^>]*)>/u);
+    assert.ok(recovered, "Direct must return only after a fresh controller readback");
+    assert.doesNotMatch(recovered[1], /disabled/u);
+  } finally {
+    querySelectorAllElements.clear();
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
+test("Direct fallback state is rendered read-only and cannot select a proxy", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalController = responses.controller_snapshot;
+  const selection = interactiveElement();
+  selection.dataset.group = "GLOBAL";
+  selection.dataset.node = "direct";
+  try {
+    const direct = controllerSnapshotWith({ mode: "direct" });
+    direct.proxies = {
+      groups: [{ name: "GLOBAL", kind: "Fallback", now: "direct", options: [], history: [] }],
+      proxies: [{ name: "direct", kind: "Direct", udp: true, history: [] }],
+    };
+    responses.controller_snapshot = direct;
+    await setEngine(RUNNING_ENGINE);
+    await reloadButton.click();
+    querySelectorAllElements.set("[data-group][data-node]", [selection]);
+
+    const html = await renderPage("proxies");
+    assert.match(html, /data-proxy-node="direct"[^>]*disabled/u);
+    assert.match(html, /• direct/u);
+    const before = invocationDetails.filter((entry) => entry.command === "select_proxy").length;
+    await selection.trigger("click");
+    assert.equal(
+      invocationDetails.filter((entry) => entry.command === "select_proxy").length,
+      before,
+      "a read-only Direct observation must never become select_proxy IPC",
+    );
+  } finally {
+    querySelectorAllElements.clear();
+    responses.controller_snapshot = originalController;
+    responses.engine_snapshot = originalEngine;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
 test("proxy mode mutations are single-flight and an old failure cannot roll back the latest success", async () => {
   const originalEngine = responses.engine_snapshot;
   const originalController = responses.controller_snapshot;

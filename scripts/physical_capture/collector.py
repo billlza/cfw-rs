@@ -71,6 +71,10 @@ from scripts.physical_capture.lifecycle import (
     capture_lifecycle_observations,
 )
 from scripts.physical_capture.packet import capture_packet_observations
+from scripts.physical_capture.policy import (
+    PhysicalCapturePolicyError,
+    require_current_collector_source_activation,
+)
 from scripts.physical_capture.performance import (
     FAILURE_RESTORATION_RELATIVE,
     INTENT_OBSERVATION_SUBJECT,
@@ -129,11 +133,11 @@ FINAL_CANDIDATE: Final = (
 )
 LANES: Final = {
     "macos15": {
-        "run_id": "run-40005-macos15",
+        "run_id": "run-40021-macos15",
         "session_prefix": "physical-capture/v040/macos15",
     },
     "current-macos": {
-        "run_id": "run-40005-current-macos",
+        "run_id": "run-40021-current-macos",
         "session_prefix": "physical-capture/v040/current-macos",
     },
 }
@@ -2415,6 +2419,13 @@ def _positive_float(value: str) -> float:
 
 
 def _initialize(arguments: argparse.Namespace) -> None:
+    try:
+        require_current_collector_source_activation()
+    except PhysicalCapturePolicyError as error:
+        raise PhysicalCollectorDriverError(
+            "collector_source_closure_unactivated",
+            "physical collector source closure is not activated for production receipts",
+        ) from error
     lane = _lane(arguments.lane)
     _require_previous_attempt_abandoned(arguments.lane, arguments.attempt)
     try:

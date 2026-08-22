@@ -130,9 +130,10 @@ cfw_verify_go_module_cache_tree() {
     "$contract_repository" \
     "$contract_toolchain_root/go-workspace/pkg/mod" \
     "$contract_toolchain_root/go-module-cache.manifest.json" \
-    "artifactKind=pinned-go-module-cache-v1" \
+    "artifactKind=pinned-go-module-cache-v2" \
     "buildTags=$LIBBOX_BUILD_TAGS" \
     "goVersion=$GO_VERSION" \
+    "moduleCacheContractSha256=$LIBBOX_MODULE_CACHE_CONTRACT_SHA256" \
     "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256" \
     "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256" \
     "platform=darwin-arm64" \

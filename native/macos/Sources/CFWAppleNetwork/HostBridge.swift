@@ -1289,8 +1289,9 @@ public actor NetworkExtensionHostBridge: TunnelHostBridging, ManagedTunnelOperat
       throw AppleNetworkError.providerFailure(failure)
     }
     guard let providerSnapshot = response.result?.snapshot,
-      providerSnapshot.state.kind == .tunnelActive,
-      providerSnapshot.configuration == (try manager.configurationDescriptor())
+      providerSnapshot.configuration == (try manager.configurationDescriptor()),
+      providerSnapshot.state.kind == .tunnelActive
+        || providerSnapshot.state.kind == .failed
     else {
       throw AppleNetworkError.providerResponseMismatch
     }

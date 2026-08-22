@@ -2,8 +2,8 @@
 
 This module is the missing orchestration boundary between the existing strict
 validators.  It has no fixture mode, caller-selected build numbers, optional
-evidence, or success override.  The fixed 40004 validation candidate must be
-approved before the fixed 40005 final candidate, and every request field is
+evidence, or success override.  The fixed 40020 validation candidate must be
+approved before the fixed 40021 final candidate, and every request field is
 derived by reopening canonical release artifacts.
 
 The workflow is intentionally layered. ``prepare_physical_candidate_manifest``
@@ -105,8 +105,8 @@ from scripts.verify_notary_log import NotaryLogError, validate_files as validate
 
 
 PRODUCT_VERSION = RELEASE_VERSION
-VALIDATION_BUILD = "40004"
-FINAL_BUILD = "40005"
+VALIDATION_BUILD = "40020"
+FINAL_BUILD = "40021"
 
 CANDIDATE_ROOT = Path("target/candidates/0.4.0")
 FINAL_NATIVE_PRODUCTS = CANDIDATE_ROOT / "release-build" / FINAL_BUILD / "native-products"
@@ -1204,7 +1204,7 @@ def seal_production_evidence(repository: Path) -> dict[str, Any]:
 
 
 def self_check(repository: Path) -> None:
-    if (PRODUCT_VERSION, VALIDATION_BUILD, FINAL_BUILD) != ("0.4.0", "40004", "40005"):
+    if (PRODUCT_VERSION, VALIDATION_BUILD, FINAL_BUILD) != ("0.4.0", "40020", "40021"):
         raise PublicationError("production release build identity drifted")
     if len(CAPABILITY_IDS) != 9:
         raise PublicationError("production release capability inventory is not fixed to nine")

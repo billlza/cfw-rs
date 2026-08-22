@@ -121,6 +121,10 @@ pub enum CredentialKind {
     TrojanPassword,
     Hysteria2Password,
     Hysteria2ObfsPassword,
+    #[serde(rename = "anytls_password")]
+    AnyTlsPassword,
+    TuicUuid,
+    TuicPassword,
 }
 
 /// Stable, non-secret reference to a credential stored outside profile files.
@@ -190,6 +194,10 @@ pub enum CredentialTarget {
     TrojanPassword,
     Hysteria2Password,
     Hysteria2ObfsPassword,
+    #[serde(rename = "anytls_password")]
+    AnyTlsPassword,
+    TuicUuid,
+    TuicPassword,
 }
 
 impl CredentialTarget {
@@ -201,15 +209,20 @@ impl CredentialTarget {
             Self::TrojanPassword => CredentialKind::TrojanPassword,
             Self::Hysteria2Password => CredentialKind::Hysteria2Password,
             Self::Hysteria2ObfsPassword => CredentialKind::Hysteria2ObfsPassword,
+            Self::AnyTlsPassword => CredentialKind::AnyTlsPassword,
+            Self::TuicUuid => CredentialKind::TuicUuid,
+            Self::TuicPassword => CredentialKind::TuicPassword,
         }
     }
 
     fn pointer_suffix(self) -> &'static str {
         match self {
-            Self::ShadowsocksPassword | Self::TrojanPassword | Self::Hysteria2Password => {
-                "password"
-            }
-            Self::VmessUuid | Self::VlessUuid => "uuid",
+            Self::ShadowsocksPassword
+            | Self::TrojanPassword
+            | Self::Hysteria2Password
+            | Self::AnyTlsPassword
+            | Self::TuicPassword => "password",
+            Self::VmessUuid | Self::VlessUuid | Self::TuicUuid => "uuid",
             Self::Hysteria2ObfsPassword => "obfs/password",
         }
     }
@@ -370,6 +383,19 @@ impl<'a> CredentialSecret<'a> {
     pub fn expose_to_vault(&self) -> &str {
         self.0
     }
+
+    pub fn validate_for_kind(&self, kind: CredentialKind) -> Result<(), InvalidCredentialSecret> {
+        if matches!(
+            kind,
+            CredentialKind::VmessUuid | CredentialKind::VlessUuid | CredentialKind::TuicUuid
+        ) {
+            let parsed = Uuid::parse_str(self.0).map_err(|_| InvalidCredentialSecret)?;
+            if parsed.hyphenated().to_string() != self.0 {
+                return Err(InvalidCredentialSecret);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for CredentialSecret<'_> {
@@ -379,5 +405,7 @@ impl fmt::Debug for CredentialSecret<'_> {
 }
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
-#[error("credential secret is empty, oversized, or contains control characters")]
+#[error(
+    "credential secret is empty, oversized, contains control characters, or is invalid for its credential kind"
+)]
 pub struct InvalidCredentialSecret;

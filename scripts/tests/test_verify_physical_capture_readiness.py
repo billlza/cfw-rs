@@ -95,6 +95,7 @@ from types import MappingProxyType
 from scripts.physical_capture.adversarial import capture_adversarial_observations
 from scripts.physical_capture.lifecycle import capture_lifecycle_observations
 from scripts.physical_capture.packet import capture_packet_observations
+from scripts.physical_capture.policy import require_current_collector_source_activation
 from scripts.physical_capture.performance import capture_performance_observations
 
 def _collect_adversarial(session, context):
@@ -120,6 +121,9 @@ def _parser():
     collect.add_argument("--harness", choices=tuple(PRODUCER_REGISTRY), required=True)
     return parser
 
+def _initialize(arguments):
+    require_current_collector_source_activation()
+
 def _dispatch(arguments, session, context):
     handler = PRODUCER_REGISTRY[arguments.harness]
     descriptors = handler(session, context)
@@ -128,6 +132,7 @@ def _dispatch(arguments, session, context):
 
 def main(argv=None):
     arguments = _parser().parse_args(argv)
+    _initialize(arguments)
     return _dispatch(arguments, session, context)
 """
 
@@ -505,8 +510,10 @@ class ReadinessCliAndWiringTests(unittest.TestCase):
         )
         stderr = io.StringIO()
         with patch.object(readiness, "analyze_repository", return_value=blockers), patch.object(
-            readiness, "_repository", return_value=Path("/")
-        ), redirect_stderr(stderr):
+            readiness, "_collector_activation_blocker", return_value=None
+        ), patch.object(readiness, "_repository", return_value=Path("/")), redirect_stderr(
+            stderr
+        ):
             self.assertEqual(readiness.main([]), 1)
         self.assertLess(
             stderr.getvalue().index("a_blocker"),
@@ -519,10 +526,29 @@ class ReadinessCliAndWiringTests(unittest.TestCase):
     def test_cli_success_has_one_explicit_message(self) -> None:
         stdout = io.StringIO()
         with patch.object(readiness, "analyze_repository", return_value=()), patch.object(
-            readiness, "_repository", return_value=Path("/")
-        ), redirect_stdout(stdout):
+            readiness, "_collector_activation_blocker", return_value=None
+        ), patch.object(readiness, "_repository", return_value=Path("/")), redirect_stdout(
+            stdout
+        ):
             self.assertEqual(readiness.main([]), 0)
         self.assertEqual(stdout.getvalue(), "physical capture source readiness verified\n")
+
+    def test_cli_reports_unactivated_collector_source_as_a_distinct_blocker(self) -> None:
+        blocker = readiness.Blocker(
+            "collector_source_closure_unactivated",
+            readiness.COLLECTOR_POLICY_PATH,
+            1,
+            "current collector source closure is not activated",
+        )
+        stderr = io.StringIO()
+        with patch.object(readiness, "analyze_repository", return_value=()), patch.object(
+            readiness, "_collector_activation_blocker", return_value=blocker
+        ), patch.object(readiness, "_repository", return_value=Path("/")), redirect_stderr(
+            stderr
+        ):
+            self.assertEqual(readiness.main([]), 1)
+        self.assertIn("collector_source_closure_unactivated", stderr.getvalue())
+        self.assertIn("physical_capture_source_not_ready", stderr.getvalue())
 
     def test_release_entrypoints_and_pin_name_the_fixed_gate(self) -> None:
         repository = Path(__file__).resolve().parents[2]
@@ -541,6 +567,16 @@ class ReadinessCliAndWiringTests(unittest.TestCase):
         )
         bindings = manifest["artifactBindings"]
         self.assertIn(gate, bindings)
+        self.assertIn("scripts/physical_capture/policy.py", bindings)
+        self.assertIn("scripts/physical_capture/cloud_run.py", bindings)
+        self.assertIn(
+            "require_current_collector_source_activation",
+            bindings["scripts/physical_capture/cloud_run.py"],
+        )
+        self.assertIn(
+            "collector_source_closure_unactivated",
+            bindings[gate],
+        )
         for relative in (
             "scripts/publication/sealed_manifest.py",
             "scripts/verify_build_boundaries.sh",

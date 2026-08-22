@@ -57,16 +57,17 @@ public struct CredentialVault: Sendable {
         }
       }
       for requested in material.entries {
-        let binding = CredentialBinding(audience: audience, reference: requested.reference)
-        if let existing = byBinding[binding] {
-          let requestedSecret = requested.withSecretBytes { $0 }
-          guard existing.reference.kind == requested.reference.kind,
-            Self.timingSafeEqual(existing.secret, requestedSecret)
-          else {
+        let requestedSecret = requested.withSecretBytes { $0 }
+        for existing in document.entries where existing.reference.id == requested.reference.id {
+          guard existing.reference.kind == requested.reference.kind else {
+            throw CredentialVaultError.kindMismatch(requested.reference.id)
+          }
+          guard Self.timingSafeEqual(existing.secret, requestedSecret) else {
             throw CredentialVaultError.immutableConflict(requested.reference.id)
           }
-        } else {
-          let requestedSecret = requested.withSecretBytes { $0 }
+        }
+        let binding = CredentialBinding(audience: audience, reference: requested.reference)
+        if byBinding[binding] == nil {
           byBinding[binding] = CredentialVaultEntry(
             audience: audience,
             reference: requested.reference,
@@ -338,6 +339,7 @@ public struct CredentialVault: Sendable {
         !entry.secret.isEmpty,
         entry.secret.count <= CredentialMaterialConstants.maximumSecretBytes,
         let secretText = String(data: entry.secret, encoding: .utf8),
+        entry.reference.kind.admitsSecretSyntax(secretText),
         secretText.unicodeScalars.contains(where: {
           CharacterSet.controlCharacters.contains($0)
         }) == false

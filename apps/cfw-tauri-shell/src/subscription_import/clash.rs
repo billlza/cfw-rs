@@ -18,8 +18,11 @@
 //! - Requests this app refuses to honour fail closed instead of being
 //!   silently dropped: `skip-cert-verify: true`, Shadowsocks plugins,
 //!   `udp-over-tcp`, `smux`, proxy chaining via `dialer-proxy`, TLS
-//!   certificate pinning via `fingerprint`, port hopping, and every proxy
-//!   type outside the closed schema.
+//!   certificate pinning via `fingerprint`, and every proxy type outside the
+//!   closed schema. Hysteria2 port hopping accepts only canonical
+//!   canonical non-overlapping port sets and one fixed 1..=3600 second hop
+//!   interval are normalized into the pinned sing-box 1.13 fields; Mihomo's
+//!   newer randomized interval range remains rejected.
 //! - `servername`/`sni`, `alpn`, and `client-fingerprint` are only mapped
 //!   while TLS is enabled; without TLS they have no wire effect in Clash
 //!   either, so dropping them preserves semantics.
@@ -32,9 +35,12 @@ use serde_json::{Value, json};
 
 use super::yaml::{YamlMapping, YamlScalar, YamlValue, load_single_document};
 use super::{
-    ImportedSubscription, OutboundCollector, build_tls_parts, credential_ref_json,
-    normalize_shadowsocks_method, normalize_vless_flow, normalize_vmess_security, parse_utls,
-    parse_vmess_alter_id, sanitized_token, tls_json, transport_from_parts,
+    ImportedSubscription, OutboundCollector, build_tls_parts, canonical_uuid_credential,
+    credential_ref_json, normalize_hysteria2_server_ports,
+    normalize_shadowsocks_method_and_password, normalize_tuic_congestion_control,
+    normalize_tuic_udp_relay_mode, normalize_v2ray_http_method, normalize_v2ray_packet_encoding,
+    normalize_vless_flow, normalize_vmess_security, parse_hysteria2_hop_interval_seconds,
+    parse_utls, parse_vmess_alter_id, sanitized_token, tls_json, transport_from_parts,
 };
 
 /// Proxy-entry keys that only tune local socket behaviour. They change
@@ -100,9 +106,11 @@ fn convert_proxy(
         "vless" => convert_vless(collector, &mut fields, name)?,
         "trojan" => convert_trojan(collector, &mut fields, name)?,
         "hysteria2" => convert_hysteria2(collector, &mut fields, name)?,
+        "anytls" => convert_anytls(collector, &mut fields, name)?,
+        "tuic" => convert_tuic(collector, &mut fields, name)?,
         other => {
             return Err(format!(
-                "{} has a proxy type outside the supported set (ss, vmess, vless, trojan, hysteria2): {}",
+                "{} has a proxy type outside the supported set (ss, vmess, vless, trojan, hysteria2, anytls, tuic): {}",
                 fields.context(),
                 sanitized_token(other)
             ));
@@ -155,11 +163,10 @@ fn convert_shadowsocks(
     }
     let server = fields.require_string("server")?;
     let server_port = fields.require_port()?;
-    let method = normalize_shadowsocks_method(&fields.require_string("cipher")?)?;
-    let reference = collector.push_secret(
-        CredentialKind::ShadowsocksPassword,
-        fields.require_string("password")?,
-    );
+    let source_method = fields.require_string("cipher")?;
+    let password = fields.require_string("password")?;
+    let method = normalize_shadowsocks_method_and_password(&source_method, &password)?;
+    let reference = collector.push_secret(CredentialKind::ShadowsocksPassword, password);
     let tag = collector.unique_tag(name)?;
     Ok(json!({
         "type": "shadowsocks",
@@ -176,6 +183,17 @@ fn convert_vmess(
     fields: &mut ProxyFields,
     name: String,
 ) -> Result<Value, String> {
+    for (key, feature) in [
+        ("global-padding", "VMess global padding"),
+        ("authenticated-length", "VMess authenticated length framing"),
+    ] {
+        if fields.take_bool(key)?.unwrap_or(false) {
+            return Err(format!(
+                "{} enables {feature}, which is not represented by the pinned runtime schema",
+                fields.context()
+            ));
+        }
+    }
     let server = fields.require_string("server")?;
     let server_port = fields.require_port()?;
     let alter_id = match fields.take("alterId") {
@@ -200,8 +218,14 @@ fn convert_vmess(
         None => None,
         Some(cipher) => normalize_vmess_security(&cipher)?,
     };
-    let reference =
-        collector.push_secret(CredentialKind::VmessUuid, fields.require_string("uuid")?);
+    let packet_encoding = fields
+        .take_string("packet-encoding")?
+        .map(|value| normalize_v2ray_packet_encoding(&value, "VMess packet encoding"))
+        .transpose()?;
+    let reference = collector.push_secret(
+        CredentialKind::VmessUuid,
+        canonical_uuid_credential(fields.require_string("uuid")?, "Clash VMess UUID")?,
+    );
     let tls = collect_tls(fields)?;
     let transport = collect_transport(fields)?;
     let tag = collector.unique_tag(name)?;
@@ -217,6 +241,9 @@ fn convert_vmess(
     }
     if let Some(security) = security {
         outbound["security"] = Value::String(security);
+    }
+    if let Some(packet_encoding) = packet_encoding {
+        outbound["packet_encoding"] = Value::String(packet_encoding);
     }
     if let Some(tls) = tls.into_optional_json(&fields.context, &server, false)? {
         outbound["tls"] = tls;
@@ -239,8 +266,25 @@ fn convert_vless(
         Some(flow) if flow.is_empty() => None,
         Some(flow) => Some(normalize_vless_flow(&flow)?),
     };
-    let reference =
-        collector.push_secret(CredentialKind::VlessUuid, fields.require_string("uuid")?);
+    match fields.take_string("encryption")? {
+        None => {}
+        Some(value) if value.is_empty() || value.eq_ignore_ascii_case("none") => {}
+        Some(value) => {
+            return Err(format!(
+                "{} uses unsupported VLESS encryption: {}",
+                fields.context(),
+                sanitized_token(&value)
+            ));
+        }
+    }
+    let packet_encoding = fields
+        .take_string("packet-encoding")?
+        .map(|value| normalize_v2ray_packet_encoding(&value, "VLESS packet encoding"))
+        .transpose()?;
+    let reference = collector.push_secret(
+        CredentialKind::VlessUuid,
+        canonical_uuid_credential(fields.require_string("uuid")?, "Clash VLESS UUID")?,
+    );
     let tls = collect_tls(fields)?;
     let transport = collect_transport(fields)?;
     let tag = collector.unique_tag(name)?;
@@ -253,6 +297,9 @@ fn convert_vless(
     });
     if let Some(flow) = flow {
         outbound["flow"] = Value::String(flow);
+    }
+    if let Some(packet_encoding) = packet_encoding {
+        outbound["packet_encoding"] = Value::String(packet_encoding);
     }
     if let Some(tls) = tls.into_optional_json(&fields.context, &server, true)? {
         outbound["tls"] = tls;
@@ -297,14 +344,23 @@ fn convert_hysteria2(
     fields: &mut ProxyFields,
     name: String,
 ) -> Result<Value, String> {
-    for key in ["ports", "mport", "hop-interval"] {
-        if fields.take(key).is_some() {
+    let ports = match (fields.take_string("ports")?, fields.take_string("mport")?) {
+        (Some(_), Some(_)) => {
             return Err(format!(
-                "{} uses Hysteria2 port hopping ({key}), which is not supported",
+                "{} repeats Hysteria2 port hopping with ports and mport",
                 fields.context()
             ));
         }
-    }
+        (Some(value), None) | (None, Some(value)) => Some(normalize_hysteria2_server_ports(
+            &value,
+            "Clash Hysteria2 ports",
+        )?),
+        (None, None) => None,
+    };
+    let hop_interval_seconds = fields
+        .take_string("hop-interval")?
+        .map(|value| parse_hysteria2_hop_interval_seconds(&value, "Clash Hysteria2 hop-interval"))
+        .transpose()?;
     let server = fields.require_string("server")?;
     let server_port = fields.require_port()?;
     let reference = collector.push_secret(
@@ -339,7 +395,7 @@ fn convert_hysteria2(
     };
     let tls = collect_tls(fields)?;
     let tag = collector.unique_tag(name)?;
-    let tls = tls.into_required_json(&fields.context, &server)?;
+    let tls = tls.into_quic_required_json(&fields.context, &server)?;
     let mut outbound = json!({
         "type": "hysteria2",
         "tag": tag,
@@ -348,6 +404,12 @@ fn convert_hysteria2(
         "credential_ref": credential_ref_json(&reference),
         "tls": tls,
     });
+    if let Some(ports) = ports {
+        outbound["server_ports"] = json!(ports);
+    }
+    if let Some(seconds) = hop_interval_seconds {
+        outbound["hop_interval_seconds"] = json!(seconds);
+    }
     if let Some(up_mbps) = up_mbps {
         outbound["up_mbps"] = json!(up_mbps);
     }
@@ -356,6 +418,84 @@ fn convert_hysteria2(
     }
     if let Some(obfs) = obfs {
         outbound["obfs"] = obfs;
+    }
+    Ok(outbound)
+}
+
+fn convert_anytls(
+    collector: &mut OutboundCollector,
+    fields: &mut ProxyFields,
+    name: String,
+) -> Result<Value, String> {
+    let server = fields.require_string("server")?;
+    let server_port = fields.require_port()?;
+    let reference = collector.push_secret(
+        CredentialKind::AnyTlsPassword,
+        fields.require_string("password")?,
+    );
+    let tls = collect_tls(fields)?.into_anytls_required_json(&fields.context, &server)?;
+    let tag = collector.unique_tag(name)?;
+    Ok(json!({
+        "type": "anytls",
+        "tag": tag,
+        "server": server,
+        "server_port": server_port,
+        "credential_ref": credential_ref_json(&reference),
+        "tls": tls,
+    }))
+}
+
+fn convert_tuic(
+    collector: &mut OutboundCollector,
+    fields: &mut ProxyFields,
+    name: String,
+) -> Result<Value, String> {
+    for (key, feature) in [
+        ("reduce-rtt", "TUIC 0-RTT handshake"),
+        ("udp-over-stream", "TUIC UDP-over-stream"),
+        ("disable-sni", "TUIC disabled SNI"),
+    ] {
+        if fields.take_bool(key)?.unwrap_or(false) {
+            return Err(format!(
+                "{} requires {feature}, which is unsupported",
+                fields.context()
+            ));
+        }
+    }
+    let server = fields.require_string("server")?;
+    let server_port = fields.require_port()?;
+    let uuid_reference = collector.push_secret(
+        CredentialKind::TuicUuid,
+        canonical_uuid_credential(fields.require_string("uuid")?, "Clash TUIC UUID")?,
+    );
+    let password_reference = collector.push_secret(
+        CredentialKind::TuicPassword,
+        fields.require_string("password")?,
+    );
+    let congestion_control = fields
+        .take_string("congestion-controller")?
+        .map(|value| normalize_tuic_congestion_control(&value))
+        .transpose()?;
+    let udp_relay_mode = fields
+        .take_string("udp-relay-mode")?
+        .map(|value| normalize_tuic_udp_relay_mode(&value))
+        .transpose()?;
+    let tls = collect_tls(fields)?.into_quic_required_json(&fields.context, &server)?;
+    let tag = collector.unique_tag(name)?;
+    let mut outbound = json!({
+        "type": "tuic",
+        "tag": tag,
+        "server": server,
+        "server_port": server_port,
+        "uuid_credential_ref": credential_ref_json(&uuid_reference),
+        "password_credential_ref": credential_ref_json(&password_reference),
+        "tls": tls,
+    });
+    if let Some(value) = congestion_control {
+        outbound["congestion_control"] = Value::String(value);
+    }
+    if let Some(value) = udp_relay_mode {
+        outbound["udp_relay_mode"] = Value::String(value);
     }
     Ok(outbound)
 }
@@ -429,10 +569,31 @@ impl TlsFields {
         self.build(server).map(Some)
     }
 
-    /// TLS object for always-TLS proxy types (trojan, hysteria2).
+    /// TLS object for always-TLS stream protocols that allow uTLS but not Reality.
     fn into_required_json(self, context: &str, server: &str) -> Result<Value, String> {
-        if self.reality.is_some() {
+        self.into_required_json_with_capabilities(context, server, true, false)
+    }
+
+    fn into_quic_required_json(self, context: &str, server: &str) -> Result<Value, String> {
+        self.into_required_json_with_capabilities(context, server, false, false)
+    }
+
+    fn into_anytls_required_json(self, context: &str, server: &str) -> Result<Value, String> {
+        self.into_required_json_with_capabilities(context, server, true, true)
+    }
+
+    fn into_required_json_with_capabilities(
+        self,
+        context: &str,
+        server: &str,
+        utls_allowed: bool,
+        reality_allowed: bool,
+    ) -> Result<Value, String> {
+        if self.reality.is_some() && !reality_allowed {
             return Err(format!("{context} does not support Reality"));
+        }
+        if self.client_fingerprint.is_some() && !utls_allowed {
+            return Err(format!("{context} does not support uTLS"));
         }
         if self.enabled_flag == Some(false) {
             return Err(format!(
@@ -469,6 +630,9 @@ fn collect_transport(fields: &mut ProxyFields) -> Result<Option<Value>, String> 
     let network = fields.take_string("network")?.unwrap_or_default();
     let ws_opts = fields.take("ws-opts");
     let grpc_opts = fields.take("grpc-opts");
+    let h2_opts = fields.take("h2-opts");
+    let http_opts = fields.take("http-opts");
+    let http_upgrade_opts = fields.take("http-upgrade-opts");
     if ws_opts.is_some() && network != "ws" {
         return Err(format!(
             "{} declares ws-opts without network: ws",
@@ -481,8 +645,95 @@ fn collect_transport(fields: &mut ProxyFields) -> Result<Option<Value>, String> 
             fields.context()
         ));
     }
+    if h2_opts.is_some() && !matches!(network.as_str(), "h2" | "http") {
+        return Err(format!(
+            "{} declares h2-opts without network: h2",
+            fields.context()
+        ));
+    }
+    if http_opts.is_some() && network != "http" {
+        return Err(format!(
+            "{} declares http-opts without network: http",
+            fields.context()
+        ));
+    }
+    if http_upgrade_opts.is_some() && !matches!(network.as_str(), "httpupgrade" | "http-upgrade") {
+        return Err(format!(
+            "{} declares http-upgrade-opts without network: httpupgrade",
+            fields.context()
+        ));
+    }
     match network.as_str() {
         "" | "tcp" => Ok(None),
+        "h2" => {
+            let (path, host) = match h2_opts {
+                None => (None, None),
+                Some(value) => {
+                    let mut options = ProxyFields::from_nested(value, fields, "h2-opts")?;
+                    let path = take_single_transport_value(&mut options, "path")?;
+                    let host = options
+                        .take_string_or_list("host")?
+                        .map(|hosts| hosts.join(","));
+                    options.reject_leftovers()?;
+                    (path, host)
+                }
+            };
+            transport_from_parts("http", path, host, None, None)
+        }
+        "http" => {
+            if http_opts.is_some() && h2_opts.is_some() {
+                return Err(format!(
+                    "{} declares both http-opts and h2-opts for network: http",
+                    fields.context()
+                ));
+            }
+            let (path, host, method) = if let Some(value) = http_opts {
+                let mut options = ProxyFields::from_nested(value, fields, "http-opts")?;
+                let path = take_single_transport_value(&mut options, "path")?;
+                let method = options
+                    .take_string("method")?
+                    .filter(|value| !value.is_empty())
+                    .map(|value| normalize_v2ray_http_method(&value, "Mihomo HTTP method"))
+                    .transpose()?
+                    .or_else(|| Some("GET".to_owned()));
+                let host = match options.take("headers") {
+                    None => None,
+                    Some(headers) => {
+                        let mut headers = ProxyFields::from_nested(headers, &options, "headers")?;
+                        let upper = headers.take_string_or_list("Host")?;
+                        let lower = headers.take_string_or_list("host")?;
+                        let host = match (upper, lower) {
+                            (Some(a), Some(b)) if a != b => {
+                                return Err(format!(
+                                    "{} declares conflicting Host header values",
+                                    headers.context()
+                                ));
+                            }
+                            (a, b) => a.or(b).map(|values| values.join(",")),
+                        };
+                        headers.reject_leftovers()?;
+                        host
+                    }
+                };
+                options.reject_leftovers()?;
+                (path, host, method)
+            } else {
+                let (path, host) = match h2_opts {
+                    None => (None, None),
+                    Some(value) => {
+                        let mut options = ProxyFields::from_nested(value, fields, "h2-opts")?;
+                        let path = take_single_transport_value(&mut options, "path")?;
+                        let host = options
+                            .take_string_or_list("host")?
+                            .map(|hosts| hosts.join(","));
+                        options.reject_leftovers()?;
+                        (path, host)
+                    }
+                };
+                (path, host, Some("GET".to_owned()))
+            };
+            transport_from_parts("http", path, host, None, method)
+        }
         "ws" => {
             let (path, host) = match ws_opts {
                 None => (None, None),
@@ -514,7 +765,7 @@ fn collect_transport(fields: &mut ProxyFields) -> Result<Option<Value>, String> 
                     (path, host)
                 }
             };
-            transport_from_parts("ws", path, host, None)
+            transport_from_parts("ws", path, host, None, None)
         }
         "grpc" => {
             let service_name = match grpc_opts {
@@ -526,9 +777,40 @@ fn collect_transport(fields: &mut ProxyFields) -> Result<Option<Value>, String> 
                     service_name
                 }
             };
-            transport_from_parts("grpc", None, None, service_name)
+            transport_from_parts("grpc", None, None, service_name, None)
         }
-        other => transport_from_parts(other, None, None, None),
+        "quic" => transport_from_parts("quic", None, None, None, None),
+        "httpupgrade" | "http-upgrade" => {
+            let (path, host) = match http_upgrade_opts {
+                None => (None, None),
+                Some(value) => {
+                    let mut options = ProxyFields::from_nested(value, fields, "http-upgrade-opts")?;
+                    let path = options.take_string("path")?;
+                    let host = options.take_string("host")?;
+                    options.reject_leftovers()?;
+                    (path, host)
+                }
+            };
+            transport_from_parts("httpupgrade", path, host, None, None)
+        }
+        other => transport_from_parts(other, None, None, None, None),
+    }
+}
+
+fn take_single_transport_value(
+    fields: &mut ProxyFields,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let Some(values) = fields.take_string_or_list(key)? else {
+        return Ok(None);
+    };
+    match values.as_slice() {
+        [] => Ok(None),
+        [value] => Ok(Some(value.clone())),
+        _ => Err(format!(
+            "{}.{key} declares multiple alternatives that cannot be projected deterministically",
+            fields.context()
+        )),
     }
 }
 
@@ -642,6 +924,31 @@ impl ProxyFields {
                 .collect::<Result<Vec<_>, _>>()
                 .map(Some),
             Some(_) => Err(format!("{}.{key} must be a YAML sequence", self.context)),
+        }
+    }
+
+    fn take_string_or_list(&mut self, key: &str) -> Result<Option<Vec<String>>, String> {
+        match self.take(key) {
+            None => Ok(None),
+            Some(YamlValue::Scalar(scalar)) if !scalar.is_null() => {
+                Ok(Some(vec![scalar.text().to_owned()]))
+            }
+            Some(YamlValue::Scalar(_)) => Ok(None),
+            Some(YamlValue::Sequence(items)) => items
+                .into_iter()
+                .map(|item| match item {
+                    YamlValue::Scalar(scalar) if !scalar.is_null() => Ok(scalar.text().to_owned()),
+                    _ => Err(format!(
+                        "{}.{key} entries must be scalar values",
+                        self.context
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some),
+            Some(_) => Err(format!(
+                "{}.{key} must be a scalar or YAML sequence",
+                self.context
+            )),
         }
     }
 

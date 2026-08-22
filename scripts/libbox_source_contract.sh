@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared validation for the immutable upstream sing-box checkout and the exact
-# downstream security, raw-packet, and DNS failover patches used by the macOS
+# downstream security, raw-packet, DNS failover, and endpoint conflict patches used by the macOS
 # libbox build.
 # Source this file only after scripts/dependency_pins.env.
 
@@ -36,6 +36,124 @@ libbox_repository_relative_path() {
   printf '%s/%s\n' "$repo_root" "$relative_path"
 }
 
+libbox_validate_module_cache_packages() {
+  local description="$1"
+  local package_kind="$2"
+  shift 2
+  if [[ $# -eq 0 ]]; then
+    echo "error: libbox module cache contract has no $description packages" >&2
+    return 1
+  fi
+
+  local package normalized component seen=" "
+  local -a components
+  for package in "$@"; do
+    case "$package_kind" in
+      local)
+        if [[ "$package" != "." && ! "$package" =~ ^\./[A-Za-z0-9._@+~-]+(/[A-Za-z0-9._@+~-]+)*$ ]]; then
+          echo "error: libbox module cache contract has an unsafe $description package: $package" >&2
+          return 1
+        fi
+        ;;
+      module)
+        if [[ ! "$package" =~ ^[A-Za-z0-9._@+~-]+(/[A-Za-z0-9._@+~-]+)+$ ]]; then
+          echo "error: libbox module cache contract has an unsafe $description package: $package" >&2
+          return 1
+        fi
+        ;;
+      *)
+        echo "error: unsupported libbox module cache package kind: $package_kind" >&2
+        return 1
+        ;;
+    esac
+    if [[ "$package" != "." ]]; then
+      normalized="${package#./}"
+      IFS='/' read -r -a components <<<"$normalized"
+      for component in "${components[@]}"; do
+        if [[ -z "$component" || "$component" == "." || "$component" == ".." ]]; then
+          echo "error: libbox module cache contract has an unsafe $description package: $package" >&2
+          return 1
+        fi
+      done
+    fi
+    if [[ "$seen" == *" $package "* ]]; then
+      echo "error: libbox module cache contract repeats $description package: $package" >&2
+      return 1
+    fi
+    seen+="$package "
+  done
+}
+
+libbox_load_module_cache_contract() {
+  if [[ $# -ne 1 ]]; then
+    echo "error: libbox_load_module_cache_contract requires the repository root" >&2
+    return 1
+  fi
+  local repo_root="$1"
+  local contract_relative="${LIBBOX_MODULE_CACHE_CONTRACT_PATH:-}"
+  local expected_sha256="${LIBBOX_MODULE_CACHE_CONTRACT_SHA256:-}"
+  local contract_path actual_sha256 array_name declaration
+  if [[ ! "$expected_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "error: libbox module cache contract digest pin is missing or malformed" >&2
+    return 1
+  fi
+  contract_path="$(
+    libbox_repository_relative_path \
+      "$repo_root" \
+      "$contract_relative" \
+      "libbox module cache contract"
+  )" || return 1
+  libbox_require_regular_file "$contract_path" || return 1
+  actual_sha256="$(libbox_sha256 "$contract_path")"
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    echo "error: libbox module cache contract digest mismatch" >&2
+    return 1
+  fi
+
+  # shellcheck source=scripts/libbox_module_cache_contract.bash
+  source "$contract_path"
+  for array_name in \
+    LIBBOX_MODULE_BUILD_PACKAGES \
+    LIBBOX_GOMOBILE_BIND_PACKAGES \
+    LIBBOX_RACE_TEST_PACKAGES \
+    LIBBOX_TEST_PACKAGES \
+    LIBBOX_COMPILE_TEST_PACKAGES \
+    LIBBOX_VET_PACKAGES; do
+    declaration="$(declare -p "$array_name" 2>/dev/null)" || {
+      echo "error: libbox module cache contract is missing array $array_name" >&2
+      return 1
+    }
+    case "$declaration" in
+      "declare -a "* | "declare -ar "*) ;;
+      *)
+        echo "error: libbox module cache contract value $array_name is not an array" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  libbox_validate_module_cache_packages \
+    "build" local "${LIBBOX_MODULE_BUILD_PACKAGES[@]}" || return 1
+  libbox_validate_module_cache_packages \
+    "gomobile bind" module "${LIBBOX_GOMOBILE_BIND_PACKAGES[@]}" || return 1
+  libbox_validate_module_cache_packages \
+    "race-test" local "${LIBBOX_RACE_TEST_PACKAGES[@]}" || return 1
+  libbox_validate_module_cache_packages \
+    "test" local "${LIBBOX_TEST_PACKAGES[@]}" || return 1
+  libbox_validate_module_cache_packages \
+    "compile-test" local "${LIBBOX_COMPILE_TEST_PACKAGES[@]}" || return 1
+  libbox_validate_module_cache_packages \
+    "vet" local "${LIBBOX_VET_PACKAGES[@]}" || return 1
+
+  readonly -a \
+    LIBBOX_MODULE_BUILD_PACKAGES \
+    LIBBOX_GOMOBILE_BIND_PACKAGES \
+    LIBBOX_RACE_TEST_PACKAGES \
+    LIBBOX_TEST_PACKAGES \
+    LIBBOX_COMPILE_TEST_PACKAGES \
+    LIBBOX_VET_PACKAGES
+}
+
 libbox_security_patch_path() {
   libbox_repository_relative_path "$1" "$SING_BOX_SECURITY_PATCH_PATH" "sing-box security patch"
 }
@@ -48,15 +166,21 @@ libbox_dns_failover_patch_path() {
   libbox_repository_relative_path "$1" "$SING_BOX_DNS_FAILOVER_PATCH_PATH" "sing-box DNS failover patch"
 }
 
+libbox_endpoint_conflict_patch_path() {
+  libbox_repository_relative_path "$1" "$SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH" "sing-box endpoint conflict patch"
+}
+
 libbox_validate_patches() {
   local repo_root="$1"
-  local security_patch_path raw_packet_patch_path dns_failover_patch_path
+  local security_patch_path raw_packet_patch_path dns_failover_patch_path endpoint_conflict_patch_path
   security_patch_path="$(libbox_security_patch_path "$repo_root")" || return 1
   raw_packet_patch_path="$(libbox_raw_packet_patch_path "$repo_root")" || return 1
   dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")" || return 1
+  endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root")" || return 1
   libbox_require_regular_file "$security_patch_path" || return 1
   libbox_require_regular_file "$raw_packet_patch_path" || return 1
   libbox_require_regular_file "$dns_failover_patch_path" || return 1
+  libbox_require_regular_file "$endpoint_conflict_patch_path" || return 1
   if [[ "$(libbox_sha256 "$security_patch_path")" != "$SING_BOX_SECURITY_PATCH_SHA256" ]]; then
     echo "error: sing-box security patch digest mismatch" >&2
     return 1
@@ -67,6 +191,10 @@ libbox_validate_patches() {
   fi
   if [[ "$(libbox_sha256 "$dns_failover_patch_path")" != "$SING_BOX_DNS_FAILOVER_PATCH_SHA256" ]]; then
     echo "error: sing-box DNS failover patch digest mismatch" >&2
+    return 1
+  fi
+  if [[ "$(libbox_sha256 "$endpoint_conflict_patch_path")" != "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256" ]]; then
+    echo "error: sing-box endpoint conflict patch digest mismatch" >&2
     return 1
   fi
 }
@@ -88,7 +216,7 @@ libbox_validate_git_root() {
 libbox_validate_upstream_source() {
   local repo_root="$1"
   local source_root="$2"
-  local security_patch_path raw_packet_patch_path dns_failover_patch_path
+  local security_patch_path raw_packet_patch_path dns_failover_patch_path endpoint_conflict_patch_path
   libbox_validate_patches "$repo_root" || return 1
   libbox_validate_git_root "$source_root" || return 1
   if [[ -n "$(git -C "$source_root" status --porcelain=v1 --untracked-files=all)" ]]; then
@@ -108,12 +236,14 @@ libbox_validate_upstream_source() {
   security_patch_path="$(libbox_security_patch_path "$repo_root")" || return 1
   raw_packet_patch_path="$(libbox_raw_packet_patch_path "$repo_root")" || return 1
   dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")" || return 1
-  # Zero-context scalar replacements are admitted only after the exact upstream
-  # commit and go.mod/go.sum digests above have been verified.
+  endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root")" || return 1
+  # Zero-context patches are admitted only after the exact upstream commit and
+  # go.mod/go.sum digests above have been verified.
   if ! git -C "$source_root" apply --unidiff-zero --check \
     "$security_patch_path" \
     "$raw_packet_patch_path" \
-    "$dns_failover_patch_path"; then
+    "$dns_failover_patch_path" \
+    "$endpoint_conflict_patch_path"; then
     echo "error: pinned patches do not apply to the pinned sing-box source" >&2
     return 1
   fi
@@ -179,7 +309,7 @@ libbox_combined_diff_sha256() {
 libbox_validate_patched_source() {
   local repo_root="$1"
   local source_root="$2"
-  local actual_diff actual_combined_diff ignored_files security_patch_path raw_packet_patch_path dns_failover_patch_path
+  local actual_diff actual_combined_diff ignored_files security_patch_path raw_packet_patch_path dns_failover_patch_path endpoint_conflict_patch_path
   libbox_validate_patches "$repo_root" || return 1
   libbox_validate_git_root "$source_root" || return 1
 
@@ -211,11 +341,18 @@ libbox_validate_patched_source() {
   security_patch_path="$(libbox_security_patch_path "$repo_root")" || return 1
   raw_packet_patch_path="$(libbox_raw_packet_patch_path "$repo_root")" || return 1
   dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")" || return 1
+  endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root")" || return 1
+  if ! git -C "$source_root" apply --unidiff-zero --reverse --check \
+    "$endpoint_conflict_patch_path"; then
+    echo "error: pinned endpoint conflict patch cannot be reversed cleanly" >&2
+    return 1
+  fi
   if ! git -C "$source_root" apply --reverse --check "$dns_failover_patch_path"; then
     echo "error: pinned DNS failover patch cannot be reversed cleanly" >&2
     return 1
   fi
-  if ! git -C "$source_root" apply --reverse --check "$raw_packet_patch_path"; then
+  if ! git -C "$source_root" apply --unidiff-zero --reverse --check \
+    "$raw_packet_patch_path"; then
     echo "error: pinned raw packet patch cannot be reversed cleanly" >&2
     return 1
   fi
@@ -268,6 +405,7 @@ libbox_verify_xcframework_artifact() {
     --metadata "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256" \
     --metadata "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256" \
     --metadata "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256" \
+    --metadata "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256" \
     --metadata "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256" \
     --metadata "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256" \
     --metadata "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256" \

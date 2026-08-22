@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 public enum NativeBridgeProtocolConstants {
-  public static let schemaVersion: UInt16 = 5
+  public static let schemaVersion: UInt16 = 6
   public static let maximumRequestBytes = 1_048_576
   public static let maximumResponseBytes = 1_048_576
   public static let maximumFailureMessageBytes = 1_024
@@ -120,6 +120,22 @@ public enum CredentialKind: String, Codable, CaseIterable, Sendable {
   case trojanPassword = "trojan_password"
   case hysteria2Password = "hysteria2_password"
   case hysteria2ObfsPassword = "hysteria2_obfs_password"
+  case anytlsPassword = "anytls_password"
+  case tuicUUID = "tuic_uuid"
+  case tuicPassword = "tuic_password"
+}
+
+extension CredentialKind {
+  public func admitsSecretSyntax(_ value: String) -> Bool {
+    switch self {
+    case .vmessUUID, .vlessUUID, .tuicUUID:
+      guard let parsed = UUID(uuidString: value) else { return false }
+      return parsed.uuidString.lowercased() == value
+    case .shadowsocksPassword, .trojanPassword, .hysteria2Password,
+      .hysteria2ObfsPassword, .anytlsPassword, .tuicPassword:
+      return true
+    }
+  }
 }
 
 public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
@@ -129,6 +145,9 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
   case trojanPassword = "trojan_password"
   case hysteria2Password = "hysteria2_password"
   case hysteria2ObfsPassword = "hysteria2_obfs_password"
+  case anytlsPassword = "anytls_password"
+  case tuicUUID = "tuic_uuid"
+  case tuicPassword = "tuic_password"
 
   fileprivate var credentialKind: CredentialKind {
     switch self {
@@ -138,14 +157,18 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
     case .trojanPassword: .trojanPassword
     case .hysteria2Password: .hysteria2Password
     case .hysteria2ObfsPassword: .hysteria2ObfsPassword
+    case .anytlsPassword: .anytlsPassword
+    case .tuicUUID: .tuicUUID
+    case .tuicPassword: .tuicPassword
     }
   }
 
   fileprivate var pointerSuffix: String {
     switch self {
-    case .shadowsocksPassword, .trojanPassword, .hysteria2Password:
+    case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
+      .tuicPassword:
       "password"
-    case .vmessUUID, .vlessUUID:
+    case .vmessUUID, .vlessUUID, .tuicUUID:
       "uuid"
     case .hysteria2ObfsPassword:
       "obfs/password"
@@ -385,7 +408,7 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     try container.encode(configContentDigest.hex, forKey: .configContentDigest)
     try container.encode(configDigest.hex, forKey: .configDigest)
     try container.encode(credentialSlots, forKey: .credentialSlots)
-    try container.encodeIfPresent(tunnelOptions, forKey: .tunnelOptions)
+    try container.encode(tunnelOptions, forKey: .tunnelOptions)
   }
 
   public func descriptor(slot: ConfigurationSlot) throws -> ConfigurationDescriptor {
@@ -437,9 +460,10 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     target: CredentialTarget
   ) -> String? {
     switch target {
-    case .shadowsocksPassword, .trojanPassword, .hysteria2Password:
+    case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
+      .tuicPassword:
       outbound["password"] as? String
-    case .vmessUUID, .vlessUUID:
+    case .vmessUUID, .vlessUUID, .tuicUUID:
       outbound["uuid"] as? String
     case .hysteria2ObfsPassword:
       (outbound["obfs"] as? [String: Any])?["password"] as? String

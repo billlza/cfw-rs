@@ -2,34 +2,41 @@
 
 This record binds the v0.4.0 production collector trust root and its external
 control plane. It does not grant `Signed_Installed_Verified`, replace the
-same-machine two-clean-OS requirement, or authorize validation build 40004.
+same-machine two-clean-OS requirement, or authorize validation build 40020.
 
 ## Source and image binding
 
 - Collector contract: `physical-collector-v1`, receipt v3, PS256.
 - Reviewed source-closure SHA-256:
-  `efe0e7a16d67406aff50bb3439e59d4fad1c9dbb6f06ab7437a7d6b84ce44545`.
-
-The lifecycle-v4 72-subject contract changes the collector source closure.
-Therefore the digest, image, revisions, and trust-policy activation recorded
-below are historical for the preceding lifecycle-v3 source and do not
-authorize a new production nonce or receipt. Before physical collection, the
-new source digest must be reviewed, built into an immutable image, deployed to
-both private services during a fail-closed maintenance window, and rebound in
-the checked-in trust policy with fresh HSM/Binary Authorization evidence. This
-document must not be updated to claim that deployment until those external
-steps actually occur.
-- Cloud Build ID: `66ec6a46-723f-4075-8f80-a4c4c635b3a7` in
+  `67fa401401dfe1ffca670cbea62eff5f74e581dcc9161847a371968b6f5176a2`.
+- Cloud Build ID: `ce844089-08be-4b00-ac89-a3177ccaf482` in
   `asia-east1`; source-closure verification, `go test ./...`, `go vet ./...`,
   image build and push all completed successfully under the dedicated builder
   service account.
 - Immutable OCI image:
-  `asia-east1-docker.pkg.dev/cfw-release-evidence-20260730/physical-evidence-control/physical-collector@sha256:6b78b06d7640568099d815b3c3485c3a00bc92eac1972721ce8be01384dde759`.
+  `asia-east1-docker.pkg.dev/cfw-release-evidence-20260730/physical-evidence-control/physical-collector@sha256:d4fa73f55dead6e806844a2c1bdbb445b55d83b9603444d3e591ffd1f418c230`.
 - On-demand scan:
-  `projects/cfw-release-evidence-20260730/locations/asia/scans/28c9f7de-8d15-40de-8cfa-226c71c7e51e`;
+  `projects/cfw-release-evidence-20260730/locations/asia/scans/fb3004c0-5908-4725-b725-87c07f0a18f8`;
   the result contained no vulnerability occurrences.
 - Current activated trust-policy v3 SHA-256:
-  `907e7f11c9510eb541537a077290c43cf2121b5047d777339a4c1f3debf9bec3`.
+  `e95c2710371b3ba6f6899cb24fcbdc42038869934b1c89ddca651bd910601355`.
+
+The first lifecycle-v4 candidate had source closure `9a640285...`, Cloud Build
+`071c7484-471f-4ea8-a997-8a364dbe5df1`, image `af2048c3...`, scan
+`d7f3ba5f-6464-43a7-9b41-d15f50694733`, deployment occurrence
+`c6318119-cb07-4c63-bcae-3299983f2ecc`, and candidate policy
+`ecbc6a17...`. It was never enabled: the authenticated `/healthz` probe was
+intercepted by Cloud Run with HTTP 404 because Cloud Run reserves paths ending
+in `z`. Both production roles remained disabled while the source replaced that
+route with `/health`, added its regression test, and went through a fresh
+build, scan, deployment attestation, policy generation, and deployment. The
+failed candidate and its immutable evidence remain historical and do not
+authorize collection.
+
+The preceding lifecycle-v3 source closure `efe0e7a1...`, image `6b78b06d...`,
+Cloud Build `66ec6a46-723f-4075-8f80-a4c4c635b3a7`, scan
+`28c9f7de-8d15-40de-8cfa-226c71c7e51e`, and trust policy `907e7f11...` also
+remain historical. They are not accepted by the current source-pinned client.
 
 The original source closure `2439c826...`, image `0fb9e228...`, build
 `0ca20d11-...`, scan `b3bd8346-...`, and trust-policy v2 digest
@@ -79,11 +86,15 @@ version under the existing grant.
 - Artifact Analysis note and Binary Authorization attestor:
   `physical-collector-v040`.
 - Deployment attestation occurrence:
-  `projects/cfw-release-evidence-20260730/occurrences/44cdf0f1-8477-4602-b5da-034b972ff01d`.
+  `projects/cfw-release-evidence-20260730/occurrences/ecc18ee8-244a-48fe-ace9-2983145f90e4`.
 - The occurrence was PAE-encoded, signed by the separate Cloud HSM ECDSA P-256
   key `collector-deploy-attestor-v040/cryptoKeyVersions/1`, and validated during
   creation. All temporary signing, occurrence-write, attestor-verifier and
   impersonation grants were removed afterward.
+- Occurrences `c6318119-cb07-4c63-bcae-3299983f2ecc` for the rejected
+  lifecycle-v4 health candidate and `44cdf0f1-8477-4602-b5da-034b972ff01d`
+  for the lifecycle-v3 dependency refresh remain immutable historical
+  evidence; neither authorizes the current image.
 - The project Binary Authorization policy is
   `REQUIRE_ATTESTATION` with `ENFORCED_BLOCK_AND_AUDIT_LOG` and no application
   image exemption. The effective organization policy allows only the `default`
@@ -92,10 +103,10 @@ version under the existing grant.
 ## Runtime and replay ledger
 
 - Nonce issuer: `physical-nonce-issuer-v040`, active revision
-  `physical-nonce-issuer-v040-00008-b58`, runtime identity
+  `physical-nonce-issuer-v040-enabled-20260822151852`, runtime identity
   `physical-nonce-issuer@cfw-release-evidence-20260730.iam.gserviceaccount.com`.
 - Receipt signer: `physical-receipt-signer-v040`, active revision
-  `physical-receipt-signer-v040-00008-gh7`, runtime identity
+  `physical-receipt-signer-v040-enabled-20260822151852`, runtime identity
   `physical-receipt-signer@cfw-release-evidence-20260730.iam.gserviceaccount.com`.
 - Both services are private Cloud Run services in `asia-east1`, use the exact
   image digest, enforce Binary Authorization, scale from zero to at most one
@@ -115,6 +126,12 @@ version under the existing grant.
   Both production routes remained private and returned HTTP 403 to
   unauthenticated requests. Activation issued no production nonce or receipt
   and did not start validation build 40002.
+- The 2026-08-22 lifecycle-v4 activation produced one disabled-state and one
+  enabled-state `COMMITTED` preflight, with signature SHA-256 values
+  `81be5f922136821aef83d93837bc6cb7e56f0a652bf6e8df0c7e1456c5de8e84`
+  and `0a2982a0fb9417d12b0ded6151156964bda1fd16ae0b2546617fca407ca2a0af`.
+  Both independently verified as RSA-PSS/SHA-256 with a 32-byte salt over the
+  fixed challenge and were read back as unique committed Firestore records.
 
 ## Single-machine policy transition
 
@@ -201,17 +218,63 @@ traffic description gate. The issuer has no non-production route that exercises
 its Firestore create path, so activation intentionally makes no claim of a live
 issuer-ledger write without a production nonce.
 
-The current revisions are receipt signer
+That dependency refresh ended with receipt signer
 `physical-receipt-signer-v040-00008-gh7` and nonce issuer
 `physical-nonce-issuer-v040-00008-b58`. Each has one 100-percent traffic target,
-uses the immutable new digest and exact configured policy SHA-256
+used that refresh's immutable digest and exact configured policy SHA-256
 `907e7f11c9510eb541537a077290c43cf2121b5047d777339a4c1f3debf9bec3`,
-retains Binary Authorization `default`, its role-specific service account,
+retained Binary Authorization `default`, its role-specific service account,
 gen2, 512 MiB/1 CPU, zero minimum and one maximum instance. Signer concurrency
-remains 1 and issuer concurrency remains its reviewed value 8. Authenticated
-malformed documents return HTTP 400 from the enabled schema gates; anonymous
-requests are denied by Cloud Run with HTTP 403. No production nonce or receipt
-was created during the refresh.
+was 1 and issuer concurrency was its reviewed value 8. Authenticated malformed
+documents returned HTTP 400 from the enabled schema gates; anonymous requests
+were denied by Cloud Run with HTTP 403. No production nonce or receipt was
+created during that refresh. The lifecycle-v4 activation below supersedes
+those revisions and bindings.
+
+## Lifecycle-v4 collector activation
+
+The lifecycle-v4 source was activated on 2026-08-22 through a fail-closed
+maintenance window. The signer was first moved to
+`physical-receipt-signer-v040-disabled-20260822151852`, then the issuer to
+`physical-nonce-issuer-v040-disabled-20260822151852`; each was Ready, the sole
+100-percent traffic target, retained its old internally consistent binding, and
+returned authenticated HTTP 503 from its production route. The rejected first
+candidate reached only signer revision
+`physical-receipt-signer-v040-prepared-20260822151852`; its external health
+failure stopped the transaction before the issuer was updated or either role
+was enabled.
+
+With both roles still closed, the final source/image/policy binding was deployed
+to `physical-receipt-signer-v040-prepared-health-20260822151852` and
+`physical-nonce-issuer-v040-prepared-health-20260822151852`. Each revision was
+required to be Ready and the sole traffic target, preserve Binary Authorization
+`default`, private invocation IAM, its role-specific service account, gen2,
+512 MiB/1 CPU, zero-to-one scaling, 30-second timeout, and concurrency 1 for
+the signer or 8 for the issuer. Authenticated `GET /health` returned HTTP 200
+from both containers, while their production routes still returned HTTP 503.
+
+The disabled-state fixed-challenge preflight committed at
+`2026-08-22T15:44:29Z` with signature SHA-256
+`81be5f922136821aef83d93837bc6cb7e56f0a652bf6e8df0c7e1456c5de8e84`.
+The signer was then enabled as
+`physical-receipt-signer-v040-enabled-20260822151852`; only after its exact
+configuration, health, authenticated HTTP 400 schema gate, anonymous HTTP 403
+gate, and a fresh enabled-state preflight passed was the issuer enabled as
+`physical-nonce-issuer-v040-enabled-20260822151852`. The second preflight
+committed at `2026-08-22T15:47:32Z` with signature SHA-256
+`0a2982a0fb9417d12b0ded6151156964bda1fd16ae0b2546617fca407ca2a0af`.
+Both signatures independently verified with the checked-in RSA-3072 key as
+RSA-PSS/SHA-256 with a 32-byte salt. A bounded Firestore read over the whole
+maintenance interval returned exactly those two committed preflight records
+and no production nonce or receipt record.
+
+The final services use source closure `67fa4014...`, image digest
+`d4fa73f5...`, trust-policy SHA-256 `e95c2710...`, and the final revisions above.
+All temporary deploy-attestor token-creator, KMS signer, note-attacher,
+occurrence-writer, and attestor-verifier grants were removed and read back to
+their empty baseline before deployment. The project Binary Authorization policy
+remained `REQUIRE_ATTESTATION` with `ENFORCED_BLOCK_AND_AUDIT_LOG`; the HSM keys,
+service IAM, and protected Firestore configuration did not drift.
 
 Rollback is forward-only and fail closed. Traffic must never be routed directly
 to `physical-receipt-signer-v040-00005-2tl`,
@@ -243,7 +306,7 @@ The former direct user `roles/run.invoker` bindings were removed from both
 services after the impersonation preflight succeeded.
 
 The source-pinned endpoint policy SHA-256 is
-`76e5a84232c92f1332ad29abe31c2d8111a9ff151821b58b10ac3b760873ee5f`.
+`8a2c3ee126d8dd619d2242bfb86b836d1559c8dc6d89ecebca66b3e3d6603e9b`.
 Before either POST, the client requires the fixed active revision, sole 100
 percent traffic target, origin and audience, then impersonates the dedicated
 identity and locally verifies the JWT audience. The activation checks confirmed

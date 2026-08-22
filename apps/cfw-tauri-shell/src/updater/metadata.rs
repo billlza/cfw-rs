@@ -1,14 +1,15 @@
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
+use reqwest::Url;
 use reqwest::header::ACCEPT;
 use reqwest::redirect::Policy;
-use reqwest::{Client, Url};
 use semver::Version;
 use serde_json::Value;
 
 use super::contract::{UpdateAuthorization, validate_update};
 use super::error::{DownloadFailureStage, NetworkFailureCategory, Result, UpdateError};
+use crate::transport_security::external_https_client_builder;
 
 const METADATA_URL: &str = "https://github.com/billlza/cfw-rs/releases/latest/download/latest.json";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
@@ -26,8 +27,8 @@ pub(super) struct CheckedUpdate {
 }
 
 pub(super) async fn check_bounded_update() -> Result<Option<CheckedUpdate>> {
-    ensure_tls_crypto_provider()?;
-    let client = Client::builder()
+    let client = external_https_client_builder()
+        .map_err(|_| UpdateError::TlsProviderUnavailable)?
         .user_agent(USER_AGENT)
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
@@ -157,17 +158,6 @@ fn validate_metadata_redirect(
         Ok(()) => attempt.follow(),
         Err(error) => attempt.error(error),
     }
-}
-
-fn ensure_tls_crypto_provider() -> Result<()> {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        // A concurrent initializer may win this process-global one-time race.
-        let _already_installed = rustls::crypto::ring::default_provider().install_default();
-    }
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        return Err(UpdateError::TlsProviderUnavailable);
-    }
-    Ok(())
 }
 
 fn sanitized_network_error(stage: DownloadFailureStage, error: &reqwest::Error) -> UpdateError {

@@ -18,6 +18,7 @@ from scripts.physical_capture.android_lan_peer import (
     admit_android_lan_peer,
     discover_android_lan_peer_identity,
     validate_android_lan_peer_identity,
+    validate_android_lan_peer_identity_shape,
 )
 from scripts.physical_capture.execution import CommandResult, command_sha256
 
@@ -387,7 +388,7 @@ class AndroidLanPeerAdmissionTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            "873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17",
+            "268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c",
             source,
         )
         self.assertIn("ARTIFACT_SIZE: Final = 2_359_422", source)
@@ -591,6 +592,26 @@ class AndroidLanPeerAdmissionTests(unittest.TestCase):
                 with self.assertRaises(AndroidLanPeerAdmissionError) as raised:
                     validate_android_lan_peer_identity(mutation)
                 self.assertEqual(raised.exception.code, "android_peer_identity_invalid")
+
+    def test_identity_shape_can_describe_stale_artifact_but_never_admit_it(self) -> None:
+        identity = self._expected_identity()
+        stale = dict(identity)
+        stale["deployment"] = dict(
+            identity["deployment"],
+            binary_sha256="0" * 64,
+            binary_size=identity["deployment"]["binary_size"] + 1,
+        )
+
+        parsed = validate_android_lan_peer_identity_shape(stale)
+        self.assertEqual(parsed, stale)
+        with self.assertRaises(AndroidLanPeerAdmissionError) as raised:
+            validate_android_lan_peer_identity(stale)
+        self.assertEqual(raised.exception.code, "android_peer_identity_invalid")
+
+        malformed = dict(stale)
+        malformed["deployment"] = dict(stale["deployment"], binary_sha256="not-a-hash")
+        with self.assertRaises(AndroidLanPeerAdmissionError):
+            validate_android_lan_peer_identity_shape(malformed)
 
     def test_pull_verification_rejects_changed_bytes_and_removes_private_copy(self) -> None:
         runner = _FakeRunner(self.artifact_bytes)

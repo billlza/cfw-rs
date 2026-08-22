@@ -2,6 +2,9 @@ use std::ffi::OsString;
 
 use crate::legacy::{LaunchArguments, parse_launch_arguments};
 
+pub(crate) const STARTUP_USAGE_EXIT_CODE: i32 = 64;
+pub(crate) const STARTUP_ADMISSION_EXIT_CODE: i32 = 78;
+
 #[cfg(feature = "physical-release-evidence")]
 pub(crate) const PACKET_EVIDENCE_FLAG: &str = "--physical-packet-evidence-v5";
 

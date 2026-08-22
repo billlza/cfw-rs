@@ -4,6 +4,16 @@ This project releases only an arm64 application for macOS 15 or newer. A green
 Rust, JavaScript, or Swift unit-test lane is necessary but does not establish a
 releasable Network Extension product.
 
+Android and iOS are not release targets. Physical interoperability may use an
+iOS device as a test peer, but its harness, device identity, transport capture,
+and receipts must be independently source-bound; an Android peer record cannot
+be renamed or reused as iOS evidence.
+The repository's test-only iOS transport peer remains outside the product and
+release bundle. The iPhone Packet-LAN mode now replaces the Android peer as the
+active `lan-bypass` evidence source, but no prior pilot or Android receipt is
+reusable: every candidate requires a fresh dynamic ready address, three joint
+Mac/iPhone connection bindings, pcap/Host evidence, and exact cleanup.
+
 ## Current source composition and release boundary
 
 The v0.4.0 Release source graph now composes the real native path rather than
@@ -26,13 +36,21 @@ the earlier missing-link placeholders:
   requirement before exporting its typed protocol.
 
 The libbox input is upstream sing-box `v1.13.15` at commit
-`3708fa18766cda1f11b77f6ed9c7bd61688f17df` plus three digest-pinned repository
-patches: security dependency updates, the public raw-packet adapter, and bounded
-DNS failover. The exact combined diff and patched `go.mod`/`go.sum` digests are
+`3708fa18766cda1f11b77f6ed9c7bd61688f17df` plus four digest-pinned repository
+patches: security dependency updates, the public raw-packet adapter, bounded
+DNS failover, and structured loopback endpoint-conflict reporting. The exact
+combined diff and patched `go.mod`/`go.sum` digests are
 release inputs in `scripts/dependency_pins.env` and
 `native/macos/Dependencies.lock.json`. The previous helper, mihomo, clash-rs,
 downloaded core, and private packet-flow file-descriptor access are not
 fallbacks.
+
+The security patch pins `golang.org/x/mod v0.40.0` and its exact tested `x/*`
+closure to remove `GO-2026-6179` and `GO-2026-6180`. The release vulnerability
+scan must report zero affected symbols and zero affected imported packages
+without an ignore. `GO-2026-5932` may remain only as the documented module-level
+`x/crypto/openpgp` report: the package has no fixed version and must remain
+absent from the libbox import graph.
 
 These are source-composition and deterministic-test claims. An unsigned
 candidate proves that the four native products and outer application can be
@@ -49,9 +67,10 @@ a private selector or `unsafeBitCast`. Test fixtures may model those failures;
 production composition may not ship them.
 
 The current closed application profile schema supports typed `direct`,
-`block`, Shadowsocks, VMess, VLESS/Reality, Trojan, and Hysteria2 outbounds; it
-must not be marketed as full sing-box configuration support. Profile JSON may
-contain immutable canonical `credential_ref` values but never secret bytes.
+`block`, Shadowsocks, VMess, VLESS/Reality, Trojan, Hysteria2, AnyTLS, and TUIC
+v5 outbounds; it must not be marketed as full sing-box configuration support.
+Profile JSON may contain immutable canonical credential references, including
+separate TUIC UUID and password references, but never secret bytes.
 The source implements missing-only shared-Keychain provisioning, presence
 checks, authenticated in-memory native slot injection, and revision-bound
 orphan cleanup. Release remains blocked until those paths pass under installed
@@ -150,7 +169,7 @@ patch, proves `SettingPresets` loading by generating a probe project, strips
 debug paths, and rejects a binary containing its temporary bootstrap root.
 
 Archive the emitted XCFramework tree manifest, Go module verification output,
-upstream identity, all three downstream patches, the combined source-diff digest,
+upstream identity, all four downstream patches, the combined source-diff digest,
 patched module digests, vulnerability scan, build tags, and tool identities.
 Reject any unproven binary.
 
@@ -215,10 +234,10 @@ evidence.
 
 The receive-only Packet peer under `tools/packet-evidence-endpoint/` is bound
 to the repository-pinned Go toolchain and reproducible Linux/amd64 digest
-`fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1`.
+`c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c`.
 Its sole Debian installation transaction is the pinned
 `install-endpoint.sh` digest
-`6527983cf9b072ab99ecd820778ccb56c9d91d79e07fc4d558715c4ce8657049`;
+`14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8`;
 the systemd unit, fixed GCE resolver, and exact capture sudoers bytes have
 digests `7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996`,
 `b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62`,
@@ -237,17 +256,19 @@ Compute instance or project IAM policy. Its only admitted binding is the fixed
 capture service account with `roles/iap.tunnelResourceAccessor`, title
 `packet-capture-ssh-only`, and condition `destination.port == 22`.
 
-This provisioning is not physical candidate evidence. Packet collection still
-fails before a probe because the controlled Android LAN peer binary, ADB tool,
-and admission source are pinned but no live device/network identity has been
-captured and the admission lease is not yet consumed by the `lan-bypass`
-producer. The closed Host baseline/test/restore transaction and DNS
-remote-stream capture are implemented, but no physical candidate Packet
-evidence has been collected. The Android peer uses a separate non-root,
-fixed-port, TCP-only linux/arm64 bounded read/discard binary; the wider GCE
-TCP/UDP/DNS executable is not admissible for LAN proof. A syntactically legal
-pcap, live endpoint, or manual SSH capture cannot substitute for the frozen
-product-state, route/interface, capture, send, and restore receipts.
+This provisioning is not itself physical candidate evidence. The active
+`lan-bypass` producer now admits one source-hash-selected physical iPhone,
+revalidates the signed thin-arm64 test app and provisioning authority, obtains
+the endpoint only from a fresh `en0` ready receipt, proves connected/prepared
+device details after any dormant wireless inventory observation, rechecks the
+unlocked state immediately before both launches, and reconciles three ordered
+TCP/EOF server observations with the Mac sender tuples before exact PID
+termination and owned-app uninstall. An adapter-level physical pilot passed,
+but no fresh complete 13-case candidate Packet run has yet been collected.
+The retained Android peer is inactive legacy test infrastructure. A
+syntactically legal pcap, live endpoint, prior pilot, or manual capture cannot
+substitute for the frozen product-state, route/interface, capture, send,
+server, restore, and cleanup receipts.
 
 Required network conditions:
 
@@ -458,20 +479,20 @@ scripts/release_publication_gate.sh \
   "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
 ```
 
-### Fixed 40004 to 40005 physical-candidate evidence sequence
+### Fixed 40020 to 40021 physical-candidate evidence sequence
 
 The production evidence composer has no fixture, path, output, build-number, or
 success-override option. Run this sequence exactly once from one clean release
-commit. The collector source changed after builds `40002` and `40003` were
-defined, so those candidates and their evidence are retired and must not be
-renamed, relabelled, or reused:
+commit. Build identities through `40019` have already been allocated to older
+source closures or validation attempts, so those candidates and their evidence
+are retired and must not be renamed, relabelled, or reused:
 
-1. build, notarize, install, and exercise validation build `40004`; preserve its
+1. build, notarize, install, and exercise validation build `40020`; preserve its
    fixed CI/toolchain, app-manifest, notarization, and runtime-recovery records;
 2. have a human reviewer approve those exact bytes in
    `target/candidates/0.4.0/review/validated-candidate.json`;
 3. build, sign inside-out, notarize, staple, and Gatekeeper-verify final build
-   `40005` from the same clean source identity;
+   `40021` from the same clean source identity;
 4. freeze the signed/notarized runtime candidate before collection:
 
    ```bash
@@ -588,7 +609,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 40004. No updater key, Apple notarization key, local private key, or older
+build 40020. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable

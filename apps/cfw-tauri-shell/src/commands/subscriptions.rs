@@ -4,8 +4,9 @@
 //! remote and local imports parse into [`ValidatedSingBoxProfile`] and are
 //! projected for both modes before they are stored, exactly like the existing
 //! text import. Subscription bodies in other syntaxes (Clash Meta YAML
-//! `proxies`, node-URI bundles) are converted into that closed schema at the
-//! import boundary by [`import_subscription_document`]; only the node list is
+//! `proxies`, Shadowsocks SIP008 JSON, node-URI bundles) are converted into
+//! that closed schema at the import boundary by
+//! [`import_subscription_document`]; only the node list is
 //! converted, because the projection owns listeners, logging, the
 //! experimental controller, and DNS. There is no template engine and no
 //! mixin.
@@ -35,6 +36,7 @@ use futures_util::StreamExt as _;
 use qrcode::QrCode;
 use qrcode::render::svg;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING, HeaderMap, HeaderValue};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
 use serde::Serialize;
@@ -42,14 +44,20 @@ use tauri::State;
 use uuid::Uuid;
 
 use super::ManagedProfiles;
-use super::imported_credentials::provision_imported_credentials_with_exact_replay;
+use super::imported_credentials::{
+    ImportedCredentialProvisionAttemptError, ImportedCredentialProvisionError,
+    provision_imported_credentials_with_exact_replay,
+};
+use super::profiles::collect_orphaned_credentials_now;
 use super::shell_ops::{open_path, owned_profile_path};
 use crate::engine::ManagedEngine;
 use crate::settings_store;
 use crate::subscription_import::{
     ImportedCredential, import_subscription_document,
     import_subscription_document_with_credential_namespace,
+    import_subscription_document_with_reusable_references,
 };
+use crate::transport_security::external_https_client_builder;
 
 const SUBSCRIPTION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SUBSCRIPTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -104,6 +112,16 @@ pub(crate) struct UiProfileSaveResult {
     active: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UiSubscriptionUpdateResult {
+    #[serde(flatten)]
+    profile: ProfileImportResult,
+    credential_cleanup_removed: u32,
+    credential_cleanup_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_cleanup_error: Option<String>,
+}
+
 #[tauri::command]
 pub(crate) async fn import_profile_url(
     engine: State<'_, ManagedEngine>,
@@ -114,11 +132,11 @@ pub(crate) async fn import_profile_url(
 ) -> Result<ProfileImportResult, String> {
     let target = validate_subscription_url(&url)?;
     let body = fetch_subscription_bounded(&target, MAX_SUBSCRIPTION_DOCUMENT_BYTES).await?;
-    let settings = engine.engine_settings().clone();
-    let imported = validated_subscription_import(&body, &settings)?;
     let _maintenance = engine
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
+    let settings = engine.engine_settings()?;
+    let imported = validated_subscription_import(&body, &settings)?;
     let profile_id = Uuid::new_v4().hyphenated().to_string();
     commit_subscription_import(
         profiles.repository(),
@@ -141,14 +159,14 @@ pub(crate) async fn import_profile_file(
     activate: bool,
 ) -> Result<ProfileImportResult, String> {
     let body = read_local_profile(Path::new(&path))?;
-    let settings = engine.engine_settings().clone();
-    let profile = validated_profile(&body, &settings)?;
     let fallback_name = Path::new(&path)
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string());
     let _maintenance = engine
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
+    let settings = engine.engine_settings()?;
+    let profile = validated_profile(&body, &settings)?;
     let imported = profiles
         .repository()
         .import_with_source(name.as_deref().or(fallback_name.as_deref()), &profile, None)
@@ -164,7 +182,7 @@ pub(crate) async fn update_profile(
     engine: State<'_, ManagedEngine>,
     profiles: State<'_, ManagedProfiles>,
     id: String,
-) -> Result<ProfileImportResult, String> {
+) -> Result<UiSubscriptionUpdateResult, String> {
     let stored = load_profile(profiles.repository(), &id)?;
     let source_url = stored
         .source_url
@@ -172,19 +190,47 @@ pub(crate) async fn update_profile(
         .ok_or_else(|| format!("profile has no subscription URL to update: {id}"))?;
     let target = validate_subscription_url(source_url)?;
     let body = fetch_subscription_bounded(&target, MAX_SUBSCRIPTION_DOCUMENT_BYTES).await?;
-    let settings = engine.engine_settings().clone();
-    let imported = validated_subscription_import(&body, &settings)?;
     let _maintenance = engine
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
-    commit_subscription_update(
+    let settings = engine.engine_settings()?;
+    let imported = validated_subscription_import_with_reusable_references(
+        &body,
+        &settings,
+        stored.profile.credential_references_in_outbound_order(),
+    )?;
+    collect_orphaned_credentials_now(profiles.repository(), profiles.credential_vault())
+        .await
+        .map_err(|error| {
+            format!(
+                "subscription update was not applied because preflight credential cleanup failed: {error}"
+            )
+        })?;
+
+    let profile = commit_subscription_update_with_rotation(
         profiles.repository(),
         profiles.credential_vault(),
         &stored,
         target.as_str(),
+        &body,
+        &settings,
         &imported,
     )
-    .await
+    .await?;
+
+    let (credential_cleanup_removed, credential_cleanup_pending, credential_cleanup_error) =
+        match collect_orphaned_credentials_now(profiles.repository(), profiles.credential_vault())
+            .await
+        {
+            Ok(removed) => (removed, false, None),
+            Err(error) => (0, true, Some(error)),
+        };
+    Ok(UiSubscriptionUpdateResult {
+        profile,
+        credential_cleanup_removed,
+        credential_cleanup_pending,
+        credential_cleanup_error,
+    })
 }
 
 /// Renames a profile and rebinds its subscription URL. The validated document
@@ -242,12 +288,12 @@ pub(crate) fn save_profile_text(
     id: String,
     body: String,
 ) -> Result<UiProfileSaveResult, String> {
-    let stored = load_profile(profiles.repository(), &id)?;
-    let settings = engine.engine_settings().clone();
-    let profile = validated_profile(&body, &settings)?;
     let _maintenance = engine
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
+    let stored = load_profile(profiles.repository(), &id)?;
+    let settings = engine.engine_settings()?;
+    let profile = validated_profile(&body, &settings)?;
     let saved = profiles
         .repository()
         .replace(&id, None, &profile, stored.source_url.as_deref())
@@ -334,6 +380,16 @@ pub(super) fn validated_subscription_import_with_namespace(
     Ok(imported)
 }
 
+fn validated_subscription_import_with_reusable_references(
+    body: &str,
+    settings: &EngineSettings,
+    references: Vec<cfw_singbox_config::CredentialRef>,
+) -> Result<crate::subscription_import::ImportedSubscription, String> {
+    let imported = import_subscription_document_with_reusable_references(body, references)?;
+    validate_subscription_projection(&imported, settings)?;
+    Ok(imported)
+}
+
 fn validate_subscription_projection(
     imported: &crate::subscription_import::ImportedSubscription,
     settings: &EngineSettings,
@@ -397,6 +453,94 @@ fn subscription_import_activation_error(error: impl fmt::Display) -> String {
     )
 }
 
+#[derive(Debug)]
+enum SubscriptionUpdateCommitError {
+    Mutation(String),
+    Credential(ImportedCredentialProvisionError),
+    Repository(String),
+}
+
+impl SubscriptionUpdateCommitError {
+    fn is_immutable_conflict(&self) -> bool {
+        matches!(
+            self,
+            Self::Credential(ImportedCredentialProvisionError::Rejected(
+                ImportedCredentialProvisionAttemptError::Vault(
+                    cfw_engine_api::CredentialVaultError::ImmutableConflict
+                )
+            ))
+        )
+    }
+}
+
+impl fmt::Display for SubscriptionUpdateCommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mutation(error) => write!(
+                formatter,
+                "subscription repository mutation could not begin before credential provisioning: {error}"
+            ),
+            Self::Credential(error) => write!(
+                formatter,
+                "subscription credential provisioning failed before repository commit: {error}"
+            ),
+            Self::Repository(error) => write!(
+                formatter,
+                "subscription repository update failed after credential provisioning; the unreferenced vault audience is eligible for credential garbage collection: {error}"
+            ),
+        }
+    }
+}
+
+async fn commit_subscription_update_attempt(
+    repository: &ProfileRepository,
+    vault: &impl CredentialVaultProvisioner,
+    expected: &StoredProfile,
+    source_url: &str,
+    imported: &crate::subscription_import::ImportedSubscription,
+) -> Result<ProfileImportResult, SubscriptionUpdateCommitError> {
+    let profile_id = &expected.record.id;
+    let mutation = repository
+        .begin_credential_profile_mutation_if_unchanged(expected)
+        .map_err(|error| SubscriptionUpdateCommitError::Mutation(error.to_string()))?;
+    provision_subscription_credentials_attempt(
+        vault,
+        profile_id,
+        &imported.profile,
+        &imported.credentials,
+    )
+    .await
+    .map_err(SubscriptionUpdateCommitError::Credential)?;
+    mutation
+        .commit_replace_if_unchanged(expected, None, &imported.profile, Some(source_url))
+        .map(|(updated, _committed)| updated)
+        .map_err(|error| SubscriptionUpdateCommitError::Repository(error.to_string()))
+}
+
+async fn commit_subscription_update_with_rotation(
+    repository: &ProfileRepository,
+    vault: &impl CredentialVaultProvisioner,
+    expected: &StoredProfile,
+    source_url: &str,
+    body: &str,
+    settings: &EngineSettings,
+    imported: &crate::subscription_import::ImportedSubscription,
+) -> Result<ProfileImportResult, String> {
+    match commit_subscription_update_attempt(repository, vault, expected, source_url, imported)
+        .await
+    {
+        Ok(profile) => Ok(profile),
+        Err(error) if error.is_immutable_conflict() => {
+            let rotated = validated_subscription_import(body, settings)?;
+            commit_subscription_update_attempt(repository, vault, expected, source_url, &rotated)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(test)]
 async fn commit_subscription_update(
     repository: &ProfileRepository,
     vault: &impl CredentialVaultProvisioner,
@@ -404,24 +548,9 @@ async fn commit_subscription_update(
     source_url: &str,
     imported: &crate::subscription_import::ImportedSubscription,
 ) -> Result<ProfileImportResult, String> {
-    let profile_id = &expected.record.id;
-    let mutation = repository
-        .begin_credential_profile_mutation()
-        .map_err(|error| {
-            format!(
-                "subscription repository mutation could not begin before credential provisioning: {error}"
-            )
-        })?;
-    provision_subscription_credentials(vault, profile_id, &imported.profile, &imported.credentials)
-        .await?;
-    mutation
-        .commit_replace_if_unchanged(expected, None, &imported.profile, Some(source_url))
-        .map(|(updated, _committed)| updated)
-        .map_err(|error| {
-            format!(
-                "subscription repository update failed after credential provisioning; the unreferenced vault audience is eligible for credential garbage collection: {error}"
-            )
-        })
+    commit_subscription_update_attempt(repository, vault, expected, source_url, imported)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn provision_subscription_credentials(
@@ -430,14 +559,23 @@ async fn provision_subscription_credentials(
     profile: &ValidatedSingBoxProfile,
     credentials: &[ImportedCredential],
 ) -> Result<(), String> {
-    if credentials.is_empty() && profile.credential_references().is_empty() {
-        return Ok(());
-    }
-    provision_imported_credentials_with_exact_replay(vault, profile_id, profile, credentials)
+    provision_subscription_credentials_attempt(vault, profile_id, profile, credentials)
         .await
         .map_err(|error| {
             format!("subscription credential provisioning failed before repository commit: {error}")
         })
+}
+
+async fn provision_subscription_credentials_attempt(
+    vault: &impl CredentialVaultProvisioner,
+    profile_id: &str,
+    profile: &ValidatedSingBoxProfile,
+    credentials: &[ImportedCredential],
+) -> Result<(), ImportedCredentialProvisionError> {
+    if credentials.is_empty() && profile.credential_references().is_empty() {
+        return Ok(());
+    }
+    provision_imported_credentials_with_exact_replay(vault, profile_id, profile, credentials).await
 }
 
 fn activate_if_requested(
@@ -779,6 +917,7 @@ pub(super) async fn fetch_subscription_bounded(
             response.status().as_u16()
         ));
     }
+    validate_subscription_content_encoding(response.headers())?;
     if response
         .content_length()
         .is_some_and(|length| length > maximum_bytes as u64)
@@ -805,9 +944,12 @@ pub(super) async fn fetch_subscription_bounded(
 }
 
 fn subscription_client() -> Result<Client, String> {
-    ensure_tls_crypto_provider()?;
-    Client::builder()
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    external_https_client_builder()
+        .map_err(|error| error.to_string())?
         .user_agent(SUBSCRIPTION_USER_AGENT)
+        .default_headers(headers)
         .referer(FORWARD_SUBSCRIPTION_REFERER)
         .connect_timeout(SUBSCRIPTION_CONNECT_TIMEOUT)
         .timeout(SUBSCRIPTION_REQUEST_TIMEOUT)
@@ -816,6 +958,12 @@ fn subscription_client() -> Result<Client, String> {
         // direct connection unless a future explicit trusted-proxy policy is
         // designed and verified end to end.
         .no_proxy()
+        // Keep the 512 KiB bound on the exact bytes the importer receives,
+        // even if another workspace crate enables reqwest compression later.
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
         .dns_resolver(PublicSubscriptionDnsResolver::new(
             SystemSubscriptionDnsResolver,
         ))
@@ -832,15 +980,21 @@ fn subscription_client() -> Result<Client, String> {
         .map_err(|error| sanitized_fetch_error("client build", &error))
 }
 
-/// reqwest is built without a bundled crypto provider, so a process-global one
-/// must exist before any HTTPS client is constructed. Installation is idempotent
-/// and shared with the updater and the controller client.
-fn ensure_tls_crypto_provider() -> Result<(), String> {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _already_installed = rustls::crypto::ring::default_provider().install_default();
-    }
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        return Err("the process TLS crypto provider is unavailable".into());
+fn validate_subscription_content_encoding(headers: &HeaderMap) -> Result<(), String> {
+    for value in headers.get_all(CONTENT_ENCODING) {
+        let value = value
+            .to_str()
+            .map_err(|_| "subscription response has an invalid Content-Encoding".to_owned())?;
+        let mut coding_count = 0_usize;
+        for coding in value.split(',').map(str::trim) {
+            coding_count += 1;
+            if coding.is_empty() || !coding.eq_ignore_ascii_case("identity") {
+                return Err("subscription response uses an unsupported Content-Encoding".to_owned());
+            }
+        }
+        if coding_count == 0 {
+            return Err("subscription response has an invalid Content-Encoding".to_owned());
+        }
     }
     Ok(())
 }
@@ -851,7 +1005,7 @@ fn sanitized_fetch_error(stage: &str, error: &reqwest::Error) -> String {
     let category = if error.is_timeout() {
         "timed out"
     } else if error.is_connect() {
-        "connection failed"
+        "secure connection failed (TLS 1.2 or newer is required)"
     } else if error.is_redirect() {
         "redirect was rejected"
     } else if error.is_body() || error.is_decode() {
@@ -930,6 +1084,45 @@ mod tests {
     const TRANSACTION_SOURCE_URL: &str = "https://subscription.example/current";
     const IMPORT_SECRET: &str = "subscription-secret-must-not-leak";
 
+    #[test]
+    fn subscription_update_result_flattens_profile_and_exposes_cleanup_state() {
+        let value = serde_json::to_value(UiSubscriptionUpdateResult {
+            profile: ProfileImportResult {
+                id: TRANSACTION_PROFILE_ID.into(),
+                name: "Work".into(),
+                bytes: 123,
+                digest: "ab".repeat(32),
+            },
+            credential_cleanup_removed: 2,
+            credential_cleanup_pending: false,
+            credential_cleanup_error: None,
+        })
+        .expect("serialize update result");
+        assert_eq!(value["name"], "Work");
+        assert_eq!(value["credential_cleanup_removed"], 2);
+        assert_eq!(value["credential_cleanup_pending"], false);
+        assert!(value.get("credential_cleanup_error").is_none());
+    }
+
+    #[test]
+    fn only_a_direct_immutable_conflict_authorizes_reference_rotation() {
+        let immutable =
+            SubscriptionUpdateCommitError::Credential(ImportedCredentialProvisionError::Rejected(
+                ImportedCredentialProvisionAttemptError::Vault(
+                    CredentialVaultError::ImmutableConflict,
+                ),
+            ));
+        assert!(immutable.is_immutable_conflict());
+
+        let unknown =
+            SubscriptionUpdateCommitError::Credential(ImportedCredentialProvisionError::Rejected(
+                ImportedCredentialProvisionAttemptError::Vault(
+                    CredentialVaultError::OutcomeUnknown,
+                ),
+            ));
+        assert!(!unknown.is_immutable_conflict());
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct ProvisionRequestSnapshot {
         profile_id: String,
@@ -937,6 +1130,33 @@ mod tests {
         required_references: Vec<CredentialRef>,
         entries: Vec<(CredentialRef, [u8; 32])>,
         repository_profile_visible: bool,
+    }
+
+    fn provision_request_snapshot(
+        profiles_dir: &Path,
+        request: &CredentialProvisionRequest<'_>,
+    ) -> ProvisionRequestSnapshot {
+        let entries = request
+            .entries()
+            .iter()
+            .map(|entry| {
+                let digest = Sha256::digest(entry.secret().expose_to_vault().as_bytes());
+                (entry.reference().clone(), digest.into())
+            })
+            .collect();
+        let profile_path = profiles_dir.join(format!("{}.profile.json", request.profile_id()));
+        let repository_profile_visible = match std::fs::symlink_metadata(profile_path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => panic!("observe repository before vault response: {error}"),
+        };
+        ProvisionRequestSnapshot {
+            profile_id: request.audience().profile_id().to_owned(),
+            profile_digest: request.audience().profile_digest().to_owned(),
+            required_references: request.required_references().to_vec(),
+            entries,
+            repository_profile_visible,
+        }
     }
 
     #[derive(Debug)]
@@ -995,32 +1215,11 @@ mod tests {
             &'a self,
             request: CredentialProvisionRequest<'a>,
         ) -> CredentialVaultFuture<'a> {
-            let entries = request
-                .entries()
-                .iter()
-                .map(|entry| {
-                    let digest = Sha256::digest(entry.secret().expose_to_vault().as_bytes());
-                    (entry.reference().clone(), digest.into())
-                })
-                .collect();
-            let profile_path = self
-                .profiles_dir
-                .join(format!("{}.profile.json", request.profile_id()));
-            let repository_profile_visible = match std::fs::symlink_metadata(profile_path) {
-                Ok(_) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => panic!("observe repository before vault response: {error}"),
-            };
+            let request_snapshot = provision_request_snapshot(&self.profiles_dir, &request);
             self.requests
                 .lock()
                 .expect("request lock")
-                .push(ProvisionRequestSnapshot {
-                    profile_id: request.audience().profile_id().to_owned(),
-                    profile_digest: request.audience().profile_digest().to_owned(),
-                    required_references: request.required_references().to_vec(),
-                    entries,
-                    repository_profile_visible,
-                });
+                .push(request_snapshot);
             let response = self
                 .responses
                 .lock()
@@ -1046,6 +1245,84 @@ mod tests {
                 }
                 response
             })
+        }
+
+        fn query_profile_credentials(
+            &self,
+            _request: CredentialPresenceRequest,
+        ) -> CredentialPresenceFuture<'_> {
+            Box::pin(async { Err(CredentialVaultError::Internal) })
+        }
+
+        fn preview_credential_garbage_collection(
+            &self,
+            _request: CredentialGarbageCollectionRequest,
+        ) -> CredentialGarbageCollectionPreviewFuture<'_> {
+            Box::pin(async { Err(CredentialVaultError::Internal) })
+        }
+
+        fn commit_credential_garbage_collection(
+            &self,
+            _request: CredentialGarbageCollectionCommitRequest,
+        ) -> CredentialGarbageCollectionCommitFuture<'_> {
+            Box::pin(async { Err(CredentialVaultError::Internal) })
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum RotationVaultMode {
+        ImmutableThenEcho,
+        AlwaysOutcomeUnknown,
+    }
+
+    #[derive(Debug)]
+    struct RotationCredentialVault {
+        profiles_dir: PathBuf,
+        mode: RotationVaultMode,
+        requests: Mutex<Vec<ProvisionRequestSnapshot>>,
+    }
+
+    impl RotationCredentialVault {
+        fn new(profiles_dir: PathBuf, mode: RotationVaultMode) -> Self {
+            Self {
+                profiles_dir,
+                mode,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<ProvisionRequestSnapshot> {
+            self.requests.lock().expect("request lock").clone()
+        }
+    }
+
+    impl CredentialVaultProvisioner for RotationCredentialVault {
+        fn provision_profile_credentials<'a>(
+            &'a self,
+            request: CredentialProvisionRequest<'a>,
+        ) -> CredentialVaultFuture<'a> {
+            let request_snapshot = provision_request_snapshot(&self.profiles_dir, &request);
+            let receipt = CredentialVaultReceipt {
+                profile_id: request_snapshot.profile_id.clone(),
+                profile_digest: request_snapshot.profile_digest.clone(),
+            };
+            let call = {
+                let mut requests = self.requests.lock().expect("request lock");
+                let call = requests.len();
+                requests.push(request_snapshot);
+                call
+            };
+            let response = match (self.mode, call) {
+                (RotationVaultMode::ImmutableThenEcho, 0) => {
+                    Err(CredentialVaultError::ImmutableConflict)
+                }
+                (RotationVaultMode::ImmutableThenEcho, 1) => Ok(receipt),
+                (RotationVaultMode::ImmutableThenEcho, _) => Err(CredentialVaultError::Internal),
+                (RotationVaultMode::AlwaysOutcomeUnknown, _) => {
+                    Err(CredentialVaultError::OutcomeUnknown)
+                }
+            };
+            Box::pin(async move { response })
         }
 
         fn query_profile_credentials(
@@ -1166,15 +1443,21 @@ mod tests {
     fn subscription_client_keeps_the_closed_transport_policy_wired() {
         let source = include_str!("subscriptions.rs");
         let builder = source
-            .split("Client::builder()")
+            .split("fn subscription_client()")
             .nth(1)
-            .expect("subscription client builder")
-            .split(".build()")
+            .expect("subscription client function")
+            .split("/// Transport failures")
             .next()
             .expect("bounded subscription client builder");
         for required in [
+            "external_https_client_builder()",
+            "HeaderValue::from_static(\"identity\")",
             ".referer(FORWARD_SUBSCRIPTION_REFERER)",
             ".no_proxy()",
+            ".no_gzip()",
+            ".no_brotli()",
+            ".no_deflate()",
+            ".no_zstd()",
             ".dns_resolver(PublicSubscriptionDnsResolver::new(",
             ".redirect(Policy::custom(",
         ] {
@@ -1182,6 +1465,27 @@ mod tests {
                 builder.contains(required),
                 "missing transport policy: {required}"
             );
+        }
+    }
+
+    #[test]
+    fn subscription_response_content_encoding_is_closed_to_identity() {
+        let empty = HeaderMap::new();
+        validate_subscription_content_encoding(&empty).expect("absent coding means identity");
+
+        let mut identity = HeaderMap::new();
+        identity.insert(CONTENT_ENCODING, HeaderValue::from_static("identity"));
+        validate_subscription_content_encoding(&identity).expect("explicit identity coding");
+
+        for value in ["gzip", "br", "identity, gzip", "", "identity,"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                CONTENT_ENCODING,
+                HeaderValue::from_str(value).expect("synthetic Content-Encoding"),
+            );
+            let error = validate_subscription_content_encoding(&headers)
+                .expect_err("unsupported content coding must fail closed");
+            assert!(error.contains("Content-Encoding"), "{value}: {error}");
         }
     }
 
@@ -1380,7 +1684,7 @@ mod tests {
     async fn fetch_errors_never_echo_the_subscription_url() {
         let secret = "token-must-not-leak";
         let host = "malformed host";
-        ensure_tls_crypto_provider().expect("test TLS provider");
+        crate::transport_security::ensure_tls_crypto_provider().expect("test TLS provider");
         let error = Client::builder()
             .timeout(Duration::from_millis(50))
             .build()
@@ -1724,7 +2028,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repository_cas_failure_preserves_selected_profile_and_leaves_only_orphan_audience() {
+    async fn stale_update_is_rejected_before_vault_provisioning() {
         let temporary = tempfile::TempDir::new().expect("temporary directory");
         let repository = ProfileRepository::new(temporary.path().join("profiles"));
         let original = selected_direct_profile(&repository);
@@ -1746,7 +2050,7 @@ mod tests {
         .await
         .expect_err("stale update CAS");
 
-        assert!(error.contains("eligible for credential garbage collection"));
+        assert!(error.contains("could not begin before credential provisioning"));
         assert_eq!(
             repository
                 .load(TRANSACTION_PROFILE_ID)
@@ -1761,10 +2065,10 @@ mod tests {
                 .expect("selected profile"),
             original
         );
-        let requests = vault.requests();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].repository_profile_visible);
-        assert_eq!(requests[0].profile_digest, imported.profile.digest());
+        assert!(
+            vault.requests().is_empty(),
+            "a stale response must not write a vault audience"
+        );
         let catalog = repository
             .credential_snapshot()
             .expect("credential snapshot")
@@ -1774,7 +2078,6 @@ mod tests {
             .find(|entry| entry.audience.profile_id() == TRANSACTION_PROFILE_ID)
             .expect("live original audience");
         assert_eq!(live.audience.profile_digest(), original.profile.digest());
-        assert_ne!(live.audience.profile_digest(), requests[0].profile_digest);
     }
 
     #[tokio::test]
@@ -1829,6 +2132,212 @@ mod tests {
                 .iter()
                 .cloned()
                 .collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_subscription_updates_keep_one_stable_vault_audience() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let body =
+            format!("trojan://{IMPORT_SECRET}@proxy.example.com:443?sni=proxy.example.com#Work");
+        let initial = validated_subscription_import(&body, &EngineSettings::default())
+            .expect("initial subscription");
+        let receipt = successful_receipt(TRANSACTION_PROFILE_ID, &initial);
+        let vault = ScriptedCredentialVault::new(
+            temporary.path().join("profiles"),
+            vec![Ok(receipt.clone()), Ok(receipt.clone()), Ok(receipt)],
+        );
+
+        commit_subscription_import(
+            &repository,
+            &vault,
+            TRANSACTION_PROFILE_ID,
+            Some("Work"),
+            TRANSACTION_SOURCE_URL,
+            &initial,
+            false,
+        )
+        .await
+        .expect("initial import");
+
+        for _ in 0..2 {
+            let stored = repository
+                .load(TRANSACTION_PROFILE_ID)
+                .expect("load profile")
+                .expect("stored profile");
+            let replay = validated_subscription_import_with_reusable_references(
+                &body,
+                &EngineSettings::default(),
+                stored.profile.credential_references_in_outbound_order(),
+            )
+            .expect("stable update import");
+            assert_eq!(replay.profile.digest(), initial.profile.digest());
+            commit_subscription_update_attempt(
+                &repository,
+                &vault,
+                &stored,
+                TRANSACTION_SOURCE_URL,
+                &replay,
+            )
+            .await
+            .expect("unchanged update");
+        }
+
+        let requests = vault.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.windows(2).all(|pair| {
+            pair[0].profile_digest == pair[1].profile_digest
+                && pair[0].required_references == pair[1].required_references
+        }));
+    }
+
+    #[tokio::test]
+    async fn immutable_secret_change_rotates_once_and_commits_the_fresh_reference() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let profiles_dir = temporary.path().join("profiles");
+        let repository = ProfileRepository::new(&profiles_dir);
+        let old_body = "trojan://old-secret@proxy.example.com:443?sni=proxy.example.com#Work";
+        let new_body = "trojan://new-secret@proxy.example.com:443?sni=proxy.example.com#Work";
+        let initial = validated_subscription_import_with_namespace(
+            old_body,
+            &EngineSettings::default(),
+            Uuid::parse_str("77777777-7777-4777-8777-777777777777").expect("credential namespace"),
+        )
+        .expect("initial subscription");
+        repository
+            .import_with_id_and_source(
+                TRANSACTION_PROFILE_ID,
+                Some("Work"),
+                &initial.profile,
+                Some(TRANSACTION_SOURCE_URL),
+            )
+            .expect("seed subscription profile");
+        repository
+            .select(TRANSACTION_PROFILE_ID)
+            .expect("select initial profile");
+        let stored = repository
+            .load(TRANSACTION_PROFILE_ID)
+            .expect("load initial profile")
+            .expect("initial profile");
+        let reused = validated_subscription_import_with_reusable_references(
+            new_body,
+            &EngineSettings::default(),
+            stored.profile.credential_references_in_outbound_order(),
+        )
+        .expect("reused-reference candidate");
+        assert_eq!(reused.profile.digest(), stored.profile.digest());
+        let vault =
+            RotationCredentialVault::new(profiles_dir, RotationVaultMode::ImmutableThenEcho);
+
+        let updated = commit_subscription_update_with_rotation(
+            &repository,
+            &vault,
+            &stored,
+            TRANSACTION_SOURCE_URL,
+            new_body,
+            &EngineSettings::default(),
+            &reused,
+        )
+        .await
+        .expect("immutable conflict rotation");
+
+        let requests = vault.requests();
+        assert_eq!(requests.len(), 2, "rotation is attempted exactly once");
+        assert_eq!(
+            requests[0].required_references,
+            stored.profile.credential_references_in_outbound_order()
+        );
+        assert_ne!(
+            requests[1].required_references, requests[0].required_references,
+            "changed material must receive a fresh UUID"
+        );
+        assert_eq!(requests[0].entries.len(), requests[1].entries.len());
+        assert!(
+            requests[0]
+                .entries
+                .iter()
+                .zip(&requests[1].entries)
+                .all(|(first, second)| first.1 == second.1),
+            "rotation changes only the UUID, not the requested secret"
+        );
+        assert_ne!(requests[1].profile_digest, requests[0].profile_digest);
+        let committed = repository
+            .load(TRANSACTION_PROFILE_ID)
+            .expect("load rotated profile")
+            .expect("rotated profile");
+        assert_eq!(updated.id, TRANSACTION_PROFILE_ID);
+        assert_eq!(committed.record.digest, requests[1].profile_digest);
+        assert_eq!(
+            committed.profile.credential_references_in_outbound_order(),
+            requests[1].required_references
+        );
+        assert_eq!(
+            repository
+                .load_selected()
+                .expect("load selected profile")
+                .expect("selected rotated profile")
+                .record
+                .digest,
+            requests[1].profile_digest
+        );
+    }
+
+    #[tokio::test]
+    async fn outcome_unknown_replays_exactly_and_never_rotates_references() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let profiles_dir = temporary.path().join("profiles");
+        let repository = ProfileRepository::new(&profiles_dir);
+        let body = "trojan://new-secret@proxy.example.com:443?sni=proxy.example.com#Work";
+        let initial = validated_subscription_import_with_namespace(
+            body,
+            &EngineSettings::default(),
+            Uuid::parse_str("88888888-8888-4888-8888-888888888888").expect("credential namespace"),
+        )
+        .expect("initial subscription");
+        repository
+            .import_with_id_and_source(
+                TRANSACTION_PROFILE_ID,
+                Some("Work"),
+                &initial.profile,
+                Some(TRANSACTION_SOURCE_URL),
+            )
+            .expect("seed subscription profile");
+        let stored = repository
+            .load(TRANSACTION_PROFILE_ID)
+            .expect("load initial profile")
+            .expect("initial profile");
+        let reused = validated_subscription_import_with_reusable_references(
+            body,
+            &EngineSettings::default(),
+            stored.profile.credential_references_in_outbound_order(),
+        )
+        .expect("reused-reference candidate");
+        let vault =
+            RotationCredentialVault::new(profiles_dir, RotationVaultMode::AlwaysOutcomeUnknown);
+
+        let error = commit_subscription_update_with_rotation(
+            &repository,
+            &vault,
+            &stored,
+            TRANSACTION_SOURCE_URL,
+            body,
+            &EngineSettings::default(),
+            &reused,
+        )
+        .await
+        .expect_err("two unknown outcomes must fail closed");
+
+        assert!(error.contains("after one outcome-unknown replay"));
+        let requests = vault.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1], "the replay must be exact");
+        assert_eq!(
+            repository
+                .load(TRANSACTION_PROFILE_ID)
+                .expect("load unchanged profile")
+                .expect("unchanged profile"),
+            stored
         );
     }
 

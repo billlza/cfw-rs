@@ -91,8 +91,8 @@ TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 PRODUCT_OBSERVATION_PREFIX = "cfw-release-observation-v1 "
 PRODUCT_OBSERVATION_DOCUMENT = "cfw-product-observation-event-v1"
 PACKET_STATE_DOCUMENT = "cfw-packet-product-state-observation-v1"
-PACKET_PROVENANCE_DOCUMENT = "cfw-packet-capture-provenance-v3"
-PACKET_ATTEMPT_DOCUMENT = "cfw-packet-send-attempt-v3"
+PACKET_PROVENANCE_DOCUMENT = "cfw-packet-capture-provenance-v4"
+PACKET_ATTEMPT_DOCUMENT = "cfw-packet-send-attempt-v4"
 PRODUCT_LOG_SUBSYSTEM = "com.bill.clashformac"
 PRODUCT_LOG_CATEGORY = "release-observation"
 PRODUCT_LOG_PREDICATE = (
@@ -124,21 +124,43 @@ REMOTE_CAPTURE_KNOWN_HOSTS_SHA256 = (
     "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba"
 )
 TRANSPORT_ENDPOINT_IDENTITY_SHA256 = (
-    "1441266a6fea3eaf0c94f4a6b60ca34bb42e7010c22fcb61cf6f04677eb8e9fa"
+    "7e878c338d56a79e69f91d6c8d7091f8f524912c249e69ebb814b4ae91be76fa"
 )
 LAN_ENDPOINT_IDENTITY_SHA256 = (
-    "7db9a43d88a58b544b006fba4b7b14f426e122bcc798a81ccb91dce071e77ce3"
+    "c5e9e90cc7a4ec25bf27041373c3fd94e8a55096fb5227ad3a5156a8053dc2a6"
 )
 LAN_ENDPOINT_IDENTITY_FILE_SHA256 = (
-    "452bfc8b3aa8883bf2326ddb001d9798626e1e8ea55f79dafd0ed3f955be2c89"
+    "bee82809982b4dc5cc0b5697f10077bfa88884f58eb152cce59a5109127d29a3"
 )
-UNRESOLVED_LAN_ENDPOINT_IDENTITY_SHA256 = hashlib.sha256(
-    b"cfw-packet-endpoint-unresolved:lan-bypass"
-).hexdigest()
+IOS_LAN_CORE_DEVICE_SHA256 = (
+    "a992e87636750487576c10f2ae66a9eb8e9a1b533ca720fd3dae047ef5f15ec0"
+)
+IOS_LAN_PROVISIONING_UDID_SHA256 = (
+    "983e5e676afaca0eeb42cc86a9898270020a6e1b9db062226033b8c415851d76"
+)
+IOS_LAN_APP_TREE_SHA256 = (
+    "9b70643066177cc6cf2b523411a50965a6c5f433aefcd91918ad2d7e8f371cc7"
+)
+IOS_LAN_EXECUTABLE_SHA256 = (
+    "01d04a497d5a45a342db9986626055428929ff72a28dfcc9882eb8a9da19d1fe"
+)
+IOS_LAN_SOURCE_TREE_SHA256 = (
+    "9dc014d685b1484d1a3bd31a9c58620d5fbb01e6efccf932024b1f30e57d5a60"
+)
+IOS_LAN_PROFILE_SHA256 = (
+    "deed517ef2a944c19c1dae2207117fe520b8d48b4a3efd31af329682b626bc47"
+)
+IOS_LAN_ENTITLEMENTS_SHA256 = (
+    "5ebda5445335b4bef0ff695cf4646a8377bc2e07b1e873ce4cdb6c8744dc1bbf"
+)
+IOS_LAN_SIGNING_CERTIFICATE_SHA256 = (
+    "80ce3788e305d8d9321d6d8ec1dd9fdde12158de9203795f992706ae61d83a2b"
+)
+IOS_LAN_PROFILE_UUID = "B43F41C0-5487-47D8-9F39-FCDBDA8BA227"
 DNS_REMOTE_CAPTURE_POLICIES: dict[str, dict[str, str]] = {
     "primary": {
         "identity_sha256": (
-            "74c44aefc884cc3ceaa7a22137ba30e37349d4081bbd2ff81aea49ffb863d145"
+            "1bc00593e985d10b0ed0d38903166d78c5ec199682141007d6a792a19320526e"
         ),
         "project": "cfw-release-evidence-20260730",
         "zone": "asia-east1-c",
@@ -154,7 +176,7 @@ DNS_REMOTE_CAPTURE_POLICIES: dict[str, dict[str, str]] = {
     },
     "secondary": {
         "identity_sha256": (
-            "190c7b668b42ad7e0d4fe6c81882151a90967745fcfcb9f4923c94d9208415f4"
+            "839764c618e036098728f4dcd02f0f600c29cc17bc5e941fab1d6f2233d1805a"
         ),
         "project": "cfw-release-evidence-20260730",
         "zone": "asia-northeast1-b",
@@ -177,9 +199,6 @@ TUNNEL_CAPTURE_LOCAL_ADDRESSES = {
     "ipv4": "198.18.64.1",
     "ipv6": "2001:2:0:64::1",
 }
-LAN_ENDPOINT_ADDRESS = "172.20.10.2"
-
-
 @dataclass(frozen=True)
 class CaseSpec:
     protocol: str
@@ -256,8 +275,32 @@ CASE_STAGE_PLANS = MappingProxyType(
 )
 
 
+def _private_lan_endpoint(value: object) -> str:
+    if not isinstance(value, str):
+        raise PacketEvidenceError(
+            "controlled LAN endpoint must come from one iPhone ready receipt"
+        )
+    try:
+        address = ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError as error:
+        raise PacketEvidenceError("controlled LAN endpoint is not IPv4") from error
+    private_networks = (
+        ipaddress.IPv4Network("10.0.0.0/8"),
+        ipaddress.IPv4Network("172.16.0.0/12"),
+        ipaddress.IPv4Network("192.168.0.0/16"),
+    )
+    if str(address) != value or not any(address in network for network in private_networks):
+        raise PacketEvidenceError(
+            "controlled LAN endpoint is not canonical RFC1918 IPv4"
+        )
+    return value
+
+
 def packet_capture_filter_argv(
-    *, case_id: str, tokens: tuple[str, str, str]
+    *,
+    case_id: str,
+    tokens: tuple[str, str, str],
+    lan_endpoint_address: str | None = None,
 ) -> tuple[str, ...]:
     """Return the only local/remote BPF expression admitted for one case."""
 
@@ -266,13 +309,14 @@ def packet_capture_filter_argv(
         raise PacketEvidenceError("packet capture filter input is not source-owned")
     if spec.protocol == "dns":
         return ("udp", "and", "port", "53")
-    remote_address = (
-        LAN_ENDPOINT_ADDRESS
-        if case_id == "lan-bypass"
-        else TRANSPORT_ENDPOINT_ADDRESSES[spec.family]
-    )
-    if remote_address is None:
-        raise PacketEvidenceError("controlled LAN endpoint is not source-pinned")
+    if case_id == "lan-bypass":
+        remote_address = _private_lan_endpoint(lan_endpoint_address)
+    else:
+        if lan_endpoint_address is not None:
+            raise PacketEvidenceError(
+                "non-LAN capture filter declares a runtime LAN endpoint"
+            )
+        remote_address = TRANSPORT_ENDPOINT_ADDRESSES[spec.family]
     payload_offset = "tcp[((tcp[12] & 0xf0) >> 2):4]"
     if spec.protocol == "udp":
         payload_offset = "udp[8:4]"
@@ -386,44 +430,20 @@ REMOTE_ACCESS_FIELDS = {
     "public_key_sha256",
 }
 LAN_PEER_REMOTE_ACCESS_FIELDS = {
+    "schema_version",
     "document",
+    "evidence_role",
+    "claim_eligible",
     "source_identity_sha256",
     "source_identity_file_sha256",
+    "runtime_endpoint_source",
     "network",
     "admission",
     "before_capture",
     "after_capture",
     "cleanup",
 }
-LAN_PEER_NETWORK_FIELDS = {"interface_name", "ipv4"}
-LAN_PEER_ADMISSION_FIELDS = {
-    "schema_version",
-    "document",
-    "identity",
-    "identity_provenance",
-    "deployment_receipt",
-    "post_deploy_identity_receipt",
-    "process_receipt",
-    "post_start_identity_receipt",
-}
-LAN_PEER_REVALIDATION_FIELDS = {"schema_version", "document", "stage", "window"}
-LAN_PEER_CLEANUP_FIELDS = {
-    "schema_version",
-    "document",
-    "process_pid",
-    "process_absent",
-    "deployment_absent",
-    "pre_delete_identity_revalidation",
-    "post_delete_identity_revalidation",
-    "removed_directory_binding",
-    "removed_binary_binding",
-    "process_absence_window",
-    "deployment_absence_window",
-    "attempts",
-    "window",
-    "outcome",
-    "capture_state",
-}
+LAN_PEER_NETWORK_FIELDS = {"interface_name", "ipv4", "listener_port", "transport"}
 ENDPOINT_FIELDS = {"role", "address", "port", "transport"}
 ATTEMPT_FIELDS = {
     "schema_version",
@@ -1080,71 +1100,666 @@ def _require_interface_output(
         raise PacketEvidenceError(f"{case_id} {label} output differs")
 
 
-def _validate_lan_peer_provenance(value: Any, *, case_id: str) -> None:
-    try:
-        access = exact_object(
-            value, LAN_PEER_REMOTE_ACCESS_FIELDS, f"{case_id}.remote_access"
-        )
-        network = exact_object(
-            access["network"], LAN_PEER_NETWORK_FIELDS, f"{case_id}.remote_access.network"
-        )
-        admission = exact_object(
-            access["admission"], LAN_PEER_ADMISSION_FIELDS, f"{case_id}.remote_access.admission"
-        )
-        before = exact_object(
-            access["before_capture"],
-            LAN_PEER_REVALIDATION_FIELDS,
-            f"{case_id}.remote_access.before_capture",
-        )
-        after = exact_object(
-            access["after_capture"],
-            LAN_PEER_REVALIDATION_FIELDS,
-            f"{case_id}.remote_access.after_capture",
-        )
-        cleanup = exact_object(
-            access["cleanup"], LAN_PEER_CLEANUP_FIELDS, f"{case_id}.remote_access.cleanup"
-        )
-    except (TypeError, ValueError) as error:
-        raise PacketEvidenceError(f"{case_id} Android LAN peer provenance is malformed") from error
+def _ios_command_receipt(
+    value: Any, *, label: str, expected_role: str | None = None
+) -> dict[str, Any]:
+    receipt = exact_object(
+        value,
+        {
+            "role",
+            "argv_sha256",
+            "started_at",
+            "completed_at",
+            "duration_ms",
+            "exit_code",
+            "stdout_size",
+            "stdout_sha256",
+            "stderr_size",
+            "stderr_sha256",
+        },
+        label,
+    )
+    started = timestamp_fraction(receipt["started_at"])
+    completed = timestamp_fraction(receipt["completed_at"])
     if (
-        access["document"] != "cfw-android-lan-peer-provenance-v1"
+        not isinstance(receipt["role"], str)
+        or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", receipt["role"]) is None
+        or expected_role is not None
+        and receipt["role"] != expected_role
+        or _sha256(receipt["argv_sha256"], f"{label}.argv_sha256")
+        != receipt["argv_sha256"]
+        or type(receipt["duration_ms"]) is not int
+        or receipt["duration_ms"] < 0
+        or type(receipt["exit_code"]) is not int
+        or receipt["exit_code"] != 0
+        or any(
+            type(receipt[field]) is not int or receipt[field] < 0
+            for field in ("stdout_size", "stderr_size")
+        )
+        or any(
+            _sha256(receipt[field], f"{label}.{field}") != receipt[field]
+            for field in ("stdout_sha256", "stderr_sha256")
+        )
+        or started > completed
+    ):
+        raise PacketEvidenceError(f"{label} command receipt differs")
+    return receipt
+
+
+def _ios_copy_receipt(
+    value: Any, *, label: str, expected_role: str
+) -> dict[str, Any]:
+    receipt = exact_object(
+        value,
+        {"command", "envelope_sha256", "receipt_sha256", "receipt_size"},
+        label,
+    )
+    _ios_command_receipt(
+        receipt["command"], label=f"{label}.command", expected_role=expected_role
+    )
+    if (
+        _sha256(receipt["envelope_sha256"], f"{label}.envelope_sha256")
+        != receipt["envelope_sha256"]
+        or _sha256(receipt["receipt_sha256"], f"{label}.receipt_sha256")
+        != receipt["receipt_sha256"]
+        or type(receipt["receipt_size"]) is not int
+        or not 1 <= receipt["receipt_size"] <= 64 * 1024
+    ):
+        raise PacketEvidenceError(f"{label} copied receipt differs")
+    return receipt
+
+
+def _validate_lan_peer_provenance(
+    value: Any, *, case_id: str
+) -> dict[str, Any]:
+    access = exact_object(
+        value, LAN_PEER_REMOTE_ACCESS_FIELDS, f"{case_id}.remote_access"
+    )
+    network = exact_object(
+        access["network"], LAN_PEER_NETWORK_FIELDS, f"{case_id}.remote_access.network"
+    )
+    peer_ipv4 = _private_lan_endpoint(network["ipv4"])
+    admission = exact_object(
+        access["admission"],
+        {
+            "schema_version",
+            "document",
+            "evidence_role",
+            "claim_eligible",
+            "source_identity_sha256",
+            "source_identity_file_sha256",
+            "device",
+            "artifact",
+            "preflight",
+            "installation",
+            "primer",
+            "session",
+            "process",
+            "network",
+            "listener",
+            "admitted_at",
+        },
+        f"{case_id}.remote_access.admission",
+    )
+    before = exact_object(
+        access["before_capture"],
+        {
+            "schema_version",
+            "document",
+            "claim_eligible",
+            "session_id",
+            "process_id",
+            "peer_ipv4",
+            "listener_port",
+            "process_inventory",
+            "process_inventory_sha256",
+            "ready_copy",
+            "observed_at",
+        },
+        f"{case_id}.remote_access.before_capture",
+    )
+    after = exact_object(
+        access["after_capture"],
+        {
+            "schema_version",
+            "document",
+            "claim_eligible",
+            "session_id",
+            "process_id",
+            "peer_ipv4",
+            "listener_port",
+            "result_copy",
+            "result_sha256",
+            "result_status",
+            "sender_server_bindings",
+            "process_inventory",
+            "process_inventory_sha256",
+            "ready_copy",
+            "observed_at",
+        },
+        f"{case_id}.remote_access.after_capture",
+    )
+    cleanup = exact_object(
+        access["cleanup"],
+        {
+            "schema_version",
+            "document",
+            "claim_eligible",
+            "outcome",
+            "capture_state",
+            "session_id",
+            "process_id",
+            "termination",
+            "uninstall",
+        },
+        f"{case_id}.remote_access.cleanup",
+    )
+    session_id = _sha256(before["session_id"], f"{case_id}.lan.session_id")
+    process_id = before["process_id"]
+    if (
+        access["schema_version"] != 1
+        or access["document"] != "cfm-ios-packet-lan-peer-provenance-v1"
+        or access["evidence_role"] != "server_observation_only"
+        or access["claim_eligible"] is not False
         or access["source_identity_sha256"] != LAN_ENDPOINT_IDENTITY_SHA256
-        or access["source_identity_file_sha256"] != LAN_ENDPOINT_IDENTITY_FILE_SHA256
-        or network != {"interface_name": "wlan0", "ipv4": LAN_ENDPOINT_ADDRESS}
-        or before["document"] != "cfw-android-lan-peer-before-capture-revalidation-v1"
-        or before["stage"] != "before-capture"
-        or after["document"] != "cfw-android-lan-peer-after-capture-revalidation-v1"
-        or after["stage"] != "after-capture"
-        or admission["schema_version"] != 1
-        or admission["document"] != "cfw-android-lan-peer-admission-v1"
-        or cleanup["schema_version"] != 1
-        or cleanup["document"] != "cfw-android-lan-peer-cleanup-v1"
+        or access["source_identity_file_sha256"]
+        != LAN_ENDPOINT_IDENTITY_FILE_SHA256
+        or access["runtime_endpoint_source"]
+        != "cfm-ios-packet-lan-peer-ready-v1"
+        or network
+        != {
+            "interface_name": "en0",
+            "ipv4": peer_ipv4,
+            "listener_port": PACKET_TRANSPORT_PORT,
+            "transport": "tcp4",
+        }
+        or type(process_id) is not int
+        or not 1 <= process_id < 2**31
+    ):
+        raise PacketEvidenceError(f"{case_id} iPhone LAN peer identity differs")
+
+    device = exact_object(
+        admission["device"],
+        {
+            "core_device_identifier_sha256",
+            "provisioning_udid_sha256",
+            "product_type",
+            "os_version",
+            "os_build",
+            "inventory_connection_state",
+            "inventory_preparedness_state",
+            "device_list_receipt_sha256",
+            "device_list_command",
+            "device_details_receipt_sha256",
+            "device_details_command",
+            "lock_receipt_sha256",
+            "lock_command",
+        },
+        f"{case_id}.lan.admission.device",
+    )
+    inventory_state_is_valid = (
+        device["inventory_connection_state"] == "connected"
+        and device["inventory_preparedness_state"] == 7
+    ) or (
+        device["inventory_connection_state"] == "disconnected"
+        and device["inventory_preparedness_state"] is None
+    )
+    if not inventory_state_is_valid:
+        raise PacketEvidenceError(
+            f"{case_id} iPhone LAN peer inventory bootstrap state differs"
+        )
+    artifact = exact_object(
+        admission["artifact"],
+        {
+            "app_tree_sha256",
+            "executable_sha256",
+            "source_tree_sha256",
+            "profile_sha256",
+            "entitlements_sha256",
+            "signing_certificate_sha256",
+            "validation",
+        },
+        f"{case_id}.lan.admission.artifact",
+    )
+    preflight = exact_object(
+        admission["preflight"],
+        {
+            "app_inventory_sha256",
+            "process_inventory_sha256",
+            "app_inventory_command",
+            "process_inventory_command",
+            "app_absent",
+            "process_absent",
+        },
+        f"{case_id}.lan.admission.preflight",
+    )
+    installation = exact_object(
+        admission["installation"],
+        {
+            "install_intent_sha256",
+            "install_receipt_sha256",
+            "post_install_app_inventory_sha256",
+            "install_command",
+            "post_install_app_inventory_command",
+        },
+        f"{case_id}.lan.admission.installation",
+    )
+    primer = exact_object(
+        admission["primer"],
+        {
+            "pre_launch_lock_receipt_sha256",
+            "pre_launch_lock_command",
+            "launch_receipt_sha256",
+            "launch_command",
+            "process_inventory_sha256",
+            "process_inventory_command",
+            "receipt_copy",
+            "cleanup",
+        },
+        f"{case_id}.lan.admission.primer",
+    )
+    admitted_session = exact_object(
+        admission["session"],
+        {"session_id", "session_sha256", "copy_receipt_sha256", "copy_command"},
+        f"{case_id}.lan.admission.session",
+    )
+    admitted_process = exact_object(
+        admission["process"],
+        {
+            "pre_launch_lock_receipt_sha256",
+            "pre_launch_lock_command",
+            "process_id",
+            "launch_receipt_sha256",
+            "launch_command",
+            "process_inventory_sha256",
+            "process_inventory_command",
+            "ready_copy",
+        },
+        f"{case_id}.lan.admission.process",
+    )
+    validation = exact_object(
+        artifact["validation"],
+        {
+            "profile_decode",
+            "keychain_certificate",
+            "signature_verify",
+            "signature_details",
+            "signature_entitlements",
+            "architectures",
+            "build_version",
+            "cdhash",
+            "profile_uuid",
+        },
+        f"{case_id}.lan.admission.artifact.validation",
+    )
+    for field, role in {
+        "profile_decode": "ios-peer-profile-decode",
+        "keychain_certificate": "ios-peer-keychain-certificate",
+        "signature_verify": "ios-peer-codesign-verify",
+        "signature_details": "ios-peer-codesign-details",
+        "signature_entitlements": "ios-peer-codesign-entitlements",
+        "architectures": "ios-peer-executable-architectures",
+        "build_version": "ios-peer-executable-build-version",
+    }.items():
+        _ios_command_receipt(
+            validation[field],
+            label=f"{case_id}.lan.artifact.validation.{field}",
+            expected_role=role,
+        )
+    if (
+        admission["schema_version"] != 1
+        or admission["document"] != "cfm-ios-packet-lan-peer-admission-v1"
+        or admission["evidence_role"] != "server_observation_only"
+        or admission["claim_eligible"] is not False
+        or admission["source_identity_sha256"] != LAN_ENDPOINT_IDENTITY_SHA256
+        or admission["source_identity_file_sha256"]
+        != LAN_ENDPOINT_IDENTITY_FILE_SHA256
+        or device["core_device_identifier_sha256"] != IOS_LAN_CORE_DEVICE_SHA256
+        or device["provisioning_udid_sha256"]
+        != IOS_LAN_PROVISIONING_UDID_SHA256
+        or device["product_type"] != "iPhone17,1"
+        or device["os_version"] != "26.5"
+        or device["os_build"] != "23F77"
+        or artifact["app_tree_sha256"] != IOS_LAN_APP_TREE_SHA256
+        or artifact["executable_sha256"] != IOS_LAN_EXECUTABLE_SHA256
+        or artifact["source_tree_sha256"] != IOS_LAN_SOURCE_TREE_SHA256
+        or artifact["profile_sha256"] != IOS_LAN_PROFILE_SHA256
+        or artifact["entitlements_sha256"] != IOS_LAN_ENTITLEMENTS_SHA256
+        or artifact["signing_certificate_sha256"]
+        != IOS_LAN_SIGNING_CERTIFICATE_SHA256
+        or validation["profile_uuid"] != IOS_LAN_PROFILE_UUID
+        or not isinstance(validation["cdhash"], str)
+        or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", validation["cdhash"])
+        is None
+        or preflight["app_absent"] is not True
+        or preflight["process_absent"] is not True
+        or admitted_session["session_id"] != session_id
+        or admitted_process["process_id"] != process_id
+        or admission["network"] != {"interface_name": "en0", "ipv4": peer_ipv4}
+        or admission["listener"] != {"port": PACKET_TRANSPORT_PORT, "transport": "tcp4"}
+    ):
+        raise PacketEvidenceError(f"{case_id} iPhone admission is not source-bound")
+    timestamp_fraction(admission["admitted_at"])
+    for value, label, role in (
+        (device["device_list_command"], "device_list", "ios-peer-device-list"),
+        (device["device_details_command"], "device_details", "ios-peer-device-details"),
+        (device["lock_command"], "lock", "ios-peer-lock-state"),
+        (preflight["app_inventory_command"], "preflight_apps", "ios-peer-app-inventory"),
+        (
+            preflight["process_inventory_command"],
+            "preflight_processes",
+            "ios-peer-process-inventory",
+        ),
+        (installation["install_command"], "install", "ios-peer-install"),
+        (
+            installation["post_install_app_inventory_command"],
+            "post_install_apps",
+            "ios-peer-app-inventory",
+        ),
+        (
+            primer["pre_launch_lock_command"],
+            "primer_pre_launch_lock",
+            "ios-peer-lock-state",
+        ),
+        (primer["launch_command"], "primer_launch", "ios-peer-primer-launch"),
+        (
+            primer["process_inventory_command"],
+            "primer_processes",
+            "ios-peer-process-inventory",
+        ),
+        (admitted_session["copy_command"], "session_copy", "ios-peer-packet-lan-session-copy"),
+        (
+            admitted_process["pre_launch_lock_command"],
+            "packet_pre_launch_lock",
+            "ios-peer-lock-state",
+        ),
+        (admitted_process["launch_command"], "packet_launch", "ios-peer-packet-lan-launch"),
+        (
+            admitted_process["process_inventory_command"],
+            "packet_processes",
+            "ios-peer-process-inventory",
+        ),
+    ):
+        _ios_command_receipt(
+            value, label=f"{case_id}.lan.admission.{label}", expected_role=role
+        )
+    _ios_copy_receipt(
+        primer["receipt_copy"],
+        label=f"{case_id}.lan.admission.primer.receipt_copy",
+        expected_role="ios-peer-primer-result-copy",
+    )
+    primer_cleanup = exact_object(
+        primer["cleanup"],
+        {
+            "process_inventory",
+            "process_inventory_sha256",
+            "primer_copy",
+            "terminate_command",
+            "terminate_receipt_sha256",
+            "process_id",
+            "post_terminate_process_inventory",
+            "post_terminate_process_inventory_sha256",
+        },
+        f"{case_id}.lan.admission.primer.cleanup",
+    )
+    _ios_command_receipt(
+        primer_cleanup["process_inventory"],
+        label=f"{case_id}.lan.primer.cleanup.process_inventory",
+        expected_role="ios-peer-process-inventory",
+    )
+    _ios_copy_receipt(
+        primer_cleanup["primer_copy"],
+        label=f"{case_id}.lan.primer.cleanup.primer_copy",
+        expected_role="ios-peer-primer-result-copy",
+    )
+    _ios_command_receipt(
+        primer_cleanup["terminate_command"],
+        label=f"{case_id}.lan.primer.cleanup.terminate",
+        expected_role="ios-peer-primer-terminate",
+    )
+    _ios_command_receipt(
+        primer_cleanup["post_terminate_process_inventory"],
+        label=f"{case_id}.lan.primer.cleanup.post_inventory",
+        expected_role="ios-peer-process-inventory",
+    )
+    if (
+        type(primer_cleanup["process_id"]) is not int
+        or not 1 <= primer_cleanup["process_id"] < 2**31
+    ):
+        raise PacketEvidenceError(f"{case_id} primer cleanup PID differs")
+    for value, label in (
+        (primer_cleanup["process_inventory_sha256"], "primer cleanup inventory"),
+        (primer_cleanup["terminate_receipt_sha256"], "primer terminate receipt"),
+        (
+            primer_cleanup["post_terminate_process_inventory_sha256"],
+            "primer post-terminate inventory",
+        ),
+    ):
+        _sha256(value, f"{case_id}.lan.{label}")
+    _ios_copy_receipt(
+        admitted_process["ready_copy"],
+        label=f"{case_id}.lan.admission.process.ready_copy",
+        expected_role="ios-peer-packet-lan-ready-copy",
+    )
+    for value, label in (
+        (device["device_list_receipt_sha256"], "device list receipt"),
+        (device["device_details_receipt_sha256"], "device details receipt"),
+        (device["lock_receipt_sha256"], "lock receipt"),
+        (preflight["app_inventory_sha256"], "preflight app inventory"),
+        (preflight["process_inventory_sha256"], "preflight process inventory"),
+        (installation["install_intent_sha256"], "install intent"),
+        (installation["install_receipt_sha256"], "install receipt"),
+        (
+            installation["post_install_app_inventory_sha256"],
+            "post-install app inventory",
+        ),
+        (primer["pre_launch_lock_receipt_sha256"], "primer pre-launch lock"),
+        (primer["launch_receipt_sha256"], "primer launch receipt"),
+        (primer["process_inventory_sha256"], "primer process inventory"),
+        (admitted_session["session_sha256"], "session receipt"),
+        (admitted_session["copy_receipt_sha256"], "session copy receipt"),
+        (
+            admitted_process["pre_launch_lock_receipt_sha256"],
+            "packet pre-launch lock",
+        ),
+        (admitted_process["launch_receipt_sha256"], "packet launch receipt"),
+        (admitted_process["process_inventory_sha256"], "packet process inventory"),
+    ):
+        _sha256(value, f"{case_id}.lan.{label}")
+
+    before_inventory = _ios_command_receipt(
+        before["process_inventory"],
+        label=f"{case_id}.lan.before.process_inventory",
+        expected_role="ios-peer-process-inventory",
+    )
+    del before_inventory
+    _ios_copy_receipt(
+        before["ready_copy"],
+        label=f"{case_id}.lan.before.ready_copy",
+        expected_role="ios-peer-packet-lan-ready-copy",
+    )
+    after_inventory = _ios_command_receipt(
+        after["process_inventory"],
+        label=f"{case_id}.lan.after.process_inventory",
+        expected_role="ios-peer-process-inventory",
+    )
+    del after_inventory
+    _ios_copy_receipt(
+        after["result_copy"],
+        label=f"{case_id}.lan.after.result_copy",
+        expected_role="ios-peer-packet-lan-result-copy",
+    )
+    _ios_copy_receipt(
+        after["ready_copy"],
+        label=f"{case_id}.lan.after.ready_copy",
+        expected_role="ios-peer-packet-lan-ready-copy",
+    )
+    if (
+        before["schema_version"] != 1
+        or before["document"] != "cfm-ios-packet-lan-peer-before-capture-v1"
+        or before["claim_eligible"] is not False
+        or after["schema_version"] != 1
+        or after["document"] != "cfm-ios-packet-lan-peer-after-capture-v1"
+        or after["claim_eligible"] is not False
+        or after["result_status"] != "closed"
+        or any(
+            value != expected
+            for value, expected in (
+                (before["session_id"], session_id),
+                (after["session_id"], session_id),
+                (before["process_id"], process_id),
+                (after["process_id"], process_id),
+                (before["peer_ipv4"], peer_ipv4),
+                (after["peer_ipv4"], peer_ipv4),
+                (before["listener_port"], PACKET_TRANSPORT_PORT),
+                (after["listener_port"], PACKET_TRANSPORT_PORT),
+            )
+        )
+    ):
+        raise PacketEvidenceError(f"{case_id} iPhone capture binding differs")
+    for value, label in (
+        (before["process_inventory_sha256"], "before process inventory"),
+        (after["process_inventory_sha256"], "after process inventory"),
+        (after["result_sha256"], "result receipt"),
+    ):
+        _sha256(value, f"{case_id}.lan.{label}")
+    timestamp_fraction(before["observed_at"])
+    timestamp_fraction(after["observed_at"])
+
+    bindings = after["sender_server_bindings"]
+    if not isinstance(bindings, list) or len(bindings) != len(PACKET_STAGES):
+        raise PacketEvidenceError(f"{case_id} iPhone sender/server bindings differ")
+    normalized_bindings: list[dict[str, Any]] = []
+    local_addresses: set[str] = set()
+    local_ports: set[int] = set()
+    for index, stage in enumerate(PACKET_STAGES):
+        binding = exact_object(
+            bindings[index],
+            {
+                "stage",
+                "token_sha256",
+                "local_address",
+                "local_port",
+                "remote_address",
+                "remote_port",
+                "bytes_received",
+                "eof_observed",
+            },
+            f"{case_id}.lan.binding.{stage}",
+        )
+        local_address = _private_lan_endpoint(binding["local_address"])
+        if (
+            binding["stage"] != stage
+            or _sha256(binding["token_sha256"], f"{case_id}.lan.{stage}.token")
+            != binding["token_sha256"]
+            or type(binding["local_port"]) is not int
+            or not 49_152 <= binding["local_port"] <= 65_535
+            or binding["remote_address"] != peer_ipv4
+            or binding["remote_port"] != PACKET_TRANSPORT_PORT
+            or binding["bytes_received"] != 20
+            or binding["eof_observed"] is not True
+        ):
+            raise PacketEvidenceError(f"{case_id} iPhone {stage} binding differs")
+        local_addresses.add(local_address)
+        local_ports.add(binding["local_port"])
+        normalized_bindings.append(binding)
+    if len(local_addresses) != 1 or len(local_ports) != len(PACKET_STAGES):
+        raise PacketEvidenceError(f"{case_id} iPhone client endpoint drifted")
+
+    termination = exact_object(
+        cleanup["termination"],
+        {
+            "process_inventory",
+            "process_inventory_sha256",
+            "ready_copy",
+            "terminate_command",
+            "terminate_receipt_sha256",
+            "process_id",
+            "post_terminate_process_inventory",
+            "post_terminate_process_inventory_sha256",
+        },
+        f"{case_id}.lan.cleanup.termination",
+    )
+    uninstall = exact_object(
+        cleanup["uninstall"],
+        {
+            "uninstall_command",
+            "uninstall_receipt_sha256",
+            "final_app_inventory",
+            "final_app_inventory_sha256",
+            "final_process_inventory",
+            "final_process_inventory_sha256",
+            "app_absent",
+            "process_absent",
+        },
+        f"{case_id}.lan.cleanup.uninstall",
+    )
+    for value, label, role in (
+        (
+            termination["process_inventory"],
+            "cleanup_process_inventory",
+            "ios-peer-process-inventory",
+        ),
+        (termination["terminate_command"], "terminate", "ios-peer-terminate"),
+        (
+            termination["post_terminate_process_inventory"],
+            "post_terminate_process_inventory",
+            "ios-peer-process-inventory",
+        ),
+        (uninstall["uninstall_command"], "uninstall", "ios-peer-uninstall"),
+        (
+            uninstall["final_app_inventory"],
+            "final_app_inventory",
+            "ios-peer-app-inventory",
+        ),
+        (
+            uninstall["final_process_inventory"],
+            "final_process_inventory",
+            "ios-peer-process-inventory",
+        ),
+    ):
+        _ios_command_receipt(
+            value, label=f"{case_id}.lan.cleanup.{label}", expected_role=role
+        )
+    _ios_copy_receipt(
+        termination["ready_copy"],
+        label=f"{case_id}.lan.cleanup.ready_copy",
+        expected_role="ios-peer-packet-lan-ready-copy",
+    )
+    for value, label in (
+        (termination["process_inventory_sha256"], "cleanup process inventory"),
+        (termination["terminate_receipt_sha256"], "terminate receipt"),
+        (
+            termination["post_terminate_process_inventory_sha256"],
+            "post-terminate process inventory",
+        ),
+        (uninstall["uninstall_receipt_sha256"], "uninstall receipt"),
+        (uninstall["final_app_inventory_sha256"], "final app inventory"),
+        (uninstall["final_process_inventory_sha256"], "final process inventory"),
+    ):
+        _sha256(value, f"{case_id}.lan.cleanup.{label}")
+    if (
+        cleanup["schema_version"] != 1
+        or cleanup["document"] != "cfm-ios-packet-lan-peer-cleanup-v1"
+        or cleanup["claim_eligible"] is not False
         or cleanup["outcome"] != "capture-complete"
         or cleanup["capture_state"] != "capture-validated"
-        or cleanup["process_absent"] is not True
-        or cleanup["deployment_absent"] is not True
+        or cleanup["session_id"] != session_id
+        or cleanup["process_id"] != process_id
+        or termination["process_id"] != process_id
+        or uninstall["app_absent"] is not True
+        or uninstall["process_absent"] is not True
     ):
-        raise PacketEvidenceError(f"{case_id} Android LAN peer provenance identity differs")
-    try:
-        from scripts.physical_capture.android_lan_peer import (
-            validate_android_lan_peer_identity,
-        )
-
-        identity = validate_android_lan_peer_identity(admission["identity"])
-    except Exception as error:
-        raise PacketEvidenceError(
-            f"{case_id} Android LAN peer admission identity is invalid"
-        ) from error
-    if (
-        hashlib.sha256(canonical_json(identity)).hexdigest()
-        != LAN_ENDPOINT_IDENTITY_SHA256
-        or identity["network_interface_name"] != network["interface_name"]
-        or identity["ipv4"] != network["ipv4"]
-    ):
-        raise PacketEvidenceError(f"{case_id} Android LAN peer admission is not source-bound")
+        raise PacketEvidenceError(f"{case_id} iPhone cleanup is incomplete")
+    return {
+        "peer_ipv4": peer_ipv4,
+        "session_id": session_id,
+        "process_id": process_id,
+        "sender_server_bindings": normalized_bindings,
+    }
 
 
-def _capture_provenance_v3(
+def _capture_provenance_v4(
     value: Any,
     *,
     case_id: str,
@@ -1156,7 +1771,7 @@ def _capture_provenance_v3(
     provenance = exact_object(value, PROVENANCE_FIELDS, f"{case_id}.capture_provenance")
     if (
         type(provenance["schema_version"]) is not int
-        or provenance["schema_version"] != 3
+        or provenance["schema_version"] != 4
         or provenance["document"] != PACKET_PROVENANCE_DOCUMENT
         or provenance["case_id"] != case_id
         or provenance["state_observation_sha256"] != state_observation_sha256
@@ -1255,6 +1870,7 @@ def _capture_provenance_v3(
         "remote_access",
         "capture_offload_context",
     )
+    lan_peer: dict[str, Any] | None = None
     if spec.protocol == "dns":
         policy = DNS_REMOTE_CAPTURE_POLICIES[spec.resolver_role]
         if device != {
@@ -1392,10 +2008,7 @@ def _capture_provenance_v3(
         ):
             raise PacketEvidenceError(f"{case_id} remote setup timeline is not causal")
     else:
-        if (
-            case_id == "lan-bypass"
-            and LAN_ENDPOINT_IDENTITY_SHA256 != UNRESOLVED_LAN_ENDPOINT_IDENTITY_SHA256
-        ):
+        if case_id == "lan-bypass":
             if device != {
                 "name": "pktap,all", "link_type": DLT_RAW,
                 "scope": "all-interfaces-source-filtered-raw",
@@ -1403,9 +2016,13 @@ def _capture_provenance_v3(
                 provenance[field] is not None
                 for field in remote_fields
                 if field not in {"remote_access", "capture_offload_context"}
-            ) or provenance["capture_offload_context"] != "android-adb-usb-lan-peer-v1":
+            ) or provenance["capture_offload_context"] != (
+                "ios-coredevice-localnetwork-packet-peer-v1"
+            ):
                 raise PacketEvidenceError(f"{case_id} local capture policy differs")
-            _validate_lan_peer_provenance(provenance["remote_access"], case_id=case_id)
+            lan_peer = _validate_lan_peer_provenance(
+                provenance["remote_access"], case_id=case_id
+            )
         elif device != {
             "name": "pktap,all", "link_type": DLT_RAW,
             "scope": "all-interfaces-source-filtered-raw",
@@ -1450,6 +2067,7 @@ def _capture_provenance_v3(
         "started_at": started_at,
         "completed_at": completed_at,
         "host_transaction": {**host, **snapshots},
+        "lan_peer": lan_peer,
     }
 
 
@@ -1527,7 +2145,12 @@ def validate_packet_state_observation(
 
 
 def _stage_endpoint_set(
-    value: Any, *, case_id: str, stage: str, spec: CaseSpec
+    value: Any,
+    *,
+    case_id: str,
+    stage: str,
+    spec: CaseSpec,
+    lan_endpoint_address: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if not isinstance(value, list) or len(value) != 2:
         raise PacketEvidenceError(f"{case_id}.{stage} endpoint_set is invalid")
@@ -1566,13 +2189,11 @@ def _stage_endpoint_set(
     expected_remote = (
         DNS_REMOTE_CAPTURE_POLICIES[spec.resolver_role][spec.family]
         if spec.protocol == "dns"
-        else LAN_ENDPOINT_ADDRESS
+        else _private_lan_endpoint(lan_endpoint_address)
         if case_id == "lan-bypass"
         else TRANSPORT_ENDPOINT_ADDRESSES[spec.family]
     )
     expected_port = 53 if spec.protocol == "dns" else PACKET_TRANSPORT_PORT
-    if expected_remote is None:
-        raise PacketEvidenceError("controlled LAN endpoint is not source-pinned")
     if remote["address"] != expected_remote or remote["port"] != expected_port:
         raise PacketEvidenceError(f"{case_id}.{stage} remote endpoint differs")
     return local, remote
@@ -1596,7 +2217,7 @@ def _ifconfig_addresses(stdout: str, family: str) -> set[str]:
     return addresses
 
 
-def _send_attempt_v3(
+def _send_attempt_v4(
     value: Any,
     *,
     case_id: str,
@@ -1609,7 +2230,7 @@ def _send_attempt_v3(
     attempt = exact_object(value, ATTEMPT_FIELDS, f"{case_id}.send_attempt")
     if (
         type(attempt["schema_version"]) is not int
-        or attempt["schema_version"] != 3
+        or attempt["schema_version"] != 4
         or attempt["document"] != PACKET_ATTEMPT_DOCUMENT
         or attempt["case_id"] != case_id
         or attempt["state_observation_sha256"] != state_observation_sha256
@@ -1634,8 +2255,18 @@ def _send_attempt_v3(
             or stage["token_sha256"] != hashlib.sha256(token).hexdigest()
         ):
             raise PacketEvidenceError(f"{case_id}.{stage_name} stage identity differs")
+        lan_peer = provenance.get("lan_peer")
+        lan_endpoint_address = (
+            lan_peer.get("peer_ipv4")
+            if isinstance(lan_peer, dict) and case_id == "lan-bypass"
+            else None
+        )
         local, remote = _stage_endpoint_set(
-            stage["endpoint_set"], case_id=case_id, stage=stage_name, spec=spec
+            stage["endpoint_set"],
+            case_id=case_id,
+            stage=stage_name,
+            spec=spec,
+            lan_endpoint_address=lan_endpoint_address,
         )
         route = _command(
             stage["route_command"],
@@ -1796,6 +2427,33 @@ def _send_attempt_v3(
         }
         if result != expected_result:
             raise PacketEvidenceError(f"{case_id}.{stage_name} send result differs")
+        if case_id == "lan-bypass":
+            if not isinstance(lan_peer, dict):
+                raise PacketEvidenceError(
+                    f"{case_id}.{stage_name} lacks iPhone server provenance"
+                )
+            server_bindings = lan_peer.get("sender_server_bindings")
+            if (
+                not isinstance(server_bindings, list)
+                or len(server_bindings) != len(PACKET_STAGES)
+            ):
+                raise PacketEvidenceError(
+                    f"{case_id}.{stage_name} iPhone server bindings differ"
+                )
+            server = server_bindings[index]
+            if (
+                server["stage"] != stage_name
+                or server["token_sha256"] != result["token_sha256"]
+                or server["local_address"] != local["address"]
+                or server["local_port"] != local["port"]
+                or server["remote_address"] != remote["address"]
+                or server["remote_port"] != remote["port"]
+                or server["bytes_received"] != result["bytes_submitted"]
+                or server["eof_observed"] is not True
+            ):
+                raise PacketEvidenceError(
+                    f"{case_id}.{stage_name} sender/iPhone binding differs"
+                )
         if not (
             route["completed_at"] <= interface_command["started_at"]
             < interface_command["completed_at"] <= command["started_at"]
@@ -1975,7 +2633,7 @@ def _validate(
             expected_kind="packet-capture-provenance",
             label=f"{case_id}.provenance_artifact",
         )
-        provenance = _capture_provenance_v3(
+        provenance = _capture_provenance_v4(
             provenance_document,
             case_id=case_id,
             spec=spec,
@@ -2015,6 +2673,12 @@ def _validate(
                 case["token"],
                 case["window_end_token"],
             ),
+            lan_endpoint_address=(
+                provenance["lan_peer"]["peer_ipv4"]
+                if case_id == "lan-bypass"
+                and isinstance(provenance["lan_peer"], dict)
+                else None
+            ),
         )
         if provenance["capture_filter_argv"] != list(expected_filter):
             raise PacketEvidenceError(f"{case_id} capture filter differs from tokens")
@@ -2023,7 +2687,7 @@ def _validate(
             expected_kind="packet-send-attempt",
             label=f"{case_id}.attempt_artifact",
         )
-        attempt = _send_attempt_v3(
+        attempt = _send_attempt_v4(
             attempt_document,
             case_id=case_id,
             spec=spec,

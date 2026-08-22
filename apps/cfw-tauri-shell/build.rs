@@ -17,7 +17,7 @@ const GO_TOOLCHAIN_TREE_SHA256_ENV: &str = "CFW_GO_TOOLCHAIN_TREE_SHA256";
 const GO_TOOLS_TREE_SHA256_ENV: &str = "CFW_GO_TOOLS_TREE_SHA256";
 const GO_MODULE_CACHE_TREE_SHA256_ENV: &str = "CFW_GO_MODULE_CACHE_TREE_SHA256";
 
-const LIBBOX_METADATA_KEYS: [&str; 23] = [
+const LIBBOX_METADATA_KEYS: [&str; 24] = [
     "sourceTag",
     "sourceCommit",
     "goVersion",
@@ -37,6 +37,7 @@ const LIBBOX_METADATA_KEYS: [&str; 23] = [
     "securityPatchSha256",
     "rawPacketPatchSha256",
     "dnsFailoverPatchSha256",
+    "endpointConflictPatchSha256",
     "patchedDiffSha256",
     "combinedDiffSha256",
     "patchedGoModSha256",
@@ -109,6 +110,7 @@ struct SingBoxLock {
     security_patch: SingBoxSecurityPatchLock,
     raw_packet_patch: SingBoxSourcePatchLock,
     dns_failover_patch: SingBoxSourcePatchLock,
+    endpoint_conflict_patch: SingBoxSourcePatchLock,
     combined_diff_sha256: String,
 }
 
@@ -286,6 +288,16 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     )?;
     require_pin(
         &pins,
+        "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+        &dependency_lock.sing_box.endpoint_conflict_patch.path,
+    )?;
+    require_pin(
+        &pins,
+        "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+        &dependency_lock.sing_box.endpoint_conflict_patch.sha256,
+    )?;
+    require_pin(
+        &pins,
         "SING_BOX_PATCHED_DIFF_SHA256",
         &dependency_lock.sing_box.security_patch.patched_diff_sha256,
     )?;
@@ -362,6 +374,29 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
     {
         return Err("sing-box DNS failover patch digest differs from dependency lock".into());
     }
+    let endpoint_conflict_patch_path = repository_root.join(safe_relative_path(
+        &dependency_lock.sing_box.endpoint_conflict_patch.path,
+    )?);
+    println!(
+        "cargo:rerun-if-changed={}",
+        endpoint_conflict_patch_path.display()
+    );
+    require_regular_file(&endpoint_conflict_patch_path)?;
+    let endpoint_conflict_patch = fs::read(&endpoint_conflict_patch_path).map_err(|error| {
+        format!(
+            "read sing-box endpoint conflict patch {}: {error}",
+            endpoint_conflict_patch_path.display()
+        )
+    })?;
+    if sha256_hex(&endpoint_conflict_patch)
+        != dependency_lock
+            .sing_box
+            .endpoint_conflict_patch
+            .sha256
+            .as_str()
+    {
+        return Err("sing-box endpoint conflict patch digest differs from dependency lock".into());
+    }
 
     let dependency_root = repository_root.join("target/native-dependencies");
     let framework = dependency_root.join("Libbox.xcframework");
@@ -402,6 +437,10 @@ fn verify_release_native_artifacts(repository_root: &Path) -> Result<(), String>
         (
             "dnsFailoverPatchSha256",
             "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+        ),
+        (
+            "endpointConflictPatchSha256",
+            "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
         ),
         ("patchedDiffSha256", "SING_BOX_PATCHED_DIFF_SHA256"),
         ("combinedDiffSha256", "SING_BOX_COMBINED_DIFF_SHA256"),

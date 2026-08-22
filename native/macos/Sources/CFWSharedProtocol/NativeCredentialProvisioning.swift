@@ -12,7 +12,8 @@ public struct CredentialProvisionEntry: Codable, Equatable, Sendable {
     guard !secretBytes.isEmpty,
       secretBytes.count <= 16 * 1_024,
       let value = String(data: secretBytes, encoding: .utf8),
-      !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+      !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+      reference.kind.admitsSecretSyntax(value)
     else {
       throw NativeBridgeProtocolError.invalidCredentialSlot
     }

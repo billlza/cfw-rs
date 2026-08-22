@@ -137,6 +137,13 @@ impl ValidatedSingBoxProfile {
         self.document.credential_references()
     }
 
+    /// Returns references in outbound/slot order for a transaction that wants
+    /// to retain stable immutable IDs while rebuilding an equivalent profile.
+    /// Presence and vault requests continue to use the canonical sorted view.
+    pub fn credential_references_in_outbound_order(&self) -> Vec<CredentialRef> {
+        self.document.credential_references_in_outbound_order()
+    }
+
     /// True only when the effective final route selects a supported remote
     /// transport. Merely declaring an unused remote does not make a DIRECT or
     /// BLOCK final route safe for one-way legacy VPN retirement.

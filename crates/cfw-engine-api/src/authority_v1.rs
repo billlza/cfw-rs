@@ -10,8 +10,8 @@ use std::{collections::BTreeSet, fmt};
 use uuid::Uuid;
 
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 0;
-pub const MINIMUM_MINOR: u16 = 0;
+pub const MINOR: u16 = 1;
+pub const MINIMUM_MINOR: u16 = 1;
 pub const SUPPORTED_FEATURE_BITS: u64 = 0;
 pub const MAX_ENVELOPE_BYTES: usize = 1_048_576;
 pub const MAX_CONFIGURATION_BYTES: u32 = 768 * 1_024;
@@ -173,7 +173,7 @@ impl WireValidate for ProtocolVersion {
         if self.major != MAJOR {
             return Err(CodecError::UnsupportedMajor(self.major));
         }
-        if self.minor != MINOR || self.minimum_minor > self.minor {
+        if self.minor != MINOR || self.minimum_minor != MINIMUM_MINOR {
             return Err(CodecError::UnsupportedMinor(self.minor));
         }
         let unsupported = self.feature_bits & !SUPPORTED_FEATURE_BITS;

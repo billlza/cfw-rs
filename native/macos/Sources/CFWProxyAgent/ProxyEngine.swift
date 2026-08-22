@@ -4,6 +4,7 @@ import Foundation
 
 enum ProxyEngineError: Error, Equatable, Sendable {
   case runtime(String)
+  case endpointConflict(role: LibboxRuntimeEndpointRole, port: UInt16)
   case runtimeReceiptMismatch
   case invalidConfiguration
   case missingMixedListener
@@ -134,10 +135,15 @@ private final class LibboxProxyEngine: ProxyEngine, @unchecked Sendable {
       guard runtimeReceipt == expectedReceipt else {
         throw ProxyEngineError.runtimeReceiptMismatch
       }
-    } catch {
+    } catch let error as LibboxRuntimeError {
+      if case .endpointConflict(let role, let port) = error {
+        throw ProxyEngineError.endpointConflict(role: role, port: port)
+      }
       // ProxySessionLifecycle always invokes stop() after a start error. Keep
       // ownership until that explicit barrier succeeds, even if the runtime
       // already performed an idempotent local cleanup.
+      throw ProxyEngineError.runtime(error.localizedDescription)
+    } catch {
       throw ProxyEngineError.runtime(error.localizedDescription)
     }
     emitReady(endpoint, sessionID: sessionID)

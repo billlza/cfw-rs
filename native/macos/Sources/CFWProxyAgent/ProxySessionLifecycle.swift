@@ -1,4 +1,5 @@
 import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
 
@@ -21,6 +22,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
   case configuration(String)
   case engineCreation(String)
   case engineStart(String)
+  case endpointConflict(role: LibboxRuntimeEndpointRole, port: UInt16)
   case listenerReadinessTimedOut
   case engineStop(String)
   case engineFailed(ProxyEngineFailure)
@@ -41,6 +43,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
     case .configuration: code = "proxy-configuration-failed"
     case .engineCreation: code = "proxy-engine-creation-failed"
     case .engineStart: code = "proxy-engine-start-failed"
+    case .endpointConflict(let role, _):
+      code = role == .mixed ? "mixed-endpoint-in-use" : "controller-endpoint-in-use"
     case .listenerReadinessTimedOut: code = "proxy-listener-readiness-timeout"
     case .engineStop: code = "proxy-engine-stop-failed"
     case .engineFailed: code = "proxy-engine-crashed"
@@ -76,6 +80,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
       "System Proxy runtime creation failed."
     case .engineStart:
       "System Proxy runtime startup failed."
+    case .endpointConflict(let role, let port):
+      "The System Proxy \(role.rawValue) endpoint could not bind to port \(port)."
     case .listenerReadinessTimedOut:
       "System Proxy listener did not become ready before the bounded timeout."
     case .engineStop:
@@ -326,6 +332,11 @@ final class ProxySessionLifecycle: @unchecked Sendable {
                 self?.handleEngineEvent(event, sessionID: sessionID)
               }
             }
+          } catch let error as ProxyEngineError {
+            if case .endpointConflict(let role, let port) = error {
+              throw ProxySessionLifecycleError.endpointConflict(role: role, port: port)
+            }
+            throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
           } catch {
             throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
           }

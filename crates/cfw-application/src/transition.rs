@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use cfw_engine_api::{
-    BackendError, EngineBackend, EngineCommandContext, EngineGenerationStore, EngineMode,
-    EngineOwner, EngineSnapshot, EngineState, TunnelInstallOutcome,
+    BackendError, BackendErrorKind, EngineBackend, EngineCommandContext, EngineGenerationStore,
+    EngineMode, EngineOwner, EngineSnapshot, EngineState, TunnelInstallOutcome,
 };
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use tokio::sync::watch;
@@ -325,10 +325,27 @@ async fn fail_backend(
         set_failed(state, snapshots, target, generation, &error);
         return Err(error);
     }
+    let endpoint_conflict = matches!(
+        (operation, source.kind),
+        (
+            EngineOperation::StartSystemProxy,
+            BackendErrorKind::MixedEndpointInUse | BackendErrorKind::ControllerEndpointInUse
+        ) | (
+            EngineOperation::StartTunnel,
+            BackendErrorKind::ControllerEndpointInUse
+        )
+    );
     let error = match stop_owned_runtime(backend, state, snapshots, operation_timeout).await {
         Ok(()) => {
             let start_error = source.clone();
             match prove_global_off(backend, state, snapshots, status_query_timeout).await {
+                Ok(()) if endpoint_conflict => {
+                    set_off(state, snapshots);
+                    return Err(EngineCoordinatorError::StartEndpointConflictAfterOff {
+                        operation,
+                        conflict: source.kind,
+                    });
+                }
                 Ok(()) => backend_error(operation, source),
                 Err(proof_error) => EngineCoordinatorError::StartAndOffProofFailed {
                     start_operation: operation,

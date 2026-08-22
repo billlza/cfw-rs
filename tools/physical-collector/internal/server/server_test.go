@@ -156,6 +156,31 @@ func TestProductionRoutesDefaultClosed(t *testing.T) {
 	}
 }
 
+func TestHealthRouteUsesCloudRunCompatiblePath(t *testing.T) {
+	store := newMemoryLedger()
+	service := mustService(t, testConfig(config.RoleNonceIssuer, false), store, nil)
+
+	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("health route returned %d", response.Code)
+	}
+	if response.Body.String() != "{\"status\":\"ok\"}\n" {
+		t.Fatalf("health route returned unexpected body %q", response.Body.String())
+	}
+
+	legacyRequest := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	legacyResponse := httptest.NewRecorder()
+	service.ServeHTTP(legacyResponse, legacyRequest)
+	if legacyResponse.Code != http.StatusNotFound {
+		t.Fatalf("reserved healthz route returned %d", legacyResponse.Code)
+	}
+	if len(store.records) != 0 {
+		t.Fatal("health checks changed the ledger")
+	}
+}
+
 func TestIssueAndSignReceiptReconstructsCanonicalPayload(t *testing.T) {
 	store := newMemoryLedger()
 	now := time.Date(2026, 7, 29, 4, 0, 0, 0, time.UTC)

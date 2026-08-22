@@ -601,14 +601,125 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                 self.assertIn(fragment, text)
 
     def test_libbox_module_cache_seals_the_offline_test_graph(self) -> None:
+        contract = (SCRIPTS / "libbox_module_cache_contract.bash").read_text(
+            encoding="utf-8"
+        )
+        for array_name in (
+            "LIBBOX_MODULE_BUILD_PACKAGES",
+            "LIBBOX_GOMOBILE_BIND_PACKAGES",
+            "LIBBOX_RACE_TEST_PACKAGES",
+            "LIBBOX_TEST_PACKAGES",
+            "LIBBOX_COMPILE_TEST_PACKAGES",
+            "LIBBOX_VET_PACKAGES",
+        ):
+            with self.subTest(contract_array=array_name):
+                self.assertIn(f"{array_name}=(", contract)
+        self.assertIn('"./route"', contract)
+
         preparation = (SCRIPTS / "prepare_libbox_modules.sh").read_text(
             encoding="utf-8"
         )
         self.assertIn("-test", preparation)
+        self.assertIn('libbox_load_module_cache_contract "$repo_root"', preparation)
+        for array_name in (
+            "LIBBOX_MODULE_BUILD_PACKAGES",
+            "LIBBOX_GOMOBILE_BIND_PACKAGES",
+            "LIBBOX_RACE_TEST_PACKAGES",
+            "LIBBOX_TEST_PACKAGES",
+            "LIBBOX_COMPILE_TEST_PACKAGES",
+            "LIBBOX_VET_PACKAGES",
+        ):
+            with self.subTest(preparation_array=array_name):
+                self.assertIn(f'"${{{array_name}[@]}}"', preparation)
+        self.assertIn("artifactKind=pinned-go-module-cache-v2", preparation)
         self.assertIn(
-            "./dns ./option ./common/dialer ./daemon ./experimental/libbox",
+            "moduleCacheContractSha256=$LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
             preparation,
         )
+
+        source_tests = (SCRIPTS / "test_libbox_source.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('libbox_load_module_cache_contract "$repo_root"', source_tests)
+        for array_name in (
+            "LIBBOX_RACE_TEST_PACKAGES",
+            "LIBBOX_TEST_PACKAGES",
+            "LIBBOX_COMPILE_TEST_PACKAGES",
+            "LIBBOX_VET_PACKAGES",
+        ):
+            with self.subTest(source_test_array=array_name):
+                self.assertIn(f'"${{{array_name}[@]}}"', source_tests)
+
+        verifier = (SCRIPTS / "release_toolchain_contract.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("artifactKind=pinned-go-module-cache-v2", verifier)
+        self.assertIn(
+            "moduleCacheContractSha256=$LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+            verifier,
+        )
+
+    def test_real_libbox_module_cache_contract_loads(self) -> None:
+        shell = (
+            'set -euo pipefail; source "$1"; source "$2"; '
+            'libbox_load_module_cache_contract "$3"; '
+            'printf "%s\\n" "${LIBBOX_COMPILE_TEST_PACKAGES[@]}"'
+        )
+        completed = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                shell,
+                "module-cache-contract-test",
+                str(PINS),
+                str(SCRIPTS / "libbox_source_contract.sh"),
+                str(REPOSITORY),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertEqual(completed.stdout.splitlines(), [b"./common/dialer", b"./route"])
+
+    def test_libbox_module_cache_contract_rejects_unsafe_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            contract = root / "unsafe-contract.sh"
+            contract.write_text(
+                """\
+LIBBOX_MODULE_BUILD_PACKAGES=("./experimental/libbox")
+LIBBOX_GOMOBILE_BIND_PACKAGES=("github.com/sagernet/gomobile/bind")
+LIBBOX_RACE_TEST_PACKAGES=("./dns")
+LIBBOX_TEST_PACKAGES=(".")
+LIBBOX_COMPILE_TEST_PACKAGES=("../escape")
+LIBBOX_VET_PACKAGES=(".")
+""",
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(contract.read_bytes()).hexdigest()
+            shell = (
+                'set -euo pipefail; source "$1"; '
+                'LIBBOX_MODULE_CACHE_CONTRACT_PATH=unsafe-contract.sh; '
+                'LIBBOX_MODULE_CACHE_CONTRACT_SHA256="$2"; '
+                'libbox_load_module_cache_contract "$3"'
+            )
+            completed = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    shell,
+                    "module-cache-contract-test",
+                    str(SCRIPTS / "libbox_source_contract.sh"),
+                    digest,
+                    str(root),
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(b"unsafe compile-test package", completed.stderr)
 
     def test_libbox_consumers_share_the_exact_artifact_contract(self) -> None:
         contract = (SCRIPTS / "libbox_source_contract.sh").read_text(encoding="utf-8")
@@ -636,6 +747,7 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256",
             "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
             "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+            "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
             "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256",
             "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
             "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256",
@@ -668,12 +780,16 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         for fragment in (
-            "const LIBBOX_METADATA_KEYS: [&str; 23]",
+            "const LIBBOX_METADATA_KEYS: [&str; 24]",
             '"goToolchainTreeSha256"',
             '"goToolsTreeSha256"',
             '"goModuleCacheTreeSha256"',
             '"archiveDeterminism"',
             '"zeroArDate-v1"',
+            "endpoint_conflict_patch: SingBoxSourcePatchLock",
+            '"SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH"',
+            '"SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"',
+            "sing-box endpoint conflict patch digest differs from dependency lock",
             "actual_metadata_keys != expected_metadata_keys",
             "CFW_GO_TOOLCHAIN_TREE_SHA256",
             "CFW_GO_TOOLS_TREE_SHA256",
@@ -1044,9 +1160,11 @@ class PublicationToolchainBindingTests(unittest.TestCase):
                 "go-workspace/pkg/mod",
                 "go-module-cache.manifest.json",
                 [
-                    "artifactKind=pinned-go-module-cache-v1",
+                    "artifactKind=pinned-go-module-cache-v2",
                     f"buildTags={self.pins['LIBBOX_BUILD_TAGS']}",
                     f"goVersion={self.pins['GO_VERSION']}",
+                    "moduleCacheContractSha256="
+                    f"{self.pins['LIBBOX_MODULE_CACHE_CONTRACT_SHA256']}",
                     f"patchedGoModSha256={self.pins['SING_BOX_PATCHED_GO_MOD_SHA256']}",
                     f"patchedGoSumSha256={self.pins['SING_BOX_PATCHED_GO_SUM_SHA256']}",
                     "platform=darwin-arm64",
@@ -1069,6 +1187,42 @@ class PublicationToolchainBindingTests(unittest.TestCase):
         with patch.dict("os.environ", {"CFW_TOOLCHAIN_ROOT": str(self.root)}):
             with self.assertRaisesRegex(PublicationError, "verification failed"):
                 verified_release_toolchain_trees(REPOSITORY, self.pins)
+
+    def test_go_module_cache_rejects_previous_closure_contract(self) -> None:
+        self._tree(
+            "go-workspace/pkg/mod",
+            "go-module-cache.manifest.json",
+            [
+                "artifactKind=pinned-go-module-cache-v1",
+                f"buildTags={self.pins['LIBBOX_BUILD_TAGS']}",
+                f"goVersion={self.pins['GO_VERSION']}",
+                f"patchedGoModSha256={self.pins['SING_BOX_PATCHED_GO_MOD_SHA256']}",
+                f"patchedGoSumSha256={self.pins['SING_BOX_PATCHED_GO_SUM_SHA256']}",
+                "platform=darwin-arm64",
+                f"sourceCommit={self.pins['SING_BOX_COMMIT']}",
+            ],
+        )
+        shell = (
+            'set -euo pipefail; source "$1"; source "$2"; '
+            'cfw_verify_go_module_cache_tree "$3" "$4"'
+        )
+        completed = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                shell,
+                "toolchain-test",
+                str(PINS),
+                str(CONTRACT),
+                str(REPOSITORY),
+                str(self.root),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(b"metadata field set mismatch", completed.stderr)
 
     def test_publication_binding_rejects_missing_or_symlink_root(self) -> None:
         linked_root = Path(self.temporary.name) / "linked-toolchains"

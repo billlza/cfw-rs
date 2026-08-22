@@ -46,7 +46,7 @@ ADB_SHA256: Final = "5759ea07285e5a5b66d84f489c118a3fa3998e69cd37725e5a3dc7cbe05
 LOCAL_ARTIFACT: Final = REPOSITORY_ROOT / "target/packet-lan-peer-linux-arm64"
 REMOTE_DIRECTORY: Final = "/data/local/tmp/cfw-release-evidence-v040"
 REMOTE_ARTIFACT: Final = f"{REMOTE_DIRECTORY}/packet-lan-peer-linux-arm64"
-ARTIFACT_SHA256: Final = "873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17"
+ARTIFACT_SHA256: Final = "268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c"
 ARTIFACT_SIZE: Final = 2_359_422
 SHELL_UID: Final = 2000
 SHELL_GID: Final = 2000
@@ -1521,8 +1521,15 @@ def _identity_document(
     return document
 
 
-def validate_android_lan_peer_identity(value: object) -> dict[str, object]:
-    """Validate and copy the stable, non-sensitive Android identity schema."""
+def validate_android_lan_peer_identity_shape(value: object) -> dict[str, object]:
+    """Validate the stable schema without admitting a deployed artifact.
+
+    This boundary exists so offline orchestration tests can load a historical
+    source identity after the locally reviewed binary changes.  It still binds
+    every platform, device-state, network, path, ownership, and mode field.
+    :func:`validate_android_lan_peer_identity` remains the only admission
+    validator and additionally requires the current binary SHA-256 and size.
+    """
 
     if type(value) is not dict or set(value) != _IDENTITY_FIELDS:
         raise AndroidLanPeerAdmissionError(
@@ -1562,25 +1569,54 @@ def validate_android_lan_peer_identity(value: object) -> dict[str, object]:
         raise AndroidLanPeerAdmissionError(
             "android_peer_identity_invalid", "Android peer deployment identity fields differ"
         )
-    expected_deployment: dict[str, object] = {
+    exact_deployment: dict[str, object] = {
         "directory_path": REMOTE_DIRECTORY,
         "directory_uid": SHELL_UID,
         "directory_gid": SHELL_GID,
         "directory_mode": "0700",
         "binary_path": REMOTE_ARTIFACT,
-        "binary_sha256": ARTIFACT_SHA256,
-        "binary_size": ARTIFACT_SIZE,
         "binary_uid": SHELL_UID,
         "binary_gid": SHELL_GID,
         "binary_mode": "0500",
     }
-    for field, expected in expected_deployment.items():
+    for field, expected in exact_deployment.items():
         if type(deployment[field]) is not type(expected) or deployment[field] != expected:
             raise AndroidLanPeerAdmissionError(
                 "android_peer_identity_invalid",
                 f"Android peer deployment identity {field} differs",
             )
+    if (
+        type(deployment["binary_sha256"]) is not str
+        or _SHA256_RE.fullmatch(deployment["binary_sha256"]) is None
+        or type(deployment["binary_size"]) is not int
+        or not 1 <= deployment["binary_size"] <= MAX_LOCAL_FILE_BYTES
+    ):
+        raise AndroidLanPeerAdmissionError(
+            "android_peer_identity_invalid",
+            "Android peer deployment artifact identity is malformed",
+        )
     return copy.deepcopy(document)
+
+
+def validate_android_lan_peer_identity(value: object) -> dict[str, object]:
+    """Validate and copy the currently admissible Android identity schema."""
+
+    document = validate_android_lan_peer_identity_shape(value)
+    deployment = document["deployment"]
+    if (
+        deployment["binary_sha256"] != ARTIFACT_SHA256
+        or deployment["binary_size"] != ARTIFACT_SIZE
+    ):
+        field = (
+            "binary_sha256"
+            if deployment["binary_sha256"] != ARTIFACT_SHA256
+            else "binary_size"
+        )
+        raise AndroidLanPeerAdmissionError(
+            "android_peer_identity_invalid",
+            f"Android peer deployment identity {field} differs",
+        )
+    return document
 
 
 def _staged_role(base: str, stage: str) -> str:
@@ -3799,4 +3835,5 @@ __all__ = [
     "admit_android_lan_peer",
     "discover_android_lan_peer_identity",
     "validate_android_lan_peer_identity",
+    "validate_android_lan_peer_identity_shape",
 ]

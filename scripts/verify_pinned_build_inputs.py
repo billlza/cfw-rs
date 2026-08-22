@@ -13,7 +13,7 @@ to the tracked release configuration without invoking any toolchain or the netwo
 * the official Tauri CLI crate, its published lock, the narrow yanked-spin lock
   update, the resulting lock, and the exact Cargo cache-normalization contract
   are checksum-bound to one installer entrypoint;
-* the three design-pinned patch files exist as regular files and their computed
+* the four design-pinned patch files exist as regular files and their computed
   SHA-256 digests match both the manifest and dependency_pins.env;
 * the combined diff SHA-256 is pinned and is distinct from any single patch digest;
 * known legacy/partial patch digests are rejected;
@@ -71,6 +71,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
         "gomobileCommit",
         "gomobileCommitKey",
         "libboxBuildTags",
+        "libboxModuleCacheContract",
         "nativeLockPath",
         "packetEvidenceEndpoint",
         "packetLanPeer",
@@ -97,6 +98,7 @@ NATIVE_LOCK_SING_BOX_FIELDS = frozenset(
         "combinedDiffSha256",
         "commit",
         "dnsFailoverPatch",
+        "endpointConflictPatch",
         "rawPacketPatch",
         "securityPatch",
         "tag",
@@ -115,13 +117,13 @@ _NETWORK_RECURSION_RE = re.compile(
     re.IGNORECASE,
 )
 _PACKET_ENDPOINT_BINARY_SHA256 = (
-    "fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1"
+    "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c"
 )
 _PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256 = (
     "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996"
 )
 _PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256 = (
-    "6527983cf9b072ab99ecd820778ccb56c9d91d79e07fc4d558715c4ce8657049"
+    "14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8"
 )
 _PACKET_ENDPOINT_RESOLVER_CONFIG_SHA256 = (
     "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62"
@@ -133,7 +135,7 @@ _PACKET_ENDPOINT_KNOWN_HOSTS_SHA256 = (
     "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba"
 )
 _PACKET_ENDPOINT_POLICY_SHA256 = (
-    "50cd366157c4297a7cc4d52e13ff8c4e176551567de38d44a905f67820981920"
+    "35f1e9bfc73baae302f7b26e24adf86df57a01c61f3c71133ae7cba23e64a5cb"
 )
 _PACKET_ENDPOINT_SOURCE_PATHS = frozenset(
     {
@@ -154,7 +156,7 @@ _PACKET_ENDPOINT_BUILD_FRAGMENTS = (
     "CGO_ENABLED=0",
     "GOOS=linux",
     "GOARCH=amd64",
-    "target/toolchains/go-1.26.5/bin/go",
+    "target/toolchains/go-1.26.6/bin/go",
     "-C tools/packet-evidence-endpoint",
     "-trimpath",
     "-ldflags='-s -w -buildid='",
@@ -162,7 +164,7 @@ _PACKET_ENDPOINT_BUILD_FRAGMENTS = (
     _PACKET_ENDPOINT_BINARY_SHA256,
 )
 _PACKET_LAN_PEER_ARTIFACT_SHA256 = (
-    "873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17"
+    "268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c"
 )
 _PACKET_LAN_PEER_ARTIFACT_SIZE = 2359422
 _ADB_RUNTIME_TOOL_PATH = "/Users/bill/Library/Android/sdk/platform-tools/adb"
@@ -172,17 +174,17 @@ _ADB_RUNTIME_TOOL_SHA256 = (
 )
 _ANDROID_LAN_PEER_SOURCE_PATH = "scripts/physical_capture/android_lan_peer.py"
 _ANDROID_LAN_PEER_SOURCE_SHA256 = (
-    "97b775aeba9f8959cddb907c7c2aa9e6e694ae3ffc0819dd5edda6be0293f60b"
+    "b7c8fa35c93d5e55310d9a48407c0c555e09f0f477deb9f6a98f2aafcb08764f"
 )
-_ANDROID_LAN_PEER_SOURCE_SIZE = 135593
+_ANDROID_LAN_PEER_SOURCE_SIZE = 137097
 _PACKET_LAN_PEER_SOURCE_TREE_SHA256 = (
-    "dc5bf2f5853b986acd3953809d68a0f75aac8bef1d682ba988ec3f7c5fa13c60"
+    "8437dce5e85780a49e882dd1594b188ce0f5188c44b7a020fe7a42d7efaa08a4"
 )
 _PACKET_LAN_PEER_BUILD_SCRIPT_SHA256 = (
     "c3fb49c83d98a710a15874afe83a3606b3f50f1f65b01c76dbb03edfcc9b43d8"
 )
 _PACKET_LAN_PEER_VERIFY_SCRIPT_SHA256 = (
-    "831ec6e34d35cbe799bae9ab8874d34c5ddd7034be19584c45ceac3731f9248d"
+    "eb7c518d3209ccf6486847e9f9042f58796b2192d5fdd733f3b991f640d7309e"
 )
 _PACKET_LAN_PEER_SOURCE_FILES = (
     (
@@ -193,7 +195,7 @@ _PACKET_LAN_PEER_SOURCE_FILES = (
     ),
     (
         "go.mod",
-        "f21defb110ca4cb0d36b3591c6214532f3e5fa9926fbe4565ce4d9edce92b8a7",
+        "af5ff7973354844d111edb9d303d6543d8aa6dc0afc6ecf439225acc15e1d1fd",
         70,
         "0644",
     ),
@@ -237,7 +239,7 @@ _PACKET_LAN_PEER_VERIFY_FRAGMENTS = (
     'cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"',
     'source_root="$repo_root/tools/packet-lan-peer"',
     'artifact="$repo_root/target/packet-lan-peer-linux-arm64"',
-    "expected_artifact_sha256=873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17",
+    "expected_artifact_sha256=268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c",
     "expected_artifact_size=2359422",
     "expected_artifact_mode=555",
     "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
@@ -261,7 +263,7 @@ _PACKET_LAN_PEER_VERIFY_FRAGMENTS = (
     '"$artifact_sha256" != "$expected_artifact_sha256"',
 )
 _PHYSICAL_COLLECTOR_GO_MOD_SHA256 = (
-    "30e04725fc86f48fbdc371e02914e7c06fa7177763c560091333297ae52795dd"
+    "24b0294d6fe42b5baab92bc58ed47a69275323bb02ca75b087605a5aabf2b2d0"
 )
 _PHYSICAL_COLLECTOR_GO_SUM_SHA256 = (
     "5c71b0dca9d0be45b65ab07b1a7386475f72d454c9638d60c36494a75fbc35ec"
@@ -1760,8 +1762,8 @@ def _verify_commits(manifest: dict, env: dict[str, str]) -> None:
 
 def _verify_patches(manifest: dict, env: dict[str, str], repository: Path) -> list[str]:
     patches = manifest.get("patches")
-    if not isinstance(patches, list) or len(patches) != 3:
-        raise PinnedInputError("pinned-input manifest must pin exactly three patches")
+    if not isinstance(patches, list) or len(patches) != 4:
+        raise PinnedInputError("pinned-input manifest must pin exactly four patches")
     rejected = set(manifest.get("rejectedPatchDigests") or [])
     seen: set[str] = set()
     digests: list[str] = []
@@ -1855,6 +1857,51 @@ def _verify_go_module_inputs(manifest: dict, env: dict[str, str]) -> None:
             _require_sha256(value, f"dependency_pins.env value {key}")
         elif not value.startswith("h1:"):
             raise PinnedInputError(f"Go module sum {key} is not an h1: checksum: {value!r}")
+
+
+def _verify_libbox_module_cache_contract(
+    manifest: dict, env: dict[str, str], repository: Path
+) -> None:
+    spec = manifest.get("libboxModuleCacheContract")
+    expected_fields = {"pathKey", "path", "sha256Key", "sha256"}
+    if not isinstance(spec, dict) or set(spec) != expected_fields:
+        raise PinnedInputError(
+            "pinned-input manifest has no exact libbox module cache contract binding"
+        )
+
+    path_key = spec["pathKey"]
+    relative = spec["path"]
+    sha256_key = spec["sha256Key"]
+    expected_sha256 = spec["sha256"]
+    if not all(
+        isinstance(value, str)
+        for value in (path_key, relative, sha256_key, expected_sha256)
+    ):
+        raise PinnedInputError("libbox module cache contract binding is malformed")
+    _require_sha256(expected_sha256, "manifest libbox module cache contract digest")
+
+    env_relative = _require_env(env, path_key)
+    if env_relative != relative:
+        raise PinnedInputError(
+            f"libbox module cache contract path {path_key} is {env_relative!r} "
+            f"but must be {relative!r}"
+        )
+    env_sha256 = _require_env(env, sha256_key)
+    _require_sha256(env_sha256, f"dependency_pins.env value {sha256_key}")
+    if env_sha256 != expected_sha256:
+        raise PinnedInputError(
+            f"libbox module cache contract digest {sha256_key} is {env_sha256} "
+            f"but must be {expected_sha256}"
+        )
+
+    actual_sha256 = hashlib.sha256(
+        _read_bytes(repository, relative, "libbox module cache contract")
+    ).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise PinnedInputError(
+            f"libbox module cache contract file digest {actual_sha256} differs "
+            f"from the pinned {expected_sha256}"
+        )
 
 
 def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: Path) -> None:
@@ -1996,6 +2043,10 @@ def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -
         "securityPatch": ("SING_BOX_SECURITY_PATCH_PATH", "SING_BOX_SECURITY_PATCH_SHA256"),
         "rawPacketPatch": ("SING_BOX_RAW_PACKET_PATCH_PATH", "SING_BOX_RAW_PACKET_PATCH_SHA256"),
         "dnsFailoverPatch": ("SING_BOX_DNS_FAILOVER_PATCH_PATH", "SING_BOX_DNS_FAILOVER_PATCH_SHA256"),
+        "endpointConflictPatch": (
+            "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+            "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+        ),
     }
     for lock_key, (path_key, sha_key) in lock_patches.items():
         entry = sing_box.get(lock_key)
@@ -2081,6 +2132,7 @@ def verify(repository: Path) -> None:
     patch_digests = _verify_patches(manifest, env, repository)
     _verify_combined_diff(manifest, env, patch_digests)
     _verify_source_contract(manifest, env)
+    _verify_libbox_module_cache_contract(manifest, env, repository)
     _verify_go_module_inputs(manifest, env)
     _verify_libbox_build_tags(manifest, env, repository)
     _verify_native_lock(manifest, env, repository)
@@ -2101,8 +2153,8 @@ def main() -> int:
         "reproducible Linux artifact binding, Android packet LAN peer source/tree/"
         "script/protocol/deployment/held-artifact binding, ADB runtime-tool source "
         "binding, physical-collector module graph, "
-        "XcodeGen patch/source binding, sing-box and gomobile commits, three libbox patch "
-        "digests, combined diff, Go module inputs, "
+        "XcodeGen patch/source binding, sing-box and gomobile commits, four libbox patch "
+        "digests, combined diff, Go module inputs and module-cache closure contract, "
         "libbox build tags required by the engine start path, native lock binding, "
         "and offline artifact-hash build-script references"
     )

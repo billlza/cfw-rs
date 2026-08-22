@@ -198,6 +198,7 @@ actor NativeBridgeCoordinator {
   var pendingTunnelInstallation: NativePendingTunnelInstallation?
   var pendingStop: NativeStopTransaction?
   var pendingStartCleanup: NativeStopTransaction?
+  var pendingFailedStartOff: NativeStopTransaction?
   var completedStartCleanup: NativeStartCleanupReceipt?
 
   init(

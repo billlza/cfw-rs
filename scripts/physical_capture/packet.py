@@ -13,7 +13,7 @@ enabling that policy cannot introduce an arbitrary shell or argv surface.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import ipaddress
@@ -69,7 +69,7 @@ from .execution import (
     ReadinessSpec,
     command_sha256,
 )
-from . import android_lan_peer
+from . import ios_packet_lan_peer_adapter
 from .observation import ObservationArtifact, ObservationCommand, PhysicalObservationError
 from .packet_host import (
     PacketCaptureDisposition,
@@ -97,13 +97,13 @@ PACKET_CAPTURE_TIMEOUT_SECONDS: Final = 45.0
 PACKET_ENDPOINT_TRANSPORT_PORT: Final = 44333
 PACKET_ENDPOINT_DNS_PORT: Final = 53
 PACKET_ENDPOINT_BINARY_SHA256: Final = (
-    "fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1"
+    "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c"
 )
 PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256: Final = (
     "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996"
 )
 PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256: Final = (
-    "6527983cf9b072ab99ecd820778ccb56c9d91d79e07fc4d558715c4ce8657049"
+    "14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8"
 )
 PACKET_ENDPOINT_RESOLVER_CONFIG_SHA256: Final = (
     "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62"
@@ -183,7 +183,8 @@ class PacketEndpointPlan:
     and server identity; those fields are forbidden for local captures.
     """
 
-    remote_address: str
+    remote_address: str | None
+    runtime_endpoint_source: str | None
     remote_port: int
     local_bind_strategy: str
     local_address_scope: str
@@ -210,6 +211,25 @@ class PacketEndpointPlan:
     remote_capture_iap_role: str | None
     remote_capture_iap_destination_port: int | None
     remote_capture_internal_ipv4_address: str | None
+
+
+def _resolved_remote_address(plan: PacketEndpointPlan) -> str:
+    if not isinstance(plan.remote_address, str):
+        raise PacketCaptureAdapterError(
+            "packet_endpoint_unresolved",
+            "packet endpoint address was not resolved before command construction",
+        )
+    try:
+        address = ipaddress.ip_address(plan.remote_address)
+    except ValueError as error:
+        raise PacketCaptureAdapterError(
+            "packet_endpoint_unresolved", "resolved packet endpoint is invalid"
+        ) from error
+    if str(address) != plan.remote_address:
+        raise PacketCaptureAdapterError(
+            "packet_endpoint_unresolved", "resolved packet endpoint is non-canonical"
+        )
+    return plan.remote_address
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,11 +280,11 @@ class PacketCaseRuntime:
     baseline_host: PacketHostBaseline | None = None
     test_host: PacketHostTestReady | None = None
     restored_host: PacketHostRestored | None = None
-    android_peer_lease: android_lan_peer.AndroidLanPeerLease | None = None
-    android_peer_admission: dict[str, object] | None = None
-    android_peer_before_capture: dict[str, object] | None = None
-    android_peer_after_capture: dict[str, object] | None = None
-    android_peer_cleanup: dict[str, object] | None = None
+    ios_peer_lease: ios_packet_lan_peer_adapter.IOSPacketLanPeerLease | None = None
+    ios_peer_admission: dict[str, object] | None = None
+    ios_peer_before_capture: dict[str, object] | None = None
+    ios_peer_after_capture: dict[str, object] | None = None
+    ios_peer_cleanup: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         self.stages = []
@@ -272,7 +292,7 @@ class PacketCaseRuntime:
 
 ENDPOINT_POLICY_PATH: Final = Path(__file__).with_name("packet_endpoints.json")
 ENDPOINT_POLICY_SHA256: Final = (
-    "50cd366157c4297a7cc4d52e13ff8c4e176551567de38d44a905f67820981920"
+    "35f1e9bfc73baae302f7b26e24adf86df57a01c61f3c71133ae7cba23e64a5cb"
 )
 PACKET_KNOWN_HOSTS_PATH: Final = Path(__file__).with_name("packet_known_hosts")
 PACKET_KNOWN_HOSTS_SHA256: Final = (
@@ -280,15 +300,6 @@ PACKET_KNOWN_HOSTS_SHA256: Final = (
 )
 ENDPOINT_POLICY_DOCUMENT: Final = "cfw-packet-endpoint-policy-v1"
 ENDPOINT_IDENTITY_DOCUMENT: Final = "cfw-packet-endpoint-instance-identity-v1"
-ANDROID_LAN_PEER_IDENTITY_PATH: Final = Path(__file__).with_name(
-    "android_lan_peer_identity.json"
-)
-ANDROID_LAN_PEER_IDENTITY_FILE_SHA256: Final = (
-    "452bfc8b3aa8883bf2326ddb001d9798626e1e8ea55f79dafd0ed3f955be2c89"
-)
-ANDROID_LAN_PEER_IDENTITY_DOCUMENT: Final = (
-    "cfw-android-lan-peer-source-identity-v1"
-)
 PACKET_LAN_PEER_NOT_APPLICABLE_SHA256: Final = (
     "fbd5434db14195c6f6ec9602abcf0b32697515ca93863d078d61bb79ae63ae26"
 )
@@ -317,6 +328,7 @@ def _validate_endpoint_policy(
     policy: Mapping[str, PacketEndpointPlan],
     *,
     allow_source_pinned_unresolved: bool = False,
+    require_current_artifacts: bool = True,
 ) -> dict[str, PacketEndpointPlan]:
     expected_cases = set(REQUIRED_CASES)
     if allow_source_pinned_unresolved:
@@ -338,22 +350,50 @@ def _validate_endpoint_policy(
             raise PacketCaptureAdapterError(
                 "packet_endpoint_policy_invalid", "packet endpoint entry is not typed"
             )
-        try:
-            remote = ipaddress.ip_address(plan.remote_address)
-        except ValueError as error:
-            raise PacketCaptureAdapterError(
-                "packet_endpoint_policy_invalid", "packet endpoint address is invalid"
-            ) from error
+        remote: ipaddress.IPv4Address | ipaddress.IPv6Address | None
+        if case_id == "lan-bypass":
+            if (
+                plan.remote_address is not None
+                or plan.runtime_endpoint_source
+                != ios_packet_lan_peer_adapter.READY_DOCUMENT
+            ):
+                raise PacketCaptureAdapterError(
+                    "packet_endpoint_policy_invalid",
+                    "LAN endpoint must be resolved from the iPhone ready receipt",
+                )
+            remote = None
+        else:
+            if plan.runtime_endpoint_source is not None:
+                raise PacketCaptureAdapterError(
+                    "packet_endpoint_policy_invalid",
+                    "static packet endpoint unexpectedly declares a runtime source",
+                )
+            try:
+                remote = ipaddress.ip_address(plan.remote_address)
+            except (TypeError, ValueError) as error:
+                raise PacketCaptureAdapterError(
+                    "packet_endpoint_policy_invalid", "packet endpoint address is invalid"
+                ) from error
         expected_version = 4 if spec.family == "ipv4" else 6
         expected_scope = (
             "ipv4-route-interface"
             if spec.family == "ipv4"
             else "ipv6-route-interface"
         )
-        endpoint_digest_contract = (
-            (
-                plan.endpoint_binary_sha256 == android_lan_peer.ARTIFACT_SHA256
-                and plan.endpoint_service_unit_sha256
+        endpoint_digests = (
+            plan.endpoint_binary_sha256,
+            plan.endpoint_service_unit_sha256,
+            plan.endpoint_install_script_sha256,
+            plan.endpoint_resolver_config_sha256,
+            plan.endpoint_capture_sudoers_sha256,
+        )
+        digest_shape_valid = all(
+            re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            for digest in endpoint_digests
+        )
+        if plan.network_role == "controlled-lan-peer":
+            stable_digest_contract = (
+                plan.endpoint_service_unit_sha256
                 == PACKET_LAN_PEER_NOT_APPLICABLE_SHA256
                 and plan.endpoint_install_script_sha256
                 == PACKET_LAN_PEER_NOT_APPLICABLE_SHA256
@@ -362,8 +402,13 @@ def _validate_endpoint_policy(
                 and plan.endpoint_capture_sudoers_sha256
                 == PACKET_LAN_PEER_NOT_APPLICABLE_SHA256
             )
-            if plan.network_role == "controlled-lan-peer"
-            else (
+            current_digest_contract = (
+                plan.endpoint_binary_sha256
+                == SOURCE_IOS_LAN_PEER_IDENTITY.executable_sha256
+            )
+        else:
+            stable_digest_contract = True
+            current_digest_contract = (
                 plan.endpoint_binary_sha256 == PACKET_ENDPOINT_BINARY_SHA256
                 and plan.endpoint_service_unit_sha256
                 == PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256
@@ -374,9 +419,13 @@ def _validate_endpoint_policy(
                 and plan.endpoint_capture_sudoers_sha256
                 == PACKET_ENDPOINT_CAPTURE_SUDOERS_SHA256
             )
+        endpoint_digest_contract = (
+            digest_shape_valid
+            and stable_digest_contract
+            and (current_digest_contract or not require_current_artifacts)
         )
         if (
-            remote.version != expected_version
+            (remote is not None and remote.version != expected_version)
             or not 1 <= plan.remote_port <= 65535
             or plan.local_bind_strategy != "route-interface-kernel-ephemeral"
             or plan.local_address_scope != expected_scope
@@ -495,6 +544,11 @@ def _validate_endpoint_policy(
                 dual_stack_services.add(
                     (plan.endpoint_service_id, plan.endpoint_service_identity_sha256)
                 )
+                if remote is None:
+                    raise PacketCaptureAdapterError(
+                        "packet_endpoint_policy_invalid",
+                        f"{case_id} transport endpoint is unresolved",
+                    )
                 dual_stack_families.add(remote.version)
         normalized[case_id] = plan
     primary_hosts = {host for host, _identity in dns_servers.get("primary", set())}
@@ -569,6 +623,7 @@ _REMOTE_CAPTURE_ACCESS_FIELDS: Final = {
 _ENDPOINT_CASE_FIELDS: Final = {
     "identity_sha256",
     "remote_address",
+    "runtime_endpoint_source",
     "remote_port",
     "capture_location",
     "interface_selector",
@@ -585,76 +640,16 @@ _TCPDUMP_PACKAGE_SHA256: Final = (
     "c97881e39b54571829ec22b98cfa9c2348c7449a92fd761ebee7826b47ef4616"
 )
 _MAX_ENDPOINT_POLICY_BYTES: Final = 256 * 1024
-_MAX_ANDROID_LAN_PEER_IDENTITY_BYTES: Final = 64 * 1024
 
-
-def _source_android_lan_peer_identity() -> tuple[
-    dict[str, object], android_lan_peer.AndroidLanNetworkExpectation, str
-]:
-    try:
-        if (
-            ANDROID_LAN_PEER_IDENTITY_PATH.is_symlink()
-            or not ANDROID_LAN_PEER_IDENTITY_PATH.is_file()
-        ):
-            raise OSError("Android LAN peer identity is not a regular source file")
-        data = ANDROID_LAN_PEER_IDENTITY_PATH.read_bytes()
-        if (
-            not 1 <= len(data) <= _MAX_ANDROID_LAN_PEER_IDENTITY_BYTES
-            or hashlib.sha256(data).hexdigest()
-            != ANDROID_LAN_PEER_IDENTITY_FILE_SHA256
-        ):
-            raise OSError("Android LAN peer identity differs from its whole-file pin")
-        document = exact_object(
-            load_json_bytes(data, "Android LAN peer source identity"),
-            {"schema_version", "document", "network", "identity_sha256", "identity"},
-            "Android LAN peer source identity",
-        )
-        if (
-            type(document["schema_version"]) is not int
-            or document["schema_version"] != 1
-            or document["document"] != ANDROID_LAN_PEER_IDENTITY_DOCUMENT
-        ):
-            raise ValueError("Android LAN peer source identity document differs")
-        network = exact_object(
-            document["network"],
-            {"interface_name", "ipv4"},
-            "Android LAN peer source network",
-        )
-        expectation = android_lan_peer.AndroidLanNetworkExpectation(
-            network["interface_name"], network["ipv4"]
-        )
-        identity = android_lan_peer.validate_android_lan_peer_identity(
-            document["identity"]
-        )
-        identity_sha256 = document["identity_sha256"]
-        if (
-            not isinstance(identity_sha256, str)
-            or re.fullmatch(r"[0-9a-f]{64}", identity_sha256) is None
-            or hashlib.sha256(canonical_json(identity)).hexdigest() != identity_sha256
-            or identity["network_interface_name"] != expectation.interface_name
-            or identity["ipv4"] != expectation.ipv4
-            or identity["deployment"]["binary_sha256"]
-            != android_lan_peer.ARTIFACT_SHA256
-            or identity["deployment"]["binary_size"] != android_lan_peer.ARTIFACT_SIZE
-            or identity["listener_port"] != android_lan_peer.LISTENER_PORT
-        ):
-            raise ValueError("Android LAN peer source identity does not match its pins")
-        return identity, expectation, identity_sha256
-    except (OSError, RawArtifactError, TypeError, ValueError) as error:
-        raise PacketCaptureAdapterError(
-            "android_lan_peer_identity_invalid",
-            "source-pinned Android LAN peer identity is unavailable or malformed",
-        ) from error
-
-
-SOURCE_ANDROID_LAN_PEER_IDENTITY: Final[dict[str, object]]
-SOURCE_ANDROID_LAN_PEER_NETWORK: Final[android_lan_peer.AndroidLanNetworkExpectation]
-SOURCE_ANDROID_LAN_PEER_IDENTITY_SHA256: Final[str]
-(
-    SOURCE_ANDROID_LAN_PEER_IDENTITY,
-    SOURCE_ANDROID_LAN_PEER_NETWORK,
-    SOURCE_ANDROID_LAN_PEER_IDENTITY_SHA256,
-) = _source_android_lan_peer_identity()
+try:
+    SOURCE_IOS_LAN_PEER_IDENTITY: Final = (
+        ios_packet_lan_peer_adapter.load_source_identity()
+    )
+except ios_packet_lan_peer_adapter.IOSPacketLanPeerError as error:
+    raise PacketCaptureAdapterError(
+        "ios_lan_peer_identity_invalid",
+        "source-pinned iPhone LAN peer identity is unavailable or malformed",
+    ) from error
 
 
 def _source_endpoint_policy() -> dict[str, PacketEndpointPlan]:
@@ -816,16 +811,6 @@ def _source_endpoint_policy() -> dict[str, PacketEndpointPlan]:
                 or re.fullmatch(r"[0-9a-f]{64}", identity[field]) is None
                 for field in digest_fields
             )
-            or identity["endpoint_binary_sha256"]
-            != PACKET_ENDPOINT_BINARY_SHA256
-            or identity["endpoint_service_unit_sha256"]
-            != PACKET_ENDPOINT_SYSTEMD_UNIT_SHA256
-            or identity["endpoint_install_script_sha256"]
-            != PACKET_ENDPOINT_INSTALL_SCRIPT_SHA256
-            or identity["endpoint_resolver_config_sha256"]
-            != PACKET_ENDPOINT_RESOLVER_CONFIG_SHA256
-            or identity["capture_sudoers_policy_sha256"]
-            != PACKET_ENDPOINT_CAPTURE_SUDOERS_SHA256
             or remote_capture_access != expected_remote_capture_access
             or identity["tcpdump_version"] != _TCPDUMP_VERSION
             or identity["tcpdump_package_sha256"] != _TCPDUMP_PACKAGE_SHA256
@@ -920,7 +905,10 @@ def _source_endpoint_policy() -> dict[str, PacketEndpointPlan]:
         if (
             not isinstance(identity_sha256, str)
             or re.fullmatch(r"[0-9a-f]{64}", identity_sha256) is None
-            or not isinstance(value["remote_address"], str)
+            or value["remote_address"] is not None
+            and not isinstance(value["remote_address"], str)
+            or value["runtime_endpoint_source"] is not None
+            and not isinstance(value["runtime_endpoint_source"], str)
             or type(value["remote_port"]) is not int
             or not isinstance(value["capture_location"], str)
             or not isinstance(value["interface_selector"], str)
@@ -936,10 +924,11 @@ def _source_endpoint_policy() -> dict[str, PacketEndpointPlan]:
             )
         if case_id == "lan-bypass":
             if (
-                identity_sha256 != SOURCE_ANDROID_LAN_PEER_IDENTITY_SHA256
-                or value["remote_address"]
-                != SOURCE_ANDROID_LAN_PEER_IDENTITY["ipv4"]
-                or value["remote_port"] != android_lan_peer.LISTENER_PORT
+                identity_sha256 != SOURCE_IOS_LAN_PEER_IDENTITY.identity_sha256
+                or value["remote_address"] is not None
+                or value["runtime_endpoint_source"]
+                != ios_packet_lan_peer_adapter.READY_DOCUMENT
+                or value["remote_port"] != ios_packet_lan_peer_adapter.LISTENER_PORT
                 or value["capture_location"] != "local-mac"
                 or value["interface_selector"] != "route-selected-lan"
                 or value["expected_interface"] != "non-utun"
@@ -947,10 +936,11 @@ def _source_endpoint_policy() -> dict[str, PacketEndpointPlan]:
             ):
                 raise PacketCaptureAdapterError(
                     "packet_endpoint_policy_invalid",
-                    "lan-bypass endpoint projection differs from the admitted Android peer",
+                    "lan-bypass endpoint projection differs from the admitted iPhone peer",
                 )
             plans[case_id] = PacketEndpointPlan(
-                remote_address=value["remote_address"],
+                remote_address=None,
+                runtime_endpoint_source=value["runtime_endpoint_source"],
                 remote_port=value["remote_port"],
                 local_bind_strategy="route-interface-kernel-ephemeral",
                 local_address_scope="ipv4-route-interface",
@@ -959,10 +949,14 @@ def _source_endpoint_policy() -> dict[str, PacketEndpointPlan]:
                 vantage=spec.vantage,
                 network_role="controlled-lan-peer",
                 endpoint_service_id=(
-                    f"android://lan-peer/{SOURCE_ANDROID_LAN_PEER_IDENTITY_SHA256}"
+                    f"ios://packet-lan-peer/{SOURCE_IOS_LAN_PEER_IDENTITY.identity_sha256}"
                 ),
-                endpoint_service_identity_sha256=SOURCE_ANDROID_LAN_PEER_IDENTITY_SHA256,
-                endpoint_binary_sha256=android_lan_peer.ARTIFACT_SHA256,
+                endpoint_service_identity_sha256=(
+                    SOURCE_IOS_LAN_PEER_IDENTITY.identity_sha256
+                ),
+                endpoint_binary_sha256=(
+                    SOURCE_IOS_LAN_PEER_IDENTITY.executable_sha256
+                ),
                 endpoint_service_unit_sha256=PACKET_LAN_PEER_NOT_APPLICABLE_SHA256,
                 endpoint_install_script_sha256=PACKET_LAN_PEER_NOT_APPLICABLE_SHA256,
                 endpoint_resolver_config_sha256=PACKET_LAN_PEER_NOT_APPLICABLE_SHA256,
@@ -1019,6 +1013,7 @@ def _source_endpoint_policy() -> dict[str, PacketEndpointPlan]:
         if (
             identity["endpoint_role"] != expected_identity_role
             or value["remote_address"] != expected_address
+            or value["runtime_endpoint_source"] is not None
             or value["remote_port"] != expected_port
             or value["capture_location"] != expected_capture_location
             or value["interface_selector"] != expected_selector
@@ -1036,6 +1031,7 @@ def _source_endpoint_policy() -> dict[str, PacketEndpointPlan]:
         remote_capture_access = identity["remote_capture_access"]
         plans[case_id] = PacketEndpointPlan(
             remote_address=value["remote_address"],
+            runtime_endpoint_source=None,
             remote_port=value["remote_port"],
             local_bind_strategy="route-interface-kernel-ephemeral",
             local_address_scope=(
@@ -1108,6 +1104,7 @@ def _source_endpoint_policy() -> dict[str, PacketEndpointPlan]:
     return _validate_endpoint_policy(
         plans,
         allow_source_pinned_unresolved=True,
+        require_current_artifacts=False,
     )
 
 
@@ -1119,25 +1116,36 @@ SOURCE_PINNED_ENDPOINTS: Final[Mapping[str, PacketEndpointPlan]] = (
 def _revalidate_source_pins() -> None:
     try:
         endpoint_policy = _source_endpoint_policy()
-        android_identity, android_network, android_identity_sha256 = (
-            _source_android_lan_peer_identity()
-        )
+        ios_identity = ios_packet_lan_peer_adapter.load_source_identity()
     except PacketCaptureAdapterError:
         raise
+    except ios_packet_lan_peer_adapter.IOSPacketLanPeerError as error:
+        raise PacketCaptureAdapterError(
+            "ios_lan_peer_identity_stale",
+            "source-pinned iPhone LAN peer identity could not be reopened",
+        ) from error
     except Exception as error:
         raise PacketCaptureAdapterError(
             "packet_source_policy_invalid",
-            "source-pinned Packet endpoint or Android identity could not be reopened",
+            "source-pinned Packet endpoint or iPhone identity could not be reopened",
+        ) from error
+    try:
+        _validate_endpoint_policy(endpoint_policy)
+    except PacketCaptureAdapterError as error:
+        raise PacketCaptureAdapterError(
+            "packet_endpoint_artifact_identity_stale",
+            "source-pinned Packet endpoints do not bind the current endpoint artifacts",
         ) from error
     if (
         endpoint_policy != SOURCE_PINNED_ENDPOINTS
-        or android_identity != SOURCE_ANDROID_LAN_PEER_IDENTITY
-        or android_network != SOURCE_ANDROID_LAN_PEER_NETWORK
-        or android_identity_sha256 != SOURCE_ANDROID_LAN_PEER_IDENTITY_SHA256
+        or ios_identity.file_sha256 != SOURCE_IOS_LAN_PEER_IDENTITY.file_sha256
+        or ios_identity.identity_sha256
+        != SOURCE_IOS_LAN_PEER_IDENTITY.identity_sha256
+        or ios_identity.as_identity() != SOURCE_IOS_LAN_PEER_IDENTITY.as_identity()
     ):
         raise PacketCaptureAdapterError(
             "packet_source_policy_changed",
-            "source-pinned Packet endpoint or Android identity changed after import",
+            "source-pinned Packet endpoint or iPhone identity changed after import",
         )
 
 
@@ -1512,6 +1520,7 @@ def _capture_spec(
     *,
     case_id: str,
     tokens: tuple[str, str, str],
+    lan_endpoint_address: str | None = None,
 ) -> CommandSpec:
     spec = REQUIRED_CASES.get(case_id)
     if spec is None or spec.protocol == "dns":
@@ -1519,7 +1528,11 @@ def _capture_spec(
             "capture_spec_invalid", "local capture case is not source-owned"
         )
     try:
-        capture_filter = packet_capture_filter_argv(case_id=case_id, tokens=tokens)
+        capture_filter = packet_capture_filter_argv(
+            case_id=case_id,
+            tokens=tokens,
+            lan_endpoint_address=lan_endpoint_address,
+        )
     except PacketEvidenceError as error:
         raise PacketCaptureAdapterError(
             "capture_spec_invalid", "local capture filter is not source-owned"
@@ -1846,6 +1859,7 @@ def _send_spec(
         "--resolver-role",
         spec.resolver_role,
     )
+    remote_address = _resolved_remote_address(plan)
     socket_arguments = (
         ()
         if spec.protocol == "dns"
@@ -1855,7 +1869,7 @@ def _send_spec(
             "--local-port",
             "0",
             "--remote-address",
-            plan.remote_address,
+            remote_address,
             "--remote-port",
             str(plan.remote_port),
         )
@@ -2176,61 +2190,83 @@ class _PacketCaseCoordinator:
         self.runtime = PacketCaseRuntime(case_id, plan, tokens)
         self.failed = False
 
-    def _admit_android_lan_peer(self) -> None:
+    def _admit_ios_lan_peer(self) -> None:
         if self.runtime.case_id != "lan-bypass":
             return
         try:
-            self.runtime.android_peer_lease = android_lan_peer.admit_android_lan_peer(
+            if (
+                self.runtime.plan.remote_address is not None
+                or self.runtime.plan.runtime_endpoint_source
+                != ios_packet_lan_peer_adapter.READY_DOCUMENT
+            ):
+                raise PacketCaptureAdapterError(
+                    "lan_peer_endpoint_unresolved",
+                    "iPhone LAN endpoint policy is not runtime-bound",
+                )
+            self.runtime.ios_peer_lease = (
+                ios_packet_lan_peer_adapter.admit_ios_packet_lan_peer(
                 runner=self.capture_boundary,
-                network=SOURCE_ANDROID_LAN_PEER_NETWORK,
-                expected_identity=SOURCE_ANDROID_LAN_PEER_IDENTITY,
+                    tokens=self.runtime.tokens,
+                    expected_source=SOURCE_IOS_LAN_PEER_IDENTITY,
+                )
             )
-            self.runtime.android_peer_admission = (
-                self.runtime.android_peer_lease.as_document()
+            self.runtime.ios_peer_admission = self.runtime.ios_peer_lease.as_document()
+            self.runtime.plan = replace(
+                self.runtime.plan,
+                remote_address=self.runtime.ios_peer_lease.peer_ipv4,
             )
-        except android_lan_peer.AndroidLanPeerAdmissionError as error:
+        except ios_packet_lan_peer_adapter.IOSPacketLanPeerError as error:
             raise PacketCaptureAdapterError(
                 "lan_peer_admission_failed",
-                "the source-pinned Android LAN peer could not be admitted",
+                "the source-pinned iPhone LAN peer could not be admitted",
             ) from error
 
-    def _revalidate_android_peer_before_capture(self) -> None:
-        lease = self.runtime.android_peer_lease
+    def _revalidate_ios_peer_before_capture(self) -> None:
+        lease = self.runtime.ios_peer_lease
         if self.runtime.case_id != "lan-bypass" or lease is None:
             return
         try:
-            self.runtime.android_peer_before_capture = lease.revalidate_before_capture()
-        except android_lan_peer.AndroidLanPeerAdmissionError as error:
+            self.runtime.ios_peer_before_capture = lease.revalidate_before_capture()
+        except ios_packet_lan_peer_adapter.IOSPacketLanPeerError as error:
             raise PacketCaptureAdapterError(
                 "lan_peer_before_capture_failed",
-                "Android LAN peer identity drifted before packet capture",
+                "iPhone LAN peer identity drifted before packet capture",
             ) from error
 
-    def _revalidate_android_peer_after_capture(self) -> None:
-        lease = self.runtime.android_peer_lease
+    def _revalidate_ios_peer_after_capture(self) -> None:
+        lease = self.runtime.ios_peer_lease
         if self.runtime.case_id != "lan-bypass" or lease is None:
             return
         try:
-            self.runtime.android_peer_after_capture = lease.revalidate_after_capture()
-        except android_lan_peer.AndroidLanPeerAdmissionError as error:
+            if self.runtime.stages is None:
+                raise PacketCaptureAdapterError(
+                    "packet_stage_set_invalid",
+                    "Packet sender stages are unavailable for iPhone reconciliation",
+                )
+            self.runtime.ios_peer_after_capture = lease.revalidate_after_capture(
+                self.runtime.stages
+            )
+        except ios_packet_lan_peer_adapter.IOSPacketLanPeerError as error:
             raise PacketCaptureAdapterError(
                 "lan_peer_after_capture_failed",
-                "Android LAN peer identity drifted after packet capture",
+                "iPhone LAN peer result did not reconcile after packet capture",
             ) from error
 
-    def _close_android_peer(self) -> None:
-        lease = self.runtime.android_peer_lease
+    def _close_ios_peer(self) -> None:
+        lease = self.runtime.ios_peer_lease
         if self.runtime.case_id != "lan-bypass" or lease is None:
             return
         try:
-            self.runtime.android_peer_admission = lease.as_document()
-            self.runtime.android_peer_cleanup = lease.close_with_receipt()
-        except android_lan_peer.AndroidLanPeerAdmissionError as error:
+            self.runtime.ios_peer_admission = lease.as_document()
+            self.runtime.ios_peer_cleanup = lease.close_with_receipt()
+        except Exception as error:
             raise PacketCaptureAdapterError(
                 "lan_peer_cleanup_failed",
-                "Android LAN peer cleanup could not be proven",
+                "iPhone LAN peer cleanup could not be proven",
             ) from error
-        self.runtime.android_peer_lease = None
+        finally:
+            if lease.is_closed:
+                self.runtime.ios_peer_lease = None
 
     def _start_capture(self) -> None:
         runtime = self.runtime
@@ -2247,6 +2283,11 @@ class _PacketCaseCoordinator:
                 self.session.archive.repository,
                 case_id=runtime.case_id,
                 tokens=runtime.tokens,
+                lan_endpoint_address=(
+                    _resolved_remote_address(runtime.plan)
+                    if runtime.case_id == "lan-bypass"
+                    else None
+                ),
             )
             readiness = ReadinessSpec(
                 stream="stderr",
@@ -2327,8 +2368,9 @@ class _PacketCaseCoordinator:
 
     def _run_stage(self, stage: str, token: str, host_stage: str) -> None:
         runtime = self.runtime
+        remote_address = _resolved_remote_address(runtime.plan)
         route_spec = _route_spec(
-            self.session.archive.repository, runtime.plan.remote_address
+            self.session.archive.repository, remote_address
         )
         route_result = self.capture_boundary.run_command(route_spec)
         route_receipt = _command_receipt(route_result, route_spec, output_limit=64 * 1024)
@@ -2392,7 +2434,7 @@ class _PacketCaseCoordinator:
                 or result.get("local_address") != local_address
                 or type(result.get("local_port")) is not int
                 or not 49152 <= result["local_port"] <= 65535
-                or result.get("remote_address") != runtime.plan.remote_address
+                or result.get("remote_address") != remote_address
                 or result.get("remote_port") != runtime.plan.remote_port
             ):
                 raise PacketCaptureAdapterError(
@@ -2408,7 +2450,7 @@ class _PacketCaseCoordinator:
                 },
                 {
                     "role": "remote",
-                    "address": runtime.plan.remote_address,
+                    "address": remote_address,
                     "port": runtime.plan.remote_port,
                     "transport": transport,
                 },
@@ -2438,9 +2480,9 @@ class _PacketCaseCoordinator:
                 )
             _require_baseline(baseline.baseline)
             self.runtime.baseline_host = baseline
-            self._admit_android_lan_peer()
+            self._admit_ios_lan_peer()
             self._start_capture()
-            self._revalidate_android_peer_before_capture()
+            self._revalidate_ios_peer_before_capture()
             for index, host_stage in enumerate(CASE_STAGE_PLANS[self.runtime.case_id]):
                 if host_stage == "baseline":
                     self._run_stage(("start", "target", "end")[index], self.runtime.tokens[index], host_stage)
@@ -2516,8 +2558,8 @@ class _PacketCaseCoordinator:
                 if host_stage == "restored":
                     self._run_stage(("start", "target", "end")[index], self.runtime.tokens[index], host_stage)
             self._finish_and_archive_capture()
-            self._revalidate_android_peer_after_capture()
-            self._close_android_peer()
+            self._revalidate_ios_peer_after_capture()
+            self._close_ios_peer()
             self._cleanup_keys()
             return PacketCaptureDisposition.COMPLETE
         except Exception:
@@ -2553,7 +2595,7 @@ class _PacketCaseCoordinator:
                 result.stdout,
                 "packet-pcap",
                 family=self.spec.family,
-                remote_address=runtime.plan.remote_address,
+                remote_address=_resolved_remote_address(runtime.plan),
                 tokens=tuple(token.encode("ascii") for token in runtime.tokens),
             )
             if runtime.stages is None or len(runtime.stages) != 3:
@@ -2589,15 +2631,16 @@ class _PacketCaseCoordinator:
             except Exception as error:
                 cleanup_error = error
             self.runtime.capture = None
-        if self.runtime.android_peer_lease is not None:
+        if self.runtime.ios_peer_lease is not None:
+            lease = self.runtime.ios_peer_lease
             try:
-                self.runtime.android_peer_cleanup = (
-                    self.runtime.android_peer_lease.abort()
-                )
+                self.runtime.ios_peer_cleanup = lease.abort()
             except Exception as error:
+                if lease.is_closed:
+                    self.runtime.ios_peer_lease = None
                 cleanup_error = cleanup_error or error
             else:
-                self.runtime.android_peer_lease = None
+                self.runtime.ios_peer_lease = None
         if self.spec.protocol == "dns":
             try:
                 _remove_private_key_files(_remote_key_path(self.session))
@@ -2680,12 +2723,18 @@ class _PacketCaseCoordinator:
         }
         capture_filter = list(
             packet_capture_filter_argv(
-                case_id=runtime.case_id, tokens=runtime.tokens
+                case_id=runtime.case_id,
+                tokens=runtime.tokens,
+                lan_endpoint_address=(
+                    _resolved_remote_address(runtime.plan)
+                    if runtime.case_id == "lan-bypass"
+                    else None
+                ),
             )
         )
         remote_fields = self._remote_provenance_fields()
         provenance = {
-            "schema_version": 3,
+            "schema_version": 4,
             "document": PACKET_PROVENANCE_DOCUMENT,
             "case_id": runtime.case_id,
             "state_observation_sha256": runtime.test_state.artifact.descriptor.sha256,
@@ -2725,7 +2774,7 @@ class _PacketCaseCoordinator:
             data=canonical_json(provenance) + b"\n",
         )
         attempt = {
-            "schema_version": 3,
+            "schema_version": 4,
             "document": PACKET_ATTEMPT_DOCUMENT,
             "case_id": runtime.case_id,
             "state_observation_sha256": runtime.test_state.artifact.descriptor.sha256,
@@ -2760,16 +2809,17 @@ class _PacketCaseCoordinator:
             if any(
                 value is None
                 for value in (
-                    runtime.android_peer_admission,
-                    runtime.android_peer_before_capture,
-                    runtime.android_peer_after_capture,
-                    runtime.android_peer_cleanup,
+                    runtime.ios_peer_admission,
+                    runtime.ios_peer_before_capture,
+                    runtime.ios_peer_after_capture,
+                    runtime.ios_peer_cleanup,
                 )
             ):
                 raise PacketCaptureAdapterError(
                     "lan_peer_provenance_incomplete",
-                    "Android LAN peer admission and cleanup receipts are incomplete",
+                    "iPhone LAN peer admission and cleanup receipts are incomplete",
                 )
+            peer_ipv4 = _resolved_remote_address(runtime.plan)
             return {
                 "remote_key_generation_command": None,
                 "remote_public_key_command": None,
@@ -2777,19 +2827,31 @@ class _PacketCaseCoordinator:
                 "remote_interface": None,
                 "remote_interface_command": None,
                 "remote_access": {
-                    "document": "cfw-android-lan-peer-provenance-v1",
-                    "source_identity_sha256": SOURCE_ANDROID_LAN_PEER_IDENTITY_SHA256,
-                    "source_identity_file_sha256": ANDROID_LAN_PEER_IDENTITY_FILE_SHA256,
+                    "schema_version": 1,
+                    "document": ios_packet_lan_peer_adapter.PROVENANCE_DOCUMENT,
+                    "evidence_role": ios_packet_lan_peer_adapter.EVIDENCE_ROLE,
+                    "claim_eligible": False,
+                    "source_identity_sha256": (
+                        SOURCE_IOS_LAN_PEER_IDENTITY.identity_sha256
+                    ),
+                    "source_identity_file_sha256": (
+                        SOURCE_IOS_LAN_PEER_IDENTITY.file_sha256
+                    ),
+                    "runtime_endpoint_source": (
+                        runtime.plan.runtime_endpoint_source
+                    ),
                     "network": {
-                        "interface_name": SOURCE_ANDROID_LAN_PEER_NETWORK.interface_name,
-                        "ipv4": SOURCE_ANDROID_LAN_PEER_NETWORK.ipv4,
+                        "interface_name": "en0",
+                        "ipv4": peer_ipv4,
+                        "listener_port": ios_packet_lan_peer_adapter.LISTENER_PORT,
+                        "transport": ios_packet_lan_peer_adapter.TRANSPORT,
                     },
-                    "admission": runtime.android_peer_admission,
-                    "before_capture": runtime.android_peer_before_capture,
-                    "after_capture": runtime.android_peer_after_capture,
-                    "cleanup": runtime.android_peer_cleanup,
+                    "admission": runtime.ios_peer_admission,
+                    "before_capture": runtime.ios_peer_before_capture,
+                    "after_capture": runtime.ios_peer_after_capture,
+                    "cleanup": runtime.ios_peer_cleanup,
                 },
-                "capture_offload_context": "android-adb-usb-lan-peer-v1",
+                "capture_offload_context": "ios-coredevice-localnetwork-packet-peer-v1",
             }
         if self.spec.protocol != "dns":
             return {

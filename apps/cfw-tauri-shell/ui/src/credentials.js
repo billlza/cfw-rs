@@ -18,15 +18,24 @@ export const CREDENTIAL_KINDS = Object.freeze([
   "trojan_password",
   "hysteria2_password",
   "hysteria2_obfs_password",
+  "anytls_password",
+  "tuic_uuid",
+  "tuic_password",
 ]);
 
 const KINDS = new Set(CREDENTIAL_KINDS);
+const CREDENTIAL_LABELS = Object.freeze({
+  anytls_password: "AnyTLS Password",
+  tuic_uuid: "TUIC UUID",
+  tuic_password: "TUIC Password",
+});
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 export function credentialLabel(kind) {
+  if (Object.hasOwn(CREDENTIAL_LABELS, kind)) return CREDENTIAL_LABELS[kind];
   return String(kind)
     .split("_")
     .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))

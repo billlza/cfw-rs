@@ -67,7 +67,6 @@ from scripts.harness.packet_evidence import (
     TRANSPORT_ENDPOINT_ADDRESSES,
     TRANSPORT_ENDPOINT_IDENTITY_SHA256,
     TUNNEL_CAPTURE_LOCAL_ADDRESSES,
-    UNRESOLVED_LAN_ENDPOINT_IDENTITY_SHA256,
     packet_capture_filter_argv,
 )
 from scripts.harness.performance_gates import (
@@ -100,7 +99,7 @@ from scripts.tests.performance_evidence_fixture import build_performance_report
 
 APP_MANIFEST = "a" * 64
 SIGNED_TREE = "b" * 64
-BUILD_NUMBER = "40005"
+BUILD_NUMBER = "40021"
 BUILT_AT = "2026-07-01T00:00:00Z"
 CAPTURED_AT = "2026-07-27T12:00:00Z"
 PERFORMANCE_COMPLETED_AT = "2026-07-27T15:20:00Z"
@@ -267,32 +266,15 @@ def final_artifact_hash_manifest(
 
 ARTIFACT_HASH_MANIFEST_SHA256 = final_artifact_hash_manifest()["sha256"]
 
-FIXTURE_LAN_ENDPOINT_ADDRESS = "198.51.100.9"
-FIXTURE_LAN_ENDPOINT_IDENTITY_SHA256 = UNRESOLVED_LAN_ENDPOINT_IDENTITY_SHA256
+FIXTURE_LAN_ENDPOINT_ADDRESS = "192.168.50.9"
+FIXTURE_LAN_ENDPOINT_IDENTITY_SHA256 = packet_contract.LAN_ENDPOINT_IDENTITY_SHA256
 
 
 @contextmanager
 def fixture_packet_policy():
-    """Install the synthetic LAN pin only around structural fixture checks.
+    """Retain the historical fixture boundary without mutating production pins."""
 
-    Production keeps both source constants unset and the unresolved case gate
-    closed.  Tests must opt into this context explicitly; constructing a
-    fixture never mutates the production validator's module state.
-    """
-
-    with (
-        patch.object(
-            packet_contract,
-            "LAN_ENDPOINT_ADDRESS",
-            FIXTURE_LAN_ENDPOINT_ADDRESS,
-        ),
-        patch.object(
-            packet_contract,
-            "LAN_ENDPOINT_IDENTITY_SHA256",
-            FIXTURE_LAN_ENDPOINT_IDENTITY_SHA256,
-        ),
-    ):
-        yield
+    yield
 
 
 def descriptor(kind: str, path: str, data: bytes) -> dict[str, Any]:
@@ -706,6 +688,38 @@ class PhysicalEvidenceFixture:
                 "stderr": stderr,
             }
 
+        def ios_command_receipt(
+            role: str,
+            seed: str,
+            started_at: str = "2026-07-27T11:59:50.000Z",
+            completed_at: str = "2026-07-27T11:59:50.010Z",
+        ) -> dict[str, Any]:
+            started_text = shifted(started_at)
+            completed_text = shifted(completed_at)
+            started = datetime.fromisoformat(started_text[:-1] + "+00:00")
+            completed = datetime.fromisoformat(completed_text[:-1] + "+00:00")
+            empty_sha256 = hashlib.sha256(b"").hexdigest()
+            return {
+                "role": role,
+                "argv_sha256": sha(f"{run_name}-{seed}-argv"),
+                "started_at": started_text,
+                "completed_at": completed_text,
+                "duration_ms": int((completed - started).total_seconds() * 1_000),
+                "exit_code": 0,
+                "stdout_size": 0,
+                "stdout_sha256": empty_sha256,
+                "stderr_size": 0,
+                "stderr_sha256": empty_sha256,
+            }
+
+        def ios_copy_receipt(role: str, seed: str) -> dict[str, Any]:
+            return {
+                "command": ios_command_receipt(role, f"{seed}-command"),
+                "envelope_sha256": sha(f"{run_name}-{seed}-envelope"),
+                "receipt_sha256": sha(f"{run_name}-{seed}-receipt"),
+                "receipt_size": 512,
+            }
+
         def shifted(value: str) -> str:
             return self._shifted(value, time_offset)
 
@@ -974,7 +988,9 @@ class PhysicalEvidenceFixture:
                     )
                 elif direct:
                     local_address = (
-                        "192.0.2.10"
+                        "192.168.50.10"
+                        if case_id == "lan-bypass"
+                        else "192.0.2.10"
                         if spec.family == "ipv4"
                         else "2001:db8:1::10"
                     )
@@ -1039,7 +1055,15 @@ class PhysicalEvidenceFixture:
             )
             with fixture_packet_policy():
                 capture_filter = list(
-                    packet_capture_filter_argv(case_id=case_id, tokens=tokens)
+                    packet_capture_filter_argv(
+                        case_id=case_id,
+                        tokens=tokens,
+                        lan_endpoint_address=(
+                            FIXTURE_LAN_ENDPOINT_ADDRESS
+                            if case_id == "lan-bypass"
+                            else None
+                        ),
+                    )
                 )
 
             remote_key_generation_command = None
@@ -1449,8 +1473,358 @@ class PhysicalEvidenceFixture:
                     }
                 )
 
+            if case_id == "lan-bypass":
+                ios_session_id = sha(f"{run_name}-{case_id}-ios-session")
+                ios_process_id = 5_544
+                server_bindings = [
+                    {
+                        "stage": stage["stage"],
+                        "token_sha256": stage["token_sha256"],
+                        "local_address": stage["endpoint_set"][0]["address"],
+                        "local_port": stage["endpoint_set"][0]["port"],
+                        "remote_address": stage["endpoint_set"][1]["address"],
+                        "remote_port": stage["endpoint_set"][1]["port"],
+                        "bytes_received": 20,
+                        "eof_observed": True,
+                    }
+                    for stage in attempt_stages
+                ]
+                artifact_validation = {
+                    "profile_decode": ios_command_receipt(
+                        "ios-peer-profile-decode", "profile-decode"
+                    ),
+                    "keychain_certificate": ios_command_receipt(
+                        "ios-peer-keychain-certificate", "keychain-certificate"
+                    ),
+                    "signature_verify": ios_command_receipt(
+                        "ios-peer-codesign-verify", "codesign-verify"
+                    ),
+                    "signature_details": ios_command_receipt(
+                        "ios-peer-codesign-details", "codesign-details"
+                    ),
+                    "signature_entitlements": ios_command_receipt(
+                        "ios-peer-codesign-entitlements", "codesign-entitlements"
+                    ),
+                    "architectures": ios_command_receipt(
+                        "ios-peer-executable-architectures", "architectures"
+                    ),
+                    "build_version": ios_command_receipt(
+                        "ios-peer-executable-build-version", "build-version"
+                    ),
+                    "cdhash": "a" * 40,
+                    "profile_uuid": packet_contract.IOS_LAN_PROFILE_UUID,
+                }
+                primer_cleanup = {
+                    "process_inventory": ios_command_receipt(
+                        "ios-peer-process-inventory", "primer-cleanup-processes"
+                    ),
+                    "process_inventory_sha256": sha(
+                        f"{run_name}-primer-cleanup-processes"
+                    ),
+                    "primer_copy": ios_copy_receipt(
+                        "ios-peer-primer-result-copy", "primer-cleanup-copy"
+                    ),
+                    "terminate_command": ios_command_receipt(
+                        "ios-peer-primer-terminate", "primer-terminate"
+                    ),
+                    "terminate_receipt_sha256": sha(
+                        f"{run_name}-primer-terminate-receipt"
+                    ),
+                    "process_id": 5_543,
+                    "post_terminate_process_inventory": ios_command_receipt(
+                        "ios-peer-process-inventory", "primer-stopped-processes"
+                    ),
+                    "post_terminate_process_inventory_sha256": sha(
+                        f"{run_name}-primer-stopped-processes"
+                    ),
+                }
+                admission = {
+                    "schema_version": 1,
+                    "document": "cfm-ios-packet-lan-peer-admission-v1",
+                    "evidence_role": "server_observation_only",
+                    "claim_eligible": False,
+                    "source_identity_sha256": (
+                        packet_contract.LAN_ENDPOINT_IDENTITY_SHA256
+                    ),
+                    "source_identity_file_sha256": (
+                        packet_contract.LAN_ENDPOINT_IDENTITY_FILE_SHA256
+                    ),
+                    "device": {
+                        "core_device_identifier_sha256": (
+                            packet_contract.IOS_LAN_CORE_DEVICE_SHA256
+                        ),
+                        "provisioning_udid_sha256": (
+                            packet_contract.IOS_LAN_PROVISIONING_UDID_SHA256
+                        ),
+                        "product_type": "iPhone17,1",
+                        "os_version": "26.5",
+                        "os_build": "23F77",
+                        "inventory_connection_state": "disconnected",
+                        "inventory_preparedness_state": None,
+                        "device_list_receipt_sha256": sha(
+                            f"{run_name}-ios-device-list"
+                        ),
+                        "device_list_command": ios_command_receipt(
+                            "ios-peer-device-list", "device-list"
+                        ),
+                        "device_details_receipt_sha256": sha(
+                            f"{run_name}-ios-device-details"
+                        ),
+                        "device_details_command": ios_command_receipt(
+                            "ios-peer-device-details", "device-details"
+                        ),
+                        "lock_receipt_sha256": sha(f"{run_name}-ios-lock"),
+                        "lock_command": ios_command_receipt(
+                            "ios-peer-lock-state", "lock-state"
+                        ),
+                    },
+                    "artifact": {
+                        "app_tree_sha256": packet_contract.IOS_LAN_APP_TREE_SHA256,
+                        "executable_sha256": (
+                            packet_contract.IOS_LAN_EXECUTABLE_SHA256
+                        ),
+                        "source_tree_sha256": (
+                            packet_contract.IOS_LAN_SOURCE_TREE_SHA256
+                        ),
+                        "profile_sha256": packet_contract.IOS_LAN_PROFILE_SHA256,
+                        "entitlements_sha256": (
+                            packet_contract.IOS_LAN_ENTITLEMENTS_SHA256
+                        ),
+                        "signing_certificate_sha256": (
+                            packet_contract.IOS_LAN_SIGNING_CERTIFICATE_SHA256
+                        ),
+                        "validation": artifact_validation,
+                    },
+                    "preflight": {
+                        "app_inventory_sha256": sha(
+                            f"{run_name}-ios-preflight-apps"
+                        ),
+                        "process_inventory_sha256": sha(
+                            f"{run_name}-ios-preflight-processes"
+                        ),
+                        "app_inventory_command": ios_command_receipt(
+                            "ios-peer-app-inventory", "preflight-apps"
+                        ),
+                        "process_inventory_command": ios_command_receipt(
+                            "ios-peer-process-inventory", "preflight-processes"
+                        ),
+                        "app_absent": True,
+                        "process_absent": True,
+                    },
+                    "installation": {
+                        "install_intent_sha256": sha(
+                            f"{run_name}-ios-install-intent"
+                        ),
+                        "install_receipt_sha256": sha(
+                            f"{run_name}-ios-install-receipt"
+                        ),
+                        "post_install_app_inventory_sha256": sha(
+                            f"{run_name}-ios-installed-apps"
+                        ),
+                        "install_command": ios_command_receipt(
+                            "ios-peer-install", "install"
+                        ),
+                        "post_install_app_inventory_command": ios_command_receipt(
+                            "ios-peer-app-inventory", "installed-apps"
+                        ),
+                    },
+                    "primer": {
+                        "pre_launch_lock_receipt_sha256": sha(
+                            f"{run_name}-ios-primer-pre-launch-lock"
+                        ),
+                        "pre_launch_lock_command": ios_command_receipt(
+                            "ios-peer-lock-state", "primer-pre-launch-lock"
+                        ),
+                        "launch_receipt_sha256": sha(
+                            f"{run_name}-ios-primer-launch"
+                        ),
+                        "launch_command": ios_command_receipt(
+                            "ios-peer-primer-launch", "primer-launch"
+                        ),
+                        "process_inventory_sha256": sha(
+                            f"{run_name}-ios-primer-processes"
+                        ),
+                        "process_inventory_command": ios_command_receipt(
+                            "ios-peer-process-inventory", "primer-processes"
+                        ),
+                        "receipt_copy": ios_copy_receipt(
+                            "ios-peer-primer-result-copy", "primer-result-copy"
+                        ),
+                        "cleanup": primer_cleanup,
+                    },
+                    "session": {
+                        "session_id": ios_session_id,
+                        "session_sha256": sha(f"{run_name}-ios-session-document"),
+                        "copy_receipt_sha256": sha(
+                            f"{run_name}-ios-session-copy-receipt"
+                        ),
+                        "copy_command": ios_command_receipt(
+                            "ios-peer-packet-lan-session-copy", "session-copy"
+                        ),
+                    },
+                    "process": {
+                        "pre_launch_lock_receipt_sha256": sha(
+                            f"{run_name}-ios-packet-pre-launch-lock"
+                        ),
+                        "pre_launch_lock_command": ios_command_receipt(
+                            "ios-peer-lock-state", "packet-pre-launch-lock"
+                        ),
+                        "process_id": ios_process_id,
+                        "launch_receipt_sha256": sha(
+                            f"{run_name}-ios-packet-launch"
+                        ),
+                        "launch_command": ios_command_receipt(
+                            "ios-peer-packet-lan-launch", "packet-launch"
+                        ),
+                        "process_inventory_sha256": sha(
+                            f"{run_name}-ios-packet-processes"
+                        ),
+                        "process_inventory_command": ios_command_receipt(
+                            "ios-peer-process-inventory", "packet-processes"
+                        ),
+                        "ready_copy": ios_copy_receipt(
+                            "ios-peer-packet-lan-ready-copy", "packet-ready-copy"
+                        ),
+                    },
+                    "network": {
+                        "interface_name": "en0",
+                        "ipv4": FIXTURE_LAN_ENDPOINT_ADDRESS,
+                    },
+                    "listener": {"port": 44_333, "transport": "tcp4"},
+                    "admitted_at": shifted("2026-07-27T11:59:58.000Z"),
+                }
+                before_capture = {
+                    "schema_version": 1,
+                    "document": "cfm-ios-packet-lan-peer-before-capture-v1",
+                    "claim_eligible": False,
+                    "session_id": ios_session_id,
+                    "process_id": ios_process_id,
+                    "peer_ipv4": FIXTURE_LAN_ENDPOINT_ADDRESS,
+                    "listener_port": 44_333,
+                    "process_inventory": ios_command_receipt(
+                        "ios-peer-process-inventory", "before-capture-processes"
+                    ),
+                    "process_inventory_sha256": sha(
+                        f"{run_name}-ios-before-capture-processes"
+                    ),
+                    "ready_copy": ios_copy_receipt(
+                        "ios-peer-packet-lan-ready-copy", "before-ready-copy"
+                    ),
+                    "observed_at": shifted("2026-07-27T11:59:58.500Z"),
+                }
+                after_capture = {
+                    "schema_version": 1,
+                    "document": "cfm-ios-packet-lan-peer-after-capture-v1",
+                    "claim_eligible": False,
+                    "session_id": ios_session_id,
+                    "process_id": ios_process_id,
+                    "peer_ipv4": FIXTURE_LAN_ENDPOINT_ADDRESS,
+                    "listener_port": 44_333,
+                    "result_copy": ios_copy_receipt(
+                        "ios-peer-packet-lan-result-copy", "packet-result-copy"
+                    ),
+                    "result_sha256": sha(f"{run_name}-ios-packet-result"),
+                    "result_status": "closed",
+                    "sender_server_bindings": server_bindings,
+                    "process_inventory": ios_command_receipt(
+                        "ios-peer-process-inventory", "after-capture-processes"
+                    ),
+                    "process_inventory_sha256": sha(
+                        f"{run_name}-ios-after-capture-processes"
+                    ),
+                    "ready_copy": ios_copy_receipt(
+                        "ios-peer-packet-lan-ready-copy", "after-ready-copy"
+                    ),
+                    "observed_at": shifted("2026-07-27T12:00:05.400Z"),
+                }
+                termination = {
+                    "process_inventory": ios_command_receipt(
+                        "ios-peer-process-inventory", "cleanup-processes"
+                    ),
+                    "process_inventory_sha256": sha(
+                        f"{run_name}-ios-cleanup-processes"
+                    ),
+                    "ready_copy": ios_copy_receipt(
+                        "ios-peer-packet-lan-ready-copy", "cleanup-ready-copy"
+                    ),
+                    "terminate_command": ios_command_receipt(
+                        "ios-peer-terminate", "packet-terminate"
+                    ),
+                    "terminate_receipt_sha256": sha(
+                        f"{run_name}-ios-packet-terminate"
+                    ),
+                    "process_id": ios_process_id,
+                    "post_terminate_process_inventory": ios_command_receipt(
+                        "ios-peer-process-inventory", "packet-stopped-processes"
+                    ),
+                    "post_terminate_process_inventory_sha256": sha(
+                        f"{run_name}-ios-packet-stopped-processes"
+                    ),
+                }
+                uninstall = {
+                    "uninstall_command": ios_command_receipt(
+                        "ios-peer-uninstall", "uninstall"
+                    ),
+                    "uninstall_receipt_sha256": sha(
+                        f"{run_name}-ios-uninstall"
+                    ),
+                    "final_app_inventory": ios_command_receipt(
+                        "ios-peer-app-inventory", "final-apps"
+                    ),
+                    "final_app_inventory_sha256": sha(
+                        f"{run_name}-ios-final-apps"
+                    ),
+                    "final_process_inventory": ios_command_receipt(
+                        "ios-peer-process-inventory", "final-processes"
+                    ),
+                    "final_process_inventory_sha256": sha(
+                        f"{run_name}-ios-final-processes"
+                    ),
+                    "app_absent": True,
+                    "process_absent": True,
+                }
+                cleanup = {
+                    "schema_version": 1,
+                    "document": "cfm-ios-packet-lan-peer-cleanup-v1",
+                    "claim_eligible": False,
+                    "outcome": "capture-complete",
+                    "capture_state": "capture-validated",
+                    "session_id": ios_session_id,
+                    "process_id": ios_process_id,
+                    "termination": termination,
+                    "uninstall": uninstall,
+                }
+                remote_access = {
+                    "schema_version": 1,
+                    "document": "cfm-ios-packet-lan-peer-provenance-v1",
+                    "evidence_role": "server_observation_only",
+                    "claim_eligible": False,
+                    "source_identity_sha256": (
+                        packet_contract.LAN_ENDPOINT_IDENTITY_SHA256
+                    ),
+                    "source_identity_file_sha256": (
+                        packet_contract.LAN_ENDPOINT_IDENTITY_FILE_SHA256
+                    ),
+                    "runtime_endpoint_source": (
+                        "cfm-ios-packet-lan-peer-ready-v1"
+                    ),
+                    "network": {
+                        "interface_name": "en0",
+                        "ipv4": FIXTURE_LAN_ENDPOINT_ADDRESS,
+                        "listener_port": 44_333,
+                        "transport": "tcp4",
+                    },
+                    "admission": admission,
+                    "before_capture": before_capture,
+                    "after_capture": after_capture,
+                    "cleanup": cleanup,
+                }
+                capture_offload_context = (
+                    "ios-coredevice-localnetwork-packet-peer-v1"
+                )
+
             provenance = {
-                "schema_version": 3,
+                "schema_version": 4,
                 "document": PACKET_PROVENANCE_DOCUMENT,
                 "case_id": case_id,
                 "state_observation_sha256": state_artifact["sha256"],
@@ -1502,7 +1876,7 @@ class PhysicalEvidenceFixture:
                 "packet-capture-provenance",
             )
             attempt = {
-                "schema_version": 3,
+                "schema_version": 4,
                 "document": PACKET_ATTEMPT_DOCUMENT,
                 "case_id": case_id,
                 "state_observation_sha256": state_artifact["sha256"],
@@ -1942,7 +2316,7 @@ class PhysicalEvidenceFixture:
             "com.bill.clashformac.packet-tunnel / "
             "com.bill.clashformac.proxy-agent\n"
             "platform: arm64 / macOS 15.0+\n"
-            "build number: 40005\n"
+            "build number: 40021\n"
         )
         identity_stderr = (
             f"{identity_app}: valid on disk\n"

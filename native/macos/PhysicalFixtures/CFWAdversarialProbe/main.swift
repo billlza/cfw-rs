@@ -472,7 +472,7 @@ private func malformedProtocolRequest(_ caseID: CaseID) throws -> Data {
       + String(repeating: "[", count: nesting)
     let suffix =
       String(repeating: "]", count: nesting)
-      + "}},\"major\":1,\"minor\":0,\"request_id\":\"\(requestID)\","
+      + "}},\"major\":1,\"minor\":\(AuthorityV1Limits.minor),\"request_id\":\"\(requestID)\","
       + "\"required_feature_bits\":0}"
     guard let data = (prefix + suffix).data(using: .utf8),
       data.count <= AuthorityV1Limits.maximumEnvelopeBytes

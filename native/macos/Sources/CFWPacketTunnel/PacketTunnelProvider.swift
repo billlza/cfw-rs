@@ -18,6 +18,7 @@ public enum PacketTunnelProviderError: Error, Equatable, Sendable {
   case packetPumpSetup(String)
   case packetPump(PacketPumpError)
   case engineStart(String)
+  case controllerEndpointConflict(port: UInt16)
   case engineStop(String)
   case networkSettings(String)
 }
@@ -49,6 +50,8 @@ extension PacketTunnelProviderError: LocalizedError {
       return "Packet pump failed: \(error)"
     case .engineStart:
       return "Packet tunnel engine start failed."
+    case .controllerEndpointConflict(let port):
+      return "The Packet Tunnel controller endpoint could not bind to port \(port)."
     case .engineStop:
       return "Packet tunnel engine stop failed."
     case .networkSettings:
@@ -132,6 +135,12 @@ extension PacketTunnelProviderError {
           "tunnel-engine-start-failed",
           "Packet tunnel engine startup failed.",
           true
+        )
+      case .controllerEndpointConflict(let port):
+        (
+          "controller-endpoint-in-use",
+          "The Packet Tunnel controller endpoint could not bind to port \(port).",
+          false
         )
       case .engineStop:
         (

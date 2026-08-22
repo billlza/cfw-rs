@@ -163,7 +163,7 @@ if {
 } != set(IDENTITY_PROBE_IDS):
     raise RuntimeError("lifecycle identity probe contract drifted")
 
-IDENTITY_FINAL_BUILD = "40005"
+IDENTITY_FINAL_BUILD = "40021"
 IDENTITY_OBSERVATION_DOCUMENT = "cfw-physical-identity-observation-v2"
 IDENTITY_OBSERVATION_SCHEMA_VERSION = 2
 IDENTITY_OBSERVATION_MAXIMUM_BYTES = 1024 * 1024
@@ -172,7 +172,7 @@ IDENTITY_VERIFIER_ROLE = "release-identity-verifier"
 IDENTITY_FIXED_COMMAND = (
     "scripts/verify_release_app.sh",
     "target/candidates/0.4.0/signed/Clash for Mac.app",
-    "target/candidates/0.4.0/release-build/40005/native-products",
+    f"target/candidates/0.4.0/release-build/{IDENTITY_FINAL_BUILD}/native-products",
 )
 IDENTITY_FIXED_COMMAND_SHA256 = hashlib.sha256(
     canonical_json(list(IDENTITY_FIXED_COMMAND))

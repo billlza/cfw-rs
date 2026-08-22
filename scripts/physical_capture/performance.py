@@ -355,7 +355,7 @@ def _capture_context(context: object) -> tuple[dict[str, Any], dict[str, Any]]:
     ):
         raise PerformanceCaptureError(
             "not_final_candidate",
-            "performance capture requires final 0.4.0 build 40005",
+            f"performance capture requires final 0.4.0 build {FINAL_RELEASE_BUILD}",
         )
     return candidate, run
 

@@ -937,6 +937,12 @@ dd {
   background: #4c4b4b;
 }
 
+.mode-switch button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  box-shadow: none;
+}
+
 .panel {
   border: 0;
   border-bottom: 1px solid var(--bc);

@@ -319,7 +319,9 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
         proof["candidate"]["version"] != PRODUCT_VERSION
         or proof["candidate"]["build_number"] != FINAL_BUILD
     ):
-        raise PerformanceGateError("performance evidence is not final 0.4.0 build 40005")
+        raise PerformanceGateError(
+            f"performance evidence is not final 0.4.0 build {FINAL_BUILD}"
+        )
     ledger_descriptor, ledger = _read_ledger(artifacts, document["ledger_artifact"])
     derived = validate_performance_ledger(ledger, artifacts=artifacts)
     if _proof_candidate(proof) != {

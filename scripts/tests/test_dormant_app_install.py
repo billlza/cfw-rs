@@ -34,6 +34,7 @@ from scripts.dormant_app_install import (
     _parse_btm_values,
     _normalize_routes,
     _parse_processes,
+    _parse_system_extension_identities,
     _require_fixed_command,
     _run_bounded_process,
     production_command_runner,
@@ -93,6 +94,24 @@ def btm_fixture(
             )
         )
     return "\n\n".join(rendered) + "\n\n\n\n"
+
+
+def system_extensions_fixture(
+    *identities: tuple[str, str],
+    category: str = "com.apple.system_extension.network_extension",
+) -> str:
+    if not identities:
+        return "0 extension(s)\n"
+    lines = [
+        f"{len(identities)} extension(s)",
+        f"--- {category}",
+        "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]",
+    ]
+    lines.extend(
+        f"*\t*\t{team_id}\t{bundle_id} (1.2.3/123)\t{bundle_id}\t[activated enabled]"
+        for team_id, bundle_id in identities
+    )
+    return "\n".join(lines) + "\n"
 
 
 def guard(*, proxy: str = "1" * 64) -> dict[str, object]:
@@ -883,7 +902,9 @@ class DormantInstallValidationTests(unittest.TestCase):
             if arguments == ("/usr/bin/systemextensionsctl", "list"):
                 return CommandResult(
                     0,
-                    "* * YKUPL7Z869 com.bill.clashformac.packet-tunnel enabled\n",
+                    system_extensions_fixture(
+                        ("YKUPL7Z869", "com.bill.clashformac.packet-tunnel")
+                    ),
                     "",
                 )
             raise AssertionError(arguments)
@@ -922,6 +943,34 @@ class DormantInstallValidationTests(unittest.TestCase):
         self.assertEqual(sum(command[0] == "/bin/launchctl" for command in observed), 3)
         self.assertIn(("/usr/bin/sfltool", "dumpbtm"), observed)
         self.assertIn(("/usr/bin/systemextensionsctl", "list"), observed)
+
+    def test_unrelated_system_extensions_do_not_block_dormancy(self) -> None:
+        def runner(arguments: tuple[str, ...]) -> CommandResult:
+            if arguments[:3] == ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="):
+                return CommandResult(0, "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n", "")
+            if arguments[:2] == ("/bin/launchctl", "print"):
+                return CommandResult(
+                    113,
+                    "",
+                    'Could not find service "fixture" in domain\n',
+                )
+            if arguments == ("/usr/bin/sfltool", "dumpbtm"):
+                return CommandResult(0, btm_fixture(), "")
+            if arguments == ("/usr/bin/systemextensionsctl", "list"):
+                return CommandResult(
+                    0,
+                    system_extensions_fixture(
+                        ("EZ5B6482X4", "com.devguru.DriverKit.SamsungMTP")
+                    ),
+                    "",
+                )
+            raise AssertionError(arguments)
+
+        with patch(
+            "scripts.dormant_app_install._required_btm_uids",
+            return_value={-2, 0, 501},
+        ):
+            require_cfm_dormant(guard(), runner)
 
     def test_registered_btm_identity_and_near_match_are_distinguished(self) -> None:
         def run_with(output: str) -> None:
@@ -1008,6 +1057,50 @@ class BtmParserTests(unittest.TestCase):
                 _parse_btm_values(output, {-2, 0, 501})
             self.assertEqual(
                 captured.exception.code, "cfm_background_item_observation_invalid"
+            )
+
+
+class SystemExtensionParserTests(unittest.TestCase):
+    def test_unrelated_and_near_match_identities_are_accepted(self) -> None:
+        identities = _parse_system_extension_identities(
+            system_extensions_fixture(
+                ("EZ5B6482X4", "com.devguru.DriverKit.SamsungMTP"),
+                ("YKUPL7Z869", "com.bill.clashformac.packet-tunnelx"),
+            )
+        )
+        self.assertEqual(
+            identities,
+            {
+                ("EZ5B6482X4", "com.devguru.DriverKit.SamsungMTP"),
+                ("YKUPL7Z869", "com.bill.clashformac.packet-tunnelx"),
+            },
+        )
+
+    def test_empty_output_is_the_only_zero_count_shape(self) -> None:
+        self.assertEqual(_parse_system_extension_identities("0 extension(s)\n"), set())
+        with self.assertRaises(InstallError) as captured:
+            _parse_system_extension_identities(
+                "0 extension(s)\n--- com.apple.system_extension.network_extension\n"
+            )
+        self.assertEqual(
+            captured.exception.code, "cfm_system_extension_observation_invalid"
+        )
+
+    def test_malformed_count_header_duplicate_and_row_fail_closed(self) -> None:
+        valid = system_extensions_fixture(("EZ5B6482X4", "com.example.extension"))
+        malformed = {
+            "count": valid.replace("1 extension(s)", "2 extension(s)", 1),
+            "header": valid.replace("teamID", "team", 1),
+            "duplicate": valid.replace("1 extension(s)", "2 extension(s)", 1)
+            + valid.split("\n", 3)[3],
+            "row": valid.replace("EZ5B6482X4", "invalid-team", 1),
+            "diagnostic": valid + "warning: partial output\n",
+        }
+        for label, output in malformed.items():
+            with self.subTest(label=label), self.assertRaises(InstallError) as captured:
+                _parse_system_extension_identities(output)
+            self.assertEqual(
+                captured.exception.code, "cfm_system_extension_observation_invalid"
             )
 
 

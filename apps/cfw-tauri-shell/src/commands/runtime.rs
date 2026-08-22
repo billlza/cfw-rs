@@ -74,7 +74,7 @@ pub(crate) async fn apply_active_profile(
         .await
         .map_err(|error| error.to_string())?;
     let selected = require_selected_profile(&profiles)?;
-    let settings = engine.engine_settings().clone();
+    let settings = engine.engine_settings()?;
     let projected = project_for_mode(&selected, &settings, mode)?;
     if mode != EngineMode::Off {
         apply_admitted_engine_mode(&engine, &retirement, &profiles, mode, mode_lease).await?;
@@ -99,7 +99,7 @@ pub(crate) fn read_runtime_config_text(
     profiles: State<'_, ManagedProfiles>,
 ) -> Result<String, String> {
     let selected = require_selected_profile(&profiles)?;
-    let settings = engine.engine_settings().clone();
+    let settings = engine.engine_settings()?;
     let mode = match engine.coordinator.snapshot().desired_mode {
         EngineMode::Tunnel => ProjectionMode::Tunnel,
         // With the engine off there is no live configuration; the System Proxy
@@ -111,7 +111,7 @@ pub(crate) fn read_runtime_config_text(
         .project(&selected.record.id, mode, &settings)
         .map_err(|error| error.to_string())?;
     let secret = engine
-        .controller_access()
+        .controller_access()?
         .client_endpoint()
         .secret
         .ok_or("the app-owned controller has no secret")?;

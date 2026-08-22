@@ -131,24 +131,21 @@ def pcapng_bytes(
 
 class PacketFixturePolicyIsolationTests(unittest.TestCase):
     def test_fixture_lan_policy_is_explicit_and_does_not_leak(self) -> None:
-        self.assertEqual(packet_contract.LAN_ENDPOINT_ADDRESS, "172.20.10.2")
+        self.assertFalse(hasattr(packet_contract, "LAN_ENDPOINT_ADDRESS"))
         self.assertEqual(
             packet_contract.LAN_ENDPOINT_IDENTITY_SHA256,
-            "7db9a43d88a58b544b006fba4b7b14f426e122bcc798a81ccb91dce071e77ce3",
+            FIXTURE_LAN_ENDPOINT_IDENTITY_SHA256,
         )
         with fixture_packet_policy():
-            self.assertEqual(
-                packet_contract.LAN_ENDPOINT_ADDRESS,
-                FIXTURE_LAN_ENDPOINT_ADDRESS,
-            )
+            self.assertFalse(hasattr(packet_contract, "LAN_ENDPOINT_ADDRESS"))
             self.assertEqual(
                 packet_contract.LAN_ENDPOINT_IDENTITY_SHA256,
                 FIXTURE_LAN_ENDPOINT_IDENTITY_SHA256,
             )
-        self.assertEqual(packet_contract.LAN_ENDPOINT_ADDRESS, "172.20.10.2")
+        self.assertFalse(hasattr(packet_contract, "LAN_ENDPOINT_ADDRESS"))
         self.assertEqual(
             packet_contract.LAN_ENDPOINT_IDENTITY_SHA256,
-            "7db9a43d88a58b544b006fba4b7b14f426e122bcc798a81ccb91dce071e77ce3",
+            FIXTURE_LAN_ENDPOINT_IDENTITY_SHA256,
         )
 
 
@@ -1374,6 +1371,65 @@ class PacketEvidenceHarnessTests(unittest.TestCase):
                 self.validate()
         finally:
             self.rewrite_provenance(local_case, original)
+
+    def test_ios_lan_peer_dynamic_endpoint_and_cleanup_fail_closed(self) -> None:
+        case = next(
+            item for item in self.document["cases"] if item["id"] == "lan-bypass"
+        )
+        descriptor = case["provenance_artifact"]
+        original = json.loads(
+            (self.root / descriptor["path"]).read_text(encoding="utf-8")
+        )
+        try:
+            endpoint_drift = copy.deepcopy(original)
+            endpoint_drift["remote_access"]["network"]["ipv4"] = "192.168.50.99"
+            self.rewrite_provenance(case, endpoint_drift)
+            with self.assertRaisesRegex(PacketEvidenceError, "source-bound"):
+                self.validate()
+
+            binding_drift = copy.deepcopy(original)
+            binding_drift["remote_access"]["after_capture"][
+                "sender_server_bindings"
+            ][1]["local_port"] = 52_000
+            self.rewrite_provenance(case, binding_drift)
+            with self.assertRaisesRegex(PacketEvidenceError, "sender/iPhone binding"):
+                self.validate()
+
+            incomplete_cleanup = copy.deepcopy(original)
+            incomplete_cleanup["remote_access"]["cleanup"]["uninstall"][
+                "app_absent"
+            ] = False
+            self.rewrite_provenance(case, incomplete_cleanup)
+            with self.assertRaisesRegex(PacketEvidenceError, "cleanup is incomplete"):
+                self.validate()
+
+            filter_drift = copy.deepcopy(original)
+            expression = filter_drift["capture_filter_argv"][0]
+            filter_drift["capture_filter_argv"][0] = expression.replace(
+                FIXTURE_LAN_ENDPOINT_ADDRESS, "192.168.50.99"
+            )
+            filter_drift["capture_filter_sha256"] = hashlib.sha256(
+                canonical_json(filter_drift["capture_filter_argv"])
+            ).hexdigest()
+            filter_drift["capture_command"]["argv"][-1] = filter_drift[
+                "capture_filter_argv"
+            ][0]
+            filter_drift["capture_command"]["argv_sha256"] = hashlib.sha256(
+                canonical_json(filter_drift["capture_command"]["argv"])
+            ).hexdigest()
+            case["capture_filter_sha256"] = filter_drift["capture_filter_sha256"]
+            case["capture_command_sha256"] = filter_drift["capture_command"][
+                "argv_sha256"
+            ]
+            self.rewrite_provenance(case, filter_drift)
+            with self.assertRaisesRegex(PacketEvidenceError, "capture filter differs"):
+                self.validate()
+        finally:
+            case["capture_filter_sha256"] = original["capture_filter_sha256"]
+            case["capture_command_sha256"] = original["capture_command"][
+                "argv_sha256"
+            ]
+            self.rewrite_provenance(case, original)
 
     def test_absence_requires_exact_state_and_bounded_causal_window(self) -> None:
         def rewrite_state(descriptor: dict, observation: dict) -> None:

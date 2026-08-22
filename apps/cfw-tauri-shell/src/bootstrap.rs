@@ -1,7 +1,10 @@
+use std::future::Future;
 use std::sync::Mutex;
+use std::time::Duration;
 
+use cfw_engine_api::EngineEvent;
 use serde::Serialize;
-use tauri::{State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use crate::legacy::{
     ConsumedHandoffTicket, MigrationHandoffLease, ProcessIdentity, RendererReadyChallenge,
@@ -9,6 +12,8 @@ use crate::legacy::{
 use crate::lifecycle::{AppLifecycle, MigrationHandoffStatus};
 
 const MAIN_WINDOW_LABEL: &str = "main";
+const PARENT_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const PARENT_EXIT_MAX_CHECKS: usize = 1_001;
 
 pub(crate) struct LaunchContext {
     migration_handoff: bool,
@@ -83,7 +88,21 @@ impl LaunchContext {
 
     pub(crate) fn require_renderer_ready_published(&self) -> Result<(), String> {
         self.require_handoff_ticket()?;
-        self.renderer_ready.require_published()
+        self.renderer_ready.require_post_parent_window_ready()
+    }
+
+    fn handoff_parent_absent(&self) -> Result<bool, String> {
+        self.require_handoff_ticket()?.parent_absent()
+    }
+
+    fn mark_post_parent_window_ready(&self) -> Result<(), String> {
+        self.require_handoff_ticket()?.require_child_identity()?;
+        self.renderer_ready.mark_post_parent_window_ready()
+    }
+
+    fn post_parent_window_ready(&self) -> Result<bool, String> {
+        self.require_handoff_ticket()?;
+        self.renderer_ready.post_parent_window_ready()
     }
 
     pub(crate) fn require_handoff_parent_absent(&self) -> Result<(), String> {
@@ -132,6 +151,7 @@ enum RendererReadyPhase {
     Challenged(RendererReadyChallenge),
     Publishing,
     Published,
+    PostParentWindowReady,
     Failed,
 }
 
@@ -179,7 +199,9 @@ impl RendererReadyGate {
             RendererReadyPhase::Publishing => {
                 Err("migration renderer readiness publication is in progress".into())
             }
-            RendererReadyPhase::Published => Ok(MigrationHandoffRendererReady::Published),
+            RendererReadyPhase::Published | RendererReadyPhase::PostParentWindowReady => {
+                Ok(MigrationHandoffRendererReady::Published)
+            }
             RendererReadyPhase::Failed => {
                 Err("migration renderer readiness previously failed and remains closed".into())
             }
@@ -216,7 +238,7 @@ impl RendererReadyGate {
                     "migration renderer readiness publication is already in progress".into(),
                 );
             }
-            RendererReadyPhase::Published => {
+            RendererReadyPhase::Published | RendererReadyPhase::PostParentWindowReady => {
                 return Err(
                     "migration renderer readiness acknowledgement was already consumed".into(),
                 );
@@ -245,13 +267,103 @@ impl RendererReadyGate {
         Ok(())
     }
 
-    fn require_published(&self) -> Result<(), String> {
-        if matches!(self.lock()?.phase, RendererReadyPhase::Published) {
+    fn mark_post_parent_window_ready(&self) -> Result<(), String> {
+        let mut inner = self.lock()?;
+        if matches!(inner.phase, RendererReadyPhase::Published) {
+            inner.phase = RendererReadyPhase::PostParentWindowReady;
             Ok(())
         } else {
-            Err("migration renderer readiness has not been published".into())
+            Err(
+                "migration window cannot complete post-parent activation in its current state"
+                    .into(),
+            )
         }
     }
+
+    fn require_post_parent_window_ready(&self) -> Result<(), String> {
+        if self.post_parent_window_ready()? {
+            Ok(())
+        } else {
+            Err("migration window is not ready after the dashboard parent exited".into())
+        }
+    }
+
+    fn post_parent_window_ready(&self) -> Result<bool, String> {
+        Ok(matches!(
+            self.lock()?.phase,
+            RendererReadyPhase::PostParentWindowReady
+        ))
+    }
+}
+
+async fn wait_for_parent_absence_with<Check, Sleep, SleepFuture>(
+    mut check: Check,
+    mut sleep: Sleep,
+    max_checks: usize,
+) -> Result<(), String>
+where
+    Check: FnMut() -> Result<bool, String>,
+    Sleep: FnMut() -> SleepFuture,
+    SleepFuture: Future<Output = ()>,
+{
+    if max_checks == 0 {
+        return Err("migration parent-exit wait has no observation budget".into());
+    }
+    for index in 0..max_checks {
+        if check()? {
+            return Ok(());
+        }
+        if index + 1 < max_checks {
+            sleep().await;
+        }
+    }
+    Err("migration dashboard parent did not exit within 20 seconds".into())
+}
+
+async fn reactivate_window_after_parent_exit(app: AppHandle) -> Result<(), String> {
+    wait_for_parent_absence_with(
+        || app.state::<LaunchContext>().handoff_parent_absent(),
+        || tokio::time::sleep(PARENT_EXIT_POLL_INTERVAL),
+        PARENT_EXIT_MAX_CHECKS,
+    )
+    .await?;
+    activate_main_window(&app)?;
+    app.state::<LaunchContext>().mark_post_parent_window_ready()
+}
+
+fn activate_main_window(app: &AppHandle) -> Result<(), String> {
+    crate::shell::prepare_migration_handoff_window(app)
+}
+
+pub(crate) fn reopen_main_window(app: &AppHandle) -> Result<(), String> {
+    let launch = app.state::<LaunchContext>();
+    if launch.is_migration_handoff() && !launch.post_parent_window_ready()? {
+        return Ok(());
+    }
+    activate_main_window(app)
+}
+
+fn schedule_post_parent_window_activation(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = reactivate_window_after_parent_exit(app.clone()).await {
+            eprintln!("migration post-parent window activation failed: {error}");
+            if let Err(emit_error) = app.emit(
+                "cfw://engine-event",
+                EngineEvent::boundary_failure(
+                    "migration_post_parent_window_failed",
+                    "The migration window could not be restored after the dashboard exited. No cutover was authorized. Relaunch Clash for Mac and retry.",
+                ),
+            ) {
+                eprintln!("failed to publish migration window activation error: {emit_error}");
+            }
+            if let Err(shutdown_error) = crate::lifecycle::request_shutdown(
+                app.clone(),
+                crate::launch::STARTUP_ADMISSION_EXIT_CODE,
+            ) {
+                eprintln!("failed to close unusable migration handoff: {shutdown_error}");
+            }
+        }
+    });
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -298,7 +410,9 @@ pub(crate) fn acknowledge_migration_handoff_renderer_ready(
     challenge: String,
 ) -> Result<(), String> {
     let renderer = RendererReadyChallenge::from_renderer_input(generation, challenge)?;
-    launch.acknowledge_renderer_ready(window.label(), renderer)
+    launch.acknowledge_renderer_ready(window.label(), renderer)?;
+    schedule_post_parent_window_activation(window.app_handle().clone());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -336,7 +450,7 @@ mod tests {
     fn native_setup_does_not_publish_or_issue_a_renderer_challenge() {
         let gate = RendererReadyGate::default();
         assert!(gate.boot_state(&challenges()).is_err());
-        assert!(gate.require_published().is_err());
+        assert!(gate.require_post_parent_window_ready().is_err());
         let publications = AtomicUsize::new(0);
         assert!(
             gate.acknowledge_with(
@@ -352,7 +466,7 @@ mod tests {
         );
         assert_eq!(publications.load(Ordering::Acquire), 0);
         gate.mark_native_ready().expect("native ready");
-        assert!(gate.require_published().is_err());
+        assert!(gate.require_post_parent_window_ready().is_err());
     }
 
     #[test]
@@ -363,7 +477,7 @@ mod tests {
         assert!(gate.boot_state(&only).is_ok());
         assert!(gate.boot_state(&only).is_err());
         assert!(gate.boot_state(&only).is_err());
-        assert!(gate.require_published().is_err());
+        assert!(gate.require_post_parent_window_ready().is_err());
     }
 
     #[test]
@@ -382,6 +496,12 @@ mod tests {
         );
         gate.acknowledge_with(MAIN_WINDOW_LABEL, current, || Ok(()), |_| Ok(()))
             .expect("current main-window acknowledgement");
+        assert!(gate.require_post_parent_window_ready().is_err());
+        gate.mark_post_parent_window_ready()
+            .expect("post-parent window ready");
+        gate.require_post_parent_window_ready()
+            .expect("final migration window readiness");
+        assert!(gate.mark_post_parent_window_ready().is_err());
     }
 
     #[test]
@@ -432,7 +552,7 @@ mod tests {
                 .acknowledge_with(MAIN_WINDOW_LABEL, proof, || Ok(()), |_| Ok(()))
                 .is_err()
         );
-        assert!(failed.require_published().is_err());
+        assert!(failed.require_post_parent_window_ready().is_err());
     }
 
     #[test]
@@ -479,5 +599,45 @@ mod tests {
             renderer_ready: RendererReadyGate::default(),
         };
         assert!(inconsistent.require_handoff_ticket().is_err());
+    }
+
+    #[tokio::test]
+    async fn parent_exit_wait_is_bounded_and_preserves_observation_errors() {
+        let checks = AtomicUsize::new(0);
+        let sleeps = AtomicUsize::new(0);
+        wait_for_parent_absence_with(
+            || Ok(checks.fetch_add(1, Ordering::AcqRel) >= 2),
+            || {
+                sleeps.fetch_add(1, Ordering::AcqRel);
+                std::future::ready(())
+            },
+            4,
+        )
+        .await
+        .expect("third observation sees parent exit");
+        assert_eq!(checks.load(Ordering::Acquire), 3);
+        assert_eq!(sleeps.load(Ordering::Acquire), 2);
+
+        let error = wait_for_parent_absence_with(
+            || Err("kernel observation failed".into()),
+            || std::future::ready(()),
+            4,
+        )
+        .await
+        .expect_err("observation failure remains terminal");
+        assert_eq!(error, "kernel observation failed");
+
+        let error = wait_for_parent_absence_with(|| Ok(false), || std::future::ready(()), 2)
+            .await
+            .expect_err("bounded wait times out");
+        assert_eq!(
+            error,
+            "migration dashboard parent did not exit within 20 seconds"
+        );
+        assert!(
+            wait_for_parent_absence_with(|| Ok(true), || std::future::ready(()), 0,)
+                .await
+                .is_err()
+        );
     }
 }

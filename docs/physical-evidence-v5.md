@@ -92,12 +92,12 @@ TOCTOU-visible mutation fails the entire physical level.
   sender. The receive-only peer source, tests, service unit and reproducible
   build instructions live in `tools/packet-evidence-endpoint/`; the pinned
   Linux/amd64 artifact digest is
-  `fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1`
+  `c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c`
   and the exact systemd unit digest is
   `7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996`.
   The only supported Debian installation transaction is
   `install-endpoint.sh`, digest
-  `6527983cf9b072ab99ecd820778ccb56c9d91d79e07fc4d558715c4ce8657049`;
+  `14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8`;
   its fixed GCE metadata resolver configuration has digest
   `b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62`.
   The installed capture sudoers rule and local strict known-hosts bytes have
@@ -108,9 +108,17 @@ TOCTOU-visible mutation fails the entire physical level.
   build, source, tests, unit, resolver, installer, sudoers, endpoint identity
   policy and known-hosts file; the generated target binary is not tracked.
   The three GCE identities and twelve non-LAN case projections are pinned. The
-  Host-owned DNS transaction and remote stream capture now have closed source
-  paths, but the complete matrix entry still refuses collection because the
-  controlled Android LAN peer is not provisioned or identity-pinned.
+  LAN projection intentionally stores no IP address: the active iPhone adapter
+  must resolve one canonical RFC1918 `en0` address from its fresh ready receipt.
+  Wireless CoreDevice inventory may initially report the hash-selected iPhone
+  as dormant (`disconnected` with no preparedness value); the immediately
+  following device-details receipt must still prove `connected` and
+  `preparednessState=7`. Independent lock-state receipts are required at
+  admission and immediately before both app launches. Packet provenance v4
+  binds those transitions, the ready address, signed app, three sender/server
+  TCP tuples and exact post-uninstall absence.
+  The Host-owned DNS transaction and remote stream capture have closed source
+  paths, but a new complete physical matrix still must be collected.
   It accepts no caller-supplied endpoint, profile, product state, pcap, or
   manual SSH result as a substitute. This is an explicit physical-run blocker,
   not a fixture fallback, and no physical candidate Packet evidence has been

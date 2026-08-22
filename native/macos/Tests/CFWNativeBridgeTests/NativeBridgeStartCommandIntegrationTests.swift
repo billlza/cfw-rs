@@ -184,6 +184,75 @@ private actor StartableProxyAgent: ProxyAgentTransporting {
   func transferredConfigurationDigests() -> [String] { startConfigurationDigests }
 }
 
+private enum FailedStartRetryFault: CaseIterable, Equatable, Sendable {
+  case ownerObservation
+  case ownerStop
+  case globalOffObservation
+}
+
+private actor FailedStartProxyAgent: ProxyAgentTransporting {
+  private let descriptor: ConfigurationDescriptor
+  private let failure = EngineFailure(
+    code: "mixed-endpoint-in-use",
+    message: "The mixed listener endpoint is already in use.",
+    isRetryable: false)
+  private var remainingSnapshotFailures: Int
+  private var remainingStopFailures: Int
+  private var failed = false
+  private var stopped = false
+  private(set) var startCalls = 0
+  private(set) var stopCalls = 0
+
+  init(descriptor: ConfigurationDescriptor, fault: FailedStartRetryFault) {
+    self.descriptor = descriptor
+    remainingSnapshotFailures = fault == .ownerObservation ? 1 : 0
+    remainingStopFailures = fault == .ownerStop ? 1 : 0
+  }
+
+  func registrationStatus() -> ProxyAgentRegistrationStatus { .enabled }
+  func ensureRegistered() {}
+
+  func start(
+    configuration: Data,
+    descriptor: ConfigurationDescriptor,
+    authorization: HostPreparedSystemProxyStart
+  ) throws {
+    try descriptor.validateConfigurationBytes(configuration)
+    startCalls += 1
+    failed = true
+    throw ProxyAgentHostError.agentFailure(failure)
+  }
+
+  func stop(configuration: ConfigurationDescriptor) throws {
+    stopCalls += 1
+    guard configuration == descriptor else {
+      throw ProxyAgentHostError.responseMismatch
+    }
+    if remainingStopFailures > 0 {
+      remainingStopFailures -= 1
+      throw ProxyAgentHostError.transportUnavailable("injected owner stop failure")
+    }
+    stopped = true
+  }
+
+  func snapshot() throws -> EngineSnapshot {
+    if remainingSnapshotFailures > 0 {
+      remainingSnapshotFailures -= 1
+      throw ProxyAgentHostError.transportUnavailable("injected owner observation failure")
+    }
+    return failed && !stopped
+      ? .proxyFailed(failure, configuration: descriptor, sequence: 1)
+      : .off
+  }
+
+  func validateConfiguration(
+    _ configuration: Data,
+    descriptor: ConfigurationDescriptor
+  ) throws {}
+
+  func counters() -> (start: Int, stop: Int) { (startCalls, stopCalls) }
+}
+
 private actor StartableTunnelHost: TunnelHostBridging {
   private let descriptor: ConfigurationDescriptor
   private let recoveryStatus: RecoveryManagedTunnelStatus
@@ -191,11 +260,16 @@ private actor StartableTunnelHost: TunnelHostBridging {
   private let installResult: SystemExtensionInstallResult
   private let installError: AppleNetworkError?
   private let cleanupEvents: NativeCleanupEventLog?
+  private let failedStartSnapshot: EngineFailure?
+  private let startPendingPreferenceDescriptor: ConfigurationDescriptor?
+  private var remainingSnapshotFailures: Int
+  private var remainingStopFailures: Int
   private(set) var installCalls = 0
   private(set) var cancelInstallCalls = 0
   private(set) var startCalls = 0
   private(set) var stopCalls = 0
   private var started = false
+  private var failedOwnerPresent = false
   private var pendingPreferenceDescriptor: ConfigurationDescriptor?
   private(set) var compensationCalls = 0
   private(set) var finishCompensationCalls = 0
@@ -207,7 +281,11 @@ private actor StartableTunnelHost: TunnelHostBridging {
     installResult: SystemExtensionInstallResult = .completed,
     installError: AppleNetworkError? = nil,
     pendingPreferenceDescriptor: ConfigurationDescriptor? = nil,
-    cleanupEvents: NativeCleanupEventLog? = nil
+    startPendingPreferenceDescriptor: ConfigurationDescriptor? = nil,
+    cleanupEvents: NativeCleanupEventLog? = nil,
+    failedStartSnapshot: EngineFailure? = nil,
+    snapshotFailures: Int = 0,
+    stopFailures: Int = 0
   ) {
     self.descriptor = descriptor
     self.recoveryStatus = recoveryStatus
@@ -215,7 +293,11 @@ private actor StartableTunnelHost: TunnelHostBridging {
     self.installResult = installResult
     self.installError = installError
     self.pendingPreferenceDescriptor = pendingPreferenceDescriptor
+    self.startPendingPreferenceDescriptor = startPendingPreferenceDescriptor
     self.cleanupEvents = cleanupEvents
+    self.failedStartSnapshot = failedStartSnapshot
+    remainingSnapshotFailures = snapshotFailures
+    remainingStopFailures = stopFailures
   }
 
   func installTunnel() throws -> SystemExtensionInstallResult {
@@ -231,19 +313,35 @@ private actor StartableTunnelHost: TunnelHostBridging {
     credentialPayload: Data?
   ) throws {
     startCalls += 1
-    if let startError { throw startError }
+    if let startPendingPreferenceDescriptor {
+      pendingPreferenceDescriptor = startPendingPreferenceDescriptor
+    }
+    if let startError {
+      failedOwnerPresent = failedStartSnapshot != nil
+      throw startError
+    }
     started = true
   }
 
-  func stopTunnel(expectedConfiguration: ConfigurationDescriptor) {
+  func stopTunnel(expectedConfiguration: ConfigurationDescriptor) throws {
     stopCalls += 1
+    if remainingStopFailures > 0 {
+      remainingStopFailures -= 1
+      throw AppleNetworkError.providerMessageFailed("injected owner stop failure")
+    }
     started = false
+    failedOwnerPresent = false
   }
 
-  func snapshot() -> EngineSnapshot {
-    started
-      ? .tunnelActive(configuration: descriptor, sequence: 1)
-      : .off
+  func snapshot() throws -> EngineSnapshot {
+    if remainingSnapshotFailures > 0 {
+      remainingSnapshotFailures -= 1
+      throw AppleNetworkError.providerMessageFailed("injected owner observation failure")
+    }
+    if failedOwnerPresent, let failedStartSnapshot {
+      return .tunnelFailed(failedStartSnapshot, configuration: descriptor, sequence: 1)
+    }
+    return started ? .tunnelActive(configuration: descriptor, sequence: 1) : .off
   }
 
   func recoveryManagedTunnelStatus() -> RecoveryManagedTunnelStatus {
@@ -365,6 +463,7 @@ private struct FixedEngineLease: NativeEngineLeaseInspecting {
 private actor RecordingEngineLease: NativeEngineLeaseInspecting {
   private var observation: AuthorityOwnershipObservation
   private var remainingCompleteFailures: Int
+  private var remainingOwnershipFailures: Int
   private let recoveredStop: NativeRecoveredStop?
   private let completeError: AuthorityDomainError?
   private let completeFailureCommits: Bool
@@ -380,6 +479,7 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
   init(
     observation: AuthorityOwnershipObservation,
     completeFailures: Int = 0,
+    ownershipFailures: Int = 0,
     recoveredStop: NativeRecoveredStop? = nil,
     completeError: AuthorityDomainError? = nil,
     completeFailureCommits: Bool = false,
@@ -388,6 +488,7 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
   ) {
     self.observation = observation
     remainingCompleteFailures = completeFailures
+    remainingOwnershipFailures = ownershipFailures
     self.recoveredStop = recoveredStop
     self.completeError = completeError
     self.completeFailureCommits = completeFailureCommits
@@ -397,7 +498,15 @@ private actor RecordingEngineLease: NativeEngineLeaseInspecting {
 
   func isAvailable() -> Bool { observation.state == .off }
 
-  func authorityOwnership() -> AuthorityOwnershipObservation { observation }
+  func authorityOwnership() throws -> AuthorityOwnershipObservation {
+    if remainingOwnershipFailures > 0 {
+      remainingOwnershipFailures -= 1
+      throw NativeBridgeExecutionError.failure(
+        .unavailable,
+        "Injected Authority ownership observation failure.")
+    }
+    return observation
+  }
 
   func reconcileOff(
     managedTunnel: RecoveryManagedTunnelStatus
@@ -737,6 +846,132 @@ struct NativeBridgeStartCommandIntegrationTests {
       )
     ).responseFailure
     #expect(unknownSystemExtensionFailure.code == .unavailable)
+  }
+
+  @Test func endpointFailureMappingRequiresAnExactNonRetryableOwnerRole() {
+    let mixed = EngineFailure(
+      code: "mixed-endpoint-in-use", message: "mixed occupied", isRetryable: false)
+    let controller = EngineFailure(
+      code: "controller-endpoint-in-use", message: "controller occupied", isRetryable: false)
+    let retryableController = EngineFailure(
+      code: "controller-endpoint-in-use", message: "invalid retry policy", isRetryable: true)
+    let nearMatch = EngineFailure(
+      code: "controller-endpoint-in-use-now", message: "near match", isRetryable: false)
+
+    #expect(
+      NativeBridgeCoordinator.map(ProxyAgentHostError.agentFailure(mixed))
+        .responseFailure.code == .mixedEndpointInUse)
+    #expect(
+      NativeBridgeCoordinator.map(ProxyAgentHostError.agentFailure(controller))
+        .responseFailure.code == .controllerEndpointInUse)
+    #expect(
+      NativeBridgeCoordinator.map(AppleNetworkError.providerFailure(controller))
+        .responseFailure.code == .controllerEndpointInUse)
+    #expect(
+      NativeBridgeCoordinator.map(AppleNetworkError.providerFailure(mixed))
+        .responseFailure.code == .identityRejected)
+    #expect(
+      NativeBridgeCoordinator.map(ProxyAgentHostError.agentFailure(retryableController))
+        .responseFailure.code == .identityRejected)
+    #expect(
+      NativeBridgeCoordinator.map(AppleNetworkError.providerFailure(nearMatch))
+        .responseFailure.code == .configurationRejected)
+  }
+
+  @Test func failedStartOffTransactionSurvivesEveryProofBoundaryFailure() async throws {
+    for fault in FailedStartRetryFault.allCases {
+      let request = try startRequest(tunnelOptions: nil)
+      let descriptor = try request.descriptor(slot: .systemProxy)
+      let proxy = FailedStartProxyAgent(descriptor: descriptor, fault: fault)
+      let lease = RecordingEngineLease(
+        observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+        ownershipFailures: fault == .globalOffObservation ? 1 : 0)
+      let coordinator = makeCoordinator(
+        proxy: proxy,
+        tunnel: StartableTunnelHost(descriptor: descriptor),
+        observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+        systemProxyPreparer: RecordingSystemProxyStartPreparer(),
+        engineLease: lease)
+
+      #expect(
+        await failureCode(coordinator, .startSystemProxy(request)) == .cleanupUnproven,
+        "fault \(fault) must retain the exact failed-start transaction")
+      #expect(
+        await failureCode(coordinator, .startSystemProxy(request)) == .cleanupUnproven,
+        "a retained cleanup transaction must block a newer start")
+
+      let wrongContext = try EngineCommandContext(
+        installationID: request.context.installationID,
+        configEpoch: request.context.configEpoch,
+        generation: request.context.generation + 1)
+      #expect(
+        await failureCode(coordinator, .stopSystemProxy(wrongContext)) == .identityRejected)
+      guard
+        case .acknowledged =
+          try await coordinator.execute(.stopSystemProxy(request.context))
+      else {
+        Issue.record("exact failed-start cleanup retry was not acknowledged for \(fault)")
+        continue
+      }
+      let counts = await proxy.counters()
+      #expect(counts.start == 1)
+      #expect(counts.stop == (fault == .ownerStop ? 2 : 1))
+      #expect(
+        await failureCode(coordinator, .stopSystemProxy(request.context)) == .identityRejected,
+        "the exact cleanup receipt is one-use")
+    }
+  }
+
+  @Test func failedTunnelStartOffTransactionSurvivesEveryProofBoundaryFailure() async throws {
+    let endpointFailure = EngineFailure(
+      code: "controller-endpoint-in-use",
+      message: "The controller endpoint is already in use.",
+      isRetryable: false)
+    for fault in FailedStartRetryFault.allCases {
+      let request = try startRequest(
+        tunnelOptions: try TunnelNetworkOptions(ipv6Enabled: true))
+      let descriptor = try request.descriptor(slot: .tunnel)
+      let tunnel = StartableTunnelHost(
+        descriptor: descriptor,
+        startError: .providerFailure(endpointFailure),
+        startPendingPreferenceDescriptor: descriptor,
+        failedStartSnapshot: endpointFailure,
+        snapshotFailures: fault == .ownerObservation ? 1 : 0,
+        stopFailures: fault == .ownerStop ? 1 : 0)
+      let lease = RecordingEngineLease(
+        observation: AuthorityOwnershipObservation(
+          state: .preparing,
+          lease: agreement(
+            for: descriptor,
+            mode: .tunnel,
+            leaseState: .prepared)),
+        ownershipFailures: fault == .globalOffObservation ? 1 : 0,
+        cancelPreparedResult: true)
+      let coordinator = makeCoordinator(
+        proxy: StartableProxyAgent(descriptor: descriptor),
+        tunnel: tunnel,
+        observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+        engineLease: lease)
+
+      #expect(
+        await failureCode(coordinator, .startTunnel(request)) == .cleanupUnproven,
+        "fault \(fault) must retain the exact Tunnel failed-start transaction")
+      #expect(
+        await failureCode(coordinator, .startTunnel(request)) == .cleanupUnproven,
+        "a retained Tunnel cleanup transaction must block a newer start")
+      guard case .acknowledged = try await coordinator.execute(.stopTunnel(request.context)) else {
+        Issue.record("exact Tunnel cleanup retry was not acknowledged for \(fault)")
+        continue
+      }
+      let counts = await tunnel.counters()
+      #expect(counts.start == 1)
+      #expect(counts.stop == (fault == .ownerStop ? 2 : 1))
+      let cancelPreparedCount = await lease.cancelPreparedCount()
+      #expect(cancelPreparedCount == 2)
+      #expect(
+        await failureCode(coordinator, .stopTunnel(request.context)) == .identityRejected,
+        "the exact Tunnel cleanup receipt is one-use")
+    }
   }
 
   @Test func staleMutationCompletionCannotReleaseANewerMutation() async throws {

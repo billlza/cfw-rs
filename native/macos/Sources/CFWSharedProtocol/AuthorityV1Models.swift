@@ -2,8 +2,8 @@ import Foundation
 
 public enum AuthorityV1Limits {
   public static let major: UInt16 = 1
-  public static let minor: UInt16 = 0
-  public static let minimumMinor: UInt16 = 0
+  public static let minor: UInt16 = 1
+  public static let minimumMinor: UInt16 = 1
   public static let supportedFeatureBits: UInt64 = 0
   public static let maximumEnvelopeBytes = 1_048_576
   public static let maximumConfigurationBytes = 768 * 1_024

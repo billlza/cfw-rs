@@ -181,8 +181,8 @@ private func exampleSnapshotEvent() throws -> AuthorityEvent {
   #expect(throws: AuthorityV1ValidationError.unsupportedMajor(2)) {
     try AuthorityProtocolVersion(major: 2)
   }
-  #expect(throws: AuthorityV1ValidationError.unsupportedMinor(1)) {
-    try AuthorityProtocolVersion(minor: 1)
+  #expect(throws: AuthorityV1ValidationError.unsupportedMinor(0)) {
+    try AuthorityProtocolVersion(minor: 0, minimumMinor: 0)
   }
   #expect(throws: AuthorityV1ValidationError.unsupportedRequiredFeatures(1)) {
     try AuthorityProtocolVersion(featureBits: 1)

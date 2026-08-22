@@ -32,7 +32,8 @@ public struct CredentialMaterialEntry: Equatable, Sendable {
     guard !secret.isEmpty,
       secret.count <= CredentialMaterialConstants.maximumSecretBytes,
       let value = String(data: secret, encoding: .utf8),
-      !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+      !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+      reference.kind.admitsSecretSyntax(value)
     else {
       throw CredentialMaterialError.invalidSecret
     }
@@ -235,12 +236,13 @@ public enum CredentialInjector {
         throw CredentialMaterialError.invalidConfiguration
       }
       switch slot.target {
-      case .shadowsocksPassword, .trojanPassword, .hysteria2Password:
+      case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
+        .tuicPassword:
         guard outbound["password"] as? String == "" else {
           throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
         }
         outbound["password"] = secret
-      case .vmessUUID, .vlessUUID:
+      case .vmessUUID, .vlessUUID, .tuicUUID:
         guard outbound["uuid"] as? String == "" else {
           throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
         }

@@ -50,6 +50,8 @@ pub(crate) enum ProfileOutbound {
         #[serde(default, skip_serializing_if = "VmessSecurity::is_auto")]
         security: VmessSecurity,
         #[serde(skip_serializing_if = "Option::is_none")]
+        packet_encoding: Option<V2RayPacketEncoding>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         tls: Option<OutboundTls>,
         #[serde(skip_serializing_if = "Option::is_none")]
         transport: Option<V2RayTransport>,
@@ -61,6 +63,8 @@ pub(crate) enum ProfileOutbound {
         credential_ref: CredentialRef,
         #[serde(skip_serializing_if = "Option::is_none")]
         flow: Option<VlessFlow>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        packet_encoding: Option<V2RayPacketEncoding>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tls: Option<OutboundTls>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +83,10 @@ pub(crate) enum ProfileOutbound {
         tag: String,
         server: String,
         server_port: u16,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_ports: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hop_interval_seconds: Option<u32>,
         credential_ref: CredentialRef,
         tls: OutboundTls,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,6 +95,26 @@ pub(crate) enum ProfileOutbound {
         down_mbps: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         obfs: Option<Hysteria2Obfs>,
+    },
+    #[serde(rename = "anytls")]
+    AnyTls {
+        tag: String,
+        server: String,
+        server_port: u16,
+        credential_ref: CredentialRef,
+        tls: OutboundTls,
+    },
+    Tuic {
+        tag: String,
+        server: String,
+        server_port: u16,
+        uuid_credential_ref: CredentialRef,
+        password_credential_ref: CredentialRef,
+        tls: OutboundTls,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        congestion_control: Option<TuicCongestionControl>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        udp_relay_mode: Option<TuicUdpRelayMode>,
     },
 }
 
@@ -176,6 +204,17 @@ pub(crate) enum VlessFlow {
     XtlsRprxVision,
 }
 
+/// The closed UDP packet framing choices shared by VMess and VLESS. `Raw`
+/// projects to sing-box's empty wire value; it is distinct from an omitted
+/// VLESS field because the pinned engine defaults omitted VLESS to XUDP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum V2RayPacketEncoding {
+    Raw,
+    PacketAddr,
+    Xudp,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OutboundTls {
@@ -224,6 +263,14 @@ pub(crate) struct RealityOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum V2RayTransport {
+    Http {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        method: Option<V2RayHttpMethod>,
+        #[serde(default = "default_websocket_path")]
+        path: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        host: Vec<String>,
+    },
     #[serde(rename = "ws")]
     Websocket {
         #[serde(default = "default_websocket_path")]
@@ -234,6 +281,45 @@ pub(crate) enum V2RayTransport {
     Grpc {
         service_name: String,
     },
+    Quic,
+    HttpUpgrade {
+        #[serde(default = "default_websocket_path")]
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum V2RayHttpMethod {
+    #[serde(rename = "GET")]
+    Get,
+    #[serde(rename = "PUT")]
+    Put,
+    #[serde(rename = "POST")]
+    Post,
+    #[serde(rename = "PATCH")]
+    Patch,
+    #[serde(rename = "DELETE")]
+    Delete,
+    #[serde(rename = "HEAD")]
+    Head,
+    #[serde(rename = "OPTIONS")]
+    Options,
+}
+
+impl V2RayHttpMethod {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Put => "PUT",
+            Self::Post => "POST",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+            Self::Head => "HEAD",
+            Self::Options => "OPTIONS",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +343,21 @@ pub(crate) enum Hysteria2ObfsType {
     Salamander,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TuicCongestionControl {
+    Cubic,
+    NewReno,
+    Bbr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TuicUdpRelayMode {
+    Native,
+    Quic,
+}
+
 fn default_websocket_path() -> String {
     "/".to_owned()
 }
@@ -278,6 +379,14 @@ impl ProfileDocument {
             .into_iter()
             .collect()
     }
+
+    pub(crate) fn credential_references_in_outbound_order(&self) -> Vec<CredentialRef> {
+        self.outbounds
+            .iter()
+            .flat_map(ProfileOutbound::credential_refs)
+            .cloned()
+            .collect()
+    }
 }
 
 impl ProfileOutbound {
@@ -293,7 +402,9 @@ impl ProfileOutbound {
             | Self::Vmess { tag, .. }
             | Self::Vless { tag, .. }
             | Self::Trojan { tag, .. }
-            | Self::Hysteria2 { tag, .. } => tag,
+            | Self::Hysteria2 { tag, .. }
+            | Self::AnyTls { tag, .. }
+            | Self::Tuic { tag, .. } => tag,
         }
     }
 
@@ -314,7 +425,13 @@ impl ProfileOutbound {
             Self::Shadowsocks { credential_ref, .. }
             | Self::Vmess { credential_ref, .. }
             | Self::Vless { credential_ref, .. }
-            | Self::Trojan { credential_ref, .. } => vec![credential_ref],
+            | Self::Trojan { credential_ref, .. }
+            | Self::AnyTls { credential_ref, .. } => vec![credential_ref],
+            Self::Tuic {
+                uuid_credential_ref,
+                password_credential_ref,
+                ..
+            } => vec![uuid_credential_ref, password_credential_ref],
         }
     }
 }

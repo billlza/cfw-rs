@@ -12,6 +12,14 @@ CONTRACT = REPOSITORY / "scripts/libbox_source_contract.sh"
 
 
 class LibboxSourceContractTests(unittest.TestCase):
+    def test_endpoint_patch_reverse_check_keeps_zero_context_admission(self) -> None:
+        contract = CONTRACT.read_text(encoding="utf-8")
+        self.assertIn(
+            'apply --unidiff-zero --reverse --check \\\n'
+            '    "$endpoint_conflict_patch_path"',
+            contract,
+        )
+
     def run_git(self, repository: Path, *arguments: str) -> str:
         result = subprocess.run(
             ["git", "-C", str(repository), *arguments],

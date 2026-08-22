@@ -75,19 +75,30 @@ class PhysicalCaptureExecutionTests(unittest.TestCase):
     def test_timeout_kills_the_complete_process_group(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "descendant-finished"
-            script = Path(directory) / "probe"
-            script.write_text(
-                "#!/bin/sh\n"
-                f"(sleep 1; /usr/bin/touch '{marker}') &\n"
-                "sleep 30\n",
-                encoding="utf-8",
+            script = (
+                '(exec >/dev/null 2>&1; /bin/sleep 2.5; '
+                '/usr/bin/touch "$1") & '
+                "printf 'READY\\n'; "
+                "/bin/sleep 30"
             )
-            script.chmod(0o700)
-            with self.assertRaisesRegex(ProbeExecutionError, "timeout"):
-                run_fixed_command(
-                    self.spec(str(script), timeout_seconds=0.1, stdout_limit=0)
+            command = start_fixed_command(
+                self.spec(
+                    "/bin/sh",
+                    "-c",
+                    script,
+                    "timeout-probe",
+                    str(marker),
+                    cwd=Path(directory),
+                    timeout_seconds=2.0,
+                    stdout_limit=64,
                 )
-            time.sleep(1.2)
+            )
+            command.wait_for_readiness(
+                ReadinessSpec("stdout", b"READY\n", 1.0)
+            )
+            with self.assertRaisesRegex(ProbeExecutionError, "timeout"):
+                command.finish()
+            time.sleep(0.7)
             self.assertFalse(marker.exists())
 
     def test_signal_and_unexpected_exit_are_not_results(self) -> None:
@@ -96,8 +107,16 @@ class PhysicalCaptureExecutionTests(unittest.TestCase):
             (("/bin/sh", "-c", "kill -TERM $$"), "signal"),
         ):
             with self.subTest(command=command):
-                with self.assertRaisesRegex(ProbeExecutionError, diagnostic):
+                with self.assertRaisesRegex(
+                    ProbeExecutionError, diagnostic
+                ) as captured:
                     run_fixed_command(self.spec(*command))
+                if diagnostic == "unexpected exit":
+                    self.assertIsNotNone(captured.exception.result)
+                    self.assertEqual(captured.exception.result.exit_code, 23)
+                    self.assertEqual(captured.exception.result.role, "test-probe")
+                else:
+                    self.assertIsNone(captured.exception.result)
 
     def test_environment_override_and_invalid_limits_are_rejected(self) -> None:
         with self.assertRaisesRegex(ProbeExecutionError, "environment"):
@@ -149,35 +168,29 @@ class PhysicalCaptureExecutionTests(unittest.TestCase):
     def test_started_command_waits_for_one_exact_line_then_returns_command_result(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            script = Path(directory) / "readiness-probe"
-            script.write_text(
-                "#!/bin/sh\n"
-                "printf 'booting\\n' >&2\n"
-                "sleep 0.05\n"
-                "printf 'READY fixed-probe\\n' >&2\n"
-                "printf 'bounded payload\\n'\n",
-                encoding="utf-8",
-            )
-            script.chmod(0o700)
-            spec = self.spec(
-                str(script),
-                cwd=Path(directory),
-                stderr_limit=1024,
-            )
-            with start_fixed_command(spec) as command:
-                command.wait_for_readiness(
-                    ReadinessSpec(
-                        stream="stderr",
-                        line=b"READY fixed-probe\n",
-                        timeout_seconds=1.0,
-                    )
+        # Use the stable system executable that the execution boundary
+        # validates. A newly created shebang file can spend more than the
+        # readiness budget in macOS execution-policy scanning before exec; that
+        # measures a mutable test artifact, not nonblocking pipe readiness.
+        script = (
+            "printf 'booting\\n' >&2; "
+            "printf 'READY fixed-probe\\n' >&2; "
+            "printf 'bounded payload\\n'"
+        )
+        spec = self.spec("/bin/sh", "-c", script, stderr_limit=1024)
+        with start_fixed_command(spec) as command:
+            command.wait_for_readiness(
+                ReadinessSpec(
+                    stream="stderr",
+                    line=b"READY fixed-probe\n",
+                    timeout_seconds=1.0,
                 )
-                result = command.finish()
+            )
+            result = command.finish()
 
         self.assertEqual(result.stdout, b"bounded payload\n")
         self.assertEqual(result.stderr, b"booting\nREADY fixed-probe\n")
-        self.assertEqual(result.argv_sha256, command_sha256([str(script)]))
+        self.assertEqual(result.argv_sha256, command_sha256(["/bin/sh", "-c", script]))
 
     def test_process_exit_before_readiness_fails_closed(self) -> None:
         command = start_fixed_command(
@@ -191,18 +204,21 @@ class PhysicalCaptureExecutionTests(unittest.TestCase):
 
     def test_readiness_timeout_kills_the_complete_process_group(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            started = Path(directory) / "readiness-descendant-started"
             marker = Path(directory) / "readiness-descendant-finished"
-            script = Path(directory) / "readiness-timeout-probe"
-            script.write_text(
-                "#!/bin/sh\n"
-                f"(sleep 0.5; /usr/bin/touch '{marker}') &\n"
-                "sleep 30\n",
-                encoding="utf-8",
+            script = (
+                '(exec >/dev/null 2>&1; /usr/bin/touch "$1"; '
+                '/bin/sleep 1.5; /usr/bin/touch "$2") & '
+                "/bin/sleep 30"
             )
-            script.chmod(0o700)
             command = start_fixed_command(
                 self.spec(
-                    str(script),
+                    "/bin/sh",
+                    "-c",
+                    script,
+                    "readiness-timeout-probe",
+                    str(started),
+                    str(marker),
                     cwd=Path(directory),
                     timeout_seconds=2.0,
                     stdout_limit=64,
@@ -210,8 +226,9 @@ class PhysicalCaptureExecutionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ProbeExecutionError, "readiness.*timeout"):
                 command.wait_for_readiness(
-                    ReadinessSpec("stdout", b"READY\n", 0.05)
+                    ReadinessSpec("stdout", b"READY\n", 1.0)
                 )
+            self.assertTrue(started.exists())
             time.sleep(0.7)
             self.assertFalse(marker.exists())
 
@@ -233,23 +250,34 @@ class PhysicalCaptureExecutionTests(unittest.TestCase):
 
     def test_explicit_cancel_terminates_descendants_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            started = Path(directory) / "cancelled-descendant-started"
             marker = Path(directory) / "cancelled-descendant-finished"
-            script = Path(directory) / "cancel-probe"
-            script.write_text(
-                "#!/bin/sh\n"
-                f"(sleep 0.5; /usr/bin/touch '{marker}') &\n"
-                "sleep 30\n",
-                encoding="utf-8",
+            script = (
+                '(exec >/dev/null 2>&1; /usr/bin/touch "$1"; '
+                '/bin/sleep 0.5; /usr/bin/touch "$2") & '
+                "printf 'READY\\n'; "
+                "/bin/sleep 30"
             )
-            script.chmod(0o700)
             command = start_fixed_command(
                 self.spec(
-                    str(script),
+                    "/bin/sh",
+                    "-c",
+                    script,
+                    "cancel-probe",
+                    str(started),
+                    str(marker),
                     cwd=Path(directory),
                     timeout_seconds=2.0,
                     stdout_limit=64,
                 )
             )
+            command.wait_for_readiness(
+                ReadinessSpec("stdout", b"READY\n", 1.0)
+            )
+            started_deadline = time.monotonic() + 1.0
+            while not started.exists() and time.monotonic() < started_deadline:
+                time.sleep(0.01)
+            self.assertTrue(started.exists())
             command.cancel()
             command.cancel()
             time.sleep(0.7)
@@ -318,18 +346,19 @@ class PhysicalCaptureExecutionTests(unittest.TestCase):
     def test_successful_parent_cannot_leave_a_silent_descendant_running(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "silent-descendant-finished"
-            script = Path(directory) / "silent-descendant-probe"
-            script.write_text(
-                "#!/bin/sh\n"
-                f"(exec >/dev/null 2>&1; sleep 0.5; /usr/bin/touch '{marker}') &\n"
-                "exit 0\n",
-                encoding="utf-8",
+            script = (
+                '(exec >/dev/null 2>&1; /bin/sleep 0.5; '
+                '/usr/bin/touch "$1") & '
+                "exit 0"
             )
-            script.chmod(0o700)
             with self.assertRaisesRegex(ProbeExecutionError, "descendants remained"):
                 run_fixed_command(
                     self.spec(
-                        str(script),
+                        "/bin/sh",
+                        "-c",
+                        script,
+                        "silent-descendant-probe",
+                        str(marker),
                         cwd=Path(directory),
                         timeout_seconds=2.0,
                         stdout_limit=0,
@@ -337,6 +366,23 @@ class PhysicalCaptureExecutionTests(unittest.TestCase):
                 )
             time.sleep(0.7)
             self.assertFalse(marker.exists())
+
+    def test_successful_parent_cannot_leave_descendants_holding_streams(self) -> None:
+        script = "(/bin/sleep 30) & exit 0"
+        with self.assertRaisesRegex(
+            ProbeExecutionError,
+            "descendants retained its streams",
+        ):
+            run_fixed_command(
+                self.spec(
+                    "/bin/sh",
+                    "-c",
+                    script,
+                    "stream-descendant-probe",
+                    timeout_seconds=2.0,
+                    stdout_limit=0,
+                )
+            )
 
     def test_unowned_process_group_cleanup_ambiguity_is_an_error(self) -> None:
         class ReapedProcess:

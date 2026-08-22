@@ -1,6 +1,6 @@
 use cfw_engine_api::{
-    BackendError, CutoverPreflightRequestError, EngineCommandContext, EngineMode, EngineOwner,
-    NativeEngineStatus, RuntimeIdentity,
+    BackendError, BackendErrorKind, CutoverPreflightRequestError, EngineCommandContext, EngineMode,
+    EngineOwner, NativeEngineStatus, RuntimeIdentity,
 };
 use cfw_singbox_config::ConfigError;
 use thiserror::Error;
@@ -119,6 +119,13 @@ pub enum EngineCoordinatorError {
         start_operation: EngineOperation,
         start_error: BackendError,
         proof_error: Box<EngineCoordinatorError>,
+    },
+    #[error(
+        "native start {operation} encountered {conflict:?}; exact cleanup and independent global Off were proven, so a fresh endpoint projection is required"
+    )]
+    StartEndpointConflictAfterOff {
+        operation: EngineOperation,
+        conflict: BackendErrorKind,
     },
     #[error("{validation_error}; cleanup {cleanup_operation} also failed: {cleanup_error}")]
     ValidationAndCleanupFailed {

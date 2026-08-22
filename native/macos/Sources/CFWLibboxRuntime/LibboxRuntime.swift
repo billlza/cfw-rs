@@ -16,6 +16,52 @@ public enum LibboxRuntimeRole: String, Codable, Equatable, Sendable {
   }
 }
 
+public enum LibboxRuntimeEndpointRole: String, Equatable, Sendable {
+  case mixed
+  case controller
+}
+
+public struct LibboxRuntimeEndpointConflict: Equatable, Sendable {
+  public let role: LibboxRuntimeEndpointRole
+  public let port: UInt16
+
+  public static func validated(
+    kind: Int32,
+    port: Int32,
+    mixedKind: Int32,
+    controllerKind: Int32,
+    receipt: LibboxRuntimeStartReceipt,
+    runtimeRole: LibboxRuntimeRole
+  ) throws -> LibboxRuntimeEndpointConflict {
+    guard mixedKind != controllerKind,
+      port > 0,
+      port <= Int32(UInt16.max),
+      let exactPort = UInt16(exactly: port)
+    else {
+      throw LibboxRuntimeError.invalidEndpointConflict(kind: kind, port: port)
+    }
+
+    let endpointRole: LibboxRuntimeEndpointRole
+    switch kind {
+    case mixedKind:
+      guard runtimeRole == .systemProxy,
+        receipt.mixedListener?.port == exactPort
+      else {
+        throw LibboxRuntimeError.invalidEndpointConflict(kind: kind, port: port)
+      }
+      endpointRole = .mixed
+    case controllerKind:
+      guard receipt.controllerListener.port == exactPort else {
+        throw LibboxRuntimeError.invalidEndpointConflict(kind: kind, port: port)
+      }
+      endpointRole = .controller
+    default:
+      throw LibboxRuntimeError.invalidEndpointConflict(kind: kind, port: port)
+    }
+    return LibboxRuntimeEndpointConflict(role: endpointRole, port: exactPort)
+  }
+}
+
 public enum LibboxRuntimeError: Error, Equatable, Sendable {
   case libboxUnavailable
   case missingBundleSetting(String)
@@ -39,6 +85,8 @@ public enum LibboxRuntimeError: Error, Equatable, Sendable {
   case serviceStartFailed(String)
   case serviceStartCleanupFailed(start: String, cleanup: String)
   case invalidRuntimeEndpoints
+  case invalidEndpointConflict(kind: Int32, port: Int32)
+  case endpointConflict(role: LibboxRuntimeEndpointRole, port: UInt16)
   case serviceNotRunning(state: Int32, message: String)
   case serviceStopFailed(String)
 }
@@ -91,6 +139,11 @@ extension LibboxRuntimeError: LocalizedError {
     case .invalidRuntimeEndpoints:
       return
         "The libbox configuration does not contain the exact application-owned loopback endpoints."
+    case .invalidEndpointConflict(let kind, let port):
+      return
+        "libbox returned an endpoint conflict that does not match the start receipt (kind \(kind), port \(port))."
+    case .endpointConflict(let role, let port):
+      return "The libbox \(role.rawValue) endpoint could not bind to port \(port)."
     case .serviceNotRunning(let state, let message):
       return "libbox runtime state is \(state): \(message)"
     case .serviceStopFailed(let message):

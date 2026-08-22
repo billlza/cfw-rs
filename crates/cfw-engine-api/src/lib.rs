@@ -16,10 +16,10 @@ pub use cfw_singbox_config::{
     MAX_CREDENTIAL_SLOTS, ValidatedSingBoxProfile,
 };
 
-// Version 5 binds the closed direct-IPv4-host route projection into every
-// Tunnel configuration identity. A version 4 native bridge would ignore that
-// route and could otherwise report a mismatched data plane as ready.
-pub const ENGINE_PROTOCOL_VERSION: u16 = 5;
+// Version 6 expands the closed credential and endpoint-conflict vocabulary.
+// Older native bridges would reject or misclassify those wire values, so the
+// complete Host/native product graph must advance together.
+pub const ENGINE_PROTOCOL_VERSION: u16 = 6;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -280,6 +280,10 @@ impl<'a> CredentialProvisionRequest<'a> {
             .into_iter()
             .collect::<BTreeSet<_>>();
         for entry in &entries {
+            entry
+                .secret
+                .validate_for_kind(entry.reference.kind())
+                .map_err(|_| CredentialProvisionRequestError::InvalidSecret)?;
             if !ids.insert(entry.reference.id()) {
                 return Err(CredentialProvisionRequestError::DuplicateReference);
             }
@@ -333,6 +337,8 @@ pub enum CredentialProvisionRequestError {
     DuplicateReference,
     #[error("credential provisioning request contains a reference absent from the profile")]
     UnexpectedReference,
+    #[error("credential provisioning request contains material invalid for its credential kind")]
+    InvalidSecret,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,6 +667,8 @@ pub enum CredentialVaultError {
     Unavailable,
     #[error("credential vault access was denied")]
     AccessDenied,
+    #[error("credential vault capacity is exhausted")]
+    CapacityExceeded,
     #[error("credential UUID already exists with different immutable material")]
     ImmutableConflict,
     #[error("credential vault rejected invalid material")]
@@ -923,6 +931,8 @@ pub enum BackendErrorKind {
     IdentityRejected,
     Timeout,
     Unavailable,
+    MixedEndpointInUse,
+    ControllerEndpointInUse,
     #[serde(other)]
     Internal,
 }
@@ -1007,6 +1017,8 @@ impl BackendErrorKind {
             | Self::TicketInvalid
             | Self::InvalidMessage
             | Self::SecretBoundsExceeded
+            | Self::MixedEndpointInUse
+            | Self::ControllerEndpointInUse
             | Self::IdentityRejected
             | Self::Internal => RetryDirective::Never,
         }
@@ -1066,6 +1078,8 @@ impl BackendErrorKind {
             Self::IdentityRejected => "The native peer identity was rejected.",
             Self::Timeout => "The native operation timed out.",
             Self::Unavailable => "The native operation is unavailable.",
+            Self::MixedEndpointInUse => "The mixed listener endpoint is already in use.",
+            Self::ControllerEndpointInUse => "The controller endpoint is already in use.",
             Self::Internal => "The native bridge failed at a stable internal boundary.",
         }
     }
@@ -1360,6 +1374,37 @@ mod tests {
     }
 
     #[test]
+    fn credential_provisioning_rejects_invalid_tuic_uuid_before_vault_io() {
+        const TUIC_UUID_REFERENCE_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const TUIC_PASSWORD_REFERENCE_ID: &str = "22222222-2222-4222-8222-222222222222";
+        let uuid_reference = CredentialRef::new(TUIC_UUID_REFERENCE_ID, CredentialKind::TuicUuid)
+            .expect("canonical TUIC UUID reference");
+        let profile = ValidatedSingBoxProfile::parse(&format!(
+            r#"{{"outbounds":[{{"type":"tuic","tag":"tuic","server":"tuic.example.com","server_port":443,"uuid_credential_ref":{{"id":"{TUIC_UUID_REFERENCE_ID}","kind":"tuic_uuid"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_REFERENCE_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"tuic.example.com"}}}}]}}"#
+        ))
+        .expect("typed TUIC profile");
+
+        let invalid = CredentialSecret::new("not-a-uuid").expect("bounded invalid UUID");
+        assert!(matches!(
+            CredentialProvisionRequest::new(
+                PROFILE_ID,
+                &profile,
+                vec![CredentialProvision::new(&uuid_reference, invalid)],
+            ),
+            Err(CredentialProvisionRequestError::InvalidSecret)
+        ));
+
+        let valid = CredentialSecret::new("33333333-3333-4333-8333-333333333333")
+            .expect("bounded canonical UUID");
+        CredentialProvisionRequest::new(
+            PROFILE_ID,
+            &profile,
+            vec![CredentialProvision::new(&uuid_reference, valid)],
+        )
+        .expect("canonical TUIC UUID request");
+    }
+
+    #[test]
     fn credential_provisioning_request_canonicalizes_entry_order() {
         const FIRST_CREDENTIAL_ID: &str = "11111111-1111-4111-8111-111111111111";
         const SECOND_CREDENTIAL_ID: &str = "22222222-2222-4222-8222-222222222222";
@@ -1412,16 +1457,16 @@ mod tests {
     }
 
     #[test]
-    fn native_bridge_v5_contract_fixtures_decode_in_rust() {
+    fn native_bridge_v6_contract_fixtures_decode_in_rust() {
         let query: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v5/query-request.json"
+            "../../../contracts/native-bridge-v6/query-request.json"
         ))
         .expect("query fixture");
         assert_eq!(query.schema_version, ENGINE_PROTOCOL_VERSION);
         assert!(matches!(query.command, NativeBridgeCommand::QueryStatus));
 
         let preview: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v5/gc-preview-request.json"
+            "../../../contracts/native-bridge-v6/gc-preview-request.json"
         ))
         .expect("GC preview fixture");
         let NativeBridgeCommand::PreviewCredentialGarbageCollection { request } = preview.command
@@ -1430,10 +1475,21 @@ mod tests {
         };
         assert_eq!(request.snapshot_digest(), "ab".repeat(32));
         assert_eq!(request.catalog().len(), 1);
-        assert_eq!(request.catalog()[0].references().len(), 1);
+        assert_eq!(
+            request.catalog()[0]
+                .references()
+                .iter()
+                .map(|reference| reference.kind())
+                .collect::<Vec<_>>(),
+            [
+                CredentialKind::AnyTlsPassword,
+                CredentialKind::TuicUuid,
+                CredentialKind::TuicPassword,
+            ]
+        );
 
         let response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v5/gc-preview-response.json"
+            "../../../contracts/native-bridge-v6/gc-preview-response.json"
         ))
         .expect("GC preview response fixture");
         let Some(NativeBridgeResult::CredentialGarbageCollectionPreview(preview)) = response.result
@@ -1444,6 +1500,16 @@ mod tests {
         assert_eq!(
             preview.vault_revision,
             "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        );
+
+        let conflict: NativeResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../contracts/native-bridge-v6/endpoint-conflict-response.json"
+        ))
+        .expect("endpoint conflict response fixture");
+        assert!(conflict.result.is_none());
+        assert_eq!(
+            conflict.failure.expect("endpoint failure").code,
+            BackendErrorKind::ControllerEndpointInUse
         );
     }
 
@@ -1503,6 +1569,17 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_conflicts_are_not_part_of_the_generic_retry_policy() {
+        for kind in [
+            BackendErrorKind::MixedEndpointInUse,
+            BackendErrorKind::ControllerEndpointInUse,
+        ] {
+            assert_eq!(kind.retry_directive(), RetryDirective::Never);
+            assert!(!kind.allows_automatic_retry(true));
+        }
+    }
+
+    #[test]
     fn proxy_agent_approval_has_a_typed_registration_retry_contract() {
         let kind = BackendErrorKind::ProxyAgentApprovalRequired;
         assert_eq!(
@@ -1522,7 +1599,7 @@ mod tests {
 
     #[test]
     fn native_public_query_json_contract_is_unchanged() {
-        let bytes = include_bytes!("../../../contracts/native-bridge-v5/query-request.json");
+        let bytes = include_bytes!("../../../contracts/native-bridge-v6/query-request.json");
         let request: NativeRequestEnvelope =
             serde_json::from_slice(bytes).expect("public query request fixture");
         assert_eq!(

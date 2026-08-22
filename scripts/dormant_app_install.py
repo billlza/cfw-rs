@@ -167,6 +167,14 @@ SYSTEM_CFM_LABELS: Final = (
     "com.bill.clashformac.helper",
 )
 USER_CFM_LABELS: Final = ("com.bill.clashformac.proxy-agent",)
+CFM_SYSTEM_EXTENSION_IDENTITY: Final = (
+    TEAM_ID,
+    "com.bill.clashformac.packet-tunnel",
+)
+SYSTEM_EXTENSION_HEADER: Final = (
+    "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]"
+)
+MAX_SYSTEM_EXTENSION_COUNT: Final = 4096
 PHASES: Final = frozenset(
     {
         "prepared",
@@ -952,6 +960,70 @@ def _parse_btm_values(output: str, required_uids: set[int]) -> set[str]:
     return values
 
 
+def _parse_system_extension_identities(output: str) -> set[tuple[str, str]]:
+    invalid = "system extension output has an unknown or inconsistent format"
+    if not output or not output.endswith("\n") or "\r" in output or "\x00" in output:
+        raise InstallError("cfm_system_extension_observation_invalid", invalid)
+    lines = output.splitlines()
+    summary = re.fullmatch(r"(0|[1-9][0-9]{0,4}) extension\(s\)", lines[0])
+    if summary is None:
+        raise InstallError("cfm_system_extension_observation_invalid", invalid)
+    expected_count = int(summary.group(1))
+    if expected_count > MAX_SYSTEM_EXTENSION_COUNT:
+        raise InstallError("cfm_system_extension_observation_invalid", invalid)
+    if expected_count == 0:
+        if lines != ["0 extension(s)"]:
+            raise InstallError("cfm_system_extension_observation_invalid", invalid)
+        return set()
+
+    identities: set[tuple[str, str]] = set()
+    categories: set[str] = set()
+    index = 1
+    while index < len(lines):
+        section = re.fullmatch(
+            r"--- (com\.apple\.system_extension\.[a-z0-9_]+)(?: \(([\x20-\x7e]{1,512})\))?",
+            lines[index],
+        )
+        if section is None or section.group(1) in categories:
+            raise InstallError("cfm_system_extension_observation_invalid", invalid)
+        categories.add(section.group(1))
+        index += 1
+        if index >= len(lines) or lines[index] != SYSTEM_EXTENSION_HEADER:
+            raise InstallError("cfm_system_extension_observation_invalid", invalid)
+        index += 1
+        section_count = 0
+        while index < len(lines) and not lines[index].startswith("--- "):
+            fields = lines[index].split("\t")
+            if len(fields) != 6 or fields[0] not in {"", "*"} or fields[1] not in {"", "*"}:
+                raise InstallError("cfm_system_extension_observation_invalid", invalid)
+            _, _, team_id, bundle_version, name, state = fields
+            bundle_match = re.fullmatch(
+                r"([A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?) \(([^()\t]{1,128})\)",
+                bundle_version,
+            )
+            if (
+                re.fullmatch(r"[A-Z0-9]{10}", team_id) is None
+                or bundle_match is None
+                or not name
+                or len(name) > 512
+                or any(ord(character) < 32 or ord(character) == 127 for character in name)
+                or re.fullmatch(r"\[[^\[\]\t\r\n]{1,256}\]", state) is None
+            ):
+                raise InstallError("cfm_system_extension_observation_invalid", invalid)
+            identity = (team_id, bundle_match.group(1))
+            if identity in identities:
+                raise InstallError("cfm_system_extension_observation_invalid", invalid)
+            identities.add(identity)
+            section_count += 1
+            index += 1
+        if section_count == 0:
+            raise InstallError("cfm_system_extension_observation_invalid", invalid)
+
+    if len(identities) != expected_count:
+        raise InstallError("cfm_system_extension_observation_invalid", invalid)
+    return identities
+
+
 def _require_no_cfm_processes(processes: list[dict[str, Any]]) -> None:
     if any(
         any(process["path"].endswith(suffix) for suffix in CFM_PROCESS_SUFFIXES)
@@ -1097,16 +1169,16 @@ def require_cfm_dormant(guard: dict[str, Any], runner: CommandRunner) -> None:
             "cfm_system_extension_observation_failed",
             "cannot prove Clash for Mac system extension absence",
         )
-    extension_output = extensions.stdout + extensions.stderr
-    if "com.bill.clashformac.packet-tunnel" in extension_output:
+    if extensions.stderr:
+        raise InstallError(
+            "cfm_system_extension_observation_invalid",
+            "system extension observation produced unexpected diagnostic output",
+        )
+    extension_identities = _parse_system_extension_identities(extensions.stdout)
+    if CFM_SYSTEM_EXTENSION_IDENTITY in extension_identities:
         raise InstallError(
             "cfm_system_extension_registered",
             "Clash for Mac packet-tunnel system extension remains registered",
-        )
-    if extensions.stderr or extensions.stdout != "0 extension(s)\n":
-        raise InstallError(
-            "cfm_system_extension_observation_invalid",
-            "system extension output does not prove an empty registration set",
         )
 
 

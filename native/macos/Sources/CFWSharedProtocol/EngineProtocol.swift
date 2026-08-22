@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 public enum NativeProtocolConstants {
-  public static let schemaVersion: UInt16 = 5
+  public static let schemaVersion: UInt16 = 6
   public static let maximumMessageBytes = 1_048_576
   public static let maximumConfigurationBytes: UInt64 = 384 * 1_024
   public static let maximumFailureMessageBytes = 1_024

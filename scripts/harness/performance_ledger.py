@@ -68,7 +68,7 @@ REQUIRED_PERFORMANCE_SUBJECTS: Final = frozenset(
 )
 
 PRODUCT_VERSION: Final = "0.4.0"
-FINAL_BUILD: Final = "40005"
+FINAL_BUILD: Final = "40021"
 PRODUCT_OBSERVATION_PREFIX: Final = "cfw-release-observation-v1 "
 PRODUCT_OBSERVATION_DOCUMENT: Final = "cfw-product-observation-event-v1"
 PRODUCT_LOG_SUBSYSTEM: Final = "com.bill.clashformac"
@@ -446,7 +446,9 @@ def _sha256(value: Any, label: str) -> str:
 def _candidate(value: Any) -> dict[str, Any]:
     candidate = exact_object(value, CANDIDATE_FIELDS, "performance ledger.candidate")
     if candidate["version"] != PRODUCT_VERSION or candidate["build_number"] != FINAL_BUILD:
-        raise PerformanceLedgerError("performance ledger is not final build 40005")
+        raise PerformanceLedgerError(
+            f"performance ledger is not final build {FINAL_BUILD}"
+        )
     for field in CANDIDATE_FIELDS - {"version", "build_number", "built_at"}:
         _sha256(candidate[field], f"performance ledger.candidate.{field}")
     _timestamp(candidate["built_at"], "performance ledger.candidate.built_at")

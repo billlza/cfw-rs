@@ -33,11 +33,15 @@ from scripts.harness.raw_artifacts import (
     read_regular_file_bytes,
     require_sha256,
 )
+from scripts.physical_capture.policy import (
+    PhysicalCapturePolicyError,
+    require_current_collector_source_activation,
+)
 
 
 ENDPOINT_POLICY_PATH = Path(__file__).with_name("endpoints.json")
 ENDPOINT_POLICY_SHA256 = (
-    "76e5a84232c92f1332ad29abe31c2d8111a9ff151821b58b10ac3b760873ee5f"
+    "8a2c3ee126d8dd619d2242bfb86b836d1559c8dc6d89ecebca66b3e3d6603e9b"
 )
 ENDPOINT_POLICY_DOCUMENT = "cfw-physical-collector-endpoints-v1"
 ENDPOINT_POLICY_SCHEMA_VERSION = 1
@@ -95,7 +99,8 @@ SERVICE_ACCOUNT_RE = re.compile(
     r"(?P<project>[a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$"
 )
 REGION_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
-SERVICE_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+SERVICE_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+REVISION_RE = SERVICE_RE
 JWT_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 UTC_SECONDS_RE = re.compile(
@@ -354,8 +359,10 @@ def _parse_endpoint(role: EndpointRole, value: Any) -> Endpoint:
     revision = raw["revision"]
     if not isinstance(service, str) or not SERVICE_RE.fullmatch(service):
         raise RawArtifactError(f"endpoint policy.{role}.service is invalid")
-    if not isinstance(revision, str) or not re.fullmatch(
-        re.escape(service) + r"-[0-9]{5}-[a-z0-9]{3}", revision
+    if (
+        not isinstance(revision, str)
+        or not REVISION_RE.fullmatch(revision)
+        or not revision.startswith(f"{service}-")
     ):
         raise RawArtifactError(f"endpoint policy.{role}.revision is invalid")
 
@@ -724,6 +731,12 @@ class CloudRunClient:
         command_runner: CommandRunner = _run_gcloud,
         connection_factory: ConnectionFactory = _default_connection_factory,
     ) -> None:
+        try:
+            require_current_collector_source_activation()
+        except PhysicalCapturePolicyError as error:
+            raise PreSendError(
+                "physical collector source closure is not activated"
+            ) from error
         self._policy = load_endpoint_policy()
         self._command_runner = command_runner
         self._connection_factory = connection_factory

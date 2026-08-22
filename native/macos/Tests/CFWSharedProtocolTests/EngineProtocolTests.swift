@@ -6,6 +6,16 @@ import Testing
 
 @testable import CFWSharedProtocol
 
+private struct EngineOwnerSchemaContract: Decodable {
+  let configurationIdentitySchemaVersion: UInt16
+  let engineOwnerSchemaVersion: UInt16
+
+  private enum CodingKeys: String, CodingKey {
+    case configurationIdentitySchemaVersion = "configuration_identity_schema_version"
+    case engineOwnerSchemaVersion = "engine_owner_schema_version"
+  }
+}
+
 func testCredentialAudience() throws -> CredentialAudience {
   CredentialAudience(
     profileID: UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!,
@@ -233,15 +243,30 @@ private func removeEngineProtocolTestDirectory(_ root: URL) {
   }
 }
 
-@Test func decoderRejectsUnknownSchemaVersion() throws {
-  let json = Data(
-    """
-    {"schemaVersion":99,"requestID":{"rawValue":"00000000-0000-0000-0000-000000000001"},"command":{"kind":"snapshot"}}
-    """.utf8
+@Test func engineOwnerSchemaMatchesSharedContractAndRejectsV5() throws {
+  var root = URL(fileURLWithPath: #filePath)
+  for _ in 0..<5 { root.deleteLastPathComponent() }
+  let contract = try JSONDecoder().decode(
+    EngineOwnerSchemaContract.self,
+    from: Data(
+      contentsOf:
+        root
+        .appendingPathComponent("contracts/engine-owner-v6", isDirectory: true)
+        .appendingPathComponent("schema-policy.json")
+    )
   )
+  #expect(contract.configurationIdentitySchemaVersion == NativeProtocolConstants.schemaVersion)
+  #expect(contract.engineOwnerSchemaVersion == NativeProtocolConstants.schemaVersion)
 
-  #expect(throws: ProtocolValidationError.unsupportedSchemaVersion(99)) {
-    try ProtocolCodec.decodeRequest(json)
+  for rejected: UInt16 in [5, 99] {
+    let json = Data(
+      """
+      {"schemaVersion":\(rejected),"requestID":{"rawValue":"00000000-0000-0000-0000-000000000001"},"command":{"kind":"snapshot"}}
+      """.utf8
+    )
+    #expect(throws: ProtocolValidationError.unsupportedSchemaVersion(rejected)) {
+      try ProtocolCodec.decodeRequest(json)
+    }
   }
 }
 

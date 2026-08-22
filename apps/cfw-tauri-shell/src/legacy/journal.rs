@@ -124,8 +124,18 @@ impl CutoverJournal {
                 == request.system_proxy_request().context.installation_id
             && self.context.config_epoch == request.system_proxy_request().context.config_epoch
             && request.system_proxy_request().context.generation >= self.context.generation
-            && self.system_proxy_digest == request.system_proxy_request().config_digest
-            && self.tunnel_digest == request.tunnel_request().config_digest
+            && request
+                .system_proxy_request()
+                .credential_audience
+                .profile_id()
+                == self.profile_id
+            && request
+                .system_proxy_request()
+                .credential_audience
+                .profile_digest()
+                == self.profile_digest
+            && request.tunnel_request().credential_audience
+                == request.system_proxy_request().credential_audience
             && &self.replacement_settings == replacement_settings
     }
 
@@ -360,24 +370,7 @@ impl CutoverJournalStore {
         let bytes = journal
             .canonical_bytes()
             .map_err(JournalAdvanceError::from)?;
-        match directory.write_atomic_with_directory_sync(&bytes, sync_directory) {
-            Ok(()) => Ok(journal),
-            Err(AtomicWriteError::Failed(error)) => Err(JournalAdvanceError::Failed(error)),
-            Err(AtomicWriteError::CommitUncertain(detail)) => {
-                // The directory remains exclusively locked while binding the
-                // visible journal back to the exact intended operation/phase.
-                // Even an exact reread remains durability-uncertain and must
-                // never be converted to ordinary success.
-                let persisted = directory.read_journal();
-                Err(JournalAdvanceError::CommitUncertain(Box::new(
-                    CommitUncertainJournal {
-                        intended: journal,
-                        persisted,
-                        detail,
-                    },
-                )))
-            }
-        }
+        commit_journal_with_directory_sync(&directory, journal, bytes, sync_directory)
     }
 
     pub(super) fn rebind_recovery_request(
@@ -387,20 +380,23 @@ impl CutoverJournalStore {
         profile_digest: &str,
         request: &CutoverPreflightRequest,
         replacement_settings: &EngineSettings,
-    ) -> Result<CutoverJournal, String> {
+    ) -> Result<CutoverJournal, JournalAdvanceError> {
         if !matches!(
             expected,
-            CutoverPhase::NetworkRetiring
-                | CutoverPhase::LegacyRetired
-                | CutoverPhase::ReplacementActive
+            CutoverPhase::NetworkRetiring | CutoverPhase::LegacyRetired
         ) {
-            return Err("cutover phase cannot be rebound for replacement recovery".into());
+            return Err(JournalAdvanceError::Failed(
+                "cutover phase cannot be rebound for replacement recovery".into(),
+            ));
         }
-        let directory = Directory::open_or_create(&self.root)?;
-        directory.lock()?;
+        let directory = Directory::open_or_create(&self.root).map_err(JournalAdvanceError::from)?;
+        directory.lock().map_err(JournalAdvanceError::from)?;
         let mut journal = directory
-            .read_journal()?
-            .ok_or_else(|| "legacy cutover journal is missing".to_owned())?;
+            .read_journal()
+            .map_err(JournalAdvanceError::from)?
+            .ok_or_else(|| {
+                JournalAdvanceError::Failed("legacy cutover journal is missing".to_owned())
+            })?;
         if journal.phase != expected
             || !journal.matches_recovery_projection(
                 profile_id,
@@ -409,11 +405,122 @@ impl CutoverJournalStore {
                 replacement_settings,
             )
         {
-            return Err("recovery profile, projection, lineage, or phase does not match the persisted cutover".into());
+            return Err(JournalAdvanceError::Failed(
+                "recovery profile, projection, lineage, or phase does not match the persisted cutover".into(),
+            ));
         }
         journal.context = request.system_proxy_request().context.clone();
-        directory.write_atomic(&journal.canonical_bytes()?)?;
-        Ok(journal)
+        journal.system_proxy_digest = request.system_proxy_request().config_digest.clone();
+        journal.tunnel_digest = request.tunnel_request().config_digest.clone();
+        let bytes = journal
+            .canonical_bytes()
+            .map_err(JournalAdvanceError::from)?;
+        commit_journal_with_directory_sync(&directory, journal, bytes, File::sync_all)
+    }
+
+    pub(super) fn rebind_endpoint_request(
+        &self,
+        expected: &CutoverJournal,
+        request: &CutoverPreflightRequest,
+        replacement_settings: &EngineSettings,
+    ) -> Result<CutoverJournal, JournalAdvanceError> {
+        self.rebind_endpoint_request_with_directory_sync(
+            expected,
+            request,
+            replacement_settings,
+            File::sync_all,
+        )
+    }
+
+    fn rebind_endpoint_request_with_directory_sync(
+        &self,
+        expected: &CutoverJournal,
+        request: &CutoverPreflightRequest,
+        replacement_settings: &EngineSettings,
+        sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<CutoverJournal, JournalAdvanceError> {
+        if !matches!(
+            expected.phase,
+            CutoverPhase::NetworkRetiring | CutoverPhase::LegacyRetired
+        ) {
+            return Err(JournalAdvanceError::Failed(
+                "cutover endpoint binding cannot change in the current phase".into(),
+            ));
+        }
+        if request.target() != expected.target
+            || request
+                .system_proxy_request()
+                .credential_audience
+                .profile_id()
+                != expected.profile_id
+            || request
+                .system_proxy_request()
+                .credential_audience
+                .profile_digest()
+                != expected.profile_digest
+            || request.tunnel_request().credential_audience
+                != request.system_proxy_request().credential_audience
+            || request.system_proxy_request().context.installation_id
+                != expected.context.installation_id
+            || request.system_proxy_request().context.config_epoch != expected.context.config_epoch
+            || request.system_proxy_request().context.generation <= expected.context.generation
+            || !settings_advance_only_endpoints(
+                &expected.replacement_settings,
+                replacement_settings,
+            )
+        {
+            return Err(JournalAdvanceError::Failed(
+                "cutover endpoint rebind changed immutable projection identity".into(),
+            ));
+        }
+
+        let directory = Directory::open_or_create(&self.root).map_err(JournalAdvanceError::from)?;
+        directory.lock().map_err(JournalAdvanceError::from)?;
+        let current = directory
+            .read_journal()
+            .map_err(JournalAdvanceError::from)?
+            .ok_or_else(|| {
+                JournalAdvanceError::Failed("legacy cutover journal is missing".to_owned())
+            })?;
+        if current != *expected {
+            return Err(JournalAdvanceError::Failed(
+                "legacy cutover journal changed before endpoint rebind commit".into(),
+            ));
+        }
+
+        let mut rebound = current;
+        rebound.context = request.system_proxy_request().context.clone();
+        rebound.system_proxy_digest = request.system_proxy_request().config_digest.clone();
+        rebound.tunnel_digest = request.tunnel_request().config_digest.clone();
+        rebound.replacement_settings = replacement_settings.clone();
+        let bytes = rebound
+            .canonical_bytes()
+            .map_err(JournalAdvanceError::from)?;
+        commit_journal_with_directory_sync(&directory, rebound, bytes, sync_directory)
+    }
+}
+
+fn commit_journal_with_directory_sync(
+    directory: &Directory,
+    intended: CutoverJournal,
+    bytes: Vec<u8>,
+    sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
+) -> Result<CutoverJournal, JournalAdvanceError> {
+    match directory.write_atomic_with_directory_sync(&bytes, sync_directory) {
+        Ok(()) => Ok(intended),
+        Err(AtomicWriteError::Failed(error)) => Err(JournalAdvanceError::Failed(error)),
+        Err(AtomicWriteError::CommitUncertain(detail)) => {
+            // The directory remains exclusively locked while binding the
+            // visible journal back to the exact intended operation.
+            let persisted = directory.read_journal();
+            Err(JournalAdvanceError::CommitUncertain(Box::new(
+                CommitUncertainJournal {
+                    intended,
+                    persisted,
+                    detail,
+                },
+            )))
+        }
     }
 }
 
@@ -712,6 +819,17 @@ fn validate_replacement_settings(settings: &EngineSettings) -> Result<(), String
     Ok(())
 }
 
+fn settings_advance_only_endpoints(current: &EngineSettings, replacement: &EngineSettings) -> bool {
+    let mut expected = current.clone();
+    expected.mixed_port = replacement.mixed_port;
+    expected.controller_port = replacement.controller_port;
+    expected == *replacement
+        && replacement.mixed_port >= current.mixed_port
+        && replacement.controller_port >= current.controller_port
+        && (replacement.mixed_port > current.mixed_port
+            || replacement.controller_port > current.controller_port)
+}
+
 fn sha256_digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -725,10 +843,18 @@ mod tests {
     use cfw_engine_api::{DirectIpv4HostRoutes, EngineStartRequest, TunnelNetworkOptions};
 
     fn request() -> CutoverPreflightRequest {
+        request_with(9, "11".repeat(32), "22".repeat(32))
+    }
+
+    fn request_with(
+        generation: u64,
+        system_proxy_digest: String,
+        tunnel_digest: String,
+    ) -> CutoverPreflightRequest {
         let context = EngineCommandContext {
             installation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
             config_epoch: 1,
-            generation: 9,
+            generation,
         };
         let credential_audience = cfw_engine_api::CredentialAudience::new(
             "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -740,7 +866,7 @@ mod tests {
             credential_audience: credential_audience.clone(),
             config_json: "{}".into(),
             config_content_digest: "10".repeat(32),
-            config_digest: "11".repeat(32),
+            config_digest: system_proxy_digest,
             credential_slots: Vec::new(),
             tunnel_options: None,
         };
@@ -749,7 +875,7 @@ mod tests {
             credential_audience,
             config_json: "{}".into(),
             config_content_digest: "20".repeat(32),
-            config_digest: "22".repeat(32),
+            config_digest: tunnel_digest,
             credential_slots: Vec::new(),
             tunnel_options: Some(TunnelNetworkOptions {
                 ipv6_enabled: true,
@@ -852,6 +978,248 @@ mod tests {
         .expect("journal");
         journal.replacement_settings.controller_port = journal.replacement_settings.mixed_port;
         assert!(journal.validate().is_err());
+    }
+
+    #[test]
+    fn endpoint_rebind_atomically_updates_every_projection_binding() {
+        let root = tempfile::tempdir().expect("temp");
+        let store = CutoverJournalStore::new(root.path());
+        let original_request = request();
+        let journal = CutoverJournal::prepared(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "33".repeat(32),
+            &original_request,
+            EngineSettings::default(),
+            LegacyRuntimePlanKind::FreshInstall,
+            LegacyNetworkJournalInput::default(),
+            None,
+        )
+        .expect("journal");
+        store.write_prepared(&journal).expect("write prepared");
+        let expected = store
+            .advance(CutoverPhase::Prepared, CutoverPhase::NetworkRetiring)
+            .expect("network retiring");
+
+        let replacement_settings = EngineSettings {
+            mixed_port: expected.replacement_settings.mixed_port + 1,
+            ..expected.replacement_settings.clone()
+        };
+        let replacement_request = request_with(10, "44".repeat(32), "55".repeat(32));
+        let rebound = store
+            .rebind_endpoint_request(&expected, &replacement_request, &replacement_settings)
+            .expect("atomic endpoint rebind");
+        assert_eq!(
+            rebound.context,
+            replacement_request.system_proxy_request().context
+        );
+        assert_eq!(
+            rebound.system_proxy_digest,
+            replacement_request.system_proxy_request().config_digest
+        );
+        assert_eq!(
+            rebound.tunnel_digest,
+            replacement_request.tunnel_request().config_digest
+        );
+        assert_eq!(rebound.replacement_settings, replacement_settings);
+        assert_eq!(store.load().expect("load").expect("journal"), rebound);
+        assert!(
+            store
+                .rebind_endpoint_request(
+                    &expected,
+                    &request_with(11, "66".repeat(32), "77".repeat(32)),
+                    &EngineSettings {
+                        mixed_port: replacement_settings.mixed_port + 1,
+                        ..replacement_settings
+                    },
+                )
+                .is_err(),
+            "a stale journal CAS cannot overwrite the committed binding"
+        );
+    }
+
+    #[test]
+    fn endpoint_rebind_directory_fsync_failure_preserves_exact_recovery_binding() {
+        let root = tempfile::tempdir().expect("temp");
+        let store = CutoverJournalStore::new(root.path());
+        let journal = CutoverJournal::prepared(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "33".repeat(32),
+            &request(),
+            EngineSettings::default(),
+            LegacyRuntimePlanKind::FreshInstall,
+            LegacyNetworkJournalInput::default(),
+            None,
+        )
+        .expect("journal");
+        store.write_prepared(&journal).expect("write prepared");
+        let expected = store
+            .advance(CutoverPhase::Prepared, CutoverPhase::NetworkRetiring)
+            .expect("network retiring");
+        let replacement_settings = EngineSettings {
+            mixed_port: expected.replacement_settings.mixed_port + 1,
+            controller_port: expected.replacement_settings.controller_port + 1,
+            ..expected.replacement_settings.clone()
+        };
+        let replacement_request = request_with(10, "44".repeat(32), "55".repeat(32));
+
+        let failure = store
+            .rebind_endpoint_request_with_directory_sync(
+                &expected,
+                &replacement_request,
+                &replacement_settings,
+                |_| {
+                    Err(std::io::Error::other(
+                        "injected endpoint directory fsync failure",
+                    ))
+                },
+            )
+            .expect_err("directory fsync must remain commit-uncertain");
+        assert!(failure.commit_is_uncertain());
+        let intended = match failure {
+            JournalAdvanceError::CommitUncertain(state) => {
+                assert_eq!(
+                    state.intended.context,
+                    replacement_request.system_proxy_request().context
+                );
+                assert_eq!(
+                    state.intended.system_proxy_digest,
+                    replacement_request.system_proxy_request().config_digest
+                );
+                assert_eq!(
+                    state.intended.tunnel_digest,
+                    replacement_request.tunnel_request().config_digest
+                );
+                assert_eq!(state.intended.replacement_settings, replacement_settings);
+                assert_eq!(state.persisted, Ok(Some(state.intended.clone())));
+                assert!(
+                    state
+                        .detail
+                        .contains("injected endpoint directory fsync failure")
+                );
+                state.intended
+            }
+            other => panic!("unexpected fault classification: {other:?}"),
+        };
+
+        let reopened = CutoverJournalStore::new(root.path());
+        assert_eq!(
+            reopened.load().expect("reopen journal"),
+            Some(intended),
+            "restart recovery must observe the exact rebound projection"
+        );
+    }
+
+    #[test]
+    fn endpoint_rebind_rejects_non_endpoint_drift_and_replacement_active() {
+        let root = tempfile::tempdir().expect("temp");
+        let store = CutoverJournalStore::new(root.path());
+        let journal = CutoverJournal::prepared(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "33".repeat(32),
+            &request(),
+            EngineSettings::default(),
+            LegacyRuntimePlanKind::FreshInstall,
+            LegacyNetworkJournalInput::default(),
+            None,
+        )
+        .expect("journal");
+        store.write_prepared(&journal).expect("write prepared");
+        let network_retiring = store
+            .advance(CutoverPhase::Prepared, CutoverPhase::NetworkRetiring)
+            .expect("network retiring");
+        let drifted = EngineSettings {
+            mixed_port: network_retiring.replacement_settings.mixed_port + 1,
+            enable_ipv6: !network_retiring.replacement_settings.enable_ipv6,
+            ..network_retiring.replacement_settings.clone()
+        };
+        assert!(
+            store
+                .rebind_endpoint_request(
+                    &network_retiring,
+                    &request_with(10, "44".repeat(32), "55".repeat(32)),
+                    &drifted,
+                )
+                .is_err(),
+            "endpoint recovery cannot change non-endpoint settings"
+        );
+
+        let legacy_retired = store
+            .advance(CutoverPhase::NetworkRetiring, CutoverPhase::LegacyRetired)
+            .expect("legacy retired");
+        let replacement_active = store
+            .advance(CutoverPhase::LegacyRetired, CutoverPhase::ReplacementActive)
+            .expect("replacement active");
+        assert!(
+            store
+                .rebind_endpoint_request(
+                    &replacement_active,
+                    &request_with(10, "44".repeat(32), "55".repeat(32)),
+                    &EngineSettings {
+                        controller_port: legacy_retired.replacement_settings.controller_port + 1,
+                        ..legacy_retired.replacement_settings
+                    },
+                )
+                .is_err(),
+            "ReplacementActive is immutable"
+        );
+    }
+
+    #[test]
+    fn recovery_rebind_rotates_context_digests_but_not_replacement_active() {
+        let root = tempfile::tempdir().expect("temp");
+        let store = CutoverJournalStore::new(root.path());
+        let journal = CutoverJournal::prepared(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "33".repeat(32),
+            &request(),
+            EngineSettings::default(),
+            LegacyRuntimePlanKind::FreshInstall,
+            LegacyNetworkJournalInput::default(),
+            None,
+        )
+        .expect("journal");
+        store.write_prepared(&journal).expect("write prepared");
+        store
+            .advance(CutoverPhase::Prepared, CutoverPhase::NetworkRetiring)
+            .expect("network retiring");
+
+        let rotated = request_with(9, "44".repeat(32), "55".repeat(32));
+        let rebound = store
+            .rebind_recovery_request(
+                CutoverPhase::NetworkRetiring,
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                &"33".repeat(32),
+                &rotated,
+                &EngineSettings::default(),
+            )
+            .expect("same-generation unused recovery projection can rotate process-bound digests");
+        assert_eq!(rebound.context, rotated.system_proxy_request().context);
+        assert_eq!(
+            rebound.system_proxy_digest,
+            rotated.system_proxy_request().config_digest
+        );
+        assert_eq!(
+            rebound.tunnel_digest,
+            rotated.tunnel_request().config_digest
+        );
+
+        store
+            .advance(CutoverPhase::NetworkRetiring, CutoverPhase::LegacyRetired)
+            .expect("legacy retired");
+        store
+            .advance(CutoverPhase::LegacyRetired, CutoverPhase::ReplacementActive)
+            .expect("replacement active");
+        assert!(
+            store
+                .rebind_recovery_request(
+                    CutoverPhase::ReplacementActive,
+                    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    &"33".repeat(32),
+                    &request_with(10, "66".repeat(32), "77".repeat(32)),
+                    &EngineSettings::default(),
+                )
+                .is_err()
+        );
     }
 
     #[test]

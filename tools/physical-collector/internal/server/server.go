@@ -71,7 +71,9 @@ func (service *Service) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 }
 
 func (service *Service) routes() {
-	service.mux.HandleFunc("/healthz", service.health)
+	// Cloud Run reserves request paths ending in "z", so the externally
+	// verifiable health endpoint must not use the conventional /healthz name.
+	service.mux.HandleFunc("/health", service.health)
 	switch service.config.Role {
 	case config.RoleNonceIssuer:
 		service.mux.HandleFunc("/v1/nonces", service.issueNonce)

@@ -346,7 +346,7 @@ _SOURCE_CLOSURE_PLANS = {
     "go": {
         "classification": "external-build-tool-pinned-binary",
         "upstream": "https://go.dev/dl/",
-        "reference": "go1.26.5.darwin-arm64",
+        "reference": "go1.26.6.darwin-arm64",
         "closure_action": (
             "retain version, executable SHA-256, module verification, and the official release "
             "archive checksum as build provenance; do not add the compiler to corresponding source"

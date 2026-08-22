@@ -31,6 +31,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::engine::ManagedEngine;
+use crate::transport_security::ensure_tls_crypto_provider;
 
 /// HTTPS-only probe target owned by a stable connectivity-check service. The
 /// renderer has no arbitrary URL preference, and the command rejects any other
@@ -164,28 +165,6 @@ fn running_runtime_identity(
     }
 }
 
-fn require_running_controller(snapshot: &EngineSnapshot) -> Result<(), ControllerCommandError> {
-    running_runtime_identity(snapshot).map(|_| ())
-}
-
-/// reqwest is built with `rustls-no-provider`, so constructing any client — this
-/// plain-HTTP loopback one included — requires a process-global crypto provider.
-/// Installation is idempotent and process-global, so this and the updater's own
-/// bootstrap cooperate rather than compete.
-fn ensure_tls_crypto_provider() -> Result<(), ControllerCommandError> {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        // A concurrent initializer may win this one-time process-global race;
-        // re-read below instead of treating that benign race as a failure.
-        let _already_installed = rustls::crypto::ring::default_provider().install_default();
-    }
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        return Err(ControllerCommandError::ClientUnavailable(
-            "the process TLS crypto provider is unavailable".into(),
-        ));
-    }
-    Ok(())
-}
-
 fn client_for_endpoint(
     endpoint: ControllerEndpoint,
 ) -> Result<ControllerClient, ControllerCommandError> {
@@ -197,7 +176,8 @@ fn client_for_endpoint(
     {
         return Ok(client.clone());
     }
-    ensure_tls_crypto_provider()?;
+    ensure_tls_crypto_provider()
+        .map_err(|error| ControllerCommandError::ClientUnavailable(error.to_string()))?;
     let client = ControllerClient::new(endpoint.clone())?;
     *cache = Some((endpoint, client.clone()));
     Ok(client)
@@ -207,8 +187,12 @@ fn client_for_endpoint(
 pub(super) fn controller_client(
     engine: &ManagedEngine,
 ) -> Result<ControllerClient, ControllerCommandError> {
-    require_running_controller(&engine.coordinator.snapshot())?;
-    client_for_endpoint(engine.controller_access().client_endpoint())
+    let snapshot = engine.coordinator.snapshot();
+    let runtime = running_runtime_identity(&snapshot)?;
+    let controller = engine
+        .active_controller_access(runtime.context.generation, &runtime.config_digest)
+        .map_err(ControllerCommandError::ClientUnavailable)?;
+    client_for_endpoint(controller.client_endpoint())
 }
 
 /// Controller client of the engine this process started, resolved from an app
@@ -1130,7 +1114,7 @@ mod tests {
                 runtime: runtime_for(EngineOwner::PacketTunnelSystemExtension, 7, "digest", false),
             },
         ] {
-            let error = require_running_controller(&snapshot(state.clone()))
+            let error = running_runtime_identity(&snapshot(state.clone()))
                 .expect_err("a controller must not be reachable without a ready engine");
             assert!(
                 matches!(error, ControllerCommandError::EngineNotRunning),
@@ -1146,7 +1130,7 @@ mod tests {
                 runtime: runtime_for(EngineOwner::PacketTunnelSystemExtension, 7, "digest", true),
             },
         ] {
-            require_running_controller(&snapshot(state))
+            running_runtime_identity(&snapshot(state))
                 .expect("a ready engine exposes its loopback controller");
         }
     }

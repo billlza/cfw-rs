@@ -2,10 +2,11 @@ use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::{
-    AuthenticatedDnsServer, ConfigError, CredentialSlot, DEFAULT_CLASH_API_PORT,
-    DirectIpv4HostRoutes, EngineSettings, MIN_CLASH_API_PORT, ProjectionMode,
-    RELEASE_PACKET_TRANSPORT_IPV4, ReleaseDnsEvidenceCase, ReleasePacketEvidenceCase,
-    TUNNEL_ADDRESS_PLAN, ValidatedSingBoxProfile,
+    AuthenticatedDnsServer, CONFIGURATION_IDENTITY_SCHEMA_VERSION, ConfigError, CredentialSlot,
+    DEFAULT_CLASH_API_PORT, DirectIpv4HostRoutes, EngineSettings, MIN_CLASH_API_PORT,
+    MINIMUM_REMOTE_TLS_VERSION, ProjectionMode, RELEASE_PACKET_TRANSPORT_IPV4,
+    ReleaseDnsEvidenceCase, ReleasePacketEvidenceCase, TUNNEL_ADDRESS_PLAN,
+    ValidatedSingBoxProfile,
 };
 
 const SS_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -15,6 +16,9 @@ const VLESS_ID: &str = "33333333-3333-4333-8333-333333333333";
 const TROJAN_ID: &str = "44444444-4444-4444-8444-444444444444";
 const HYSTERIA_ID: &str = "55555555-5555-4555-8555-555555555555";
 const HYSTERIA_OBFS_ID: &str = "66666666-6666-4666-8666-666666666666";
+const ANYTLS_ID: &str = "88888888-8888-4888-8888-888888888888";
+const TUIC_UUID_ID: &str = "99999999-9999-4999-8999-999999999999";
+const TUIC_PASSWORD_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab";
 const PROFILE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -27,6 +31,13 @@ struct TunnelAddressPlanContract {
     ipv6_address: String,
     ipv6_prefix_length: u8,
     ipv6_dns_peer: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct EngineOwnerSchemaContract {
+    configuration_identity_schema_version: u16,
+    engine_owner_schema_version: u16,
 }
 
 #[test]
@@ -78,6 +89,7 @@ fn projections_have_exactly_one_application_owned_inbound() {
         assert_eq!(server["path"], "/dns-query");
         assert_eq!(server["tls"]["enabled"], true);
         assert!(server["tls"]["server_name"].is_string());
+        assert_eq!(server["tls"]["min_version"], MINIMUM_REMOTE_TLS_VERSION);
     }
     for server in servers {
         assert_ne!(server["server"], TUNNEL_ADDRESS_PLAN.ipv4_dns_peer);
@@ -444,6 +456,37 @@ fn vmess_legacy_protocol_alter_id_reaches_the_runtime_projection() {
 }
 
 #[test]
+fn vless_raw_packet_encoding_is_distinct_from_an_omitted_field() {
+    for (packet_encoding, expected) in [(Some("raw"), Some("")), (None, None)] {
+        let packet_encoding = packet_encoding
+            .map(|value| format!(r#","packet_encoding":"{value}""#))
+            .unwrap_or_default();
+        let profile = ValidatedSingBoxProfile::parse(&format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}}{packet_encoding}}}]}}"#
+        ))
+        .expect("typed VLESS profile");
+        let projected = profile
+            .project(
+                PROFILE_ID,
+                ProjectionMode::SystemProxy,
+                &EngineSettings::default(),
+            )
+            .expect("VLESS projection");
+        let config: serde_json::Value =
+            serde_json::from_str(projected.as_json()).expect("projected VLESS JSON");
+        let outbound = config["outbounds"][0].as_object().expect("VLESS outbound");
+
+        match expected {
+            Some(value) => assert_eq!(
+                outbound.get("packet_encoding"),
+                Some(&serde_json::Value::String(value.to_owned()))
+            ),
+            None => assert!(!outbound.contains_key("packet_encoding")),
+        }
+    }
+}
+
+#[test]
 fn release_dns_evidence_is_a_closed_udp53_tunnel_projection() {
     let cases = [
         (
@@ -612,11 +655,102 @@ fn every_supported_remote_protocol_uses_the_same_bounded_bootstrap_pair() {
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected config");
         let outbounds = config["outbounds"].as_array().expect("outbound matrix");
-        assert_eq!(outbounds.len(), 5);
+        assert_eq!(outbounds.len(), 7);
         for outbound in outbounds {
             assert_eq!(outbound["domain_resolver"], expected);
         }
     }
+}
+
+#[test]
+fn every_enabled_remote_tls_projection_has_the_product_tls_floor() {
+    let profile = remote_protocol_matrix_profile();
+    for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
+        let projected = profile
+            .project(PROFILE_ID, mode, &EngineSettings::default())
+            .expect("remote protocol matrix projection");
+        let config: serde_json::Value =
+            serde_json::from_str(projected.as_json()).expect("projected config");
+        let tls_outbounds = config["outbounds"]
+            .as_array()
+            .expect("outbound matrix")
+            .iter()
+            .filter(|outbound| outbound["tls"]["enabled"] == true)
+            .collect::<Vec<_>>();
+        assert_eq!(tls_outbounds.len(), 6);
+        for outbound in tls_outbounds {
+            assert_eq!(
+                outbound["tls"]["min_version"], MINIMUM_REMOTE_TLS_VERSION,
+                "{} lost the product TLS floor",
+                outbound["tag"]
+            );
+        }
+    }
+}
+
+#[test]
+fn anytls_and_tuic_project_exact_placeholders_and_slots_in_both_modes() {
+    let profile = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[
+          {{"type":"anytls","tag":"anytls","server":"anytls.example.com","server_port":443,"credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}},"tls":{{"enabled":true,"server_name":"front.example.com","alpn":["h2"],"utls":{{"enabled":true,"fingerprint":"chrome"}}}}}},
+          {{"type":"tuic","tag":"tuic","server":"tuic.example.com","server_port":10443,"uuid_credential_ref":{{"id":"{TUIC_UUID_ID}","kind":"tuic_uuid"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"tuic.example.com","alpn":["h3"]}},"congestion_control":"new_reno","udp_relay_mode":"quic"}}
+        ],"route":{{"final":"tuic"}}}}"#
+    ))
+    .expect("typed AnyTLS/TUIC profile");
+
+    let mut mode_outbounds = Vec::new();
+    for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
+        let projected = profile
+            .project(PROFILE_ID, mode, &EngineSettings::default())
+            .expect("AnyTLS/TUIC runtime projection");
+        let config: serde_json::Value =
+            serde_json::from_str(projected.as_json()).expect("projected config");
+        let outbounds = config["outbounds"].as_array().expect("outbounds");
+        assert_eq!(outbounds.len(), 2);
+        assert_eq!(outbounds[0]["type"], "anytls");
+        assert_eq!(outbounds[0]["password"], "");
+        assert_eq!(outbounds[0]["tls"]["utls"]["fingerprint"], "chrome");
+        assert_eq!(
+            outbounds[0]["tls"]["min_version"],
+            MINIMUM_REMOTE_TLS_VERSION
+        );
+        assert!(outbounds[0].get("credential_ref").is_none());
+        assert_eq!(outbounds[1]["type"], "tuic");
+        assert_eq!(outbounds[1]["uuid"], "");
+        assert_eq!(outbounds[1]["password"], "");
+        assert_eq!(outbounds[1]["congestion_control"], "new_reno");
+        assert_eq!(outbounds[1]["udp_relay_mode"], "quic");
+        assert_eq!(outbounds[1]["zero_rtt_handshake"], false);
+        assert_eq!(
+            outbounds[1]["tls"]["min_version"],
+            MINIMUM_REMOTE_TLS_VERSION
+        );
+        assert!(outbounds[1].get("uuid_credential_ref").is_none());
+        assert!(outbounds[1].get("password_credential_ref").is_none());
+
+        assert_eq!(projected.credential_slots().len(), 3);
+        let slots = projected.credential_slots();
+        assert_eq!(slots[0].reference().id(), ANYTLS_ID);
+        assert_eq!(slots[0].json_pointer(), "/outbounds/0/password");
+        assert_eq!(slots[1].reference().id(), TUIC_UUID_ID);
+        assert_eq!(slots[1].json_pointer(), "/outbounds/1/uuid");
+        assert_eq!(slots[2].reference().id(), TUIC_PASSWORD_ID);
+        assert_eq!(slots[2].json_pointer(), "/outbounds/1/password");
+        assert_eq!(
+            serde_json::to_value(&slots[0]).unwrap()["target"],
+            "anytls_password"
+        );
+        assert_eq!(
+            serde_json::to_value(&slots[1]).unwrap()["target"],
+            "tuic_uuid"
+        );
+        assert_eq!(
+            serde_json::to_value(&slots[2]).unwrap()["target"],
+            "tuic_password"
+        );
+        mode_outbounds.push(outbounds.clone());
+    }
+    assert_eq!(mode_outbounds[0], mode_outbounds[1]);
 }
 
 #[test]
@@ -882,6 +1016,34 @@ fn direct_ipv4_host_route_wire_value_rejects_duplicates_and_noncanonical_inputs(
 }
 
 #[test]
+fn hysteria2_port_hopping_projects_to_pinned_sing_box_fields() {
+    let profile = ValidatedSingBoxProfile::parse(&format!(
+        r#"{{"outbounds":[{{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,"server_ports":["443","5000:5002"],"hop_interval_seconds":30,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}}}}]}}"#
+    ))
+    .expect("Hysteria2 hopping profile");
+
+    for mode in [ProjectionMode::SystemProxy, ProjectionMode::Tunnel] {
+        let projected = profile
+            .project(PROFILE_ID, mode, &EngineSettings::default())
+            .expect("Hysteria2 hopping projection");
+        let config: serde_json::Value =
+            serde_json::from_str(projected.as_json()).expect("runtime JSON");
+        let hysteria2 = config["outbounds"]
+            .as_array()
+            .expect("runtime outbounds")
+            .iter()
+            .find(|outbound| outbound["type"] == "hysteria2")
+            .expect("runtime Hysteria2");
+        assert_eq!(
+            hysteria2["server_ports"],
+            serde_json::json!(["443:443", "5000:5002"])
+        );
+        assert_eq!(hysteria2["hop_interval"], "30s");
+        assert_eq!(hysteria2["password"], "");
+    }
+}
+
+#[test]
 fn rust_tunnel_address_plan_matches_the_cross_language_contract() {
     let contract: TunnelAddressPlanContract = serde_json::from_str(include_str!(
         "../../../../contracts/tunnel-address-plan-v1.json"
@@ -902,6 +1064,41 @@ fn rust_tunnel_address_plan_matches_the_cross_language_contract() {
     assert_eq!(contract.ipv6_dns_peer, TUNNEL_ADDRESS_PLAN.ipv6_dns_peer);
 }
 
+#[test]
+fn configuration_identity_schema_matches_the_engine_owner_contract() {
+    let contract: EngineOwnerSchemaContract = serde_json::from_str(include_str!(
+        "../../../../contracts/engine-owner-v6/schema-policy.json"
+    ))
+    .expect("engine owner schema contract");
+    assert_eq!(
+        contract.configuration_identity_schema_version,
+        CONFIGURATION_IDENTITY_SCHEMA_VERSION
+    );
+    assert_eq!(contract.engine_owner_schema_version, 6);
+
+    let projected = ValidatedSingBoxProfile::direct()
+        .project(
+            PROFILE_ID,
+            ProjectionMode::SystemProxy,
+            &EngineSettings::default(),
+        )
+        .expect("direct projection");
+    let identity = crate::validation::canonicalize(serde_json::json!({
+        "configuration_sha256": projected.configuration_digest(),
+        "credential_audience": projected.credential_audience(),
+        "credential_slots": projected.credential_slots(),
+        "mode": "system_proxy",
+        "network_options": null,
+        "schema_version": CONFIGURATION_IDENTITY_SCHEMA_VERSION,
+    }));
+    let expected = crate::sha256_hex(
+        serde_json::to_string(&identity)
+            .expect("configuration identity JSON")
+            .as_bytes(),
+    );
+    assert_eq!(projected.digest(), expected);
+}
+
 fn shadowsocks_profile(credential_id: &str) -> ValidatedSingBoxProfile {
     ValidatedSingBoxProfile::parse(&format!(
         r#"{{"outbounds":[{{"type":"shadowsocks","tag":"proxy","server":"ss.example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{credential_id}","kind":"shadowsocks_password"}}}}],"route":{{"final":"proxy"}}}}"#
@@ -917,7 +1114,9 @@ fn remote_protocol_matrix_profile() -> ValidatedSingBoxProfile {
             {{"type":"vmess","tag":"vmess","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"security":"auto","tls":{{"enabled":true,"server_name":"vmess.example.com","utls":{{"enabled":true,"fingerprint":"chrome"}}}},"transport":{{"type":"ws","path":"/ws","headers":{{"Host":"vmess.example.com"}}}}}},
             {{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"flow":"xtls-rprx-vision","tls":{{"enabled":true,"server_name":"www.example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}}}}}},
             {{"type":"trojan","tag":"trojan","server":"trojan.example.com","server_port":443,"credential_ref":{{"id":"{TROJAN_ID}","kind":"trojan_password"}},"tls":{{"enabled":true,"server_name":"trojan.example.com"}},"transport":{{"type":"grpc","service_name":"tunnel"}}}},
-            {{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}},"up_mbps":100,"down_mbps":200,"obfs":{{"type":"salamander","credential_ref":{{"id":"{HYSTERIA_OBFS_ID}","kind":"hysteria2_obfs_password"}}}}}}
+            {{"type":"hysteria2","tag":"hy2","server":"hy2.example.com","server_port":443,"credential_ref":{{"id":"{HYSTERIA_ID}","kind":"hysteria2_password"}},"tls":{{"enabled":true,"server_name":"hy2.example.com"}},"up_mbps":100,"down_mbps":200,"obfs":{{"type":"salamander","credential_ref":{{"id":"{HYSTERIA_OBFS_ID}","kind":"hysteria2_obfs_password"}}}}}},
+            {{"type":"anytls","tag":"anytls","server":"anytls.example.com","server_port":443,"credential_ref":{{"id":"{ANYTLS_ID}","kind":"anytls_password"}},"tls":{{"enabled":true,"server_name":"anytls.example.com"}}}},
+            {{"type":"tuic","tag":"tuic","server":"tuic.example.com","server_port":443,"uuid_credential_ref":{{"id":"{TUIC_UUID_ID}","kind":"tuic_uuid"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"tuic.example.com"}},"congestion_control":"bbr","udp_relay_mode":"native"}}
           ],
           "route": {{"final":"ss"}}
         }}"#

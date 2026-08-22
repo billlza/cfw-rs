@@ -443,11 +443,11 @@ class TrustPolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             policy.collector_source_sha256,
-            "efe0e7a16d67406aff50bb3439e59d4fad1c9dbb6f06ab7437a7d6b84ce44545",
+            "67fa401401dfe1ffca670cbea62eff5f74e581dcc9161847a371968b6f5176a2",
         )
         self.assertEqual(
             policy.collector_executable_sha256,
-            "6b78b06d7640568099d815b3c3485c3a00bc92eac1972721ce8be01384dde759",
+            "d4fa73f55dead6e806844a2c1bdbb445b55d83b9603444d3e591ffd1f418c230",
         )
 
     def test_not_configured_deployment_sentinel_requires_exact_schema_v2(self) -> None:

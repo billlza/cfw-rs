@@ -34,6 +34,7 @@ from scripts.publication.orchestrator import (
     _parse_codesign_details,
     _physical_candidate_hash_manifest,
     _physical_collector_candidate,
+    _production_context,
     _publish_outputs,
     _require_final_inputs_unchanged,
     _require_physical_candidate_binding,
@@ -57,9 +58,9 @@ def _write(repository: Path, relative: str, data: bytes = b"evidence\n") -> Path
 
 
 def _context(repository: Path) -> ProductionContext:
-    ci_path = "target/candidates/0.4.0/validation/40004/evidence/unsigned-ci-lanes.json"
+    ci_path = "target/candidates/0.4.0/validation/40020/evidence/unsigned-ci-lanes.json"
     validation_manifest = (
-        "target/candidates/0.4.0/validation/40004/signed/"
+        "target/candidates/0.4.0/validation/40020/signed/"
         "Clash for Mac.app.manifest.json"
     )
     receipt_path = repository / "target/notarization-receipt.json"
@@ -98,10 +99,32 @@ class ProductionOrchestratorIdentityTests(unittest.TestCase):
     def test_release_identity_has_no_caller_selected_builds(self) -> None:
         self.assertEqual(
             (PRODUCT_VERSION, VALIDATION_BUILD, FINAL_BUILD),
-            ("0.4.0", "40004", "40005"),
+            ("0.4.0", "40020", "40021"),
         )
+        self.assertGreater(int(VALIDATION_BUILD), 40019)
+        self.assertGreater(int(FINAL_BUILD), int(VALIDATION_BUILD))
         signature = inspect.signature(seal_production_evidence)
         self.assertEqual(tuple(signature.parameters), ("repository",))
+
+    def test_retired_validation_reviews_cannot_authorize_the_final_build(self) -> None:
+        source_identity = {
+            "repositoryCommit": "a" * 40,
+            "releaseSourceSha256": "b" * 64,
+        }
+        for retired in ("40004", "40019"):
+            with self.subTest(retired=retired), patch(
+                "scripts.publication.orchestrator.current_identity",
+                return_value=source_identity,
+            ), patch("scripts.publication.orchestrator.validate_inventory"), patch(
+                "scripts.publication.orchestrator.validate_candidate_review",
+                return_value={
+                    "product": {"version": PRODUCT_VERSION, "build_number": retired},
+                    "candidate": {},
+                },
+            ), self.assertRaisesRegex(
+                PublicationError, "validated candidate is not exactly build 40020"
+            ):
+                _production_context(REPOSITORY)
 
     def test_cli_has_no_fixture_build_path_output_or_override_option(self) -> None:
         completed = subprocess.run(
@@ -193,7 +216,7 @@ class ProductionOrchestratorDerivationTests(unittest.TestCase):
             paths = (
                 "target/candidates/0.4.0/signed/Clash for Mac.app.manifest.json",
                 "target/native-dependencies/Libbox.xcframework.manifest.json",
-                "target/candidates/0.4.0/signed/Clash.for.Mac_0.4.0_40005_notary.zip",
+                "target/candidates/0.4.0/signed/Clash.for.Mac_0.4.0_40021_notary.zip",
                 "target/candidates/0.4.0/signed/notarization.json",
                 "target/candidates/0.4.0/signed/notarization-log.json",
                 "target/candidates/0.4.0/signed/gatekeeper.json",
@@ -224,12 +247,12 @@ class ProductionOrchestratorDerivationTests(unittest.TestCase):
             )
             _write(
                 repository,
-                "target/candidates/0.4.0/notary-attempts/release/40005/intent.json",
+                "target/candidates/0.4.0/notary-attempts/release/40021/intent.json",
                 b"intent\n",
             )
             _write(
                 repository,
-                "target/candidates/0.4.0/notary-attempts/release/40005/events/00000000.json",
+                "target/candidates/0.4.0/notary-attempts/release/40021/events/00000000.json",
                 b"event\n",
             )
             first = _physical_candidate_hash_manifest(context)
@@ -246,7 +269,7 @@ class ProductionOrchestratorDerivationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(collector_candidate["version"], "0.4.0")
-            self.assertEqual(collector_candidate["build_number"], "40005")
+            self.assertEqual(collector_candidate["build_number"], "40021")
             self.assertEqual(
                 collector_candidate["artifact_hash_manifest_sha256"],
                 first["sha256"],

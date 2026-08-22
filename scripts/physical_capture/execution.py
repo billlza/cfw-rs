@@ -47,6 +47,12 @@ _CONTROLLED_EXTRA_ENVIRONMENT_KEYS = frozenset(
 class ProbeExecutionError(RuntimeError):
     """A fixed physical probe could not produce a bounded trusted result."""
 
+    def __init__(
+        self, message: str, *, result: CommandResult | None = None
+    ) -> None:
+        super().__init__(message)
+        self.result = result
+
 
 @dataclass(frozen=True, slots=True)
 class CommandSpec:
@@ -362,7 +368,11 @@ class StartedCommand:
         self._started_monotonic = started_monotonic
         self._started_wall = started_wall
         self._deadline = started_monotonic + float(spec.timeout_seconds)
-        self._selector = selectors.DefaultSelector()
+        # Match subprocess' pipe coordination on Darwin. Kqueue can leave a
+        # freshly exec'd child blocked in dyld's synchronous image notification
+        # while the parent waits only for pipe readability; poll wakes the pipe
+        # lifecycle without weakening any output or time bound.
+        self._selector = selectors.PollSelector()
         self._streams: dict[int, tuple[str, int, bytearray]] = {
             process.stdout.fileno(): ("stdout", spec.stdout_limit, bytearray()),
             process.stderr.fileno(): ("stderr", spec.stderr_limit, bytearray()),
@@ -537,24 +547,13 @@ class StartedCommand:
             completed_wall = self._wall_clock()
             duration_seconds = self._monotonic() - self._started_monotonic
             duration_ms = max(1, int(round(duration_seconds * 1000.0)))
-            if return_code < 0:
-                raise ProbeExecutionError("fixed probe terminated by signal")
-            if return_code not in self._spec.accepted_exit_codes:
-                raise ProbeExecutionError("fixed probe returned an unexpected exit code")
-            if (
-                self._readiness is not None
-                and self._exact_line_count(self._readiness) != 1
-            ):
-                raise ProbeExecutionError(
-                    "fixed probe exact readiness line was absent or duplicated at completion"
-                )
             stdout = bytes(
                 next(value[2] for value in self._streams.values() if value[0] == "stdout")
             )
             stderr = bytes(
                 next(value[2] for value in self._streams.values() if value[0] == "stderr")
             )
-            self._result = CommandResult(
+            result = CommandResult(
                 role=self._spec.role,
                 argv_sha256=command_sha256(self._argv),
                 started_at=_timestamp(self._started_wall),
@@ -564,6 +563,22 @@ class StartedCommand:
                 stdout=stdout,
                 stderr=stderr,
             )
+            if return_code < 0:
+                raise ProbeExecutionError("fixed probe terminated by signal")
+            if return_code not in self._spec.accepted_exit_codes:
+                raise ProbeExecutionError(
+                    "fixed probe returned an unexpected exit code",
+                    result=result,
+                )
+            if (
+                self._readiness is not None
+                and self._exact_line_count(self._readiness) != 1
+            ):
+                raise ProbeExecutionError(
+                    "fixed probe exact readiness line was absent or duplicated at completion",
+                    result=result,
+                )
+            self._result = result
             self._cleanup(terminate=False)
             return self._result
         except BaseException:

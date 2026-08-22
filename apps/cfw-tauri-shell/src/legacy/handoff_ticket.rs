@@ -500,7 +500,7 @@ impl ConsumedHandoffTicket {
     }
 
     pub(crate) fn require_parent_absent(&self) -> Result<(), String> {
-        if identity_exists(&self.ticket.parent)? {
+        if !self.parent_absent()? {
             Err(
                 "the ticket-bound 0.4.0 dashboard parent is still running; cutover remains blocked"
                     .into(),
@@ -508,6 +508,10 @@ impl ConsumedHandoffTicket {
         } else {
             Ok(())
         }
+    }
+
+    pub(crate) fn parent_absent(&self) -> Result<bool, String> {
+        identity_exists(&self.ticket.parent).map(|exists| !exists)
     }
 }
 

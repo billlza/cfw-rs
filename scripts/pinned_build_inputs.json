@@ -12,7 +12,7 @@
     "XCODEGEN_SOURCE_SHA256": "a3270d0e5fce8f4dc2aa1801b0d932f6561cd24c0735e718d2455896b2359142",
     "XCODEGEN_PACKAGE_RESOLVED_SHA256": "2f0b0265e33ab55bbc6cab8ad209afa85821064a2cb6fe4a1df07b642f7cebcd",
     "NODE_VERSION": "24.18.0",
-    "GO_VERSION": "1.26.5",
+    "GO_VERSION": "1.26.6",
     "GOMOBILE_VERSION": "v0.1.13",
     "GOVULNCHECK_VERSION": "v1.6.0",
     "TAURI_CLI_VERSION": "2.11.4",
@@ -27,8 +27,8 @@
       "verificationPhase": "android-lan-peer-admission",
       "sourceBinding": {
         "path": "scripts/physical_capture/android_lan_peer.py",
-        "sha256": "97b775aeba9f8959cddb907c7c2aa9e6e694ae3ffc0819dd5edda6be0293f60b",
-        "size": 135593,
+        "sha256": "b7c8fa35c93d5e55310d9a48407c0c555e09f0f477deb9f6a98f2aafcb08764f",
+        "size": 137097,
         "mode": "0644",
         "pathConstant": "ADB",
         "versionConstant": "ADB_VERSION",
@@ -38,11 +38,11 @@
   },
   "packetEvidenceEndpoint": {
     "goVersionKey": "GO_VERSION",
-    "goVersion": "1.26.5",
+    "goVersion": "1.26.6",
     "goos": "linux",
     "goarch": "amd64",
     "cgoEnabled": "0",
-    "binarySha256": "fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1",
+    "binarySha256": "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c",
     "transportPort": 44333,
     "dnsPort": 53,
     "readmePath": "tools/packet-evidence-endpoint/README.md",
@@ -51,12 +51,12 @@
       "CGO_ENABLED=0",
       "GOOS=linux",
       "GOARCH=amd64",
-      "target/toolchains/go-1.26.5/bin/go",
+      "target/toolchains/go-1.26.6/bin/go",
       "-C tools/packet-evidence-endpoint",
       "-trimpath",
       "-ldflags='-s -w -buildid='",
       "-o ../../target/packet-evidence-endpoint-linux-amd64",
-      "fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1"
+      "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c"
     ],
     "sourceFiles": [
       {
@@ -65,7 +65,7 @@
       },
       {
         "path": "tools/packet-evidence-endpoint/install-endpoint.sh",
-        "sha256": "6527983cf9b072ab99ecd820778ccb56c9d91d79e07fc4d558715c4ce8657049"
+        "sha256": "14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8"
       },
       {
         "path": "tools/packet-evidence-endpoint/main.go",
@@ -89,11 +89,11 @@
       },
       {
         "path": "tools/packet-evidence-endpoint/README.md",
-        "sha256": "4e9701fe2a359ab0bb397bb259e1f08a07e119a94561f11fa90612811268f6a2"
+        "sha256": "5d5914f5546730a4f20ad5e9d7e92bc47cf3c173443ba1563895828bbb117f2a"
       },
       {
         "path": "scripts/physical_capture/packet_endpoints.json",
-        "sha256": "50cd366157c4297a7cc4d52e13ff8c4e176551567de38d44a905f67820981920"
+        "sha256": "35f1e9bfc73baae302f7b26e24adf86df57a01c61f3c71133ae7cba23e64a5cb"
       },
       {
         "path": "scripts/physical_capture/packet_known_hosts",
@@ -105,7 +105,7 @@
     "schema": "cfw-packet-lan-peer-build-input-v1",
     "goToolchain": {
       "versionKey": "GO_VERSION",
-      "version": "1.26.5",
+      "version": "1.26.6",
       "goos": "linux",
       "goarch": "arm64",
       "cgoEnabled": "0"
@@ -113,7 +113,7 @@
     "source": {
       "root": "tools/packet-lan-peer",
       "treeAlgorithm": "sha256-tree-v2",
-      "treeSha256": "dc5bf2f5853b986acd3953809d68a0f75aac8bef1d682ba988ec3f7c5fa13c60",
+      "treeSha256": "8437dce5e85780a49e882dd1594b188ce0f5188c44b7a020fe7a42d7efaa08a4",
       "rootMode": "0755",
       "files": [
         {
@@ -124,7 +124,7 @@
         },
         {
           "path": "go.mod",
-          "sha256": "f21defb110ca4cb0d36b3591c6214532f3e5fa9926fbe4565ce4d9edce92b8a7",
+          "sha256": "af5ff7973354844d111edb9d303d6543d8aa6dc0afc6ecf439225acc15e1d1fd",
           "size": 70,
           "mode": "0644"
         },
@@ -144,7 +144,7 @@
     },
     "artifact": {
       "path": "target/packet-lan-peer-linux-arm64",
-      "sha256": "873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17",
+      "sha256": "268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c",
       "size": 2359422,
       "fileType": "regular",
       "linkCount": 1,
@@ -197,7 +197,7 @@
     },
     "verifyScript": {
       "path": "scripts/verify_packet_lan_peer.sh",
-      "sha256": "831ec6e34d35cbe799bae9ab8874d34c5ddd7034be19584c45ceac3731f9248d",
+      "sha256": "eb7c518d3209ccf6486847e9f9042f58796b2192d5fdd733f3b991f640d7309e",
       "size": 7357,
       "mode": "0755",
       "requiredFragments": [
@@ -206,7 +206,7 @@
         "cfw_verify_go_toolchain_tree \"$repo_root\" \"$toolchain_root\"",
         "source_root=\"$repo_root/tools/packet-lan-peer\"",
         "artifact=\"$repo_root/target/packet-lan-peer-linux-arm64\"",
-        "expected_artifact_sha256=873df1f69324c1310af9c6115802e46426da70f38fe893ebf3054632764e8b17",
+        "expected_artifact_sha256=268699e59caff2ea3ddf73e2a22b556364724a6bae985d012f1df7e2b089085c",
         "expected_artifact_size=2359422",
         "expected_artifact_mode=555",
         "module_path=github.com/billziss-gh/cfw-rs/tools/packet-lan-peer",
@@ -233,9 +233,9 @@
   },
   "physicalCollectorModule": {
     "goVersionKey": "GO_VERSION",
-    "goVersion": "1.26.5",
+    "goVersion": "1.26.6",
     "goModPath": "tools/physical-collector/go.mod",
-    "goModSha256": "30e04725fc86f48fbdc371e02914e7c06fa7177763c560091333297ae52795dd",
+    "goModSha256": "24b0294d6fe42b5baab92bc58ed47a69275323bb02ca75b087605a5aabf2b2d0",
     "goSumPath": "tools/physical-collector/go.sum",
     "goSumSha256": "5c71b0dca9d0be45b65ab07b1a7386475f72d454c9638d60c36494a75fbc35ec",
     "requiredModuleFragments": [
@@ -359,40 +359,54 @@
       "name": "sing-box security dependencies patch",
       "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
       "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
-      "sha256": "2af9a0d4ec55ddfaeb8656dfe42abba156b20299fcb69da01015eaeb265ec7e2"
+      "sha256": "529ce3939fa23573e2cceaa4ee209ebd34a75204bd91e999c9bbf843b0867798"
     },
     {
       "name": "sing-box raw packet tun patch",
       "pathKey": "SING_BOX_RAW_PACKET_PATCH_PATH",
       "sha256Key": "SING_BOX_RAW_PACKET_PATCH_SHA256",
-      "sha256": "3367a387fe58b9bb374bb08a7fae9ad2fd46d609e8e9aea49a92a14ec9de4cac"
+      "sha256": "3a40130eb30f471bd5ab17cfce289f43e3600bdadcfc1aadab25a68f9703e124"
     },
     {
       "name": "sing-box DNS failover patch",
       "pathKey": "SING_BOX_DNS_FAILOVER_PATCH_PATH",
       "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
       "sha256": "66a1c6c98457ce7cdbdeb08797f253fae52d4dd1fae6f634159572b4286b6473"
+    },
+    {
+      "name": "sing-box endpoint conflict patch",
+      "pathKey": "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+      "sha256Key": "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+      "sha256": "5a956c63025b4692db43d2c77ac46de1ae573e0afcc866de9b59704a273b0c02"
     }
   ],
   "combinedDiffSha256Key": "SING_BOX_COMBINED_DIFF_SHA256",
-  "combinedDiffSha256": "8a2b698b8c3a7285b963c3ffc67480b6eed06021c6fe585eccd22513799d2a80",
+  "combinedDiffSha256": "1ad890f1e17a9ff9af3369bef3329650b4ac0e0fc4f33a4840c5911f1e6a2a7f",
   "sourceContract": {
     "patchedDiffSha256Key": "SING_BOX_PATCHED_DIFF_SHA256",
-    "patchedDiffSha256": "b1fa2f098c4aebf1bf3a8a5082f99c892a3b1bbaf1dc51664e3a1fde401b7d95",
+    "patchedDiffSha256": "0e839490c8c841532b2d13d88c24a94542f3fcb727700e6abf6040a9946e83e4",
     "patchedGoModSha256Key": "SING_BOX_PATCHED_GO_MOD_SHA256",
-    "patchedGoModSha256": "aa0101b194e65676a0abc7207ce20c9f000a30fc7ba6f40e8fde065ae802341d",
+    "patchedGoModSha256": "58dd87dca554127aeb919fc2d5abb1ad1cc51fe72081ea4a7ab4c2d11d027e91",
     "patchedGoSumSha256Key": "SING_BOX_PATCHED_GO_SUM_SHA256",
-    "patchedGoSumSha256": "97cb91e52f6915aba762ef666065fed3c5e91adaa9a61181a91ca3141193b577"
+    "patchedGoSumSha256": "4c2976095a2cd3ced5b54268bc820d2d9c48c56d7399a3b832966070d011ae88"
+  },
+  "libboxModuleCacheContract": {
+    "pathKey": "LIBBOX_MODULE_CACHE_CONTRACT_PATH",
+    "path": "scripts/libbox_module_cache_contract.bash",
+    "sha256Key": "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+    "sha256": "4a28e369e4dfca07cd2091f81ae5375752e66aa592eb54c4dfb40c7ec34fb066"
   },
   "verifiedGoModuleInputKeys": [
     "GOMOBILE_MODULE_SUM",
     "GOVULNCHECK_MODULE_SUM",
+    "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
     "SING_BOX_UPSTREAM_GO_MOD_SHA256",
     "SING_BOX_UPSTREAM_GO_SUM_SHA256",
     "SING_BOX_PATCHED_GO_MOD_SHA256",
     "SING_BOX_PATCHED_GO_SUM_SHA256"
   ],
   "rejectedPatchDigests": [
+    "3367a387fe58b9bb374bb08a7fae9ad2fd46d609e8e9aea49a92a14ec9de4cac",
     "66128ca96ff613b0803cc92b3269b4e7822cd2532c43597e9e283acc6d9f4dde",
     "ca751c4ec4b82a60d4dd8716627dc2665b154901a988603108bb5e4e718cf439",
     "c618b69baa770e0afc3239f78acfeaaf354e3dc8105e2e61b149d4ede00a93b7"
@@ -456,7 +470,8 @@
         "$SING_BOX_COMBINED_DIFF_SHA256",
         "$SING_BOX_SECURITY_PATCH_SHA256",
         "$SING_BOX_RAW_PACKET_PATCH_SHA256",
-        "$SING_BOX_DNS_FAILOVER_PATCH_SHA256"
+        "$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+        "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"
       ],
       "forbidNetworkRecursion": true
     }
@@ -482,6 +497,7 @@
       "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256",
       "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
       "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+      "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
       "patchedDiffSha256=$SING_BOX_PATCHED_DIFF_SHA256",
       "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
       "patchedGoModSha256=$SING_BOX_PATCHED_GO_MOD_SHA256",
@@ -499,6 +515,7 @@
       "securityPatchSha256=$SING_BOX_SECURITY_PATCH_SHA256",
       "rawPacketPatchSha256=$SING_BOX_RAW_PACKET_PATCH_SHA256",
       "dnsFailoverPatchSha256=$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+      "endpointConflictPatchSha256=$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
       "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256"
     ],
     "scripts/build_native_products.sh": [
@@ -923,8 +940,8 @@
       "does not cover every numbered requirement exactly once"
     ],
     "scripts/harness/physical_collector_trust_policy.json": [
-      "\"collector_source_sha256\":\"efe0e7a16d67406aff50bb3439e59d4fad1c9dbb6f06ab7437a7d6b84ce44545\"",
-      "\"collector_executable_sha256\":\"6b78b06d7640568099d815b3c3485c3a00bc92eac1972721ce8be01384dde759\"",
+      "\"collector_source_sha256\":\"67fa401401dfe1ffca670cbea62eff5f74e581dcc9161847a371968b6f5176a2\"",
+      "\"collector_executable_sha256\":\"d4fa73f55dead6e806844a2c1bdbb445b55d83b9603444d3e591ffd1f418c230\"",
       "\"key_version\":\"projects/cfw-release-evidence-20260730/locations/asia-east1/keyRings/physical-evidence/cryptoKeys/collector-receipts-v040/cryptoKeyVersions/1\"",
       "\"schema_version\":3",
       "\"aggregator_version\":\"physical-evidence-aggregator-v5-single-machine\"",
@@ -956,7 +973,7 @@
     ],
     "scripts/harness/physical_collector_request.py": [
       "CONTEXT_DOCUMENT = \"cfw-physical-run-context-v1\"",
-      "FINAL_RELEASE_BUILD = \"40005\"",
+      "FINAL_RELEASE_BUILD = \"40021\"",
       "MAX_COLLECTOR_REQUEST_BYTES = 1 << 20",
       "PRODUCTION_NONCE_TTL = timedelta(hours=6)",
       "FIXED_PYTHON_PROBE = Path(\"/opt/homebrew/bin/python3\")",
@@ -978,7 +995,7 @@
     ],
     "scripts/harness/performance_ledger.py": [
       "LEDGER_SCHEMA_VERSION: Final = 2",
-      "FINAL_BUILD: Final = \"40005\"",
+      "FINAL_BUILD: Final = \"40021\"",
       "SOAK_HEARTBEAT_COUNT: Final = 37",
       "SOAK_TRAFFIC_COUNT: Final = 13",
       "NETWORK_QUALITY_MAX_SECONDS: Final = 5",
@@ -1011,6 +1028,19 @@
       "_probe_argv",
       "capture_adversarial_observations"
     ],
+    "scripts/physical_capture/policy.py": [
+      "COLLECTOR_SOURCE_DIGEST_TOOL",
+      "require_current_collector_source_activation",
+      "argv=(\"/bin/bash\", str(COLLECTOR_SOURCE_DIGEST_TOOL))",
+      "run_fixed_command",
+      "hmac.compare_digest",
+      "physical collector source closure is not activated by the checked-in policy"
+    ],
+    "scripts/physical_capture/cloud_run.py": [
+      "require_current_collector_source_activation",
+      "physical collector source closure is not activated",
+      "raise PreSendError("
+    ],
     "scripts/physical_capture/collector.py": [
       "LANES: Final",
       "ATTEMPTS: Final = (\"01\", \"02\", \"03\")",
@@ -1024,6 +1054,8 @@
       "_reopen_performance_recovery_state",
       "previous_attempt_abandonment_invalid",
       "validate_restart_recovery_chain",
+      "require_current_collector_source_activation",
+      "collector_source_closure_unactivated",
       "session.event_view",
       "collect_performance_session",
       "recover_performance_session"
@@ -1058,7 +1090,9 @@
       "adversarial_helper_closure_incomplete",
       "collector_production_flow_incomplete",
       "host_evidence_path_unreachable",
+      "collector_source_closure_unactivated",
       "physical_capture_source_not_ready",
+      "def _collector_activation_blocker()",
       "def analyze_repository(repository: Path)"
     ],
     "scripts/verify_build_boundaries.sh": [
@@ -1103,8 +1137,8 @@
     ],
     "scripts/publication/orchestrator.py": [
       "RELEASE_VERSION",
-      "VALIDATION_BUILD = \"40004\"",
-      "FINAL_BUILD = \"40005\"",
+      "VALIDATION_BUILD = \"40020\"",
+      "FINAL_BUILD = \"40021\"",
       "prepare_physical_candidate_manifest",
       "physical-collector-candidate.json",
       "_physical_collector_candidate",
@@ -1171,13 +1205,13 @@
     "scripts/physical_capture/packet.py": [
       "PACKET_ENDPOINT_TRANSPORT_PORT: Final = 44333",
       "PACKET_ENDPOINT_DNS_PORT: Final = 53",
-      "fb92ecb25b77cd30c6710775501e5418cbf6415166326be37ddc443487fa2fc1",
+      "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c",
       "7d485a9fe9081ebf019fcc8abc1d596358a64326e2490749d9903197262e3996",
-      "6527983cf9b072ab99ecd820778ccb56c9d91d79e07fc4d558715c4ce8657049",
+      "14b45b1705f762057ac38d836f2ac5c7d3721e72ec0ec45b72505b354f0d05c8",
       "b290cc794e7f0faac9ebbd63f83aad67d23086b48206295d5d6a2767721c1e62",
       "a91c2bc91a294622d44f14e2cad653b9703fcf70afa42bf91e0248ef240c3411",
       "3741384531dbd24c65a2225386beae492bf92c61fdf2d5b90b57051d57be36ba",
-      "50cd366157c4297a7cc4d52e13ff8c4e176551567de38d44a905f67820981920",
+      "35f1e9bfc73baae302f7b26e24adf86df57a01c61f3c71133ae7cba23e64a5cb",
       "endpoint_binary_sha256",
       "endpoint_service_unit_sha256",
       "endpoint_install_script_sha256",

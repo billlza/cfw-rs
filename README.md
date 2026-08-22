@@ -1,6 +1,14 @@
 # Clash for Mac (`cfw-rs`)
 
 Clash for Mac is an Apple Silicon-only network client for macOS 15 and newer.
+Android and iOS are not application targets. An iOS device may be used as an
+independent physical-validation peer when its harness and evidence are bound
+separately; that does not add an iOS product or compatibility surface.
+The isolated [`tools/physical-transport-peer-ios`](tools/physical-transport-peer-ios/README.md)
+project is test infrastructure only. Its signed arm64 app, hash-selected
+physical iPhone lifecycle, dynamic RFC1918 endpoint, three TCP/EOF server
+receipts, and exact uninstall proof are now the active `lan-bypass` support
+source for Packet evidence; this does not place iOS code in the release bundle.
 The target data plane is a source-built sing-box/libbox engine behind Apple
 Network Extension APIs. The retired root-helper, mihomo, clash-rs, downloaded
 core, Clash REST/WebSocket, custom-script, and PAC execution paths are not
@@ -32,21 +40,44 @@ match the requested projection.
 
 The profile validator implements a closed typed subset: one to 128 uniquely
 tagged `direct`, `block`, Shadowsocks, VMess, VLESS (including Reality),
-Trojan, or Hysteria2 outbounds, plus an optional `route.final` naming a
-declared tag. Persistent JSON contains canonical `credential_ref` objects,
-never passwords, UUID values, private keys, or other secrets. Projection emits
-only empty credential placeholders and closed injection slots. User-defined
+Trojan, Hysteria2, AnyTLS, or TUIC v5 outbounds, plus an optional `route.final`
+naming a declared tag. Persistent JSON contains canonical credential references,
+never passwords, UUID values, private keys, or other secrets. TUIC keeps its
+UUID and password in two independently typed references. Projection emits only
+empty credential placeholders and closed injection slots. User-defined
 DNS/services, remote resources inside profiles, scripts, executable paths, raw
 credentials, and unknown fields are rejected. Subscription import is a
-boundary conversion into that schema: typed profile JSON passes through, and
-Clash Meta YAML `proxies` lists and node-URI bundles (`ss://`, `vmess://`,
-`vless://`, `trojan://`, `hysteria2://`) are converted with bounded parsers
+boundary conversion into that schema: typed profile JSON passes through;
+restricted upstream sing-box `outbounds` JSON, Clash Meta YAML `proxies`
+lists, Shadowsocks SIP008 JSON, and node-URI bundles (`ss://`, `vmess://`,
+`vless://`, `trojan://`, `hysteria2://`, `anytls://`, `tuic://`) are converted with bounded parsers
 whose secrets go straight to the credential vault, never into the stored
-profile. Credential entry
+profile. VMess accepts both the traditional base64-JSON form and the
+URL-shaped AEAD form without `alterId`. VMess/VLESS packet encoding and the closed HTTP/H2, WebSocket, gRPC,
+HTTPUpgrade, and V2Ray QUIC transport shapes are preserved. Mihomo HTTP
+imports preserve a closed method/path/Host subset and reject nondeterministic
+multi-path or arbitrary custom-header semantics. Hysteria2 accepts canonical,
+non-overlapping multi-port sets and a fixed bounded hop interval from its
+official URI, Mihomo YAML, or sing-box JSON; randomized interval ranges that
+require sing-box 1.14 remain rejected by the pinned 1.13 runtime. VLESS Vision rejects V2Ray
+transport streams and accepts only omitted or XUDP packet encoding. XHTTP and
+unknown transport semantics fail closed. Hysteria2 and TUIC use QUIC TLS and
+reject uTLS and Reality; AnyTLS uses the standard TLS path and may use the
+schema's uTLS and Reality options. Every enabled remote TLS transport and authenticated DoH
+projection has a product-owned TLS 1.2 minimum that profiles cannot lower;
+normal negotiation prefers TLS 1.3, and QUIC always requires TLS 1.3. TUIC also
+projects 0-RTT as explicitly disabled. Subscription and update clients are
+HTTPS-only and use the same single TLS 1.2-or-newer negotiation policy without
+retry-based protocol fallback. Subscription downloads explicitly request
+identity encoding and reject compressed responses they cannot safely decode.
+Shadowsocks 2022 imports require SIP002 plain percent-encoded userinfo and
+validate every standard-base64 PSK in a single- or multi-user key chain against
+the selected method before any credential reaches the vault batch.
+Credential entry
 queries only missing references and submits them as one bounded, zeroized
 batch to the immutable shared-Keychain vault. Existing UUIDs are not
-re-prompted; same-value retries are idempotent and rotation requires a new UUID
-plus a profile update. Two-phase, revision-bound garbage collection removes
+re-prompted; same-value retries are idempotent across profile audiences and
+rotation requires a new UUID plus a profile update. Two-phase, revision-bound garbage collection removes
 only entries absent from every selected or staged managed profile. Signed
 entitlement and physical runtime proof remain release gates, so current source
 must not yet claim a credential-bearing data plane can start in a release
@@ -111,7 +142,7 @@ Release inputs are recorded in
 
 - Rust 1.97.1
 - Node.js 24.18.0 LTS
-- Go 1.26.5
+- Go 1.26.6
 - SagerNet gomobile v0.1.13
 - cargo-deny 0.20.2
 - sing-box/libbox v1.13.15 at
@@ -155,7 +186,8 @@ source.
 Tool acquisition and module-cache preparation are explicit networked steps.
 The actual libbox build is offline and accepts only the materialized source
 whose upstream commit, dependency-security patch, public packet-flow adapter
-patch, and combined source diff all match their pins:
+patch, DNS-failover patch, structured endpoint-conflict patch, and combined
+source diff all match their pins:
 
 ```sh
 ./scripts/bootstrap_release_toolchain.sh
@@ -174,7 +206,7 @@ SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
   ./scripts/build_libbox.sh
 ```
 
-The build refuses a different commit, any diff beyond the exact three-patch
+The build refuses a different commit, any diff beyond the exact four-patch
 series, a wrong Go/gomobile toolchain, changed module files, existing output,
 or missing offline module cache. It records a path-independent SHA-256 tree
 manifest for the produced XCFramework. See

@@ -332,7 +332,7 @@ mod tests {
             uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("request UUID");
         let result = parse_response(
             request_id,
-            include_bytes!("../../../../contracts/native-bridge-v5/gc-preview-response.json"),
+            include_bytes!("../../../../contracts/native-bridge-v6/gc-preview-response.json"),
         )
         .expect("cross-language response");
         let NativeBridgeResult::CredentialGarbageCollectionPreview(preview) = result else {
@@ -347,7 +347,7 @@ mod tests {
             uuid::Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee").expect("request UUID");
         let error = parse_response(
             expected,
-            include_bytes!("../../../../contracts/native-bridge-v5/gc-preview-response.json"),
+            include_bytes!("../../../../contracts/native-bridge-v6/gc-preview-response.json"),
         )
         .expect_err("mismatched response must fail");
         assert_eq!(error.code, NativeBridgeErrorCode::IdentityRejected);

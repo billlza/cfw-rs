@@ -3,8 +3,10 @@ use std::net::IpAddr;
 
 use serde_json::{Map, Value, json};
 
-use crate::profile::{OutboundTls, ProfileDocument, ProfileOutbound, V2RayTransport};
-use crate::{ConfigError, CredentialSlot, CredentialTarget};
+use crate::profile::{
+    OutboundTls, ProfileDocument, ProfileOutbound, V2RayPacketEncoding, V2RayTransport,
+};
+use crate::{ConfigError, CredentialSlot, CredentialTarget, MINIMUM_REMOTE_TLS_VERSION};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DomainResolverTags<'a> {
@@ -126,6 +128,7 @@ impl ProfileOutbound {
                 credential_ref,
                 alter_id,
                 security,
+                packet_encoding,
                 tls,
                 transport,
             } => {
@@ -136,6 +139,7 @@ impl ProfileOutbound {
                 if alter_id.is_legacy() {
                     object.insert("alter_id".into(), Value::from(1));
                 }
+                insert_packet_encoding(&mut object, packet_encoding.as_ref());
                 insert_tls_transport(&mut object, tls.as_ref(), transport.as_ref())?;
                 (
                     object,
@@ -152,6 +156,7 @@ impl ProfileOutbound {
                 server_port,
                 credential_ref,
                 flow,
+                packet_encoding,
                 tls,
                 transport,
             } => {
@@ -161,6 +166,7 @@ impl ProfileOutbound {
                 if let Some(flow) = flow {
                     object.insert("flow".into(), serde_json::to_value(flow)?);
                 }
+                insert_packet_encoding(&mut object, packet_encoding.as_ref());
                 insert_tls_transport(&mut object, tls.as_ref(), transport.as_ref())?;
                 (
                     object,
@@ -196,6 +202,8 @@ impl ProfileOutbound {
                 tag,
                 server,
                 server_port,
+                server_ports,
+                hop_interval_seconds,
                 credential_ref,
                 tls,
                 up_mbps,
@@ -204,6 +212,26 @@ impl ProfileOutbound {
             } => {
                 let mut object =
                     remote_outbound("hysteria2", tag, server, *server_port, bootstrap_resolver);
+                if let Some(server_ports) = server_ports {
+                    // The pinned sing-quic parser accepts only explicit
+                    // start:end ranges. Keep the profile model's compact
+                    // single-port form, but close each singleton at the
+                    // runtime boundary consumed by libbox.
+                    let runtime_server_ports = server_ports
+                        .iter()
+                        .map(|item| {
+                            if item.contains(':') {
+                                item.clone()
+                            } else {
+                                format!("{item}:{item}")
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    object.insert("server_ports".into(), json!(runtime_server_ports));
+                }
+                if let Some(seconds) = hop_interval_seconds {
+                    object.insert("hop_interval".into(), json!(format!("{seconds}s")));
+                }
                 object.insert("password".into(), Value::String(String::new()));
                 object.insert("tls".into(), project_tls(tls)?);
                 if let Some(value) = up_mbps {
@@ -232,6 +260,64 @@ impl ProfileOutbound {
                     )?);
                 }
                 (object, slots)
+            }
+            Self::AnyTls {
+                tag,
+                server,
+                server_port,
+                credential_ref,
+                tls,
+            } => {
+                let mut object =
+                    remote_outbound("anytls", tag, server, *server_port, bootstrap_resolver);
+                object.insert("password".into(), Value::String(String::new()));
+                object.insert("tls".into(), project_tls(tls)?);
+                (
+                    object,
+                    vec![CredentialSlot::new(
+                        credential_ref.clone(),
+                        CredentialTarget::AnyTlsPassword,
+                        index,
+                    )?],
+                )
+            }
+            Self::Tuic {
+                tag,
+                server,
+                server_port,
+                uuid_credential_ref,
+                password_credential_ref,
+                tls,
+                congestion_control,
+                udp_relay_mode,
+            } => {
+                let mut object =
+                    remote_outbound("tuic", tag, server, *server_port, bootstrap_resolver);
+                object.insert("uuid".into(), Value::String(String::new()));
+                object.insert("password".into(), Value::String(String::new()));
+                object.insert("tls".into(), project_tls(tls)?);
+                object.insert("zero_rtt_handshake".into(), Value::Bool(false));
+                if let Some(value) = congestion_control {
+                    object.insert("congestion_control".into(), serde_json::to_value(value)?);
+                }
+                if let Some(value) = udp_relay_mode {
+                    object.insert("udp_relay_mode".into(), serde_json::to_value(value)?);
+                }
+                (
+                    object,
+                    vec![
+                        CredentialSlot::new(
+                            uuid_credential_ref.clone(),
+                            CredentialTarget::TuicUuid,
+                            index,
+                        )?,
+                        CredentialSlot::new(
+                            password_credential_ref.clone(),
+                            CredentialTarget::TuicPassword,
+                            index,
+                        )?,
+                    ],
+                )
             }
         };
         Ok((Value::Object(std::mem::take(&mut object)), slots))
@@ -281,10 +367,30 @@ fn insert_tls_transport(
     Ok(())
 }
 
+fn insert_packet_encoding(
+    object: &mut Map<String, Value>,
+    packet_encoding: Option<&V2RayPacketEncoding>,
+) {
+    if let Some(packet_encoding) = packet_encoding {
+        let value = match packet_encoding {
+            V2RayPacketEncoding::Raw => "",
+            V2RayPacketEncoding::PacketAddr => "packetaddr",
+            V2RayPacketEncoding::Xudp => "xudp",
+        };
+        object.insert("packet_encoding".into(), Value::String(value.into()));
+    }
+}
+
 fn project_tls(tls: &OutboundTls) -> Result<Value, ConfigError> {
     let mut object = Map::new();
     object.insert("enabled".into(), Value::Bool(tls.enabled));
     object.insert("server_name".into(), Value::String(tls.server_name.clone()));
+    if tls.enabled {
+        object.insert(
+            "min_version".into(),
+            Value::String(MINIMUM_REMOTE_TLS_VERSION.to_owned()),
+        );
+    }
     if !tls.alpn.is_empty() {
         object.insert("alpn".into(), serde_json::to_value(&tls.alpn)?);
     }
@@ -309,6 +415,17 @@ fn project_tls(tls: &OutboundTls) -> Result<Value, ConfigError> {
 
 fn project_transport(transport: &V2RayTransport) -> Value {
     match transport {
+        V2RayTransport::Http { method, path, host } => {
+            let mut object = Map::from_iter([
+                ("type".into(), Value::String("http".into())),
+                ("path".into(), Value::String(path.clone())),
+                ("host".into(), json!(host)),
+            ]);
+            if let Some(method) = method {
+                object.insert("method".into(), Value::String(method.as_str().into()));
+            }
+            Value::Object(object)
+        }
         V2RayTransport::Websocket { path, headers } => {
             let mut object = Map::from_iter([
                 ("type".into(), Value::String("ws".into())),
@@ -323,5 +440,16 @@ fn project_transport(transport: &V2RayTransport) -> Value {
             "type": "grpc",
             "service_name": service_name,
         }),
+        V2RayTransport::Quic => json!({ "type": "quic" }),
+        V2RayTransport::HttpUpgrade { path, host } => {
+            let mut object = Map::from_iter([
+                ("type".into(), Value::String("httpupgrade".into())),
+                ("path".into(), Value::String(path.clone())),
+            ]);
+            if let Some(host) = host {
+                object.insert("host".into(), Value::String(host.clone()));
+            }
+            Value::Object(object)
+        }
     }
 }

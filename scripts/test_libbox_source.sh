@@ -12,6 +12,7 @@ source "$repo_root/scripts/go_release_environment.sh"
 source "$repo_root/scripts/libbox_source_contract.sh"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
+libbox_load_module_cache_contract "$repo_root"
 
 [[ $# -eq 0 ]] || {
   echo "error: usage: scripts/test_libbox_source.sh" >&2
@@ -48,14 +49,14 @@ configure_offline_go_environment
   cd "$source_root"
   "$go_bin" mod verify
   "$go_bin" test -count=1 -race -ldflags=-checklinkname=0 \
-    -tags "$LIBBOX_BUILD_TAGS" ./dns ./option
+    -tags "$LIBBOX_BUILD_TAGS" "${LIBBOX_RACE_TEST_PACKAGES[@]}"
   "$go_bin" test -count=1 -ldflags=-checklinkname=0 \
     -tags "$LIBBOX_BUILD_TAGS" \
-    ./dns ./option ./common/dialer ./daemon ./experimental/libbox
+    "${LIBBOX_TEST_PACKAGES[@]}"
   "$go_bin" test -run '^$' -ldflags=-checklinkname=0 \
-    -tags "$LIBBOX_BUILD_TAGS" ./common/dialer ./route
+    -tags "$LIBBOX_BUILD_TAGS" "${LIBBOX_COMPILE_TEST_PACKAGES[@]}"
   "$go_bin" vet -tags "$LIBBOX_BUILD_TAGS" \
-    ./dns ./option ./common/dialer ./daemon ./experimental/libbox
+    "${LIBBOX_VET_PACKAGES[@]}"
 )
 
 libbox_validate_patched_source "$repo_root" "$source_root"

@@ -22,6 +22,19 @@ cfw_require_supported_python
 PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_version_contract.py"
 PYTHONDONTWRITEBYTECODE=1 python3 -B \
   "$repo_root/scripts/verify_physical_capture_readiness.py"
+PYTHONDONTWRITEBYTECODE=1 python3 -B - "$repo_root" <<'PY'
+import importlib
+import sys
+
+repository = sys.argv[1]
+sys.path.insert(0, repository)
+adapter = importlib.import_module(
+    "scripts.physical_capture.ios_packet_lan_peer_adapter"
+)
+
+adapter.validate_static_source_identity(adapter.load_source_identity())
+print("iPhone Packet LAN static source identity verified")
+PY
 
 macos_major="$(sw_vers -productVersion | cut -d. -f1)"
 if (( macos_major < 15 )); then
@@ -94,6 +107,8 @@ python3 - \
   "$SING_BOX_RAW_PACKET_PATCH_SHA256" \
   "$SING_BOX_DNS_FAILOVER_PATCH_PATH" \
   "$SING_BOX_DNS_FAILOVER_PATCH_SHA256" \
+  "$SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH" \
+  "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256" \
   "$SING_BOX_PATCHED_DIFF_SHA256" \
   "$SING_BOX_COMBINED_DIFF_SHA256" \
   "$SING_BOX_PATCHED_GO_MOD_SHA256" \
@@ -120,6 +135,8 @@ from pathlib import Path
     raw_packet_patch_sha256,
     dns_failover_patch_path,
     dns_failover_patch_sha256,
+    endpoint_conflict_patch_path,
+    endpoint_conflict_patch_sha256,
     patched_diff_sha256,
     combined_diff_sha256,
     patched_go_mod_sha256,
@@ -150,6 +167,10 @@ expected_native = {
             "path": dns_failover_patch_path,
             "sha256": dns_failover_patch_sha256,
         },
+        "endpointConflictPatch": {
+            "path": endpoint_conflict_patch_path,
+            "sha256": endpoint_conflict_patch_sha256,
+        },
         "combinedDiffSha256": combined_diff_sha256,
     },
     "singBoxForAppleReference": {"commit": apple_commit},
@@ -179,6 +200,11 @@ verify_repository_patch(
     security_patch_path,
     security_patch_sha256,
     "sing-box security patch",
+)
+verify_repository_patch(
+    endpoint_conflict_patch_path,
+    endpoint_conflict_patch_sha256,
+    "sing-box endpoint conflict patch",
 )
 verify_repository_patch(
     raw_packet_patch_path,

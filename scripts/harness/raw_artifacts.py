@@ -167,7 +167,7 @@ RELEASE_TRUST_POLICY_PATH = Path(__file__).with_name(
 )
 # Updated only together with the canonical policy file after the external HSM
 # attestation, collector source closure, and immutable image digest are reviewed.
-RELEASE_TRUST_POLICY_SHA256 = "907e7f11c9510eb541537a077290c43cf2121b5047d777339a4c1f3debf9bec3"
+RELEASE_TRUST_POLICY_SHA256 = "e95c2710371b3ba6f6899cb24fcbdc42038869934b1c89ddca651bd910601355"
 
 
 class RawArtifactError(ValueError):

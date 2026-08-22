@@ -706,6 +706,26 @@ impl ProfileRepository {
         })
     }
 
+    /// Begins a credential-bearing replacement only if the profile loaded
+    /// before external I/O is still the exact repository value. The exclusive
+    /// lock remains held across the subsequent vault prepare and repository
+    /// commit, so stale subscription responses cannot create orphan audiences.
+    pub fn begin_credential_profile_mutation_if_unchanged(
+        &self,
+        expected: &StoredProfile,
+    ) -> Result<LockedCredentialProfileMutation, ProfileError> {
+        validate_stored_profile(expected)?;
+        let mutation = self.begin_credential_profile_mutation()?;
+        let id = validate_profile_id(&expected.record.id)?;
+        let current = mutation
+            .repository
+            .decode(id, mutation.directory.open_profile_file(id)?)?;
+        if &current != expected {
+            return Err(ProfileError::ProfileChanged { id: id.to_owned() });
+        }
+        Ok(mutation)
+    }
+
     fn recover_repository(&self, directory: &RepositoryDirectory) -> Result<(), ProfileError> {
         directory.recover_owned_temporaries()?;
         self.recover_selected_replace(directory).map(|_| ())

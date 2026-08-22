@@ -16,10 +16,11 @@ pub use cfw_singbox_config::{
     MAX_CREDENTIAL_SLOTS, ValidatedSingBoxProfile,
 };
 
-// Version 6 expands the closed credential and endpoint-conflict vocabulary.
-// Older native bridges would reject or misclassify those wire values, so the
-// complete Host/native product graph must advance together.
-pub const ENGINE_PROTOCOL_VERSION: u16 = 6;
+// Version 7 adds the closed, action-level current-service maintenance command.
+// Older native bridges cannot hold the Host operation lease across its Off
+// proof and service mutation, so the complete Host/native graph advances
+// together.
+pub const ENGINE_PROTOCOL_VERSION: u16 = 7;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1142,10 +1143,84 @@ pub trait EngineBackend: Send + Sync + 'static {
 /// This is the only product-level native wire command. Swift maps it onto the
 /// already-versioned ProxyAgent and Packet Tunnel command envelopes; it does
 /// not expose an independent product state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeServiceMaintenanceAction {
+    Status,
+    ProveOff,
+    UnregisterProxyAgent,
+    UnregisterGlobalAuthority,
+    RegisterGlobalAuthority,
+    RegisterProxyAgent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeServiceRegistrationStatus {
+    Enabled,
+    RequiresApproval,
+    NotRegistered,
+    NotFound,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeServiceEngineStatus {
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeServiceMaintenanceResult {
+    pub action: NativeServiceMaintenanceAction,
+    pub engine_status: Option<NativeServiceEngineStatus>,
+    pub global_authority: NativeServiceRegistrationStatus,
+    pub proxy_agent: NativeServiceRegistrationStatus,
+}
+
+impl NativeServiceMaintenanceResult {
+    pub fn validate(&self) -> bool {
+        use NativeServiceMaintenanceAction as Action;
+        use NativeServiceRegistrationStatus as Status;
+
+        match self.action {
+            Action::Status => self.engine_status.is_none(),
+            Action::ProveOff => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.proxy_agent == Status::Enabled
+                    && self.global_authority == Status::Enabled
+            }
+            Action::UnregisterProxyAgent => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::Enabled
+            }
+            Action::UnregisterGlobalAuthority => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::NotRegistered
+            }
+            Action::RegisterGlobalAuthority => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::Enabled
+            }
+            Action::RegisterProxyAgent => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.proxy_agent == Status::Enabled
+                    && self.global_authority == Status::Enabled
+            }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "opcode", content = "payload", rename_all = "snake_case")]
 pub enum NativeBridgeCommand {
     QueryStatus,
+    MaintainCurrentServices {
+        action: NativeServiceMaintenanceAction,
+    },
     StartSystemProxy {
         request: EngineStartRequest,
     },
@@ -1182,6 +1257,10 @@ impl fmt::Debug for NativeBridgeCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::QueryStatus => formatter.write_str("QueryStatus"),
+            Self::MaintainCurrentServices { action } => formatter
+                .debug_struct("MaintainCurrentServices")
+                .field("action", action)
+                .finish(),
             Self::StartSystemProxy { request } => formatter
                 .debug_struct("StartSystemProxy")
                 .field("request", request)
@@ -1255,6 +1334,7 @@ pub enum NativeBridgeResult {
     CredentialGarbageCollectionPreview(CredentialGarbageCollectionPreview),
     CredentialGarbageCollectionReceipt(CredentialGarbageCollectionReceipt),
     CutoverPreflight(CutoverPreflightOutcome),
+    ServiceMaintenance(NativeServiceMaintenanceResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1457,16 +1537,42 @@ mod tests {
     }
 
     #[test]
-    fn native_bridge_v6_contract_fixtures_decode_in_rust() {
+    fn native_bridge_v7_contract_fixtures_decode_in_rust() {
         let query: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v6/query-request.json"
+            "../../../contracts/native-bridge-v7/query-request.json"
         ))
         .expect("query fixture");
         assert_eq!(query.schema_version, ENGINE_PROTOCOL_VERSION);
         assert!(matches!(query.command, NativeBridgeCommand::QueryStatus));
 
+        let maintenance: NativeRequestEnvelope = serde_json::from_str(include_str!(
+            "../../../contracts/native-bridge-v7/maintenance-request.json"
+        ))
+        .expect("maintenance request fixture");
+        assert!(matches!(
+            maintenance.command,
+            NativeBridgeCommand::MaintainCurrentServices {
+                action: NativeServiceMaintenanceAction::UnregisterProxyAgent
+            }
+        ));
+
+        let maintenance_response: NativeResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../contracts/native-bridge-v7/maintenance-response.json"
+        ))
+        .expect("maintenance response fixture");
+        let Some(NativeBridgeResult::ServiceMaintenance(maintenance_result)) =
+            maintenance_response.result
+        else {
+            panic!("maintenance fixture response kind");
+        };
+        assert!(maintenance_result.validate());
+        assert_eq!(
+            maintenance_result.action,
+            NativeServiceMaintenanceAction::UnregisterProxyAgent
+        );
+
         let preview: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v6/gc-preview-request.json"
+            "../../../contracts/native-bridge-v7/gc-preview-request.json"
         ))
         .expect("GC preview fixture");
         let NativeBridgeCommand::PreviewCredentialGarbageCollection { request } = preview.command
@@ -1489,7 +1595,7 @@ mod tests {
         );
 
         let response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v6/gc-preview-response.json"
+            "../../../contracts/native-bridge-v7/gc-preview-response.json"
         ))
         .expect("GC preview response fixture");
         let Some(NativeBridgeResult::CredentialGarbageCollectionPreview(preview)) = response.result
@@ -1503,7 +1609,7 @@ mod tests {
         );
 
         let conflict: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v6/endpoint-conflict-response.json"
+            "../../../contracts/native-bridge-v7/endpoint-conflict-response.json"
         ))
         .expect("endpoint conflict response fixture");
         assert!(conflict.result.is_none());
@@ -1511,6 +1617,60 @@ mod tests {
             conflict.failure.expect("endpoint failure").code,
             BackendErrorKind::ControllerEndpointInUse
         );
+    }
+
+    #[test]
+    fn native_service_maintenance_result_contract_is_closed() {
+        use NativeServiceMaintenanceAction as Action;
+        use NativeServiceRegistrationStatus as Status;
+
+        let valid = [
+            NativeServiceMaintenanceResult {
+                action: Action::Status,
+                engine_status: None,
+                global_authority: Status::Unknown,
+                proxy_agent: Status::NotFound,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::ProveOff,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                proxy_agent: Status::Enabled,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::UnregisterProxyAgent,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::UnregisterGlobalAuthority,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::NotRegistered,
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::RegisterGlobalAuthority,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::RegisterProxyAgent,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                proxy_agent: Status::Enabled,
+            },
+        ];
+        assert!(valid.iter().all(NativeServiceMaintenanceResult::validate));
+
+        for mut result in valid {
+            result.engine_status = match result.engine_status {
+                Some(_) => None,
+                None => Some(NativeServiceEngineStatus::Off),
+            };
+            assert!(!result.validate());
+        }
     }
 
     #[derive(Deserialize)]
@@ -1599,7 +1759,7 @@ mod tests {
 
     #[test]
     fn native_public_query_json_contract_is_unchanged() {
-        let bytes = include_bytes!("../../../contracts/native-bridge-v6/query-request.json");
+        let bytes = include_bytes!("../../../contracts/native-bridge-v7/query-request.json");
         let request: NativeRequestEnvelope =
             serde_json::from_slice(bytes).expect("public query request fixture");
         assert_eq!(

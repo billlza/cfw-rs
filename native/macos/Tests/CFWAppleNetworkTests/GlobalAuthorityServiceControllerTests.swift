@@ -23,6 +23,8 @@ private final class FakeAuthorityDaemonService: GlobalAuthorityDaemonServicing,
     registerCalls += 1
     if let registerError { throw registerError }
   }
+
+  func unregister() throws {}
 }
 
 private enum FakeRegistrationError: Error { case denied }

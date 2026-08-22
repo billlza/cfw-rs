@@ -7,6 +7,7 @@ mod lifecycle;
 #[cfg(feature = "physical-release-evidence")]
 mod packet_evidence_transport;
 mod release_observation;
+mod service_maintenance;
 mod shell;
 mod subscription_import;
 mod transport_security;
@@ -151,6 +152,13 @@ fn main() {
                     std::process::exit(STARTUP_ADMISSION_EXIT_CODE);
                 }
             }
+        }
+        LaunchMode::ServiceMaintenance(action) => {
+            if let Err(error) = service_maintenance::run(action) {
+                eprintln!("service maintenance failed: {error}");
+                std::process::exit(70);
+            }
+            return;
         }
         #[cfg(feature = "physical-release-evidence")]
         LaunchMode::PacketEvidence => {

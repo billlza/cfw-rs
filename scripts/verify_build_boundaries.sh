@@ -79,14 +79,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'from scripts.publication.final_candidat
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/sealed_evidence_manifest.py self-check
 
 # The production composer is deliberately distinct from the generic fixture-
-# capable validators. Its source-bound self-check fixes the 40021 -> 40022
+# capable validators. Its source-bound self-check fixes the 40022 -> 40023
 # sequence and proves that the requirements-derived nine-capability inventory
 # is complete before any physical or publication evidence is considered.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/production_release_evidence.py self-check
 
 for fragment in \
-  'VALIDATION_BUILD = "40021"' \
-  'FINAL_BUILD = "40022"' \
+  'VALIDATION_BUILD = "40022"' \
+  'FINAL_BUILD = "40023"' \
   'prepare_physical_candidate_manifest' \
   'seal_production_evidence' \
   'require_clean=True' \
@@ -100,8 +100,43 @@ for fragment in \
   'fixture=False' \
   'require_verified=True' \
   'artifacts_permitted'; do
-  grep -Fq "$fragment" scripts/publication/orchestrator.py || {
+  grep -Fq -- "$fragment" scripts/publication/orchestrator.py || {
     echo "error: production release orchestrator is missing $fragment" >&2
+    exit 1
+  }
+done
+
+for fragment in \
+  'BUILD_NUMBER: Final = "40022"' \
+  'FINAL_BUILD_NUMBER: Final = "40023"' \
+  'target/release-worktrees/40022' \
+  'target/candidates/0.4.0/validation/40022/signed' \
+  'target/candidates/0.4.0/signed' \
+  'notarized-release-v1' \
+  '_matching_clean_source_identity' \
+  'parse_service_maintenance_receipt' \
+  'exclusive_release_maintenance_lock' \
+  'require_decommissioned_service_transaction' \
+  'candidate_toolchain_override' \
+  'fixed release worktree and local toolchain must be real directories'; do
+  grep -Fq -- "$fragment" scripts/dormant_app_install.py || {
+    echo "error: dormant installer is missing $fragment" >&2
+    exit 1
+  }
+done
+
+for fragment in \
+  'cfw-current-service-transaction-v1' \
+  'unregister-proxy-agent' \
+  'unregister-global-authority' \
+  'register-global-authority' \
+  'register-proxy-agent' \
+  'capture_cfw_guard(self.runner, require_cfm_absent=False)' \
+  'service_install_evidence_invalid' \
+  'installation["previous"] != intent["previous"]' \
+  '--final'; do
+  grep -Fq -- "$fragment" scripts/current_service_transaction.py || {
+    echo "error: current-service transaction is missing $fragment" >&2
     exit 1
   }
 done
@@ -113,7 +148,7 @@ for fragment in \
   'require_fixed_evidence_mapping' \
   'unknown numbered section' \
   'does not cover every numbered requirement exactly once'; do
-  grep -Fq "$fragment" scripts/release_capability_inventory.py || {
+  grep -Fq -- "$fragment" scripts/release_capability_inventory.py || {
     echo "error: release capability inventory validator is missing $fragment" >&2
     exit 1
   }
@@ -202,7 +237,7 @@ for fragment in \
   '_validate_publication_bundle' \
   'seal_distribution_set' \
   'verify_distribution_set'; do
-  grep -Fq "$fragment" scripts/release_artifact_set.py || {
+  grep -Fq -- "$fragment" scripts/release_artifact_set.py || {
     echo "error: release artifact set is missing $fragment" >&2
     exit 1
   }

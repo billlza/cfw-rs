@@ -5,7 +5,8 @@ use std::time::Duration;
 use cfw_engine_api::{
     CutoverPreflightOutcome, CutoverPreflightRequest, EngineCommandContext, EngineStartRequest,
     NativeBridgeCommand, NativeBridgeResult, NativeEngineStatus, NativeRequestEnvelope,
-    RuntimeIdentity, TunnelInstallOutcome,
+    NativeServiceMaintenanceAction, NativeServiceMaintenanceResult, RuntimeIdentity,
+    TunnelInstallOutcome,
 };
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
@@ -188,6 +189,30 @@ impl NativeFrameworkBridge {
             BridgeState::Available(_) => None,
             BridgeState::Unavailable(message) => Some(message),
         }
+    }
+
+    pub fn maintain_current_services(
+        &self,
+        action: NativeServiceMaintenanceAction,
+    ) -> NativeBridgeFuture<'_, NativeServiceMaintenanceResult> {
+        Box::pin(async move {
+            match self
+                .invoke(NativeBridgeCommand::MaintainCurrentServices { action })
+                .await?
+            {
+                NativeBridgeResult::ServiceMaintenance(result) if result.action == action => {
+                    Ok(result)
+                }
+                NativeBridgeResult::ServiceMaintenance(_) => Err(NativeBridgeError::new(
+                    NativeBridgeErrorCode::IdentityRejected,
+                    "native service maintenance response action does not match the request",
+                )),
+                _ => Err(NativeBridgeError::new(
+                    NativeBridgeErrorCode::Internal,
+                    "native service maintenance returned the wrong result kind",
+                )),
+            }
+        })
     }
 
     fn invoke(&self, command: NativeBridgeCommand) -> NativeBridgeFuture<'_, NativeBridgeResult> {

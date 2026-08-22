@@ -84,7 +84,8 @@ else:
 DOCUMENT: Final = "cfw-dormant-app-install-v1"
 SCHEMA_VERSION: Final = 1
 VERSION: Final = "0.4.0"
-BUILD_NUMBER: Final = "40009"
+BUILD_NUMBER: Final = "40022"
+FINAL_BUILD_NUMBER: Final = "40023"
 TEAM_ID: Final = "YKUPL7Z869"
 TARGET_NAME: Final = "Clash for Mac.app"
 PAYLOAD_NAME: Final = TARGET_NAME
@@ -92,10 +93,22 @@ PARTIAL_PAYLOAD_NAME: Final = ".Clash for Mac.app.partial"
 JOURNAL_NAME: Final = ".com.bill.clashformac.dormant-install.json"
 JOURNAL_PENDING_NAME: Final = ".com.bill.clashformac.dormant-install.pending"
 LOCK_NAME: Final = ".com.bill.clashformac.dormant-install.lock"
+MAINTENANCE_LOCK_NAME: Final = ".com.bill.clashformac.release-maintenance-v1.lock"
 STAGING_PREFIX: Final = ".com.bill.clashformac.dormant-install."
-RELEASE_WORKTREE_RELATIVE: Final = Path("target/release-worktrees/40009")
+FINAL_JOURNAL_NAME: Final = ".com.bill.clashformac.final-install.json"
+FINAL_JOURNAL_PENDING_NAME: Final = ".com.bill.clashformac.final-install.pending"
+FINAL_LOCK_NAME: Final = ".com.bill.clashformac.final-install.lock"
+FINAL_STAGING_PREFIX: Final = ".com.bill.clashformac.final-install."
+RELEASE_WORKTREE_RELATIVE: Final = Path("target/release-worktrees/40022")
 CANDIDATE_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/validation/40009/signed"
+    "target/candidates/0.4.0/validation/40022/signed"
+)
+FINAL_CANDIDATE_RELATIVE: Final = Path("target/candidates/0.4.0/signed")
+VALIDATION_NATIVE_PRODUCTS_RELATIVE: Final = Path(
+    "target/candidates/0.4.0/validation/40022/native-products"
+)
+FINAL_NATIVE_PRODUCTS_RELATIVE: Final = Path(
+    "target/candidates/0.4.0/release-build/40023/native-products"
 )
 MAX_JOURNAL_BYTES: Final = 1024 * 1024
 MAX_GUARD_SEGMENTS: Final = 8
@@ -124,49 +137,27 @@ CFM_PROCESS_SUFFIXES: Final = (
     "/Contents/MacOS/CFWPacketTunnel",
     "/Library/PrivilegedHelperTools/com.bill.clashformac.helper",
 )
-BTM_DELIMITER: Final = "=" * 24
-BTM_ALLOWED_FIELDS: Final = frozenset(
-    {
-        "Assoc. Bundle IDs",
-        "Bundle Identifier",
-        "Developer Name",
-        "Disposition",
-        "Embedded Item Identifiers",
-        "Executable Path",
-        "Flags",
-        "Generation",
-        "Identifier",
-        "Last Use",
-        "Name",
-        "Parent Identifier",
-        "Team Identifier",
-        "Type",
-        "URL",
-        "UUID",
-    }
-)
-BTM_REQUIRED_FIELDS: Final = frozenset(
-    {
-        "Developer Name",
-        "Disposition",
-        "Flags",
-        "Generation",
-        "Identifier",
-        "Name",
-        "Type",
-        "URL",
-        "UUID",
-    }
-)
-CFM_BTM_IDENTITY_PATTERN: Final = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:[0-9]+\.)?com\.bill\.clashformac"
-    r"(?:\.[A-Za-z0-9_-]+)*(?![A-Za-z0-9_.-])"
-)
-SYSTEM_CFM_LABELS: Final = (
-    "com.bill.clashformac.global-authority",
-    "com.bill.clashformac.helper",
-)
+SYSTEM_CFM_LABELS: Final = ("com.bill.clashformac.global-authority",)
 USER_CFM_LABELS: Final = ("com.bill.clashformac.proxy-agent",)
+LEGACY_TOMBSTONE_LABEL: Final = "com.bill.clashformac.helper"
+LEGACY_TOMBSTONE_PROGRAM: Final = (
+    "Contents/Library/HelperTools/cfw-helper-tombstone"
+)
+SERVICE_MAINTENANCE_FLAG: Final = "--service-maintenance-v1"
+SERVICE_TRANSACTION_DOCUMENT: Final = "cfw-current-service-transaction-v1"
+SERVICE_TRANSACTION_SCHEMA_VERSION: Final = 1
+SERVICE_DECOMMISSION_PHASES: Final = (
+    "prepared",
+    "proxy_unregistered",
+    "authority_unregistered",
+    "decommissioned",
+)
+SERVICE_DECOMMISSION_ACTIONS: Final = (
+    "prepare",
+    "unregister-proxy-agent",
+    "unregister-global-authority",
+    "verify-dormant",
+)
 CFM_SYSTEM_EXTENSION_IDENTITY: Final = (
     TEAM_ID,
     "com.bill.clashformac.packet-tunnel",
@@ -181,9 +172,6 @@ PHASES: Final = frozenset(
         "staged",
         "swapped",
         "installed",
-        "rollback-prepared",
-        "rollback-swapped",
-        "rolled-back",
     }
 )
 
@@ -197,31 +185,119 @@ class InstallError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class InstallProfile:
+    name: str
+    build_number: str
+    previous_build_number: str
+    repository_relative: Path
+    candidate_relative: Path
+    native_products_relative: Path
+    artifact_kind: str
+    journal_name: str
+    journal_pending_name: str
+    lock_name: str
+    staging_prefix: str
+    service_transaction_directory: str
+
+    @property
+    def service_pending_directory(self) -> str:
+        return f"{self.service_transaction_directory}.pending"
+
+    @property
+    def service_lock_name(self) -> str:
+        return f"{self.service_transaction_directory}.lock"
+
+
+VALIDATION_INSTALL_PROFILE: Final = InstallProfile(
+    name="validation",
+    build_number=BUILD_NUMBER,
+    previous_build_number="40019",
+    repository_relative=RELEASE_WORKTREE_RELATIVE,
+    candidate_relative=CANDIDATE_RELATIVE,
+    native_products_relative=VALIDATION_NATIVE_PRODUCTS_RELATIVE,
+    artifact_kind="notarized-validation-candidate-v1",
+    journal_name=JOURNAL_NAME,
+    journal_pending_name=JOURNAL_PENDING_NAME,
+    lock_name=LOCK_NAME,
+    staging_prefix=STAGING_PREFIX,
+    service_transaction_directory=".com.bill.clashformac.service-transaction-v1",
+)
+FINAL_INSTALL_PROFILE: Final = InstallProfile(
+    name="final",
+    build_number=FINAL_BUILD_NUMBER,
+    previous_build_number=BUILD_NUMBER,
+    repository_relative=Path("."),
+    candidate_relative=FINAL_CANDIDATE_RELATIVE,
+    native_products_relative=FINAL_NATIVE_PRODUCTS_RELATIVE,
+    artifact_kind="notarized-release-v1",
+    journal_name=FINAL_JOURNAL_NAME,
+    journal_pending_name=FINAL_JOURNAL_PENDING_NAME,
+    lock_name=FINAL_LOCK_NAME,
+    staging_prefix=FINAL_STAGING_PREFIX,
+    service_transaction_directory=(
+        ".com.bill.clashformac.final-service-transaction-v1"
+    ),
+)
+INSTALL_PROFILES: Final = {
+    VALIDATION_INSTALL_PROFILE.name: VALIDATION_INSTALL_PROFILE,
+    FINAL_INSTALL_PROFILE.name: FINAL_INSTALL_PROFILE,
+}
+
+
+@dataclass(frozen=True)
 class InstallPaths:
     repository: Path
     candidate_app: Path
     candidate_manifest: Path
     target_parent: Path
+    operator_repository: Path | None = None
     target_name: str = TARGET_NAME
-    journal_name: str = JOURNAL_NAME
-    journal_pending_name: str = JOURNAL_PENDING_NAME
-    lock_name: str = LOCK_NAME
+    profile: InstallProfile = VALIDATION_INSTALL_PROFILE
 
     @classmethod
-    def production(cls) -> "InstallPaths":
+    def production(cls, generation: str = "validation") -> "InstallPaths":
+        try:
+            profile = INSTALL_PROFILES[generation]
+        except KeyError as error:
+            raise InstallError(
+                "install_generation_invalid",
+                "installation generation is not one of the two fixed release generations",
+            ) from error
         operator_repository = Path(__file__).resolve().parent.parent
-        repository = operator_repository / RELEASE_WORKTREE_RELATIVE
-        signed = repository / CANDIDATE_RELATIVE
+        repository = operator_repository / profile.repository_relative
+        signed = repository / profile.candidate_relative
         return cls(
             repository=repository,
             candidate_app=signed / TARGET_NAME,
             candidate_manifest=signed / f"{TARGET_NAME}.manifest.json",
             target_parent=Path("/Applications"),
+            operator_repository=operator_repository,
+            profile=profile,
         )
 
     @property
     def target_app(self) -> Path:
         return self.target_parent / self.target_name
+
+    @property
+    def candidate_executable(self) -> Path:
+        return self.candidate_app / "Contents/MacOS/clash-for-mac"
+
+    @property
+    def release_toolchain_root(self) -> Path:
+        return self.repository / "target/toolchains"
+
+    @property
+    def journal_name(self) -> str:
+        return self.profile.journal_name
+
+    @property
+    def journal_pending_name(self) -> str:
+        return self.profile.journal_pending_name
+
+    @property
+    def lock_name(self) -> str:
+        return self.profile.lock_name
 
     @property
     def journal(self) -> Path:
@@ -275,6 +351,9 @@ Copier = Callable[[Path, Path], None]
 TreeSyncer = Callable[[Path], None]
 Swapper = Callable[[int, str, int, str], None]
 BundleVerifier = Callable[[Path, AppIdentity], None]
+ServiceDecommissionVerifier = Callable[
+    [InstallPaths, CandidateIdentity, AppIdentity, dict[str, Any]], None
+]
 
 
 @dataclass(frozen=True)
@@ -288,13 +367,19 @@ class InstallRuntime:
     sync_tree: TreeSyncer
     swap: Swapper
     verify_bundle: BundleVerifier
+    require_service_decommissioned: ServiceDecommissionVerifier
 
     @classmethod
-    def production(cls) -> "InstallRuntime":
+    def production(cls, paths: InstallPaths | None = None) -> "InstallRuntime":
         runner = production_command_runner
+        selected_paths = paths or InstallPaths.production()
         return cls(
             capture_guard=lambda: capture_cfw_guard(runner),
-            require_cfm_dormant=lambda guard: require_cfm_dormant(guard, runner),
+            require_cfm_dormant=lambda guard: require_cfm_dormant(
+                guard,
+                runner,
+                executable=selected_paths.candidate_executable,
+            ),
             require_cfm_process_absent=lambda: require_cfm_process_absent(runner),
             admit_candidate=lambda paths: admit_fixed_candidate(paths, runner),
             read_identity=read_app_identity,
@@ -306,6 +391,7 @@ class InstallRuntime:
             verify_bundle=lambda path, identity: verify_dormant_bundle(
                 path, identity, runner
             ),
+            require_service_decommissioned=require_decommissioned_service_transaction,
         )
 
 
@@ -386,28 +472,38 @@ def production_command_runner(arguments: tuple[str, ...]) -> CommandResult:
         "/bin/launchctl",
         "/bin/ps",
         "/sbin/ifconfig",
-        "/usr/bin/sfltool",
+        "/usr/bin/dscl",
         "/usr/bin/systemextensionsctl",
         "/usr/sbin/netstat",
         "/usr/sbin/scutil",
     }:
         timeout = 30.0
-    if arguments == ("/usr/bin/sfltool", "dumpbtm"):
-        timeout = 120.0
+    if _fixed_host_executable_path(arguments[0]):
+        timeout = 60.0
     return _run_bounded_process(arguments, timeout=timeout)
 
 
 def _fixed_bundle_command_path(value: str) -> bool:
     path = Path(value)
-    production = InstallPaths.production()
-    if path in {production.candidate_app, production.target_app}:
+    production_paths = tuple(
+        InstallPaths.production(generation) for generation in INSTALL_PROFILES
+    )
+    if path in {
+        *(item.candidate_app for item in production_paths),
+        *(item.target_app for item in production_paths),
+    }:
         return True
     if not path.is_absolute() or path.parent.parent != Path("/Applications"):
         return False
     container = path.parent.name
-    if not container.startswith(STAGING_PREFIX):
+    matching_profiles = tuple(
+        profile
+        for profile in INSTALL_PROFILES.values()
+        if container.startswith(profile.staging_prefix)
+    )
+    if len(matching_profiles) != 1:
         return False
-    transaction_id = container.removeprefix(STAGING_PREFIX)
+    transaction_id = container.removeprefix(matching_profiles[0].staging_prefix)
     try:
         canonical = str(uuid.UUID(transaction_id))
     except (ValueError, AttributeError):
@@ -418,11 +514,30 @@ def _fixed_bundle_command_path(value: str) -> bool:
     }
 
 
+def _fixed_host_executable_path(value: str) -> bool:
+    path = Path(value)
+    if path.name != "clash-for-mac" or path.parent.name != "MacOS":
+        return False
+    contents = path.parent.parent
+    return contents.name == "Contents" and _fixed_bundle_command_path(
+        str(contents.parent)
+    )
+
+
 def _require_fixed_command(arguments: tuple[str, ...]) -> None:
     fixed = {
         ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="),
+        (
+            "/usr/bin/dscl",
+            ".",
+            "-readall",
+            "/Users",
+            "UniqueID",
+            "NFSHomeDirectory",
+            "UserShell",
+            "AuthenticationAuthority",
+        ),
         ("/sbin/ifconfig",),
-        ("/usr/bin/sfltool", "dumpbtm"),
         ("/usr/bin/systemextensionsctl", "list"),
         ("/usr/sbin/netstat", "-rn", "-f", "inet"),
         ("/usr/sbin/netstat", "-rn", "-f", "inet6"),
@@ -431,10 +546,26 @@ def _require_fixed_command(arguments: tuple[str, ...]) -> None:
     }
     if arguments in fixed:
         return
+    if (
+        len(arguments) == 3
+        and _fixed_host_executable_path(arguments[0])
+        and arguments[1] == SERVICE_MAINTENANCE_FLAG
+        and arguments[2]
+        in {
+            "prove-off",
+            "status",
+            "unregister-proxy-agent",
+            "unregister-global-authority",
+            "register-global-authority",
+            "register-proxy-agent",
+        }
+    ):
+        return
     if len(arguments) == 3 and arguments[:2] == ("/bin/launchctl", "print"):
         domain = arguments[2]
         allowed_system = {
-            f"system/{label}" for label in SYSTEM_CFM_LABELS
+            *(f"system/{label}" for label in SYSTEM_CFM_LABELS),
+            f"system/{LEGACY_TOMBSTONE_LABEL}",
         }
         if domain in allowed_system or re.fullmatch(
             r"gui/[1-9][0-9]*/com\.bill\.clashformac\.proxy-agent", domain
@@ -449,11 +580,14 @@ def _require_fixed_command(arguments: tuple[str, ...]) -> None:
             ("/usr/bin/xcrun", "stapler", "validate"),
         }:
             return
-        production = InstallPaths.production()
+        production_candidates = {
+            InstallPaths.production(generation).candidate_app
+            for generation in INSTALL_PROFILES
+        }
         if (
             arguments[:2] == ("/usr/bin/ditto", "--noqtn")
             and len(arguments) == 4
-            and Path(arguments[2]) == production.candidate_app
+            and Path(arguments[2]) in production_candidates
             and _fixed_bundle_command_path(path)
             and Path(path).name == PARTIAL_PAYLOAD_NAME
         ):
@@ -781,185 +915,6 @@ def _require_exact_cfw_proxy(output: str) -> None:
         )
 
 
-def _required_btm_uids(gui_uid: int) -> set[int]:
-    try:
-        accounts = pwd.getpwall()
-    except OSError as error:
-        raise InstallError(
-            "cfm_background_item_observation_failed",
-            "cannot enumerate local users for the BTM absence proof",
-        ) from error
-    required = {-2, 0, gui_uid}
-    required.update(
-        account.pw_uid
-        for account in accounts
-        if 500 <= account.pw_uid < 2**31 and account.pw_name != "nobody"
-    )
-    return required
-
-
-def _parse_btm_values(output: str, required_uids: set[int]) -> set[str]:
-    invalid = "Clash for Mac BTM output is incomplete or has an unknown format"
-    if (
-        not output
-        or not output.endswith("\n\n\n\n")
-        or output.endswith("\n\n\n\n\n")
-    ):
-        raise InstallError("cfm_background_item_observation_invalid", invalid)
-    lines = output.splitlines()
-    index = 0
-    observed_uids: set[int] = set()
-    observed_uid_order: list[int] = []
-    values: set[str] = set()
-
-    def skip_blank_lines() -> None:
-        nonlocal index
-        while index < len(lines) and lines[index] == "":
-            index += 1
-
-    while True:
-        skip_blank_lines()
-        if index == len(lines):
-            break
-        if lines[index] != BTM_DELIMITER or index + 2 >= len(lines):
-            raise InstallError("cfm_background_item_observation_invalid", invalid)
-        header = re.fullmatch(
-            r" Records for UID (-2|0|[1-9][0-9]*) : "
-            r"([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})",
-            lines[index + 1],
-        )
-        if header is None or lines[index + 2] != BTM_DELIMITER:
-            raise InstallError("cfm_background_item_observation_invalid", invalid)
-        uid = int(header.group(1))
-        try:
-            section_uuid = str(uuid.UUID(header.group(2))).upper()
-        except ValueError as error:
-            raise InstallError(
-                "cfm_background_item_observation_invalid", invalid
-            ) from error
-        if section_uuid != header.group(2) or uid in observed_uids:
-            raise InstallError("cfm_background_item_observation_invalid", invalid)
-        observed_uids.add(uid)
-        observed_uid_order.append(uid)
-        index += 3
-        skip_blank_lines()
-        if index + 2 >= len(lines):
-            raise InstallError("cfm_background_item_observation_invalid", invalid)
-        if re.fullmatch(
-            r" ServiceManagement migrated: (?:true|false)", lines[index]
-        ) is None or re.fullmatch(
-            r" LaunchServices registered: (?:true|false)", lines[index + 1]
-        ) is None:
-            raise InstallError("cfm_background_item_observation_invalid", invalid)
-        index += 2
-        skip_blank_lines()
-        if index >= len(lines) or lines[index] != " Items:":
-            raise InstallError("cfm_background_item_observation_invalid", invalid)
-        index += 1
-        expected_item = 1
-
-        while True:
-            skip_blank_lines()
-            if index == len(lines) or lines[index] == BTM_DELIMITER:
-                break
-            item = re.fullmatch(r" #([1-9][0-9]*):", lines[index])
-            if item is None or int(item.group(1)) != expected_item:
-                raise InstallError("cfm_background_item_observation_invalid", invalid)
-            expected_item += 1
-            index += 1
-            fields: dict[str, str] = {}
-            embedded_expected: int | None = None
-            record_closed = False
-
-            while index < len(lines):
-                line = lines[index]
-                if line == "":
-                    skip_blank_lines()
-                    record_closed = True
-                    if index < len(lines) and lines[index] != BTM_DELIMITER and re.fullmatch(
-                        r" #[1-9][0-9]*:", lines[index]
-                    ) is None:
-                        raise InstallError(
-                            "cfm_background_item_observation_invalid", invalid
-                        )
-                    break
-                if line == BTM_DELIMITER or re.fullmatch(r" #[1-9][0-9]*:", line):
-                    raise InstallError("cfm_background_item_observation_invalid", invalid)
-                if embedded_expected is not None:
-                    embedded = re.fullmatch(r"    #([1-9][0-9]*): (\S.*)", line)
-                    if embedded is None or int(embedded.group(1)) != embedded_expected:
-                        raise InstallError(
-                            "cfm_background_item_observation_invalid", invalid
-                        )
-                    values.add(embedded.group(2))
-                    embedded_expected += 1
-                    index += 1
-                    continue
-                field = re.fullmatch(r" +([A-Za-z][A-Za-z0-9. ]*):(?: (.*))?", line)
-                if field is None:
-                    raise InstallError("cfm_background_item_observation_invalid", invalid)
-                name = field.group(1)
-                value = field.group(2) or ""
-                if name not in BTM_ALLOWED_FIELDS or name in fields:
-                    raise InstallError("cfm_background_item_observation_invalid", invalid)
-                if name == "Embedded Item Identifiers":
-                    if value:
-                        raise InstallError(
-                            "cfm_background_item_observation_invalid", invalid
-                        )
-                    fields[name] = value
-                    embedded_expected = 1
-                else:
-                    if not value or any(ord(character) < 32 for character in value):
-                        raise InstallError(
-                            "cfm_background_item_observation_invalid", invalid
-                        )
-                    fields[name] = value
-                    values.add(value)
-                index += 1
-
-            if (
-                not record_closed
-                or embedded_expected == 1
-                or not BTM_REQUIRED_FIELDS.issubset(fields)
-            ):
-                raise InstallError("cfm_background_item_observation_invalid", invalid)
-            try:
-                item_uuid = str(uuid.UUID(fields["UUID"])).upper()
-            except ValueError as error:
-                raise InstallError(
-                    "cfm_background_item_observation_invalid", invalid
-                ) from error
-            if (
-                item_uuid != fields["UUID"]
-                or re.fullmatch(r"\S.* \(0x[0-9a-f]+\)", fields["Type"]) is None
-                or re.fullmatch(
-                    r"\[(?:enabled|disabled), (?:allowed|disallowed), "
-                    r"(?:notified|not notified)(?:, alerted)?\] "
-                    r"\((?:0|0x[0-9a-f]+)\)",
-                    fields["Disposition"],
-                )
-                is None
-                or re.fullmatch(r"[0-9]+", fields["Generation"]) is None
-                or (
-                    "Assoc. Bundle IDs" in fields
-                    and re.fullmatch(r"\[.*\]", fields["Assoc. Bundle IDs"])
-                    is None
-                )
-            ):
-                raise InstallError("cfm_background_item_observation_invalid", invalid)
-
-    if (
-        len(observed_uid_order) < 2
-        or observed_uid_order[:2] != [-2, 0]
-        or observed_uid_order[2:] != sorted(observed_uid_order[2:])
-        or any(uid <= 0 for uid in observed_uid_order[2:])
-        or not required_uids.issubset(observed_uids)
-    ):
-        raise InstallError("cfm_background_item_observation_invalid", invalid)
-    return values
-
-
 def _parse_system_extension_identities(output: str) -> set[tuple[str, str]]:
     invalid = "system extension output has an unknown or inconsistent format"
     if not output or not output.endswith("\n") or "\r" in output or "\x00" in output:
@@ -1035,13 +990,16 @@ def _require_no_cfm_processes(processes: list[dict[str, Any]]) -> None:
         )
 
 
-def capture_cfw_guard(runner: CommandRunner) -> dict[str, Any]:
+def capture_cfw_guard(
+    runner: CommandRunner, *, require_cfm_absent: bool = True
+) -> dict[str, Any]:
     process_output = _require_command_success(
         runner(("/bin/ps", "-axo", "pid=,uid=,lstart=,comm=")),
         "CFW process observation",
     )
     observed = _parse_processes(process_output)
-    _require_no_cfm_processes(observed)
+    if require_cfm_absent:
+        _require_no_cfm_processes(observed)
     required = []
     for path in (CFW_GUI, CFW_CORE):
         matches = [process for process in observed if process["path"] == path]
@@ -1106,7 +1064,215 @@ def require_cfm_process_absent(runner: CommandRunner) -> list[dict[str, Any]]:
     return processes
 
 
-def require_cfm_dormant(guard: dict[str, Any], runner: CommandRunner) -> None:
+def require_single_interactive_local_user(
+    runner: CommandRunner, expected_uid: int
+) -> None:
+    if type(expected_uid) is not int or expected_uid <= 0 or expected_uid != os.geteuid():
+        raise InstallError(
+            "cfm_user_inventory_invalid",
+            "maintenance owner is not the effective local user",
+        )
+    result = runner(
+        (
+            "/usr/bin/dscl",
+            ".",
+            "-readall",
+            "/Users",
+            "UniqueID",
+            "NFSHomeDirectory",
+            "UserShell",
+            "AuthenticationAuthority",
+        )
+    )
+    if result.returncode != 0 or result.stderr or not result.stdout.endswith("\n"):
+        raise InstallError(
+            "cfm_user_inventory_invalid",
+            "cannot enumerate local interactive user registrations",
+        )
+    records = result.stdout.rstrip("\n").split("\n-\n")
+    if not records or len(records) > 4096:
+        raise InstallError(
+            "cfm_user_inventory_invalid", "local user inventory size is invalid"
+        )
+    interactive_uids: set[int] = set()
+    seen_uids: set[int] = set()
+    for record in records:
+        values: dict[str, str] = {}
+        for line in record.splitlines():
+            key, separator, value = line.partition(": ")
+            if separator and key in {
+                "AuthenticationAuthority",
+                "NFSHomeDirectory",
+                "UniqueID",
+                "UserShell",
+            }:
+                if key in values or not value:
+                    raise InstallError(
+                        "cfm_user_inventory_invalid",
+                        "local user record contains duplicate or empty fields",
+                    )
+                values[key] = value
+        if not {"NFSHomeDirectory", "UniqueID", "UserShell"} <= set(values):
+            raise InstallError(
+                "cfm_user_inventory_invalid",
+                "local user record omits a required identity field",
+            )
+        try:
+            uid = int(values["UniqueID"])
+        except ValueError as error:
+            raise InstallError(
+                "cfm_user_inventory_invalid", "local user uid is malformed"
+            ) from error
+        if uid in seen_uids:
+            raise InstallError(
+                "cfm_user_inventory_invalid", "local user inventory repeats a uid"
+            )
+        seen_uids.add(uid)
+        shell = values["UserShell"]
+        home = values["NFSHomeDirectory"]
+        authenticated = "AuthenticationAuthority" in values
+        if (
+            uid >= 500
+            and shell not in {"/bin/false", "/usr/bin/false", "/usr/sbin/nologin"}
+            and (authenticated or home.startswith("/Users/"))
+        ):
+            interactive_uids.add(uid)
+    if interactive_uids != {expected_uid}:
+        raise InstallError(
+            "cfm_multi_user_registration_unproven",
+            "another persistent local user could retain a ProxyAgent registration",
+        )
+
+
+def _require_launchctl_service_absent(result: CommandResult, domain: str) -> None:
+    combined = result.stdout + result.stderr
+    if result.returncode == 0:
+        raise InstallError(
+            "cfm_service_registered",
+            f"Clash for Mac service remains registered: {domain}",
+        )
+    if result.returncode != 113 or "Could not find service" not in combined:
+        raise InstallError(
+            "cfm_service_observation_failed",
+            f"cannot prove Clash for Mac service absence: {domain}",
+        )
+
+
+def _require_legacy_tombstone_absent_or_inactive(result: CommandResult) -> None:
+    domain = f"system/{LEGACY_TOMBSTONE_LABEL}"
+    if result.returncode == 113 and "Could not find service" in result.stdout + result.stderr:
+        return
+    if result.returncode != 0 or result.stderr:
+        raise InstallError(
+            "cfm_legacy_tombstone_observation_failed",
+            "cannot prove the legacy migration tombstone state",
+        )
+    lines = result.stdout.splitlines()
+    if not lines or lines[0] != f"{domain} = {{" or lines[-1] != "}":
+        raise InstallError(
+            "cfm_legacy_tombstone_invalid",
+            "legacy migration tombstone launchd output is malformed",
+        )
+    stripped = [line.strip() for line in lines]
+    required = {
+        "active count = 0",
+        "managed_by = com.apple.xpc.ServiceManagement",
+        "state = not running",
+        f"program identifier = {LEGACY_TOMBSTONE_PROGRAM} (mode: 2)",
+        "parent bundle identifier = com.bill.clashformac",
+        "\"team-identifier\" => \"YKUPL7Z869\"",
+        "domain = system",
+    }
+    if any(stripped.count(value) != 1 for value in required):
+        raise InstallError(
+            "cfm_legacy_tombstone_invalid",
+            "legacy migration tombstone is active, ambiguous, or has the wrong identity",
+        )
+
+
+def parse_service_maintenance_receipt(
+    result: CommandResult, expected_action: str
+) -> dict[str, Any]:
+    if result.returncode != 0 or result.stderr or not result.stdout.endswith("\n"):
+        raise InstallError(
+            "cfm_service_status_failed",
+            "signed Host could not prove current SMAppService registration state",
+        )
+    try:
+        receipt = json.loads(
+            result.stdout,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (json.JSONDecodeError, ValueError) as error:
+        raise InstallError(
+            "cfm_service_status_invalid",
+            "signed Host returned a malformed service status receipt",
+        ) from error
+    expected_keys = {
+        "action",
+        "document",
+        "engine_status",
+        "global_authority",
+        "proxy_agent",
+    }
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != expected_keys
+        or receipt.get("action") != expected_action.replace("-", "_")
+        or receipt.get("document") != "cfw-current-service-maintenance-v1"
+        or receipt.get("engine_status")
+        != (None if expected_action == "status" else "off")
+        or receipt.get("global_authority")
+        not in {
+            "enabled",
+            "requires_approval",
+            "not_registered",
+            "not_found",
+            "unknown",
+        }
+        or receipt.get("proxy_agent")
+        not in {
+            "enabled",
+            "requires_approval",
+            "not_registered",
+            "not_found",
+            "unknown",
+        }
+        or result.stdout.encode("utf-8") != _canonical_json(receipt)
+    ):
+        raise InstallError(
+            "cfm_service_status_invalid",
+            "signed Host returned a noncanonical service maintenance receipt",
+        )
+    return receipt
+
+
+def _require_current_services_unregistered(
+    runner: CommandRunner,
+    *,
+    executable: Path | None = None,
+) -> None:
+    service_host = executable or InstallPaths.production().candidate_executable
+    receipt = parse_service_maintenance_receipt(
+        runner((str(service_host), SERVICE_MAINTENANCE_FLAG, "status")),
+        "status",
+    )
+    if (
+        receipt["global_authority"] != "not_registered"
+        or receipt["proxy_agent"] != "not_registered"
+    ):
+        raise InstallError(
+            "cfm_service_status_invalid",
+            "signed Host did not prove both current SMAppServices unregistered",
+        )
+
+
+def require_cfm_dormant(
+    guard: dict[str, Any],
+    runner: CommandRunner,
+    *,
+    executable: Path | None = None,
+) -> None:
     processes = require_cfm_process_absent(runner)
     cfw_processes = guard.get("cfw_processes")
     if not isinstance(cfw_processes, list) or not cfw_processes:
@@ -1114,6 +1280,7 @@ def require_cfm_dormant(guard: dict[str, Any], runner: CommandRunner) -> None:
     gui_uid = cfw_processes[0].get("uid")
     if type(gui_uid) is not int or gui_uid <= 0:
         raise InstallError("cfw_identity_invalid", "CFW GUI uid is invalid")
+    require_single_interactive_local_user(runner, gui_uid)
     gui_uids = {gui_uid}
     gui_uids.update(
         process["uid"]
@@ -1132,37 +1299,17 @@ def require_cfm_dormant(guard: dict[str, Any], runner: CommandRunner) -> None:
         ),
     ]
     for domain in domains:
-        result = runner(("/bin/launchctl", "print", domain))
-        combined = result.stdout + result.stderr
-        if result.returncode == 0:
-            raise InstallError(
-                "cfm_service_registered",
-                f"Clash for Mac service remains registered: {domain}",
-            )
-        if result.returncode != 113 or "Could not find service" not in combined:
-            raise InstallError(
-                "cfm_service_observation_failed",
-                f"cannot prove Clash for Mac service absence: {domain}",
-            )
-    background_items = runner(("/usr/bin/sfltool", "dumpbtm"))
-    if background_items.returncode != 0:
-        raise InstallError(
-            "cfm_background_item_observation_failed",
-            "cannot prove cross-user Clash for Mac background-item absence",
+        _require_launchctl_service_absent(
+            runner(("/bin/launchctl", "print", domain)), domain
         )
-    if background_items.stderr:
-        raise InstallError(
-            "cfm_background_item_observation_invalid",
-            "Clash for Mac BTM observation produced unexpected diagnostic output",
-        )
-    background_values = _parse_btm_values(
-        background_items.stdout, _required_btm_uids(gui_uid)
+    _require_legacy_tombstone_absent_or_inactive(
+        runner(("/bin/launchctl", "print", f"system/{LEGACY_TOMBSTONE_LABEL}"))
     )
-    if any(CFM_BTM_IDENTITY_PATTERN.search(value) for value in background_values):
-        raise InstallError(
-            "cfm_background_item_registered",
-            "Clash for Mac background-item registration remains in the BTM database",
-        )
+    # BTM records are not a launchability boundary: Apple documents that an
+    # unregistered item may remain visible until later system maintenance, and
+    # `sfltool dumpbtm` is not a bounded API. The signed Host SMAppService
+    # statuses plus exact launchd job/process absence are authoritative here.
+    _require_current_services_unregistered(runner, executable=executable)
     extensions = runner(("/usr/bin/systemextensionsctl", "list"))
     if extensions.returncode != 0:
         raise InstallError(
@@ -1190,17 +1337,65 @@ def _assert_guard_unchanged(before: dict[str, Any], after: dict[str, Any]) -> No
         )
 
 
+def _matching_clean_source_identity(
+    operator_repository: Path, release_worktree: Path
+) -> dict[str, str]:
+    operator_source = current_identity(operator_repository, require_clean=True)
+    worktree_source = current_identity(release_worktree, require_clean=True)
+    if worktree_source != operator_source:
+        raise CandidateBindingError(
+            "operator and candidate worktree source identities differ"
+        )
+    return worktree_source
+
+
+def _clean_profile_source_identity(
+    operator_repository: Path, release_repository: Path
+) -> dict[str, str]:
+    if release_repository == operator_repository:
+        return current_identity(operator_repository, require_clean=True)
+    return _matching_clean_source_identity(operator_repository, release_repository)
+
+
 def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> CandidateIdentity:
-    expected_repository = (
-        Path(__file__).resolve().parent.parent / RELEASE_WORKTREE_RELATIVE
-    ).resolve(strict=True)
-    if paths.repository.resolve(strict=True) != expected_repository:
+    if "CFW_TOOLCHAIN_ROOT" in os.environ:
+        raise InstallError(
+            "candidate_toolchain_override",
+            "dormant installation refuses a caller-selected release toolchain root",
+        )
+    operator_repository = Path(__file__).resolve().parent.parent
+    profile = paths.profile
+    expected_repository = operator_repository / profile.repository_relative
+    if paths.operator_repository != operator_repository or paths.repository != expected_repository:
         raise InstallError("candidate_path_invalid", "production repository path is not fixed")
-    expected_signed = expected_repository / CANDIDATE_RELATIVE
-    if paths.candidate_app != expected_signed / TARGET_NAME or paths.candidate_manifest != expected_signed / f"{TARGET_NAME}.manifest.json":
+    try:
+        worktree_metadata = expected_repository.lstat()
+        toolchain_metadata = paths.release_toolchain_root.lstat()
+    except OSError as error:
+        raise InstallError(
+            "candidate_worktree_invalid",
+            "fixed release worktree or its local toolchain is unavailable",
+        ) from error
+    if (
+        expected_repository.is_symlink()
+        or not stat.S_ISDIR(worktree_metadata.st_mode)
+        or paths.release_toolchain_root.is_symlink()
+        or not stat.S_ISDIR(toolchain_metadata.st_mode)
+    ):
+        raise InstallError(
+            "candidate_worktree_invalid",
+            "fixed release worktree and local toolchain must be real directories",
+        )
+    expected_signed = expected_repository / profile.candidate_relative
+    if (
+        paths.candidate_app != expected_signed / TARGET_NAME
+        or paths.candidate_manifest != expected_signed / f"{TARGET_NAME}.manifest.json"
+    ):
         raise InstallError("candidate_path_invalid", "candidate path is not the fixed signed output")
     try:
-        source = current_identity(paths.repository, require_clean=True)
+        source = _clean_profile_source_identity(
+            operator_repository, paths.repository
+        )
         manifest = load_strict_json(paths.candidate_manifest, "signed candidate manifest")
         metadata = manifest.get("metadata")
         if not isinstance(metadata, dict):
@@ -1208,13 +1403,15 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
         build_number = canonical_build_version(
             metadata.get("buildNumber"), "signed candidate build number"
         )
-        if build_number != BUILD_NUMBER:
-            raise CandidateBindingError("signed candidate is not fixed build 40009")
+        if build_number != profile.build_number:
+            raise CandidateBindingError(
+                f"signed candidate is not fixed build {profile.build_number}"
+            )
         toolchain = derive_candidate_toolchain_metadata(paths.repository)
         validated = validate_candidate_app_manifest(
             paths.candidate_manifest,
             paths.candidate_app,
-            artifact_kind="notarized-validation-candidate-v1",
+            artifact_kind=profile.artifact_kind,
             build_number=build_number,
             source_identity=source,
             toolchain_metadata=toolchain,
@@ -1259,10 +1456,7 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
     if tree_sha256 != gatekeeper.get("target_signed_app_tree_sha256"):
         raise InstallError("candidate_gatekeeper_mismatch", "Gatekeeper evidence targets other bytes")
 
-    native_products = (
-        paths.repository
-        / f"target/candidates/0.4.0/validation/{build_number}/native-products"
-    )
+    native_products = paths.repository / profile.native_products_relative
     verifier = paths.repository / "scripts/verify_release_app.sh"
     _require_command_success(
         _run_fixed_release_verifier(
@@ -1288,7 +1482,9 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
     # Close every read/command TOCTOU window before returning the admitted bytes.
     if _tree_sha256(paths.candidate_app, "signed candidate") != tree_sha256:
         raise InstallError("candidate_identity_drift", "candidate changed during admission")
-    if current_identity(paths.repository, require_clean=True) != source:
+    if (
+        _clean_profile_source_identity(operator_repository, paths.repository) != source
+    ):
         raise InstallError("candidate_source_drift", "release source changed during admission")
     return CandidateIdentity(
         app=AppIdentity(VERSION, build_number, tree_sha256),
@@ -1561,6 +1757,80 @@ def _read_fd_bytes(descriptor: int, maximum: int) -> bytes:
     return bytes(output)
 
 
+@contextmanager
+def exclusive_release_maintenance_lock(target_parent: Path) -> Iterator[None]:
+    """Serialize every service-registration and application-swap mutation."""
+
+    parent_fd = _open_directory(target_parent)
+    descriptor = -1
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        try:
+            descriptor = os.open(
+                MAINTENANCE_LOCK_NAME,
+                flags,
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except OSError as error:
+            raise InstallError(
+                "maintenance_lock_unavailable",
+                "cannot open the release maintenance lock",
+            ) from error
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise InstallError(
+                "maintenance_lock_unsafe",
+                "release maintenance lock ownership, type, link count, or mode is unsafe",
+            )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise InstallError(
+                "maintenance_busy",
+                "another release maintenance transaction is active",
+            ) from error
+
+        def require_identity() -> None:
+            try:
+                visible = os.stat(
+                    MAINTENANCE_LOCK_NAME,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise InstallError(
+                    "maintenance_lock_identity_drift",
+                    "release maintenance lock path is unavailable",
+                ) from error
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (visible.st_dev, visible.st_ino):
+                raise InstallError(
+                    "maintenance_lock_identity_drift",
+                    "release maintenance lock path was rebound",
+                )
+
+        require_identity()
+        try:
+            yield
+        finally:
+            require_identity()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
 def _strict_dict(value: object, fields: set[str], label: str) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != fields:
         raise InstallError("journal_invalid", f"{label} has an unexpected field set")
@@ -1631,7 +1901,251 @@ def _validate_guard(value: object) -> dict[str, Any]:
     return guard
 
 
-def validate_journal(value: object) -> dict[str, Any]:
+def _read_private_service_document(
+    directory_fd: int,
+    name: str,
+    label: str,
+) -> tuple[dict[str, Any], bytes]:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as error:
+        raise InstallError(
+            "service_decommission_evidence_invalid",
+            f"cannot open {label}",
+        ) from error
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_size <= 0
+            or opened.st_size > MAX_JOURNAL_BYTES
+        ):
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                f"{label} metadata is unsafe",
+            )
+        data = _read_fd_bytes(descriptor, MAX_JOURNAL_BYTES)
+        after = os.fstat(descriptor)
+        visible = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    finally:
+        os.close(descriptor)
+    if (
+        (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        )
+        != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        or (after.st_dev, after.st_ino) != (visible.st_dev, visible.st_ino)
+    ):
+        raise InstallError(
+            "service_decommission_evidence_invalid",
+            f"{label} changed while reading",
+        )
+    try:
+        value = json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise InstallError(
+            "service_decommission_evidence_invalid",
+            f"{label} is not strict JSON",
+        ) from error
+    if not isinstance(value, dict) or data != _canonical_json(value):
+        raise InstallError(
+            "service_decommission_evidence_invalid",
+            f"{label} is not canonical JSON",
+        )
+    return value, data
+
+
+def require_decommissioned_service_transaction(
+    paths: InstallPaths,
+    candidate: CandidateIdentity,
+    previous: AppIdentity,
+    expected_guard: dict[str, Any],
+) -> None:
+    """Verify the exact append-only service journal before any bundle swap."""
+
+    parent_fd = _open_directory(paths.target_parent)
+    directory_fd = -1
+    directory_name = paths.profile.service_transaction_directory
+    try:
+        try:
+            directory_fd = os.open(
+                directory_name,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+        except OSError as error:
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "fixed service transaction is unavailable",
+            ) from error
+        directory_metadata = os.fstat(directory_fd)
+        visible_directory = os.stat(
+            directory_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISDIR(directory_metadata.st_mode)
+            or directory_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+            or (directory_metadata.st_dev, directory_metadata.st_ino)
+            != (visible_directory.st_dev, visible_directory.st_ino)
+        ):
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "fixed service transaction directory is unsafe",
+            )
+
+        event_names = [
+            f"event-{sequence:08d}.json"
+            for sequence in range(len(SERVICE_DECOMMISSION_PHASES))
+        ]
+        if set(os.listdir(directory_fd)) != {"intent.json", *event_names}:
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "service transaction is not exactly at the decommissioned phase",
+            )
+
+        intent, intent_data = _read_private_service_document(
+            directory_fd,
+            "intent.json",
+            "service intent",
+        )
+        if set(intent) != {
+            "candidate",
+            "document",
+            "previous",
+            "schema_version",
+            "transaction_id",
+        }:
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "service intent shape is invalid",
+            )
+        try:
+            transaction_id = str(uuid.UUID(intent["transaction_id"]))
+        except (TypeError, ValueError, AttributeError) as error:
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "service transaction id is invalid",
+            ) from error
+        if (
+            intent["document"] != SERVICE_TRANSACTION_DOCUMENT
+            or intent["schema_version"] != SERVICE_TRANSACTION_SCHEMA_VERSION
+            or transaction_id != intent["transaction_id"]
+            or intent["candidate"] != candidate.document()
+            or intent["previous"] != previous.document()
+        ):
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "service intent does not bind this installation generation",
+            )
+
+        intent_sha256 = _sha256_bytes(intent_data)
+        previous_event_sha256: str | None = None
+        baseline_guard: dict[str, Any] | None = None
+        for sequence, name in enumerate(event_names):
+            event, event_data = _read_private_service_document(
+                directory_fd,
+                name,
+                f"service event {sequence}",
+            )
+            if set(event) != {
+                "action",
+                "document",
+                "guard_after",
+                "guard_before",
+                "intent_sha256",
+                "phase",
+                "previous_event_sha256",
+                "schema_version",
+                "sequence",
+            }:
+                raise InstallError(
+                    "service_decommission_evidence_invalid",
+                    "service event shape is invalid",
+                )
+            before = _validate_guard(event["guard_before"])
+            after = _validate_guard(event["guard_after"])
+            if (
+                event["action"] != SERVICE_DECOMMISSION_ACTIONS[sequence]
+                or event["document"] != SERVICE_TRANSACTION_DOCUMENT
+                or event["intent_sha256"] != intent_sha256
+                or event["phase"] != SERVICE_DECOMMISSION_PHASES[sequence]
+                or event["previous_event_sha256"] != previous_event_sha256
+                or event["schema_version"]
+                != SERVICE_TRANSACTION_SCHEMA_VERSION
+                or event["sequence"] != sequence
+                or before != after
+                or (baseline_guard is not None and before != baseline_guard)
+            ):
+                raise InstallError(
+                    "service_decommission_evidence_invalid",
+                    "service event lineage or CFW guard is invalid",
+                )
+            if baseline_guard is None:
+                baseline_guard = after
+            previous_event_sha256 = _sha256_bytes(event_data)
+
+        visible_after = os.stat(
+            directory_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        opened_after = os.fstat(directory_fd)
+        if (opened_after.st_dev, opened_after.st_ino) != (
+            visible_after.st_dev,
+            visible_after.st_ino,
+        ):
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "service transaction directory was rebound",
+            )
+        if baseline_guard is None:
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "service transaction has no CFW guard baseline",
+            )
+        _assert_guard_unchanged(baseline_guard, expected_guard)
+    except InstallError as error:
+        if error.code == "journal_invalid":
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "service transaction contains an invalid CFW guard",
+            ) from error
+        raise
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        os.close(parent_fd)
+
+
+def validate_journal(
+    value: object,
+    profile: InstallProfile = VALIDATION_INSTALL_PROFILE,
+) -> dict[str, Any]:
     document = _strict_dict(
         value,
         {
@@ -1659,7 +2173,7 @@ def validate_journal(value: object) -> dict[str, Any]:
         raise InstallError("journal_invalid", "transaction id is invalid") from error
     if transaction_id != document["transaction_id"]:
         raise InstallError("journal_invalid", "transaction id is not canonical")
-    expected_staging = f"{STAGING_PREFIX}{transaction_id}"
+    expected_staging = f"{profile.staging_prefix}{transaction_id}"
     if document["staging_name"] != expected_staging:
         raise InstallError("journal_invalid", "staging directory is not transaction-bound")
     candidate = _strict_dict(
@@ -1683,6 +2197,14 @@ def validate_journal(value: object) -> dict[str, Any]:
     if not isinstance(candidate["repository_commit"], str) or re.fullmatch(r"[0-9a-f]{40}", candidate["repository_commit"]) is None:
         raise InstallError("journal_invalid", "candidate repository commit is invalid")
     previous_app = _validate_app_document(document["previous"], "previous application")
+    if (
+        candidate_app["build_number"] != profile.build_number
+        or previous_app["build_number"] != profile.previous_build_number
+    ):
+        raise InstallError(
+            "journal_invalid",
+            "installation journal is not for the fixed release generation",
+        )
     if int(candidate_app["build_number"]) <= int(previous_app["build_number"]):
         raise InstallError("journal_invalid", "candidate build is not newer than previous build")
     guards = document["guards"]
@@ -1691,7 +2213,7 @@ def validate_journal(value: object) -> dict[str, Any]:
     operations: list[str] = []
     for index, segment in enumerate(guards):
         segment = _strict_dict(segment, {"after", "before", "operation"}, "CFW guard segment")
-        if segment["operation"] not in {"install", "recover", "rollback"}:
+        if segment["operation"] not in {"install", "recover"}:
             raise InstallError("journal_invalid", "CFW guard operation is invalid")
         operations.append(segment["operation"])
         before = _validate_guard(segment["before"])
@@ -1703,15 +2225,7 @@ def validate_journal(value: object) -> dict[str, Any]:
             raise InstallError("journal_invalid", "only the active CFW guard may be incomplete")
     if operations[0] != "install" or "install" in operations[1:]:
         raise InstallError("journal_invalid", "CFW guard must begin with one install operation")
-    rollback_count = operations.count("rollback")
-    rollback_phase = document["phase"] in {
-        "rollback-prepared",
-        "rollback-swapped",
-        "rolled-back",
-    }
-    if rollback_count != (1 if rollback_phase else 0):
-        raise InstallError("journal_invalid", "CFW rollback guard differs from journal phase")
-    terminal = document["phase"] in {"installed", "rolled-back"}
+    terminal = document["phase"] == "installed"
     last_incomplete = guards[-1]["after"] is None
     if terminal == last_incomplete:
         raise InstallError("journal_invalid", "CFW guard completion differs from journal phase")
@@ -1720,9 +2234,6 @@ def validate_journal(value: object) -> dict[str, Any]:
         "staged": 2,
         "swapped": 3,
         "installed": 4,
-        "rollback-prepared": 5,
-        "rollback-swapped": 6,
-        "rolled-back": 7,
     }[document["phase"]]
     if document["sequence"] < minimum_sequence:
         raise InstallError("journal_invalid", "journal sequence is impossible for its phase")
@@ -1766,13 +2277,11 @@ def _require_journal_successor(
         "prepared": "staged",
         "staged": "swapped",
         "swapped": "installed",
-        "rollback-prepared": "rollback-swapped",
-        "rollback-swapped": "rolled-back",
     }
     if pending["phase"] == direct_transitions.get(current["phase"]):
         if pending["guards"] == current["guards"]:
             return
-        if current["phase"] in {"swapped", "rollback-swapped"} and (
+        if current["phase"] == "swapped" and (
             len(pending["guards"]) == len(current["guards"])
             and pending["guards"][:-1] == current["guards"][:-1]
             and current["guards"][-1]["after"] is None
@@ -1781,13 +2290,6 @@ def _require_journal_successor(
                 **current["guards"][-1],
                 "after": current["guards"][-1]["before"],
             }
-        ):
-            return
-    if current["phase"] == "installed" and pending["phase"] == "rollback-prepared":
-        if (
-            pending["guards"][:-1] == current["guards"]
-            and pending["guards"][-1]["operation"] == "rollback"
-            and pending["guards"][-1]["after"] is None
         ):
             return
     if pending["phase"] == current["phase"] and len(pending["guards"]) == len(
@@ -1859,7 +2361,28 @@ class JournalStore:
             )
             if (rebound.st_dev, rebound.st_ino) != (metadata.st_dev, metadata.st_ino):
                 raise InstallError("install_lock_unsafe", "installation lock path changed")
-            yield
+            try:
+                yield
+            finally:
+                try:
+                    rebound_after = os.stat(
+                        self.paths.lock_name,
+                        dir_fd=self.parent_fd,
+                        follow_symlinks=False,
+                    )
+                except OSError as error:
+                    raise InstallError(
+                        "install_lock_unsafe",
+                        "installation lock path is unavailable",
+                    ) from error
+                if (rebound_after.st_dev, rebound_after.st_ino) != (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                ):
+                    raise InstallError(
+                        "install_lock_unsafe",
+                        "installation lock path changed",
+                    )
         finally:
             os.close(descriptor)
 
@@ -1902,14 +2425,30 @@ class JournalStore:
             raise InstallError("journal_invalid", "installation journal is not strict JSON") from error
         if data != _canonical_json(value):
             raise InstallError("journal_invalid", "installation journal is not canonical JSON")
-        return validate_journal(value)
+        return validate_journal(value, self.paths.profile)
 
-    def load(self) -> dict[str, Any] | None:
+    def peek(self) -> dict[str, Any] | None:
         current = self._load_name(self.paths.journal_name)
         pending = self._load_name(self.paths.journal_pending_name)
         if pending is None:
             return current
         _require_journal_successor(current, pending)
+        return pending
+
+    def load(
+        self,
+        authorize: Callable[[dict[str, Any]], None],
+    ) -> dict[str, Any] | None:
+        current = self._load_name(self.paths.journal_name)
+        pending = self._load_name(self.paths.journal_pending_name)
+        document = pending if pending is not None else current
+        if pending is not None:
+            _require_journal_successor(current, pending)
+        if document is None:
+            return None
+        authorize(document)
+        if pending is None:
+            return current
         self._rename_pending()
         return pending
 
@@ -1930,7 +2469,7 @@ class JournalStore:
         _fsync_directory_fd(self.parent_fd)
 
     def write(self, document: dict[str, Any]) -> None:
-        validated = validate_journal(document)
+        validated = validate_journal(document, self.paths.profile)
         data = _canonical_json(validated)
         if len(data) > MAX_JOURNAL_BYTES:
             raise InstallError("journal_invalid", "installation journal is oversized")
@@ -2035,7 +2574,23 @@ class DormantInstallTransaction:
         previous = self.runtime.read_identity(self.paths.target_app)
         self.runtime.verify_bundle(self.paths.target_app, previous)
         if int(candidate.app.build_number) <= int(previous.build_number):
-            raise InstallError("candidate_not_newer", "candidate build is not newer than installed build")
+            raise InstallError(
+                "candidate_not_newer", "candidate build is not newer than installed build"
+            )
+        if (
+            candidate.app.build_number != self.paths.profile.build_number
+            or previous.build_number != self.paths.profile.previous_build_number
+        ):
+            raise InstallError(
+                "install_generation_mismatch",
+                "candidate and installed application do not match the fixed release generation",
+            )
+        self.runtime.require_service_decommissioned(
+            self.paths,
+            candidate,
+            previous,
+            before,
+        )
         after = self._capture_stable_dormant_guard(before)
         return candidate, previous
 
@@ -2044,85 +2599,87 @@ class DormantInstallTransaction:
         # job is present, even creating the persistent transaction lock would
         # violate the zero-write dormant-preflight contract.
         candidate, previous = self.preflight()
-        with JournalStore(self.paths) as store:
-            with store.locked():
-                opening_guard = self._capture_stable_dormant_guard()
-                if store.load() is not None:
-                    raise InstallError("journal_exists", "recover or roll back the existing transaction")
-                before = self._capture_stable_dormant_guard(opening_guard)
-                transaction_id = str(uuid.uuid4())
-                staging_name = f"{STAGING_PREFIX}{transaction_id}"
-                document: dict[str, Any] = {
-                    "candidate": candidate.document(),
-                    "document": DOCUMENT,
-                    "guards": [{"after": None, "before": before, "operation": "install"}],
-                    "phase": "prepared",
-                    "previous": previous.document(),
-                    "schema_version": SCHEMA_VERSION,
-                    "sequence": 1,
-                    "staging_name": staging_name,
-                    "transaction_id": transaction_id,
-                }
-                store.write(document)
-                return self._resume(store, document)
+        with exclusive_release_maintenance_lock(self.paths.target_parent):
+            with JournalStore(self.paths) as store:
+                with store.locked():
+                    opening_guard = self._capture_stable_dormant_guard()
+                    self.runtime.require_service_decommissioned(
+                        self.paths,
+                        candidate,
+                        previous,
+                        opening_guard,
+                    )
+                    if store.peek() is not None:
+                        raise InstallError(
+                            "journal_exists",
+                            "recover the existing installation transaction",
+                        )
+                    before = self._capture_stable_dormant_guard(opening_guard)
+                    transaction_id = str(uuid.uuid4())
+                    staging_name = (
+                        f"{self.paths.profile.staging_prefix}{transaction_id}"
+                    )
+                    document: dict[str, Any] = {
+                        "candidate": candidate.document(),
+                        "document": DOCUMENT,
+                        "guards": [
+                            {
+                                "after": None,
+                                "before": before,
+                                "operation": "install",
+                            }
+                        ],
+                        "phase": "prepared",
+                        "previous": previous.document(),
+                        "schema_version": SCHEMA_VERSION,
+                        "sequence": 1,
+                        "staging_name": staging_name,
+                        "transaction_id": transaction_id,
+                    }
+                    store.write(document)
+                    return self._resume(store, document)
 
     def recover(self) -> dict[str, Any]:
         before_open = self._capture_stable_dormant_guard()
-        with JournalStore(self.paths) as store:
-            with store.locked():
-                before = self._capture_stable_dormant_guard(before_open)
-                document = store.load()
-                if document is None:
-                    raise InstallError("journal_absent", "there is no installation transaction")
-                if document["phase"] in {"installed", "rolled-back"}:
-                    self._verify_terminal(document)
-                    return document
-                if len(document["guards"]) >= MAX_GUARD_SEGMENTS:
-                    raise InstallError("guard_capacity", "installation recovery guard capacity is exhausted")
-                original_before = document["guards"][-1]["before"]
-                _assert_guard_unchanged(original_before, before)
-                updated = _next(document)
-                updated["guards"][-1]["after"] = before
-                updated["guards"].append(
-                    {"after": None, "before": before, "operation": "recover"}
-                )
-                store.write(updated)
-                return self._resume(store, updated)
-
-    def rollback(self) -> dict[str, Any]:
-        before_open = self._capture_stable_dormant_guard()
-        with JournalStore(self.paths) as store:
-            with store.locked():
-                before = self._capture_stable_dormant_guard(before_open)
-                document = store.load()
-                if document is None or document["phase"] != "installed":
-                    raise InstallError("rollback_unavailable", "only an installed transaction can roll back")
-                if len(document["guards"]) >= MAX_GUARD_SEGMENTS:
-                    raise InstallError("guard_capacity", "installation rollback guard capacity is exhausted")
-                self._require_layout(document, target="candidate", staged="previous")
-                self.runtime.verify_bundle(
-                    self.paths.target_app, _candidate_from_journal(document).app
-                )
-                self.runtime.verify_bundle(
-                    self.paths.target_parent
-                    / document["staging_name"]
-                    / PAYLOAD_NAME,
-                    _previous_from_journal(document),
-                )
-                updated = _next(document, phase="rollback-prepared")
-                updated["guards"].append(
-                    {"after": None, "before": before, "operation": "rollback"}
-                )
-                store.write(updated)
-                return self._resume(store, updated)
+        with exclusive_release_maintenance_lock(self.paths.target_parent):
+            with JournalStore(self.paths) as store:
+                with store.locked():
+                    before = self._capture_stable_dormant_guard(before_open)
+                    document = store.load(
+                        lambda selected: self.runtime.require_service_decommissioned(
+                            self.paths,
+                            _candidate_from_journal(selected),
+                            _previous_from_journal(selected),
+                            before,
+                        )
+                    )
+                    if document is None:
+                        raise InstallError(
+                            "journal_absent", "there is no installation transaction"
+                        )
+                    if document["phase"] == "installed":
+                        self._verify_terminal(document)
+                        return document
+                    if len(document["guards"]) >= MAX_GUARD_SEGMENTS:
+                        raise InstallError(
+                            "guard_capacity",
+                            "installation recovery guard capacity is exhausted",
+                        )
+                    original_before = document["guards"][-1]["before"]
+                    _assert_guard_unchanged(original_before, before)
+                    updated = _next(document)
+                    updated["guards"][-1]["after"] = before
+                    updated["guards"].append(
+                        {"after": None, "before": before, "operation": "recover"}
+                    )
+                    store.write(updated)
+                    return self._resume(store, updated)
 
     def _resume(self, store: JournalStore, document: dict[str, Any]) -> dict[str, Any]:
         candidate = _candidate_from_journal(document)
         parent_fd = _open_directory(self.paths.target_parent)
         container_path = self.paths.target_parent / document["staging_name"]
         try:
-            if document["phase"] in {"rollback-prepared", "rollback-swapped"}:
-                return self._resume_rollback(store, document)
             if document["phase"] == "prepared":
                 self._capture_stable_dormant_guard(
                     document["guards"][-1]["before"]
@@ -2273,66 +2830,6 @@ class DormantInstallTransaction:
         finally:
             os.close(parent_fd)
 
-    def _resume_rollback(
-        self, store: JournalStore, document: dict[str, Any]
-    ) -> dict[str, Any]:
-        if document["phase"] == "rollback-prepared":
-            parent_fd, container_fd = self._open_transaction_directories(document)
-            try:
-                target = self.runtime.read_identity(self.paths.target_app)
-                staged = self.runtime.read_identity(
-                    self.paths.target_parent / document["staging_name"] / PAYLOAD_NAME
-                )
-                candidate = _candidate_from_journal(document).app
-                previous = _previous_from_journal(document)
-                if _same_app(target, candidate) and _same_app(staged, previous):
-                    self.runtime.verify_bundle(self.paths.target_app, candidate)
-                    self.runtime.verify_bundle(
-                        self.paths.target_parent
-                        / document["staging_name"]
-                        / PAYLOAD_NAME,
-                        previous,
-                    )
-                    self._capture_stable_dormant_guard(
-                        document["guards"][-1]["before"]
-                    )
-                    self._require_layout(
-                        document, target="candidate", staged="previous"
-                    )
-                    self.runtime.swap(
-                        parent_fd, self.paths.target_name, container_fd, PAYLOAD_NAME
-                    )
-                    _fsync_directory_fd(container_fd)
-                    _fsync_directory_fd(parent_fd)
-                elif not (
-                    _same_app(target, previous) and _same_app(staged, candidate)
-                ):
-                    raise InstallError(
-                        "recovery_layout_ambiguous",
-                        "rollback transaction has unknown bundle identities",
-                    )
-            finally:
-                os.close(container_fd)
-                os.close(parent_fd)
-            self._require_layout(document, target="previous", staged="candidate")
-            document = _next(document, phase="rollback-swapped")
-            store.write(document)
-
-        if document["phase"] == "rollback-swapped":
-            self._require_layout(document, target="previous", staged="candidate")
-            after = self._capture_stable_dormant_guard(
-                document["guards"][-1]["before"]
-            )
-            self._require_layout(
-                document, target="previous", staged="candidate"
-            )
-            document["guards"][-1]["after"] = after
-            document = _next(document, phase="rolled-back")
-            store.write(document)
-            self._verify_terminal(document)
-            return document
-        raise InstallError("journal_phase_invalid", "rollback did not reach a terminal phase")
-
     def _open_transaction_directories(self, document: dict[str, Any]) -> tuple[int, int]:
         parent_fd = _open_directory(self.paths.target_parent)
         try:
@@ -2371,17 +2868,6 @@ class DormantInstallTransaction:
                 / PAYLOAD_NAME,
                 _previous_from_journal(document),
             )
-        elif document["phase"] == "rolled-back":
-            self._require_layout(document, target="previous", staged="candidate")
-            self.runtime.verify_bundle(
-                self.paths.target_app, _previous_from_journal(document)
-            )
-            self.runtime.verify_bundle(
-                self.paths.target_parent
-                / document["staging_name"]
-                / PAYLOAD_NAME,
-                _candidate_from_journal(document).app,
-            )
         else:
             raise InstallError("journal_phase_invalid", "journal is not terminal")
         for segment in document["guards"]:
@@ -2390,13 +2876,14 @@ class DormantInstallTransaction:
             _assert_guard_unchanged(segment["before"], segment["after"])
 
 
-def _transaction() -> DormantInstallTransaction:
+def _transaction(generation: str = "validation") -> DormantInstallTransaction:
     if os.geteuid() == 0:
         raise InstallError(
             "root_execution_refused",
             "dormant install must run as the owning administrator, never through sudo",
         )
-    return DormantInstallTransaction(InstallPaths.production(), InstallRuntime.production())
+    paths = InstallPaths.production(generation)
+    return DormantInstallTransaction(paths, InstallRuntime.production(paths))
 
 
 def main() -> None:
@@ -2405,10 +2892,14 @@ def main() -> None:
     mode.add_argument("--preflight", action="store_true")
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--recover", action="store_true")
-    mode.add_argument("--rollback", action="store_true")
+    parser.add_argument(
+        "--final",
+        action="store_true",
+        help="operate on the fixed 40022 to 40023 final generation",
+    )
     arguments = parser.parse_args()
     try:
-        transaction = _transaction()
+        transaction = _transaction("final" if arguments.final else "validation")
         if arguments.preflight:
             candidate, previous = transaction.preflight()
             print(
@@ -2421,7 +2912,7 @@ def main() -> None:
         elif arguments.recover:
             result = transaction.recover()
         else:
-            result = transaction.rollback()
+            result = transaction.recover()
     except (InstallError, OSError, ValueError) as error:
         code = error.code if isinstance(error, InstallError) else "unexpected_install_error"
         raise SystemExit(f"error: {code}: {error}") from error

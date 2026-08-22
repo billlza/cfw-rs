@@ -193,6 +193,8 @@ actor NativeBridgeCoordinator {
   let engineLease: any NativeEngineLeaseInspecting
   let credentialVault: any NativeCredentialVaulting
   let hostOperationLease: any NativeHostOperationLeaseAcquiring
+  let serviceMaintainer: any CurrentAppServiceMaintaining
+  let serviceRuntimeObserver: any CurrentAppServiceRuntimeObserving
   var activeOperation: UUID?
   var startupPreferenceRecoveryComplete = false
   var pendingTunnelInstallation: NativePendingTunnelInstallation?
@@ -207,7 +209,10 @@ actor NativeBridgeCoordinator {
     tunnel: any TunnelHostBridging,
     engineLease: any NativeEngineLeaseInspecting,
     credentialVault: any NativeCredentialVaulting,
-    hostOperationLease: any NativeHostOperationLeaseAcquiring
+    hostOperationLease: any NativeHostOperationLeaseAcquiring,
+    serviceMaintainer: any CurrentAppServiceMaintaining = CurrentAppServiceMaintainer(),
+    serviceRuntimeObserver: any CurrentAppServiceRuntimeObserving =
+      CurrentAppServiceRuntimeObserver()
   ) {
     self.proxy = proxy
     self.systemProxyPreparer = systemProxyPreparer
@@ -215,6 +220,8 @@ actor NativeBridgeCoordinator {
     self.engineLease = engineLease
     self.credentialVault = credentialVault
     self.hostOperationLease = hostOperationLease
+    self.serviceMaintainer = serviceMaintainer
+    self.serviceRuntimeObserver = serviceRuntimeObserver
   }
 
   func execute(_ command: NativeBridgeCommand) async throws -> NativeBridgeResult {
@@ -238,6 +245,8 @@ actor NativeBridgeCoordinator {
     switch command {
     case .queryStatus:
       return .status(try await queryExternalStatus())
+    case .maintainCurrentServices(let action):
+      return .serviceMaintenance(try await maintainCurrentServices(action))
     case .startSystemProxy(let request):
       return .runtime(try await startSystemProxy(request))
     case .stopSystemProxy(let context):

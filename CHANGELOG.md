@@ -16,6 +16,14 @@
   gone and legacy System Proxy and DNS state has been explicitly verified.
   Ambiguous proxy or DNS ownership requires user review instead of an
   automatic overwrite.
+- Add a release-only, signed-Host maintenance transaction that proves global
+  Off, unregisters ProxyAgent before GlobalAuthority, preserves the inactive
+  one-way legacy tombstone, atomically installs the fixed candidate, and then
+  registers GlobalAuthority before ProxyAgent. Append-only recovery events bind
+  every step to an unchanged Clash for Windows process and network projection.
+  One inode-bound outer lock serializes service and bundle mutations, and
+  independent fixed journals cover both 40019→40022 validation and
+  40022→40023 final installation without overwriting earlier evidence.
 
 ### Network architecture
 
@@ -198,8 +206,9 @@
   there is no unsigned or alternate-key fallback. The replacement public key
   is embedded in 0.4.0 and its private half remains outside the repository.
 - Keep in-process replacement intentionally absent because the required
-  verified `SMAppService` daemon re-registration transaction is not implemented
-  yet; metadata or a browser handoff is never reported as installation.
+  verified `SMAppService` maintenance transaction is release-operator-only and
+  unavailable to the renderer/updater; metadata or a browser handoff is never
+  reported as installation.
 - Release remains blocked until installed-identity proof for shared-Keychain
   provisioning and authenticated in-memory Tunnel injection, physical packet
   capture of the pinned resolver-failover behavior, exact Developer ID and

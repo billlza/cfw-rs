@@ -7,6 +7,7 @@ public enum GlobalAuthorityRegistrationStatus: Equatable, Sendable {
   case requiresApproval
   case notRegistered
   case notFound
+  case unknown
 }
 
 public enum GlobalAuthorityRegistrationError: Error, Equatable, Sendable {
@@ -23,6 +24,7 @@ public protocol GlobalAuthorityServiceControlling: Sendable {
 public protocol GlobalAuthorityDaemonServicing: Sendable {
   var registrationStatus: GlobalAuthorityRegistrationStatus { get }
   func register() throws
+  func unregister() throws
 }
 
 public struct SMGlobalAuthorityDaemonService: GlobalAuthorityDaemonServicing {
@@ -36,12 +38,16 @@ public struct SMGlobalAuthorityDaemonService: GlobalAuthorityDaemonServicing {
     case .requiresApproval: .requiresApproval
     case .notRegistered: .notRegistered
     case .notFound: .notFound
-    @unknown default: .notFound
+    @unknown default: .unknown
     }
   }
 
   public func register() throws {
     try SMAppService.daemon(plistName: Self.plistName).register()
+  }
+
+  public func unregister() throws {
+    try SMAppService.daemon(plistName: Self.plistName).unregister()
   }
 }
 
@@ -71,7 +77,7 @@ public struct SMGlobalAuthorityServiceController: GlobalAuthorityServiceControll
           throw GlobalAuthorityRegistrationError.approvalRequired
         case .notFound:
           throw GlobalAuthorityRegistrationError.serviceNotFound
-        case .enabled, .notRegistered:
+        case .enabled, .notRegistered, .unknown:
           throw GlobalAuthorityRegistrationError.registrationFailed
         }
       }
@@ -79,8 +85,10 @@ public struct SMGlobalAuthorityServiceController: GlobalAuthorityServiceControll
       case .enabled: return
       case .requiresApproval: throw GlobalAuthorityRegistrationError.approvalRequired
       case .notFound: throw GlobalAuthorityRegistrationError.serviceNotFound
-      case .notRegistered: throw GlobalAuthorityRegistrationError.registrationFailed
+      case .notRegistered, .unknown: throw GlobalAuthorityRegistrationError.registrationFailed
       }
+    case .unknown:
+      throw GlobalAuthorityRegistrationError.registrationFailed
     }
   }
 }

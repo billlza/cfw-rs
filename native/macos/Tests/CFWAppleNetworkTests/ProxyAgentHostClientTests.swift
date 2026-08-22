@@ -32,6 +32,8 @@ private final class FakeProxyAgentService: ProxyAgentServicing, @unchecked Senda
     registerCalls += 1
     if let registerError { throw registerError }
   }
+
+  func unregister() throws {}
 }
 
 private enum ProxyAgentRegistrationTestError: Error { case denied }

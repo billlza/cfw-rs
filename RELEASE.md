@@ -479,23 +479,79 @@ scripts/release_publication_gate.sh \
   "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
 ```
 
-### Fixed 40021 to 40022 physical-candidate evidence sequence
+### Fixed 40022 to 40023 physical-candidate evidence sequence
 
 The production evidence composer has no fixture, path, output, build-number, or
 success-override option. Run this sequence exactly once from one clean release
-commit. Build identities through `40020` have already been allocated to older
+commit. Build identities through `40021` have already been allocated to older
 source closures or validation attempts. Build `40020` terminated at its
-fail-closed host-compatibility gate before Apple submission and remains an
-immutable retired attempt. Those candidates and their evidence must not be
-renamed, relabelled, or reused:
+fail-closed host-compatibility gate before Apple submission. Build `40021`
+completed Apple notarization, stapling, Gatekeeper, app, manifest, and sealed
+transaction verification under submission
+`29f581a9-ee90-4c21-830d-9de9838c6e79`, but was retired after notarization and
+before installation: its source-bound dormant installer still selected build
+`40009`, and the current ProxyAgent/GlobalAuthority decommission/recommission
+transaction did not yet exist. Preserve all three `40021` candidate, attempt,
+and global-claim roots permanently; do not rename, relabel, resubmit, install,
+or write a validated review for those bytes. The exact immutable identities and
+reason are recorded in
+[`docs/release/validation-build-40021-retirement.md`](docs/release/validation-build-40021-retirement.md).
 
-1. build, notarize, install, and exercise validation build `40021`; preserve its
-   fixed CI/toolchain, app-manifest, notarization, and runtime-recovery records;
-2. have a human reviewer approve those exact bytes in
+1. from the final clean release commit, create the fixed detached worktree
+   `target/release-worktrees/40022`, materialize its real non-symlink
+   `target/toolchains` and native dependency trees from the same pinned
+   artifacts, then build and notarize validation build `40022` directly in that
+   worktree;
+2. while the old CFM is Off and its Host is absent, preserve the inactive
+   one-way legacy tombstone and run the fixed maintenance/install sequence:
+
+   ```bash
+   python3 -B scripts/current_service_transaction.py --preflight
+   python3 -B scripts/current_service_transaction.py --decommission
+   python3 -B scripts/dormant_app_install.py --preflight
+   python3 -B scripts/dormant_app_install.py --install
+   python3 -B scripts/current_service_transaction.py --recommission
+   ```
+
+   The first transaction unregisters only ProxyAgent and GlobalAuthority in
+   that order, using the signed Host and an append-only event journal. The
+   dormant installer then performs the journaled atomic bundle swap, after
+   which the installed candidate registers GlobalAuthority before ProxyAgent
+   and proves global Off again. Every mutation is bracketed by the unchanged
+   CFW process/binary/proxy/DNS/TUN/route guard. Service registration and app
+   replacement share one inode-bound outer maintenance lock; the installer
+   also requires the exact decommissioned service journal to bind both the
+   candidate and the previous application before it can copy or swap bytes.
+   After interruption, run only the matching `--recover` entrypoint. This is a
+   forward-only release transaction: there is no production rollback command,
+   because restoring the old bundle without a matching old-service
+   recommission journal would leave an unproven mixed state. Never use
+   `launchctl bootout`, `kill`, `sfltool resetbtm`, Finder, `ditto`, or a DMG
+   drag as a substitute;
+3. install and exercise validation build `40022`, preserving its fixed
+   CI/toolchain, app-manifest, notarization, service/install, and
+   runtime-recovery records;
+4. have a human reviewer approve those exact bytes in
    `target/candidates/0.4.0/review/validated-candidate.json`;
-3. build, sign inside-out, notarize, staple, and Gatekeeper-verify final build
-   `40022` from the same clean source identity;
-4. freeze the signed/notarized runtime candidate before collection:
+5. build, sign inside-out, notarize, staple, and Gatekeeper-verify final build
+   `40023` from the same clean source identity;
+6. repeat the fixed transaction using the independent final-generation
+   journals. This proves and installs only the exact `40022` to `40023`
+   transition without overwriting the validation-generation evidence:
+
+   ```bash
+   python3 -B scripts/current_service_transaction.py --final --preflight
+   python3 -B scripts/current_service_transaction.py --final --decommission
+   python3 -B scripts/dormant_app_install.py --final --preflight
+   python3 -B scripts/dormant_app_install.py --final --install
+   python3 -B scripts/current_service_transaction.py --final --recommission
+   ```
+
+   Any interruption must resume with the matching script's `--final
+   --recover` form. Before collection, reopen both final journals, prove build
+   `40023` is installed, prove GlobalAuthority and ProxyAgent belong to build
+   `40023`, and prove the engine remains globally Off;
+7. freeze the signed/notarized runtime candidate before collection:
 
    ```bash
    python3 -B scripts/production_release_evidence.py \
@@ -511,25 +567,29 @@ renamed, relabelled, or reused:
    log, Gatekeeper evidence, publication closure, SBOMs, receipt, intent, and
    event tree. It refuses to replace an existing file; any drift requires a new
    build and clean evidence root, never an in-place rewrite;
-5. run the source-pinned production collector for both required clean OS
+8. run the source-pinned production collector for both required clean OS
    environments (`macos15` and `current-macos`) on the same physical Mac,
    following
    [`docs/physical-evidence-v5.md`](./docs/physical-evidence-v5.md). Both PS256
    run receipts and the aggregate must bind the exact manifest digest from step
-   4. Retain all raw private bytes and place only the strict aggregate descriptor
+   7. Retain all raw private bytes and place only the strict aggregate descriptor
    at
    `target/candidates/0.4.0/release/final-candidate/physical-evidence.json`;
    the current policy requires a 3-hour operator-observed interval with no
    reported crash on each pinned OS. This duration and timestamp/crash-list
    evidence model are approved only for the small internal distribution; they
    are neither a remote liveness attestation nor a public-GA stability claim;
-   before requesting either nonce, redeploy and rebind the lifecycle-v4 Go
-   collector source/image/trust policy and install the reviewed root-owned
-   lifecycle probe. The previously deployed collector digest and revisions do
-   not authorize this changed 72-subject contract; local tests or a root-owned
-   binary without the reviewed source/image binding are not production
-   evidence;
-6. after both OS-run archives are complete, seal the runtime evidence:
+   before requesting either nonce, reopen the lifecycle-v4 Go collector source
+   closure `67fa4014...`, immutable image `d4fa73f5...`, trust-policy digest
+   `e95c2710...`, endpoint-policy revisions, traffic, IAM, and Binary
+   Authorization state, and install the reviewed root-owned lifecycle probe.
+   The 2026-08-22 activation recorded in
+   `docs/release/physical-collector-v040.md` is the source-bound authorization
+   for the current 72 lifecycle subjects and 265 total required raw subjects.
+   If any live binding differs, use a fresh fail-closed collector maintenance
+   transaction before collection; local tests or a root-owned binary without
+   the reviewed source/image binding are not production evidence;
+9. after both OS-run archives are complete, seal the runtime evidence:
 
    ```bash
    python3 -B scripts/production_release_evidence.py seal
@@ -545,7 +605,7 @@ renamed, relabelled, or reused:
 
 This physical-candidate manifest and sealed runtime evidence intentionally do
 not claim to contain a DMG, updater signature, or remote release asset. Only
-after step 6 may the post-signing DMG/updater packaging transactions run. Their
+after step 9 may the post-signing DMG/updater packaging transactions run. Their
 later distribution artifact-set seal binds the final DMG, updater archive and
 signature, public projections, upload bundle, and remote-download verification;
 neither layer may be renamed or treated as the other.
@@ -584,9 +644,12 @@ for a user-controlled update. It does not download, extract, or atomically swap
 the installed app and must not report a browser handoff as installation. After
 an external replacement, the `SMAppService` daemon requires an explicit,
 verified re-registration transaction before native services resume. That
-transaction is not implemented in 0.4.0, so in-process replacement is
-intentionally absent and no metadata/browser handoff is reported as a completed
-installation. The former Tauri updater runtime, in-process archive installer,
+transaction is deliberately not exposed in-process, so runtime replacement is
+absent and no metadata/browser handoff is reported as a completed
+installation. The release-only `current_service_transaction.py` plus
+`dormant_app_install.py` sequence is the fixed, source-bound maintenance path;
+it is not callable from the renderer or updater and does not turn a browser
+handoff into installation. The former Tauri updater runtime, in-process archive installer,
 and privileged AppleScript fallback are not linked. See Apple's
 [`SMAppService.register()`](https://developer.apple.com/documentation/servicemanagement/smappservice/register%28%29)
 documentation and the corresponding
@@ -611,7 +674,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 40021. No updater key, Apple notarization key, local private key, or older
+build 40022. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable

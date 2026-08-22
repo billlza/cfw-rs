@@ -48,6 +48,10 @@ private enum NativeBridgeRequestShape {
     switch opcode {
     case "query_status":
       try exactKeys(command, ["opcode"])
+    case "maintain_current_services":
+      try exactKeys(command, ["opcode", "payload"])
+      let payload = try object(command["payload"])
+      try exactKeys(payload, ["action"])
     case "start_system_proxy", "start_tunnel":
       try exactKeys(command, ["opcode", "payload"])
       try validateEngineStartRequest(requestPayload(command))

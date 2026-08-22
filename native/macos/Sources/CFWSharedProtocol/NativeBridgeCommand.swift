@@ -2,6 +2,7 @@ import Foundation
 
 public enum NativeBridgeCommand: Equatable, Sendable {
   case queryStatus
+  case maintainCurrentServices(NativeServiceMaintenanceAction)
   case startSystemProxy(EngineStartRequest)
   case stopSystemProxy(EngineCommandContext)
   case installTunnel(EngineCommandContext)
@@ -22,12 +23,14 @@ extension NativeBridgeCommand: Codable {
   }
 
   private enum PayloadKeys: String, CodingKey {
+    case action
     case request
     case context
   }
 
   private enum Opcode: String, Codable {
     case queryStatus = "query_status"
+    case maintainCurrentServices = "maintain_current_services"
     case startSystemProxy = "start_system_proxy"
     case stopSystemProxy = "stop_system_proxy"
     case installTunnel = "install_tunnel"
@@ -50,6 +53,11 @@ extension NativeBridgeCommand: Codable {
         throw NativeBridgeProtocolError.invalidCommand
       }
       self = .queryStatus
+    case .maintainCurrentServices:
+      let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      self = .maintainCurrentServices(
+        try payload.decode(NativeServiceMaintenanceAction.self, forKey: .action)
+      )
     case .startSystemProxy, .startTunnel:
       let payload = try container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
       let request = try payload.decode(EngineStartRequest.self, forKey: .request)
@@ -72,7 +80,8 @@ extension NativeBridgeCommand: Codable {
       case .installTunnel: self = .installTunnel(context)
       case .cancelTunnelInstall: self = .cancelTunnelInstall(context)
       case .stopTunnel: self = .stopTunnel(context)
-      case .queryStatus, .startSystemProxy, .startTunnel, .provisionCredentials,
+      case .queryStatus, .maintainCurrentServices, .startSystemProxy, .startTunnel,
+        .provisionCredentials,
         .queryCredentialPresence, .previewCredentialGarbageCollection,
         .commitCredentialGarbageCollection, .preflightCutover:
         throw NativeBridgeProtocolError.invalidCommand
@@ -110,6 +119,10 @@ extension NativeBridgeCommand: Codable {
     switch self {
     case .queryStatus:
       try container.encode(Opcode.queryStatus, forKey: .opcode)
+    case .maintainCurrentServices(let action):
+      try container.encode(Opcode.maintainCurrentServices, forKey: .opcode)
+      var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+      try payload.encode(action, forKey: .action)
     case .startSystemProxy(let request):
       try container.encode(Opcode.startSystemProxy, forKey: .opcode)
       var payload = container.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)

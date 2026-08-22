@@ -12,7 +12,9 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
+
+from scripts.candidate_artifact_binding import CandidateBindingError
 
 from scripts.dormant_app_install import (
     AppIdentity,
@@ -22,6 +24,9 @@ from scripts.dormant_app_install import (
     InstallError,
     InstallPaths,
     InstallRuntime,
+    FINAL_INSTALL_PROFILE,
+    FINAL_JOURNAL_NAME,
+    FINAL_STAGING_PREFIX,
     JOURNAL_NAME,
     JOURNAL_PENDING_NAME,
     LOCK_NAME,
@@ -31,22 +36,27 @@ from scripts.dormant_app_install import (
     STAGING_PREFIX,
     TARGET_NAME,
     capture_cfw_guard,
-    _parse_btm_values,
+    admit_fixed_candidate,
+    _assert_guard_unchanged,
     _normalize_routes,
+    _matching_clean_source_identity,
     _parse_processes,
     _parse_system_extension_identities,
     _require_fixed_command,
     _run_bounded_process,
     production_command_runner,
+    parse_service_maintenance_receipt,
     require_cfm_dormant,
+    require_single_interactive_local_user,
     swap_names,
     validate_journal,
     _require_journal_successor,
+    exclusive_release_maintenance_lock,
 )
 
 
-OLD = AppIdentity("0.4.0", "40006", "a" * 64)
-NEW = AppIdentity("0.4.0", "40009", "b" * 64)
+OLD = AppIdentity("0.4.0", "40019", "a" * 64)
+NEW = AppIdentity("0.4.0", "40022", "b" * 64)
 CANDIDATE = CandidateIdentity(
     app=NEW,
     manifest_sha256="c" * 64,
@@ -55,45 +65,79 @@ CANDIDATE = CandidateIdentity(
 )
 
 
-def btm_fixture(
-    *, identifier: str = "16.example.unrelated", include_gui_uid: bool = True
+def service_status_fixture(
+    *, proxy: str = "not_registered", authority: str = "not_registered"
 ) -> str:
-    sections = [
-        (-2, "FFFFEEEE-DDDD-CCCC-BBBB-AAAAFFFFFFFE"),
-        (0, "FFFFEEEE-DDDD-CCCC-BBBB-AAAA00000000"),
+    return json.dumps(
+        {
+            "action": "status",
+            "document": "cfw-current-service-maintenance-v1",
+            "engine_status": None,
+            "global_authority": authority,
+            "proxy_agent": proxy,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n"
+
+
+def inactive_tombstone_fixture() -> str:
+    return "\n".join(
+        (
+            "system/com.bill.clashformac.helper = {",
+            "\tactive count = 0",
+            "\tmanaged_by = com.apple.xpc.ServiceManagement",
+            "\tstate = not running",
+            "\tprogram identifier = Contents/Library/HelperTools/cfw-helper-tombstone (mode: 2)",
+            "\tparent bundle identifier = com.bill.clashformac",
+            "\tLWCR = {",
+            '\t\t"team-identifier" => "YKUPL7Z869"',
+            "\t}",
+            "\tdomain = system",
+            "}",
+            "",
+        )
+    )
+
+
+def local_users_fixture(*, extra_authenticated_uid: int | None = None) -> str:
+    records = [
+        "\n".join(
+            (
+                "AuthenticationAuthority: ;ShadowHash;",
+                f"NFSHomeDirectory: /Users/test-{os.geteuid()}",
+                "RecordName: test-user",
+                f"UniqueID: {os.geteuid()}",
+                "UserShell: /bin/zsh",
+            )
+        )
     ]
-    if include_gui_uid:
-        sections.append((501, "61C4D840-8827-4F43-ADE6-BCBA90A9229D"))
-    rendered = []
-    for position, (uid, section_uuid) in enumerate(sections, start=1):
-        item_identifier = identifier if uid == -2 else f"16.example.user-{uid}"
-        item_uuid = f"00000000-0000-4000-8000-{position:012d}"
-        rendered.append(
+    if extra_authenticated_uid is not None:
+        records.append(
             "\n".join(
                 (
-                    "========================",
-                    f" Records for UID {uid} : {section_uuid}",
-                    "========================",
-                    "",
-                    " ServiceManagement migrated: false",
-                    " LaunchServices registered: false",
-                    "",
-                    " Items:",
-                    "",
-                    " #1:",
-                    f"                 UUID: {item_uuid}",
-                    "                 Name: Fixture",
-                    "       Developer Name: Fixture Developer",
-                    "                 Type: daemon (0x10)",
-                    "                Flags: [  ] (0)",
-                    "          Disposition: [disabled, allowed, not notified] (0x2)",
-                    f"           Identifier: {item_identifier}",
-                    "                  URL: (null)",
-                    "           Generation: 1",
+                    "AuthenticationAuthority: ;ShadowHash;",
+                    f"NFSHomeDirectory: /Users/test-{extra_authenticated_uid}",
+                    "RecordName: other-user",
+                    f"UniqueID: {extra_authenticated_uid}",
+                    "UserShell: /bin/zsh",
                 )
             )
         )
-    return "\n\n".join(rendered) + "\n\n\n\n"
+    return "\n-\n".join(records) + "\n"
+
+
+def is_local_user_inventory_command(arguments: tuple[str, ...]) -> bool:
+    return arguments == (
+        "/usr/bin/dscl",
+        ".",
+        "-readall",
+        "/Users",
+        "UniqueID",
+        "NFSHomeDirectory",
+        "UserShell",
+        "AuthenticationAuthority",
+    )
 
 
 def system_extensions_fixture(
@@ -187,6 +231,7 @@ class DormantInstallFixture:
         self.admit_count = 0
         self.copy_count = 0
         self.swap_count = 0
+        self.service_baseline = guard()
 
     def cleanup(self) -> None:
         self.temporary.cleanup()
@@ -226,8 +271,9 @@ class DormantInstallFixture:
         quick=None,
         swap=None,
     ) -> InstallRuntime:
+        guard_values = captures or [guard()]
         return InstallRuntime(
-            capture_guard=GuardSequence(captures or [guard()]),
+            capture_guard=GuardSequence(guard_values),
             require_cfm_dormant=dormant or (lambda _guard: None),
             require_cfm_process_absent=quick or (lambda: []),
             admit_candidate=self.admit,
@@ -236,6 +282,10 @@ class DormantInstallFixture:
             sync_tree=lambda _path: None,
             swap=swap or self.swap,
             verify_bundle=lambda _path, _identity: None,
+            require_service_decommissioned=(
+                lambda _paths, _candidate, _previous, expected_guard:
+                _assert_guard_unchanged(self.service_baseline, expected_guard)
+            ),
         )
 
     def transaction(self, **runtime_arguments) -> DormantInstallTransaction:
@@ -295,6 +345,49 @@ class DormantInstallTransactionTests(unittest.TestCase):
         self.assertEqual(self.fixture.admit_count, 0)
         self.assertEqual(self.fixture.copy_count, 0)
         self.assertEqual(self.fixture.swap_count, 0)
+
+    def test_shared_maintenance_lock_blocks_before_journal_copy_or_swap(self) -> None:
+        with exclusive_release_maintenance_lock(self.fixture.parent):
+            with self.assertRaises(InstallError) as captured:
+                self.fixture.transaction().install()
+
+        self.assertEqual(captured.exception.code, "maintenance_busy")
+        self.assertFalse((self.fixture.parent / JOURNAL_NAME).exists())
+        self.assertEqual(self.fixture.copy_count, 0)
+        self.assertEqual(self.fixture.swap_count, 0)
+
+    def test_shared_maintenance_lock_path_rebinding_is_detected(self) -> None:
+        lock_path = self.fixture.parent / ".com.bill.clashformac.release-maintenance-v1.lock"
+        with self.assertRaises(InstallError) as captured:
+            with exclusive_release_maintenance_lock(self.fixture.parent):
+                lock_path.unlink()
+                lock_path.write_bytes(b"")
+                lock_path.chmod(0o600)
+
+        self.assertEqual(
+            captured.exception.code,
+            "maintenance_lock_identity_drift",
+        )
+
+    def test_service_guard_drift_blocks_before_install_journal_copy_or_swap(self) -> None:
+        changed = guard(proxy="8" * 64)
+        captures = [guard(), guard(), guard(), guard(), changed, changed]
+
+        with self.assertRaises(InstallError) as captured:
+            self.fixture.transaction(captures=captures).install()
+
+        self.assertEqual(captured.exception.code, "cfw_guard_changed")
+        self.assertFalse((self.fixture.parent / JOURNAL_NAME).exists())
+        self.assertFalse((self.fixture.parent / JOURNAL_PENDING_NAME).exists())
+        self.assertFalse(
+            any(
+                path.is_dir() and path.name.startswith(STAGING_PREFIX)
+                for path in self.fixture.parent.iterdir()
+            )
+        )
+        self.assertEqual(self.fixture.copy_count, 0)
+        self.assertEqual(self.fixture.swap_count, 0)
+        self.assertEqual(self.fixture.read_identity(self.fixture.target), OLD)
 
     def test_crash_before_swap_recovers_from_staged_candidate(self) -> None:
         def crash_before_swap(*_arguments) -> None:
@@ -489,145 +582,56 @@ class DormantInstallTransactionTests(unittest.TestCase):
         self.assertEqual(self.fixture.read_identity(self.fixture.target), OLD)
         self.assertEqual(self.fixture.swap_count, 0)
 
-    def test_rollback_is_atomic_and_itself_crash_recoverable(self) -> None:
-        installed = self.fixture.transaction().install()
-        self.assertEqual(installed["phase"], "installed")
-
-        def swap_then_crash(first_fd: int, first_name: str, second_fd: int, second_name: str) -> None:
-            self.fixture.swap(first_fd, first_name, second_fd, second_name)
+    def test_recovery_rejects_service_guard_drift_before_resume_or_swap(self) -> None:
+        def crash_before_swap(*_arguments) -> None:
             raise SimulatedCrash()
 
         with self.assertRaises(SimulatedCrash):
-            self.fixture.transaction(swap=swap_then_crash).rollback()
-        self.assertEqual(self.fixture.journal()["phase"], "rollback-prepared")
-        self.assertEqual(self.fixture.read_identity(self.fixture.target), OLD)
-        self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), NEW)
-
-        result = self.fixture.transaction().recover()
-        self.assertEqual(result["phase"], "rolled-back")
-        self.assertEqual(self.fixture.read_identity(self.fixture.target), OLD)
-        self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), NEW)
-        self.assertTrue(all(item["before"] == item["after"] for item in result["guards"]))
-
-    def test_guard_drift_during_rollback_check_blocks_before_swap(self) -> None:
-        self.fixture.transaction().install()
-        current = guard()
+            self.fixture.transaction(swap=crash_before_swap).install()
+        journal_path = self.fixture.parent / JOURNAL_NAME
+        before_journal = journal_path.read_bytes()
+        before_copy_count = self.fixture.copy_count
+        before_swap_count = self.fixture.swap_count
         changed = guard(proxy="8" * 64)
-        checks = 0
 
-        def capture() -> dict[str, object]:
-            return current
+        with self.assertRaises(InstallError) as captured:
+            self.fixture.transaction(captures=[changed]).recover()
 
-        def drift_during_dormancy(_guard) -> None:
-            nonlocal checks, current
-            checks += 1
-            if checks == 3:
-                current = changed
-
-        runtime = replace(
-            self.fixture.runtime(dormant=drift_during_dormancy),
-            capture_guard=capture,
-        )
-        with self.assertRaisesRegex(InstallError, "Clash for Windows identity"):
-            DormantInstallTransaction(self.fixture.paths, runtime).rollback()
-
-        self.assertEqual(checks, 3)
-        self.assertEqual(self.fixture.journal()["phase"], "rollback-prepared")
-        self.assertEqual(self.fixture.swap_count, 1)
-        self.assertEqual(self.fixture.read_identity(self.fixture.target), NEW)
-        self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), OLD)
-
-    def test_cfm_process_appearing_during_rollback_terminal_is_not_sealed(self) -> None:
-        self.fixture.transaction().install()
-
-        def swap_then_crash(
-            first_fd: int, first_name: str, second_fd: int, second_name: str
-        ) -> None:
-            self.fixture.swap(first_fd, first_name, second_fd, second_name)
-            raise SimulatedCrash()
-
-        with self.assertRaises(SimulatedCrash):
-            self.fixture.transaction(swap=swap_then_crash).rollback()
-        self.assertEqual(self.fixture.journal()["phase"], "rollback-prepared")
-
-        checks = 0
-        cfm_active = False
-
-        def becomes_active(_guard) -> None:
-            nonlocal checks, cfm_active
-            checks += 1
-            if checks == 3:
-                cfm_active = True
-
-        def quick_process_check() -> list[dict[str, object]]:
-            if cfm_active:
-                raise InstallError("cfm_process_running", "fixture CFM appeared")
-            return []
-
-        with self.assertRaisesRegex(InstallError, "fixture CFM appeared"):
-            self.fixture.transaction(
-                dormant=becomes_active, quick=quick_process_check
-            ).recover()
-
-        journal = self.fixture.journal()
-        self.assertEqual(checks, 3)
-        self.assertEqual(journal["phase"], "rollback-swapped")
-        self.assertIsNone(journal["guards"][-1]["after"])
-        self.assertEqual(self.fixture.swap_count, 2)
+        self.assertEqual(captured.exception.code, "cfw_guard_changed")
+        self.assertEqual(journal_path.read_bytes(), before_journal)
+        self.assertEqual(self.fixture.copy_count, before_copy_count)
+        self.assertEqual(self.fixture.swap_count, before_swap_count)
         self.assertEqual(self.fixture.read_identity(self.fixture.target), OLD)
         self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), NEW)
 
-    def test_rollback_bundle_tamper_during_heavy_check_blocks_before_swap(self) -> None:
-        self.fixture.transaction().install()
-        checks = 0
-        tampered = replace(OLD, tree_sha256="9" * 64)
-
-        def tamper_staged(_guard) -> None:
-            nonlocal checks
-            checks += 1
-            if checks == 3:
-                self.fixture._write_identity(self.fixture.staging_payload(), tampered)
-
-        with self.assertRaisesRegex(InstallError, "bundle layout differs"):
-            self.fixture.transaction(dormant=tamper_staged).rollback()
-
-        self.assertEqual(checks, 3)
-        self.assertEqual(self.fixture.journal()["phase"], "rollback-prepared")
-        self.assertEqual(self.fixture.swap_count, 1)
-        self.assertEqual(self.fixture.read_identity(self.fixture.target), NEW)
-        self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), tampered)
-
-    def test_rollback_target_tamper_during_terminal_check_is_not_sealed(self) -> None:
-        self.fixture.transaction().install()
-
-        def swap_then_crash(
-            first_fd: int, first_name: str, second_fd: int, second_name: str
-        ) -> None:
-            self.fixture.swap(first_fd, first_name, second_fd, second_name)
+    def test_recovery_authorizes_service_guard_before_pending_publication(self) -> None:
+        def stop_before_publish(_store: JournalStore) -> None:
             raise SimulatedCrash()
 
-        with self.assertRaises(SimulatedCrash):
-            self.fixture.transaction(swap=swap_then_crash).rollback()
+        with patch.object(JournalStore, "_rename_pending", stop_before_publish):
+            with self.assertRaises(SimulatedCrash):
+                self.fixture.transaction().install()
 
-        checks = 0
-        tampered = replace(OLD, tree_sha256="9" * 64)
+        journal_path = self.fixture.parent / JOURNAL_NAME
+        pending_path = self.fixture.parent / JOURNAL_PENDING_NAME
+        self.assertFalse(journal_path.exists())
+        before_pending = pending_path.read_bytes()
+        before_pending_inode = pending_path.stat().st_ino
+        changed = guard(proxy="8" * 64)
 
-        def tamper_target(_guard) -> None:
-            nonlocal checks
-            checks += 1
-            if checks == 3:
-                self.fixture._write_identity(self.fixture.target, tampered)
+        with self.assertRaises(InstallError) as captured:
+            self.fixture.transaction(captures=[changed]).recover()
 
-        with self.assertRaisesRegex(InstallError, "bundle layout differs"):
-            self.fixture.transaction(dormant=tamper_target).recover()
+        self.assertEqual(captured.exception.code, "cfw_guard_changed")
+        self.assertFalse(journal_path.exists())
+        self.assertEqual(pending_path.read_bytes(), before_pending)
+        self.assertEqual(pending_path.stat().st_ino, before_pending_inode)
+        self.assertEqual(self.fixture.copy_count, 0)
+        self.assertEqual(self.fixture.swap_count, 0)
+        self.assertEqual(self.fixture.read_identity(self.fixture.target), OLD)
 
-        journal = self.fixture.journal()
-        self.assertEqual(checks, 3)
-        self.assertEqual(journal["phase"], "rollback-swapped")
-        self.assertIsNone(journal["guards"][-1]["after"])
-        self.assertEqual(self.fixture.swap_count, 2)
-        self.assertEqual(self.fixture.read_identity(self.fixture.target), tampered)
-        self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), NEW)
+    def test_transaction_exposes_no_rollback_surface(self) -> None:
+        self.assertFalse(hasattr(self.fixture.transaction(), "rollback"))
 
     def test_second_install_cannot_overwrite_recovery_journal_or_backup(self) -> None:
         self.fixture.transaction().install()
@@ -658,8 +662,10 @@ class DormantInstallTransactionTests(unittest.TestCase):
         self.assertEqual(result["phase"], "installed")
         self.assertEqual(self.fixture.read_identity(self.fixture.target), NEW)
 
-    def test_fsynced_pending_next_generation_is_promoted_during_recovery(self) -> None:
+    def test_fsynced_rollback_generation_is_rejected_without_promotion(self) -> None:
         installed = self.fixture.transaction().install()
+        journal = self.fixture.parent / JOURNAL_NAME
+        before_journal = journal.read_bytes()
         pending = json.loads(json.dumps(installed))
         pending["sequence"] += 1
         pending["phase"] = "rollback-prepared"
@@ -668,14 +674,15 @@ class DormantInstallTransactionTests(unittest.TestCase):
         )
         self.fixture.write_pending(pending)
 
-        with JournalStore(self.fixture.paths) as store:
-            with store.locked():
-                result = store.load()
-        self.assertIsNotNone(result)
-        self.assertEqual(result["sequence"], pending["sequence"])
-        self.assertEqual(result["phase"], "rollback-prepared")
-        self.assertEqual(self.fixture.journal()["sequence"], pending["sequence"])
-        self.assertFalse((self.fixture.parent / JOURNAL_PENDING_NAME).exists())
+        with self.assertRaises(InstallError) as captured:
+            with JournalStore(self.fixture.paths) as store:
+                with store.locked():
+                    store.load(lambda _document: None)
+        self.assertEqual(captured.exception.code, "journal_invalid")
+        self.assertEqual(journal.read_bytes(), before_journal)
+        self.assertTrue((self.fixture.parent / JOURNAL_PENDING_NAME).exists())
+        self.assertEqual(self.fixture.read_identity(self.fixture.target), NEW)
+        self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), OLD)
         self.assertEqual(self.fixture.swap_count, 1)
 
     def test_pending_generation_with_broken_lineage_fails_without_swap(self) -> None:
@@ -729,23 +736,6 @@ class DormantInstallTransactionTests(unittest.TestCase):
             self.fixture.read_identity(self.fixture.staging_payload()), before["backup"]
         )
 
-    def test_active_cfm_blocks_rollback_before_transaction_mutation(self) -> None:
-        self.fixture.transaction().install()
-        journal = self.fixture.parent / JOURNAL_NAME
-        lock = self.fixture.parent / LOCK_NAME
-        before_journal = journal.read_bytes()
-        before_lock_inode = lock.stat().st_ino
-
-        def blocked(_guard) -> None:
-            raise InstallError("cfm_service_registered", "fixture registered CFM")
-
-        with self.assertRaisesRegex(InstallError, "fixture registered CFM"):
-            self.fixture.transaction(dormant=blocked).rollback()
-        self.assertEqual(journal.read_bytes(), before_journal)
-        self.assertEqual(lock.stat().st_ino, before_lock_inode)
-        self.assertEqual(self.fixture.read_identity(self.fixture.target), NEW)
-        self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), OLD)
-
     def test_cfm_race_after_lock_blocks_before_pending_promotion(self) -> None:
         self.fixture.transaction().install()
         journal = self.fixture.parent / JOURNAL_NAME
@@ -771,6 +761,112 @@ class DormantInstallTransactionTests(unittest.TestCase):
 
 
 class DormantInstallValidationTests(unittest.TestCase):
+    def test_service_maintenance_receipt_engine_status_contract(self) -> None:
+        actions = (
+            "status",
+            "prove-off",
+            "unregister-proxy-agent",
+            "unregister-global-authority",
+            "register-global-authority",
+            "register-proxy-agent",
+        )
+        for action in actions:
+            expected_engine_status = None if action == "status" else "off"
+            receipt = {
+                "action": action.replace("-", "_"),
+                "document": "cfw-current-service-maintenance-v1",
+                "engine_status": expected_engine_status,
+                "global_authority": "not_registered",
+                "proxy_agent": "not_registered",
+            }
+            stdout = json.dumps(
+                receipt,
+                sort_keys=True,
+                separators=(",", ":"),
+            ) + "\n"
+            with self.subTest(action=action):
+                self.assertEqual(
+                    parse_service_maintenance_receipt(
+                        CommandResult(0, stdout, ""),
+                        action,
+                    ),
+                    receipt,
+                )
+
+                invalid_receipt = {
+                    **receipt,
+                    "engine_status": (
+                        "off" if expected_engine_status is None else None
+                    ),
+                }
+                invalid_stdout = json.dumps(
+                    invalid_receipt,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ) + "\n"
+                with self.assertRaises(InstallError) as captured:
+                    parse_service_maintenance_receipt(
+                        CommandResult(0, invalid_stdout, ""),
+                        action,
+                    )
+                self.assertEqual(
+                    captured.exception.code,
+                    "cfm_service_status_invalid",
+                )
+
+    def test_candidate_admission_rejects_toolchain_environment_override(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CFW_TOOLCHAIN_ROOT": "/tmp/caller-selected-toolchain"},
+        ):
+            with self.assertRaises(InstallError) as captured:
+                admit_fixed_candidate(
+                    InstallPaths.production(),
+                    lambda arguments: (_ for _ in ()).throw(
+                        AssertionError(arguments)
+                    ),
+                )
+        self.assertEqual(captured.exception.code, "candidate_toolchain_override")
+
+    def test_final_generation_has_distinct_fixed_paths_and_journal(self) -> None:
+        paths = InstallPaths.production("final")
+
+        self.assertEqual(paths.profile, FINAL_INSTALL_PROFILE)
+        self.assertEqual(paths.profile.build_number, "40023")
+        self.assertEqual(paths.profile.previous_build_number, "40022")
+        self.assertTrue(
+            str(paths.candidate_app).endswith(
+                "/target/candidates/0.4.0/signed/Clash for Mac.app"
+            )
+        )
+        self.assertEqual(paths.journal_name, FINAL_JOURNAL_NAME)
+        self.assertEqual(paths.profile.staging_prefix, FINAL_STAGING_PREFIX)
+
+    def test_final_journal_rejects_validation_generation_identity(self) -> None:
+        transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        document = {
+            "candidate": {
+                **CANDIDATE.document(),
+                "build_number": "40023",
+            },
+            "document": "cfw-dormant-app-install-v1",
+            "guards": [
+                {"after": None, "before": guard(), "operation": "install"}
+            ],
+            "phase": "prepared",
+            "previous": {**OLD.document(), "build_number": "40022"},
+            "schema_version": 1,
+            "sequence": 1,
+            "staging_name": f"{FINAL_STAGING_PREFIX}{transaction_id}",
+            "transaction_id": transaction_id,
+        }
+        validate_journal(document, FINAL_INSTALL_PROFILE)
+
+        document["previous"]["build_number"] = "40019"
+        with self.assertRaises(InstallError) as captured:
+            validate_journal(document, FINAL_INSTALL_PROFILE)
+        self.assertEqual(captured.exception.code, "journal_invalid")
+
     def test_terminal_install_pending_is_a_precise_guard_closure(self) -> None:
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         installed = {
@@ -792,29 +888,34 @@ class DormantInstallValidationTests(unittest.TestCase):
         validate_journal(installed)
         _require_journal_successor(swapped, installed)
 
-    def test_terminal_rollback_pending_is_a_precise_guard_closure(self) -> None:
+    def test_forward_only_journal_rejects_legacy_rollback_shapes(self) -> None:
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-        rolled_back = {
+        document = {
             "candidate": CANDIDATE.document(),
             "document": "cfw-dormant-app-install-v1",
             "guards": [
                 {"after": guard(), "before": guard(), "operation": "install"},
                 {"after": guard(), "before": guard(), "operation": "rollback"},
             ],
-            "phase": "rolled-back",
+            "phase": "installed",
             "previous": OLD.document(),
             "schema_version": 1,
-            "sequence": 7,
+            "sequence": 5,
             "staging_name": f"{STAGING_PREFIX}{transaction_id}",
             "transaction_id": transaction_id,
         }
-        rollback_swapped = json.loads(json.dumps(rolled_back))
-        rollback_swapped["phase"] = "rollback-swapped"
-        rollback_swapped["sequence"] = 6
-        rollback_swapped["guards"][-1]["after"] = None
-        validate_journal(rollback_swapped)
-        validate_journal(rolled_back)
-        _require_journal_successor(rollback_swapped, rolled_back)
+        for phase in (
+            "installed",
+            "rollback-prepared",
+            "rollback-swapped",
+            "rolled-back",
+        ):
+            shaped = json.loads(json.dumps(document))
+            shaped["phase"] = phase
+            with self.subTest(phase=phase):
+                with self.assertRaises(InstallError) as captured:
+                    validate_journal(shaped)
+                self.assertEqual(captured.exception.code, "journal_invalid")
 
     def test_journal_rejects_caller_chosen_staging_name(self) -> None:
         document = {
@@ -838,19 +939,88 @@ class DormantInstallValidationTests(unittest.TestCase):
             ".com.bill.clashformac.dormant-install.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         )
 
-    def test_production_candidate_is_fixed_to_40009_validation_worktree(self) -> None:
+    def test_production_candidate_is_fixed_to_40022_validation_worktree(self) -> None:
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                "/target/release-worktrees/40009/target/candidates/0.4.0/"
-                "validation/40009/signed/Clash for Mac.app"
+                "/target/release-worktrees/40022/target/candidates/0.4.0/"
+                "validation/40022/signed/Clash for Mac.app"
             )
         )
+
+    def test_operator_and_release_worktree_must_share_one_clean_source_identity(self) -> None:
+        identity = {
+            "repositoryCommit": "a" * 40,
+            "releaseSourceSha256": "b" * 64,
+        }
+        with patch(
+            "scripts.dormant_app_install.current_identity",
+            side_effect=[identity, identity],
+        ) as current:
+            self.assertEqual(
+                _matching_clean_source_identity(Path("/operator"), Path("/worktree")),
+                identity,
+            )
+        self.assertEqual(
+            current.call_args_list,
+            [
+                call(Path("/operator"), require_clean=True),
+                call(Path("/worktree"), require_clean=True),
+            ],
+        )
+
+        drift = {**identity, "releaseSourceSha256": "c" * 64}
+        with patch(
+            "scripts.dormant_app_install.current_identity",
+            side_effect=[identity, drift],
+        ), self.assertRaises(CandidateBindingError):
+            _matching_clean_source_identity(Path("/operator"), Path("/worktree"))
+
+    def test_local_user_inventory_blocks_logged_out_authenticated_users(self) -> None:
+        def runner(output: str):
+            def run(arguments: tuple[str, ...]) -> CommandResult:
+                if is_local_user_inventory_command(arguments):
+                    return CommandResult(0, output, "")
+                raise AssertionError(arguments)
+
+            return run
+
+        require_single_interactive_local_user(
+            runner(local_users_fixture()), os.geteuid()
+        )
+        with self.assertRaises(InstallError) as captured:
+            require_single_interactive_local_user(
+                runner(local_users_fixture(extra_authenticated_uid=os.geteuid() + 1)),
+                os.geteuid(),
+            )
+        self.assertEqual(
+            captured.exception.code, "cfm_multi_user_registration_unproven"
+        )
+
+    def test_noninteractive_service_account_does_not_create_a_false_user_gate(self) -> None:
+        output = local_users_fixture().rstrip("\n") + "\n-\n" + "\n".join(
+            (
+                "NFSHomeDirectory: /Library/PostgreSQL/18",
+                "RecordName: postgres",
+                f"UniqueID: {os.geteuid() + 1}",
+                "UserShell: /bin/bash",
+                "",
+            )
+        )
+
+        def runner(arguments: tuple[str, ...]) -> CommandResult:
+            if is_local_user_inventory_command(arguments):
+                return CommandResult(0, output, "")
+            raise AssertionError(arguments)
+
+        require_single_interactive_local_user(runner, os.geteuid())
 
     def test_inactive_but_registered_cfm_job_still_blocks(self) -> None:
         def runner(arguments: tuple[str, ...]) -> CommandResult:
             if arguments[:3] == ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="):
                 return CommandResult(0, "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n", "")
+            if is_local_user_inventory_command(arguments):
+                return CommandResult(0, local_users_fixture(), "")
             if arguments[:2] == ("/bin/launchctl", "print"):
                 return CommandResult(0, "state = not running\n", "")
             raise AssertionError(arguments)
@@ -863,6 +1033,8 @@ class DormantInstallValidationTests(unittest.TestCase):
         def runner(arguments: tuple[str, ...]) -> CommandResult:
             if arguments[:3] == ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="):
                 return CommandResult(0, "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n", "")
+            if is_local_user_inventory_command(arguments):
+                return CommandResult(0, local_users_fixture(), "")
             if arguments[:2] == ("/bin/launchctl", "print"):
                 return CommandResult(1, "", "permission denied\n")
             raise AssertionError(arguments)
@@ -891,14 +1063,18 @@ class DormantInstallValidationTests(unittest.TestCase):
         def runner(arguments: tuple[str, ...]) -> CommandResult:
             if arguments[:3] == ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="):
                 return CommandResult(0, "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n", "")
+            if is_local_user_inventory_command(arguments):
+                return CommandResult(0, local_users_fixture(), "")
             if arguments[:2] == ("/bin/launchctl", "print"):
+                if arguments[2] == "system/com.bill.clashformac.helper":
+                    return CommandResult(0, inactive_tombstone_fixture(), "")
                 return CommandResult(
                     113,
                     "",
                     'Could not find service "fixture" in domain\n',
                 )
-            if arguments == ("/usr/bin/sfltool", "dumpbtm"):
-                return CommandResult(0, btm_fixture(), "")
+            if arguments[1:] == ("--service-maintenance-v1", "status"):
+                return CommandResult(0, service_status_fixture(), "")
             if arguments == ("/usr/bin/systemextensionsctl", "list"):
                 return CommandResult(
                     0,
@@ -909,10 +1085,7 @@ class DormantInstallValidationTests(unittest.TestCase):
                 )
             raise AssertionError(arguments)
 
-        with patch(
-            "scripts.dormant_app_install._required_btm_uids",
-            return_value={-2, 0, 501},
-        ), self.assertRaises(InstallError) as captured:
+        with self.assertRaises(InstallError) as captured:
             require_cfm_dormant(guard(), runner)
         self.assertEqual(captured.exception.code, "cfm_system_extension_registered")
 
@@ -923,39 +1096,45 @@ class DormantInstallValidationTests(unittest.TestCase):
             observed.append(arguments)
             if arguments[:3] == ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="):
                 return CommandResult(0, "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n", "")
+            if is_local_user_inventory_command(arguments):
+                return CommandResult(0, local_users_fixture(), "")
             if arguments[:2] == ("/bin/launchctl", "print"):
+                if arguments[2] == "system/com.bill.clashformac.helper":
+                    return CommandResult(0, inactive_tombstone_fixture(), "")
                 return CommandResult(
                     113,
                     "",
                     'Could not find service "fixture" in domain\n',
                 )
-            if arguments == ("/usr/bin/sfltool", "dumpbtm"):
-                return CommandResult(0, btm_fixture(), "")
+            if arguments[1:] == ("--service-maintenance-v1", "status"):
+                return CommandResult(0, service_status_fixture(), "")
             if arguments == ("/usr/bin/systemextensionsctl", "list"):
                 return CommandResult(0, "0 extension(s)\n", "")
             raise AssertionError(arguments)
 
-        with patch(
-            "scripts.dormant_app_install._required_btm_uids",
-            return_value={-2, 0, 501},
-        ):
-            require_cfm_dormant(guard(), runner)
+        require_cfm_dormant(guard(), runner)
         self.assertEqual(sum(command[0] == "/bin/launchctl" for command in observed), 3)
-        self.assertIn(("/usr/bin/sfltool", "dumpbtm"), observed)
+        self.assertTrue(
+            any(command[1:] == ("--service-maintenance-v1", "status") for command in observed)
+        )
         self.assertIn(("/usr/bin/systemextensionsctl", "list"), observed)
 
     def test_unrelated_system_extensions_do_not_block_dormancy(self) -> None:
         def runner(arguments: tuple[str, ...]) -> CommandResult:
             if arguments[:3] == ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="):
                 return CommandResult(0, "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n", "")
+            if is_local_user_inventory_command(arguments):
+                return CommandResult(0, local_users_fixture(), "")
             if arguments[:2] == ("/bin/launchctl", "print"):
+                if arguments[2] == "system/com.bill.clashformac.helper":
+                    return CommandResult(0, inactive_tombstone_fixture(), "")
                 return CommandResult(
                     113,
                     "",
                     'Could not find service "fixture" in domain\n',
                 )
-            if arguments == ("/usr/bin/sfltool", "dumpbtm"):
-                return CommandResult(0, btm_fixture(), "")
+            if arguments[1:] == ("--service-maintenance-v1", "status"):
+                return CommandResult(0, service_status_fixture(), "")
             if arguments == ("/usr/bin/systemextensionsctl", "list"):
                 return CommandResult(
                     0,
@@ -966,98 +1145,49 @@ class DormantInstallValidationTests(unittest.TestCase):
                 )
             raise AssertionError(arguments)
 
-        with patch(
-            "scripts.dormant_app_install._required_btm_uids",
-            return_value={-2, 0, 501},
-        ):
-            require_cfm_dormant(guard(), runner)
+        require_cfm_dormant(guard(), runner)
 
-    def test_registered_btm_identity_and_near_match_are_distinguished(self) -> None:
-        def run_with(output: str) -> None:
+    def test_signed_service_status_and_inactive_tombstone_are_both_required(self) -> None:
+        def run_with(*, service_status: str, tombstone: str) -> None:
             def runner(arguments: tuple[str, ...]) -> CommandResult:
                 if arguments[:3] == ("/bin/ps", "-axo", "pid=,uid=,lstart=,comm="):
                     return CommandResult(
                         0, "1 0 Thu Jul 23 15:20:55 2026 /sbin/launchd\n", ""
                     )
+                if is_local_user_inventory_command(arguments):
+                    return CommandResult(0, local_users_fixture(), "")
                 if arguments[:2] == ("/bin/launchctl", "print"):
+                    if arguments[2] == "system/com.bill.clashformac.helper":
+                        return CommandResult(0, tombstone, "")
                     return CommandResult(
                         113, "", 'Could not find service "fixture" in domain\n'
                     )
-                if arguments == ("/usr/bin/sfltool", "dumpbtm"):
-                    return CommandResult(0, output, "")
+                if arguments[1:] == ("--service-maintenance-v1", "status"):
+                    return CommandResult(0, service_status, "")
                 if arguments == ("/usr/bin/systemextensionsctl", "list"):
                     return CommandResult(0, "0 extension(s)\n", "")
                 raise AssertionError(arguments)
 
-            with patch(
-                "scripts.dormant_app_install._required_btm_uids",
-                return_value={-2, 0, 501},
-            ):
-                require_cfm_dormant(guard(), runner)
+            require_cfm_dormant(guard(), runner)
 
-        run_with(btm_fixture(identifier="16.com.bill.clashformacx.helper"))
-        registered = (
-            btm_fixture(identifier="2.com.bill.clashformac"),
-            btm_fixture().replace(
-                "           Generation: 1",
-                "    Parent Identifier: 2.com.bill.clashformac\n"
-                "           Generation: 1",
-                1,
-            ),
-            btm_fixture().replace(
-                "           Generation: 1",
-                "    Bundle Identifier: com.bill.clashformac\n"
-                "           Generation: 1",
-                1,
-            ),
-            btm_fixture().replace(
-                "           Generation: 1",
-                "    Assoc. Bundle IDs: [com.bill.clashformac]\n"
-                "           Generation: 1",
-                1,
-            ),
-            btm_fixture().replace(
-                "           Generation: 1",
-                "           Generation: 1\n"
-                "  Embedded Item Identifiers:\n"
-                "    #1: 8192.com.bill.clashformac",
-                1,
-            ),
+        run_with(
+            service_status=service_status_fixture(),
+            tombstone=inactive_tombstone_fixture(),
         )
-        for output in registered:
-            with self.subTest(output=output[:80]), self.assertRaises(
-                InstallError
-            ) as captured:
-                run_with(output)
-            self.assertEqual(
-                captured.exception.code, "cfm_background_item_registered"
+        with self.assertRaises(InstallError) as service_error:
+            run_with(
+                service_status=service_status_fixture(proxy="enabled"),
+                tombstone=inactive_tombstone_fixture(),
             )
-
-
-class BtmParserTests(unittest.TestCase):
-    def test_complete_multi_uid_output_is_accepted(self) -> None:
-        values = _parse_btm_values(btm_fixture(), {-2, 0, 501})
-        self.assertIn("16.example.unrelated", values)
-
-    def test_empty_truncated_unknown_gap_and_missing_uid_fail_closed(self) -> None:
-        complete = btm_fixture()
-        malformed = {
-            "empty": "",
-            "truncated": complete.rstrip("\n") + "\n\n",
-            "unknown": complete.replace(
-                "           Generation: 1",
-                "           Mystery Field: value\n           Generation: 1",
-                1,
-            ),
-            "gap": complete.replace(" #1:", " #2:", 1),
-            "missing_uid": btm_fixture(include_gui_uid=False),
-        }
-        for label, output in malformed.items():
-            with self.subTest(label=label), self.assertRaises(InstallError) as captured:
-                _parse_btm_values(output, {-2, 0, 501})
-            self.assertEqual(
-                captured.exception.code, "cfm_background_item_observation_invalid"
+        self.assertEqual(service_error.exception.code, "cfm_service_status_invalid")
+        with self.assertRaises(InstallError) as tombstone_error:
+            run_with(
+                service_status=service_status_fixture(),
+                tombstone=inactive_tombstone_fixture().replace(
+                    "active count = 0", "active count = 1"
+                ),
             )
+        self.assertEqual(tombstone_error.exception.code, "cfm_legacy_tombstone_invalid")
 
 
 class SystemExtensionParserTests(unittest.TestCase):
@@ -1231,33 +1361,6 @@ en0: flags=8863<UP> mtu 1500
 
 
 class BoundedCommandRunnerTests(unittest.TestCase):
-    def test_sfltool_dumpbtm_has_a_dedicated_slow_success_bound(self) -> None:
-        command = ("/usr/bin/sfltool", "dumpbtm")
-
-        def slow_success(arguments: tuple[str, ...], *, timeout: float) -> CommandResult:
-            self.assertEqual(arguments, command)
-            self.assertEqual(timeout, 120.0)
-            time.sleep(0.02)
-            return CommandResult(0, btm_fixture(), "")
-
-        with patch(
-            "scripts.dormant_app_install._run_bounded_process",
-            side_effect=slow_success,
-        ):
-            result = production_command_runner(command)
-        self.assertEqual(result.returncode, 0)
-
-    def test_sfltool_dumpbtm_timeout_is_not_converted_to_success(self) -> None:
-        command = ("/usr/bin/sfltool", "dumpbtm")
-        timeout = InstallError("command_timeout", "fixture timeout")
-        with patch(
-            "scripts.dormant_app_install._run_bounded_process",
-            side_effect=timeout,
-        ) as bounded, self.assertRaises(InstallError) as captured:
-            production_command_runner(command)
-        bounded.assert_called_once_with(command, timeout=120.0)
-        self.assertIs(captured.exception, timeout)
-
     def test_immediate_exit_has_a_result_and_only_uses_its_spawned_group(self) -> None:
         observed_groups: list[int] = []
         spawned_pids: list[int] = []
@@ -1366,6 +1469,47 @@ class BoundedCommandRunnerTests(unittest.TestCase):
             with self.subTest(command=command):
                 with self.assertRaises(InstallError):
                     _require_fixed_command(command)
+
+    def test_signed_host_maintenance_commands_are_exact_and_closed(self) -> None:
+        executables = (
+            str(InstallPaths.production().candidate_executable),
+            str(InstallPaths.production("final").candidate_executable),
+        )
+        for executable in executables:
+            for action in (
+                "prove-off",
+                "status",
+                "unregister-proxy-agent",
+                "unregister-global-authority",
+                "register-global-authority",
+                "register-proxy-agent",
+            ):
+                _require_fixed_command(
+                    (executable, "--service-maintenance-v1", action)
+                )
+        executable = executables[0]
+        for command in (
+            (executable, "--service-maintenance-v1", "unknown"),
+            (executable, "--service-maintenance-v1", "status", "extra"),
+            ("/tmp/clash-for-mac", "--service-maintenance-v1", "status"),
+        ):
+            with self.subTest(command=command), self.assertRaises(InstallError):
+                _require_fixed_command(command)
+
+    def test_launchctl_observation_allows_only_fixed_current_and_tombstone_jobs(self) -> None:
+        for domain in (
+            "system/com.bill.clashformac.global-authority",
+            "system/com.bill.clashformac.helper",
+            "gui/501/com.bill.clashformac.proxy-agent",
+        ):
+            _require_fixed_command(("/bin/launchctl", "print", domain))
+        for domain in (
+            "system/com.bill.clashformac.unreviewed",
+            "gui/0/com.bill.clashformac.proxy-agent",
+            "gui/501/com.bill.clashformac.helper",
+        ):
+            with self.subTest(domain=domain), self.assertRaises(InstallError):
+                _require_fixed_command(("/bin/launchctl", "print", domain))
 
 if __name__ == "__main__":
     unittest.main()

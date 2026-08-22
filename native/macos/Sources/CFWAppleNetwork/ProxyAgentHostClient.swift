@@ -7,6 +7,7 @@ public enum ProxyAgentRegistrationStatus: Equatable, Sendable {
   case requiresApproval
   case notRegistered
   case notFound
+  case unknown
 }
 
 public enum ProxyAgentHostError: Error, Equatable, Sendable {
@@ -54,6 +55,7 @@ public protocol ProxyAgentServiceControlling: Sendable {
 public protocol ProxyAgentServicing: Sendable {
   var registrationStatus: ProxyAgentRegistrationStatus { get }
   func register() throws
+  func unregister() throws
 }
 
 public struct SMProxyAgentService: ProxyAgentServicing {
@@ -67,12 +69,16 @@ public struct SMProxyAgentService: ProxyAgentServicing {
     case .requiresApproval: .requiresApproval
     case .notRegistered: .notRegistered
     case .notFound: .notFound
-    @unknown default: .notFound
+    @unknown default: .unknown
     }
   }
 
   public func register() throws {
     try SMAppService.agent(plistName: Self.launchAgentPlistName).register()
+  }
+
+  public func unregister() throws {
+    try SMAppService.agent(plistName: Self.launchAgentPlistName).unregister()
   }
 }
 
@@ -102,7 +108,7 @@ public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Senda
           throw ProxyAgentHostError.registrationRequiresApproval
         case .notFound:
           throw ProxyAgentHostError.registrationUnavailable
-        case .enabled, .notRegistered:
+        case .enabled, .notRegistered, .unknown:
           throw ProxyAgentHostError.registrationFailed(error.localizedDescription)
         }
       }
@@ -111,9 +117,11 @@ public struct SMProxyAgentServiceController: ProxyAgentServiceControlling, Senda
         return
       case .requiresApproval:
         throw ProxyAgentHostError.registrationRequiresApproval
-      case .notRegistered, .notFound:
+      case .notRegistered, .notFound, .unknown:
         throw ProxyAgentHostError.registrationUnavailable
       }
+    case .unknown:
+      throw ProxyAgentHostError.registrationUnavailable
     }
   }
 }
@@ -336,7 +344,7 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
       break
     case .requiresApproval:
       throw ProxyAgentHostError.registrationRequiresApproval
-    case .notRegistered, .notFound:
+    case .notRegistered, .notFound, .unknown:
       throw ProxyAgentHostError.registrationUnavailable
     }
     let result = try await execute(

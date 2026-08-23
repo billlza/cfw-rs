@@ -84,6 +84,18 @@ private func verifyFixture<T: AuthorityV1WireModel>(
     installed40019AuthorityFixture("off-snapshot-response.json"),
     requestID: snapshotID)
 
+  let handshakeResponseText = try #require(
+    String(
+      data: installed40019AuthorityFixture("handshake-response.json"),
+      encoding: .utf8))
+  let inventedNullOperation = handshakeResponseText.replacingOccurrences(
+    of: "\"minor\":0,\"request_id\"",
+    with: "\"minor\":0,\"operation_id\":null,\"request_id\"")
+  #expect(throws: (any Error).self) {
+    try Installed40019AuthorityOffCodec.validateHandshakeResponse(
+      Data(inventedNullOperation.utf8), requestID: handshakeID)
+  }
+
   let offSnapshotText = try #require(
     String(
       data: installed40019AuthorityFixture("off-snapshot-response.json"),
@@ -107,6 +119,14 @@ private func verifyFixture<T: AuthorityV1WireModel>(
     try Installed40019AuthorityOffCodec.validateOffSnapshotResponse(
       installed40019AuthorityFixture("off-snapshot-response.json"),
       requestID: handshakeID)
+  }
+
+  let inventedNullLease = offSnapshotText.replacingOccurrences(
+    of: "\"console_uid\":501,\"protocol_version\"",
+    with: "\"console_uid\":501,\"lease_view\":null,\"protocol_version\"")
+  #expect(throws: (any Error).self) {
+    try Installed40019AuthorityOffCodec.validateOffSnapshotResponse(
+      Data(inventedNullLease.utf8), requestID: snapshotID)
   }
 }
 

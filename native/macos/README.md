@@ -172,8 +172,8 @@ python3 -B scripts/verify_native_product_graph.py
 python3 -B scripts/verify_release_authority_gate.py .
 python3 -B scripts/verify_production_boundary_removal.py .
 
-export CFW_BUILD_NUMBER=40024
-export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.4.0/validation/40024/native-products"
+export CFW_BUILD_NUMBER=40026
+export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.4.0/validation/40026/native-products"
 ./scripts/build_native_products.sh --unsigned
 
 cd native/macos

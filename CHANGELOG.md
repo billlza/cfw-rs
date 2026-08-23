@@ -22,8 +22,10 @@
   registers GlobalAuthority before ProxyAgent. Append-only recovery events bind
   every step to an unchanged Clash for Windows process and network projection.
   One inode-bound outer lock serializes service and bundle mutations, and
-  independent fixed journals cover both 40019→40024 validation and
-  40024→40025 final installation without overwriting earlier evidence. The
+  independent fixed journals cover both 40019→40026 validation and
+  40026→40027 final installation without overwriting earlier evidence. The
+  canonical allocation ledger prevents a retired validation build or its
+  reserved final companion from being reused by a later source closure. The
   validation-only compatibility island can prove the already-installed 40019
   ProxyAgent schema 5 and GlobalAuthority v1.0 Off without weakening the
   current schema 6 / Authority v1.1 runtime path. A lost unregister receipt is

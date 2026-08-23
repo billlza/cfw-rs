@@ -555,10 +555,10 @@
       "xcodegenToolchainTreeSha256=$xcodegen_toolchain_tree_sha256"
     ],
     "scripts/dormant_app_install.py": [
-      "BUILD_NUMBER: Final = \"40024\"",
-      "FINAL_BUILD_NUMBER: Final = \"40025\"",
-      "target/release-worktrees/40024",
-      "target/candidates/0.4.0/validation/40024/signed",
+      "BUILD_NUMBER: Final = \"40026\"",
+      "FINAL_BUILD_NUMBER: Final = \"40027\"",
+      "target/release-worktrees/40026",
+      "target/candidates/0.4.0/validation/40026/signed",
       "target/candidates/0.4.0/signed",
       "notarized-release-v1",
       "_matching_clean_source_identity",
@@ -909,7 +909,7 @@
     "RELEASE.md": [
       "PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B",
       "scripts/release_secret_material_blocker.py",
-      "--authorize-release-worktree 40024",
+      "--authorize-release-worktree 40026",
       "Level 1 lifecycle/inode capability",
       "owner-only main `.git` administrative tree",
       "quiescent, single-writer step",
@@ -1058,7 +1058,7 @@
     ],
     "scripts/harness/physical_collector_request.py": [
       "CONTEXT_DOCUMENT = \"cfw-physical-run-context-v1\"",
-      "FINAL_RELEASE_BUILD = \"40025\"",
+      "FINAL_RELEASE_BUILD = \"40027\"",
       "MAX_COLLECTOR_REQUEST_BYTES = 1 << 20",
       "PRODUCTION_NONCE_TTL = timedelta(hours=6)",
       "FIXED_PYTHON_PROBE = Path(\"/opt/homebrew/bin/python3\")",
@@ -1080,7 +1080,7 @@
     ],
     "scripts/harness/performance_ledger.py": [
       "LEDGER_SCHEMA_VERSION: Final = 2",
-      "FINAL_BUILD: Final = \"40025\"",
+      "FINAL_BUILD: Final = \"40027\"",
       "SOAK_HEARTBEAT_COUNT: Final = 37",
       "SOAK_TRAFFIC_COUNT: Final = 13",
       "NETWORK_QUALITY_MAX_SECONDS: Final = 5",
@@ -1181,7 +1181,15 @@
       "def analyze_repository(repository: Path)"
     ],
     "scripts/verify_build_boundaries.sh": [
-      "scripts/verify_physical_capture_readiness.py"
+      "scripts/verify_physical_capture_readiness.py",
+      "scripts/verify_release_build_allocations.py"
+    ],
+    "scripts/verify_release_build_allocations.py": [
+      "IMMUTABLE_RETIRED_PREFIX: Final = (",
+      "cfm-release-build-allocation-v1",
+      "docs/release/build-allocations-v040.json",
+      "retired_unbuilt_reserved_final_companion",
+      "active validation/final builds must be consecutive"
     ],
     "scripts/verify_release_environment.sh": [
       "scripts/verify_physical_capture_readiness.py"
@@ -1222,8 +1230,8 @@
     ],
     "scripts/publication/orchestrator.py": [
       "RELEASE_VERSION",
-      "VALIDATION_BUILD = \"40024\"",
-      "FINAL_BUILD = \"40025\"",
+      "VALIDATION_BUILD = \"40026\"",
+      "FINAL_BUILD = \"40027\"",
       "prepare_physical_candidate_manifest",
       "physical-collector-candidate.json",
       "_physical_collector_candidate",

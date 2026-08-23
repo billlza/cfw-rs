@@ -116,13 +116,15 @@ struct Installed40019AuthorityOffProofDependencies: @unchecked Sendable {
     },
     makeSession: { identity in
       NSXPCInstalled40019AuthoritySession(
-        machServiceName: "com.bill.clashformac.global-authority",
+        machServiceName: Installed40019AuthorityOffProver.hostMachServiceName,
         codeSigningRequirement: identity.xpcCodeSigningRequirement)
     }
   )
 }
 
 struct Installed40019AuthorityOffProver: Installed40019AuthorityOffProving {
+  static let hostMachServiceName = GlobalAuthorityConnectionContract.machServiceName(for: .host)
+
   private let dependencies: Installed40019AuthorityOffProofDependencies
   private let deadline: CallbackDeadlineScheduler
 

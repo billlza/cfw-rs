@@ -2033,7 +2033,7 @@ def main() -> None:
     parser.add_argument(
         "--final",
         action="store_true",
-        help="operate on the fixed 40024 to 40025 final generation",
+        help="operate on the fixed 40026 to 40027 final generation",
     )
     arguments = parser.parse_args()
     try:

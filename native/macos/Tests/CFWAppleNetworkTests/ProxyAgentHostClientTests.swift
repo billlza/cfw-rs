@@ -617,4 +617,45 @@ struct ProxyAgentHostClientTests {
       #expect(requirement != nil)
     }
   }
+
+  @Test func kernelProcessIdentityReadsTheCurrentUnprivilegedProcess() throws {
+    let identity = try Installed40019ServiceProcessObserver.kernelProcessIdentity(getpid())
+    #expect(identity.processIdentifier == getpid())
+    #expect(identity.effectiveUserIdentifier == geteuid())
+    #expect(identity.realUserIdentifier == getuid())
+    #expect(identity.startSeconds > 0)
+    #expect(identity.startMicroseconds < 1_000_000)
+  }
+
+  @Test func kernelProcessIdentityReadsRootLaunchdWithoutPrivilege() throws {
+    let identity = try Installed40019ServiceProcessObserver.kernelProcessIdentity(1)
+    #expect(identity.processIdentifier == 1)
+    #expect(identity.effectiveUserIdentifier == 0)
+    #expect(identity.realUserIdentifier == 0)
+    #expect(identity.startSeconds > 0)
+    #expect(identity.startMicroseconds < 1_000_000)
+  }
+
+  @Test func kernelProcessIdentityRejectsPidAndTimestampAmbiguity() {
+    #expect(throws: (any Error).self) {
+      try Installed40019ServiceProcessObserver.validatedKernelProcessIdentity(
+        expectedProcessIdentifier: 12,
+        observedProcessIdentifier: 13,
+        effectiveUserIdentifier: 0,
+        realUserIdentifier: 0,
+        startSeconds: 1,
+        startMicroseconds: 0
+      )
+    }
+    #expect(throws: (any Error).self) {
+      try Installed40019ServiceProcessObserver.validatedKernelProcessIdentity(
+        expectedProcessIdentifier: 12,
+        observedProcessIdentifier: 12,
+        effectiveUserIdentifier: 0,
+        realUserIdentifier: 0,
+        startSeconds: 1,
+        startMicroseconds: 1_000_000
+      )
+    }
+  }
 }

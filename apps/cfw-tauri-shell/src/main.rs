@@ -4,6 +4,8 @@ mod engine;
 mod launch;
 mod legacy;
 mod lifecycle;
+#[cfg(target_os = "macos")]
+mod main_run_loop_driver;
 #[cfg(feature = "physical-release-evidence")]
 mod packet_evidence_transport;
 mod release_observation;

@@ -537,16 +537,18 @@ package enum Installed40019AuthorityOffCodec {
     requestID: AuthorityIdentifier
   ) throws {
     let result = try responseResult(data, requestID: requestID)
-    try AuthorityV1Codec.exactKeys(
+    try exactKeys(
       result,
-      [
-        "console_uid", "last_failure", "lease_view", "protocol_version",
-        "replay_cursor", "revision", "state",
+      required: [
+        "protocol_version", "revision", "state",
+      ],
+      optional: [
+        "console_uid", "last_failure", "lease_view", "replay_cursor",
       ])
     guard let state = result["state"] as? String, AuthorityState(rawValue: state) != nil else {
       throw AuthorityV1ValidationError.invalidState
     }
-    guard state == AuthorityState.off.rawValue, result["lease_view"] is NSNull else {
+    guard state == AuthorityState.off.rawValue, result["lease_view"] == nil else {
       throw Installed40019AuthorityOffValidationError.notOff
     }
     try validateVersion(try AuthorityV1Codec.dictionary(result["protocol_version"]))
@@ -555,6 +557,19 @@ package enum Installed40019AuthorityOffCodec {
     try validateOptionalConsoleUID(result["console_uid"])
     try validateOptionalFailure(result["last_failure"])
     try validateOptionalReplayCursor(result["replay_cursor"], maximumRevision: revision)
+  }
+
+  private static func exactKeys(
+    _ object: [String: Any],
+    required: Set<String>,
+    optional: Set<String>
+  ) throws {
+    // Build 40019 used synthesized Codable encoding: nil optional fields are
+    // omitted, while every present field remains part of the closed schema.
+    let observed = Set(object.keys)
+    guard required.isSubset(of: observed), observed.isSubset(of: required.union(optional)) else {
+      throw AuthorityV1ValidationError.malformedEnvelope
+    }
   }
 
   private static func request(
@@ -578,12 +593,11 @@ package enum Installed40019AuthorityOffCodec {
     try AuthorityV1Codec.checkEnvelopeSize(data)
     let response = try AuthorityV1Codec.parseCanonicalObject(data)
     try AuthorityV1Codec.exactKeys(
-      response, ["major", "minor", "operation_id", "request_id", "result"])
+      response, ["major", "minor", "request_id", "result"])
     guard
       try AuthorityV1Codec.unsigned(response["major"], as: UInt16.self) == protocolMajor,
       try AuthorityV1Codec.unsigned(response["minor"], as: UInt16.self) == protocolMinor,
-      try AuthorityV1Codec.identifier(response["request_id"]) == requestID,
-      response["operation_id"] is NSNull
+      try AuthorityV1Codec.identifier(response["request_id"]) == requestID
     else { throw AuthorityV1ValidationError.invalidContext }
     return try AuthorityV1Codec.dictionary(response["result"])
   }
@@ -613,12 +627,12 @@ package enum Installed40019AuthorityOffCodec {
   }
 
   private static func validateOptionalConsoleUID(_ value: Any?) throws {
-    if value is NSNull { return }
+    guard let value else { return }
     _ = try AuthorityV1Codec.unsigned(value, as: UInt32.self)
   }
 
   private static func validateOptionalFailure(_ value: Any?) throws {
-    if value is NSNull { return }
+    guard let value else { return }
     let failure = try AuthorityV1Codec.dictionary(value)
     try AuthorityV1Codec.exactKeys(failure, ["code"])
     guard let code = failure["code"] as? String,
@@ -634,7 +648,7 @@ package enum Installed40019AuthorityOffCodec {
     _ value: Any?,
     maximumRevision: UInt64
   ) throws {
-    if value is NSNull { return }
+    guard let value else { return }
     let cursor = try AuthorityV1Codec.dictionary(value)
     try AuthorityV1Codec.exactKeys(
       cursor,

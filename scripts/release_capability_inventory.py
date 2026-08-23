@@ -93,12 +93,12 @@ LEVEL_REPORT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         (
             "unsigned-artifact",
             "unsigned_artifact",
-            "target/candidates/0.4.0/validation/40024/signed/Clash for Mac.app.manifest.json",
+            "target/candidates/0.4.0/validation/40026/signed/Clash for Mac.app.manifest.json",
         ),
         (
             "deterministic-ci",
             "deterministic_test",
-            "target/candidates/0.4.0/validation/40024/evidence/unsigned-ci-lanes.json",
+            "target/candidates/0.4.0/validation/40026/evidence/unsigned-ci-lanes.json",
         ),
     ),
     "Signed_Installed_Verified": (

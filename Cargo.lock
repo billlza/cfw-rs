@@ -609,6 +609,7 @@ dependencies = [
  "cfw-profiles",
  "cfw-singbox-config",
  "core-foundation",
+ "dispatch2",
  "futures-util",
  "libc",
  "objc2-app-kit",

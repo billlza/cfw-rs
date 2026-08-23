@@ -1841,14 +1841,14 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/orchestrator.py"
         fixture.manifest["artifactBindings"][path] = [
-            'VALIDATION_BUILD = "40024"',
-            'FINAL_BUILD = "40025"',
+            'VALIDATION_BUILD = "40026"',
+            'FINAL_BUILD = "40027"',
             "seal_production_evidence",
             "require_verified=True",
         ]
         fixture.extra_artifact_files[path] = (
-            'VALIDATION_BUILD = "40024"\n'
-            'FINAL_BUILD = "40025"\n'
+            'VALIDATION_BUILD = "40026"\n'
+            'FINAL_BUILD = "40027"\n'
             "def seal_production_evidence():\n"
             "    require_verified=True\n"
         )

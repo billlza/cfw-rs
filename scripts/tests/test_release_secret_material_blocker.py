@@ -50,7 +50,7 @@ def _run_git(repository: Path, *arguments: str) -> None:
 
 def _create_registered_release_worktree(
     repository: Path,
-    build: str = "40024",
+    build: str = "40026",
     *,
     authorize_cache_scope: bool = True,
 ) -> Path:
@@ -228,7 +228,7 @@ class ScanByPathAndNameTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            worktree = Path(root) / "target/release-worktrees/40024"
+            worktree = Path(root) / "target/release-worktrees/40026"
             cache = worktree / "target/toolchains"
             cache.mkdir(parents=True)
             (worktree / ".git").write_text("self-authored marker", encoding="utf-8")
@@ -626,7 +626,7 @@ finally:
             )
             registered = secret_blocker._registered_release_worktree_targets(
                 root.resolve(), require_scope_receipt=False
-            )["40024"]
+            )["40026"]
             system_open = os.open
             system_fstat = os.fstat
             system_close = os.close
@@ -675,7 +675,7 @@ finally:
             )
             registered = secret_blocker._registered_release_worktree_targets(
                 root.resolve(), require_scope_receipt=False
-            )["40024"]
+            )["40026"]
             system_open = os.open
             system_flock = secret_blocker.fcntl.flock
             observed: dict[str, int] = {}
@@ -936,7 +936,7 @@ finally:
                 "target must be empty before cache-scope enrollment",
             ):
                 secret_blocker.authorize_release_worktree_cache_scope(
-                    root, "40024"
+                    root, "40026"
                 )
 
     def test_scope_enrollment_recovers_complete_pending_receipt(self) -> None:
@@ -947,10 +947,10 @@ finally:
             )
             admin = _worktree_admin_directory(worktree)
             pending = admin / secret_blocker.RELEASE_WORKTREE_CACHE_SCOPE_PENDING
-            pending.write_bytes(_expected_scope_receipt_data(root, "40024"))
+            pending.write_bytes(_expected_scope_receipt_data(root, "40026"))
             pending.chmod(0o600)
             receipt = secret_blocker.authorize_release_worktree_cache_scope(
-                root, "40024"
+                root, "40026"
             )
             self.assertTrue(receipt.is_file())
             self.assertFalse(pending.exists())
@@ -985,12 +985,12 @@ finally:
                     "pending file could not be committed",
                 ):
                     secret_blocker.authorize_release_worktree_cache_scope(
-                        root, "40024"
+                        root, "40026"
                     )
             self.assertTrue(pending.is_file())
             self.assertFalse(final.exists())
             receipt = secret_blocker.authorize_release_worktree_cache_scope(
-                root, "40024"
+                root, "40026"
             )
             self.assertEqual(receipt, final)
             self.assertFalse(pending.exists())
@@ -1005,12 +1005,12 @@ finally:
             admin = _worktree_admin_directory(worktree)
             pending = admin / secret_blocker.RELEASE_WORKTREE_CACHE_SCOPE_PENDING
             final = admin / secret_blocker.RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT
-            pending.write_bytes(_expected_scope_receipt_data(root, "40024"))
+            pending.write_bytes(_expected_scope_receipt_data(root, "40026"))
             pending.chmod(0o600)
             os.link(pending, final)
             self.assertEqual(final.stat().st_nlink, 2)
             receipt = secret_blocker.authorize_release_worktree_cache_scope(
-                root, "40024"
+                root, "40026"
             )
             self.assertEqual(receipt, final)
             self.assertFalse(pending.exists())
@@ -1024,7 +1024,7 @@ finally:
                 "fixture", encoding="utf-8"
             )
             receipt = secret_blocker.authorize_release_worktree_cache_scope(
-                root, "40024"
+                root, "40026"
             )
             self.assertTrue(receipt.is_file())
             self.assertEqual(scan_workspace(root), [])

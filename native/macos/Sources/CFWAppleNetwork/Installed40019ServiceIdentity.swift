@@ -17,6 +17,14 @@ package struct Installed40019ServiceProcessIdentity: Equatable, Sendable {
   package let xpcCodeSigningRequirement: String
 }
 
+struct Installed40019KernelProcessIdentity: Equatable, Sendable {
+  let processIdentifier: pid_t
+  let effectiveUserIdentifier: uid_t
+  let realUserIdentifier: uid_t
+  let startSeconds: UInt64
+  let startMicroseconds: UInt64
+}
+
 private enum Installed40019ServiceIdentityError: Error, Equatable, Sendable {
   case rejected
 }
@@ -178,22 +186,9 @@ package struct Installed40019ServiceProcessObserver: Sendable {
     _ processIdentifier: pid_t,
     contract: Installed40019ServiceIdentityContract
   ) throws -> Installed40019ServiceProcessIdentity {
-    var information = proc_bsdinfo()
-    let informationSize = MemoryLayout<proc_bsdinfo>.size
-    let returned = withUnsafeMutablePointer(to: &information) { pointer in
-      proc_pidinfo(
-        processIdentifier,
-        Int32(PROC_PIDTBSDINFO),
-        0,
-        pointer,
-        Int32(informationSize)
-      )
-    }
-    guard returned == informationSize,
-      information.pbi_pid == UInt32(processIdentifier),
-      uid_t(information.pbi_uid) == contract.processUserIdentifier,
-      uid_t(information.pbi_ruid) == contract.processUserIdentifier,
-      information.pbi_start_tvsec > 0,
+    let information = try Self.kernelProcessIdentity(processIdentifier)
+    guard information.effectiveUserIdentifier == contract.processUserIdentifier,
+      information.realUserIdentifier == contract.processUserIdentifier,
       processPath(processIdentifier) == contract.executablePath,
       isLive(processIdentifier)
     else { throw Installed40019ServiceIdentityError.rejected }
@@ -201,9 +196,64 @@ package struct Installed40019ServiceProcessObserver: Sendable {
       service: contract.service,
       processIdentifier: processIdentifier,
       userIdentifier: contract.processUserIdentifier,
-      startSeconds: information.pbi_start_tvsec,
-      startMicroseconds: information.pbi_start_tvusec,
+      startSeconds: information.startSeconds,
+      startMicroseconds: information.startMicroseconds,
       xpcCodeSigningRequirement: contract.designatedRequirement
+    )
+  }
+
+  static func kernelProcessIdentity(
+    _ processIdentifier: pid_t
+  ) throws -> Installed40019KernelProcessIdentity {
+    var processInformation = kinfo_proc()
+    var processInformationSize = MemoryLayout<kinfo_proc>.size
+    var managementInformationBase: [Int32] = [
+      CTL_KERN, KERN_PROC, KERN_PROC_PID, processIdentifier,
+    ]
+    let status = managementInformationBase.withUnsafeMutableBufferPointer { mib in
+      withUnsafeMutablePointer(to: &processInformation) { information in
+        sysctl(
+          mib.baseAddress,
+          u_int(mib.count),
+          information,
+          &processInformationSize,
+          nil,
+          0
+        )
+      }
+    }
+    guard status == 0, processInformationSize == MemoryLayout<kinfo_proc>.size else {
+      throw Installed40019ServiceIdentityError.rejected
+    }
+    return try validatedKernelProcessIdentity(
+      expectedProcessIdentifier: processIdentifier,
+      observedProcessIdentifier: processInformation.kp_proc.p_pid,
+      effectiveUserIdentifier: processInformation.kp_eproc.e_ucred.cr_uid,
+      realUserIdentifier: processInformation.kp_eproc.e_pcred.p_ruid,
+      startSeconds: processInformation.kp_proc.p_starttime.tv_sec,
+      startMicroseconds: processInformation.kp_proc.p_starttime.tv_usec
+    )
+  }
+
+  static func validatedKernelProcessIdentity(
+    expectedProcessIdentifier: pid_t,
+    observedProcessIdentifier: pid_t,
+    effectiveUserIdentifier: uid_t,
+    realUserIdentifier: uid_t,
+    startSeconds: Int,
+    startMicroseconds: Int32
+  ) throws -> Installed40019KernelProcessIdentity {
+    guard observedProcessIdentifier == expectedProcessIdentifier,
+      startSeconds > 0,
+      startMicroseconds >= 0,
+      startMicroseconds < 1_000_000
+    else { throw Installed40019ServiceIdentityError.rejected }
+    return Installed40019KernelProcessIdentity(
+      processIdentifier: observedProcessIdentifier,
+      effectiveUserIdentifier: effectiveUserIdentifier,
+      realUserIdentifier: realUserIdentifier,
+      startSeconds: UInt64(startSeconds),
+      startMicroseconds: UInt64(startMicroseconds)
     )
   }
 

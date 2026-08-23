@@ -57,7 +57,7 @@ from scripts.dormant_app_install import (
 
 
 OLD = AppIdentity("0.4.0", "40019", "a" * 64)
-NEW = AppIdentity("0.4.0", "40024", "b" * 64)
+NEW = AppIdentity("0.4.0", "40026", "b" * 64)
 CANDIDATE = CandidateIdentity(
     app=NEW,
     manifest_sha256="c" * 64,
@@ -967,8 +967,8 @@ class DormantInstallValidationTests(unittest.TestCase):
         paths = InstallPaths.production("final")
 
         self.assertEqual(paths.profile, FINAL_INSTALL_PROFILE)
-        self.assertEqual(paths.profile.build_number, "40025")
-        self.assertEqual(paths.profile.previous_build_number, "40024")
+        self.assertEqual(paths.profile.build_number, "40027")
+        self.assertEqual(paths.profile.previous_build_number, "40026")
         self.assertTrue(
             str(paths.candidate_app).endswith(
                 "/target/candidates/0.4.0/signed/Clash for Mac.app"
@@ -982,14 +982,14 @@ class DormantInstallValidationTests(unittest.TestCase):
         document = {
             "candidate": {
                 **CANDIDATE.document(),
-                "build_number": "40025",
+                "build_number": "40027",
             },
             "document": "cfw-dormant-app-install-v1",
             "guards": [
                 {"after": None, "before": guard(), "operation": "install"}
             ],
             "phase": "prepared",
-            "previous": {**OLD.document(), "build_number": "40024"},
+            "previous": {**OLD.document(), "build_number": "40026"},
             "schema_version": 1,
             "sequence": 1,
             "staging_name": f"{FINAL_STAGING_PREFIX}{transaction_id}",
@@ -1074,12 +1074,12 @@ class DormantInstallValidationTests(unittest.TestCase):
             ".com.bill.clashformac.dormant-install.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         )
 
-    def test_production_candidate_is_fixed_to_40024_validation_worktree(self) -> None:
+    def test_production_candidate_is_fixed_to_40026_validation_worktree(self) -> None:
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                "/target/release-worktrees/40024/target/candidates/0.4.0/"
-                "validation/40024/signed/Clash for Mac.app"
+                "/target/release-worktrees/40026/target/candidates/0.4.0/"
+                "validation/40026/signed/Clash for Mac.app"
             )
         )
 

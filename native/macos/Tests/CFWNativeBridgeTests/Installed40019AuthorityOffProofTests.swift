@@ -96,13 +96,13 @@ private final class StubInstalled40019AuthoritySession:
 
   private static func handshakeResponse(requestID: String) -> String {
     """
-    {"major":1,"minor":0,"operation_id":null,"request_id":"\(requestID)","result":{"command_timeout_ms":5000,"maximum_configuration_bytes":786432,"maximum_credential_slots":256,"maximum_individual_secret_bytes":16384,"maximum_mutating_transactions":1,"maximum_queued_events_per_peer":32,"maximum_read_only_requests":64,"maximum_total_secret_bytes":262144,"preparation_lifetime_ms":10000,"stop_attestation_timeout_ms":5000,"version":{"feature_bits":0,"major":1,"max_message_bytes":1048576,"minimum_minor":0,"minor":0}}}
+    {"major":1,"minor":0,"request_id":"\(requestID)","result":{"command_timeout_ms":5000,"maximum_configuration_bytes":786432,"maximum_credential_slots":256,"maximum_individual_secret_bytes":16384,"maximum_mutating_transactions":1,"maximum_queued_events_per_peer":32,"maximum_read_only_requests":64,"maximum_total_secret_bytes":262144,"preparation_lifetime_ms":10000,"stop_attestation_timeout_ms":5000,"version":{"feature_bits":0,"major":1,"max_message_bytes":1048576,"minimum_minor":0,"minor":0}}}
     """
   }
 
   private static func snapshotResponse(requestID: String, state: String) -> String {
     """
-    {"major":1,"minor":0,"operation_id":null,"request_id":"\(requestID)","result":{"console_uid":501,"last_failure":null,"lease_view":null,"protocol_version":{"feature_bits":0,"major":1,"max_message_bytes":1048576,"minimum_minor":0,"minor":0},"replay_cursor":null,"revision":1,"state":"\(state)"}}
+    {"major":1,"minor":0,"request_id":"\(requestID)","result":{"console_uid":501,"protocol_version":{"feature_bits":0,"major":1,"max_message_bytes":1048576,"minimum_minor":0,"minor":0},"revision":1,"state":"\(state)"}}
     """
   }
 }
@@ -133,6 +133,17 @@ private func authorityIdentity(
     startSeconds: 1_777_777_777,
     startMicroseconds: 123_456,
     xpcCodeSigningRequirement: "fixed-authority-requirement"
+  )
+}
+
+@Test func installed40019AuthorityUsesTheRoleScopedHostMachService() {
+  #expect(
+    Installed40019AuthorityOffProver.hostMachServiceName
+      == GlobalAuthorityConnectionContract.machServiceName(for: .host)
+  )
+  #expect(
+    Installed40019AuthorityOffProver.hostMachServiceName
+      == "YKUPL7Z869.group.com.bill.clashformac.global-authority.host"
   )
 }
 

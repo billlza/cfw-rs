@@ -45,5 +45,7 @@ regenerated after an identity change, or treated as candidate evidence.
 
 Do not delete, rename, copy to another build number, resubmit, install, or use
 these bytes as input to `validated-candidate.json`. Do not allocate build 40023.
-The next validation/final pair is 40024/40025 from one new clean source
-identity containing the fixed, read-only 40019 compatibility proof.
+Build 40024 and its unbuilt reserved final companion 40025 were later retired
+under their own immutable record. The next validation/final pair is
+40026/40027 from one new clean source identity containing the corrected,
+read-only 40019 compatibility proof.

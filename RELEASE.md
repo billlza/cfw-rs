@@ -479,7 +479,12 @@ scripts/release_publication_gate.sh \
   "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
 ```
 
-### Fixed 40024 to 40025 physical-candidate evidence sequence
+### Fixed 40026 to 40027 physical-candidate evidence sequence
+
+The canonical allocation ledger is
+[`docs/release/build-allocations-v040.json`](docs/release/build-allocations-v040.json).
+The build-boundary gate rejects an active pair that overlaps or truncates its
+immutable retired prefix.
 
 The production evidence composer has no fixture, path, output, build-number, or
 success-override option. Run this sequence exactly once from one clean release
@@ -504,6 +509,16 @@ service or app mutation. Build 40022 and its reserved, unbuilt final companion
 40023 are both retired; preserve their identities and evidence exactly as
 recorded in
 [`docs/release/validation-build-40022-retirement.md`](docs/release/validation-build-40022-retirement.md).
+Build `40024` completed notarization, stapling, Gatekeeper, app, and manifest
+verification under Apple submission
+`da1cd32b-2614-49a1-9d56-b25a1eb94431`, but its read-only preflight exposed
+main-thread callback starvation and two exact installed-40019 observation/wire
+contract errors. No service registration or app mutation occurred. Preserve and
+retire those bytes as recorded in
+[`docs/release/validation-build-40024-retirement.md`](docs/release/validation-build-40024-retirement.md);
+never rebuild, relabel, resubmit, install, or approve that build. Its fixed but
+unbuilt final companion, build `40025`, is also retired and must never be
+reassigned.
 
 The 40019 compatibility path is read-only and exact-version only. Each legacy
 unregister action reproves Off before mutation. If a completed Authority
@@ -517,14 +532,14 @@ of guessing from service status, and it never labels recovery as a legacy v1.0
 wire proof.
 
 1. from the final clean release commit, create the fixed detached worktree
-   `target/release-worktrees/40024` and its otherwise empty direct `target`
+   `target/release-worktrees/40026` and its otherwise empty direct `target`
    directory. Before materializing any cache or build output, run this explicit
    enrollment once from the operator repository root:
 
    ```bash
    PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B \
      scripts/release_secret_material_blocker.py \
-     "$PWD" --authorize-release-worktree 40024
+     "$PWD" --authorize-release-worktree 40026
    ```
 
    The scanner never mints this receipt. The command atomically publishes a
@@ -534,7 +549,7 @@ wire proof.
    until the command returns. Only after that succeeds, materialize the real
    non-symlink `target/toolchains` and
    native dependency trees from the same pinned artifacts, then build and
-   notarize validation build `40024` directly in that worktree. The workspace
+   notarize validation build `40026` directly in that worktree. The workspace
    secret gate excludes only that authenticated worktree's direct managed-cache
    roots; it still scans the worktree source and every `target/candidates`,
    `target/tmp`, `target/release`, or unexpected tree;
@@ -574,15 +589,15 @@ wire proof.
    recommission journal would leave an unproven mixed state. Never use
    `launchctl bootout`, `kill`, `sfltool resetbtm`, Finder, `ditto`, or a DMG
    drag as a substitute;
-3. install and exercise validation build `40024`, preserving its fixed
+3. install and exercise validation build `40026`, preserving its fixed
    CI/toolchain, app-manifest, notarization, service/install, and
    runtime-recovery records;
 4. have a human reviewer approve those exact bytes in
    `target/candidates/0.4.0/review/validated-candidate.json`;
 5. build, sign inside-out, notarize, staple, and Gatekeeper-verify final build
-   `40025` from the same clean source identity;
+   `40027` from the same clean source identity;
 6. repeat the fixed transaction using the independent final-generation
-   journals. This proves and installs only the exact `40024` to `40025`
+   journals. This proves and installs only the exact `40026` to `40027`
    transition without overwriting the validation-generation evidence:
 
    ```bash
@@ -595,8 +610,8 @@ wire proof.
 
    Any interruption must resume with the matching script's `--final
    --recover` form. Before collection, reopen both final journals, prove build
-   `40025` is installed, prove GlobalAuthority and ProxyAgent belong to build
-   `40025`, and prove the engine remains globally Off;
+   `40027` is installed, prove GlobalAuthority and ProxyAgent belong to build
+   `40027`, and prove the engine remains globally Off;
 7. freeze the signed/notarized runtime candidate before collection:
 
    ```bash
@@ -720,7 +735,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 40025. No updater key, Apple notarization key, local private key, or older
+build 40027. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable

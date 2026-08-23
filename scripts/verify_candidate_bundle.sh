@@ -1,7 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
+# shellcheck source=scripts/release_python_launcher.sh
+source "$repo_root/scripts/release_python_launcher.sh"
 app_path="${1:-$repo_root/target/candidates/0.4.0/unsigned/cargo/release/bundle/macos/Clash for Mac.app}"
 native_products_root="${2:-$repo_root/target/candidates/0.4.0/unsigned/native-products}"
 unsigned_host_option="${3:-}"
@@ -28,5 +31,7 @@ arguments=(
 if [[ -n "$unsigned_host_option" ]]; then
   arguments+=("$unsigned_host_option")
 fi
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_candidate_bundle.py" \
+cfw_run_release_python_script \
+  "$repo_root" \
+  "$repo_root/scripts/verify_candidate_bundle.py" \
   "${arguments[@]}"

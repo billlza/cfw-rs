@@ -20,7 +20,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
 import stat
 import subprocess
 import tarfile
@@ -28,6 +27,26 @@ import tempfile
 import tomllib
 from typing import Any, Callable
 import uuid
+import sys
+
+if __name__ == "__main__":
+    requested_command = sys.argv[1] if len(sys.argv) > 1 else ""
+    if requested_command in {
+        "seal-updater",
+        "verify-updater",
+        "verify-dmg",
+        "seal-release",
+        "verify-release",
+    }:
+        from release_python_runtime import (
+            ReleasePythonRuntimeError,
+            require_closed_release_runtime,
+        )
+
+        try:
+            require_closed_release_runtime()
+        except ReleasePythonRuntimeError as error:
+            raise SystemExit(f"error: release artifact set: {error}") from error
 
 if __package__:
     from .candidate_artifact_binding import TOOLCHAIN_METADATA_ORDER
@@ -64,6 +83,21 @@ if __package__:
         MAX_SOURCE_ARCHIVE_BYTES as MAX_CORRESPONDING_SOURCE_ARCHIVE_BYTES,
     )
     from .repository_source_identity import SourceIdentityError, current_identity
+    from .release_cargo_inputs import (
+        CRATES_IO_SOURCE,
+        ReleaseCargoInputsError,
+        create_runtime_cargo_home,
+        release_verifier_dependency_records,
+        verify_runtime_cargo_home,
+        verify_workspace_cargo_inputs,
+    )
+    from .release_rust_toolchain import (
+        ReleaseRustToolchainError,
+        build_toolchain_surface,
+        pinned_toolchain_contract,
+        validate_recorded_surface,
+        verify_pinned_toolchain,
+    )
     from .validate_updater_archive import (
         ArchiveContractError,
         build_archive_app_manifest,
@@ -105,6 +139,21 @@ else:
         MAX_SOURCE_ARCHIVE_BYTES as MAX_CORRESPONDING_SOURCE_ARCHIVE_BYTES,
     )
     from repository_source_identity import SourceIdentityError, current_identity
+    from release_cargo_inputs import (
+        CRATES_IO_SOURCE,
+        ReleaseCargoInputsError,
+        create_runtime_cargo_home,
+        release_verifier_dependency_records,
+        verify_runtime_cargo_home,
+        verify_workspace_cargo_inputs,
+    )
+    from release_rust_toolchain import (
+        ReleaseRustToolchainError,
+        build_toolchain_surface,
+        pinned_toolchain_contract,
+        validate_recorded_surface,
+        verify_pinned_toolchain,
+    )
     from validate_updater_archive import (
         ArchiveContractError,
         build_archive_app_manifest,
@@ -118,7 +167,7 @@ TEAM_ID = "YKUPL7Z869"
 OFFICIAL_RELEASE_ORIGIN = "https://github.com/billlza/cfw-rs/releases/download"
 UPDATER_SEAL_DOCUMENT = "cfw-updater-release-set-seal-v1"
 UPDATER_VERIFICATION_DOCUMENT = "cfw-updater-embedded-pubkey-verification-v1"
-RELEASE_VERIFIER_BINDING_DOCUMENT = "cfw-release-verifier-build-binding-v1"
+RELEASE_VERIFIER_BINDING_DOCUMENT = "cfw-release-verifier-build-binding-v2"
 DMG_SEAL_DOCUMENT = "cfw-dmg-release-set-seal-v1"
 DMG_SUBMISSION_DOCUMENT = "cfw-dmg-notarization-submission-receipt-v1"
 DISTRIBUTION_SEAL_DOCUMENT = "cfw-distribution-release-set-seal-v1"
@@ -149,14 +198,7 @@ MAX_PUBLICATION_BUNDLE_EXTENSION_BYTES = 128 * 1024 * 1024
 MAX_PUBLICATION_BUNDLE_AUXILIARY_BYTES = 256 * 1024 * 1024
 MAX_PUBLICATION_PUBLIC_FILE_BYTES = 256 * 1024 * 1024
 MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES = 256 * 1024 * 1024
-MAX_RELEASE_VERIFIER_CRATE_BYTES = 64 * 1024 * 1024
 MAX_RELEASE_VERIFIER_CRATES = 128
-MAX_RELEASE_VERIFIER_CRATE_ENTRIES = 50_000
-MAX_RELEASE_VERIFIER_CRATE_FILE_BYTES = 32 * 1024 * 1024
-MAX_RELEASE_VERIFIER_VENDOR_BYTES = 512 * 1024 * 1024
-MAX_RELEASE_TOOLCHAIN_FILES = 50_000
-MAX_RELEASE_TOOLCHAIN_FILE_BYTES = 768 * 1024 * 1024
-MAX_RELEASE_TOOLCHAIN_TOTAL_BYTES = 1024 * 1024 * 1024
 PRIVATE_PUBLICATION_VISIBILITIES = frozenset(
     {"private-release-evidence", "private-release-operations"}
 )
@@ -176,7 +218,6 @@ PRIVATE_PUBLICATION_FILENAMES = frozenset(
     }
 )
 RELEASE_VERIFIER_TARGET = "aarch64-apple-darwin"
-CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 RELEASE_VERIFIER_SOURCE_INPUTS = {
     "cargo_lock": "Cargo.lock",
     "crate_manifest": "crates/cfw-release-verifier/Cargo.toml",
@@ -187,6 +228,8 @@ RELEASE_VERIFIER_SOURCE_INPUTS = {
     "workspace_manifest": "Cargo.toml",
 }
 RELEASE_VERIFIER_BUILD_COMMAND = [
+    "CARGO_HOME=<private-runtime-cargo-home>",
+    "CARGO_NET_OFFLINE=true",
     "cargo",
     "build",
     "--offline",
@@ -202,27 +245,17 @@ RELEASE_VERIFIER_BUILD_COMMAND = [
     "--target-dir",
     "<private-ephemeral-target>",
     "--config",
-    "net.offline=true",
-    "--config",
-    'source.crates-io.replace-with="verified-vendor"',
-    "--config",
-    'source.verified-vendor.directory="<verified-vendor>"',
-    "--config",
     'build.rustflags=["--remap-path-prefix=<private-root>=/cfw-release-verifier-build"]',
 ]
 RELEASE_VERIFIER_LOCK_COMMAND = [
+    "CARGO_HOME=<private-runtime-cargo-home>",
+    "CARGO_NET_OFFLINE=true",
     "cargo",
     "generate-lockfile",
     "--offline",
     "--quiet",
     "--manifest-path",
     "<private-isolated-workspace>/Cargo.toml",
-    "--config",
-    "net.offline=true",
-    "--config",
-    'source.crates-io.replace-with="verified-vendor"',
-    "--config",
-    'source.verified-vendor.directory="<verified-vendor>"',
 ]
 RELEASE_VERIFIER_VERIFY_COMMAND = [
     "cfw-release-verifier",
@@ -280,20 +313,15 @@ class ReleaseVerifierBuild:
     executable: Path
     cargo: Path
     cargo_version: str
+    cargo_input_root: Path
+    cargo_lock_sha256: str
+    cargo_vendor_sha256: str
     dependency_sources: dict[str, Any]
     isolated_lock_sha256: str
     rustc: Path
     rustc_version: str
-    rustup: Path
     toolchain: str
     toolchain_surface: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class LockedRegistryCrate:
-    checksum: str
-    name: str
-    version: str
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -485,144 +513,6 @@ def _release_verifier_source_inputs(repository: Path) -> dict[str, dict[str, obj
     return records
 
 
-def _source_cargo_home() -> Path:
-    configured = os.environ.get("CARGO_HOME")
-    candidate = (
-        Path(configured).expanduser()
-        if configured
-        else Path.home() / ".cargo"
-    )
-    try:
-        resolved = candidate.resolve(strict=True)
-    except (OSError, RuntimeError) as error:
-        raise ArtifactSetError("Cargo source cache is unavailable") from error
-    _require_real_directory(resolved, "Cargo source cache")
-    return resolved
-
-
-def _reject_effective_cargo_configuration(
-    repository: Path, cargo_home: Path
-) -> None:
-    try:
-        canonical_repository = repository.resolve(strict=True)
-    except (OSError, RuntimeError) as error:
-        raise ArtifactSetError("release repository cannot be resolved") from error
-    candidates: set[Path] = {
-        cargo_home / "config",
-        cargo_home / "config.toml",
-    }
-    for directory in (canonical_repository, *canonical_repository.parents):
-        candidates.add(directory / ".cargo/config")
-        candidates.add(directory / ".cargo/config.toml")
-    for path in sorted(candidates):
-        if os.path.lexists(path):
-            raise ArtifactSetError(
-                "release verifier build refuses an ambient Cargo configuration: "
-                f"{path}"
-            )
-
-
-def _locked_release_verifier_crates(repository: Path) -> list[LockedRegistryCrate]:
-    lock_path = repository / "Cargo.lock"
-    try:
-        document = tomllib.loads(
-            read_regular(lock_path, MAX_PUBLICATION_DOCUMENT_BYTES).decode("utf-8")
-        )
-    except (PublicationError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-        raise ArtifactSetError("Cargo.lock is not a bounded TOML document") from error
-    packages = document.get("package")
-    if document.get("version") != 4 or not isinstance(packages, list):
-        raise ArtifactSetError("Cargo.lock does not use the required v4 package graph")
-
-    indexed: dict[str, list[dict[str, Any]]] = {}
-    identities: dict[tuple[str, str, str | None], dict[str, Any]] = {}
-    for package in packages:
-        if not isinstance(package, dict):
-            raise ArtifactSetError("Cargo.lock contains a malformed package")
-        name = package.get("name")
-        version = package.get("version")
-        source = package.get("source")
-        if (
-            not isinstance(name, str)
-            or not isinstance(version, str)
-            or (source is not None and not isinstance(source, str))
-        ):
-            raise ArtifactSetError("Cargo.lock package identity is malformed")
-        identity = (name, version, source)
-        if identity in identities:
-            raise ArtifactSetError("Cargo.lock repeats a package identity")
-        identities[identity] = package
-        indexed.setdefault(name, []).append(package)
-
-    roots = [
-        package
-        for package in indexed.get("cfw-release-verifier", [])
-        if package.get("source") is None and package.get("version") == "0.4.0"
-    ]
-    if len(roots) != 1:
-        raise ArtifactSetError("Cargo.lock lacks the exact local release verifier")
-
-    def dependency_package(rendered: object) -> dict[str, Any]:
-        if not isinstance(rendered, str) or not rendered or len(rendered) > 1024:
-            raise ArtifactSetError("Cargo.lock dependency reference is malformed")
-        name, separator, remainder = rendered.partition(" ")
-        candidates = indexed.get(name, [])
-        if separator:
-            version, source_separator, source_text = remainder.partition(" (")
-            candidates = [
-                package for package in candidates if package.get("version") == version
-            ]
-            if source_separator:
-                if not source_text.endswith(")"):
-                    raise ArtifactSetError("Cargo.lock dependency source is malformed")
-                source = source_text[:-1]
-                candidates = [
-                    package for package in candidates if package.get("source") == source
-                ]
-        if len(candidates) != 1:
-            raise ArtifactSetError(
-                f"Cargo.lock dependency is ambiguous or absent: {rendered}"
-            )
-        return candidates[0]
-
-    pending = [roots[0]]
-    visited: set[tuple[str, str, str | None]] = set()
-    locked: list[LockedRegistryCrate] = []
-    while pending:
-        package = pending.pop()
-        identity = (
-            str(package["name"]),
-            str(package["version"]),
-            package.get("source"),
-        )
-        if identity in visited:
-            continue
-        visited.add(identity)
-        if len(visited) > MAX_RELEASE_VERIFIER_CRATES + 1:
-            raise ArtifactSetError("release verifier dependency graph is too large")
-        if package is not roots[0]:
-            if package.get("source") != CRATES_IO_SOURCE:
-                raise ArtifactSetError(
-                    "release verifier dependency is not from the fixed crates.io registry"
-                )
-            locked.append(
-                LockedRegistryCrate(
-                    checksum=_require_sha256(
-                        package.get("checksum"),
-                        f"{package['name']} {package['version']} crate checksum",
-                    ),
-                    name=str(package["name"]),
-                    version=str(package["version"]),
-                )
-            )
-        dependencies = package.get("dependencies", [])
-        if not isinstance(dependencies, list):
-            raise ArtifactSetError("Cargo.lock package dependencies are malformed")
-        pending.extend(dependency_package(item) for item in dependencies)
-    locked.sort(key=lambda item: (item.name, item.version, item.checksum))
-    return locked
-
-
 def _write_private_file(path: Path, data: bytes, mode: int = 0o600) -> None:
     try:
         with path.open("xb") as handle:
@@ -630,158 +520,6 @@ def _write_private_file(path: Path, data: bytes, mode: int = 0o600) -> None:
             handle.write(data)
     except OSError as error:
         raise ArtifactSetError(f"cannot materialize private build input: {path.name}") from error
-
-
-def _verified_crate_archive(cargo_home: Path, crate: LockedRegistryCrate) -> Path:
-    candidates = sorted(
-        (cargo_home / "registry/cache").glob(
-            f"*/{crate.name}-{crate.version}.crate"
-        )
-    )
-    matches: list[Path] = []
-    for candidate in candidates:
-        try:
-            record = _artifact_record(candidate, MAX_RELEASE_VERIFIER_CRATE_BYTES)
-        except ArtifactSetError:
-            continue
-        if record["sha256"] == crate.checksum:
-            matches.append(candidate)
-    if len(matches) != 1:
-        raise ArtifactSetError(
-            f"expected one checksum-verified cached crate for {crate.name} {crate.version}"
-        )
-    return matches[0]
-
-
-def _extract_verified_crate(
-    archive_path: Path,
-    crate: LockedRegistryCrate,
-    vendor: Path,
-    budget: dict[str, int],
-) -> dict[str, object]:
-    package_root_name = f"{crate.name}-{crate.version}"
-    package_root = vendor / package_root_name
-    package_root.mkdir(mode=0o700)
-    seen: set[str] = set()
-    file_digests: dict[str, str] = {}
-    try:
-        with tarfile.open(archive_path, mode="r:gz") as archive:
-            for member in archive:
-                budget["entries"] += 1
-                if budget["entries"] > MAX_RELEASE_VERIFIER_CRATE_ENTRIES:
-                    raise ArtifactSetError("verified crate contains too many entries")
-                path = PurePosixPath(member.name)
-                if (
-                    path.is_absolute()
-                    or not path.parts
-                    or path.parts[0] != package_root_name
-                    or any(part in {"", ".", ".."} for part in path.parts)
-                    or len(member.name.encode("utf-8")) > 4096
-                ):
-                    raise ArtifactSetError("verified crate contains an unsafe path")
-                relative = PurePosixPath(*path.parts[1:])
-                if not relative.parts:
-                    if not member.isdir():
-                        raise ArtifactSetError("verified crate root is not a directory")
-                    continue
-                rendered = relative.as_posix()
-                if rendered in seen:
-                    raise ArtifactSetError("verified crate contains a duplicate path")
-                seen.add(rendered)
-                destination = package_root.joinpath(*relative.parts)
-                if member.isdir():
-                    destination.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    destination.chmod(0o700)
-                    continue
-                if not member.isfile():
-                    raise ArtifactSetError(
-                        "verified crate contains a non-regular source entry"
-                    )
-                if (
-                    member.size < 0
-                    or member.size > MAX_RELEASE_VERIFIER_CRATE_FILE_BYTES
-                    or budget["bytes"] + member.size
-                    > MAX_RELEASE_VERIFIER_VENDOR_BYTES
-                ):
-                    raise ArtifactSetError("verified crate source exceeds its fixed limit")
-                budget["bytes"] += member.size
-                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                source = archive.extractfile(member)
-                if source is None:
-                    raise ArtifactSetError("verified crate source entry cannot be read")
-                digest = hashlib.sha256()
-                remaining = member.size
-                try:
-                    with destination.open("xb") as output:
-                        os.fchmod(
-                            output.fileno(), 0o700 if member.mode & 0o111 else 0o600
-                        )
-                        while remaining:
-                            chunk = source.read(min(1024 * 1024, remaining))
-                            if not chunk:
-                                raise ArtifactSetError(
-                                    "verified crate source entry is truncated"
-                                )
-                            remaining -= len(chunk)
-                            digest.update(chunk)
-                            output.write(chunk)
-                        if source.read(1):
-                            raise ArtifactSetError(
-                                "verified crate source exceeds its header size"
-                            )
-                finally:
-                    source.close()
-                file_digests[rendered] = digest.hexdigest()
-    except (OSError, tarfile.TarError) as error:
-        raise ArtifactSetError("cannot extract checksum-verified crate archive") from error
-    if "Cargo.toml" not in file_digests:
-        raise ArtifactSetError("verified crate omits Cargo.toml")
-    checksum_document = {
-        "files": file_digests,
-        "package": crate.checksum,
-    }
-    _write_private_file(
-        package_root / ".cargo-checksum.json",
-        canonical_json(checksum_document),
-    )
-    try:
-        manifest = build_manifest(package_root, algorithm="sha256-tree-v2")
-    except (OSError, ValueError) as error:
-        raise ArtifactSetError("cannot bind verified crate source tree") from error
-    return {
-        "crate_sha256": crate.checksum,
-        "name": crate.name,
-        "source": CRATES_IO_SOURCE,
-        "source_tree_sha256": manifest["sha256"],
-        "version": crate.version,
-    }
-
-
-def _materialize_verified_vendor(
-    repository: Path, cargo_home: Path, vendor: Path
-) -> dict[str, object]:
-    locked = _locked_release_verifier_crates(repository)
-    archives = [
-        (_verified_crate_archive(cargo_home, crate), crate) for crate in locked
-    ]
-    if (
-        sum(path.lstat().st_size for path, _crate in archives)
-        > MAX_RELEASE_VERIFIER_VENDOR_BYTES
-    ):
-        raise ArtifactSetError("release verifier crate archives exceed their fixed limit")
-    budget = {"bytes": 0, "entries": 0}
-    crates = [
-        _extract_verified_crate(path, crate, vendor, budget)
-        for path, crate in archives
-    ]
-    if not crates:
-        raise ArtifactSetError("release verifier has no authenticated dependencies")
-    digest = hashlib.sha256(canonical_json(crates)).hexdigest()
-    return {
-        "algorithm": "crates-io-lock-archive-tree-v1",
-        "crates": crates,
-        "sha256": digest,
-    }
 
 
 def _validate_isolated_release_verifier_lock(
@@ -912,33 +650,10 @@ def _validate_release_verifier_dependencies(value: object) -> dict[str, Any]:
 def _validate_release_toolchain_surface(
     value: object, repository: Path
 ) -> dict[str, Any]:
-    value = _require_exact_keys(
-        value,
-        {"algorithm", "components", "file_count", "sha256", "total_size"},
-        "Rust release toolchain surface",
-    )
-    expected_components = sorted(
-        {
-            f"cargo-{RELEASE_VERIFIER_TARGET}",
-            f"clippy-preview-{RELEASE_VERIFIER_TARGET}",
-            f"rust-std-{RELEASE_VERIFIER_TARGET}",
-            f"rustc-{RELEASE_VERIFIER_TARGET}",
-            f"rustfmt-preview-{RELEASE_VERIFIER_TARGET}",
-        }
-    )
-    if (
-        value["algorithm"] != "rustup-component-file-tree-v1"
-        or value["components"] != expected_components
-        or not isinstance(value["file_count"], int)
-        or isinstance(value["file_count"], bool)
-        or not 0 < value["file_count"] <= MAX_RELEASE_TOOLCHAIN_FILES
-        or not isinstance(value["total_size"], int)
-        or isinstance(value["total_size"], bool)
-        or not 0 < value["total_size"] <= MAX_RELEASE_TOOLCHAIN_TOTAL_BYTES
-        or value["sha256"] != _release_toolchain_surface_pin(repository)
-    ):
-        raise ArtifactSetError("Rust release toolchain surface is inconsistent")
-    return value
+    try:
+        return validate_recorded_surface(repository, value)
+    except ReleaseRustToolchainError as error:
+        raise ArtifactSetError("Rust release toolchain surface is inconsistent") from error
 
 
 def _validate_release_verifier_binding(
@@ -949,6 +664,8 @@ def _validate_release_verifier_binding(
         {
             "build_command",
             "cargo",
+            "cargo_workspace_lock_sha256",
+            "cargo_workspace_vendor_sha256",
             "dependency_sources",
             "document",
             "executable",
@@ -957,7 +674,6 @@ def _validate_release_verifier_binding(
             "lock_sha256",
             "network",
             "rustc",
-            "rustup",
             "schema_version",
             "source_inputs",
             "target",
@@ -970,7 +686,7 @@ def _validate_release_verifier_binding(
     if (
         value["document"] != RELEASE_VERIFIER_BINDING_DOCUMENT
         or type(value["schema_version"]) is not int
-        or value["schema_version"] != 1
+        or value["schema_version"] != 3
         or value["network"] != "offline"
         or value["target"] != RELEASE_VERIFIER_TARGET
         or value["build_command"] != RELEASE_VERIFIER_BUILD_COMMAND
@@ -983,6 +699,14 @@ def _validate_release_verifier_binding(
     ):
         raise ArtifactSetError("release verifier build policy is inconsistent")
     _require_sha256(value["lock_sha256"], "isolated release verifier lock digest")
+    cargo_workspace_lock_sha256 = _require_sha256(
+        value["cargo_workspace_lock_sha256"],
+        "release verifier workspace Cargo.lock digest",
+    )
+    _require_sha256(
+        value["cargo_workspace_vendor_sha256"],
+        "release verifier workspace Cargo vendor digest",
+    )
 
     channel = _pinned_rust_channel(repository)
     expected_toolchain = f"{channel}-aarch64-apple-darwin"
@@ -993,12 +717,6 @@ def _validate_release_verifier_binding(
     )
     rustc = _validate_recorded_executable(
         value["rustc"], filename="rustc", label="release verifier rustc", include_version=True
-    )
-    _validate_recorded_executable(
-        value["rustup"],
-        filename="rustup",
-        label="release verifier rustup",
-        include_version=False,
     )
     _validate_recorded_executable(
         value["executable"],
@@ -1013,11 +731,38 @@ def _validate_release_verifier_binding(
         or channel not in str(rustc["version"])
     ):
         raise ArtifactSetError("release verifier compiler versions are inconsistent")
-    _validate_release_verifier_dependencies(value["dependency_sources"])
+    dependency_sources = _validate_release_verifier_dependencies(
+        value["dependency_sources"]
+    )
     _validate_release_toolchain_surface(value["toolchain_surface"], repository)
     if value["source_inputs"] != _release_verifier_source_inputs(repository):
         raise ArtifactSetError(
             "release verifier source inputs differ from the sealed build binding"
+        )
+    if cargo_workspace_lock_sha256 != value["source_inputs"]["cargo_lock"]["sha256"]:
+        raise ArtifactSetError(
+            "release verifier workspace Cargo.lock differs from its source binding"
+        )
+    try:
+        workspace_inputs = verify_workspace_cargo_inputs(
+            repository,
+            Path(os.environ["CFW_RELEASE_CARGO_INPUT_ROOT"]),
+        )
+        expected_dependencies = release_verifier_dependency_records(
+            repository, workspace_inputs
+        )
+    except (KeyError, OSError, ReleaseCargoInputsError) as error:
+        raise ArtifactSetError(
+            "cannot revalidate the release verifier Cargo workspace inputs"
+        ) from error
+    if (
+        workspace_inputs.cargo_lock_sha256 != cargo_workspace_lock_sha256
+        or workspace_inputs.vendor_tree_sha256
+        != value["cargo_workspace_vendor_sha256"]
+        or dependency_sources != expected_dependencies
+    ):
+        raise ArtifactSetError(
+            "release verifier Cargo dependency binding differs from the verified vendor"
         )
     return value
 
@@ -1074,177 +819,43 @@ def _release_verifier_environment(
 
 
 def _pinned_rust_channel(repository: Path) -> str:
-    path = repository / "rust-toolchain.toml"
     try:
-        document = tomllib.loads(
-            read_regular(path, MAX_SMALL_DOCUMENT_BYTES).decode("utf-8")
-        )
-    except (PublicationError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        return pinned_toolchain_contract(repository)[0]
+    except ReleaseRustToolchainError as error:
         raise ArtifactSetError("Rust release toolchain declaration is invalid") from error
-    if set(document) != {"toolchain"} or not isinstance(
-        document["toolchain"], dict
-    ):
-        raise ArtifactSetError("Rust release toolchain declaration is not exact")
-    channel = document["toolchain"].get("channel")
-    if not isinstance(channel, str) or not re.fullmatch(
-        r"[1-9][0-9]*[.][0-9]+[.][0-9]+", channel
-    ):
-        raise ArtifactSetError("Rust release toolchain channel is not pinned")
-    return channel
 
 
 def _release_toolchain_surface_pin(repository: Path) -> str:
-    env_path = repository / "scripts/dependency_pins.env"
     try:
-        lines = read_regular(env_path, MAX_SMALL_DOCUMENT_BYTES).decode(
-            "utf-8"
-        ).splitlines()
-    except (PublicationError, UnicodeDecodeError) as error:
-        raise ArtifactSetError("release dependency pins are invalid") from error
-    values: dict[str, str] = {}
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", line)
-        if match is None or match.group(1) in values:
-            raise ArtifactSetError("release dependency pins are not canonical")
-        values[match.group(1)] = match.group(2)
-    key = "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256"
-    digest = _require_sha256(values.get(key), "pinned Rust toolchain surface")
-    manifest, _data = _load_strict_json(
-        repository / "scripts/pinned_build_inputs.json",
-        MAX_PUBLICATION_DOCUMENT_BYTES,
-    )
-    tools = manifest.get("tools")
-    if not isinstance(tools, dict) or tools.get(key) != digest:
-        raise ArtifactSetError("Rust toolchain surface pin is not manifest-bound")
-    return digest
+        return pinned_toolchain_contract(repository)[1]
+    except ReleaseRustToolchainError as error:
+        raise ArtifactSetError("Rust toolchain surface pin is not manifest-bound") from error
 
 
 def _pinned_rust_toolchain_root(toolchain: str) -> Path:
-    configured = os.environ.get("RUSTUP_HOME")
-    rustup_home = (
-        Path(configured).expanduser()
-        if configured
-        else Path.home() / ".rustup"
-    )
-    candidate = rustup_home / "toolchains" / toolchain
+    selected_rustc = os.environ.get("CFW_RELEASE_RUSTC_EXECUTABLE")
+    if not selected_rustc:
+        raise ArtifactSetError(
+            "closed release environment omitted its pinned Rust compiler"
+        )
+    candidate = Path(selected_rustc).parent.parent
     try:
         root = candidate.resolve(strict=True)
     except (OSError, RuntimeError) as error:
         raise ArtifactSetError("pinned Rust toolchain directory is unavailable") from error
     if root != candidate.absolute():
         raise ArtifactSetError("pinned Rust toolchain directory is not canonical")
+    if root.name != toolchain:
+        raise ArtifactSetError("pinned Rust compiler is from a different toolchain")
     _require_real_directory(root, "pinned Rust toolchain directory")
     return root
 
 
-def _rust_toolchain_file_record(root: Path, relative: str) -> dict[str, object]:
-    path = root.joinpath(*PurePosixPath(relative).parts)
-    try:
-        metadata = path.lstat()
-    except OSError as error:
-        raise ArtifactSetError("pinned Rust toolchain file is unavailable") from error
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_nlink != 1
-        or metadata.st_size > MAX_RELEASE_TOOLCHAIN_FILE_BYTES
-    ):
-        raise ArtifactSetError("pinned Rust toolchain file is not a bounded regular file")
-    try:
-        size, digest = regular_file_identity(path)
-    except PublicationError as error:
-        raise ArtifactSetError("cannot identify pinned Rust toolchain file") from error
-    if size != metadata.st_size:
-        raise ArtifactSetError("pinned Rust toolchain file changed while hashing")
-    return {
-        "mode": f"{stat.S_IMODE(metadata.st_mode):04o}",
-        "path": relative,
-        "sha256": digest,
-        "size": size,
-    }
-
-
 def _release_toolchain_surface(root: Path) -> dict[str, Any]:
-    expected_components = sorted(
-        {
-            f"cargo-{RELEASE_VERIFIER_TARGET}",
-            f"clippy-preview-{RELEASE_VERIFIER_TARGET}",
-            f"rust-std-{RELEASE_VERIFIER_TARGET}",
-            f"rustc-{RELEASE_VERIFIER_TARGET}",
-            f"rustfmt-preview-{RELEASE_VERIFIER_TARGET}",
-        }
-    )
-    rustlib = root / "lib/rustlib"
-    components_path = rustlib / "components"
     try:
-        components = sorted(
-            read_regular(components_path, MAX_SMALL_DOCUMENT_BYTES)
-            .decode("utf-8")
-            .splitlines()
-        )
-    except (PublicationError, UnicodeDecodeError) as error:
-        raise ArtifactSetError("Rust toolchain component inventory is invalid") from error
-    if components != expected_components:
-        raise ArtifactSetError("Rust toolchain component inventory is not exact")
-
-    relative_files = {
-        "lib/rustlib/components",
-        "lib/rustlib/multirust-channel-manifest.toml",
-        "lib/rustlib/multirust-config.toml",
-        "lib/rustlib/rust-installer-version",
-    }
-    for component in expected_components:
-        manifest_relative = f"lib/rustlib/manifest-{component}"
-        relative_files.add(manifest_relative)
-        manifest_path = root.joinpath(*PurePosixPath(manifest_relative).parts)
-        try:
-            lines = read_regular(manifest_path, MAX_PUBLICATION_DOCUMENT_BYTES).decode(
-                "utf-8"
-            ).splitlines()
-        except (PublicationError, UnicodeDecodeError) as error:
-            raise ArtifactSetError("Rust component manifest is invalid") from error
-        for line in lines:
-            kind, separator, relative = line.partition(":")
-            candidate = PurePosixPath(relative)
-            if (
-                not separator
-                or kind not in {"dir", "file"}
-                or candidate.is_absolute()
-                or not candidate.parts
-                or any(part in {"", ".", ".."} for part in candidate.parts)
-            ):
-                raise ArtifactSetError("Rust component manifest path is unsafe")
-            resolved = root.joinpath(*candidate.parts)
-            if kind == "dir":
-                try:
-                    metadata = resolved.lstat()
-                except OSError as error:
-                    raise ArtifactSetError(
-                        "Rust component directory is unavailable"
-                    ) from error
-                if not stat.S_ISDIR(metadata.st_mode) or resolved.is_symlink():
-                    raise ArtifactSetError("Rust component directory is not real")
-            else:
-                relative_files.add(candidate.as_posix())
-    if len(relative_files) > MAX_RELEASE_TOOLCHAIN_FILES:
-        raise ArtifactSetError("Rust toolchain surface contains too many files")
-    records: list[dict[str, object]] = []
-    total_size = 0
-    for relative in sorted(relative_files):
-        record = _rust_toolchain_file_record(root, relative)
-        total_size += int(record["size"])
-        if total_size > MAX_RELEASE_TOOLCHAIN_TOTAL_BYTES:
-            raise ArtifactSetError("Rust toolchain surface exceeds its fixed size limit")
-        records.append(record)
-    return {
-        "algorithm": "rustup-component-file-tree-v1",
-        "components": expected_components,
-        "file_count": len(records),
-        "sha256": hashlib.sha256(canonical_json(records)).hexdigest(),
-        "total_size": total_size,
-    }
+        return build_toolchain_surface(root)
+    except ReleaseRustToolchainError as error:
+        raise ArtifactSetError("Rust toolchain surface is invalid") from error
 
 
 def _tool_version(
@@ -1273,24 +884,25 @@ def _tool_version(
 
 @contextmanager
 def _compiled_release_verifier(repository: Path):
-    source_cargo_home = _source_cargo_home()
-    _reject_effective_cargo_configuration(repository, source_cargo_home)
-    rustup_text = shutil.which("rustup")
-    if rustup_text is None:
-        raise ArtifactSetError("rustup is unavailable for release verifier build")
     try:
-        rustup = Path(rustup_text).resolve(strict=True)
-    except OSError as error:
-        raise ArtifactSetError("rustup path cannot be resolved") from error
-    _artifact_record(rustup, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
+        workspace_inputs = verify_workspace_cargo_inputs(
+            repository,
+            Path(os.environ["CFW_RELEASE_CARGO_INPUT_ROOT"]),
+        )
+    except (KeyError, OSError, ReleaseCargoInputsError) as error:
+        raise ArtifactSetError(
+            "verified Cargo workspace inputs are unavailable"
+        ) from error
     channel = _pinned_rust_channel(repository)
     toolchain = f"{channel}-{RELEASE_VERIFIER_TARGET}"
     toolchain_root = _pinned_rust_toolchain_root(toolchain)
-    toolchain_surface = _release_toolchain_surface(toolchain_root)
-    if toolchain_surface["sha256"] != _release_toolchain_surface_pin(repository):
-        raise ArtifactSetError("Rust release toolchain differs from its pinned surface")
-    cargo = toolchain_root / "bin/cargo"
-    rustc = toolchain_root / "bin/rustc"
+    try:
+        verified_toolchain = verify_pinned_toolchain(repository, toolchain_root)
+    except ReleaseRustToolchainError as error:
+        raise ArtifactSetError("Rust release toolchain differs from its pin") from error
+    toolchain_surface = verified_toolchain.surface
+    cargo = verified_toolchain.cargo
+    rustc = verified_toolchain.rustc
     _artifact_record(cargo, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
     _artifact_record(rustc, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
     if cargo.parent != rustc.parent:
@@ -1306,7 +918,6 @@ def _compiled_release_verifier(repository: Path):
         home = private_root / "home"
         temporary_directory = private_root / "tmp"
         target = private_root / "target"
-        vendor = private_root / "verified-vendor"
         workspace = private_root / "isolated-workspace"
         crate_directory = workspace / "crates/cfw-release-verifier"
         for directory in (
@@ -1314,15 +925,25 @@ def _compiled_release_verifier(repository: Path):
             home,
             temporary_directory,
             target,
-            vendor,
             workspace,
         ):
             directory.mkdir(mode=0o700)
         crate_directory.mkdir(parents=True, mode=0o700)
         (crate_directory / "src").mkdir(mode=0o700)
-        dependency_sources = _materialize_verified_vendor(
-            repository, source_cargo_home, vendor
-        )
+        try:
+            dependency_sources = release_verifier_dependency_records(
+                repository, workspace_inputs
+            )
+            create_runtime_cargo_home(
+                repository,
+                workspace_inputs,
+                cargo_home,
+                additional_working_directories=(workspace,),
+            )
+        except ReleaseCargoInputsError as error:
+            raise ArtifactSetError(
+                "release verifier Cargo inputs are invalid"
+            ) from error
         _write_private_file(
             workspace / "Cargo.toml",
             RELEASE_VERIFIER_ISOLATED_WORKSPACE.encode("utf-8"),
@@ -1340,7 +961,6 @@ def _compiled_release_verifier(repository: Path):
             ),
         ):
             _write_private_file(destination, read_regular(source, maximum))
-        _reject_effective_cargo_configuration(workspace, cargo_home)
         environment = _release_verifier_environment(
             cargo.parent,
             cargo_home=cargo_home,
@@ -1362,16 +982,6 @@ def _compiled_release_verifier(repository: Path):
             )
         ):
             raise ArtifactSetError("release verifier build environment is injectable")
-        if not re.fullmatch(r"[A-Za-z0-9_./-]+", str(vendor)):
-            raise ArtifactSetError("verified vendor path is not safely renderable")
-        cargo_configuration = [
-            "--config",
-            "net.offline=true",
-            "--config",
-            'source.crates-io.replace-with="verified-vendor"',
-            "--config",
-            f'source.verified-vendor.directory="{vendor}"',
-        ]
         lock_command = [
             str(cargo),
             "generate-lockfile",
@@ -1379,7 +989,6 @@ def _compiled_release_verifier(repository: Path):
             "--quiet",
             "--manifest-path",
             str(workspace / "Cargo.toml"),
-            *cargo_configuration,
         ]
         _run_bounded_process(
             lock_command,
@@ -1406,7 +1015,6 @@ def _compiled_release_verifier(repository: Path):
             str(workspace / "Cargo.toml"),
             "--target-dir",
             str(target),
-            *cargo_configuration,
             "--config",
             (
                 'build.rustflags=["--remap-path-prefix='
@@ -1426,15 +1034,35 @@ def _compiled_release_verifier(repository: Path):
             / "release/cfw-release-verifier"
         )
         _artifact_record(executable, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
+        try:
+            verify_runtime_cargo_home(
+                repository,
+                workspace_inputs,
+                cargo_home,
+                additional_working_directories=(workspace,),
+            )
+            ending_workspace_inputs = verify_workspace_cargo_inputs(
+                repository, workspace_inputs.root
+            )
+        except ReleaseCargoInputsError as error:
+            raise ArtifactSetError(
+                "release verifier Cargo inputs changed during compilation"
+            ) from error
+        if ending_workspace_inputs != workspace_inputs:
+            raise ArtifactSetError(
+                "release verifier Cargo inputs changed during compilation"
+            )
         yield ReleaseVerifierBuild(
             executable=executable,
             cargo=cargo,
             cargo_version=cargo_version,
+            cargo_input_root=workspace_inputs.root,
+            cargo_lock_sha256=workspace_inputs.cargo_lock_sha256,
+            cargo_vendor_sha256=workspace_inputs.vendor_tree_sha256,
             dependency_sources=dependency_sources,
             isolated_lock_sha256=isolated_lock_sha256,
             rustc=rustc,
             rustc_version=rustc_version,
-            rustup=rustup,
             toolchain=toolchain,
             toolchain_surface=toolchain_surface,
         )
@@ -1482,7 +1110,15 @@ def _produce_updater_verification(
     archive: Path,
     signature: Path,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    _reject_effective_cargo_configuration(repository, _source_cargo_home())
+    try:
+        workspace_inputs_before = verify_workspace_cargo_inputs(
+            repository,
+            Path(os.environ["CFW_RELEASE_CARGO_INPUT_ROOT"]),
+        )
+    except (KeyError, OSError, ReleaseCargoInputsError) as error:
+        raise ArtifactSetError(
+            "verified Cargo workspace inputs are unavailable"
+        ) from error
     inputs_before = _release_verifier_source_inputs(repository)
     with _compiled_release_verifier(repository) as build:
         cargo_before = _artifact_record(
@@ -1490,9 +1126,6 @@ def _produce_updater_verification(
         )
         rustc_before = _artifact_record(
             build.rustc, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES
-        )
-        rustup_before = _artifact_record(
-            build.rustup, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES
         )
         executable_before = _artifact_record(
             build.executable, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES
@@ -1505,8 +1138,6 @@ def _produce_updater_verification(
             != cargo_before
             or _artifact_record(build.rustc, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
             != rustc_before
-            or _artifact_record(build.rustup, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
-            != rustup_before
             or _artifact_record(
                 build.executable, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES
             )
@@ -1520,6 +1151,18 @@ def _produce_updater_verification(
         raise ArtifactSetError(
             "release verifier source inputs changed during verification"
         )
+    try:
+        workspace_inputs_after = verify_workspace_cargo_inputs(
+            repository, build.cargo_input_root
+        )
+    except ReleaseCargoInputsError as error:
+        raise ArtifactSetError(
+            "verified Cargo workspace inputs changed during release verification"
+        ) from error
+    if workspace_inputs_after != workspace_inputs_before:
+        raise ArtifactSetError(
+            "verified Cargo workspace inputs changed during release verification"
+        )
     toolchain_surface_after = _release_toolchain_surface(
         build.cargo.parent.parent
     )
@@ -1530,6 +1173,8 @@ def _produce_updater_verification(
     binding = {
         "build_command": RELEASE_VERIFIER_BUILD_COMMAND,
         "cargo": {**cargo_before, "version": build.cargo_version},
+        "cargo_workspace_lock_sha256": build.cargo_lock_sha256,
+        "cargo_workspace_vendor_sha256": build.cargo_vendor_sha256,
         "dependency_sources": build.dependency_sources,
         "document": RELEASE_VERIFIER_BINDING_DOCUMENT,
         "executable": executable_before,
@@ -1540,8 +1185,7 @@ def _produce_updater_verification(
         "lock_sha256": build.isolated_lock_sha256,
         "network": "offline",
         "rustc": {**rustc_before, "version": build.rustc_version},
-        "rustup": rustup_before,
-        "schema_version": 1,
+        "schema_version": 3,
         "source_inputs": inputs_after,
         "target": RELEASE_VERIFIER_TARGET,
         "toolchain": build.toolchain,

@@ -1,9 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Build the pinned libbox XCFramework from the exact materialized patched tree.
 # This script is deliberately offline and never clones source or installs tools.
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/go_release_environment.sh
@@ -12,6 +13,11 @@ source "$repo_root/scripts/go_release_environment.sh"
 source "$repo_root/scripts/libbox_source_contract.sh"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
+python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+if [[ ! -x "$python_bin" ]]; then
+  echo "error: closed release Python is required" >&2
+  exit 1
+fi
 
 source_input="${SING_BOX_SOURCE:-}"
 if [[ -z "$source_input" ]]; then
@@ -153,7 +159,8 @@ go_tools_tree_sha256="$(cfw_release_toolchain_tree_sha256 \
 go_module_cache_tree_sha256="$(cfw_release_toolchain_tree_sha256 \
   "$toolchain_root/go-module-cache.manifest.json")"
 output_manifest="$(dirname "$output_root")/$(basename "$output_root").manifest.json"
-python3 "$repo_root/scripts/hash_artifact.py" \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/hash_artifact.py" \
   "$output_root" \
   --output "$output_manifest" \
   --metadata "sourceTag=$SING_BOX_VERSION" \

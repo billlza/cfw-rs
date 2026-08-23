@@ -5,6 +5,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=../verify_release_app.sh
 source "$repo_root/scripts/verify_release_app.sh"
+entitlement_test_python="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+[[ -x "$entitlement_test_python" ]] || {
+  echo "error: entitlement fixture requires closed Python" >&2
+  exit 1
+}
 
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/cfw-entitlement-test.XXXXXX")"
 trap '/bin/rm -rf "$temporary_root"' EXIT
@@ -13,7 +18,8 @@ write_fixture() {
   local path="$1"
   local kind="$2"
   local keychain_mode="$3"
-  python3 - "$path" "$kind" "$keychain_mode" "$expected_team_id" \
+  PYTHONDONTWRITEBYTECODE=1 "$entitlement_test_python" -I -S -B -W error - \
+    "$path" "$kind" "$keychain_mode" "$expected_team_id" \
     "$expected_app_group" "$expected_agent_keychain_access_group" \
     "$expected_extension_keychain_access_group" <<'PY'
 import plistlib
@@ -112,7 +118,8 @@ printf '%s' 'profile-placeholder' >"$bundle_fixture/Contents/embedded.provisionp
 
 write_profile_fixture() {
   local entitlements_path="$1"
-  python3 - "$profile_fixture" "$entitlements_path" "$certificate_fixture" \
+  PYTHONDONTWRITEBYTECODE=1 "$entitlement_test_python" -I -S -B -W error - \
+    "$profile_fixture" "$entitlements_path" "$certificate_fixture" \
     "$expected_team_id" <<'PY'
 from datetime import datetime, timedelta, timezone
 import plistlib
@@ -156,7 +163,8 @@ write_portal_profile_fixture() {
   local signed_entitlements_path="$1"
   local kind="$2"
   write_profile_fixture "$signed_entitlements_path"
-  python3 - "$profile_fixture" "$kind" "$expected_team_id" <<'PY'
+  PYTHONDONTWRITEBYTECODE=1 "$entitlement_test_python" -I -S -B -W error - \
+    "$profile_fixture" "$kind" "$expected_team_id" <<'PY'
 import plistlib
 import sys
 

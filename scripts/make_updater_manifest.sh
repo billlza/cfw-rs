@@ -46,16 +46,15 @@ for exported_environment_name in $exported_environment_names; do
   esac
 done
 unset exported_environment_name exported_environment_names
-# Release helpers and the interpreter probe must never resolve through a
-# caller-controlled PATH. The canonical Python directory is added only after
-# that fixed probe resolves and passes file checks below.
+# Release helpers must never resolve through a caller-controlled PATH. The
+# shared publication gate replaces this temporary system PATH with the exact
+# pinned release environment before any Python release tool executes.
 PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 LC_ALL=C
 LANG=C
 export LC_ALL LANG
 readonly LC_ALL LANG
-readonly python_probe="/opt/homebrew/bin/python3"
 if [[ -n "${BASHOPTS-}" ||
   "$SHELLOPTS" != "braceexpand:hashall:interactive-comments:privileged" ]]; then
   printf '%s\n' \
@@ -92,7 +91,8 @@ if ! ulimit -c 0 >/dev/null 2>&1 || [[ "$(ulimit -c)" != "0" ]]; then
   exit 1
 fi
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+unset CDPATH
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 
 die() {
   echo "error: $*" >&2
@@ -126,16 +126,11 @@ require_xtrace_disabled() {
 
 require_xtrace_disabled
 set +a
-[[ -x "$python_probe" ]] || die "fixed release Python probe is unavailable"
-python_bin="$($python_probe -I -S -B -c 'import os, sys; print(os.path.realpath(sys.executable))')" ||
-  die "cannot resolve the release Python interpreter"
+python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
 [[ "$python_bin" == /* && -x "$python_bin" ]] ||
-  die "release Python interpreter is not an absolute executable"
+  die "closed release Python interpreter is unavailable"
 require_regular_file "$python_bin"
 readonly python_bin
-PATH="$(dirname "$python_bin"):/usr/bin:/bin:/usr/sbin:/sbin"
-readonly PATH
-export PATH
 cfw_require_supported_python "$python_bin"
 
 assert_semver() {
@@ -220,7 +215,9 @@ archive_size="$(stat -f '%z' "$staged_archive")"
 (( archive_size > 0 && archive_size <= maximum_updater_archive_bytes )) ||
   die "updater archive size must be within 1..=$maximum_updater_archive_bytes bytes"
 
-"$python_bin" -I -S -B "$repo_root/scripts/validate_updater_archive.py" \
+cfw_run_release_python_script \
+  "$repo_root" \
+  "$repo_root/scripts/validate_updater_archive.py" \
   "$staged_archive" "$app_name"
 
 echo "==> signing updater archive"
@@ -231,7 +228,7 @@ set +a
   LC_ALL=C \
   LANG=C \
   PYTHONDONTWRITEBYTECODE=1 \
-  "$python_bin" -I -S -B \
+  "$python_bin" -I -S -B -W error \
   "$repo_root/scripts/updater_signing_launcher.py" \
   "$staged_archive"
 cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
@@ -240,7 +237,8 @@ require_regular_file "$staged_signature"
 download_url="$official_release_origin/v${version}/${archive_name}"
 notes="${NOTES:-Clash for Mac ${version}}"
 VERSION="$version" NOTES="$notes" SIGNATURE="$(tr -d '\n' <"$staged_signature")" \
-DOWNLOAD_URL="$download_url" LATEST_JSON="$staged_latest" "$python_bin" -I -S -B - <<'PY'
+DOWNLOAD_URL="$download_url" LATEST_JSON="$staged_latest" \
+  "$python_bin" -I -S -B -W error - <<'PY'
 import json
 import os
 import sys
@@ -274,8 +272,10 @@ with path.open("x", encoding="utf-8") as handle:
 PY
 require_regular_file "$staged_latest"
 
-PYTHONDONTWRITEBYTECODE=1 "$python_bin" -S -B \
-  "$repo_root/scripts/release_artifact_set.py" seal-updater \
+cfw_run_release_python_script \
+  "$repo_root" \
+  "$repo_root/scripts/release_artifact_set.py" \
+  seal-updater \
   --staging "$staging" \
   --destination "$final_set" \
   --version "$version" \

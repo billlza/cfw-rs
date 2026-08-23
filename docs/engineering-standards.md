@@ -109,7 +109,7 @@ the baseline is the CI parity set, in order:
 cargo fmt --all -- --check
 cargo metadata --locked --filter-platform aarch64-apple-darwin --format-version 1
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-targets
+cargo test --locked --workspace --all-targets --all-features
 cargo deny --locked --target aarch64-apple-darwin check
 ```
 

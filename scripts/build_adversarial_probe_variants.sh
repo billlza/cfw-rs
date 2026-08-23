@@ -253,7 +253,7 @@ readonly EXTERNAL_CASE_GROUPS=(
 )
 
 "${SWIFT}" package --package-path "${PACKAGE}" dump-package >"${PACKAGE_DOCUMENT}"
-/usr/bin/python3 - "${PACKAGE_DOCUMENT}" \
+/usr/bin/python3 -S -B - "${PACKAGE_DOCUMENT}" \
   "${EXTERNAL_TARGETS[0]}" "${EXTERNAL_SOURCE_PATHS[0]}" \
   "${EXTERNAL_TARGETS[1]}" "${EXTERNAL_SOURCE_PATHS[1]}" \
   "${EXTERNAL_TARGETS[2]}" "${EXTERNAL_SOURCE_PATHS[2]}" \

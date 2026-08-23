@@ -45,6 +45,11 @@ from scripts.release_artifact_set import (
     verify_release_sets,
     verify_updater_set,
 )
+from scripts.release_cargo_inputs import (
+    ReleaseCargoInputsError,
+    WorkspaceCargoInputs,
+    reject_ambient_cargo_configuration,
+)
 from scripts.tests.gatekeeper_fixture import fixture as base_gatekeeper_fixture
 from scripts.tests.notary_fixture import (
     ARCHIVE_BYTES,
@@ -108,7 +113,12 @@ def create_release_verifier_build(repository: Path) -> ReleaseVerifierBuild:
             "[package]\nname = \"cfw-release-verifier\"\nversion = \"0.1.0\"\n"
         ),
         "crates/cfw-release-verifier/src/main.rs": "fn main() {}\n",
-        "rust-toolchain.toml": "[toolchain]\nchannel = \"1.97.1\"\n",
+        "rust-toolchain.toml": (
+            "[toolchain]\n"
+            "channel = \"1.97.1\"\n"
+            "components = [\"rustfmt\", \"clippy\"]\n"
+            "profile = \"minimal\"\n"
+        ),
         "apps/cfw-tauri-shell/tauri.conf.json": (
             '{"plugins":{"updater":{"pubkey":"fixture-public-key"}}}\n'
         ),
@@ -124,12 +134,10 @@ def create_release_verifier_build(repository: Path) -> ReleaseVerifierBuild:
     rustc = toolchain_root / "bin/rustc"
     tool_directory = repository / "fixture-release-tools"
     tool_directory.mkdir(mode=0o700)
-    rustup = tool_directory / "rustup"
     executable = tool_directory / "cfw-release-verifier"
     cargo.write_bytes(b"fixture cargo executable\n")
     rustc.write_bytes(b"fixture rustc executable\n")
-    rustup.write_bytes(b"fixture rustup executable\n")
-    for path in (cargo, rustc, rustup):
+    for path in (cargo, rustc):
         path.chmod(0o700)
 
     components = [
@@ -166,6 +174,7 @@ def create_release_verifier_build(repository: Path) -> ReleaseVerifierBuild:
     toolchain_surface = _release_toolchain_surface(toolchain_root)
     (repository / "scripts").mkdir(exist_ok=True)
     (repository / "scripts/dependency_pins.env").write_text(
+        "RUST_VERSION=1.97.1\n"
         "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256="
         + str(toolchain_surface["sha256"])
         + "\n",
@@ -176,6 +185,7 @@ def create_release_verifier_build(repository: Path) -> ReleaseVerifierBuild:
             {
                 "schema": "cfw-pinned-build-inputs-v1",
                 "tools": {
+                    "RUST_VERSION": "1.97.1",
                     "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": (
                         toolchain_surface["sha256"]
                     )
@@ -245,10 +255,20 @@ print(json.dumps({
             + "\n"
         ).encode("utf-8")
     ).hexdigest()
+    cargo_input_root = repository / "fixture-cargo-workspace"
+    cargo_archives = cargo_input_root / "archives"
+    cargo_vendor = cargo_input_root / "verified-vendor"
+    cargo_archives.mkdir(parents=True, mode=0o700)
+    cargo_vendor.mkdir(mode=0o700)
     return ReleaseVerifierBuild(
         executable=executable,
         cargo=cargo,
         cargo_version="cargo 1.97.1 (fixture)",
+        cargo_input_root=cargo_input_root,
+        cargo_lock_sha256=hashlib.sha256(
+            (repository / "Cargo.lock").read_bytes()
+        ).hexdigest(),
+        cargo_vendor_sha256="4" * 64,
         dependency_sources={
             "algorithm": "crates-io-lock-archive-tree-v1",
             "crates": dependency_crates,
@@ -257,10 +277,50 @@ print(json.dumps({
         isolated_lock_sha256="3" * 64,
         rustc=rustc,
         rustc_version="rustc 1.97.1 (fixture)",
-        rustup=rustup,
         toolchain="1.97.1-aarch64-apple-darwin",
         toolchain_surface=toolchain_surface,
     )
+
+
+def cargo_inputs_for_build(build: ReleaseVerifierBuild) -> WorkspaceCargoInputs:
+    return WorkspaceCargoInputs(
+        root=build.cargo_input_root,
+        archives=build.cargo_input_root / "archives",
+        vendor=build.cargo_input_root / "verified-vendor",
+        cargo_lock_sha256=build.cargo_lock_sha256,
+        crates_sha256=str(build.dependency_sources["sha256"]),
+        vendor_tree_sha256=build.cargo_vendor_sha256,
+        crate_records=tuple(build.dependency_sources["crates"]),
+    )
+
+
+def require_fixture_cargo_boundary(repository: Path) -> None:
+    try:
+        reject_ambient_cargo_configuration(repository)
+    except ReleaseCargoInputsError as error:
+        raise ArtifactSetError("ambient Cargo configuration is forbidden") from error
+
+
+@contextmanager
+def verified_cargo_fixture(build: ReleaseVerifierBuild):
+    inputs = cargo_inputs_for_build(build)
+
+    def verify_inputs(repository: Path, root: Path) -> WorkspaceCargoInputs:
+        if repository != build.cargo_input_root.parent or root != inputs.root:
+            raise AssertionError("release verifier used the wrong Cargo input fixture")
+        return inputs
+
+    with patch.dict(
+        os.environ,
+        {"CFW_RELEASE_CARGO_INPUT_ROOT": str(inputs.root)},
+    ), patch(
+        "scripts.release_artifact_set.verify_workspace_cargo_inputs",
+        side_effect=verify_inputs,
+    ), patch(
+        "scripts.release_artifact_set.release_verifier_dependency_records",
+        return_value=build.dependency_sources,
+    ):
+        yield
 
 
 class SimulatedCrash(BaseException):
@@ -763,13 +823,14 @@ class UpdaterArtifactSetTests(unittest.TestCase):
     @contextmanager
     def _compiled_verifier(self, repository: Path):
         self.assertEqual(repository, self.root)
+        require_fixture_cargo_boundary(repository)
         yield self.verifier_build
 
     def seal(self, publish: Callable[[Path, Path], None] = publisher) -> Path:
         with patch(
             "scripts.release_artifact_set._compiled_release_verifier",
             new=self._compiled_verifier,
-        ):
+        ), verified_cargo_fixture(self.verifier_build):
             return seal_updater_set(
                 self.staging,
                 self.destination,
@@ -784,7 +845,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
         with patch(
             "scripts.release_artifact_set._compiled_release_verifier",
             new=self._compiled_verifier,
-        ):
+        ), verified_cargo_fixture(self.verifier_build):
             return verify_updater_set(
                 directory or self.destination,
                 repository=self.root,
@@ -821,6 +882,15 @@ class UpdaterArtifactSetTests(unittest.TestCase):
         self.assertEqual(
             seal["release_verifier"]["executable"]["filename"],
             "cfw-release-verifier",
+        )
+        self.assertEqual(seal["release_verifier"]["schema_version"], 3)
+        self.assertEqual(
+            seal["release_verifier"]["cargo_workspace_lock_sha256"],
+            self.verifier_build.cargo_lock_sha256,
+        )
+        self.assertEqual(
+            seal["release_verifier"]["cargo_workspace_vendor_sha256"],
+            self.verifier_build.cargo_vendor_sha256,
         )
         self.assertEqual(seal["release_verifier"]["network"], "offline")
 
@@ -912,7 +982,37 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             encoding="utf-8",
         )
         with self.assertRaisesRegex(
-            ArtifactSetError, "fresh release verifier build differs"
+            ArtifactSetError,
+            "Cargo dependency binding|fresh release verifier build differs",
+        ):
+            self.verify(destination)
+
+    def test_workspace_vendor_digest_tamper_is_rejected(self) -> None:
+        destination = self.seal()
+        seal_path = destination / "updater-set.seal.json"
+        seal = json.loads(seal_path.read_text(encoding="utf-8"))
+        seal["release_verifier"]["cargo_workspace_vendor_sha256"] = "9" * 64
+        seal_path.write_text(
+            json.dumps(seal, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ArtifactSetError, "Cargo dependency binding"):
+            self.verify(destination)
+
+    def test_workspace_lock_digest_tamper_is_rejected(self) -> None:
+        destination = self.seal()
+        seal_path = destination / "updater-set.seal.json"
+        seal = json.loads(seal_path.read_text(encoding="utf-8"))
+        seal["release_verifier"]["cargo_workspace_lock_sha256"] = "9" * 64
+        seal_path.write_text(
+            json.dumps(seal, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            ArtifactSetError,
+            "workspace Cargo.lock differs|Cargo dependency binding",
         ):
             self.verify(destination)
 
@@ -1178,13 +1278,14 @@ class DistributionFixture:
     def _compiled_verifier(self, repository: Path):
         if repository != self.dmg.repository:
             raise AssertionError("distribution verifier used the wrong repository")
+        require_fixture_cargo_boundary(repository)
         yield self.verifier_build
 
     def seal(self, publication_publisher: Callable[[Path, Path], None] = publisher) -> Path:
         with patch(
             "scripts.release_artifact_set._compiled_release_verifier",
             new=self._compiled_verifier,
-        ):
+        ), verified_cargo_fixture(self.verifier_build):
             return seal_distribution_set(
                 self.dmg.repository,
                 self.dmg.release_root,
@@ -1200,7 +1301,7 @@ class DistributionFixture:
         with patch(
             "scripts.release_artifact_set._compiled_release_verifier",
             new=self._compiled_verifier,
-        ):
+        ), verified_cargo_fixture(self.verifier_build):
             return verify_release_sets(
                 self.dmg.repository,
                 self.dmg.release_root,
@@ -1214,7 +1315,7 @@ class DistributionFixture:
         with patch(
             "scripts.release_artifact_set._compiled_release_verifier",
             new=self._compiled_verifier,
-        ):
+        ), verified_cargo_fixture(self.verifier_build):
             return verify_distribution_set(
                 destination,
                 repository=self.dmg.repository,
@@ -1523,7 +1624,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
         with patch(
             "scripts.release_artifact_set._compiled_release_verifier",
             new=self.fixture._compiled_verifier,
-        ):
+        ), verified_cargo_fixture(self.fixture.verifier_build):
             with self.assertRaisesRegex(
                 ArtifactSetError, "semantic authorization fixture rejected"
             ):

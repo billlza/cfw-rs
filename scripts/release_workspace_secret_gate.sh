@@ -7,7 +7,8 @@ run_release_secret_material_blocker() {
   local workspace_root="$1"
   local gate_dir
   gate_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-  PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B \
+  PYTHONDONTWRITEBYTECODE=1 \
+    "${CFW_RELEASE_PYTHON_EXECUTABLE:-python3}" -I -S -B -W error \
     "$gate_dir/release_secret_material_blocker.py" "$workspace_root"
 }
 

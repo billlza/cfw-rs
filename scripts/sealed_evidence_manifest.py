@@ -31,8 +31,30 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import subprocess
 from pathlib import Path
+import sys
+
+if __name__ == "__main__":
+    requested_command = sys.argv[1] if len(sys.argv) > 1 else ""
+    requires_closed_runtime = requested_command in {
+        "collect-source-gates",
+        "ci-toolchain-binding",
+        "collect-ci-lanes",
+        "publication-gate",
+        "status",
+    } or (
+        requested_command in {"seal", "verify"} and "--fixture" not in sys.argv[2:]
+    )
+    if requires_closed_runtime:
+        from release_python_runtime import (
+            ReleasePythonRuntimeError,
+            require_closed_release_runtime,
+        )
+
+        try:
+            require_closed_release_runtime()
+        except ReleasePythonRuntimeError as error:
+            raise SystemExit(f"error: sealed evidence manifest: {error}") from error
 
 if __package__:
     from .publication.ci_lanes import (
@@ -42,7 +64,13 @@ if __package__:
         collect_ci_lanes,
         derive_toolchain_binding,
     )
+    from .publication.bounded_process import (
+        BoundedProcessError,
+        run_bounded_process,
+    )
     from .publication.common import PublicationError, canonical_json, write_new
+    from .publication.graph_model import load_pins
+    from .publication.release_environment import release_tool_environment
     from .publication.sealed_manifest import (
         DEFAULT_MANIFEST_PATH,
         GATE_ORDER,
@@ -66,7 +94,13 @@ else:
         collect_ci_lanes,
         derive_toolchain_binding,
     )
+    from publication.bounded_process import (
+        BoundedProcessError,
+        run_bounded_process,
+    )
     from publication.common import PublicationError, canonical_json, write_new
+    from publication.graph_model import load_pins
+    from publication.release_environment import release_tool_environment
     from publication.sealed_manifest import (
         DEFAULT_MANIFEST_PATH,
         GATE_ORDER,
@@ -86,6 +120,7 @@ else:
 # The fixed per-gate wall-clock bound. A gate that exceeds it is recorded as
 # ``timeout`` - a non-passing result - and is never masked into a pass.
 GATE_TIMEOUT_SECONDS = 900
+MAX_SOURCE_GATE_OUTPUT_BYTES = 8 * 1024 * 1024
 
 
 def _repository() -> Path:
@@ -100,8 +135,14 @@ def command_collect_source_gates(arguments: argparse.Namespace) -> None:
     a non-passing result; nothing is converted into success.
     """
     repository = _repository()
+    pins = load_pins(repository / "scripts/dependency_pins.env")
+    environment = release_tool_environment(repository, pins)
     try:
-        source_identity = current_identity(repository, require_clean=True)
+        source_identity = current_identity(
+            repository,
+            require_clean=True,
+            environment=environment,
+        )
     except (OSError, SourceIdentityError) as error:
         raise PublicationError(
             "P0 source gates require one clean, readable release source identity"
@@ -115,23 +156,36 @@ def command_collect_source_gates(arguments: argparse.Namespace) -> None:
         if path.is_symlink() or not path.is_file():
             raise PublicationError(f"p0 source gate script is missing: {script}")
         command = (
-            ["bash", str(path)]
+            ["/bin/bash", "-p", str(path)]
             if script.endswith(".sh")
-            else ["python3", "-B", str(path)]
+            else [
+                "/bin/bash",
+                "-p",
+                "-c",
+                'source "$1/scripts/release_python_launcher.sh"; '
+                'cfw_run_release_python_script "$1" "$2"',
+                "source-gate-python",
+                str(repository),
+                str(path),
+            ]
         )
         try:
-            completed = subprocess.run(
+            completed = run_bounded_process(
                 command,
-                cwd=str(repository),
-                capture_output=True,
-                check=False,
+                cwd=repository,
+                environment=environment,
                 timeout=GATE_TIMEOUT_SECONDS,
+                output_limit=MAX_SOURCE_GATE_OUTPUT_BYTES,
             )
             output = completed.stdout + completed.stderr
             exit_code = completed.returncode
             status = "passed" if exit_code == 0 else "failed"
-        except subprocess.TimeoutExpired as error:
-            output = (error.stdout or b"") + (error.stderr or b"")
+        except BoundedProcessError as error:
+            if error.reason != "timeout":
+                raise PublicationError(
+                    f"p0 source gate {identifier} violated its process boundary"
+                ) from error
+            output = error.stdout + error.stderr
             exit_code = 124
             status = "timeout"
         if exit_code < 0 or exit_code > 255:
@@ -149,7 +203,11 @@ def command_collect_source_gates(arguments: argparse.Namespace) -> None:
             }
         )
     try:
-        completed_identity = current_identity(repository, require_clean=True)
+        completed_identity = current_identity(
+            repository,
+            require_clean=True,
+            environment=environment,
+        )
     except (OSError, SourceIdentityError) as error:
         raise PublicationError(
             "release source changed or became unreadable while P0 gates ran"

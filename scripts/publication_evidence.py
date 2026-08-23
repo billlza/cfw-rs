@@ -3,6 +3,18 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+from release_python_runtime import (
+    ReleasePythonRuntimeError,
+    require_closed_release_runtime,
+)
+
+if "--fixture" not in sys.argv[1:]:
+    try:
+        require_closed_release_runtime()
+    except ReleasePythonRuntimeError as error:
+        raise SystemExit(f"error: publication evidence: {error}") from error
 
 from publication.common import PublicationError
 from publication.draft import draft

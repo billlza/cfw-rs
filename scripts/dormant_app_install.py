@@ -84,8 +84,8 @@ else:
 DOCUMENT: Final = "cfw-dormant-app-install-v1"
 SCHEMA_VERSION: Final = 1
 VERSION: Final = "0.4.0"
-BUILD_NUMBER: Final = "40026"
-FINAL_BUILD_NUMBER: Final = "40027"
+BUILD_NUMBER: Final = "40028"
+FINAL_BUILD_NUMBER: Final = "40029"
 TEAM_ID: Final = "YKUPL7Z869"
 TARGET_NAME: Final = "Clash for Mac.app"
 PAYLOAD_NAME: Final = TARGET_NAME
@@ -99,16 +99,16 @@ FINAL_JOURNAL_NAME: Final = ".com.bill.clashformac.final-install.json"
 FINAL_JOURNAL_PENDING_NAME: Final = ".com.bill.clashformac.final-install.pending"
 FINAL_LOCK_NAME: Final = ".com.bill.clashformac.final-install.lock"
 FINAL_STAGING_PREFIX: Final = ".com.bill.clashformac.final-install."
-RELEASE_WORKTREE_RELATIVE: Final = Path("target/release-worktrees/40026")
+RELEASE_WORKTREE_RELATIVE: Final = Path("target/release-worktrees/40028")
 CANDIDATE_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/validation/40026/signed"
+    "target/candidates/0.4.0/validation/40028/signed"
 )
 FINAL_CANDIDATE_RELATIVE: Final = Path("target/candidates/0.4.0/signed")
 VALIDATION_NATIVE_PRODUCTS_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/validation/40026/native-products"
+    "target/candidates/0.4.0/validation/40028/native-products"
 )
 FINAL_NATIVE_PRODUCTS_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/release-build/40027/native-products"
+    "target/candidates/0.4.0/release-build/40029/native-products"
 )
 MAX_JOURNAL_BYTES: Final = 1024 * 1024
 MAX_GUARD_SEGMENTS: Final = 8
@@ -3128,7 +3128,7 @@ def main() -> None:
     parser.add_argument(
         "--final",
         action="store_true",
-        help="operate on the fixed 40026 to 40027 final generation",
+        help="operate on the fixed 40028 to 40029 final generation",
     )
     arguments = parser.parse_args()
     try:
@@ -3156,4 +3156,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from release_python_runtime import (
+        ReleasePythonRuntimeError,
+        require_closed_release_runtime,
+    )
+
+    try:
+        require_closed_release_runtime()
+    except ReleasePythonRuntimeError as error:
+        raise SystemExit(f"error: dormant-install runtime admission: {error}") from error
     main()

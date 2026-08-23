@@ -167,6 +167,7 @@ class Fixture:
             release_source_sha256="b" * 64,
             deployment_target="15.0",
             toolchain_metadata={
+                "cargoWorkspaceSourcesTreeSha256": "0" * 64,
                 "goModuleCacheTreeSha256": "1" * 64,
                 "goToolchainTreeSha256": "2" * 64,
                 "goToolsTreeSha256": "3" * 64,
@@ -8042,6 +8043,8 @@ class NotarizationCliTests(unittest.TestCase):
             "b" * 64,
             "--deployment-target",
             "15.0",
+            "--cargo-workspace-sources-tree-sha256",
+            "0" * 64,
             "--go-module-cache-tree-sha256",
             "1" * 64,
             "--go-toolchain-tree-sha256",

@@ -167,7 +167,7 @@ On macOS 15+ Apple Silicon:
 ./scripts/assert_apple_silicon.sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets
+cargo test --workspace --all-targets --all-features
 
 cd apps/cfw-tauri-shell
 npm ci
@@ -190,20 +190,20 @@ patch, DNS-failover patch, structured endpoint-conflict patch, and combined
 source diff all match their pins:
 
 ```sh
-./scripts/bootstrap_release_toolchain.sh
-
-SING_BOX_SOURCE=/absolute/path/to/clean-upstream-sing-box \
-LIBBOX_PATCHED_SOURCE_OUTPUT=/absolute/path/to/patched-sing-box \
-  ./scripts/materialize_libbox_source.sh
-
-SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
-  ./scripts/prepare_libbox_modules.sh
-
-SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
-  ./scripts/scan_libbox_vulnerabilities.sh
-
-SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
-  ./scripts/build_libbox.sh
+./scripts/run_release_ci_gate.sh prepare-cargo-workspace-inputs
+./scripts/run_release_ci_gate.sh bootstrap-policy-tools
+./scripts/run_release_ci_gate.sh bootstrap-release-toolchain
+./scripts/run_release_ci_gate.sh fetch-libbox-upstream \
+  /absolute/path/to/clean-upstream-sing-box
+./scripts/run_release_ci_gate.sh materialize-libbox-source \
+  /absolute/path/to/clean-upstream-sing-box \
+  /absolute/path/to/patched-sing-box
+./scripts/run_release_ci_gate.sh prepare-libbox-modules \
+  /absolute/path/to/patched-sing-box
+./scripts/run_release_ci_gate.sh libbox-vulnerability-scan \
+  /absolute/path/to/patched-sing-box
+./scripts/run_release_ci_gate.sh build-libbox \
+  /absolute/path/to/patched-sing-box
 ```
 
 The build refuses a different commit, any diff beyond the exact four-patch

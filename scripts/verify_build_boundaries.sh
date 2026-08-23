@@ -1,35 +1,43 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Cargo build scripts may validate local prebuilt native inputs, but may not
 # download dependencies or recursively invoke another build system.
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 cd "$repo_root"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
-cfw_require_supported_python
+python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+if [[ -z "$python_bin" ]]; then
+  python_bin="$(command -v python3)"
+fi
+readonly python_bin
+cfw_require_supported_python "$python_bin"
 
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_release_authority_gate.py
-
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_pinned_build_inputs.py
-
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_release_build_allocations.py
-
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_physical_capture_readiness.py
-
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_production_boundary_removal.py
-
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_native_product_graph.py
-
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/notarization_transaction.py --self-check
-
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/dmg_notarization_transaction.py self-check
-
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/release_artifact_set.py self-check
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/verify_release_authority_gate.py"
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/verify_pinned_build_inputs.py"
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/verify_release_build_allocations.py"
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/verify_physical_capture_readiness.py"
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/verify_production_boundary_removal.py"
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/verify_native_product_graph.py"
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/notarization_transaction.py" --self-check
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/dmg_notarization_transaction.py" self-check
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/release_artifact_set.py" self-check
 
 # Reject duplicate string keys inside the release-set policy literals. Python
 # accepts them silently, which could otherwise weaken an exact-field contract.
-PYTHONDONTWRITEBYTECODE=1 python3 -B - scripts/release_artifact_set.py <<'PY'
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+  scripts/release_artifact_set.py <<'PY'
 import ast
 from pathlib import Path
 import sys
@@ -58,37 +66,33 @@ PY
 # the physical evidence itself requires signed runs on one Apple Silicon Mac
 # across both source-pinned clean macOS environments and an externally
 # provisioned collector trust root.
-/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_machine_identity.py --self-check
-/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_collector_request.py self-check
-/opt/homebrew/bin/python3 -I -S -B scripts/harness/physical_evidence_aggregator.py --self-check
-
-# Confirm the final-candidate notarization/installed binder (Task 12.2) is wired
-# to the physical-evidence aggregator, the sealed-closure pins, and the
-# path/name-only updater-key blocker, and that it requires the full inside-out
-# identity set plus the installed-matrix/packet/performance/security/soak report
-# families across both required macOS run sets. This is a source-boundary
-# contract check only; the notarization/staple/Gatekeeper and physical evidence
-# themselves require a signed, notarized candidate captured separately.
-PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'from scripts.publication.final_candidate import self_check; self_check(); print("final candidate binder self-check ok")'
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/harness/physical_machine_identity.py" --self-check
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/harness/physical_collector_request.py" self-check
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/harness/physical_evidence_aggregator.py" --self-check
 
 # Confirm the immutable sealed outer Evidence Manifest and publication gate
 # (Task 12.3) is wired to the Evidence_Manifest level order, the physical
-# aggregator, the sealed closure, the final-candidate binder, and the
+# aggregator, the sealed closure, and the nested final-candidate binder, plus the
 # path/name-only updater-key blocker, and that an empty gate table authorizes no
 # evidence level and refuses publication. This is a source-boundary contract
 # check only; sealing the manifest additionally requires the signed, notarized,
 # and physical evidence captured separately.
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/sealed_evidence_manifest.py self-check
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/sealed_evidence_manifest.py" self-check
 
 # The production composer is deliberately distinct from the generic fixture-
-# capable validators. Its source-bound self-check fixes the 40026 -> 40027
-# sequence and proves that the requirements-derived nine-capability inventory
-# is complete before any physical or publication evidence is considered.
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/production_release_evidence.py self-check
+# capable validators. Its pure source-bound self-check is valid in either
+# closed production or unsigned-validation CI. Commands that create or seal
+# evidence still require the production wrapper and production admission.
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/production_release_evidence.py" self-check
 
 for fragment in \
-  'VALIDATION_BUILD = "40026"' \
-  'FINAL_BUILD = "40027"' \
+  'VALIDATION_BUILD = "40028"' \
+  'FINAL_BUILD = "40029"' \
   'prepare_physical_candidate_manifest' \
   'seal_production_evidence' \
   'require_clean=True' \
@@ -109,10 +113,10 @@ for fragment in \
 done
 
 for fragment in \
-  'BUILD_NUMBER: Final = "40026"' \
-  'FINAL_BUILD_NUMBER: Final = "40027"' \
-  'target/release-worktrees/40026' \
-  'target/candidates/0.4.0/validation/40026/signed' \
+  'BUILD_NUMBER: Final = "40028"' \
+  'FINAL_BUILD_NUMBER: Final = "40029"' \
+  'target/release-worktrees/40028' \
+  'target/candidates/0.4.0/validation/40028/signed' \
   'target/candidates/0.4.0/signed' \
   'notarized-release-v1' \
   '_matching_clean_source_identity' \
@@ -179,7 +183,8 @@ while IFS= read -r build_script; do
   fi
 done <<<"$build_scripts"
 
-python3 - "$repo_root/apps/cfw-tauri-shell/tauri.conf.json" <<'PY'
+"$python_bin" -I -S -B -W error - \
+  "$repo_root/apps/cfw-tauri-shell/tauri.conf.json" <<'PY'
 import json
 from pathlib import Path
 import sys

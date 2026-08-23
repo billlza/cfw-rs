@@ -1,9 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Explicit, networked dependency preparation. Release builds never call this
 # script; they consume only the already-verified local Go module cache.
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/go_release_environment.sh
@@ -12,6 +13,11 @@ source "$repo_root/scripts/go_release_environment.sh"
 source "$repo_root/scripts/libbox_source_contract.sh"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
+python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+if [[ ! -x "$python_bin" ]]; then
+  echo "error: closed release Python is required" >&2
+  exit 1
+fi
 libbox_load_module_cache_contract "$repo_root"
 source_input="${SING_BOX_SOURCE:-}"
 if [[ -z "$source_input" ]]; then
@@ -98,7 +104,8 @@ fi
   "$go_bin" mod verify
 )
 libbox_validate_patched_source "$repo_root" "$source_root"
-python3 "$repo_root/scripts/hash_artifact.py" \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/hash_artifact.py" \
   "$module_cache" \
   --output "$module_manifest" \
   --algorithm sha256-tree-v2 \

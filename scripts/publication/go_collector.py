@@ -67,12 +67,15 @@ def _environment(
     repository: Path,
     pins: dict[str, str],
     go_cache: Path,
+    release_environment: dict[str, str],
 ) -> tuple[Path, dict[str, str]]:
-    toolchain_root, _tree_digests = verified_release_toolchain_trees(repository, pins)
+    toolchain_root, _tree_digests = verified_release_toolchain_trees(
+        repository, pins, release_environment
+    )
     go_bin = toolchain_root / f"go-{pins['GO_VERSION']}" / "bin/go"
     if not go_bin.is_file() or go_bin.is_symlink():
         raise PublicationError("pinned Go toolchain is unavailable for linked-package collection")
-    environment = os.environ.copy()
+    environment = dict(release_environment)
     for key in list(environment):
         if key.startswith("GO") or key in {"AR", "CC", "CXX", "PKG_CONFIG", "SDKROOT"}:
             environment.pop(key, None)
@@ -97,13 +100,20 @@ def _environment(
     return go_bin, environment
 
 
-def collect_go(repository: Path, libbox_source: Path, pins: dict[str, str]) -> CollectorResult:
+def collect_go(
+    repository: Path,
+    libbox_source: Path,
+    pins: dict[str, str],
+    release_environment: dict[str, str],
+) -> CollectorResult:
     cache_parent = repository / "target/release-build-cache"
     cache_parent.mkdir(parents=True, exist_ok=True)
     if cache_parent.is_symlink() or not cache_parent.is_dir():
         raise PublicationError("Go collector cache parent must be a real directory")
     with tempfile.TemporaryDirectory(prefix="go-collector.", dir=cache_parent) as temporary:
-        go_bin, environment = _environment(repository, pins, Path(temporary))
+        go_bin, environment = _environment(
+            repository, pins, Path(temporary), release_environment
+        )
         payload = run(
             [
                 str(go_bin),
@@ -116,7 +126,7 @@ def collect_go(repository: Path, libbox_source: Path, pins: dict[str, str]) -> C
             libbox_source,
             environment,
         )
-    verified_release_toolchain_trees(repository, pins)
+    verified_release_toolchain_trees(repository, pins, release_environment)
     if len(payload) > MAX_COMMAND_BYTES:
         raise PublicationError("Go linked-package graph exceeded its fixed bound")
     packages = _decode_json_stream(payload)

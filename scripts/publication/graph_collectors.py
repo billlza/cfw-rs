@@ -18,17 +18,21 @@ from .native_collector import collect_native, collect_toolchains
 from .npm_collector import collect_npm
 
 
-def collect_all(repository: Path, libbox_source: Path) -> CollectedGraphs:
+def collect_all(
+    repository: Path,
+    libbox_source: Path,
+    release_environment: dict[str, str],
+) -> CollectedGraphs:
     pins = load_pins(repository / "scripts/dependency_pins.env")
     components: dict[str, ComponentSeed] = {}
     relationships: set[tuple[str, str, str]] = set()
     graphs: dict[str, dict[str, Any]] = {}
     graph_components: dict[str, set[str]] = {}
     for result in (
-        collect_cargo(repository),
+        collect_cargo(repository, release_environment),
         collect_npm(repository),
-        collect_go(repository, libbox_source, pins),
-        collect_native(repository, pins),
+        collect_go(repository, libbox_source, pins, release_environment),
+        collect_native(repository, pins, release_environment),
     ):
         result_components, result_relationships, result_graphs, result_bindings = result
         for candidate in result_components.values():
@@ -39,7 +43,9 @@ def collect_all(repository: Path, libbox_source: Path) -> CollectedGraphs:
                 raise PublicationError(f"duplicate collected graph kind: {kind}")
             graphs[kind] = graph
             graph_components[kind] = result_bindings[kind]
-    toolchains, toolchain_relationships = collect_toolchains(repository, pins)
+    toolchains, toolchain_relationships = collect_toolchains(
+        repository, pins, release_environment
+    )
     for candidate in toolchains.values():
         merge_seed(components, candidate)
     relationships.update(toolchain_relationships)

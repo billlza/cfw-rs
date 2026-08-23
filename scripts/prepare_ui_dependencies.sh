@@ -1,10 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Materialize the exact lockfile-defined UI dependency tree with the pinned
 # Node distribution, then seal every byte, mode, and internal symlink before it
 # can enter a release build. This is an explicit networked preparation step.
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/release_toolchain_contract.sh
@@ -24,6 +25,9 @@ die() {
   echo "error: $*" >&2
   exit 1
 }
+
+python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+[[ -x "$python_bin" ]] || die "closed release Python is required"
 
 [[ $# -eq 0 ]] || die "usage: scripts/prepare_ui_dependencies.sh"
 [[ "$toolchain_root" == /* ]] || die "CFW_TOOLCHAIN_ROOT must be absolute"
@@ -111,7 +115,8 @@ mkdir -p \
   "$npm_bin" --prefix "$sealed_workspace" ls --all --offline >/dev/null
 
 package_lock_sha256="$(cfw_ui_package_lock_sha256 "$repo_root")"
-python3 "$repo_root/scripts/hash_artifact.py" \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/hash_artifact.py" \
   "$sealed_workspace/node_modules" \
   --output "$staged_manifest" \
   --algorithm sha256-tree-v2 \

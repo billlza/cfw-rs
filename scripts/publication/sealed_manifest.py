@@ -132,6 +132,7 @@ except ImportError:  # pragma: no cover - CLI invocation style
 from scripts.publication.final_candidate import (  # noqa: E402
     PRODUCT_VERSION,
     VERIFIED as CANDIDATE_VERIFIED,
+    self_check as final_candidate_self_check,
     validate_final_candidate_binding,
 )
 from scripts.publication.sealed_closure import (  # noqa: E402
@@ -1516,6 +1517,7 @@ def environment_status(
 
 def self_check() -> None:
     """Verify the outer seal's wiring without any evidence file."""
+    final_candidate_self_check()
     if LEVEL_ORDER != (
         "Source_Implemented",
         "Unsigned_CI_Verified",

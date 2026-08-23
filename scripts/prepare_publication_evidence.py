@@ -4,6 +4,16 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from release_python_runtime import (
+    ReleasePythonRuntimeError,
+    require_closed_release_runtime,
+)
+
+try:
+    require_closed_release_runtime()
+except ReleasePythonRuntimeError as error:
+    raise SystemExit(f"error: publication preparation: {error}") from error
+
 from publication.common import PublicationError
 from publication.preparer import (
     expected_blocker_report,

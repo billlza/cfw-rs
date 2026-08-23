@@ -1921,6 +1921,23 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.authorize_release_worktree:
+            if __package__:
+                from .release_python_runtime import (
+                    ReleasePythonRuntimeError,
+                    require_closed_release_runtime,
+                )
+            else:
+                from release_python_runtime import (
+                    ReleasePythonRuntimeError,
+                    require_closed_release_runtime,
+                )
+
+            try:
+                require_closed_release_runtime()
+            except ReleasePythonRuntimeError as error:
+                raise SecretMaterialReleaseBlock(
+                    f"release-worktree runtime admission failed: {error}"
+                ) from error
             receipt = authorize_release_worktree_cache_scope(
                 args.workspace_root,
                 args.authorize_release_worktree,

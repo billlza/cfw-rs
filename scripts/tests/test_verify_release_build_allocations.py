@@ -11,21 +11,21 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
         value = allocations.load_contract()
         allocations.validate_contract(
             value,
-            expected_validation="40026",
-            expected_final="40027",
+            expected_validation="40028",
+            expected_final="40029",
         )
 
     def test_retired_final_companion_cannot_be_reused_as_validation(self) -> None:
         value = copy.deepcopy(allocations.load_contract())
-        value["active_pair"]["validation"] = "40025"
-        value["active_pair"]["final"] = "40026"
+        value["active_pair"]["validation"] = "40027"
+        value["active_pair"]["final"] = "40028"
         value["allocations"][-3] = {
-            "build": "40025",
+            "build": "40027",
             "role": "validation",
             "status": "active",
         }
         value["allocations"][-2] = {
-            "build": "40026",
+            "build": "40028",
             "role": "final",
             "status": "active",
         }
@@ -36,8 +36,8 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
         ):
             allocations.validate_contract(
                 value,
-                expected_validation="40025",
-                expected_final="40026",
+                expected_validation="40027",
+                expected_final="40028",
             )
 
     def test_allocation_history_cannot_omit_a_reserved_build(self) -> None:
@@ -49,8 +49,8 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
         ):
             allocations.validate_contract(
                 value,
-                expected_validation="40026",
-                expected_final="40027",
+                expected_validation="40028",
+                expected_final="40029",
             )
 
     def test_non_string_role_is_a_stable_contract_error(self) -> None:
@@ -62,8 +62,21 @@ class ReleaseBuildAllocationTests(unittest.TestCase):
         ):
             allocations.validate_contract(
                 value,
-                expected_validation="40026",
-                expected_final="40027",
+                expected_validation="40028",
+                expected_final="40029",
+            )
+
+    def test_retired_40026_status_cannot_be_rewritten(self) -> None:
+        value = copy.deepcopy(allocations.load_contract())
+        value["allocations"][5]["status"] = "active"
+        with self.assertRaisesRegex(
+            allocations.ReleaseBuildAllocationError,
+            "immutable retired allocation prefix changed",
+        ):
+            allocations.validate_contract(
+                value,
+                expected_validation="40028",
+                expected_final="40029",
             )
 
 

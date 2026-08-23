@@ -164,9 +164,12 @@ class NativeBuildScriptTests(unittest.TestCase):
             verify_native_build_script(mutated)
 
     def test_missing_product_graph_gate_fails_closed(self) -> None:
+        gate = '"$repo_root/scripts/verify_native_product_graph.py"'
+        self.assertEqual(self.build.count(gate), 1)
         mutated = self.build.replace(
-            '  "$repo_root/scripts/verify_native_product_graph.py"',
-            '  "$repo_root/scripts/removed_native_product_graph.py"',
+            gate,
+            '"$repo_root/scripts/removed_native_product_graph.py"',
+            1,
         )
         with self.assertRaisesRegex(NativeProductGraphError, "product-graph gate"):
             verify_native_build_script(mutated)

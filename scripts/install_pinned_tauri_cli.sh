@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Install the pinned Tauri CLI from its checksum-bound crates.io source archive.
 #
 # Tauri CLI 2.11.4's published Cargo.lock selects yanked spin 0.9.8. Cargo
@@ -7,8 +7,10 @@
 # then installs from the resulting local source with --locked. Product builds
 # remain offline and never invoke this script implicitly.
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
+cd "$repo_root"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/release_toolchain_contract.sh
@@ -18,6 +20,13 @@ die() {
   echo "error: $*" >&2
   exit 1
 }
+
+python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+[[ -x "$python_bin" ]] || die "closed release Python is required"
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/release_cargo_inputs.py" \
+  reject-ambient --repository "$repo_root" --release-home "$HOME" ||
+  die "ambient Cargo configuration is forbidden during Tauri CLI bootstrap"
 
 [[ $# -eq 0 ]] || die "usage: scripts/install_pinned_tauri_cli.sh"
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
@@ -69,7 +78,7 @@ verify_tauri_payload_layout() {
   printf '%s  %s\n' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$source/Cargo.lock" |
     shasum -a 256 --check >/dev/null
 
-  PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+  PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
     "$root" "$forbidden_prefix" "$TAURI_CLI_VERSION" <<'PY'
 import os
 import re
@@ -113,14 +122,14 @@ PY
 
 verify_cargo_preparation_cache() {
   local root="$1"
-  PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract" \
-    validate-preparation "$root"
+  cfw_run_release_python_script \
+    "$repo_root" "$cargo_cache_contract" validate-preparation "$root"
 }
 
 normalize_cargo_offline_cache() {
   local root="$1"
-  PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract" \
-    normalize-offline "$root"
+  cfw_run_release_python_script \
+    "$repo_root" "$cargo_cache_contract" normalize-offline "$root"
 }
 
 reject_cargo_warnings() {
@@ -149,14 +158,11 @@ if [[ -e "$install_root" || -L "$install_root" || -e "$install_manifest" || -L "
 fi
 
 readonly rust_toolchain="$RUST_VERSION-aarch64-apple-darwin"
-rustup_bin="$(command -v rustup || true)"
-[[ "$rustup_bin" == /* && -x "$rustup_bin" ]] ||
-  die "an absolute rustup executable is required"
-cargo_bin="$("$rustup_bin" which --toolchain "$rust_toolchain" cargo)"
-rustc_bin="$("$rustup_bin" which --toolchain "$rust_toolchain" rustc)"
-readonly rustup_bin cargo_bin rustc_bin
+cargo_bin="${CFW_RELEASE_CARGO_EXECUTABLE:-}"
+rustc_bin="${CFW_RELEASE_RUSTC_EXECUTABLE:-}"
+readonly cargo_bin rustc_bin
 [[ "$cargo_bin" == /* && "$rustc_bin" == /* && -x "$cargo_bin" && -x "$rustc_bin" ]] ||
-  die "rustup did not resolve absolute pinned cargo and rustc executables"
+  die "closed release Cargo and rustc executables are required"
 [[ "$(dirname "$cargo_bin")" == "$(dirname "$rustc_bin")" ]] ||
   die "pinned cargo and rustc must come from one toolchain"
 [[ "$($rustc_bin --version | awk '{print $2}')" == "$RUST_VERSION" ]] ||
@@ -217,7 +223,8 @@ readonly archive="$prepared_archive"
 # The archive digest identifies the official payload. Validate its shape as a
 # second boundary before asking tar to write it, rejecting links, special files,
 # absolute paths, path traversal, and entries outside the expected crate root.
-PYTHONDONTWRITEBYTECODE=1 python3 -B - "$archive" "tauri-cli-$TAURI_CLI_VERSION" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+  "$archive" "tauri-cli-$TAURI_CLI_VERSION" <<'PY'
 import sys
 import tarfile
 from pathlib import PurePosixPath
@@ -258,7 +265,7 @@ printf '%s  %s\n' "$TAURI_CLI_LOCK_PATCH_SHA256" "$lock_patch" |
 printf '%s  %s\n' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock" |
   shasum -a 256 --check
 
-PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
   "$cargo_manifest" \
   "$cargo_lock" \
   "$TAURI_CLI_VERSION" \
@@ -331,7 +338,8 @@ readonly offline_cargo_home="$staging/offline-cargo-home"
 readonly offline_cache_manifest="$staging/offline-cargo-home.manifest.json"
 /usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"
 normalize_cargo_offline_cache "$offline_cargo_home"
-python3 "$repo_root/scripts/hash_artifact.py" \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/hash_artifact.py" \
   "$offline_cargo_home" \
   --output "$offline_cache_manifest" \
   --algorithm sha256-tree-v2 \
@@ -417,7 +425,8 @@ verify_tauri_payload_layout "$payload" "$staging"
 [[ "$("$payload/bin/cargo-tauri" --version)" == "tauri-cli $TAURI_CLI_VERSION" ]] ||
   die "installed tauri-cli identity mismatch"
 verify_tauri_payload_layout "$payload" "$staging"
-python3 "$repo_root/scripts/hash_artifact.py" \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/hash_artifact.py" \
   "$payload" \
   --output "$staging/tauri-cli-$TAURI_CLI_VERSION.manifest.json" \
   --algorithm sha256-tree-v2 \

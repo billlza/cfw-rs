@@ -2033,7 +2033,7 @@ def main() -> None:
     parser.add_argument(
         "--final",
         action="store_true",
-        help="operate on the fixed 40026 to 40027 final generation",
+        help="operate on the fixed 40028 to 40029 final generation",
     )
     arguments = parser.parse_args()
     try:
@@ -2062,4 +2062,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from release_python_runtime import (
+        ReleasePythonRuntimeError,
+        require_closed_release_runtime,
+    )
+
+    try:
+        require_closed_release_runtime()
+    except ReleasePythonRuntimeError as error:
+        raise SystemExit(f"error: current-service runtime admission: {error}") from error
     main()

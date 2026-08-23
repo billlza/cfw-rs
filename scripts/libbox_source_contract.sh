@@ -4,6 +4,11 @@
 # libbox build.
 # Source this file only after scripts/dependency_pins.env.
 
+libbox_contract_directory="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && /bin/pwd -P)"
+# shellcheck source=scripts/release_python_launcher.sh
+source "$libbox_contract_directory/release_python_launcher.sh"
+unset libbox_contract_directory
+
 libbox_sha256() {
   shasum -a 256 "$1" | awk '{print $1}'
 }
@@ -12,6 +17,173 @@ libbox_require_regular_file() {
   local path="$1"
   if [[ ! -f "$path" || -L "$path" ]]; then
     echo "error: required regular file is missing or is a symlink: $path" >&2
+    return 1
+  fi
+}
+
+libbox_git_execute() {
+  if [[ $# -lt 3 ]]; then
+    echo "error: libbox_git_execute requires source root, index selector, and Git arguments" >&2
+    return 1
+  fi
+  local source_root="$1"
+  local index_file="$2"
+  shift 2
+  local -a git_environment=(
+    "HOME=/var/empty"
+    "LANG=C"
+    "LC_ALL=C"
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+    "GIT_ATTR_NOSYSTEM=1"
+    "GIT_CONFIG_GLOBAL=/dev/null"
+    "GIT_CONFIG_NOSYSTEM=1"
+    "GIT_CONFIG_SYSTEM=/dev/null"
+    "GIT_LITERAL_PATHSPECS=1"
+    "GIT_NO_LAZY_FETCH=1"
+    "GIT_NO_REPLACE_OBJECTS=1"
+    "GIT_OPTIONAL_LOCKS=0"
+  )
+  if [[ "$source_root" != /* || ! -d "$source_root" || -L "$source_root" ]]; then
+    echo "error: libbox Git source root must be an absolute real directory" >&2
+    return 1
+  fi
+  if [[ -n "$index_file" ]]; then
+    [[ "$index_file" == /* ]] || {
+      echo "error: libbox temporary Git index must be absolute" >&2
+      return 1
+    }
+    git_environment+=("GIT_INDEX_FILE=$index_file")
+  fi
+  /usr/bin/env -i "${git_environment[@]}" \
+    /usr/bin/git --no-pager \
+    -C "$source_root" \
+    --work-tree="$source_root" \
+    -c core.attributesFile=/dev/null \
+    -c core.autocrlf=false \
+    -c core.bare=false \
+    -c core.checkStat=default \
+    -c core.excludesFile=/dev/null \
+    -c core.fileMode=true \
+    -c core.fsmonitor=false \
+    -c core.hooksPath=/dev/null \
+    -c core.ignoreCase=false \
+    -c core.ignoreStat=false \
+    -c core.precomposeUnicode=true \
+    -c core.sparseCheckout=false \
+    -c core.sparseCheckoutCone=false \
+    -c core.symlinks=true \
+    -c core.trustctime=true \
+    -c core.untrackedCache=false \
+    "$@"
+}
+
+libbox_git() {
+  local source_root="$1"
+  shift
+  libbox_git_execute "$source_root" "" "$@"
+}
+
+libbox_git_with_index() {
+  local source_root="$1"
+  local index_file="$2"
+  shift 2
+  libbox_git_execute "$source_root" "$index_file" "$@"
+}
+
+libbox_require_absent_git_configuration() {
+  local source_root="$1"
+  local description="$2"
+  shift 2
+  local output status
+  if output="$(libbox_git "$source_root" "$@" 2>&1)"; then
+    echo "error: libbox Git refuses $description: $output" >&2
+    return 1
+  else
+    status=$?
+  fi
+  if [[ $status -ne 1 || -n "$output" ]]; then
+    echo "error: libbox Git could not verify absence of $description" >&2
+    return 1
+  fi
+}
+
+libbox_validate_git_controls() {
+  local source_root="$1"
+  local git_directory="$source_root/.git"
+  local exclude_file="$git_directory/info/exclude"
+  local attributes_file="$git_directory/info/attributes"
+  local alternates_file="$git_directory/objects/info/alternates"
+  local worktree_config="$git_directory/config.worktree"
+  local index_report record line trimmed invalid_index=0
+  if [[ ! -d "$git_directory" || -L "$git_directory" ]]; then
+    echo "error: libbox source must be a standalone checkout with a real .git directory" >&2
+    return 1
+  fi
+  if [[ -e "$alternates_file" || -L "$alternates_file" || \
+    -e "$worktree_config" || -L "$worktree_config" ]]; then
+    echo "error: libbox Git refuses alternate objects or per-worktree configuration" >&2
+    return 1
+  fi
+  libbox_require_absent_git_configuration \
+    "$source_root" \
+    "an effective core.worktree configuration" \
+    config --includes --show-origin --get-all core.worktree || return 1
+  libbox_require_absent_git_configuration \
+    "$source_root" \
+    "local include configuration" \
+    config --local --includes --show-origin --get-regexp \
+    '^include(if\..*)?\.path$' || return 1
+  libbox_require_absent_git_configuration \
+    "$source_root" \
+    "local filter configuration" \
+    config --local --includes --show-origin --get-regexp '^filter\.' || return 1
+
+  if [[ -e "$exclude_file" || -L "$exclude_file" ]]; then
+    libbox_require_regular_file "$exclude_file" || return 1
+    if [[ "$(/usr/bin/stat -f '%l' "$exclude_file")" != "1" || \
+      "$(/usr/bin/stat -f '%z' "$exclude_file")" -gt 262144 ]]; then
+      echo "error: libbox Git local exclude file is unsafe or unbounded" >&2
+      return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      trimmed="${line#"${line%%[![:space:]]*}"}"
+      if [[ -n "$trimmed" && "$trimmed" != \#* ]]; then
+        echo "error: libbox Git local exclude file contains an active pattern" >&2
+        return 1
+      fi
+    done < "$exclude_file"
+  fi
+
+  if [[ -e "$attributes_file" || -L "$attributes_file" ]]; then
+    libbox_require_regular_file "$attributes_file" || return 1
+    if [[ "$(/usr/bin/stat -f '%l' "$attributes_file")" != "1" || \
+      "$(/usr/bin/stat -f '%z' "$attributes_file")" -gt 262144 ]]; then
+      echo "error: libbox Git local attributes file is unsafe or unbounded" >&2
+      return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      trimmed="${line#"${line%%[![:space:]]*}"}"
+      if [[ -n "$trimmed" && "$trimmed" != \#* ]]; then
+        echo "error: libbox Git local attributes file contains an active rule" >&2
+        return 1
+      fi
+    done < "$attributes_file"
+  fi
+
+  index_report="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/cfw-libbox-index-flags.XXXXXX")" || return 1
+  if ! libbox_git "$source_root" ls-files -v -z --cached > "$index_report"; then
+    /bin/rm -f "$index_report"
+    return 1
+  fi
+  while IFS= read -r -d '' record; do
+    if [[ "$record" != "H "* ]]; then
+      invalid_index=1
+      break
+    fi
+  done < "$index_report"
+  /bin/rm -f "$index_report"
+  if [[ $invalid_index -ne 0 ]]; then
+    echo "error: libbox Git index contains non-default visibility flags" >&2
     return 1
   fi
 }
@@ -202,12 +374,13 @@ libbox_validate_patches() {
 libbox_validate_git_root() {
   local source_root="$1"
   local top_level
-  top_level="$(git -C "$source_root" rev-parse --show-toplevel)" || return 1
+  libbox_validate_git_controls "$source_root" || return 1
+  top_level="$(libbox_git "$source_root" rev-parse --show-toplevel)" || return 1
   if [[ "$(cd "$top_level" && pwd -P)" != "$source_root" ]]; then
     echo "error: SING_BOX_SOURCE must name the checkout root" >&2
     return 1
   fi
-  if [[ "$(git -C "$source_root" rev-parse HEAD)" != "$SING_BOX_COMMIT" ]]; then
+  if [[ "$(libbox_git "$source_root" rev-parse HEAD)" != "$SING_BOX_COMMIT" ]]; then
     echo "error: sing-box checkout is not pinned commit $SING_BOX_COMMIT" >&2
     return 1
   fi
@@ -219,7 +392,7 @@ libbox_validate_upstream_source() {
   local security_patch_path raw_packet_patch_path dns_failover_patch_path endpoint_conflict_patch_path
   libbox_validate_patches "$repo_root" || return 1
   libbox_validate_git_root "$source_root" || return 1
-  if [[ -n "$(git -C "$source_root" status --porcelain=v1 --untracked-files=all)" ]]; then
+  if [[ -n "$(libbox_git "$source_root" status --porcelain=v1 --untracked-files=all)" ]]; then
     echo "error: upstream sing-box checkout must be clean" >&2
     return 1
   fi
@@ -239,7 +412,7 @@ libbox_validate_upstream_source() {
   endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root")" || return 1
   # Zero-context patches are admitted only after the exact upstream commit and
   # go.mod/go.sum digests above have been verified.
-  if ! git -C "$source_root" apply --unidiff-zero --check \
+  if ! libbox_git "$source_root" apply --whitespace=error-all --unidiff-zero --check \
     "$security_patch_path" \
     "$raw_packet_patch_path" \
     "$dns_failover_patch_path" \
@@ -254,16 +427,7 @@ libbox_canonical_diff() {
   shift
   # Full object IDs and explicit diff settings keep the release digest independent
   # of clone depth, object population, and operator Git configuration.
-  /usr/bin/env \
-    -u GIT_CONFIG_COUNT \
-    -u GIT_CONFIG_PARAMETERS \
-    -u GIT_DIFF_OPTS \
-    GIT_CONFIG_GLOBAL=/dev/null \
-    GIT_CONFIG_SYSTEM=/dev/null \
-    git -C "$source_root" \
-    -c core.attributesFile=/dev/null \
-    -c core.autocrlf=false \
-    -c core.filemode=true \
+  libbox_git "$source_root" \
     -c diff.interHunkContext=0 \
     -c diff.suppressBlankEmpty=false \
     --no-pager diff \
@@ -293,13 +457,29 @@ libbox_combined_diff_sha256() {
   local temporary_directory temporary_index digest
   temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/cfw-libbox-index.XXXXXX")"
   temporary_index="$temporary_directory/index"
-  if ! GIT_INDEX_FILE="$temporary_index" git -C "$source_root" read-tree HEAD ||
-    ! GIT_INDEX_FILE="$temporary_index" git -C "$source_root" add -A -- .; then
+  if ! libbox_git_with_index "$source_root" "$temporary_index" read-tree HEAD ||
+    ! libbox_git_with_index "$source_root" "$temporary_index" add -A -- .; then
     /bin/rm -r "$temporary_directory"
     return 1
   fi
   digest="$(
-    GIT_INDEX_FILE="$temporary_index" libbox_canonical_diff "$source_root" --cached HEAD -- |
+    libbox_git_with_index "$source_root" "$temporary_index" \
+      -c diff.interHunkContext=0 \
+      -c diff.suppressBlankEmpty=false \
+      --no-pager diff \
+      --no-color \
+      --no-ext-diff \
+      --no-textconv \
+      --binary \
+      --full-index \
+      --no-renames \
+      --no-indent-heuristic \
+      --diff-algorithm=myers \
+      --unified=3 \
+      -O/dev/null \
+      --src-prefix=a/ \
+      --dst-prefix=b/ \
+      --cached HEAD -- |
       shasum -a 256 | awk '{print $1}'
   )"
   /bin/rm -r "$temporary_directory"
@@ -313,7 +493,7 @@ libbox_validate_patched_source() {
   libbox_validate_patches "$repo_root" || return 1
   libbox_validate_git_root "$source_root" || return 1
 
-  ignored_files="$(git -C "$source_root" ls-files --others --ignored --exclude-standard)"
+  ignored_files="$(libbox_git "$source_root" ls-files --others --ignored --exclude-standard)"
   if [[ -n "$ignored_files" ]]; then
     echo "error: patched sing-box checkout contains ignored files" >&2
     return 1
@@ -342,21 +522,21 @@ libbox_validate_patched_source() {
   raw_packet_patch_path="$(libbox_raw_packet_patch_path "$repo_root")" || return 1
   dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")" || return 1
   endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root")" || return 1
-  if ! git -C "$source_root" apply --unidiff-zero --reverse --check \
+  if ! libbox_git "$source_root" apply --whitespace=error-all --unidiff-zero --reverse --check \
     "$endpoint_conflict_patch_path"; then
     echo "error: pinned endpoint conflict patch cannot be reversed cleanly" >&2
     return 1
   fi
-  if ! git -C "$source_root" apply --reverse --check "$dns_failover_patch_path"; then
+  if ! libbox_git "$source_root" apply --whitespace=error-all --reverse --check "$dns_failover_patch_path"; then
     echo "error: pinned DNS failover patch cannot be reversed cleanly" >&2
     return 1
   fi
-  if ! git -C "$source_root" apply --unidiff-zero --reverse --check \
+  if ! libbox_git "$source_root" apply --whitespace=error-all --unidiff-zero --reverse --check \
     "$raw_packet_patch_path"; then
     echo "error: pinned raw packet patch cannot be reversed cleanly" >&2
     return 1
   fi
-  if ! git -C "$source_root" apply --unidiff-zero --reverse --check \
+  if ! libbox_git "$source_root" apply --whitespace=error-all --unidiff-zero --reverse --check \
     "$security_patch_path"; then
     echo "error: pinned security patch cannot be reversed cleanly" >&2
     return 1
@@ -379,7 +559,8 @@ libbox_verify_xcframework_artifact() {
   local go_tools_tree_sha256="$5"
   local go_module_cache_tree_sha256="$6"
 
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  cfw_run_release_python_script \
+    "$repository" \
     "$repository/scripts/verify_artifact_manifest.py" \
     "$artifact" \
     "$manifest" \

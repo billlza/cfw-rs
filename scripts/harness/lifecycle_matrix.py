@@ -163,7 +163,7 @@ if {
 } != set(IDENTITY_PROBE_IDS):
     raise RuntimeError("lifecycle identity probe contract drifted")
 
-IDENTITY_FINAL_BUILD = "40027"
+IDENTITY_FINAL_BUILD = "40029"
 IDENTITY_OBSERVATION_DOCUMENT = "cfw-physical-identity-observation-v2"
 IDENTITY_OBSERVATION_SCHEMA_VERSION = 2
 IDENTITY_OBSERVATION_MAXIMUM_BYTES = 1024 * 1024

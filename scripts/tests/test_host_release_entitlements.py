@@ -4,10 +4,8 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
 import plistlib
-import re
 import stat
 import subprocess
-import sys
 import tempfile
 import unittest
 
@@ -264,32 +262,25 @@ class SignedCandidateWiringTests(unittest.TestCase):
         self.assertIn("\numask 022\n", source)
         self.assertNotIn("\numask 077\n", source)
 
-    def isolated_runner_bootstrap(self) -> str:
-        source = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
-            encoding="utf-8"
-        )
-        match = re.search(
-            r'PYTHONDONTWRITEBYTECODE=1 "\$python_bin" -I -S -B -c \'\n'
-            r'(?P<bootstrap>.*?)\n\' "\$repo_root" "\$script" "\$@"',
-            source,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(match)
-        return match.group("bootstrap") if match is not None else ""
+    def isolated_runner_command(self, script: Path, *arguments: str) -> list[str]:
+        return [
+            "/bin/bash",
+            "-p",
+            "-c",
+            'source "$1/scripts/release_python_launcher.sh"; '
+            'cfw_run_release_python_script "$1" "$2" "${@:3}"',
+            "isolated-release-python-test",
+            str(REPOSITORY),
+            str(script),
+            *arguments,
+        ]
 
     def test_isolated_runner_supports_repository_package_imports(self) -> None:
         completed = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                "-S",
-                "-B",
-                "-c",
-                self.isolated_runner_bootstrap(),
-                str(REPOSITORY),
-                str(REPOSITORY / "scripts/host_release_entitlements.py"),
+            self.isolated_runner_command(
+                REPOSITORY / "scripts/host_release_entitlements.py",
                 "--help",
-            ],
+            ),
             check=False,
             capture_output=True,
             text=True,
@@ -303,30 +294,21 @@ class SignedCandidateWiringTests(unittest.TestCase):
             outside = Path(temporary_directory) / "outside.py"
             outside.write_text("raise SystemExit(0)\n", encoding="utf-8")
             completed = subprocess.run(
-                [
-                    sys.executable,
-                    "-I",
-                    "-S",
-                    "-B",
-                    "-c",
-                    self.isolated_runner_bootstrap(),
-                    str(REPOSITORY),
-                    str(outside),
-                ],
+                self.isolated_runner_command(outside),
                 check=False,
                 capture_output=True,
                 text=True,
             )
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("escaped the reviewed scripts directory", completed.stderr)
+        self.assertIn("entrypoint is unavailable or unsafe", completed.stderr)
 
     def test_final_host_signature_uses_generated_release_xcent(self) -> None:
         source = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
             encoding="utf-8"
         )
         generation = source.index("scripts/host_release_entitlements.py")
-        final_signing = source.index("\ncodesign \\\n  --force", generation)
+        final_signing = source.index("\n/usr/bin/codesign \\\n  --force", generation)
 
         self.assertLess(generation, final_signing)
         self.assertIn('--entitlements "$host_release_xcent"', source[final_signing:])

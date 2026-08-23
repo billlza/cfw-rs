@@ -1,19 +1,17 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Package a fully verified arm64 application, then sign, notarize, staple, and
 # Gatekeeper-assess the DMG. No unsigned or partially verified fallback exists.
 set -euo pipefail
 umask 077
-unset PYTHONPATH PYTHONHOME BASH_ENV ENV CDPATH \
-  DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_FRAMEWORK_PATH \
-  DYLD_FALLBACK_LIBRARY_PATH
-export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-readonly python_bin="/opt/homebrew/bin/python3"
-[[ -x "$python_bin" ]] || {
-  echo "error: pinned Python interpreter is unavailable: $python_bin" >&2
-  exit 1
-}
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
+# shellcheck source=scripts/dependency_pins.env
+source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_tool_environment.sh
+source "$repo_root/scripts/release_tool_environment.sh"
+cfw_seal_release_tool_environment production
+cfw_select_release_apple_toolchain
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
 # shellcheck source=scripts/release_publication_gate.sh
@@ -25,7 +23,7 @@ die() {
   exit 1
 }
 
-cfw_require_supported_python
+cfw_require_supported_python "$CFW_RELEASE_PYTHON_EXECUTABLE"
 
 assert_semver() {
   local version="$1"
@@ -94,8 +92,10 @@ for legacy_output in \
 done
 
 if [[ -n "$recovery_submission_id" ]]; then
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
-    "$repo_root/scripts/dmg_notarization_transaction.py" recover \
+  cfw_run_release_python_script \
+    "$repo_root" \
+    "$repo_root/scripts/dmg_notarization_transaction.py" \
+    recover \
     --repository "$repo_root" \
     --release-root "$output_root" \
     --transaction-root "$transaction_root" \
@@ -107,8 +107,10 @@ if [[ -n "$recovery_submission_id" ]]; then
   exit 0
 fi
 
-PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B \
-  "$repo_root/scripts/dmg_notarization_transaction.py" preflight \
+cfw_run_release_python_script \
+  "$repo_root" \
+  "$repo_root/scripts/dmg_notarization_transaction.py" \
+  preflight \
   --repository "$repo_root" \
   --release-root "$output_root" \
   --transaction-root "$transaction_root" \
@@ -150,8 +152,10 @@ signature_details="$(/usr/bin/codesign -d --verbose=4 "$staged_dmg" 2>&1)"
   die "DMG secure signing timestamp is missing"
 [[ "$signature_details" != *"Signature=adhoc"* ]] || die "ad-hoc DMG signature is forbidden"
 
-PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B \
-  "$repo_root/scripts/dmg_notarization_transaction.py" start \
+cfw_run_release_python_script \
+  "$repo_root" \
+  "$repo_root/scripts/dmg_notarization_transaction.py" \
+  start \
   --repository "$repo_root" \
   --release-root "$output_root" \
   --transaction-root "$transaction_root" \

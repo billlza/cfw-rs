@@ -1,8 +1,17 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-source "$repo_root/scripts/release_publication_gate.sh"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/../.." && /bin/pwd -P)"
+# shellcheck source=scripts/release_python_launcher.sh
+source "$repo_root/scripts/release_python_launcher.sh"
+# shellcheck source=scripts/release_publication_path_contract.sh
+source "$repo_root/scripts/release_publication_path_contract.sh"
+python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+[[ -x "$python_bin" ]] || {
+  echo "error: release publication fixture requires closed Python" >&2
+  exit 1
+}
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/cfw-publication-fixture.XXXXXX")"
 trap '/bin/rm -rf "$fixture_root"' EXIT
 
@@ -25,7 +34,8 @@ printf '%s\n' '{"artifact":"fixture"}' >"$prepared/artifacts/fixture-manifest.js
 printf '%s\n' '{"graph":"fixture"}' >"$prepared/graphs/fixture-graph.json"
 printf '%s\n' 'fixture app payload' >"$app/Contents/payload.txt"
 
-python3 - "$prepared/closure-components.json" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+  "$prepared/closure-components.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -96,7 +106,8 @@ Path(sys.argv[1]).write_text(json.dumps(payload, sort_keys=True), encoding="utf-
 PY
 
 machine="$fixture_root/machine-closure.json"
-closure_sha="$(python3 "$repo_root/scripts/publication_evidence.py" draft \
+closure_sha="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/publication_evidence.py" draft \
   --prepared "$prepared" \
   --app "$app" \
   --output "$machine" \
@@ -104,7 +115,8 @@ closure_sha="$(python3 "$repo_root/scripts/publication_evidence.py" draft \
 
 bad_license="$fixture_root/bad-license"
 cp -R "$prepared" "$bad_license"
-python3 - "$bad_license/closure-components.json" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+  "$bad_license/closure-components.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -114,7 +126,8 @@ payload = json.loads(path.read_text(encoding="utf-8"))
 payload["components"][1]["license_expression"] = "NOASSERTION"
 path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 PY
-if python3 "$repo_root/scripts/publication_evidence.py" draft \
+if cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/publication_evidence.py" draft \
   --prepared "$bad_license" \
   --app "$app" \
   --output "$fixture_root/bad-license.json" \
@@ -128,7 +141,8 @@ reverse_payload="$fixture_root/reverse-payload"
 cp -R "$prepared" "$reverse_payload"
 mkdir -p "$reverse_payload/source/application/reverse"
 printf '%s\n' 'reference-only payload' >"$reverse_payload/source/application/reverse/forbidden.bin"
-if python3 "$repo_root/scripts/publication_evidence.py" draft \
+if cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/publication_evidence.py" draft \
   --prepared "$reverse_payload" \
   --app "$app" \
   --output "$fixture_root/reverse-payload.json" \
@@ -139,7 +153,8 @@ fi
 grep -Fq "reference-only reverse payload is forbidden" "$fixture_root/reverse-payload.stderr"
 
 review="$fixture_root/legal-review.json"
-python3 - "$review" "$closure_sha" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+  "$review" "$closure_sha" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -162,18 +177,21 @@ Path(sys.argv[1]).write_text(json.dumps(review, sort_keys=True), encoding="utf-8
 PY
 
 evidence="$fixture_root/evidence"
-python3 "$repo_root/scripts/publication_evidence.py" finalize \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/publication_evidence.py" finalize \
   --prepared "$prepared" \
   --app "$app" \
   --review "$review" \
   --output "$evidence" \
   --fixture
-python3 "$repo_root/scripts/publication_evidence.py" verify \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/publication_evidence.py" verify \
   --evidence "$evidence" \
   --app "$app" \
   --fixture
 
-if python3 "$repo_root/scripts/publication_evidence.py" verify \
+if cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/publication_evidence.py" verify \
   --evidence "$fixture_root/missing" \
   --app "$app" \
   --fixture 2>"$fixture_root/missing.stderr"; then
@@ -182,15 +200,16 @@ if python3 "$repo_root/scripts/publication_evidence.py" verify \
 fi
 grep -Eq "No such file or directory|does not exist" "$fixture_root/missing.stderr"
 
-if CFW_PUBLICATION_EVIDENCE_DIR="$evidence" \
-  verify_release_publication_evidence "$app" 2>"$fixture_root/fixed-path.stderr"; then
+if cfw_require_fixed_publication_app_path \
+  "$repo_root" "$app" 2>"$fixture_root/fixed-path.stderr"; then
   echo "error: production publication gate accepted a non-candidate app" >&2
   exit 1
 fi
 grep -Fq "accepts only the fixed 0.4.0 signed app" "$fixture_root/fixed-path.stderr"
 
 printf '%s\n' 'modified app payload' >"$app/Contents/payload.txt"
-if python3 "$repo_root/scripts/publication_evidence.py" verify \
+if cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/publication_evidence.py" verify \
   --evidence "$evidence" \
   --app "$app" \
   --fixture 2>"$fixture_root/app-tamper.stderr"; then
@@ -201,7 +220,8 @@ grep -Fq "signed app differs from publication evidence" "$fixture_root/app-tampe
 printf '%s\n' 'fixture app payload' >"$app/Contents/payload.txt"
 
 printf '%s\n' 'tampered' >>"$evidence/licenses/dependency/LICENSE"
-if python3 "$repo_root/scripts/publication_evidence.py" verify \
+if cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/publication_evidence.py" verify \
   --evidence "$evidence" \
   --app "$app" \
   --fixture 2>"$fixture_root/tamper.stderr"; then

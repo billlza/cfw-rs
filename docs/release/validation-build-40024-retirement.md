@@ -50,9 +50,10 @@ The corrected path preserves strict identity, signature, hash, PID/start-time,
 UID, path, protocol-version, and Off-state validation. It does not treat a
 timeout, missing field, rejected identity, or interrupted connection as Off.
 
-## Successor generation
+## Successor generations
 
-The next immutable pair is validation build 40026 and final build 40027 from
-one new clean source identity. Build 40026 must repeat signing, notarization,
-artifact verification, and the complete read-only preflight before any
-authorized maintenance transaction can begin.
+Validation build 40026 was later notarized and then retired before installation
+when its read-only admission preflight exposed a toolchain-binding mismatch;
+build 40027 remained unbuilt. Their separate immutable record is
+`docs/release/validation-build-40026-retirement.md`. The next immutable pair is
+validation build 40028 and final build 40029 from one new clean source identity.

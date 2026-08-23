@@ -3,9 +3,14 @@
 # target/toolchains. Callers invoking managed-tree functions must source
 # dependency_pins.env first.
 
+release_contract_directory="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && /bin/pwd -P)"
+# shellcheck source=scripts/release_python_launcher.sh
+source "$release_contract_directory/release_python_launcher.sh"
+unset release_contract_directory
+
 cfw_require_supported_python() {
-  local contract_python="${1:-python3}"
-  "$contract_python" -S -B -c \
+  local contract_python="${1:-${CFW_RELEASE_PYTHON_EXECUTABLE:-python3}}"
+  "$contract_python" -I -S -B -W error -c \
     'import sys; raise SystemExit(not ((3, 11) <= sys.version_info[:2] < (4, 0)))' || {
     echo "error: Python 3.11 through 3.x is required" >&2
     return 1
@@ -24,7 +29,8 @@ cfw_verify_release_toolchain_manifest() {
     contract_metadata_arguments+=(--metadata "$contract_metadata")
   done
 
-  PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
+  cfw_run_release_python_script \
+    "$contract_repository" \
     "$contract_repository/scripts/verify_artifact_manifest.py" \
     "$contract_artifact" \
     "$contract_manifest" \

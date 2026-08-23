@@ -25,6 +25,8 @@ if __package__:
         toolchain_sha256,
     )
     from .publication.common import PublicationError
+    from .publication.graph_model import load_pins
+    from .publication.release_environment import release_tool_environment
     from .publication.sealed_manifest import _ci_lane_document
 else:
     from hash_artifact import SUPPORTED_ALGORITHMS, build_manifest
@@ -34,6 +36,8 @@ else:
         toolchain_sha256,
     )
     from publication.common import PublicationError
+    from publication.graph_model import load_pins
+    from publication.release_environment import release_tool_environment
     from publication.sealed_manifest import _ci_lane_document
 
 
@@ -45,6 +49,7 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 # ``derive_toolchain_identity()['release_tree_sha256']``.  The names on the
 # right are the stable artifact-manifest metadata contract.
 RELEASE_TREE_METADATA = {
+    "cargo-workspace-sources": "cargoWorkspaceSourcesTreeSha256",
     "go": "goToolchainTreeSha256",
     "go-module-cache": "goModuleCacheTreeSha256",
     "go-release-tools": "goToolsTreeSha256",
@@ -245,8 +250,20 @@ def validate_candidate_app_manifest(
     return document
 
 
-def derive_candidate_toolchain_metadata(repository: Path) -> dict[str, str]:
-    digest, identity = derive_toolchain_binding(repository.resolve(strict=True))
+def derive_candidate_toolchain_metadata(
+    repository: Path, *, unsigned_validation: bool = False
+) -> dict[str, str]:
+    repository = repository.resolve(strict=True)
+    environment = None
+    if unsigned_validation:
+        pins = load_pins(repository / "scripts/dependency_pins.env")
+        environment = release_tool_environment(
+            repository,
+            pins,
+            dict(os.environ),
+            role="unsigned-validation",
+        )
+    digest, identity = derive_toolchain_binding(repository, environment)
     return toolchain_manifest_metadata(digest, identity)
 
 
@@ -257,10 +274,14 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parent.parent,
     )
+    parser.add_argument("--unsigned-validation-toolchain", action="store_true")
     arguments = parser.parse_args()
     try:
-        metadata = derive_candidate_toolchain_metadata(arguments.repository)
-    except (CandidateBindingError, OSError, ValueError) as error:
+        metadata = derive_candidate_toolchain_metadata(
+            arguments.repository,
+            unsigned_validation=arguments.unsigned_validation_toolchain,
+        )
+    except (CandidateBindingError, OSError, PublicationError, ValueError) as error:
         raise SystemExit(f"error: candidate toolchain binding failed: {error}") from error
     # Every value is a validated lowercase SHA-256.  The fixed positional form
     # is consumed by bash without eval or generated shell source.

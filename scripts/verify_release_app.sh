@@ -31,6 +31,11 @@ die() {
   exit 1
 }
 
+python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+[[ "$python_bin" == /* && -x "$python_bin" ]] ||
+  die "closed release Python interpreter is unavailable"
+readonly python_bin
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command is unavailable: $1"
 }
@@ -110,7 +115,7 @@ verify_entitlements() {
   local entitlement_path="$1"
   local kind="$2"
   local bundle_identifier="$3"
-  python3 -S -B - "$entitlement_path" "$kind" "$bundle_identifier" \
+  "$python_bin" -I -S -B -W error - "$entitlement_path" "$kind" "$bundle_identifier" \
     "$expected_team_id" "$expected_app_group" "$expected_agent_keychain_access_group" \
     "$expected_extension_keychain_access_group" "$repo_root" <<'PY'
 import plistlib
@@ -232,7 +237,8 @@ verify_provisioning_profile() {
     die "cannot extract signing certificate from $bundle"
   require_regular_file "${certificate_prefix}0"
 
-  python3 -S -B - "$decoded_profile" "$signed_entitlements" "${certificate_prefix}0" \
+  "$python_bin" -I -S -B -W error - \
+    "$decoded_profile" "$signed_entitlements" "${certificate_prefix}0" \
     "$kind" "$bundle_identifier" "$expected_team_id" "$expected_app_group" \
     "$expected_agent_keychain_access_group" "$expected_extension_keychain_access_group" \
     "$repo_root" <<'PY'
@@ -351,7 +357,8 @@ verify_tombstone_provenance() {
   local manifest="$native_products_root/CFWLegacyTombstone.manifest.json"
   require_regular_file "$staged_binary"
   require_regular_file "$manifest"
-  python3 -S -B - "$repo_root" "$manifest" "$staged_binary" "$build_number" <<'PY'
+  "$python_bin" -I -S -B -W error - \
+    "$repo_root" "$manifest" "$staged_binary" "$build_number" <<'PY'
 import hashlib
 import json
 from pathlib import Path
@@ -418,7 +425,7 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
 
-for command in codesign dwarfdump file find lipo plutil python3 security spctl stat vtool xcrun; do
+for command in codesign dwarfdump file find lipo plutil security spctl stat vtool xcrun; do
   require_command "$command"
 done
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
@@ -441,7 +448,8 @@ native_products_root="${2:-}"
 app_path="$(cd "$(dirname "$app_path")" && pwd -P)/$(basename "$app_path")"
 native_products_root="$(cd "$native_products_root" && pwd -P)"
 
-build_number="$(PYTHONDONTWRITEBYTECODE=1 python3 -S -B - "$repo_root" "$app_path" <<'PY'
+build_number="$(PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+  "$repo_root" "$app_path" <<'PY'
 import sys
 
 sys.path.insert(0, sys.argv[1] + "/scripts")
@@ -456,11 +464,11 @@ case "$native_products_root" in
   *) die "native products root is not the immutable root for app build $build_number" ;;
 esac
 
-native_source_sha256="$(PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
-  "$repo_root/scripts/hash_native_build_inputs.py")" ||
+native_source_sha256="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/hash_native_build_inputs.py")" ||
   die "cannot hash current native build inputs"
-source_identity="$(PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
-  "$repo_root/scripts/repository_source_identity.py")" ||
+source_identity="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/repository_source_identity.py")" ||
   die "cannot derive current release source identity"
 read -r repository_commit release_source_sha256 <<<"$source_identity"
 [[ -n "$repository_commit" && -n "$release_source_sha256" ]] ||
@@ -490,7 +498,8 @@ for product in \
   CFWNativeBridge.framework \
   CFWProxyAgent.app \
   "$expected_extension_wrapper"; do
-  PYTHONDONTWRITEBYTECODE=1 python3 -S -B "$repo_root/scripts/verify_artifact_manifest.py" \
+  cfw_run_release_python_script \
+    "$repo_root" "$repo_root/scripts/verify_artifact_manifest.py" \
     "$native_products_root/$product" \
     "$native_products_root/$product.manifest.json" \
     --metadata "buildNumber=$build_number" \
@@ -502,12 +511,12 @@ for product in \
     --metadata "signingMode=developer-id"
 done
 
-PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
-  "$repo_root/scripts/verify_candidate_bundle.py" \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/verify_candidate_bundle.py" \
   "$app_path" \
   --native-products-root "$native_products_root"
 
-python3 -S -B - "$app_path" <<'PY'
+"$python_bin" -I -S -B -W error - "$app_path" <<'PY'
 import os
 from pathlib import Path
 import stat
@@ -626,7 +635,8 @@ cmp -s "$authority_plist" "$repo_root/native/macos/Config/com.bill.clashformac.g
   die "Global Authority launchd BundleProgram mismatch"
 [[ "$(plist_value "$authority_plist" UserName)" == "root" ]] ||
   die "Global Authority must run as root"
-python3 -S -B - "$authority_plist" "$expected_team_id" "$expected_app_id" <<'PY'
+"$python_bin" -I -S -B -W error - \
+  "$authority_plist" "$expected_team_id" "$expected_app_id" <<'PY'
 import plistlib
 import sys
 
@@ -735,8 +745,8 @@ done <"$macho_candidates"
 codesign --verify --deep --strict --verbose=4 "$app_path"
 if [[ $pre_notary -eq 0 ]]; then
   xcrun stapler validate "$app_path"
-  PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
-    "$repo_root/scripts/gatekeeper_assessment.py" \
+  cfw_run_release_python_script \
+    "$repo_root" "$repo_root/scripts/gatekeeper_assessment.py" \
     --target "$app_path" \
     --assessment-type execute
 fi

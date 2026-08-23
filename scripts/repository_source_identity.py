@@ -9,8 +9,13 @@ import json
 import os
 import re
 import stat
-import subprocess
 from pathlib import Path
+from typing import Mapping
+
+if __package__:
+    from .release_git import ReleaseGitError, run_release_git
+else:
+    from release_git import ReleaseGitError, run_release_git
 
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -46,19 +51,30 @@ class SourceIdentityError(RuntimeError):
     """The repository cannot supply a trustworthy release-source identity."""
 
 
-def _run_git(repository: Path, arguments: list[str]) -> bytes:
-    result = subprocess.run(
-        ["git", "-C", str(repository), *arguments],
-        check=False,
-        capture_output=True,
+def _run_git(
+    repository: Path,
+    arguments: list[str],
+    environment: Mapping[str, str] | None = None,
+) -> bytes:
+    try:
+        return run_release_git(
+            repository,
+            arguments,
+            environment=environment,
+            protected_roots=RELEASE_PATHS,
+        )
+    except ReleaseGitError as error:
+        raise SourceIdentityError(
+            f"cannot query the release repository identity: {error}"
+        ) from error
+
+
+def repository_commit(
+    repository: Path, environment: Mapping[str, str] | None = None
+) -> str:
+    commit = _run_git(
+        repository, ["rev-parse", "--verify", "HEAD^{commit}"], environment
     )
-    if result.returncode != 0:
-        raise SourceIdentityError("cannot query the release repository identity")
-    return result.stdout
-
-
-def repository_commit(repository: Path) -> str:
-    commit = _run_git(repository, ["rev-parse", "--verify", "HEAD^{commit}"])
     try:
         decoded = commit.decode("ascii").strip()
     except UnicodeDecodeError as error:
@@ -68,16 +84,45 @@ def repository_commit(repository: Path) -> str:
     return decoded
 
 
-def require_clean_repository(repository: Path) -> None:
-    status = _run_git(
+def _clean_repository_identity(
+    repository: Path, environment: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    index_records = _run_git(
         repository,
-        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        ["ls-files", "-v", "-z", "--cached", "--", *RELEASE_PATHS],
+        environment,
     )
-    if status:
+    for record in (item for item in index_records.split(b"\0") if item):
+        if len(record) < 3 or record[1:2] != b" " or record[:1] != b"H":
+            raise SourceIdentityError(
+                "release repository index contains non-default visibility flags"
+            )
+    commit = repository_commit(repository, environment)
+    observed = {
+        "repositoryCommit": commit,
+        "releaseSourceSha256": release_source_digest(repository, environment),
+    }
+    historical = identity_at_commit(repository, commit, environment)
+    if observed != historical:
         raise SourceIdentityError("release repository contains tracked or untracked changes")
+    repeated = {
+        "repositoryCommit": repository_commit(repository, environment),
+        "releaseSourceSha256": release_source_digest(repository, environment),
+    }
+    if repeated != observed:
+        raise SourceIdentityError("release repository changed while deriving its identity")
+    return observed
 
 
-def _source_paths(repository: Path) -> list[Path]:
+def require_clean_repository(
+    repository: Path, environment: Mapping[str, str] | None = None
+) -> None:
+    _clean_repository_identity(repository, environment)
+
+
+def _source_paths(
+    repository: Path, environment: Mapping[str, str] | None = None
+) -> list[Path]:
     arguments = [
         "--",
         *RELEASE_PATHS,
@@ -92,12 +137,15 @@ def _source_paths(repository: Path) -> list[Path]:
             "--exclude-standard",
             *arguments,
         ],
+        environment,
     )
     deleted = set(
         name
-        for name in _run_git(repository, ["ls-files", "-z", "--deleted", *arguments]).split(
-            b"\0"
-        )
+        for name in _run_git(
+            repository,
+            ["ls-files", "-z", "--deleted", *arguments],
+            environment,
+        ).split(b"\0")
         if name
     )
     relative_names = [name for name in encoded.split(b"\0") if name]
@@ -138,9 +186,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def release_source_digest(repository: Path) -> str:
+def release_source_digest(
+    repository: Path, environment: Mapping[str, str] | None = None
+) -> str:
     digest = hashlib.sha256()
-    for path in _source_paths(repository):
+    for path in _source_paths(repository, environment):
         metadata = path.stat()
         entry = {
             "executable": bool(metadata.st_mode & stat.S_IXUSR),
@@ -154,12 +204,17 @@ def release_source_digest(repository: Path) -> str:
     return digest.hexdigest()
 
 
-def _historical_release_paths(repository: Path, commit: str) -> tuple[str, ...]:
+def _historical_release_paths(
+    repository: Path,
+    commit: str,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
     """Read the target commit's literal source-closure policy without executing it."""
     try:
         source = _run_git(
             repository,
             ["cat-file", "blob", f"{commit}:scripts/repository_source_identity.py"],
+            environment,
         ).decode("utf-8", errors="strict")
     except (SourceIdentityError, UnicodeDecodeError) as error:
         raise SourceIdentityError(
@@ -223,7 +278,11 @@ def _historical_release_paths(repository: Path, commit: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def identity_at_commit(repository: Path, commit: str) -> dict[str, str]:
+def identity_at_commit(
+    repository: Path,
+    commit: str,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Recompute a clean historical release identity from immutable Git blobs.
 
     Notarization recovery may be performed by a later clean checkout.  Its
@@ -234,13 +293,18 @@ def identity_at_commit(repository: Path, commit: str) -> dict[str, str]:
     """
     if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
         raise SourceIdentityError("historical release commit is not canonical")
-    resolved = _run_git(repository, ["rev-parse", "--verify", f"{commit}^{{commit}}"])
+    resolved = _run_git(
+        repository,
+        ["rev-parse", "--verify", f"{commit}^{{commit}}"],
+        environment,
+    )
     if resolved.decode("ascii", errors="strict").strip() != commit:
         raise SourceIdentityError("historical release commit is unavailable")
-    release_paths = _historical_release_paths(repository, commit)
+    release_paths = _historical_release_paths(repository, commit, environment)
     listing = _run_git(
         repository,
         ["ls-tree", "-rz", "--full-tree", commit, "--", *release_paths],
+        environment,
     )
     records: list[dict[str, object]] = []
     seen: set[str] = set()
@@ -261,7 +325,11 @@ def identity_at_commit(repository: Path, commit: str) -> dict[str, str]:
                 f"historical release source path is repeated: {canonical_name}"
             )
         seen.add(canonical_name)
-        blob = _run_git(repository, ["cat-file", "blob", object_id.decode("ascii")])
+        blob = _run_git(
+            repository,
+            ["cat-file", "blob", object_id.decode("ascii")],
+            environment,
+        )
         records.append(
             {
                 "executable": mode == b"100755",
@@ -286,12 +354,17 @@ def identity_at_commit(repository: Path, commit: str) -> dict[str, str]:
     return {"repositoryCommit": commit, "releaseSourceSha256": digest.hexdigest()}
 
 
-def current_identity(repository: Path, *, require_clean: bool = False) -> dict[str, str]:
+def current_identity(
+    repository: Path,
+    *,
+    require_clean: bool = False,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     if require_clean:
-        require_clean_repository(repository)
+        return _clean_repository_identity(repository, environment)
     return {
-        "repositoryCommit": repository_commit(repository),
-        "releaseSourceSha256": release_source_digest(repository),
+        "repositoryCommit": repository_commit(repository, environment),
+        "releaseSourceSha256": release_source_digest(repository, environment),
     }
 
 

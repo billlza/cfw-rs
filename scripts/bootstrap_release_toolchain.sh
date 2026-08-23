@@ -1,15 +1,21 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Download pinned build tools into target/toolchains. Product builds never call
 # this script and never download tools or binaries implicitly.
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/go_release_environment.sh
 source "$repo_root/scripts/go_release_environment.sh"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
+python_bin="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+if [[ ! -x "$python_bin" ]]; then
+  echo "error: closed release Python is required" >&2
+  exit 1
+fi
 
 bootstrap_scope=full
 if [[ $# -eq 1 && "$1" == "--node-only" ]]; then
@@ -60,7 +66,8 @@ install_archive() {
   tar -xzf "$staging/$archive" -C "$staging"
   payload="$staging/$(basename "$destination")"
   /bin/mv "$staging/$extracted" "$payload"
-  python3 "$repo_root/scripts/hash_artifact.py" \
+  cfw_run_release_python_script \
+    "$repo_root" "$repo_root/scripts/hash_artifact.py" \
     "$payload" \
     --output "$staging/$(basename "$manifest")" \
     --algorithm sha256-tree-v2 \
@@ -152,7 +159,8 @@ install_xcodegen() {
     "https://codeload.github.com/yonaskolb/XcodeGen/tar.gz/$XCODEGEN_COMMIT" \
     --output "$archive"
   printf '%s  %s\n' "$XCODEGEN_SOURCE_SHA256" "$archive" | shasum -a 256 --check
-  PYTHONDONTWRITEBYTECODE=1 python3 -B - "$archive" "XcodeGen-$XCODEGEN_COMMIT" <<'PY'
+  PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+    "$archive" "XcodeGen-$XCODEGEN_COMMIT" <<'PY'
 import sys
 import tarfile
 from pathlib import PurePosixPath
@@ -349,7 +357,8 @@ PY
     echo "error: installed XcodeGen cannot load its SettingPresets resources" >&2
     exit 1
   fi
-  if PYTHONDONTWRITEBYTECODE=1 python3 -B - "$payload/bin/xcodegen" "$staging" <<'PY'
+  if PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+    "$payload/bin/xcodegen" "$staging" <<'PY'
 import sys
 from pathlib import Path
 
@@ -369,7 +378,8 @@ PY
     echo "error: source-built XcodeGen embeds its temporary build path" >&2
     exit 1
   fi
-  python3 "$repo_root/scripts/hash_artifact.py" \
+  cfw_run_release_python_script \
+    "$repo_root" "$repo_root/scripts/hash_artifact.py" \
     "$payload" \
     --output "$staging/xcodegen-$XCODEGEN_VERSION.manifest.json" \
     --algorithm sha256-tree-v2 \
@@ -450,7 +460,8 @@ else
     "github.com/sagernet/gomobile/cmd/gobind@$GOMOBILE_VERSION"
   "$go_bin" install \
     "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
-  python3 "$repo_root/scripts/hash_artifact.py" \
+  cfw_run_release_python_script \
+    "$repo_root" "$repo_root/scripts/hash_artifact.py" \
     "$tools_staging/bin" \
     --output "$tools_staging/go-workspace-bin.manifest.json" \
     --algorithm sha256-tree-v2 \

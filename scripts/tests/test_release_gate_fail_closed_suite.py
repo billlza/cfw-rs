@@ -261,14 +261,23 @@ _PINS_ENV = "scripts/dependency_pins.env"
 
 
 def _copy_pinned_tree(destination: Path) -> Path:
-    for relative in _PINNED_INPUTS:
+    manifest = json.loads(
+        (REPO_ROOT / "scripts/pinned_build_inputs.json").read_text(encoding="utf-8")
+    )
+    artifact_bindings = manifest.get("artifactBindings")
+    if not isinstance(artifact_bindings, dict):
+        raise AssertionError("shipped artifact-binding closure is unavailable")
+    fixture_inputs = tuple(
+        dict.fromkeys((*_PINNED_INPUTS, *sorted(artifact_bindings)))
+    )
+    for relative in fixture_inputs:
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise AssertionError("shipped artifact-binding path is not repository-relative")
         source = REPO_ROOT / relative
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-    manifest = json.loads(
-        (REPO_ROOT / "scripts/pinned_build_inputs.json").read_text(encoding="utf-8")
-    )
     runtime_tools = manifest.get("runtimeTools")
     if not isinstance(runtime_tools, dict):
         raise AssertionError("shipped runtime-tool source closure is unavailable")
@@ -516,6 +525,7 @@ jobs:
 _PINS = "\n".join(
     [
         "RUST_VERSION=1.97.1",
+        "PYTHON_VERSION=3.14.6",
         "NODE_VERSION=24.18.0",
         "XCODE_VERSION=26.6",
         "XCODE_BUILD_VERSION=17F113",

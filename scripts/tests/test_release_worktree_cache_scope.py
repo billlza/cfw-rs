@@ -13,8 +13,8 @@ from scripts.release_secret_material_blocker import (
 
 def _receipt() -> ReleaseWorktreeCacheScopeReceipt:
     return ReleaseWorktreeCacheScopeReceipt(
-        build="40026",
-        worktree_path="/release/target/release-worktrees/40026",
+        build="40028",
+        worktree_path="/release/target/release-worktrees/40028",
         head="8de7baa6757136510c7f749e15b3869c792fb722",
         admin=StablePathIdentity(device=1, inode=2),
         worktree=StablePathIdentity(device=1, inode=3),
@@ -37,7 +37,7 @@ class ReleaseWorktreeCacheScopeTests(unittest.TestCase):
         ):
             parse_scope_receipt(b" " + canonical)
         duplicate = canonical.replace(
-            b'{"adminIdentity":', b'{"build":"40026","adminIdentity":', 1
+            b'{"adminIdentity":', b'{"build":"40028","adminIdentity":', 1
         )
         with self.assertRaisesRegex(
             ReleaseWorktreeCacheScopeError, "duplicate key"

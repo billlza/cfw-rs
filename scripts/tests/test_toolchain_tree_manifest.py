@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.publication.common import PublicationError
-from scripts.publication.ci_lanes import Lane, lane_environment
+from scripts.publication.ci_lanes import Lane, lane_environment, release_tool_environment
 from scripts.publication.release_toolchains import verified_release_toolchain_trees
 
 
@@ -469,6 +469,132 @@ class ExecutionBeforeVersionTests(unittest.TestCase):
 
 
 class ReleaseConsumerContractTests(unittest.TestCase):
+    def test_release_consumers_share_the_closed_apple_tool_environment(self) -> None:
+        for relative in (
+            "build_signed_candidate.sh",
+            "build_unsigned_candidate.sh",
+            "build_native_products.sh",
+            "verify_release_environment.sh",
+        ):
+            with self.subTest(script=relative):
+                text = (SCRIPTS / relative).read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("#!/bin/bash -p\n"))
+                self.assertIn(
+                    'source "$repo_root/scripts/release_tool_environment.sh"', text
+                )
+                self.assertIn("cfw_seal_release_tool_environment", text)
+                self.assertIn("cfw_select_release_apple_toolchain", text)
+                self.assertNotRegex(text, r"(?m)(?<!/)\bxcodebuild\s+(?:build|-version)")
+                self.assertLess(text.index("unset CDPATH"), text.index('repo_root="$(cd '))
+                self.assertLess(
+                    text.index('source "$repo_root/scripts/dependency_pins.env"'),
+                    text.index("cfw_seal_release_tool_environment"),
+                )
+
+        contract = (SCRIPTS / "release_tool_environment.sh").read_text(
+            encoding="utf-8"
+        )
+        for fragment in (
+            'rust_toolchain_root="$release_home/.rustup/toolchains/$RUST_VERSION-aarch64-apple-darwin"',
+            'policy_tool_root="$release_home/.cfm-release-tooling/policy-$CARGO_AUDIT_VERSION-$CARGO_DENY_VERSION"',
+            'cargo_aux_bin="$policy_tool_root/bin"',
+            'python_root="/opt/homebrew/Cellar/python@$python_series/$PYTHON_VERSION/',
+            '/usr/bin:/bin:/usr/sbin:/sbin:$rust_bin:$cargo_aux_bin',
+            "/usr/bin/dscacheutil -q user -a uid",
+            "/usr/bin/xcode-select -p",
+            "/usr/bin/xcodebuild -version",
+            "/usr/bin/xcrun --find swift",
+            "SDKROOT",
+            "SWIFT_EXEC",
+            "TOOLCHAINS",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, contract)
+
+        signed = (SCRIPTS / "build_signed_candidate.sh").read_text(encoding="utf-8")
+        unsigned = (SCRIPTS / "build_unsigned_candidate.sh").read_text(
+            encoding="utf-8"
+        )
+        native = (SCRIPTS / "build_native_products.sh").read_text(encoding="utf-8")
+        publication = (SCRIPTS / "prepare_publication_evidence.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("cfw_seal_release_tool_environment production", signed)
+        self.assertIn("--validation-python-executable", unsigned)
+        self.assertIn("cfw_seal_release_tool_environment unsigned-validation", unsigned)
+        self.assertIn("--unsigned-validation-toolchain", unsigned)
+        self.assertIn('"${1:-}" == "--unsigned"', native)
+        self.assertIn("cfw_seal_release_tool_environment production", publication)
+
+    def test_closed_shell_environment_never_executes_ambient_apple_shadows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_bin = Path(temporary) / "bin"
+            fake_bin.mkdir()
+            marker = Path(temporary) / "ambient-apple-tool-ran"
+            for tool in ("swift", "xcodebuild", "xcrun"):
+                executable = fake_bin / tool
+                executable.write_text(
+                    f"#!/bin/sh\ntouch '{marker}'\nexit 99\n", encoding="utf-8"
+                )
+                executable.chmod(0o755)
+            environment = dict(os.environ)
+            environment.update(
+                {
+                    "PATH": f"{fake_bin}:{environment['PATH']}",
+                    "TOOLCHAINS": "untrusted",
+                    "SDKROOT": str(Path(temporary) / "sdk"),
+                    "SWIFT_EXEC": str(fake_bin / "swift"),
+                }
+            )
+            role = (
+                "unsigned-validation"
+                if "CFW_UNSIGNED_VALIDATION_PYTHON" in environment
+                else "production"
+            )
+            completed = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-p",
+                    "-c",
+                    "set -euo pipefail; "
+                    'source "$1/scripts/release_tool_environment.sh"; '
+                    'source "$1/scripts/dependency_pins.env"; '
+                    'export DYLD_INSERT_LIBRARIES="$2"; '
+                    'cfw_seal_release_tool_environment "$3"; '
+                    "cfw_select_release_apple_toolchain; "
+                    'printf "%s\\n%s\\n" "$PATH" "$DEVELOPER_DIR"',
+                    "release-tool-environment-test",
+                    str(REPOSITORY),
+                    str(Path(temporary) / "inject.dylib"),
+                    role,
+                ],
+                cwd=REPOSITORY,
+                env=environment,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            self.assertFalse(marker.exists())
+            lines = completed.stdout.decode().splitlines()
+            release_home = Path.home().resolve()
+            policy_root = (
+                release_home
+                / ".cfm-release-tooling"
+                / (
+                    f"policy-{_pins()['CARGO_AUDIT_VERSION']}-"
+                    f"{_pins()['CARGO_DENY_VERSION']}"
+                )
+            )
+            self.assertEqual(
+                lines[0],
+                "/usr/bin:/bin:/usr/sbin:/sbin:"
+                f"{release_home}/.rustup/toolchains/"
+                f"{_pins()['RUST_VERSION']}-aarch64-apple-darwin/bin:"
+                f"{policy_root}/bin",
+            )
+            self.assertTrue(lines[1].endswith("/Contents/Developer"))
+
     def test_candidate_builds_use_the_warning_free_unsigned_host_contract(self) -> None:
         contract = (SCRIPTS / "tauri_host_skeleton.sh").read_text(encoding="utf-8")
         for variable in (
@@ -483,6 +609,30 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertIn("Tauri.macos.toml", contract)
         self.assertIn("signingIdentity", contract)
         self.assertNotIn("--no-sign", contract)
+        self.assertIn(
+            'source "$tauri_host_contract_directory/release_cargo_inputs.sh"',
+            contract,
+        )
+        self.assertEqual(contract.count("cfw_verify_release_cargo_runtime"), 2)
+        runtime_guard = contract.index(
+            "Tauri build requires the verified candidate Cargo runtime"
+        )
+        runtime_verification_before = contract.index(
+            "cfw_verify_release_cargo_runtime", runtime_guard
+        )
+        config_preflight = contract.index(
+            "PYTHONDONTWRITEBYTECODE=1", runtime_verification_before
+        )
+        tauri_execution = contract.index(
+            '"$contract_tauri_host_bin" build', config_preflight
+        )
+        runtime_verification_after = contract.index(
+            "cfw_verify_release_cargo_runtime", tauri_execution
+        )
+        self.assertLess(runtime_guard, runtime_verification_before)
+        self.assertLess(runtime_verification_before, config_preflight)
+        self.assertLess(config_preflight, tauri_execution)
+        self.assertLess(tauri_execution, runtime_verification_after)
 
         for relative in (
             "build_unsigned_candidate.sh",
@@ -492,11 +642,58 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                 source = (SCRIPTS / relative).read_text(encoding="utf-8")
                 self.assertNotIn("--no-sign", source)
                 self.assertIn("source \"$repo_root/scripts/tauri_host_skeleton.sh\"", source)
-                build = source.index("cfw_build_tauri_host_skeleton")
+                runtime_create = source.index(
+                    'candidate_cargo_home="$(cfw_create_release_cargo_runtime '
+                    '"$repo_root")"'
+                )
+                cleanup_name = (
+                    "cleanup_candidate_cargo_runtime()"
+                    if relative == "build_unsigned_candidate.sh"
+                    else "cleanup()"
+                )
+                cleanup_function = source.index(cleanup_name)
+                cleanup_runtime_removal = source.index(
+                    'cfw_remove_release_cargo_runtime "$candidate_cargo_home"',
+                    cleanup_function,
+                )
+                cleanup_trap = source.index(
+                    (
+                        "trap cleanup_candidate_cargo_runtime EXIT"
+                        if relative == "build_unsigned_candidate.sh"
+                        else "trap cleanup EXIT"
+                    ),
+                    cleanup_runtime_removal,
+                )
+                cargo_use = source.index(
+                    'CARGO_HOME="$candidate_cargo_home" CARGO_NET_OFFLINE=true',
+                    runtime_create,
+                )
+                build = source.index("cfw_build_tauri_host_skeleton", cargo_use)
+                runtime_verification = source.index(
+                    'cfw_verify_release_cargo_runtime "$repo_root" '
+                    '"$candidate_cargo_home"',
+                    build,
+                )
+                runtime_removal = source.index(
+                    'cfw_remove_release_cargo_runtime "$candidate_cargo_home"',
+                    runtime_verification,
+                )
+                runtime_clear = source.index(
+                    'candidate_cargo_home=""', runtime_removal
+                )
                 verification = source.index(
                     "verify_candidate_bundle.sh", build
                 )
                 manifest = source.index("scripts/hash_artifact.py", verification)
+                self.assertLess(runtime_create, cargo_use)
+                self.assertLess(cleanup_function, cleanup_runtime_removal)
+                self.assertLess(cleanup_runtime_removal, cleanup_trap)
+                self.assertLess(cleanup_trap, cargo_use)
+                self.assertLess(cargo_use, build)
+                self.assertLess(build, runtime_verification)
+                self.assertLess(runtime_verification, runtime_removal)
+                self.assertLess(runtime_removal, runtime_clear)
+                self.assertLess(runtime_clear, verification)
                 self.assertLess(build, verification)
                 self.assertLess(verification, manifest)
                 self.assertIn("--require-unsigned-host", source[verification:manifest])
@@ -599,6 +796,24 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             with self.subTest(script=relative):
                 text = (SCRIPTS / relative).read_text(encoding="utf-8")
                 self.assertIn(fragment, text)
+
+    def test_xcode_project_verifier_uses_a_closed_xcodegen_environment(self) -> None:
+        verifier = (SCRIPTS / "verify_xcode_project.sh").read_text(encoding="utf-8")
+        for fragment in (
+            "/usr/bin/env -i",
+            'HOME="$isolated_home"',
+            'TMPDIR="$isolated_tmp"',
+            "USER=cfw-release",
+            "LOGNAME=cfw-release",
+            "LANG=C",
+            "LC_ALL=C",
+            'PATH="/usr/bin:/bin:/usr/sbin:/sbin"',
+            'DEVELOPER_DIR="${DEVELOPER_DIR:?}"',
+            '"$xcodegen" generate',
+            "--no-env",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, verifier)
 
     def test_libbox_module_cache_seals_the_offline_test_graph(self) -> None:
         contract = (SCRIPTS / "libbox_module_cache_contract.bash").read_text(
@@ -829,6 +1044,82 @@ LIBBOX_VET_PACKAGES=(".")
                 text = (SCRIPTS / relative).read_text(encoding="utf-8")
                 self.assertIn("cfw_require_supported_python", text)
 
+    def test_release_runbook_bootstraps_policy_tools_before_sealed_gates(self) -> None:
+        runbook = (REPOSITORY / "RELEASE.md").read_text(encoding="utf-8")
+        cargo_workspace_inputs = runbook.index(
+            "./scripts/run_release_ci_gate.sh prepare-cargo-workspace-inputs"
+        )
+        policy_bootstrap = runbook.index(
+            "./scripts/run_release_ci_gate.sh bootstrap-policy-tools"
+        )
+        release_toolchain = runbook.index(
+            "./scripts/run_release_ci_gate.sh bootstrap-release-toolchain"
+        )
+        self.assertLess(cargo_workspace_inputs, policy_bootstrap)
+        self.assertLess(policy_bootstrap, release_toolchain)
+
+    def test_ui_gates_do_not_expand_an_empty_array_under_nounset(self) -> None:
+        wrapper = (SCRIPTS / "run_release_ci_gate.sh").read_text(encoding="utf-8")
+        self.assertNotIn("ui_arguments", wrapper)
+        self.assertIn(
+            'ui-test)\n    [[ $# -eq 0 ]] || die "$gate accepts no arguments"\n'
+            '    /bin/bash -p "$repo_root/scripts/build_ui_with_pinned_node.sh" \\\n'
+            "      --test",
+            wrapper,
+        )
+        self.assertIn(
+            'ui-build)\n    [[ $# -eq 0 ]] || die "$gate accepts no arguments"\n'
+            '    /bin/bash -p "$repo_root/scripts/build_ui_with_pinned_node.sh"',
+            wrapper,
+        )
+        self.assertIn(
+            'ui-audit)\n    [[ $# -eq 0 ]] || die "$gate accepts no arguments"\n'
+            '    /bin/bash -p "$repo_root/scripts/build_ui_with_pinned_node.sh" \\\n'
+            "      --audit",
+            wrapper,
+        )
+
+    def test_readmes_use_the_closed_libbox_preparation_sequence(self) -> None:
+        expected = (
+            "prepare-cargo-workspace-inputs",
+            "bootstrap-policy-tools",
+            "bootstrap-release-toolchain",
+            "fetch-libbox-upstream",
+            "materialize-libbox-source",
+            "prepare-libbox-modules",
+            "libbox-vulnerability-scan",
+            "build-libbox",
+        )
+        for relative in ("README.md", "RELEASE.md"):
+            text = (REPOSITORY / relative).read_text(encoding="utf-8")
+            offsets = [
+                text.index(f"./scripts/run_release_ci_gate.sh {gate}")
+                for gate in expected
+            ]
+            with self.subTest(relative=relative):
+                self.assertEqual(offsets, sorted(offsets))
+
+        native = (REPOSITORY / "native/macos/README.md").read_text(
+            encoding="utf-8"
+        )
+        native_offsets = [
+            native.index(f"./scripts/run_release_ci_gate.sh {gate}")
+            for gate in expected[:3]
+        ]
+        self.assertEqual(native_offsets, sorted(native_offsets))
+
+    def test_native_readme_keeps_unsigned_builds_out_of_active_validation(self) -> None:
+        readme = (REPOSITORY / "native/macos/README.md").read_text(encoding="utf-8")
+        self.assertIn("export CFW_BUILD_NUMBER=40000", readme)
+        self.assertIn(
+            "target/candidates/0.4.0/native-validation/40000/native-products",
+            readme,
+        )
+        self.assertNotIn(
+            "target/candidates/0.4.0/validation/40028/native-products",
+            readme,
+        )
+
     def test_tauri_installer_uses_isolated_clean_payload(self) -> None:
         installer = (SCRIPTS / "install_pinned_tauri_cli.sh").read_text(encoding="utf-8")
         for fragment in (
@@ -849,7 +1140,8 @@ LIBBOX_VET_PACKAGES=(".")
             "payloadLayout=bin-and-patched-source-v1",
             'PATH="$cargo_install_root/bin:$(dirname "$cargo_bin"):',
             'readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"',
-            'PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract"',
+            'cfw_run_release_python_script',
+            '"$repo_root" "$cargo_cache_contract"',
             'reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"',
             'reject_cargo_warnings "$install_log" "tauri-cli installation"',
             "cacheContractSha256=$TAURI_CARGO_CACHE_CONTRACT_SHA256",
@@ -1001,6 +1293,14 @@ LIBBOX_VET_PACKAGES=(".")
 
     def test_custom_toolchain_root_is_the_node_lane_execution_root(self) -> None:
         pins = _pins()
+        role = (
+            "unsigned-validation"
+            if "CFW_UNSIGNED_VALIDATION_PYTHON" in os.environ
+            else "production"
+        )
+        closed_environment = release_tool_environment(
+            REPOSITORY, pins, dict(os.environ), role=role
+        )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve() / "verified-toolchains"
             root.mkdir()
@@ -1012,6 +1312,7 @@ LIBBOX_VET_PACKAGES=(".")
                 REPOSITORY / "target/artifacts/fixture",
                 REPOSITORY / "target/runner-temp/fixture",
                 root,
+                release_environment=closed_environment,
             )
         expected_bin = root / f"node-{pins['NODE_VERSION']}" / "bin"
         self.assertEqual(environment["CFW_TOOLCHAIN_ROOT"], str(root))
@@ -1025,6 +1326,15 @@ class PublicationToolchainBindingTests(unittest.TestCase):
         self.root = Path(self.temporary.name) / "toolchains"
         self.root.mkdir()
         self.pins = _pins()
+        role = (
+            "unsigned-validation"
+            if "CFW_UNSIGNED_VALIDATION_PYTHON" in os.environ
+            else "production"
+        )
+        self.release_environment = release_tool_environment(
+            REPOSITORY, self.pins, dict(os.environ), role=role
+        )
+        self.release_environment["CFW_TOOLCHAIN_ROOT"] = str(self.root)
 
     def _tree(self, relative: str, manifest_name: str, metadata: list[str]) -> Path:
         root = self.root / relative
@@ -1081,6 +1391,10 @@ class PublicationToolchainBindingTests(unittest.TestCase):
 
     def _prepare(self) -> dict[str, Path]:
         return {
+            "cargo-workspace-sources": Path(
+                self.release_environment["CFW_RELEASE_CARGO_INPUT_ROOT"]
+            )
+            / "vendor.manifest.json",
             "go": self._tree(
                 f"go-{self.pins['GO_VERSION']}",
                 f"go-{self.pins['GO_VERSION']}.manifest.json",
@@ -1175,18 +1489,31 @@ class PublicationToolchainBindingTests(unittest.TestCase):
 
     def test_publication_binding_contains_every_verified_tree(self) -> None:
         markers = self._prepare()
-        with patch.dict("os.environ", {"CFW_TOOLCHAIN_ROOT": str(self.root)}):
-            root, digests = verified_release_toolchain_trees(REPOSITORY, self.pins)
+        root, digests = verified_release_toolchain_trees(
+            REPOSITORY, self.pins, self.release_environment
+        )
         self.assertEqual(root, self.root.resolve())
         self.assertEqual(set(digests), set(markers))
         self.assertTrue(all(len(digest) == 64 for digest in digests.values()))
 
+    def test_publication_binding_uses_the_supplied_closed_environment(self) -> None:
+        markers = self._prepare()
+        environment = dict(self.release_environment)
+        environment["CFW_TOOLCHAIN_ROOT"] = str(self.root)
+        with patch.dict(os.environ, {"PATH": "/tmp/untrusted"}):
+            root, digests = verified_release_toolchain_trees(
+                REPOSITORY, self.pins, environment=environment
+            )
+        self.assertEqual(root, self.root.resolve())
+        self.assertEqual(set(digests), set(markers))
+
     def test_publication_binding_rejects_tree_drift(self) -> None:
         markers = self._prepare()
         markers["go-module-cache"].write_text("tampered", encoding="utf-8")
-        with patch.dict("os.environ", {"CFW_TOOLCHAIN_ROOT": str(self.root)}):
-            with self.assertRaisesRegex(PublicationError, "verification failed"):
-                verified_release_toolchain_trees(REPOSITORY, self.pins)
+        with self.assertRaisesRegex(PublicationError, "verification failed"):
+            verified_release_toolchain_trees(
+                REPOSITORY, self.pins, self.release_environment
+            )
 
     def test_go_module_cache_rejects_previous_closure_contract(self) -> None:
         self._tree(
@@ -1229,15 +1556,20 @@ class PublicationToolchainBindingTests(unittest.TestCase):
         linked_root.symlink_to(self.root, target_is_directory=True)
         for unsafe_root in (linked_root, Path(self.temporary.name) / "missing"):
             with self.subTest(root=unsafe_root):
-                with patch.dict("os.environ", {"CFW_TOOLCHAIN_ROOT": str(unsafe_root)}):
-                    with self.assertRaisesRegex(PublicationError, "missing.*symlink"):
-                        verified_release_toolchain_trees(REPOSITORY, self.pins)
+                environment = dict(self.release_environment)
+                environment["CFW_TOOLCHAIN_ROOT"] = str(unsafe_root)
+                with self.assertRaisesRegex(PublicationError, "missing.*symlink"):
+                    verified_release_toolchain_trees(
+                        REPOSITORY, self.pins, environment
+                    )
 
     def test_publication_binding_rejects_split_brain_pins(self) -> None:
         mismatched = dict(self.pins)
         mismatched["NODE_VERSION"] = "0.0.0"
         with self.assertRaisesRegex(PublicationError, "pins do not match"):
-            verified_release_toolchain_trees(REPOSITORY, mismatched)
+            verified_release_toolchain_trees(
+                REPOSITORY, mismatched, self.release_environment
+            )
 
     def test_contract_does_not_shadow_readonly_caller_paths(self) -> None:
         self._prepare()

@@ -2,11 +2,27 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+trusted_python="${CFW_RELEASE_PYTHON_EXECUTABLE:-}"
+[[ -x "$trusted_python" ]] || {
+  echo "error: updater-secret fixture requires closed Python" >&2
+  exit 1
+}
+
+run_clean_environment() {
+  /usr/bin/env -i \
+    "HOME=$HOME" \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    LANG=C \
+    LC_ALL=C \
+    "$@"
+}
+
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/cfw-updater-secret.XXXXXX")"
 trap '/bin/rm -rf "$temporary_root"' EXIT
 
 trace_log="$temporary_root/xtrace.log"
-if TAURI_PRIVATE_KEY_PATH=/outside/updater.key \
+if run_clean_environment \
+  TAURI_PRIVATE_KEY_PATH=/outside/updater.key \
   TAURI_PRIVATE_KEY_PASSWORD=trace-secret-must-not-appear \
   /bin/bash -p -x "$repo_root/scripts/make_updater_manifest.sh" \
   >"$trace_log" 2>&1; then
@@ -29,7 +45,7 @@ for secret_name in \
 do
   secret_value="forbidden-${secret_name}"
   secret_log="$temporary_root/${secret_name}.log"
-  if /usr/bin/env "$secret_name=$secret_value" \
+  if run_clean_environment "$secret_name=$secret_value" \
     "$repo_root/scripts/make_updater_manifest.sh" \
     >"$secret_log" 2>&1; then
     echo "error: $secret_name unexpectedly passed updater release creation" >&2
@@ -49,7 +65,7 @@ printf '%s\n' "printf '%s\\n' ran >'$startup_marker'; unset BASH_ENV ENV" \
   >"$startup_hook"
 for hook_name in BASH_ENV ENV; do
   hook_log="$temporary_root/${hook_name}.log"
-  if /usr/bin/env "$hook_name=$startup_hook" \
+  if run_clean_environment "$hook_name=$startup_hook" \
     "$repo_root/scripts/make_updater_manifest.sh" \
     >"$hook_log" 2>&1; then
     echo "error: $hook_name unexpectedly passed updater release creation" >&2
@@ -63,7 +79,8 @@ for hook_name in BASH_ENV ENV; do
 done
 
 ordinary_bash_log="$temporary_root/ordinary-bash.log"
-if /bin/bash "$repo_root/scripts/make_updater_manifest.sh" \
+if run_clean_environment \
+  /bin/bash "$repo_root/scripts/make_updater_manifest.sh" \
   >"$ordinary_bash_log" 2>&1; then
   echo "error: ordinary bash bypassed the privileged updater entrypoint" >&2
   exit 1
@@ -71,7 +88,7 @@ fi
 /usr/bin/grep -Fq "requires its /bin/bash -p entrypoint" "$ordinary_bash_log"
 
 exported_options_log="$temporary_root/exported-options.log"
-if /usr/bin/env BASHOPTS=extdebug \
+if run_clean_environment BASHOPTS=extdebug \
   "$repo_root/scripts/make_updater_manifest.sh" \
   >"$exported_options_log" 2>&1; then
   echo "error: exported BASHOPTS unexpectedly passed updater creation" >&2
@@ -85,11 +102,11 @@ mkdir -p "$hijack_bin"
 cat >"$hijack_bin/python3" <<SH
 #!/bin/bash
 printf '%s\n' ran >"$hijack_marker"
-exec /opt/homebrew/bin/python3 "\$@"
+exec "$trusted_python" "\$@"
 SH
 chmod 755 "$hijack_bin/python3"
 hijack_log="$temporary_root/path-hijack.log"
-if /usr/bin/env PATH="$hijack_bin:$PATH" \
+if run_clean_environment PATH="$hijack_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   "$repo_root/scripts/make_updater_manifest.sh" /nonexistent \
   >"$hijack_log" 2>&1; then
   echo "error: PATH-hijack fixture unexpectedly passed updater creation" >&2
@@ -108,7 +125,7 @@ from pathlib import Path
 Path("$python_injection_marker").write_text("ran\n", encoding="utf-8")
 PY
 unsafe_environment_log="$temporary_root/unsafe-environment.log"
-if /usr/bin/env PYTHONPATH="$python_injection" \
+if run_clean_environment PYTHONPATH="$python_injection" \
   "$repo_root/scripts/make_updater_manifest.sh" /nonexistent \
   >"$unsafe_environment_log" 2>&1; then
   echo "error: unsafe Python environment unexpectedly passed" >&2
@@ -121,9 +138,19 @@ fi
   exit 1
 }
 
+python_bytecode_log="$temporary_root/python-bytecode.log"
+if run_clean_environment PYTHONDONTWRITEBYTECODE=1 \
+  "$repo_root/scripts/make_updater_manifest.sh" /nonexistent \
+  >"$python_bytecode_log" 2>&1; then
+  echo "error: caller PYTHONDONTWRITEBYTECODE unexpectedly passed" >&2
+  exit 1
+fi
+/usr/bin/grep -Fq "refuses unsafe exported environment state" \
+  "$python_bytecode_log"
+
 python_userbase="$temporary_root/python-userbase"
 python_userbase_marker="$temporary_root/python-userbase-ran"
-python_version="$(/opt/homebrew/bin/python3 -I -S -B -c \
+python_version="$(PYTHONDONTWRITEBYTECODE=1 "$trusted_python" -I -S -B -W error -c \
   'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')"
 python_user_site="$python_userbase/lib/$python_version/site-packages"
 mkdir -p "$python_user_site"
@@ -132,7 +159,7 @@ from pathlib import Path
 Path("$python_userbase_marker").write_text("ran\n", encoding="utf-8")
 PY
 python_userbase_log="$temporary_root/python-userbase.log"
-if /usr/bin/env PYTHONUSERBASE="$python_userbase" \
+if run_clean_environment PYTHONUSERBASE="$python_userbase" \
   "$repo_root/scripts/make_updater_manifest.sh" /nonexistent \
   >"$python_userbase_log" 2>&1; then
   echo "error: PYTHONUSERBASE unexpectedly passed updater creation" >&2
@@ -165,13 +192,24 @@ cfw_verify_tauri_toolchain_tree() {
 }
 SH
 
-cat >"$fixture_repo/scripts/release_publication_gate.sh" <<'SH'
+cat >"$fixture_repo/scripts/release_publication_gate.sh" <<SH
+CFW_RELEASE_PYTHON_EXECUTABLE="$trusted_python"
+export CFW_RELEASE_PYTHON_EXECUTABLE
+
+cfw_run_release_python_script() {
+  local repository="\$1"
+  local script="\$2"
+  shift 2
+  PYTHONDONTWRITEBYTECODE=1 "\$CFW_RELEASE_PYTHON_EXECUTABLE" \
+    -I -S -B -W error "\$script" "\$@"
+}
+
 release_native_products_root_for_app() {
-  printf '%s\n' "${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/native-products"
+  printf '%s\n' "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/native-products"
 }
 
 verify_release_publication_evidence() {
-  [[ "$1" == /* ]]
+  [[ "\$1" == /* ]]
 }
 SH
 
@@ -269,8 +307,7 @@ printf '%s\n' "fixture app" >"$app_path/Contents/fixture.txt"
 run_fixture() {
   local output_directory="$1"
   shift
-  /usr/bin/env \
-    PATH="$PATH" \
+  run_clean_environment \
     CFW_TOOLCHAIN_ROOT="$fixture_repo/target/toolchains" \
     OUT_DIR="$output_directory" \
     "$@" \

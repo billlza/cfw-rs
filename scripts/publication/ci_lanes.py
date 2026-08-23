@@ -5,7 +5,10 @@ Evidence Manifest (``publication.sealed_manifest``). It adds no competing
 framework: the lane identifiers come from
 :data:`publication.sealed_manifest.REQUIRED_CI_LANES`, the lane *commands* are
 transcribed from ``.github/workflows/ci.yml`` (the source of truth audited by
-``scripts/verify_ci_no_masking.py``), the toolchain identity is derived from the
+``scripts/verify_ci_no_masking.py``), except that ``unsigned-candidate`` is its
+production-local release-evidence counterpart and deliberately uses the fixed
+Cellar Python rather than the hosted runner's setup-python selection. The
+toolchain identity is derived from the
 already-authoritative pinned-input graph
 (``publication.sealed_closure.derive_supply_chain``), and the assembled document
 is validated by the gate's own validator before it is written.
@@ -31,7 +34,9 @@ machine:
 * ``resolved`` - the exact identity strings reported by the tools that actually
   execute the lanes (``rustc``, ``cargo``, ``cargo-deny``, ``cargo-tauri``,
   ``xcodebuild``, ``swift``, and the pinned ``node``/``npm``/``go``/``gomobile``/
-  ``govulncheck``). Each resolved identity is checked against its pin; a missing
+  ``govulncheck``). Python binds its launcher, framework runtime, and complete
+  standard-library tree; every Python lane disables ``site`` initialization.
+  Each resolved identity is checked against its pin; a missing
   tool or a version mismatch raises :class:`PublicationError` and no digest is
   produced, so a lane set can never be recorded against an unknown toolchain.
 
@@ -60,7 +65,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import selectors
+import signal
+import stat
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +78,7 @@ from typing import Any, Callable
 from .common import (
     PublicationError,
     canonical_json,
+    open_regular,
     read_regular,
     require_sha256,
     sha256_bytes,
@@ -78,6 +88,24 @@ from .common import (
 from .sealed_closure import derive_supply_chain
 from .sealed_manifest import REQUIRED_CI_LANES, _ci_lane_document, _require_command
 from .release_toolchains import verified_release_toolchain_trees
+from .release_environment import (
+    APPLE_SWIFT,
+    APPLE_XCODEBUILD,
+    APPLE_XCRUN,
+    SYSTEM_PATH,
+    identity_output,
+    release_tool_environment,
+)
+if __package__ and __package__.startswith("scripts."):
+    from scripts.release_rust_toolchain import (
+        ReleaseRustToolchainError,
+        verify_pinned_toolchain,
+    )
+else:
+    from release_rust_toolchain import (
+        ReleaseRustToolchainError,
+        verify_pinned_toolchain,
+    )
 
 
 SCHEMA_VERSION = 1
@@ -93,10 +121,7 @@ TIMEOUT_EXIT_CODE = 124
 
 PINS_RELATIVE = "scripts/dependency_pins.env"
 MAX_LOG_BYTES = 64 * 1024 * 1024
-
-# Where the pinned Node/Go toolchains are staged by
-# ``scripts/bootstrap_release_toolchain.sh``.
-TOOLCHAIN_ROOT_RELATIVE = "target/toolchains"
+MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
 
 # The patched sing-box tree the libbox lanes consume. The CI workflow
 # materializes it from the pinned upstream commit in a separate step; locally it
@@ -106,6 +131,7 @@ DEFAULT_LIBBOX_SOURCE_TEMPLATE = "target/sources/sing-box-{version}-patched"
 # The libbox build lane never overwrites the authoritative XCFramework that the
 # unsigned-candidate lane binds by manifest digest; it writes its own output.
 DEFAULT_LIBBOX_OUTPUT = "target/native-dependencies-ci-lane/Libbox.xcframework"
+AUTHORITATIVE_LIBBOX_OUTPUT = "target/native-dependencies/Libbox.xcframework"
 
 
 @dataclass(frozen=True)
@@ -135,92 +161,104 @@ class Lane:
 # and build lanes, and the unsigned candidate lane runs last because it consumes
 # the UI dependency tree and the native products.
 LANES: tuple[Lane, ...] = (
-    Lane("build-script-boundary", "./scripts/verify_build_boundaries.sh", timeout=1800),
+    Lane(
+        "build-script-boundary",
+        "./scripts/run_release_ci_gate.sh build-script-boundary",
+        timeout=1800,
+    ),
     Lane(
         "ci-no-masking",
-        "PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_ci_no_masking.py",
+        "./scripts/run_release_ci_gate.sh ci-no-masking",
         timeout=600,
     ),
-    Lane("evidence-manifest-lane", "./scripts/verify_evidence_manifest_lane.sh", timeout=1800),
+    Lane(
+        "evidence-manifest-lane",
+        "./scripts/run_release_ci_gate.sh evidence-manifest-lane",
+        timeout=1800,
+    ),
     Lane(
         "version-contract",
-        "PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_version_contract.py",
+        "./scripts/run_release_ci_gate.sh version-contract",
         timeout=600,
     ),
-    Lane("rust-fmt", "cargo fmt --all -- --check", timeout=900),
+    Lane("rust-fmt", "./scripts/run_release_ci_gate.sh rust-fmt", timeout=900),
     Lane(
         "rust-locked-metadata",
-        "cargo metadata --locked --filter-platform aarch64-apple-darwin --format-version 1 >/dev/null",
+        "./scripts/run_release_ci_gate.sh rust-metadata",
         timeout=900,
     ),
     Lane(
         "rust-clippy",
-        "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+        "./scripts/run_release_ci_gate.sh rust-clippy",
         timeout=5400,
     ),
-    Lane("rust-test", "cargo test --locked --workspace --all-targets", timeout=7200),
+    Lane("rust-test", "./scripts/run_release_ci_gate.sh rust-test", timeout=7200),
     Lane(
         "rust-target-audit",
-        "PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/audit_rust_target.py",
+        "./scripts/run_release_ci_gate.sh rust-target-audit",
         timeout=1800,
     ),
-    Lane("cargo-deny", "cargo deny --locked --target aarch64-apple-darwin check", timeout=1800),
-    Lane("node-install", "./scripts/prepare_ui_dependencies.sh", timeout=1800),
-    Lane("node-test", "./scripts/build_ui_with_pinned_node.sh --test", timeout=1800),
-    Lane("node-build", "./scripts/build_ui_with_pinned_node.sh", timeout=1800),
+    Lane("cargo-deny", "./scripts/run_release_ci_gate.sh cargo-deny", timeout=1800),
+    Lane(
+        "node-install",
+        "./scripts/run_release_ci_gate.sh prepare-ui-dependencies",
+        timeout=1800,
+    ),
+    Lane("node-test", "./scripts/run_release_ci_gate.sh ui-test", timeout=1800),
+    Lane("node-build", "./scripts/run_release_ci_gate.sh ui-build", timeout=1800),
     Lane(
         "node-audit",
-        "./scripts/build_ui_with_pinned_node.sh --audit",
+        "./scripts/run_release_ci_gate.sh ui-audit",
         timeout=900,
     ),
     Lane(
         "swift-format-lint",
-        "swift format lint --recursive --strict native/macos/Sources "
-        "native/macos/SystemExtension native/macos/Tests",
+        "./scripts/run_release_ci_gate.sh swift-format-lint",
         timeout=1800,
     ),
-    Lane("swift-package-test", "swift test --package-path native/macos", timeout=5400),
-    Lane("xcode-project-verify", "./scripts/verify_xcode_project.sh", timeout=1800),
+    Lane(
+        "swift-package-test",
+        "./scripts/run_release_ci_gate.sh swift-package-test",
+        timeout=5400,
+    ),
+    Lane(
+        "xcode-project-verify",
+        "./scripts/run_release_ci_gate.sh verify-xcode-project",
+        timeout=1800,
+    ),
     Lane(
         "xcode-unsigned-test",
-        "xcodebuild test -project native/macos/CFWNative.xcodeproj -scheme CFWNativeTests "
-        "-destination 'platform=macOS,arch=arm64' CODE_SIGNING_ALLOWED=NO",
+        "./scripts/run_release_ci_gate.sh xcode-unsigned-test",
         timeout=5400,
     ),
     Lane(
         "xcode-analyze",
-        "for scheme in CFWNativeTests CFWPacketTunnelExtension CFWProxyAgent CFWNativeBridge; "
-        "do xcodebuild analyze -project native/macos/CFWNative.xcodeproj -scheme \"$scheme\" "
-        "-destination 'platform=macOS,arch=arm64' CODE_SIGNING_ALLOWED=NO; done",
+        "./scripts/run_release_ci_gate.sh xcode-analyze",
         timeout=7200,
     ),
     Lane(
         "libbox-module-verify",
-        'SING_BOX_SOURCE="$SING_BOX_SOURCE" ./scripts/test_libbox_source.sh',
+        './scripts/run_release_ci_gate.sh libbox-source-tests "$SING_BOX_SOURCE"',
         timeout=7200,
         libbox_source=True,
         runner_temp=True,
     ),
     Lane(
         "libbox-govulncheck",
-        'SING_BOX_SOURCE="$SING_BOX_SOURCE" ./scripts/scan_libbox_vulnerabilities.sh',
+        './scripts/run_release_ci_gate.sh libbox-vulnerability-scan "$SING_BOX_SOURCE"',
         timeout=3600,
         libbox_source=True,
     ),
     Lane(
         "libbox-build",
-        'LIBBOX_OUTPUT="$LIBBOX_OUTPUT" SING_BOX_SOURCE="$SING_BOX_SOURCE" '
-        "./scripts/build_libbox.sh",
+        './scripts/run_release_ci_gate.sh build-libbox "$SING_BOX_SOURCE" "$LIBBOX_OUTPUT"',
         timeout=7200,
         libbox_source=True,
         libbox_output=True,
     ),
     Lane(
         "release-tooling-tests",
-        "PYTHONWARNINGS=error PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest "
-        "discover -s scripts/tests -p 'test_*.py'; "
-        'while IFS= read -r test_script; do bash "$test_script"; done '
-        "< <(find scripts/tests -type f -name '*_test.sh' | sort)",
+        "./scripts/run_release_ci_gate.sh release-tool-tests",
         timeout=7200,
     ),
     Lane(
@@ -273,14 +311,166 @@ def self_check() -> None:
 
 if __package__ and __package__.startswith("scripts."):
     from scripts import verify_pinned_build_inputs as pinned
+    from scripts.hash_artifact import build_manifest
+    from scripts.repository_source_identity import (
+        SourceIdentityError,
+        current_identity,
+    )
 else:  # pragma: no cover - exercised via both invocation styles
     import verify_pinned_build_inputs as pinned
+    from hash_artifact import build_manifest
+    from repository_source_identity import SourceIdentityError, current_identity
 
 
-IDENTITY_TIMEOUT_SECONDS = 120
+class _DuplicateManifestFieldError(ValueError):
+    pass
+
+
+def _strict_manifest_object(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateManifestFieldError(f"duplicate manifest field: {key}")
+        result[key] = value
+    return result
+
+
+def _libbox_manifest_metadata(
+    pins: dict[str, str], toolchain_trees: dict[str, str]
+) -> dict[str, str]:
+    def pin(name: str) -> str:
+        value = pins.get(name)
+        if not isinstance(value, str) or not value:
+            raise PublicationError(f"Libbox metadata pin is unavailable: {name}")
+        return value
+
+    return {
+        "sourceTag": pin("SING_BOX_VERSION"),
+        "sourceCommit": pin("SING_BOX_COMMIT"),
+        "goVersion": pin("GO_VERSION"),
+        "goToolchainTreeSha256": require_sha256(
+            toolchain_trees.get("go"), "verified Go toolchain tree digest"
+        ),
+        "goToolsTreeSha256": require_sha256(
+            toolchain_trees.get("go-release-tools"),
+            "verified Go release-tools tree digest",
+        ),
+        "goModuleCacheTreeSha256": require_sha256(
+            toolchain_trees.get("go-module-cache"),
+            "verified Go module-cache tree digest",
+        ),
+        "gomobileVersion": pin("GOMOBILE_VERSION"),
+        "gomobileCommit": pin("GOMOBILE_COMMIT"),
+        "gomobileModuleSum": pin("GOMOBILE_MODULE_SUM"),
+        "archiveDeterminism": "zeroArDate-v1",
+        "headerNormalization": "angleBracketFrameworkImports-v1",
+        "platform": pin("LIBBOX_APPLE_PLATFORM"),
+        "buildTags": pin("LIBBOX_BUILD_TAGS"),
+        "nonMacOsTags": pin("LIBBOX_NON_MACOS_TAGS"),
+        "upstreamGoModSha256": pin("SING_BOX_UPSTREAM_GO_MOD_SHA256"),
+        "upstreamGoSumSha256": pin("SING_BOX_UPSTREAM_GO_SUM_SHA256"),
+        "securityPatchSha256": pin("SING_BOX_SECURITY_PATCH_SHA256"),
+        "rawPacketPatchSha256": pin("SING_BOX_RAW_PACKET_PATCH_SHA256"),
+        "dnsFailoverPatchSha256": pin("SING_BOX_DNS_FAILOVER_PATCH_SHA256"),
+        "endpointConflictPatchSha256": pin(
+            "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"
+        ),
+        "patchedDiffSha256": pin("SING_BOX_PATCHED_DIFF_SHA256"),
+        "combinedDiffSha256": pin("SING_BOX_COMBINED_DIFF_SHA256"),
+        "patchedGoModSha256": pin("SING_BOX_PATCHED_GO_MOD_SHA256"),
+        "patchedGoSumSha256": pin("SING_BOX_PATCHED_GO_SUM_SHA256"),
+    }
+
+
+def _verified_libbox_manifest(
+    artifact: Path,
+    manifest: Path,
+    expected_metadata: dict[str, str],
+) -> tuple[bytes, dict[str, Any]]:
+    encoded = read_regular(manifest)
+    try:
+        document = json.loads(
+            encoded.decode("utf-8"), object_pairs_hook=_strict_manifest_object
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        _DuplicateManifestFieldError,
+    ) as error:
+        raise PublicationError(f"Libbox artifact manifest is invalid: {manifest}") from error
+    expected_fields = {"algorithm", "entries", "metadata", "root", "sha256"}
+    if not isinstance(document, dict) or set(document) != expected_fields:
+        raise PublicationError("Libbox artifact manifest has an unexpected shape")
+    if (
+        document.get("algorithm") != "sha256-tree-v1"
+        or document.get("root") != "Libbox.xcframework"
+        or document.get("metadata") != expected_metadata
+    ):
+        raise PublicationError("Libbox artifact manifest identity or metadata drifted")
+    try:
+        actual = build_manifest(artifact, algorithm="sha256-tree-v1")
+    except (OSError, RuntimeError, ValueError) as error:
+        raise PublicationError(f"cannot verify Libbox artifact tree: {artifact}") from error
+    for field in ("algorithm", "entries", "root", "sha256"):
+        if document.get(field) != actual.get(field):
+            raise PublicationError(f"Libbox artifact manifest {field} drifted")
+    if read_regular(manifest) != encoded:
+        raise PublicationError("Libbox artifact manifest changed during verification")
+    return encoded, document
+
+
+def verify_libbox_reproduction(
+    repository: Path,
+    rebuilt_artifact: Path,
+    pins: dict[str, str],
+    toolchain_trees: dict[str, str],
+) -> str:
+    """Prove the fresh CI build is byte-identical to the consumed artifact."""
+
+    repository = repository.resolve(strict=True)
+    authoritative_input = repository / AUTHORITATIVE_LIBBOX_OUTPUT
+    if not rebuilt_artifact.is_absolute():
+        raise PublicationError("rebuilt Libbox artifact path must be absolute")
+    try:
+        authoritative = authoritative_input.resolve(strict=True)
+        rebuilt = rebuilt_artifact.resolve(strict=True)
+    except OSError as error:
+        raise PublicationError("both Libbox reproduction artifacts are required") from error
+    if authoritative != authoritative_input:
+        raise PublicationError("authoritative Libbox artifact path is not canonical")
+    if rebuilt != rebuilt_artifact or rebuilt == authoritative:
+        raise PublicationError(
+            "rebuilt Libbox artifact must be an independent canonical path"
+        )
+    expected_metadata = _libbox_manifest_metadata(pins, toolchain_trees)
+    authoritative_manifest = authoritative.parent / (
+        authoritative.name + ".manifest.json"
+    )
+    rebuilt_manifest = rebuilt.parent / (rebuilt.name + ".manifest.json")
+    authoritative_bytes, authoritative_document = _verified_libbox_manifest(
+        authoritative, authoritative_manifest, expected_metadata
+    )
+    rebuilt_bytes, rebuilt_document = _verified_libbox_manifest(
+        rebuilt, rebuilt_manifest, expected_metadata
+    )
+    if (
+        rebuilt_bytes != authoritative_bytes
+        or rebuilt_document != authoritative_document
+    ):
+        raise PublicationError(
+            "fresh Libbox build is not byte-identical to the consumed artifact"
+        )
+    return require_sha256(
+        authoritative_document.get("sha256"),
+        "reproduced Libbox tree digest",
+    )
+
 
 # Pins that the Apple/tool identity checks below are compared against.
 APPLE_PIN_KEYS = ("XCODE_VERSION", "XCODE_BUILD_VERSION", "MACOS_DEPLOYMENT_TARGET")
+PYTHON_STDLIB_MANIFEST_ALGORITHM = "sha256-tree-v1"
 
 
 def _pins(repository: Path) -> dict[str, str]:
@@ -290,32 +480,6 @@ def _pins(repository: Path) -> dict[str, str]:
         )
     except pinned.PinnedInputError as error:
         raise PublicationError(f"cannot read the pinned toolchain set: {error}") from error
-
-
-def _identity_output(
-    argv: list[str], repository: Path, label: str, env: dict[str, str], maximum: int = 512
-) -> str:
-    """Return one tool's normalized identity string, or fail closed."""
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(repository),
-            capture_output=True,
-            check=False,
-            env=env,
-            timeout=IDENTITY_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise PublicationError(f"cannot resolve the {label} toolchain identity: {error}") from error
-    if completed.returncode != 0:
-        raise PublicationError(
-            f"cannot resolve the {label} toolchain identity: exit {completed.returncode}"
-        )
-    text = (completed.stdout + completed.stderr).decode("utf-8", "replace")
-    identity = "; ".join(line.strip() for line in text.splitlines() if line.strip())
-    if not identity or len(identity) > maximum:
-        raise PublicationError(f"the {label} toolchain identity is empty or unbounded")
-    return identity
 
 
 def _expect(identity: str, expected: str, label: str) -> str:
@@ -335,13 +499,114 @@ def _expect_field(identity: str, index: int, expected: str, label: str) -> str:
     return identity
 
 
+def _bound_executable_identity(
+    executable: Path,
+    arguments: list[str],
+    repository: Path,
+    label: str,
+    environment: dict[str, str],
+    maximum: int = 4096,
+) -> tuple[str, str]:
+    try:
+        resolved = executable.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as error:
+        raise PublicationError(f"cannot resolve the {label} executable: {error}") from error
+    if (
+        not resolved.is_file()
+        or not os.access(resolved, os.X_OK)
+        or metadata.st_size <= 0
+    ):
+        raise PublicationError(f"the {label} executable is unavailable or unsafe")
+    identity = identity_output(
+        [str(resolved), *arguments],
+        repository,
+        label,
+        environment,
+        maximum=maximum,
+    )
+    binding = f"path={resolved}; sha256={_executable_sha256(resolved)}; identity={identity}"
+    return identity, binding
+
+
+def _executable_sha256(path: Path) -> str:
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise PublicationError(f"cannot inspect executable {path}: {error}") from error
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > MAX_EXECUTABLE_BYTES
+    ):
+        raise PublicationError(f"executable size or type is unsafe: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise PublicationError(f"cannot open executable {path}: {error}") from error
+    digest = hashlib.sha256()
+    try:
+        opened = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_size) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+        ):
+            raise PublicationError(f"executable changed while opening: {path}")
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise PublicationError(f"executable ended before its observed size: {path}")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise PublicationError(f"executable changed while hashing: {path}")
+    return digest.hexdigest()
+
+
+def _python_stdlib_binding(stdlib: Path) -> str:
+    try:
+        resolved = stdlib.resolve(strict=True)
+        if resolved != stdlib or not stdlib.is_dir() or stdlib.is_symlink():
+            raise ValueError("standard-library root is not canonical")
+        manifest = build_manifest(
+            stdlib,
+            algorithm=PYTHON_STDLIB_MANIFEST_ALGORITHM,
+        )
+        digest = manifest.get("sha256")
+        if not isinstance(digest, str):
+            raise ValueError("standard-library manifest omitted its digest")
+        require_sha256(digest, "Python standard-library tree SHA-256")
+    except (OSError, RuntimeError, ValueError) as error:
+        raise PublicationError(
+            f"cannot bind the Python standard-library tree: {error}"
+        ) from error
+    return (
+        f"stdlib_path={stdlib}; "
+        f"stdlib_algorithm={PYTHON_STDLIB_MANIFEST_ALGORITHM}; "
+        f"stdlib_sha256={digest}"
+    )
+
+
 def _go_module_identity(
     repository: Path, go_bin: Path, binary: Path, module: str, version: str, module_sum: str, env: dict[str, str]
 ) -> str:
     """Bind one pinned Go tool by module path, version, and module checksum."""
     if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
         raise PublicationError(f"pinned Go tool is missing or not executable: {binary}")
-    identity = _identity_output(
+    identity = identity_output(
         [str(go_bin), "version", "-m", str(binary)],
         repository,
         f"{module} tool",
@@ -364,69 +629,138 @@ def _resolved_toolchain(
     repository: Path,
     pins: dict[str, str],
     toolchain_root: Path | None = None,
+    release_environment: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Resolve the identity of every tool that actually executes a lane."""
+    base = (
+        release_tool_environment(repository, pins)
+        if release_environment is None
+        else dict(release_environment)
+    )
     if toolchain_root is None:
-        toolchain_root, _tree_digests = verified_release_toolchain_trees(repository, pins)
+        toolchain_root, _tree_digests = verified_release_toolchain_trees(
+            repository, pins, environment=base
+        )
     node_bin_dir = toolchain_root / f"node-{pins['NODE_VERSION']}" / "bin"
     go_bin = toolchain_root / f"go-{pins['GO_VERSION']}" / "bin" / "go"
     go_workspace_bin = toolchain_root / "go-workspace" / "bin"
     xcodegen_bin = toolchain_root / f"xcodegen-{pins['XCODEGEN_VERSION']}" / "bin/xcodegen"
     tauri_bin = toolchain_root / f"tauri-cli-{pins['TAURI_CLI_VERSION']}" / "bin/cargo-tauri"
 
-    base = dict(os.environ)
-    base["PYTHONDONTWRITEBYTECODE"] = "1"
+    try:
+        rustc_bin = Path(base["CFW_RELEASE_RUSTC_EXECUTABLE"])
+        cargo_bin = Path(base["CFW_RELEASE_CARGO_EXECUTABLE"])
+        cargo_audit_bin = Path(base["CFW_RELEASE_CARGO_AUDIT_EXECUTABLE"])
+        cargo_deny_bin = Path(base["CFW_RELEASE_CARGO_DENY_EXECUTABLE"])
+        python_bin = Path(base["CFW_RELEASE_PYTHON_EXECUTABLE"])
+        python_runtime = Path(base["CFW_RELEASE_PYTHON_RUNTIME"])
+        python_stdlib = Path(base["CFW_RELEASE_PYTHON_STDLIB"])
+    except KeyError as error:
+        raise PublicationError("release environment omitted an executable identity") from error
     node_env = dict(base)
-    node_env["PATH"] = f"{node_bin_dir}:{base.get('PATH', '')}"
+    node_env["PATH"] = f"{node_bin_dir}:{base['PATH']}"
 
     resolved: dict[str, str] = {}
-    resolved["rustc"] = _expect_field(
-        _identity_output(["rustc", "--version"], repository, "rustc", base),
-        1,
-        pins["RUST_VERSION"],
-        "rustc",
+    try:
+        rust_toolchain = verify_pinned_toolchain(
+            repository, rustc_bin.parent.parent.resolve(strict=True)
+        )
+    except (OSError, ReleaseRustToolchainError) as error:
+        raise PublicationError("Rust release toolchain surface is invalid") from error
+    surface = rust_toolchain.surface
+    resolved["rust-toolchain-surface"] = (
+        f"root={rust_toolchain.root}; algorithm={surface['algorithm']}; "
+        f"components={','.join(surface['components'])}; "
+        f"file_count={surface['file_count']}; sha256={surface['sha256']}; "
+        f"total_size={surface['total_size']}"
     )
-    resolved["cargo"] = _expect_field(
-        _identity_output(["cargo", "--version"], repository, "cargo", base),
-        1,
-        pins["RUST_VERSION"],
-        "cargo",
+    rustc_identity, resolved["rustc"] = _bound_executable_identity(
+        rustc_bin, ["--version"], repository, "rustc", base
     )
-    resolved["cargo-deny"] = _expect_field(
-        _identity_output(["cargo", "deny", "--version"], repository, "cargo-deny", base),
-        1,
-        pins["CARGO_DENY_VERSION"],
+    _expect_field(rustc_identity, 1, pins["RUST_VERSION"], "rustc")
+    cargo_identity, resolved["cargo"] = _bound_executable_identity(
+        cargo_bin, ["--version"], repository, "cargo", base
+    )
+    _expect_field(cargo_identity, 1, pins["RUST_VERSION"], "cargo")
+    cargo_audit_identity, resolved["cargo-audit"] = _bound_executable_identity(
+        cargo_audit_bin,
+        ["--version"],
+        repository,
+        "cargo-audit",
+        base,
+    )
+    _expect_field(
+        cargo_audit_identity, 1, pins["CARGO_AUDIT_VERSION"], "cargo-audit"
+    )
+    cargo_deny_identity, resolved["cargo-deny"] = _bound_executable_identity(
+        cargo_deny_bin,
+        ["--version"],
+        repository,
         "cargo-deny",
+        base,
     )
+    _expect_field(cargo_deny_identity, 1, pins["CARGO_DENY_VERSION"], "cargo-deny")
+    python_identity, python_binding = _bound_executable_identity(
+        python_bin, ["--version"], repository, "Python", base
+    )
+    _expect(python_identity, f"Python {pins['PYTHON_VERSION']}", "Python")
+    if (
+        not python_runtime.is_file()
+        or python_runtime.is_symlink()
+        or python_runtime.stat().st_nlink != 1
+    ):
+        raise PublicationError(
+            "the pinned Python framework runtime is unavailable or unsafe"
+        )
+    resolved["python3"] = (
+        f"{python_binding}; runtime_path={python_runtime}; "
+        f"runtime_sha256={sha256_file(python_runtime)}; "
+        f"{_python_stdlib_binding(python_stdlib)}"
+    )
+    for name, executable, arguments in (
+        ("git", Path("/usr/bin/git"), ["--version"]),
+        ("bash", Path("/bin/bash"), ["--version"]),
+        ("zsh", Path("/bin/zsh"), ["--version"]),
+    ):
+        _identity, resolved[name] = _bound_executable_identity(
+            executable,
+            arguments,
+            repository,
+            name,
+            base,
+            maximum=16 * 1024,
+        )
     resolved["cargo-tauri"] = _expect_field(
-        _identity_output([str(tauri_bin), "--version"], repository, "tauri-cli", base),
+        identity_output([str(tauri_bin), "--version"], repository, "tauri-cli", base),
         1,
         pins["TAURI_CLI_VERSION"],
         "tauri-cli",
     )
     resolved["xcodegen"] = _expect(
-        _identity_output([str(xcodegen_bin), "--version"], repository, "XcodeGen", base),
+        identity_output([str(xcodegen_bin), "--version"], repository, "XcodeGen", base),
         f"Version: {pins['XCODEGEN_VERSION']}",
         "XcodeGen",
     )
     resolved["xcodebuild"] = _expect(
-        _identity_output(["xcodebuild", "-version"], repository, "Xcode", base),
+        identity_output([APPLE_XCODEBUILD, "-version"], repository, "Xcode", base),
         f"Xcode {pins['XCODE_VERSION']}; Build version {pins['XCODE_BUILD_VERSION']}",
         "Xcode",
     )
     # The workflow only asserts that the Swift driver reports an identity; there
     # is no separate Swift pin (it ships inside the pinned Xcode).
-    resolved["swift"] = _identity_output(["swift", "--version"], repository, "Swift", base)
+    resolved["swift"] = identity_output(
+        [APPLE_SWIFT, "--version"], repository, "Swift", base
+    )
     resolved["node"] = _expect(
-        _identity_output([str(node_bin_dir / "node"), "--version"], repository, "Node.js", node_env),
+        identity_output([str(node_bin_dir / "node"), "--version"], repository, "Node.js", node_env),
         f"v{pins['NODE_VERSION']}",
         "Node.js",
     )
-    resolved["npm"] = _identity_output(
+    resolved["npm"] = identity_output(
         [str(node_bin_dir / "npm"), "--version"], repository, "npm", node_env
     )
     resolved["go"] = _expect(
-        _identity_output([str(go_bin), "version"], repository, "Go", base),
+        identity_output([str(go_bin), "version"], repository, "Go", base),
         f"go version go{pins['GO_VERSION']} darwin/arm64",
         "Go",
     )
@@ -451,7 +785,10 @@ def _resolved_toolchain(
     return resolved
 
 
-def derive_toolchain_identity(repository: Path) -> dict[str, Any]:
+def derive_toolchain_identity(
+    repository: Path,
+    release_environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Derive the canonical toolchain identity the CI lanes are bound to.
 
     Fail closed: ``derive_supply_chain`` first runs the pinned-input verifier, and
@@ -460,13 +797,22 @@ def derive_toolchain_identity(repository: Path) -> dict[str, Any]:
     """
     supply = derive_supply_chain(repository)
     pins = _pins(repository)
-    toolchain_root, tree_digests = verified_release_toolchain_trees(repository, pins)
     for key in APPLE_PIN_KEYS:
         if key not in pins:
             raise PublicationError(f"dependency_pins.env is missing required pin {key}")
-    resolved = _resolved_toolchain(repository, pins, toolchain_root)
+    environment = (
+        release_tool_environment(repository, pins)
+        if release_environment is None
+        else dict(release_environment)
+    )
+    toolchain_root, tree_digests = verified_release_toolchain_trees(
+        repository, pins, environment=environment
+    )
+    resolved = _resolved_toolchain(
+        repository, pins, toolchain_root, release_environment=environment
+    )
     _verified_root_after, tree_digests_after = verified_release_toolchain_trees(
-        repository, pins
+        repository, pins, environment=environment
     )
     if _verified_root_after != toolchain_root or tree_digests_after != tree_digests:
         raise PublicationError("release toolchain changed while resolving its identity")
@@ -491,8 +837,11 @@ def toolchain_sha256(identity: dict[str, Any]) -> str:
     return sha256_bytes(canonical_json(identity))
 
 
-def derive_toolchain_binding(repository: Path) -> tuple[str, dict[str, Any]]:
-    identity = derive_toolchain_identity(repository)
+def derive_toolchain_binding(
+    repository: Path,
+    release_environment: dict[str, str] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    identity = derive_toolchain_identity(repository, release_environment)
     return toolchain_sha256(identity), identity
 
 
@@ -560,6 +909,10 @@ def record_lane(
     started_at: int,
 ) -> dict[str, Any]:
     """Build one journal record from a real lane run. Fail closed."""
+    if len(output) > MAX_LOG_BYTES:
+        raise PublicationError(
+            f"lane {lane.identifier!r} output exceeded {MAX_LOG_BYTES} bytes"
+        )
     status, normalized = _normalized_exit(exit_code, timed_out)
     if (status == PASSED) != (normalized == 0):
         # Defense in depth: a pass must have exit 0 and exit 0 must be a pass.
@@ -594,17 +947,21 @@ def lane_environment(
     libbox_output: Path,
     runner_temp: Path,
     toolchain_root: Path,
+    release_environment: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the lane's environment: the pinned toolchain and nothing masking."""
-    environment = dict(os.environ)
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment = (
+        release_tool_environment(repository, pins)
+        if release_environment is None
+        else dict(release_environment)
+    )
     environment["MACOSX_DEPLOYMENT_TARGET"] = pins["MACOS_DEPLOYMENT_TARGET"]
     environment["CFW_TOOLCHAIN_ROOT"] = str(toolchain_root)
     for key in ("SING_BOX_SOURCE", "LIBBOX_OUTPUT", "RUNNER_TEMP"):
         environment.pop(key, None)
     if lane.pinned_node:
         node_bin = toolchain_root / f"node-{pins['NODE_VERSION']}" / "bin"
-        environment["PATH"] = f"{node_bin}:{environment.get('PATH', '')}"
+        environment["PATH"] = f"{node_bin}:{environment['PATH']}"
     if lane.libbox_source:
         environment["SING_BOX_SOURCE"] = str(libbox_source)
     if lane.libbox_output:
@@ -613,6 +970,41 @@ def lane_environment(
         runner_temp.mkdir(parents=True, exist_ok=True)
         environment["RUNNER_TEMP"] = str(runner_temp)
     return environment
+
+
+def _lane_process_group_exists(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_lane_process_group(
+    process: subprocess.Popen[bytes], lane_identifier: str
+) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if process.poll() is None:
+            process.kill()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired as error:
+        raise PublicationError(
+            f"lane {lane_identifier!r} leader did not terminate after SIGKILL"
+        ) from error
+    cleanup_deadline = time.monotonic() + 5
+    while _lane_process_group_exists(process.pid):
+        if time.monotonic() >= cleanup_deadline:
+            raise PublicationError(
+                f"lane {lane_identifier!r} descendants did not terminate after SIGKILL"
+            )
+        time.sleep(0.01)
 
 
 def execute_lane(
@@ -626,7 +1018,7 @@ def execute_lane(
     # GitHub Actions runs ``run:`` steps with ``bash -e -o pipefail``; the lanes
     # are executed with the same fail-fast shell.
     process = subprocess.Popen(
-        ["bash", "-euo", "pipefail", "-c", lane.command],
+        ["/bin/bash", "-p", "-euo", "pipefail", "-c", lane.command],
         cwd=str(working_directory),
         env=environment,
         stdin=subprocess.DEVNULL,
@@ -634,22 +1026,97 @@ def execute_lane(
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
-    timed_out = False
-    try:
-        output, _ = process.communicate(timeout=lane.timeout)
-        exit_code: int | None = process.returncode
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        exit_code = None
+    if process.stdout is None:
+        process.kill()
+        raise PublicationError(f"lane {lane.identifier!r} has no output pipe")
+
+    descriptor = -1
+    selector: selectors.BaseSelector | None = None
+    output = bytearray()
+    termination_reason: str | None = None
+    termination_deadline: float | None = None
+
+    def terminate(reason: str) -> None:
+        nonlocal termination_reason, termination_deadline
+        if termination_reason is not None:
+            return
+        termination_reason = reason
+        termination_deadline = time.monotonic() + 120
         try:
-            os.killpg(os.getpgid(process.pid), 9)
+            os.killpg(process.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
-            process.kill()
+            if process.poll() is None:
+                process.kill()
+
+    try:
+        descriptor = process.stdout.fileno()
+        os.set_blocking(descriptor, False)
+        selector = selectors.DefaultSelector()
+        selector.register(descriptor, selectors.EVENT_READ)
+        while selector.get_map() or process.poll() is None:
+            now = time.monotonic()
+            if termination_reason is None and now - started >= lane.timeout:
+                terminate("timeout")
+            if termination_deadline is not None and now >= termination_deadline:
+                raise PublicationError(
+                    f"lane {lane.identifier!r} did not terminate after SIGKILL"
+                )
+            active_deadline = (
+                termination_deadline
+                if termination_deadline is not None
+                else started + lane.timeout
+            )
+            wait_seconds = max(0.0, min(0.25, active_deadline - now))
+            try:
+                events = selector.select(wait_seconds)
+            except InterruptedError:
+                continue
+            for _key, _mask in events:
+                while True:
+                    try:
+                        chunk = os.read(descriptor, min(1024 * 1024, MAX_LOG_BYTES + 1))
+                    except BlockingIOError:
+                        break
+                    if not chunk:
+                        selector.unregister(descriptor)
+                        break
+                    if termination_reason is not None:
+                        continue
+                    remaining = MAX_LOG_BYTES - len(output)
+                    if len(chunk) > remaining:
+                        output.extend(chunk[:remaining])
+                        terminate("output-limit")
+                    else:
+                        output.extend(chunk)
+            if process.poll() is not None and not selector.get_map():
+                break
+        if process.poll() is None:
+            process.wait(timeout=1)
+    except BaseException:
+        _terminate_lane_process_group(process, lane.identifier)
+        raise
+    finally:
         try:
-            output, _ = process.communicate(timeout=120)
-        except subprocess.TimeoutExpired:
-            output = b""
-    return output, exit_code, timed_out, time.monotonic() - started
+            if selector is not None:
+                selector.close()
+        finally:
+            process.stdout.close()
+
+    group_remained = _lane_process_group_exists(process.pid)
+    descendant_remained = termination_reason is None and group_remained
+    if group_remained:
+        _terminate_lane_process_group(process, lane.identifier)
+    if descendant_remained:
+        raise PublicationError(
+            f"lane {lane.identifier!r} left a descendant process running"
+        )
+    if termination_reason == "output-limit":
+        raise PublicationError(
+            f"lane {lane.identifier!r} output exceeded {MAX_LOG_BYTES} bytes"
+        )
+    timed_out = termination_reason == "timeout"
+    exit_code: int | None = None if timed_out else process.returncode
+    return bytes(output), exit_code, timed_out, time.monotonic() - started
 
 
 # --------------------------------------------------------------------------
@@ -674,6 +1141,51 @@ def write_journal_record(journal: Path, lane: Lane, record: dict[str, Any], outp
     write_new(record_path, canonical_json(record))
 
 
+def _read_journal_output(
+    journal: Path, lane: Lane, record: dict[str, Any]
+) -> bytes:
+    _record_path, log_path = _journal_paths(journal, lane)
+    if (
+        record.get("log_name") != log_path.name
+        or type(record.get("log_bytes")) is not int
+        or not 0 <= record["log_bytes"] <= MAX_LOG_BYTES
+    ):
+        raise PublicationError(
+            f"lane {lane.identifier!r} journal log metadata is invalid"
+        )
+    stream, opened = open_regular(log_path)
+    with stream:
+        output = stream.read(MAX_LOG_BYTES + 1)
+        after = os.fstat(stream.fileno())
+    if (
+        len(output) > MAX_LOG_BYTES
+        or len(output) != record["log_bytes"]
+        or opened.st_size != record["log_bytes"]
+        or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    ):
+        raise PublicationError(
+            f"lane {lane.identifier!r} journal log digest changed on disk"
+        )
+    if hashlib.sha256(output).hexdigest() != record["log_sha256"]:
+        raise PublicationError(
+            f"lane {lane.identifier!r} journal log digest changed on disk"
+        )
+    return output
+
+
+def _publish_toolchain_binding(journal: Path, identity: dict[str, Any]) -> None:
+    binding_path = journal / "toolchain-binding.json"
+    payload = canonical_json(identity)
+    if binding_path.is_symlink():
+        raise PublicationError(f"refusing to write through a symlink: {binding_path}")
+    if binding_path.exists():
+        if read_regular(binding_path) == payload:
+            return
+        binding_path.unlink()
+    write_new(binding_path, payload)
+
+
 def read_journal_record(
     journal: Path,
     lane: Lane,
@@ -687,7 +1199,7 @@ def read_journal_record(
     commit or source tree, against another toolchain, for a different command,
     or when its log no longer hashes to the recorded digest.
     """
-    record_path, log_path = _journal_paths(journal, lane)
+    record_path, _log_path = _journal_paths(journal, lane)
     if record_path.is_symlink() or not record_path.is_file():
         return None
     try:
@@ -705,14 +1217,7 @@ def read_journal_record(
         or record["toolchain_sha256"] != toolchain
     ):
         return None
-    if log_path.is_symlink() or not log_path.is_file():
-        raise PublicationError(f"lane {lane.identifier!r} journal log is missing: {log_path}")
-    digest = hashlib.sha256()
-    with log_path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    if digest.hexdigest() != record["log_sha256"]:
-        raise PublicationError(f"lane {lane.identifier!r} journal log digest changed on disk")
+    _read_journal_output(journal, lane, record)
     # Re-derive the status from the recorded exit code so a hand-edited journal
     # cannot promote a failure.
     status, normalized = _normalized_exit(
@@ -766,6 +1271,9 @@ def assemble_document(
 
 
 Runner = Callable[[Path, Lane, dict[str, str]], tuple[bytes, int | None, bool, float]]
+LibboxReproductionVerifier = Callable[
+    [Path, Path, dict[str, str], dict[str, str]], str
+]
 
 
 def collect_ci_lanes(
@@ -781,8 +1289,8 @@ def collect_ci_lanes(
     libbox_source: Path | None = None,
     libbox_output: Path | None = None,
     runner: Runner = execute_lane,
+    reproduction_verifier: LibboxReproductionVerifier = verify_libbox_reproduction,
     report: Callable[[str], None] = print,
-    toolchain: tuple[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the required unsigned-CI lanes and write the canonical document.
 
@@ -799,33 +1307,35 @@ def collect_ci_lanes(
     if unknown:
         raise PublicationError(f"unknown unsigned CI lane selection: {unknown}")
     pins = _pins(repository)
-    if toolchain is None:
-        digest, identity = derive_toolchain_binding(repository)
-        execution_toolchain_root, execution_tree_digests = verified_release_toolchain_trees(
-            repository, pins
+    execution_environment = release_tool_environment(repository, pins)
+    expected_source_identity = {
+        "repositoryCommit": commit,
+        "releaseSourceSha256": release_source_sha256,
+    }
+    try:
+        starting_source_identity = current_identity(
+            repository,
+            require_clean=True,
+            environment=execution_environment,
         )
-        if identity.get("release_tree_sha256") != execution_tree_digests:
-            raise PublicationError(
-                "CI lane execution toolchain differs from the canonical binding"
-            )
-    else:
-        digest, identity = toolchain
-        configured_root = Path(
-            os.environ.get("CFW_TOOLCHAIN_ROOT", repository / TOOLCHAIN_ROOT_RELATIVE)
+    except (OSError, SourceIdentityError) as error:
+        raise PublicationError(
+            "unsigned CI lanes require one clean release source identity"
+        ) from error
+    if starting_source_identity != expected_source_identity:
+        raise PublicationError(
+            "unsigned CI lane inputs differ from the current release source identity"
         )
-        selected_root = (
-            configured_root if configured_root.is_absolute() else repository / configured_root
+    digest, identity = derive_toolchain_binding(
+        repository, release_environment=execution_environment
+    )
+    execution_toolchain_root, execution_tree_digests = verified_release_toolchain_trees(
+        repository, pins, environment=execution_environment
+    )
+    if identity.get("release_tree_sha256") != execution_tree_digests:
+        raise PublicationError(
+            "CI lane execution toolchain differs from the canonical binding"
         )
-        try:
-            if not selected_root.is_dir() or selected_root.is_symlink():
-                raise PublicationError(
-                    "CI lane execution toolchain root is missing, not a directory, or a symlink"
-                )
-            execution_toolchain_root = selected_root.resolve(strict=True)
-        except OSError as error:
-            raise PublicationError(
-                f"cannot resolve the CI lane execution toolchain root: {error}"
-            ) from error
     source = (
         repository / DEFAULT_LIBBOX_SOURCE_TEMPLATE.format(version=pins["SING_BOX_VERSION"])
         if libbox_source is None
@@ -836,11 +1346,8 @@ def collect_ci_lanes(
     if output.exists() or output.is_symlink():
         raise PublicationError(f"refusing to replace an unsigned CI lane record: {output}")
     journal.mkdir(parents=True, exist_ok=True)
-    binding_path = journal / "toolchain-binding.json"
-    if binding_path.is_symlink():
-        raise PublicationError(f"refusing to write through a symlink: {binding_path}")
-    binding_path.unlink(missing_ok=True)
-    write_new(binding_path, canonical_json(identity))
+    if journal.is_symlink() or not journal.is_dir():
+        raise PublicationError(f"CI lane journal is not a real directory: {journal}")
 
     report(
         "unsigned CI lanes: "
@@ -848,49 +1355,146 @@ def collect_ci_lanes(
         f"toolchain_sha256={digest}"
     )
     records: dict[str, dict[str, Any]] = {}
-    for lane in LANES:
-        existing = read_journal_record(
-            journal, lane, commit, release_source_sha256, digest
-        )
-        if existing is not None and lane.identifier not in rerun:
-            records[lane.identifier] = existing
-            report(
-                f"  {lane.identifier}: replayed {existing['status']} "
-                f"(exit {existing['exit_code']}, {existing['duration_seconds']}s)"
+    pending_lanes: list[Lane] = []
+    reproduction_digest: str | None = None
+    with tempfile.TemporaryDirectory(prefix=".ci-lane-attempt.", dir=journal) as attempt:
+        attempt_journal = Path(attempt)
+        for lane in LANES:
+            existing = read_journal_record(
+                journal, lane, commit, release_source_sha256, digest
             )
-            continue
-        if assemble_only or (only and lane.identifier not in only):
-            report(f"  {lane.identifier}: not recorded")
-            continue
-        environment = lane_environment(
-            repository,
-            lane,
-            pins,
-            source,
-            artifact,
-            journal / "runner-temp" / lane.identifier,
-            execution_toolchain_root,
+            if existing is not None and lane.identifier not in rerun:
+                records[lane.identifier] = existing
+                report(
+                    f"  {lane.identifier}: replayed {existing['status']} "
+                    f"(exit {existing['exit_code']}, {existing['duration_seconds']}s)"
+                )
+                continue
+            if assemble_only or (only and lane.identifier not in only):
+                report(f"  {lane.identifier}: not recorded")
+                continue
+            environment = lane_environment(
+                repository,
+                lane,
+                pins,
+                source,
+                artifact,
+                attempt_journal / "runner-temp" / lane.identifier,
+                execution_toolchain_root,
+                release_environment=execution_environment,
+            )
+            report(
+                f"  {lane.identifier}: running (bound to {lane.timeout}s) $ {lane.command}"
+            )
+            started_at = int(time.time())
+            output_bytes, exit_code, timed_out, duration = runner(
+                repository, lane, environment
+            )
+            record = record_lane(
+                lane,
+                commit,
+                release_source_sha256,
+                digest,
+                output_bytes,
+                exit_code,
+                timed_out,
+                duration,
+                started_at,
+            )
+            write_journal_record(attempt_journal, lane, record, output_bytes)
+            pending_lanes.append(lane)
+            records[lane.identifier] = record
+            report(
+                f"  {lane.identifier}: {record['status']} (exit {record['exit_code']}, "
+                f"{record['duration_seconds']}s, log {record['log_sha256'][:12]})"
+            )
+
+        try:
+            ending_execution_environment = release_tool_environment(
+                repository, pins, execution_environment
+            )
+        except PublicationError as error:
+            raise PublicationError(
+                "release tool environment changed while CI lanes were executing"
+            ) from error
+        if ending_execution_environment != execution_environment:
+            raise PublicationError(
+                "release tool environment changed while CI lanes were executing"
+            )
+
+        try:
+            ending_source_identity = current_identity(
+                repository,
+                require_clean=True,
+                environment=ending_execution_environment,
+            )
+        except (OSError, SourceIdentityError) as error:
+            raise PublicationError(
+                "release source changed or became unreadable while CI lanes were executing"
+            ) from error
+        if ending_source_identity != starting_source_identity:
+            raise PublicationError(
+                "release source changed while CI lanes were executing"
+            )
+
+        ending_digest, ending_identity = derive_toolchain_binding(
+            repository, release_environment=ending_execution_environment
         )
-        report(f"  {lane.identifier}: running (bound to {lane.timeout}s) $ {lane.command}")
-        started_at = int(time.time())
-        output_bytes, exit_code, timed_out, duration = runner(repository, lane, environment)
-        record = record_lane(
-            lane,
-            commit,
-            release_source_sha256,
-            digest,
-            output_bytes,
-            exit_code,
-            timed_out,
-            duration,
-            started_at,
+        ending_toolchain_root, ending_tree_digests = verified_release_toolchain_trees(
+            repository, pins, environment=ending_execution_environment
         )
-        write_journal_record(journal, lane, record, output_bytes)
-        records[lane.identifier] = record
-        report(
-            f"  {lane.identifier}: {record['status']} (exit {record['exit_code']}, "
-            f"{record['duration_seconds']}s, log {record['log_sha256'][:12]})"
+        if (
+            ending_digest != digest
+            or ending_identity != identity
+            or ending_toolchain_root != execution_toolchain_root
+            or ending_tree_digests != execution_tree_digests
+            or ending_identity.get("release_tree_sha256") != ending_tree_digests
+        ):
+            raise PublicationError(
+                "release toolchain changed while CI lanes were executing"
+            )
+
+        if set(records) == set(REQUIRED_CI_LANES) and all(
+            record["status"] == PASSED for record in records.values()
+        ):
+            reproduction_digest = require_sha256(
+                reproduction_verifier(
+                    repository,
+                    artifact,
+                    pins,
+                    ending_tree_digests,
+                ),
+                "verified Libbox reproduction tree digest",
+            )
+
+        _publish_toolchain_binding(journal, identity)
+        for lane in pending_lanes:
+            staged_record = read_journal_record(
+                attempt_journal, lane, commit, release_source_sha256, digest
+            )
+            if staged_record is None or staged_record != records[lane.identifier]:
+                raise PublicationError(
+                    f"lane {lane.identifier!r} staged journal record changed before publication"
+                )
+            staged_output = _read_journal_output(
+                attempt_journal, lane, staged_record
+            )
+            write_journal_record(journal, lane, staged_record, staged_output)
+
+    if reproduction_digest is not None:
+        repeated_reproduction_digest = require_sha256(
+            reproduction_verifier(
+                repository,
+                artifact,
+                pins,
+                ending_tree_digests,
+            ),
+            "repeated Libbox reproduction tree digest",
         )
+        if repeated_reproduction_digest != reproduction_digest:
+            raise PublicationError(
+                "Libbox reproduction changed while CI evidence was being published"
+            )
 
     document, failures = assemble_document(
         records, commit, release_source_sha256, digest

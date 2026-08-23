@@ -25,7 +25,7 @@ if [[ ! -d "$source_root/.git" || -L "$source_root/.git" ]]; then
   exit 1
 fi
 actual_gitlinks="$(
-  git -C "$source_root" ls-files --stage |
+  libbox_git "$source_root" ls-files --stage |
     awk '$1 == "160000" { print $2 " " $4 }'
 )"
 expected_gitlinks="$SING_BOX_ANDROID_REFERENCE_COMMIT clients/android
@@ -73,7 +73,7 @@ mkdir "$staging/checkout"
 COPYFILE_DISABLE=1 /bin/cp -R "$source_root/.git" "$staging/checkout/.git"
 (
   cd "$source_root"
-  git ls-files -z | COPYFILE_DISABLE=1 tar --null -cf - -T -
+  libbox_git "$source_root" ls-files -z | COPYFILE_DISABLE=1 tar --null -cf - -T -
 ) | (
   cd "$staging/checkout"
   COPYFILE_DISABLE=1 tar -xf -
@@ -86,12 +86,12 @@ endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root"
 # so the regenerated module-version patch stays deterministic. This is safe only
 # because libbox_validate_upstream_source has already pinned the exact commit and
 # exact go.mod/go.sum digests before this point.
-git -C "$staging/checkout" apply --unidiff-zero --check \
+libbox_git "$staging/checkout" apply --whitespace=error-all --unidiff-zero --check \
   "$security_patch_path" \
   "$raw_packet_patch_path" \
   "$dns_failover_patch_path" \
   "$endpoint_conflict_patch_path"
-git -C "$staging/checkout" apply --unidiff-zero \
+libbox_git "$staging/checkout" apply --whitespace=error-all --unidiff-zero \
   "$security_patch_path" \
   "$raw_packet_patch_path" \
   "$dns_failover_patch_path" \

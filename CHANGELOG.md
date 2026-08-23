@@ -22,8 +22,8 @@
   registers GlobalAuthority before ProxyAgent. Append-only recovery events bind
   every step to an unchanged Clash for Windows process and network projection.
   One inode-bound outer lock serializes service and bundle mutations, and
-  independent fixed journals cover both 40019→40026 validation and
-  40026→40027 final installation without overwriting earlier evidence. The
+  independent fixed journals cover both 40019→40028 validation and
+  40028→40029 final installation without overwriting earlier evidence. The
   canonical allocation ledger prevents a retired validation build or its
   reserved final companion from being reused by a later source closure. The
   validation-only compatibility island can prove the already-installed 40019
@@ -33,6 +33,18 @@
   its distinct proof profile records the exact switch from installed-service
   absence to a current Authority v1.1 Off proof and survives interruption after
   the current Authority is registered.
+- Retire notarized validation build 40026 and its unbuilt companion 40027 after
+  installation admission exposed an ambient Swift/toolchain binding mismatch.
+  Tool identity and actual lane execution now share one closed environment:
+  the effective account selects a fixed Rust root, Python is exact-version
+  pinned, Apple tools come from one validated Developer directory, and the
+  Python/Rust/cargo helper/system shell executables are content-bound. New lane
+  journals remain isolated until the start/end tool identities agree, and lane
+  output is terminated at its fixed streaming bound. Hosted build-40000 CI may
+  select only the exact SHA-pinned setup-python executable; production paths
+  reject that unsigned-only input. Publication source enumeration uses fixed
+  system Git with user/system configuration, unsafe local excludes, fsmonitor,
+  and untracked-cache influence removed. The successor pair is 40028/40029.
 - Authenticate nested release-worktree managed caches through bounded,
   descriptor-relative Git administrative control files plus an explicit
   empty-target lifecycle receipt before excluding them from the path/name-only

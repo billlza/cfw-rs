@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -337,6 +338,7 @@ class ValidatedCandidateEvidenceTests(unittest.TestCase):
             repository = Path(directory)
             self.make_review(repository)
             app = self.make_final_app(repository)
+            release_environment = dict(os.environ)
             with mock.patch(
                 "scripts.publication.artifact_preparation.current_identity",
                 return_value=self.source_identity(),
@@ -346,6 +348,7 @@ class ValidatedCandidateEvidenceTests(unittest.TestCase):
                     repository / "target/candidates/0.4.0/release-build/40001/native-products",
                     app,
                     "40001",
+                    release_environment,
                 )
             self.assertIn("validated-candidate-unsigned-ci", sources)
             self.assertIn("validated-candidate-toolchain-binding", sources)
@@ -373,6 +376,7 @@ class ValidatedCandidateEvidenceTests(unittest.TestCase):
                 repository = Path(directory)
                 self.make_review(repository)
                 app = self.make_final_app(repository)
+                release_environment = dict(os.environ)
                 if defect == "tree":
                     (app / "Contents/fixture.bin").write_bytes(b"final-app-tamper")
                 else:
@@ -390,6 +394,7 @@ class ValidatedCandidateEvidenceTests(unittest.TestCase):
                         / "target/candidates/0.4.0/release-build/40001/native-products",
                         app,
                         "40001",
+                        release_environment,
                     )
 
 

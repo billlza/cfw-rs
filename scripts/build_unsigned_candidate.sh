@@ -1,12 +1,29 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Produce a structurally complete, non-runnable release skeleton for CI and
 # local packaging validation. This script never launches the app or mutates
 # proxy, route, DNS, helper, launchd, or Network Extension state.
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_tool_environment.sh
+source "$repo_root/scripts/release_tool_environment.sh"
+candidate_binding_arguments=(--repository "$repo_root")
+if [[ $# -eq 0 ]]; then
+  cfw_seal_release_tool_environment production
+elif [[ $# -eq 2 && "$1" == "--validation-python-executable" && "$2" == /* ]]; then
+  export CFW_UNSIGNED_VALIDATION_PYTHON="$2"
+  cfw_seal_release_tool_environment unsigned-validation
+  candidate_binding_arguments+=(--unsigned-validation-toolchain)
+  shift 2
+else
+  echo "error: usage: scripts/build_unsigned_candidate.sh [--validation-python-executable ABSOLUTE_PATH]" >&2
+  exit 2
+fi
+readonly python_bin="$CFW_RELEASE_PYTHON_EXECUTABLE"
+readonly -a candidate_binding_arguments
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
 # shellcheck source=scripts/libbox_source_contract.sh
@@ -15,6 +32,7 @@ source "$repo_root/scripts/libbox_source_contract.sh"
 source "$repo_root/scripts/ui_dependency_contract.sh"
 # shellcheck source=scripts/tauri_host_skeleton.sh
 source "$repo_root/scripts/tauri_host_skeleton.sh"
+cfw_select_release_apple_toolchain
 toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 node_bin="$toolchain_root/node-$NODE_VERSION/bin/node"
 npm_bin="$toolchain_root/node-$NODE_VERSION/bin/npm"
@@ -31,12 +49,13 @@ die() {
   exit 1
 }
 
-cfw_require_supported_python
+cfw_require_supported_python "$python_bin"
 
 [[ $# -eq 0 ]] || die "usage: scripts/build_unsigned_candidate.sh"
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "candidate builds require Apple Silicon macOS"
-[[ "$(xcodebuild -version)" == "Xcode $XCODE_VERSION"$'\n'"Build version $XCODE_BUILD_VERSION" ]] ||
+[[ "$(/usr/bin/xcodebuild -version)" == \
+  "Xcode $XCODE_VERSION"$'\n'"Build version $XCODE_BUILD_VERSION" ]] ||
   die "Xcode $XCODE_VERSION ($XCODE_BUILD_VERSION) is required"
 [[ "$(rustc --version | awk '{print $2}')" == "$RUST_VERSION" ]] ||
   die "rustc $RUST_VERSION is required"
@@ -47,12 +66,13 @@ cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
 [[ "$("$node_bin" --version)" == "v$NODE_VERSION" ]] ||
   die "pinned Node.js $NODE_VERSION is unavailable"
 [[ -x "$npm_bin" ]] || die "pinned npm is unavailable"
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_version_contract.py"
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/verify_version_contract.py"
 [[ -d "$repo_root/apps/cfw-tauri-shell/node_modules" ]] ||
   die "UI dependencies are not prepared; run pinned npm ci explicitly"
 "$npm_bin" --prefix "$repo_root/apps/cfw-tauri-shell" ls --all --offline >/dev/null
-source_identity_start="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/repository_source_identity.py")" ||
+source_identity_start="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/repository_source_identity.py")" ||
   die "cannot capture the release source identity"
 read -r repository_commit release_source_sha256 <<<"$source_identity_start"
 [[ -n "$repository_commit" && -n "$release_source_sha256" ]] ||
@@ -60,11 +80,13 @@ read -r repository_commit release_source_sha256 <<<"$source_identity_start"
 ui_dependencies_tree_observed_start="$(
   cfw_verify_ui_dependencies_tree "$repo_root" "$toolchain_root"
 )"
-toolchain_binding_start="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/candidate_artifact_binding.py" --repository "$repo_root")" ||
+toolchain_binding_start="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/candidate_artifact_binding.py" \
+  "${candidate_binding_arguments[@]}")" ||
   die "cannot derive the canonical candidate toolchain binding"
 read -r \
   toolchain_sha256 \
+  cargo_workspace_sources_tree_sha256 \
   go_toolchain_tree_sha256 \
   go_module_cache_tree_sha256 \
   go_tools_tree_sha256 \
@@ -87,6 +109,14 @@ for parent in \
 done
 [[ ! -e "$candidate_root" && ! -L "$candidate_root" ]] ||
   die "refusing to replace an existing candidate root: $candidate_root"
+candidate_cargo_home="$(cfw_create_release_cargo_runtime "$repo_root")" ||
+  die "cannot create the candidate Cargo runtime"
+cleanup_candidate_cargo_runtime() {
+  if [[ -n "${candidate_cargo_home:-}" ]]; then
+    cfw_remove_release_cargo_runtime "$candidate_cargo_home"
+  fi
+}
+trap cleanup_candidate_cargo_runtime EXIT
 export CFW_BUILD_NUMBER="$build_version"
 export CFW_NATIVE_PRODUCTS_OUTPUT="$native_products"
 export CFW_NATIVE_DERIVED_DATA="$candidate_root/xcode-derived-data"
@@ -106,14 +136,15 @@ libbox_verify_xcframework_artifact \
   "$go_module_cache_tree_sha256" >/dev/null
 
 "$repo_root/scripts/build_native_products.sh" --unsigned
-"$repo_root/scripts/build_legacy_tombstone.sh" --unsigned
+CARGO_HOME="$candidate_cargo_home" CARGO_NET_OFFLINE=true \
+  "$repo_root/scripts/build_legacy_tombstone.sh" --unsigned
 "$repo_root/scripts/build_ui_with_pinned_node.sh"
 
 unset CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTFLAGS
 export CARGO_NET_OFFLINE=true
 export CARGO_TARGET_DIR="$cargo_target"
 export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
-tauri_override="$(python3 - "$build_version" "$native_products" <<'PY'
+tauri_override="$("$python_bin" -I -S -B -W error - "$build_version" "$native_products" <<'PY'
 import json
 import sys
 
@@ -138,10 +169,14 @@ print(json.dumps({
 }, separators=(",", ":")))
 PY
 )"
-cfw_build_tauri_host_skeleton \
+CARGO_HOME="$candidate_cargo_home" CARGO_NET_OFFLINE=true \
+  cfw_build_tauri_host_skeleton \
   "$repo_root/apps/cfw-tauri-shell" \
   "$tauri_bin" \
   "$tauri_override"
+cfw_verify_release_cargo_runtime "$repo_root" "$candidate_cargo_home"
+cfw_remove_release_cargo_runtime "$candidate_cargo_home"
+candidate_cargo_home=""
 "$repo_root/scripts/verify_candidate_bundle.sh" \
   "$app_path" \
   "$native_products" \
@@ -153,24 +188,27 @@ ui_dependencies_tree_observed_end="$(
 )"
 [[ "$ui_dependencies_tree_observed_end" == "$ui_dependencies_tree_observed_start" ]] ||
   die "UI dependency tree changed while the unsigned candidate was building"
-toolchain_binding_end="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/candidate_artifact_binding.py" --repository "$repo_root")" ||
+toolchain_binding_end="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/candidate_artifact_binding.py" \
+  "${candidate_binding_arguments[@]}")" ||
   die "cannot re-observe the canonical candidate toolchain binding"
 [[ "$toolchain_binding_end" == "$toolchain_binding_start" ]] ||
   die "release toolchain changed while the unsigned candidate was building"
 
-source_identity_end="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/repository_source_identity.py")" ||
+source_identity_end="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/repository_source_identity.py")" ||
   die "cannot re-observe the release source identity"
 [[ "$source_identity_end" == "$source_identity_start" ]] ||
   die "release source changed while the unsigned candidate was building"
-python3 "$repo_root/scripts/hash_artifact.py" \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/hash_artifact.py" \
   "$app_path" \
   --output "$app_manifest" \
   --metadata "artifactKind=unsigned-application-validation-v1" \
   --metadata "architecture=arm64" \
   --metadata "buildNumber=$build_version" \
   --metadata "deploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
+  --metadata "cargoWorkspaceSourcesTreeSha256=$cargo_workspace_sources_tree_sha256" \
   --metadata "goModuleCacheTreeSha256=$go_module_cache_tree_sha256" \
   --metadata "goToolchainTreeSha256=$go_toolchain_tree_sha256" \
   --metadata "goToolsTreeSha256=$go_tools_tree_sha256" \
@@ -188,10 +226,12 @@ app_manifest_sha256="$(
 readonly app_manifest_sha256
 [[ "$app_manifest_sha256" =~ ^[0-9a-f]{64}$ ]] ||
   die "unsigned application manifest identity is malformed"
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/verify_artifact_manifest.py" \
   "$app_path" \
   "$app_manifest" \
   --metadata "buildNumber=$build_version" \
+  --metadata "cargoWorkspaceSourcesTreeSha256=$cargo_workspace_sources_tree_sha256" \
   --metadata "goModuleCacheTreeSha256=$go_module_cache_tree_sha256" \
   --metadata "goToolchainTreeSha256=$go_toolchain_tree_sha256" \
   --metadata "goToolsTreeSha256=$go_tools_tree_sha256" \
@@ -209,7 +249,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifes
   --require-unsigned-host
 [[ "$(/usr/bin/shasum -a 256 "$app_manifest" | /usr/bin/awk '{print $1}')" == "$app_manifest_sha256" ]] ||
   die "unsigned application manifest changed during final verification"
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/verify_artifact_manifest.py" \
   "$app_path" \
   "$app_manifest" \
   --metadata "buildNumber=$build_version" \

@@ -413,7 +413,9 @@ export function withLogRows(logs, entries) {
 }
 
 export function pageById(id) {
-  return PAGES.find((page) => page.id === id) ?? PAGES[0];
+  const page = PAGES.find((candidate) => candidate.id === id);
+  if (!page) throw new TypeError(`unknown renderer page id: ${String(id)}`);
+  return page;
 }
 
 export function activeProfile() {

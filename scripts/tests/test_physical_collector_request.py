@@ -58,7 +58,7 @@ REQUEST_SCRIPT = (
 def _candidate() -> dict:
     return {
         "version": "0.4.0",
-        "build_number": "40027",
+        "build_number": "40029",
         "app_manifest_sha256": "a" * 64,
         "signed_app_tree_sha256": "b" * 64,
         "artifact_hash_manifest_sha256": "c" * 64,
@@ -260,7 +260,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         self.runner = _runner()
         self.context = initialize_context(
             _candidate(),
-            run_id="run-40027-macos15",
+            run_id="run-40029-macos15",
             clean_install_confirmed=True,
             runner=self.runner,
             observed_at=self.observed_at,
@@ -322,23 +322,25 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         ):
             initialize_context(
                 _candidate(),
-                run_id="run-40027-macos15",
+                run_id="run-40029-macos15",
                 clean_install_confirmed=False,
                 runner=self.runner,
                 observed_at=self.observed_at,
             )
 
-    def test_initialize_requires_final_40027_build_with_signed_64_bit_bound(self) -> None:
+    def test_initialize_requires_final_40029_build_with_signed_64_bit_bound(self) -> None:
         for build_number, message in (
-            ("40002", "must be final release build 40027"),
-            ("40003", "must be final release build 40027"),
-            ("40004", "must be final release build 40027"),
-            ("40005", "must be final release build 40027"),
-            ("40019", "must be final release build 40027"),
-            ("40020", "must be final release build 40027"),
-            ("40022", "must be final release build 40027"),
-            ("40023", "must be final release build 40027"),
-            ("40026", "must be final release build 40027"),
+            ("40002", "must be final release build 40029"),
+            ("40003", "must be final release build 40029"),
+            ("40004", "must be final release build 40029"),
+            ("40005", "must be final release build 40029"),
+            ("40019", "must be final release build 40029"),
+            ("40020", "must be final release build 40029"),
+            ("40022", "must be final release build 40029"),
+            ("40023", "must be final release build 40029"),
+            ("40026", "must be final release build 40029"),
+            ("40027", "must be final release build 40029"),
+            ("40028", "must be final release build 40029"),
             (str(2**63), "signed 64-bit"),
             ("9" * 5_000, "signed 64-bit"),
         ):

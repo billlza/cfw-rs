@@ -8934,6 +8934,7 @@ def self_check() -> None:
 
 def _metadata(arguments: argparse.Namespace) -> dict[str, str]:
     return {
+        "cargoWorkspaceSourcesTreeSha256": arguments.cargo_workspace_sources_tree_sha256,
         "goModuleCacheTreeSha256": arguments.go_module_cache_tree_sha256,
         "goToolchainTreeSha256": arguments.go_toolchain_tree_sha256,
         "goToolsTreeSha256": arguments.go_tools_tree_sha256,
@@ -8962,6 +8963,7 @@ def main() -> None:
     parser.add_argument("--repository-commit", required=True)
     parser.add_argument("--release-source-sha256", required=True)
     parser.add_argument("--deployment-target", required=True)
+    parser.add_argument("--cargo-workspace-sources-tree-sha256", required=True)
     parser.add_argument("--go-module-cache-tree-sha256", required=True)
     parser.add_argument("--go-toolchain-tree-sha256", required=True)
     parser.add_argument("--go-tools-tree-sha256", required=True)

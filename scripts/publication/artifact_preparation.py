@@ -71,6 +71,7 @@ def component_specs(
     staging: Path,
     seeds: dict[str, ComponentSeed],
     reviews: dict[str, dict[str, Any]],
+    release_environment: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
     for identifier in sorted(seeds):
@@ -79,11 +80,15 @@ def component_specs(
             continue
         review = reviews[identifier]
         source_root = select_source(seed, review)
-        evidence = source_input_evidence(repository, seed, source_root)
+        evidence = source_input_evidence(
+            repository, seed, source_root, release_environment
+        )
         if review["source_evidence"] != evidence:
             raise PublicationError(f"component source evidence no longer recomputes: {identifier}")
         resolution = validate_automatic_resolution(seed, review["license_resolution"])
-        source_relative, source_entries = stage_source(repository, staging, seed, source_root)
+        source_relative, source_entries = stage_source(
+            repository, staging, seed, source_root, release_environment
+        )
         license_files = stage_licenses(
             staging,
             seed,
@@ -159,6 +164,7 @@ def _artifact_sources(
     native_products: Path,
     app: Path,
     build_number: str,
+    release_environment: dict[str, str] | None,
 ) -> dict[str, Path]:
     sources = {
         kind: repository / relative
@@ -178,7 +184,9 @@ def _artifact_sources(
     )
     review_path = repository / "target/candidates/0.4.0/review/validated-candidate.json"
     try:
-        source_identity = current_identity(repository)
+        source_identity = current_identity(
+            repository, environment=release_environment
+        )
         review = validate_candidate_review(
             repository,
             review_path,
@@ -254,13 +262,20 @@ def write_artifacts(
     native_products: Path,
     app: Path,
     build_number: str,
+    release_environment: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     by_name = {seed.name: seed.identifier for seed in components.values()}
     artifact_root = staging / "artifacts"
     artifact_root.mkdir()
     output = []
     for kind, source in sorted(
-        _artifact_sources(repository, native_products, app, build_number).items()
+        _artifact_sources(
+            repository,
+            native_products,
+            app,
+            build_number,
+            release_environment,
+        ).items()
     ):
         destination = artifact_root / f"{kind}.json"
         copy_regular_new(source, destination, MAX_COPY_FILE_BYTES)

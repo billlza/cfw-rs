@@ -13,6 +13,7 @@ from scripts.verify_pinned_build_inputs import (
     MAX_NATIVE_LOCK_BYTES,
     MAX_PINNED_MANIFEST_BYTES,
     PinnedInputError,
+    REQUIRED_RELEASE_BOUNDARY_BINDINGS,
     verify,
 )
 
@@ -271,16 +272,17 @@ echo "$TAURI_CARGO_CACHE_CONTRACT_SHA256"
 readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"
 verify_cargo_preparation_cache() {
   local root="$1"
-  PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract" \
+  cfw_run_release_python_script "$repo_root" "$cargo_cache_contract" \
     validate-preparation "$root"
 }
 normalize_cargo_offline_cache() {
   local root="$1"
-  PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract" \
+  cfw_run_release_python_script "$repo_root" "$cargo_cache_contract" \
     normalize-offline "$root"
 }
 git apply --unidiff-zero "$TAURI_CLI_LOCK_PATCH_PATH"
-rustup which --toolchain "$rust_toolchain" cargo
+cargo_bin="$CFW_RELEASE_CARGO_EXECUTABLE"
+rustc_bin="$CFW_RELEASE_RUSTC_EXECUTABLE"
 verify_cargo_preparation_cache "$prepared_cargo_home"
 /usr/bin/env -i CARGO_HOME="$prepared_cargo_home" \
   CARGO_HTTP_LOW_SPEED_LIMIT=1 CARGO_HTTP_MULTIPLEXING=true \
@@ -292,7 +294,8 @@ reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"
 verify_cargo_preparation_cache "$prepared_cargo_home"
 /usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"
 normalize_cargo_offline_cache "$offline_cargo_home"
-python3 "$repo_root/scripts/hash_artifact.py" \
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/hash_artifact.py" \
   "$offline_cargo_home"
 offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest)"
 /usr/bin/env -i PATH="$cargo_install_root/bin:$(dirname "$cargo_bin"):/usr/bin:/bin:/usr/sbin:/sbin" \
@@ -321,9 +324,20 @@ echo "xcodeVersion=$XCODE_VERSION"
 echo "cfw_verify_tauri_toolchain_tree"
 """
 CI_WORKFLOW = """\
-run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
-run: cargo deny --locked --target aarch64-apple-darwin check
-run: ./scripts/install_pinned_tauri_cli.sh
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        id: validation-python
+        with:
+          python-version: "3.14.6"
+          architecture: arm64
+          update-environment: false
+      - run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-policy-tools
+      - run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' cargo-deny
+      - run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' install-tauri-cli
 """
 XCODEGEN_BOOTSTRAP = """\
 #!/usr/bin/env bash
@@ -591,8 +605,9 @@ class Fixture:
             "cargoDeny": {
                 "ciWorkflowPath": ".github/workflows/ci.yml",
                 "requiredCiFragments": [
-                    'cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked',
-                    "cargo deny --locked --target aarch64-apple-darwin check",
+                    "run_release_ci_gate.sh",
+                    "bootstrap-policy-tools",
+                    "cargo-deny",
                 ],
             },
             "tauriCli": {
@@ -613,7 +628,7 @@ class Fixture:
                 "cacheContractSha256Key": "TAURI_CARGO_CACHE_CONTRACT_SHA256",
                 "cacheContractSha256": TAURI_CACHE_CONTRACT_SHA,
                 "ciWorkflowPath": ".github/workflows/ci.yml",
-                "requiredCiFragment": "./scripts/install_pinned_tauri_cli.sh",
+                "requiredCiFragment": "install-tauri-cli",
                 "installerPath": "scripts/install_pinned_tauri_cli.sh",
                 "requiredInstallerFragments": [
                     "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate",
@@ -625,10 +640,12 @@ class Fixture:
                     "$TAURI_CLI_SPIN_CRATE_SHA256",
                     "$TAURI_CARGO_CACHE_CONTRACT_SHA256",
                     'readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"',
-                    'PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract"',
+                    "cfw_run_release_python_script",
+                    '"$repo_root" "$cargo_cache_contract"',
                     'validate-preparation "$root"',
                     'normalize-offline "$root"',
-                    'which --toolchain "$rust_toolchain"',
+                    'cargo_bin="$CFW_RELEASE_CARGO_EXECUTABLE"',
+                    'rustc_bin="$CFW_RELEASE_RUSTC_EXECUTABLE"',
                     "/usr/bin/env -i",
                     'CARGO_HOME="$prepared_cargo_home"',
                     'CARGO_HOME="$offline_cargo_home"',
@@ -813,7 +830,20 @@ class Fixture:
         self.xcodegen_bootstrap = XCODEGEN_BOOTSTRAP
         self.tauri_installer = TAURI_INSTALLER
         self.ci_workflow = CI_WORKFLOW
-        self.extra_artifact_files: dict[str, str] = {}
+        for relative in REQUIRED_RELEASE_BOUNDARY_BINDINGS:
+            self.manifest["artifactBindings"].setdefault(
+                relative, ["fixture-release-boundary"]
+            )
+        self.extra_artifact_files: dict[str, str] = {
+            relative: "fixture-release-boundary\n"
+            for relative in REQUIRED_RELEASE_BOUNDARY_BINDINGS
+            if relative not in {
+                "scripts/build_libbox.sh",
+                "scripts/build_native_products.sh",
+                "scripts/build_unsigned_candidate.sh",
+                "scripts/libbox_source_contract.sh",
+            }
+        }
         self._extra_env_text = ""
 
     def env_text(self) -> str:
@@ -1388,8 +1418,8 @@ class PinnedBuildInputsTests(unittest.TestCase):
 
     def test_cargo_deny_ci_hard_coded_version_fails(self) -> None:
         fixture = Fixture()
-        fixture.ci_workflow = fixture.ci_workflow.replace(
-            '"$CARGO_DENY_VERSION"', "0.20.2"
+        fixture.ci_workflow += (
+            "\n      - run: cargo install cargo-deny --version 0.20.2 --locked\n"
         )
         self._assert_fails(fixture, "cargo-deny CI")
 
@@ -1441,7 +1471,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
     def test_tauri_cache_contract_wrapper_cannot_be_noop(self) -> None:
         fixture = Fixture()
         fixture.tauri_installer = fixture.tauri_installer.replace(
-            'PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract" '
+            'cfw_run_release_python_script "$repo_root" "$cargo_cache_contract" '
             '    normalize-offline "$root"',
             "true",
         )
@@ -1830,6 +1860,62 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture.build_native = '#!/usr/bin/env bash\necho "no binding"\n'
         self._assert_fails(fixture, "artifact-hash binding")
 
+    def test_missing_release_boundary_binding_fails(self) -> None:
+        fixture = Fixture()
+        missing = sorted(REQUIRED_RELEASE_BOUNDARY_BINDINGS)[0]
+        del fixture.manifest["artifactBindings"][missing]
+        self._assert_fails(fixture, "required release boundary bindings")
+
+    def test_ci_unsigned_python_must_match_the_dependency_pin(self) -> None:
+        fixture = Fixture()
+        fixture.env["PYTHON_VERSION"] = "3.14.6"
+        fixture.manifest["tools"]["PYTHON_VERSION"] = "3.14.6"
+        fixture.manifest["artifactBindings"][".github/workflows/ci.yml"] = [
+            "python-version:"
+        ]
+        self._verify_fixture(fixture)
+
+        fixture.ci_workflow = fixture.ci_workflow.replace(
+            'python-version: "3.14.6"', 'python-version: "3.14.7"'
+        )
+        self._assert_fails(fixture, "Python version does not exactly match")
+
+    def test_each_release_job_has_one_exact_python_binding(self) -> None:
+        fixture = Fixture()
+        fixture.env["PYTHON_VERSION"] = "3.14.6"
+        fixture.manifest["tools"]["PYTHON_VERSION"] = "3.14.6"
+        fixture.manifest["artifactBindings"][".github/workflows/ci.yml"] = [
+            "python-version:"
+        ]
+        fixture.ci_workflow += """
+  release-two:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        id: validation-python
+        with:
+          python-version: "3.14.6"
+          architecture: arm64
+          update-environment: false
+      - run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test
+"""
+        self._verify_fixture(fixture)
+
+        fixture.ci_workflow = fixture.ci_workflow.replace(
+            '          python-version: "3.14.6"\n'
+            "          architecture: arm64\n"
+            "          update-environment: false\n"
+            "      - run: ./scripts/run_release_ci_gate.sh "
+            "--validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test",
+            '          python-version: "3.14.7"\n'
+            "          architecture: arm64\n"
+            "          update-environment: false\n"
+            "      - run: ./scripts/run_release_ci_gate.sh "
+            "--validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test",
+        )
+        self._assert_fails(fixture, "release-two.*Python version")
+
     def test_libbox_exact_contract_missing_metadata_binding_fails(self) -> None:
         fixture = Fixture()
         fixture.libbox_contract = fixture.libbox_contract.replace(
@@ -1841,14 +1927,14 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/orchestrator.py"
         fixture.manifest["artifactBindings"][path] = [
-            'VALIDATION_BUILD = "40026"',
-            'FINAL_BUILD = "40027"',
+            'VALIDATION_BUILD = "40028"',
+            'FINAL_BUILD = "40029"',
             "seal_production_evidence",
             "require_verified=True",
         ]
         fixture.extra_artifact_files[path] = (
-            'VALIDATION_BUILD = "40026"\n'
-            'FINAL_BUILD = "40027"\n'
+            'VALIDATION_BUILD = "40028"\n'
+            'FINAL_BUILD = "40029"\n'
             "def seal_production_evidence():\n"
             "    require_verified=True\n"
         )

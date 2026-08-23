@@ -46,6 +46,7 @@ regenerated after an identity change, or treated as candidate evidence.
 Do not delete, rename, copy to another build number, resubmit, install, or use
 these bytes as input to `validated-candidate.json`. Do not allocate build 40023.
 Build 40024 and its unbuilt reserved final companion 40025 were later retired
-under their own immutable record. The next validation/final pair is
-40026/40027 from one new clean source identity containing the corrected,
-read-only 40019 compatibility proof.
+under their own immutable record. Build 40026 was then notarized and retired
+before installation when its read-only admission preflight exposed a
+toolchain-binding mismatch; build 40027 remained unbuilt. The active successor
+pair is 40028/40029 from one new clean source identity.

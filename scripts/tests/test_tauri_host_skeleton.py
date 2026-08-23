@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,10 +36,14 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         self.write_config({"bundle": {"macOS": {}}})
         self.tauri = self.root / "cargo-tauri"
         self.tauri.write_text(
-            "#!/bin/sh\nprintf '[%s]\\n' \"$@\"\n",
+            "#!/bin/sh\n"
+            "printf '[cargo-home=%s]\\n[offline=%s]\\n' \"$CARGO_HOME\" \"$CARGO_NET_OFFLINE\"\n"
+            "printf '[%s]\\n' \"$@\"\n",
             encoding="utf-8",
         )
         self.tauri.chmod(0o755)
+        self.cargo_home = self.root / "cargo-home"
+        self.cargo_home.mkdir(mode=0o700)
         self.override = json.dumps(
             {"bundle": {"macOS": {"bundleVersion": "40000"}}},
             separators=(",", ":"),
@@ -54,27 +59,70 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         self,
         *,
         override: str | None = None,
-        environment_updates: dict[str, str] | None = None,
+        environment_updates: dict[str, str | None] | None = None,
         errexit: bool = True,
         readonly_caller_tauri: Path | None = None,
+        runtime_verifier_failure_call: int | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         environment = dict(os.environ)
         for variable in SIGNING_VARIABLES:
             environment.pop(variable, None)
+        environment.update(
+            {
+                "CARGO_HOME": str(self.cargo_home),
+                "CARGO_NET_OFFLINE": "true",
+                "CFW_RELEASE_PYTHON_EXECUTABLE": sys.executable,
+            }
+        )
         if environment_updates:
-            environment.update(environment_updates)
+            for variable, value in environment_updates.items():
+                if value is None:
+                    environment.pop(variable, None)
+                else:
+                    environment[variable] = value
         shell = ("set -euo pipefail; " if errexit else "set -uo pipefail; ")
         shell += 'source "$1"; '
+        shell += (
+            'contract_test_repository="$5"; '
+            'contract_test_cargo_home="$6"; '
+            'contract_test_runtime_failure_call="$8"; '
+            "contract_test_runtime_verification_count=0; "
+            "cfw_verify_release_cargo_runtime() { "
+            "contract_test_runtime_verification_count="
+            "$((contract_test_runtime_verification_count + 1)); "
+            'if [[ "$#" -ne 2 || "$1" != "$contract_test_repository" || '
+            '"$2" != "$contract_test_cargo_home" ]]; then '
+            "echo 'fixture error: unexpected Cargo runtime verification arguments' >&2; "
+            "return 97; "
+            "fi; "
+            'if [[ "$contract_test_runtime_failure_call" -ne 0 && '
+            '"$contract_test_runtime_verification_count" -eq '
+            '"$contract_test_runtime_failure_call" ]]; then '
+            "echo 'fixture error: Cargo runtime verification rejected' >&2; "
+            "return 86; "
+            "fi; "
+            "}; "
+        )
         if readonly_caller_tauri is not None:
             shell += (
                 'readonly app_dir="$2"; '
-                'readonly tauri_bin="$5"; '
+                'readonly tauri_bin="$7"; '
                 'readonly config_override="$4"; '
                 'readonly variable="caller-variable"; '
             )
-        shell += 'cfw_build_tauri_host_skeleton "$2" "$3" "$4"'
+        shell += (
+            'cfw_build_tauri_host_skeleton "$2" "$3" "$4"; '
+            "contract_test_status=$?; "
+            'if [[ "$contract_test_status" -eq 0 && '
+            '"$contract_test_runtime_verification_count" -ne 2 ]]; then '
+            "echo 'fixture error: Cargo runtime verifier was not called twice' >&2; "
+            "exit 96; "
+            "fi; "
+            'exit "$contract_test_status"'
+        )
         command = [
             "/bin/bash",
+            "-p",
             "-c",
             shell,
             "tauri-host-skeleton-test",
@@ -82,9 +130,11 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
             str(self.app_dir),
             str(self.tauri),
             self.override if override is None else override,
+            str(REPOSITORY),
+            str(self.cargo_home),
+            str(readonly_caller_tauri) if readonly_caller_tauri else "",
+            str(runtime_verifier_failure_call or 0),
         ]
-        if readonly_caller_tauri is not None:
-            command.append(str(readonly_caller_tauri))
         return subprocess.run(
             command,
             check=False,
@@ -122,6 +172,8 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         completed = self.run_contract()
         self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         arguments = completed.stdout.decode()
+        self.assertIn(f"[cargo-home={self.cargo_home}]\n", arguments)
+        self.assertIn("[offline=true]\n", arguments)
         self.assertIn(
             "[build]\n[--bundles]\n[app]\n[--ci]\n"
             "[--features]\n[physical-release-evidence]\n[--config]\n",
@@ -145,6 +197,8 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         self.assertEqual(completed.stderr, b"")
         expected_arguments = (
+            f"[cargo-home={self.cargo_home}]\n"
+            "[offline=true]\n"
             "[build]\n"
             "[--bundles]\n"
             "[app]\n"
@@ -156,6 +210,35 @@ class TauriHostSkeletonRunnerTests(unittest.TestCase):
         )
         self.assertEqual(completed.stdout.decode(), expected_arguments)
         self.assertNotIn(b"caller-tauri", completed.stdout)
+
+    def test_runner_requires_an_offline_absolute_cargo_runtime(self) -> None:
+        for environment_updates in (
+            {"CARGO_HOME": None},
+            {"CARGO_HOME": "relative-cargo-home"},
+            {"CARGO_NET_OFFLINE": None},
+            {"CARGO_NET_OFFLINE": "false"},
+        ):
+            with self.subTest(environment_updates=environment_updates):
+                completed = self.run_contract(
+                    environment_updates=environment_updates
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(b"verified candidate Cargo runtime", completed.stderr)
+                self.assertNotIn(b"[build]", completed.stdout)
+
+    def test_runtime_verification_failure_blocks_before_and_after_tauri(self) -> None:
+        before = self.run_contract(
+            errexit=False,
+            runtime_verifier_failure_call=1,
+        )
+        self.assertNotEqual(before.returncode, 0)
+        self.assertIn(b"Cargo runtime verification rejected", before.stderr)
+        self.assertNotIn(b"[build]", before.stdout)
+
+        after = self.run_contract(runtime_verifier_failure_call=2)
+        self.assertNotEqual(after.returncode, 0)
+        self.assertIn(b"Cargo runtime verification rejected", after.stderr)
+        self.assertIn(b"[build]", after.stdout)
 
     def test_runner_rejects_every_signing_environment_variable_even_when_empty(self) -> None:
         for variable in SIGNING_VARIABLES:

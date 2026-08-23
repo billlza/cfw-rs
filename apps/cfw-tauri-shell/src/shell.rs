@@ -421,8 +421,6 @@ fn emit_shell_error(app: &AppHandle, kind: &str, message: String) {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::path::PathBuf;
-    use std::process::Command;
 
     use cfw_controller::{ProxyGroup, ProxyNode};
 
@@ -445,31 +443,41 @@ mod tests {
         }
     }
 
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RendererPageContract {
+        id: String,
+        title: String,
+        summary: String,
+    }
+
     fn renderer_page_ids() -> BTreeSet<String> {
-        const READ_PAGES_MODULE: &str = r#"
-import { pathToFileURL } from "node:url";
-
-const { PAGES } = await import(pathToFileURL(process.argv[1]).href);
-if (!Array.isArray(PAGES) || PAGES.some((page) => typeof page?.id !== "string")) {
-  throw new TypeError("renderer PAGES must be an array of objects with string ids");
-}
-process.stdout.write(JSON.stringify(PAGES.map((page) => page.id)));
-"#;
-
-        let state_module = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/src/state.js");
-        let output = Command::new("node")
-            .args(["--input-type=module", "--eval", READ_PAGES_MODULE])
-            .arg(&state_module)
-            .output()
-            .unwrap_or_else(|error| panic!("failed to execute renderer page contract: {error}"));
+        let pages: Vec<RendererPageContract> =
+            serde_json::from_str(include_str!("../ui/src/pages.json"))
+                .expect("renderer page contract must be strict JSON");
         assert!(
-            output.status.success(),
-            "renderer page contract failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            !pages.is_empty(),
+            "renderer page contract must not be empty"
         );
-        let pages: Vec<String> = serde_json::from_slice(&output.stdout)
-            .expect("renderer page contract must produce a JSON string array");
-        let unique = pages.iter().cloned().collect::<BTreeSet<_>>();
+        for page in &pages {
+            assert!(
+                page.id.split('-').all(|segment| {
+                    !segment.is_empty()
+                        && segment
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                }),
+                "renderer page id must be canonical lowercase kebab-case"
+            );
+            assert!(
+                !page.title.trim().is_empty() && !page.summary.trim().is_empty(),
+                "renderer page title and summary must not be empty"
+            );
+        }
+        let unique = pages
+            .iter()
+            .map(|page| page.id.clone())
+            .collect::<BTreeSet<_>>();
         assert_eq!(
             unique.len(),
             pages.len(),

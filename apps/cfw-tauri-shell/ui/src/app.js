@@ -3213,8 +3213,21 @@ const pageRenderers = {
   feedback: renderFeedback,
 };
 
+const declaredPageIds = PAGES.map(({ id }) => id).sort();
+const rendererPageIds = Object.keys(pageRenderers).sort();
+if (
+  declaredPageIds.length !== rendererPageIds.length
+  || declaredPageIds.some((id, index) => id !== rendererPageIds[index])
+) {
+  throw new TypeError("renderer page implementations must exactly match the shared page contract");
+}
+
 function renderPage() {
   const page = pageById(state.activePage);
+  const renderer = pageRenderers[page.id];
+  if (typeof renderer !== "function") {
+    throw new TypeError(`renderer is unavailable for page ${page.id}`);
+  }
   document.title = "";
   const productName = document.getElementById("product-name");
   if (productName) productName.textContent = state.payload.product?.name ?? "Clash for Mac";
@@ -3230,7 +3243,7 @@ function renderPage() {
   updateStatusBar();
 
   renderNav();
-  document.getElementById("page").innerHTML = (pageRenderers[state.activePage] ?? renderGeneral)();
+  document.getElementById("page").innerHTML = renderer();
   bindPageEvents();
   renderGlassOverlays();
   if (state.profileInspector?.mode === "edit" && state.profileInspector.focusKey) {

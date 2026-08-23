@@ -2,8 +2,8 @@
 
 This module is the missing orchestration boundary between the existing strict
 validators.  It has no fixture mode, caller-selected build numbers, optional
-evidence, or success override.  The fixed 40026 validation candidate must be
-approved before the fixed 40027 final candidate, and every request field is
+evidence, or success override.  The fixed 40028 validation candidate must be
+approved before the fixed 40029 final candidate, and every request field is
 derived by reopening canonical release artifacts.
 
 The workflow is intentionally layered. ``prepare_physical_candidate_manifest``
@@ -23,12 +23,9 @@ import json
 import os
 from pathlib import Path
 import re
-import selectors
 import shutil
-import signal
 import subprocess
 import tempfile
-import time
 from typing import Any
 
 from .common import (
@@ -44,6 +41,7 @@ from .common import (
     tree_digest,
     write_new,
 )
+from .bounded_process import BoundedProcessError, run_bounded_process
 from .final_candidate import (
     REQUIRED_NESTED_CODE,
     TEAM_ID,
@@ -51,6 +49,8 @@ from .final_candidate import (
     validate_final_candidate_binding,
 )
 from .release_contract import RELEASE_VERSION
+from .release_environment import release_tool_environment
+from .graph_model import load_pins
 from .sealed_closure import (
     build_sealed_closure,
     derive_supply_chain,
@@ -105,8 +105,8 @@ from scripts.verify_notary_log import NotaryLogError, validate_files as validate
 
 
 PRODUCT_VERSION = RELEASE_VERSION
-VALIDATION_BUILD = "40026"
-FINAL_BUILD = "40027"
+VALIDATION_BUILD = "40028"
+FINAL_BUILD = "40029"
 
 CANDIDATE_ROOT = Path("target/candidates/0.4.0")
 FINAL_NATIVE_PRODUCTS = CANDIDATE_ROOT / "release-build" / FINAL_BUILD / "native-products"
@@ -144,6 +144,7 @@ CDHASH_RE = re.compile(r"^[0-9a-f]{40}$")
 @dataclass(frozen=True)
 class ProductionContext:
     repository: Path
+    release_environment: dict[str, str]
     source_identity: dict[str, str]
     review: dict[str, Any]
     ci_document: dict[str, Any]
@@ -195,115 +196,64 @@ def _run_checked(
     command: list[str],
     repository: Path,
     label: str,
+    environment: dict[str, str],
     *,
     timeout: float = 900,
     output_limit: int = MAX_COMMAND_OUTPUT,
 ) -> subprocess.CompletedProcess[bytes]:
-    environment = {
-        "HOME": str(Path.home()),
-        "LANG": "C",
-        "LC_ALL": "C",
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-        "PYTHONDONTWRITEBYTECODE": "1",
-    }
+    if not environment:
+        raise PublicationError(f"{label} requires the closed release environment")
     try:
-        process = subprocess.Popen(
+        completed = run_bounded_process(
             command,
-            cwd=repository,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+            cwd=repository.resolve(strict=True),
+            environment=environment,
+            timeout=timeout,
+            output_limit=output_limit,
         )
-    except OSError as error:
-        raise PublicationError(f"{label} could not start") from error
-    if process.stdout is None or process.stderr is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        raise PublicationError(f"{label} output pipes are unavailable")
-
-    selector = selectors.DefaultSelector()
-    stdout_fd = process.stdout.fileno()
-    stderr_fd = process.stderr.fileno()
-    buffers = {stdout_fd: bytearray(), stderr_fd: bytearray()}
-    selector.register(process.stdout, selectors.EVENT_READ)
-    selector.register(process.stderr, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout
-    try:
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise PublicationError(f"{label} exceeded its time limit")
-            for key, _events in selector.select(min(remaining, 1.0)):
-                chunk = os.read(key.fd, 64 * 1024)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                buffers[key.fd].extend(chunk)
-                if sum(len(buffer) for buffer in buffers.values()) > output_limit:
-                    raise PublicationError(f"{label} output exceeds its fixed bound")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise PublicationError(f"{label} exceeded its time limit")
-        returncode = process.wait(timeout=remaining)
-        try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
-            pass
+    except (OSError, BoundedProcessError) as error:
+        if isinstance(error, BoundedProcessError):
+            if error.reason == "timeout":
+                message = f"{label} exceeded its time limit"
+            elif error.reason == "output-limit":
+                message = f"{label} output exceeds its fixed bound"
+            elif error.reason == "descendant":
+                message = f"{label} left a descendant process running"
+            else:
+                message = f"{label} did not complete inside its process boundary"
         else:
-            os.killpg(process.pid, signal.SIGKILL)
-            raise PublicationError(f"{label} left a descendant process running")
-    except subprocess.TimeoutExpired as error:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        raise PublicationError(f"{label} exceeded its time limit") from error
-    except BaseException:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        raise
-    finally:
-        selector.close()
-        process.stdout.close()
-        process.stderr.close()
-
-    completed = subprocess.CompletedProcess(
-        command,
-        returncode,
-        bytes(buffers[stdout_fd]),
-        bytes(buffers[stderr_fd]),
-    )
+            message = f"{label} could not start"
+        raise PublicationError(message) from error
     if completed.returncode != 0:
         raise PublicationError(f"{label} failed with exit code {completed.returncode}")
     return completed
 
 
-def _validate_release_application(repository: Path) -> None:
+def _validate_release_application(
+    repository: Path, release_environment: dict[str, str]
+) -> None:
     _run_checked(
         [
             "/bin/bash",
+            "-p",
             str(repository / "scripts/verify_release_app.sh"),
             str(_path(repository, SIGNED_APP)),
             str(_path(repository, FINAL_NATIVE_PRODUCTS)),
         ],
         repository,
         "final release application verification",
+        release_environment,
     )
 
 
 def _production_context(repository: Path) -> ProductionContext:
     repository = repository.resolve(strict=True)
+    pins = load_pins(repository / "scripts/dependency_pins.env")
+    release_environment = release_tool_environment(repository, pins)
     try:
-        source_identity = current_identity(repository, require_clean=True)
+        source_identity = current_identity(
+            repository, require_clean=True, environment=release_environment
+        )
         validate_inventory(repository)
         review = validate_candidate_review(
             repository,
@@ -357,7 +307,7 @@ def _production_context(repository: Path) -> ProductionContext:
         raise PublicationError(
             f"final signed application is not exactly {PRODUCT_VERSION} build {FINAL_BUILD}"
         )
-    _validate_release_application(repository)
+    _validate_release_application(repository, release_environment)
 
     publication_root = _path(repository, PUBLICATION_ROOT)
     try:
@@ -435,6 +385,7 @@ def _production_context(repository: Path) -> ProductionContext:
     libbox_manifest = _load_strict_json(_path(repository, LIBBOX_MANIFEST))
     context = ProductionContext(
         repository=repository,
+        release_environment=release_environment,
         source_identity=source_identity,
         review=review,
         ci_document=ci_document,
@@ -695,6 +646,7 @@ def _nested_code(context: ProductionContext) -> list[dict[str, Any]]:
             ["/usr/bin/codesign", "-d", "--verbose=4", str(target)],
             repository,
             f"{role} codesign identity capture",
+            context.release_environment,
         )
         details = _parse_codesign_details(
             details_result.stdout + details_result.stderr, role
@@ -705,11 +657,13 @@ def _nested_code(context: ProductionContext) -> list[dict[str, Any]]:
             ["/usr/bin/codesign", "-d", "-r-", str(target)],
             repository,
             f"{role} designated requirement capture",
+            context.release_environment,
         )
         entitlements_result = _run_checked(
             ["/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", str(target)],
             repository,
             f"{role} entitlement capture",
+            context.release_environment,
         )
         entitlements = entitlements_result.stdout
         if not entitlements:
@@ -1020,7 +974,11 @@ def _require_final_inputs_unchanged(
     expected_physical_candidate_manifest: dict[str, Any],
 ) -> None:
     try:
-        observed_source = current_identity(context.repository, require_clean=True)
+        observed_source = current_identity(
+            context.repository,
+            require_clean=True,
+            environment=context.release_environment,
+        )
     except (OSError, SourceIdentityError) as error:
         raise PublicationError("release source identity cannot be rechecked") from error
     if observed_source != context.source_identity:
@@ -1204,7 +1162,7 @@ def seal_production_evidence(repository: Path) -> dict[str, Any]:
 
 
 def self_check(repository: Path) -> None:
-    if (PRODUCT_VERSION, VALIDATION_BUILD, FINAL_BUILD) != ("0.4.0", "40026", "40027"):
+    if (PRODUCT_VERSION, VALIDATION_BUILD, FINAL_BUILD) != ("0.4.0", "40028", "40029"):
         raise PublicationError("production release build identity drifted")
     if len(CAPABILITY_IDS) != 9:
         raise PublicationError("production release capability inventory is not fixed to nine")

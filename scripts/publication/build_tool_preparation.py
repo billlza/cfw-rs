@@ -85,6 +85,7 @@ def build_tool_specs(
     repository: Path,
     seeds: dict[str, ComponentSeed],
     reviews: dict[str, dict[str, Any]],
+    release_environment: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     output = []
     for identifier in sorted(seeds):
@@ -92,7 +93,9 @@ def build_tool_specs(
         if not seed.external_build_tool:
             continue
         review = reviews[identifier]
-        expected_source = source_input_evidence(repository, seed, seed.source_root)
+        expected_source = source_input_evidence(
+            repository, seed, seed.source_root, release_environment
+        )
         if review["source_evidence"] != expected_source:
             raise PublicationError(f"external build-tool evidence drifted: {identifier}")
         resolution = validate_automatic_resolution(seed, review["license_resolution"])

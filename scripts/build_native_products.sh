@@ -1,16 +1,26 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Build the four native release products from the tracked Xcode project.
 # Unsigned mode is for CI validation only. Developer ID mode requires the
 # product's exact identity and target-specific provisioning profiles.
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_tool_environment.sh
+source "$repo_root/scripts/release_tool_environment.sh"
+if [[ "${1:-}" == "--unsigned" && -n "${CFW_UNSIGNED_VALIDATION_PYTHON:-}" ]]; then
+  cfw_seal_release_tool_environment unsigned-validation
+else
+  cfw_seal_release_tool_environment production
+fi
+readonly python_bin="$CFW_RELEASE_PYTHON_EXECUTABLE"
 # shellcheck source=scripts/libbox_source_contract.sh
 source "$repo_root/scripts/libbox_source_contract.sh"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
+cfw_select_release_apple_toolchain
 
 readonly expected_team_id="YKUPL7Z869"
 readonly authority_signing_identifier="com.bill.clashformac.global-authority"
@@ -40,6 +50,36 @@ EOF
   exit 2
 }
 
+validate_candidate_output() {
+  PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+    "$repo_root" "$CFW_BUILD_NUMBER" "$output_input" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1] + "/scripts")
+from release_build_identity import candidate_native_products_output
+
+print(candidate_native_products_output(Path(sys.argv[1]), sys.argv[3], sys.argv[2]))
+PY
+}
+
+validate_candidate_derived_data() {
+  PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+    "$repo_root" "$CFW_BUILD_NUMBER" "$output_input" "$derived_data" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1] + "/scripts")
+from release_build_identity import candidate_native_derived_data_output
+
+print(
+    candidate_native_derived_data_output(
+        Path(sys.argv[1]), sys.argv[3], sys.argv[4], sys.argv[2]
+    )
+)
+PY
+}
+
 [[ $# -eq 1 ]] || usage
 case "$1" in
   --unsigned)
@@ -55,17 +95,10 @@ esac
 
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "native products require Apple Silicon macOS"
-[[ "$output_input" == /* ]] || die "native product output must be absolute"
-[[ "$output_input" == "$repo_root/target/candidates/0.4.0/"*"/native-products" ]] ||
-  die "native products must use a 0.4.0 candidate-specific immutable root"
-PYTHONDONTWRITEBYTECODE=1 python3 -B - "$repo_root" "$CFW_BUILD_NUMBER" <<'PY'
-import sys
-
-sys.path.insert(0, sys.argv[1] + "/scripts")
-from release_build_identity import canonical_build_version
-
-canonical_build_version(sys.argv[2], "CFW_BUILD_NUMBER")
-PY
+[[ "$(validate_candidate_output)" == "$output_input" ]] ||
+  die "native products must use an exact candidate-specific immutable root"
+[[ "$(validate_candidate_derived_data)" == "$derived_data" ]] ||
+  die "Xcode derived data must use the exact candidate-specific output root"
 [[ -d "$project" && ! -L "$project" ]] || die "tracked Xcode project is unavailable"
 [[ -d "$repo_root/target/native-dependencies/Libbox.xcframework" ]] ||
   die "source-built Libbox.xcframework is unavailable"
@@ -92,10 +125,10 @@ libbox_manifest_sha256_start="$(
     awk '{print $1}'
 )" || die "cannot hash the verified Libbox manifest"
 "$repo_root/scripts/verify_xcode_project.sh"
-PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/verify_native_product_graph.py"
-source_identity_start="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/repository_source_identity.py")" ||
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/verify_native_product_graph.py"
+source_identity_start="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/repository_source_identity.py")" ||
   die "cannot capture the release source identity"
 read -r repository_commit release_source_sha256 <<<"$source_identity_start"
 [[ -n "$repository_commit" && -n "$release_source_sha256" ]] ||
@@ -110,7 +143,12 @@ fi
   die "refusing to replace derived data: $derived_data"
 [[ ! -L "$output_input" ]] || die "native product output must not be a symlink"
 mkdir -p "$output_input"
-output_root="$(cd "$output_input" && pwd -P)"
+output_root="$(validate_candidate_output)" ||
+  die "native product output changed while it was being created"
+[[ "$output_root" == "$output_input" ]] ||
+  die "native product output is not canonical"
+[[ "$(validate_candidate_derived_data)" == "$derived_data" ]] ||
+  die "Xcode derived-data output changed while the candidate root was created"
 
 products=(
   CFWGlobalAuthority
@@ -125,7 +163,7 @@ for product in "${products[@]}"; do
     die "refusing to replace native product manifest: $output_root/$product.manifest.json"
 done
 
-xcode_version_output="$(xcodebuild -version)" || die "cannot query Xcode identity"
+xcode_version_output="$(/usr/bin/xcodebuild -version)" || die "cannot query Xcode identity"
 xcode_version="$(printf '%s\n' "$xcode_version_output" | awk 'NR == 1 {print $2}')"
 xcode_build="$(printf '%s\n' "$xcode_version_output" | awk 'NR == 2 {print $3}')"
 [[ -n "$xcode_version" && -n "$xcode_build" ]] || die "invalid Xcode identity"
@@ -169,7 +207,7 @@ else
     die "Packet Tunnel provisioning profile specifier must be an exact profile UUID"
   [[ "$MACOS_SIGN_IDENTITY" == "Developer ID Application:"*"($expected_team_id)" ]] ||
     die "signing identity must be a Developer ID Application identity for $expected_team_id"
-  security find-identity -v -p codesigning | grep -Fq "\"$MACOS_SIGN_IDENTITY\"" ||
+  /usr/bin/security find-identity -v -p codesigning | grep -Fq "\"$MACOS_SIGN_IDENTITY\"" ||
     die "the requested Developer ID identity is not available in the keychain"
   signing_arguments=(
     CODE_SIGNING_ALLOWED=YES
@@ -185,7 +223,7 @@ fi
 build_scheme() {
   local scheme="$1"
   shift
-  xcodebuild build \
+  /usr/bin/xcodebuild build \
     "${common_arguments[@]}" \
     -scheme "$scheme" \
     "${signing_arguments[@]}" \
@@ -230,9 +268,9 @@ verify_macho() {
   local binary="$1"
   local architecture
   local build_details
-  architecture="$(lipo -archs "$binary")"
+  architecture="$(/usr/bin/lipo -archs "$binary")"
   [[ "$architecture" == "arm64" ]] || die "native product is not thin arm64: $binary"
-  build_details="$(vtool -show-build "$binary")"
+  build_details="$(/usr/bin/vtool -show-build "$binary")"
   [[ "$build_details" =~ platform[[:space:]]+MACOS ]] ||
     die "native product is not a macOS Mach-O: $binary"
   [[ "$build_details" =~ minos[[:space:]]+$MACOS_DEPLOYMENT_TARGET([[:space:]]|$) ]] ||
@@ -253,7 +291,7 @@ if [[ "$signing_mode" == "developer-id" ]]; then
   # and Developer ID certificates. The privileged launch daemon has a stricter
   # release identity, so replace only this standalone Mach-O signature with the
   # exact reviewed Developer ID designated requirement.
-  codesign \
+  /usr/bin/codesign \
     --force \
     --options runtime \
     --timestamp \
@@ -266,11 +304,11 @@ if [[ "$signing_mode" == "developer-id" ]]; then
   authority_requirement_text="$staging/.authority-requirement.txt"
   authority_requirement_expected="$staging/.authority-requirement.expected"
   authority_requirement_actual="$staging/.authority-requirement.actual"
-  codesign -d -r "$authority_requirement_text" "$authority_binary" \
+  /usr/bin/codesign -d -r "$authority_requirement_text" "$authority_binary" \
     >/dev/null 2>&1 || die "cannot extract the Global Authority designated requirement"
-  csreq -r="$authority_designated_requirement" -b "$authority_requirement_expected" ||
+  /usr/bin/csreq -r="$authority_designated_requirement" -b "$authority_requirement_expected" ||
     die "cannot compile the expected Global Authority designated requirement"
-  csreq -r "$authority_requirement_text" -b "$authority_requirement_actual" ||
+  /usr/bin/csreq -r "$authority_requirement_text" -b "$authority_requirement_actual" ||
     die "cannot compile the signed Global Authority designated requirement"
   cmp -s "$authority_requirement_expected" "$authority_requirement_actual" ||
     die "Global Authority designated requirement mismatch"
@@ -292,8 +330,8 @@ done
 
 if [[ "$signing_mode" == "developer-id" ]]; then
   for product in "${products[@]}"; do
-    codesign --verify --strict --verbose=4 "$staging/$product"
-    signature="$(codesign -d --verbose=4 "$staging/$product" 2>&1)"
+    /usr/bin/codesign --verify --strict --verbose=4 "$staging/$product"
+    signature="$(/usr/bin/codesign -d --verbose=4 "$staging/$product" 2>&1)"
     [[ "$signature" == *"TeamIdentifier=$expected_team_id"* ]] ||
       die "native product Team ID mismatch: $product"
     [[ "$signature" == *"Authority=Developer ID Application:"*"($expected_team_id)"* ]] ||
@@ -312,9 +350,10 @@ libbox_manifest_sha256="$(
   shasum -a 256 "$repo_root/target/native-dependencies/Libbox.xcframework.manifest.json" |
     awk '{print $1}'
 )" || die "cannot re-hash the verified Libbox manifest"
-native_source_sha256="$(PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/hash_native_build_inputs.py")"
-source_identity_end="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
-  "$repo_root/scripts/repository_source_identity.py")" ||
+native_source_sha256="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/hash_native_build_inputs.py")"
+source_identity_end="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/repository_source_identity.py")" ||
   die "cannot re-observe the release source identity"
 [[ "$source_identity_end" == "$source_identity_start" ]] ||
   die "release source changed while native products were building"
@@ -338,7 +377,8 @@ for product in "${products[@]}"; do
     com.bill.clashformac.packet-tunnel.systemextension) artifact_kind="native-packet-tunnel-v1" ;;
     *) die "unknown native product: $product" ;;
   esac
-  python3 "$repo_root/scripts/hash_artifact.py" \
+  cfw_run_release_python_script \
+    "$repo_root" "$repo_root/scripts/hash_artifact.py" \
     "$staging/$product" \
     --output "$staging/$product.manifest.json" \
     --metadata "artifactKind=$artifact_kind" \

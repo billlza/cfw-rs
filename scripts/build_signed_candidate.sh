@@ -1,23 +1,19 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Build, sign, notarize, staple, and verify the installable 0.4.0 candidate.
 # This script never installs or launches the app and never changes network,
 # proxy, DNS, helper, launchd, or Network Extension runtime state.
 set -euo pipefail
 umask 022
+unset CDPATH
 
-unset PYTHONPATH PYTHONHOME BASH_ENV ENV CDPATH \
-  DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_FRAMEWORK_PATH \
-  DYLD_FALLBACK_LIBRARY_PATH
-rustc_path="$(command -v rustc 2>/dev/null || true)"
-[[ -n "$rustc_path" && -x "$rustc_path" ]] || {
-  echo "error: pinned Rust compiler is unavailable before the release PATH is sealed" >&2
-  exit 1
-}
-rust_toolchain_bin="$(dirname "$rustc_path")"
-export PATH="$rust_toolchain_bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-readonly python_bin="/opt/homebrew/bin/python3"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=scripts/dependency_pins.env
+source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_tool_environment.sh
+source "$repo_root/scripts/release_tool_environment.sh"
+cfw_seal_release_tool_environment production
+python_bin="$CFW_RELEASE_PYTHON_EXECUTABLE"
+readonly python_bin
 
 die() {
   echo "error: $*" >&2
@@ -27,31 +23,7 @@ die() {
 [[ -x "$python_bin" ]] || die "pinned Python interpreter is unavailable: $python_bin"
 
 run_isolated_python_script() {
-  local script="$1"
-  shift
-  [[ "$script" == "$repo_root/scripts/"* && -f "$script" && ! -L "$script" ]] ||
-    die "isolated Python entrypoint is not a reviewed repository script: $script"
-  PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -c '
-import os
-import runpy
-import stat
-import sys
-
-repository = os.path.realpath(sys.argv.pop(1))
-requested_script = sys.argv.pop(1)
-scripts_directory = os.path.join(repository, "scripts")
-script = os.path.realpath(requested_script)
-metadata = os.lstat(requested_script)
-if (
-    os.path.dirname(script) != scripts_directory
-    or not stat.S_ISREG(metadata.st_mode)
-    or metadata.st_nlink != 1
-    or os.path.islink(requested_script)
-):
-    raise RuntimeError("isolated Python entrypoint escaped the reviewed scripts directory")
-sys.path[:0] = [scripts_directory, repository]
-runpy.run_path(script, run_name="__main__")
-' "$repo_root" "$script" "$@"
+  cfw_run_release_python_script "$repo_root" "$@"
 }
 
 source_identity_start="$(run_isolated_python_script \
@@ -61,8 +33,6 @@ read -r repository_commit release_source_sha256 <<<"$source_identity_start"
 [[ -n "$repository_commit" && -n "$release_source_sha256" ]] ||
   die "release source identity is incomplete"
 
-# shellcheck source=scripts/dependency_pins.env
-source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
 # shellcheck source=scripts/libbox_source_contract.sh
@@ -71,6 +41,7 @@ source "$repo_root/scripts/libbox_source_contract.sh"
 source "$repo_root/scripts/ui_dependency_contract.sh"
 # shellcheck source=scripts/tauri_host_skeleton.sh
 source "$repo_root/scripts/tauri_host_skeleton.sh"
+cfw_select_release_apple_toolchain
 readonly expected_team_id="YKUPL7Z869"
 readonly expected_app_id="com.bill.clashformac"
 readonly candidate_base="$repo_root/target/candidates/0.4.0"
@@ -99,7 +70,8 @@ esac
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "signed candidates require Apple Silicon macOS"
 : "${CFW_BUILD_NUMBER:?set the explicit positive integer candidate build number}"
-PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B - "$repo_root" "$CFW_BUILD_NUMBER" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+  "$repo_root" "$CFW_BUILD_NUMBER" <<'PY'
 import sys
 
 sys.path.insert(0, sys.argv[1] + "/scripts")
@@ -139,7 +111,7 @@ host_profile_size="$(stat -f '%z' "$HOST_PROVISIONING_PROFILE_PATH")"
 readonly host_profile_sha256 host_profile_size
 [[ "$host_profile_sha256" =~ ^[0-9a-f]{64}$ && "$host_profile_size" =~ ^[1-9][0-9]*$ ]] ||
   die "host provisioning profile identity is malformed"
-security find-identity -v -p codesigning | grep -Fq "\"$MACOS_SIGN_IDENTITY\"" ||
+/usr/bin/security find-identity -v -p codesigning | grep -Fq "\"$MACOS_SIGN_IDENTITY\"" ||
   die "the requested Developer ID identity is unavailable"
 for parent in "$repo_root/target" "$repo_root/target/candidates" "$candidate_base"; do
   [[ ! -L "$parent" ]] || die "candidate parent must not be a symlink: $parent"
@@ -156,8 +128,12 @@ mkdir -p "$build_parent"
 mkdir "$build_root" || die "candidate build number is already reserved: $CFW_BUILD_NUMBER"
 
 staging=""
+candidate_cargo_home=""
 completed=0
 cleanup() {
+  if [[ -n "${candidate_cargo_home:-}" ]]; then
+    cfw_remove_release_cargo_runtime "$candidate_cargo_home"
+  fi
   if [[ ! -e "$attempt_root" && ! -L "$attempt_root" && \
     -n "${staging:-}" && -d "$staging" && \
     "$staging" == "$candidate_base/.signed-stage."* ]]; then
@@ -169,6 +145,9 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+candidate_cargo_home="$(cfw_create_release_cargo_runtime "$repo_root")" ||
+  die "cannot create the candidate Cargo runtime"
 
 export CFW_NATIVE_PRODUCTS_OUTPUT="$native_products"
 export CFW_NATIVE_DERIVED_DATA="$build_root/xcode-derived-data"
@@ -184,6 +163,7 @@ toolchain_binding_start="$(run_isolated_python_script \
   die "cannot derive the canonical candidate toolchain binding"
 read -r \
   toolchain_sha256 \
+  cargo_workspace_sources_tree_sha256 \
   go_toolchain_tree_sha256 \
   go_module_cache_tree_sha256 \
   go_tools_tree_sha256 \
@@ -207,7 +187,8 @@ libbox_verify_xcframework_artifact \
   "$go_tools_tree_sha256" \
   "$go_module_cache_tree_sha256" >/dev/null
 "$repo_root/scripts/build_native_products.sh" --developer-id
-"$repo_root/scripts/build_legacy_tombstone.sh" --developer-id
+CARGO_HOME="$candidate_cargo_home" CARGO_NET_OFFLINE=true \
+  "$repo_root/scripts/build_legacy_tombstone.sh" --developer-id
 
 for product in \
   CFWGlobalAuthority \
@@ -231,7 +212,8 @@ unset CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTFLAGS
 export CARGO_NET_OFFLINE=true
 export CARGO_TARGET_DIR="$cargo_target"
 export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
-tauri_override="$("$python_bin" -I -S -B - "$CFW_BUILD_NUMBER" "$native_products" <<'PY'
+tauri_override="$("$python_bin" -I -S -B -W error - \
+  "$CFW_BUILD_NUMBER" "$native_products" <<'PY'
 import json
 import sys
 
@@ -257,10 +239,14 @@ print(json.dumps({
 PY
 )"
 cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
-cfw_build_tauri_host_skeleton \
+CARGO_HOME="$candidate_cargo_home" CARGO_NET_OFFLINE=true \
+  cfw_build_tauri_host_skeleton \
   "$repo_root/apps/cfw-tauri-shell" \
   "$tauri_bin" \
   "$tauri_override"
+cfw_verify_release_cargo_runtime "$repo_root" "$candidate_cargo_home"
+cfw_remove_release_cargo_runtime "$candidate_cargo_home"
+candidate_cargo_home=""
 "$repo_root/scripts/verify_candidate_bundle.sh" \
   "$built_app" \
   "$native_products" \
@@ -289,6 +275,7 @@ run_isolated_python_script "$repo_root/scripts/hash_artifact.py" \
   --metadata "architecture=arm64" \
   --metadata "buildNumber=$CFW_BUILD_NUMBER" \
   --metadata "deploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
+  --metadata "cargoWorkspaceSourcesTreeSha256=$cargo_workspace_sources_tree_sha256" \
   --metadata "goModuleCacheTreeSha256=$go_module_cache_tree_sha256" \
   --metadata "goToolchainTreeSha256=$go_toolchain_tree_sha256" \
   --metadata "goToolsTreeSha256=$go_tools_tree_sha256" \
@@ -332,12 +319,12 @@ run_isolated_python_script "$repo_root/scripts/verify_artifact_manifest.py" \
 decoded_host_profile="$staging/host-profile.plist"
 host_signing_identities="$staging/host-signing-identities.txt"
 host_release_xcent="$staging/Host.release.xcent"
-security cms -D \
+/usr/bin/security cms -D \
   -i "$staged_app/Contents/embedded.provisionprofile" \
   >"$decoded_host_profile" || die "cannot decode the staged Host provisioning profile"
 plutil -lint "$decoded_host_profile" >/dev/null ||
   die "the staged Host provisioning profile is not a valid plist"
-security find-identity -v -p codesigning >"$host_signing_identities" ||
+/usr/bin/security find-identity -v -p codesigning >"$host_signing_identities" ||
   die "cannot query the codesigning identities"
 run_isolated_python_script "$repo_root/scripts/host_release_entitlements.py" \
   --decoded-profile "$decoded_host_profile" \
@@ -386,17 +373,17 @@ for nested in \
   "$staged_app/Contents/Library/LoginItems/CFWProxyAgent.app" \
   "$staged_app/Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension" \
   "$staged_app/Contents/Library/HelperTools/cfw-helper-tombstone"; do
-  codesign --verify --strict --verbose=4 "$nested"
+  /usr/bin/codesign --verify --strict --verbose=4 "$nested"
 done
 
-codesign \
+/usr/bin/codesign \
   --force \
   --options runtime \
   --timestamp \
   --entitlements "$host_release_xcent" \
   --sign "$MACOS_SIGN_IDENTITY" \
   "$staged_app"
-codesign --verify --deep --strict --verbose=4 "$staged_app"
+/usr/bin/codesign --verify --deep --strict --verbose=4 "$staged_app"
 "$repo_root/scripts/verify_release_app.sh" --pre-notary "$staged_app" "$native_products"
 /bin/rm "$decoded_host_profile" "$host_signing_identities" "$host_release_xcent"
 
@@ -409,6 +396,7 @@ run_isolated_python_script "$repo_root/scripts/notarization_transaction.py" \
   --repository-commit "$repository_commit" \
   --release-source-sha256 "$release_source_sha256" \
   --deployment-target "$MACOS_DEPLOYMENT_TARGET" \
+  --cargo-workspace-sources-tree-sha256 "$cargo_workspace_sources_tree_sha256" \
   --go-module-cache-tree-sha256 "$go_module_cache_tree_sha256" \
   --go-toolchain-tree-sha256 "$go_toolchain_tree_sha256" \
   --go-tools-tree-sha256 "$go_tools_tree_sha256" \

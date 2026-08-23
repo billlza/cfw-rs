@@ -367,7 +367,7 @@ globalThis.window.__TAURI_INTERNALS__ = {
 };
 
 const appModule = await import("../src/app.js");
-const { state, runtime } = await import("../src/state.js");
+const { PAGES, state, runtime } = await import("../src/state.js");
 await new Promise((resolve) => setTimeout(resolve, 150));
 
 const emit = async (event, payload) => {
@@ -1854,7 +1854,7 @@ test("Engine generation prevents stale provider and rule snapshots from repopula
 });
 
 test("every page renders", async () => {
-  for (const id of ["general", "proxies", "profiles", "providers", "logs", "connections", "rules", "settings", "feedback"]) {
+  for (const { id } of PAGES) {
     const html = await renderPage(id);
     assert.ok(html.length > 200, `page ${id} rendered ${html.length} characters`);
   }

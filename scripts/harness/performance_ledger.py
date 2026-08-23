@@ -68,7 +68,7 @@ REQUIRED_PERFORMANCE_SUBJECTS: Final = frozenset(
 )
 
 PRODUCT_VERSION: Final = "0.4.0"
-FINAL_BUILD: Final = "40027"
+FINAL_BUILD: Final = "40029"
 PRODUCT_OBSERVATION_PREFIX: Final = "cfw-release-observation-v1 "
 PRODUCT_OBSERVATION_DOCUMENT: Final = "cfw-product-observation-event-v1"
 PRODUCT_LOG_SUBSYSTEM: Final = "com.bill.clashformac"

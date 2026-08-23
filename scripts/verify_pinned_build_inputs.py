@@ -6,8 +6,8 @@ to the tracked release configuration without invoking any toolchain or the netwo
 
 * every pinned tool version and the sing-box/gomobile upstream commits in
   scripts/dependency_pins.env match the manifest exactly;
-* cargo-deny's CI install consumes the release pin with ``--locked`` and the
-  release gate checks the exact Apple Silicon target graph;
+* cargo-audit and cargo-deny's CI installs consume their release pins with
+  ``--locked`` and the release gate checks the exact Apple Silicon target graph;
 * the XcodeGen installed-resource patch and patched source digest are bound to
     the isolated bootstrap and its installed-resource probe;
 * the official Tauri CLI crate, its published lock, the narrow yanked-spin lock
@@ -87,6 +87,29 @@ PINNED_MANIFEST_FIELDS = frozenset(
         "tools",
         "verifiedGoModuleInputKeys",
         "xcodegen",
+    }
+)
+REQUIRED_RELEASE_BOUNDARY_BINDINGS = frozenset(
+    {
+        "scripts/authorize_release_worktree.sh",
+        "scripts/hash_artifact.py",
+        "scripts/prepare_publication_evidence.sh",
+        "scripts/publication/bounded_process.py",
+        "scripts/publication/release_environment.py",
+        "scripts/release_cargo_inputs.py",
+        "scripts/release_cargo_inputs.sh",
+        "scripts/release_python_launcher.sh",
+        "scripts/release_policy_tool_directory.sh",
+        "scripts/release_python_runtime.py",
+        "scripts/release_rust_toolchain.py",
+        "scripts/release_tool_environment.sh",
+        "scripts/run_current_service_transaction.sh",
+        "scripts/run_dormant_app_install.sh",
+        "scripts/run_production_release_evidence.sh",
+        "scripts/run_publication_evidence.sh",
+        "scripts/run_release_ci_gate.sh",
+        "scripts/run_release_python_tests.py",
+        "scripts/run_sealed_evidence_manifest.sh",
     }
 )
 NATIVE_LOCK_FIELDS = frozenset(
@@ -1644,7 +1667,7 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
             )
     exact_counts = {
         'readonly cargo_cache_contract="$repo_root/scripts/tauri_cargo_cache_contract.py"': 1,
-        'PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B "$cargo_cache_contract"': 2,
+        '"$repo_root" "$cargo_cache_contract"': 2,
         'validate-preparation "$root"': 1,
         'normalize-offline "$root"': 1,
         'verify_cargo_preparation_cache "$prepared_cargo_home"': 2,
@@ -1692,7 +1715,7 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         copied,
     )
     manifest_generation = locate(
-        'python3 "$repo_root/scripts/hash_artifact.py"',
+        '"$repo_root" "$repo_root/scripts/hash_artifact.py"',
         normalized_before,
     )
     manifest_input = locate('"$offline_cargo_home"', manifest_generation)
@@ -2073,7 +2096,9 @@ def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -
         )
 
 
-def _verify_build_scripts(manifest: dict, repository: Path) -> None:
+def _verify_build_scripts(
+    manifest: dict, repository: Path, environment_pins: dict[str, str]
+) -> None:
     build_scripts = manifest.get("buildScripts") or {}
     for relative, rules in build_scripts.items():
         text = _read_text(
@@ -2093,8 +2118,29 @@ def _verify_build_scripts(manifest: dict, repository: Path) -> None:
                     f"build script {relative} contains a network or recursive action: {match.group(0)!r}"
                 )
 
-    artifact_bindings = manifest.get("artifactBindings") or {}
+    artifact_bindings = manifest.get("artifactBindings")
+    if not isinstance(artifact_bindings, dict):
+        raise PinnedInputError("pinned-input manifest has no artifact bindings")
+    missing_release_boundaries = sorted(
+        REQUIRED_RELEASE_BOUNDARY_BINDINGS - set(artifact_bindings)
+    )
+    if missing_release_boundaries:
+        raise PinnedInputError(
+            "pinned-input manifest omits required release boundary bindings: "
+            f"{missing_release_boundaries}"
+        )
     for relative, bindings in artifact_bindings.items():
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or not isinstance(bindings, list)
+            or not bindings
+            or any(not isinstance(binding, str) or not binding for binding in bindings)
+            or len(bindings) != len(set(bindings))
+        ):
+            raise PinnedInputError(
+                "pinned-input manifest has a malformed artifact binding"
+            )
         text = _read_text(
             repository,
             relative,
@@ -2104,6 +2150,88 @@ def _verify_build_scripts(manifest: dict, repository: Path) -> None:
             if binding not in text:
                 raise PinnedInputError(
                     f"build script {relative} is missing artifact-hash binding {binding!r}"
+                )
+
+    workflow_relative = ".github/workflows/ci.yml"
+    if workflow_relative in artifact_bindings:
+        workflow = _read_text(
+            repository,
+            workflow_relative,
+            "CI workflow",
+        )
+        expected_python = _require_env(environment_pins, "PYTHON_VERSION")
+        lines = workflow.splitlines()
+        jobs: dict[str, list[str]] = {}
+        current_job: str | None = None
+        in_jobs = False
+        job_header = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
+        for line in lines:
+            if not in_jobs:
+                in_jobs = line == "jobs:"
+                continue
+            if line and not line.startswith(" ") and not line.startswith("#"):
+                break
+            match = job_header.match(line)
+            if match:
+                current_job = match.group(1)
+                jobs[current_job] = []
+            elif current_job is not None:
+                jobs[current_job].append(line)
+        release_jobs = {
+            name: "\n".join(body)
+            for name, body in jobs.items()
+            if "./scripts/run_release_ci_gate.sh" in "\n".join(body)
+        }
+        if not release_jobs:
+            raise PinnedInputError(
+                "CI workflow has no job using the closed release gate"
+            )
+        for name, body in release_jobs.items():
+            configured_python_versions = re.findall(
+                r'(?m)^\s+python-version:\s*"([0-9]+[.][0-9]+[.][0-9]+)"\s*$',
+                body,
+            )
+            if configured_python_versions != [expected_python]:
+                raise PinnedInputError(
+                    f"CI job {name!r} unsigned-validation Python version does not "
+                    "exactly match dependency_pins.env"
+                )
+            required_python_fragments = (
+                "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+                "id: validation-python",
+                "architecture: arm64",
+                "update-environment: false",
+            )
+            for fragment in required_python_fragments:
+                if body.count(fragment) != 1:
+                    raise PinnedInputError(
+                        f"CI job {name!r} does not bind exactly one closed "
+                        f"unsigned-validation Python through {fragment!r}"
+                    )
+            body_lines = body.splitlines()
+            gate_commands: list[str] = []
+            index = 0
+            while index < len(body_lines):
+                line = body_lines[index]
+                if "./scripts/run_release_ci_gate.sh" not in line:
+                    index += 1
+                    continue
+                command = line.strip()
+                while command.endswith("\\"):
+                    index += 1
+                    if index >= len(body_lines):
+                        break
+                    command = command[:-1].rstrip() + " " + body_lines[index].strip()
+                gate_commands.append(command)
+                index += 1
+            if not gate_commands or any(
+                "--validation-python-executable" not in command
+                or "steps.validation-python.outputs.python-path" not in command
+                for command in gate_commands
+            ):
+                raise PinnedInputError(
+                    f"CI job {name!r} has a release gate outside its exact "
+                    "unsigned-validation Python boundary"
                 )
 
 
@@ -2136,7 +2264,7 @@ def verify(repository: Path) -> None:
     _verify_go_module_inputs(manifest, env)
     _verify_libbox_build_tags(manifest, env, repository)
     _verify_native_lock(manifest, env, repository)
-    _verify_build_scripts(manifest, repository)
+    _verify_build_scripts(manifest, repository, env)
 
 
 def main() -> int:
@@ -2147,7 +2275,8 @@ def main() -> int:
         print(f"error: pinned build inputs failed: {error}", file=sys.stderr)
         return 1
     print(
-        "pinned build inputs verified: Rust/cargo-deny/Node/Go/gomobile/govulncheck/"
+        "pinned build inputs verified: Python/Rust/cargo-audit/cargo-deny/Node/Go/"
+        "gomobile/govulncheck/"
         "Tauri CLI/sing-box versions, checksum-bound Tauri CLI local-source installation, "
         "packet evidence endpoint source/service/sudoers/identity/known-hosts and "
         "reproducible Linux artifact binding, Android packet LAN peer source/tree/"

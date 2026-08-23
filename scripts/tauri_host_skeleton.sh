@@ -3,6 +3,11 @@
 # signing identity. The resulting linker signature is verified separately by
 # verify_candidate_bundle.py before any release manifest or manual signature.
 
+tauri_host_contract_directory="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && /bin/pwd -P)"
+# shellcheck source=scripts/release_cargo_inputs.sh
+source "$tauri_host_contract_directory/release_cargo_inputs.sh"
+unset tauri_host_contract_directory
+
 cfw_build_tauri_host_skeleton() {
   if [[ $# -ne 3 ]]; then
     echo "error: cfw_build_tauri_host_skeleton requires APP_DIR TAURI_BIN CONFIG_OVERRIDE" >&2
@@ -13,6 +18,9 @@ cfw_build_tauri_host_skeleton() {
   local contract_tauri_host_bin="$2"
   local contract_tauri_host_config_override="$3"
   local contract_tauri_host_signing_variable
+  local contract_tauri_host_repository
+  contract_tauri_host_repository="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)" ||
+    return 1
 
   [[ "$contract_tauri_host_app_dir" == /* && \
     -d "$contract_tauri_host_app_dir" && ! -L "$contract_tauri_host_app_dir" ]] || {
@@ -34,8 +42,15 @@ cfw_build_tauri_host_skeleton() {
       return 1
     fi
   done
+  if [[ "${CARGO_HOME:-}" != /* || "${CARGO_NET_OFFLINE:-}" != "true" ]]; then
+    echo "error: Tauri build requires the verified candidate Cargo runtime" >&2
+    return 1
+  fi
+  cfw_verify_release_cargo_runtime \
+    "$contract_tauri_host_repository" "$CARGO_HOME" || return 1
 
-  PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+  PYTHONDONTWRITEBYTECODE=1 \
+    "${CFW_RELEASE_PYTHON_EXECUTABLE:-python3}" -I -S -B -W error - \
     "$contract_tauri_host_app_dir" \
     "$contract_tauri_host_config_override" <<'PY' || return 1
 import json
@@ -120,8 +135,12 @@ PY
       -u APPLE_CERTIFICATE \
       -u APPLE_CERTIFICATE_PASSWORD \
       -u APPLE_SIGNING_IDENTITY \
+      CARGO_HOME="$CARGO_HOME" \
+      CARGO_NET_OFFLINE=true \
       "$contract_tauri_host_bin" build --bundles app --ci \
       --features physical-release-evidence --config \
       "$contract_tauri_host_config_override"
-  )
+  ) || return 1
+  cfw_verify_release_cargo_runtime \
+    "$contract_tauri_host_repository" "$CARGO_HOME"
 }

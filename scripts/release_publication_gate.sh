@@ -1,15 +1,19 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Verify the sealed, legally reviewed publication evidence for the exact signed
 # 0.4.0 application. This gate has no success override and performs no network
 # access; evidence preparation is an explicit earlier release phase.
 set -euo pipefail
+unset CDPATH
 
-unset PYTHONPATH PYTHONHOME BASH_ENV ENV CDPATH \
-  DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_FRAMEWORK_PATH \
-  DYLD_FALLBACK_LIBRARY_PATH
-export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-
-publication_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+publication_repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
+# shellcheck source=scripts/dependency_pins.env
+source "$publication_repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_tool_environment.sh
+source "$publication_repo_root/scripts/release_tool_environment.sh"
+cfw_seal_release_tool_environment production
+cfw_select_release_apple_toolchain
+# shellcheck source=scripts/release_publication_path_contract.sh
+source "$publication_repo_root/scripts/release_publication_path_contract.sh"
 publication_signed_app="$publication_repo_root/target/candidates/0.4.0/signed/Clash for Mac.app"
 publication_evidence_root="$publication_repo_root/target/candidates/0.4.0/release/publication"
 
@@ -31,20 +35,8 @@ release_native_products_root_for_app() {
 
 verify_release_publication_evidence() {
   local app_path="${1:-}"
-  if [[ -z "$app_path" || "$app_path" != /* ]]; then
-    echo "error: publication gate requires the absolute signed app path" >&2
+  cfw_require_fixed_publication_app_path "$publication_repo_root" "$app_path" ||
     return 1
-  fi
-  if [[ ! -d "$app_path" || -L "$app_path" ]]; then
-    echo "error: publication gate signed app is unavailable or is a symlink" >&2
-    return 1
-  fi
-  local canonical_app
-  canonical_app="$(cd "$app_path" && pwd -P)"
-  if [[ "$canonical_app" != "$publication_signed_app" ]]; then
-    echo "error: publication gate accepts only the fixed 0.4.0 signed app: $publication_signed_app" >&2
-    return 1
-  fi
   if [[ ! -d "$publication_evidence_root" || -L "$publication_evidence_root" ]]; then
     echo "error: publication evidence directory is missing or is a symlink: $publication_evidence_root" >&2
     return 1
@@ -54,13 +46,20 @@ verify_release_publication_evidence() {
   # CI, signed-installed evidence, sealed closure, the final-candidate binding,
   # and release-secret custody must all pass. A missing, blocked, or hand-edited
   # manifest refuses publication; there is no override and no fallback.
-  PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
-    "$publication_repo_root/scripts/sealed_evidence_manifest.py" publication-gate
+  cfw_run_release_python_script \
+    "$publication_repo_root" \
+    "$publication_repo_root/scripts/sealed_evidence_manifest.py" \
+    publication-gate
   local native_products_root
   native_products_root="$(release_native_products_root_for_app "$app_path")" || return 1
-  "$publication_repo_root/scripts/verify_release_app.sh" "$app_path" "$native_products_root"
-  /usr/bin/python3 -S -B \
-    "$publication_repo_root/scripts/publication_evidence.py" verify \
+  /bin/bash -p \
+    "$publication_repo_root/scripts/verify_release_app.sh" \
+    "$app_path" \
+    "$native_products_root"
+  cfw_run_release_python_script \
+    "$publication_repo_root" \
+    "$publication_repo_root/scripts/publication_evidence.py" \
+    verify \
     --evidence "$publication_evidence_root" \
     --app "$app_path"
 }
@@ -76,8 +75,10 @@ verify_release_upload_artifacts() {
   # accepts only the final distribution seal after every package, component
   # seal, candidate manifest, CCS, SBOM, and legal-review byte recomputes.
   verify_release_publication_evidence "$publication_signed_app"
-  PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
-    "$publication_repo_root/scripts/release_artifact_set.py" verify-release \
+  cfw_run_release_python_script \
+    "$publication_repo_root" \
+    "$publication_repo_root/scripts/release_artifact_set.py" \
+    verify-release \
     --repository "$publication_repo_root" \
     --release-root "$publication_repo_root/target/candidates/0.4.0/release" \
     --version "$version"
@@ -92,8 +93,10 @@ seal_release_upload_artifacts() {
   # The distribution seal is deliberately post-packaging: it can be created
   # only after the app/publication lane and both byte-proven package sets pass.
   verify_release_publication_evidence "$publication_signed_app"
-  PYTHONDONTWRITEBYTECODE=1 python3 -S -B \
-    "$publication_repo_root/scripts/release_artifact_set.py" seal-release \
+  cfw_run_release_python_script \
+    "$publication_repo_root" \
+    "$publication_repo_root/scripts/release_artifact_set.py" \
+    seal-release \
     --repository "$publication_repo_root" \
     --release-root "$publication_repo_root/target/candidates/0.4.0/release" \
     --version "$version"

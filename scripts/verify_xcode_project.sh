@@ -27,13 +27,24 @@ cleanup() {
 }
 trap cleanup EXIT
 staged_native="$staging/native/macos"
-mkdir -p "$staged_native"
+isolated_home="$staging/home"
+isolated_tmp="$staging/tmp"
+mkdir -p "$staged_native" "$isolated_home" "$isolated_tmp"
 for input in Config Headers Sources SystemExtension Tests; do
   /usr/bin/ditto --noqtn "$native_root/$input" "$staged_native/$input"
 done
 /usr/bin/ditto --noqtn "$native_root/project.yml" "$staged_native/project.yml"
 
-"$xcodegen" generate \
+/usr/bin/env -i \
+  HOME="$isolated_home" \
+  TMPDIR="$isolated_tmp" \
+  USER=cfw-release \
+  LOGNAME=cfw-release \
+  LANG=C \
+  LC_ALL=C \
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+  DEVELOPER_DIR="${DEVELOPER_DIR:?}" \
+  "$xcodegen" generate \
   --spec "$staged_native/project.yml" \
   --project "$staged_native" \
   --project-root "$staged_native" \

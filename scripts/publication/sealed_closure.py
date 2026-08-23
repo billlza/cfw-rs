@@ -72,6 +72,7 @@ PHYSICAL_INPUTS = ("signed_app", "xcframework", "vulnerability_reports")
 # content-addressed inputs the sealed closure must bind, in addition to the
 # versions carried by the pinned-input manifest.
 TOOLCHAIN_DIGEST_KEYS = {
+    "rust_release_toolchain_surface_sha256": "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256",
     "node_darwin_arm64_sha256": "NODE_DARWIN_ARM64_SHA256",
     "go_darwin_arm64_sha256": "GO_DARWIN_ARM64_SHA256",
     "gomobile_module_sum": "GOMOBILE_MODULE_SUM",

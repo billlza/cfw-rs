@@ -25,7 +25,16 @@ REPOSITORY = Path(__file__).resolve().parent.parent.parent
 class ReleaseCapabilityInventoryTests(unittest.TestCase):
     def test_direct_cli_invocation_uses_the_supported_import_mode(self) -> None:
         completed = subprocess.run(
-            ["python3", "-B", "scripts/release_capability_inventory.py"],
+            [
+                "/bin/bash",
+                "-p",
+                "-c",
+                'source "$1/scripts/release_python_launcher.sh"; '
+                'cfw_run_release_python_script "$1" '
+                '"$1/scripts/release_capability_inventory.py"',
+                "release-capability-inventory-test",
+                str(REPOSITORY),
+            ],
             cwd=REPOSITORY,
             capture_output=True,
             text=True,

@@ -36,7 +36,8 @@ cfw_verify_ui_dependencies_artifact() {
       "$contract_toolchain_root"
   )"
   contract_package_lock_sha256="$(cfw_ui_package_lock_sha256 "$contract_repository")"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  cfw_run_release_python_script \
+    "$contract_repository" \
     "$contract_repository/scripts/verify_artifact_manifest.py" \
     "$contract_artifact" \
     "$contract_manifest" \

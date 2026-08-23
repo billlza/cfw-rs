@@ -5,6 +5,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { UI_COMMANDS, UI_EVENTS } from "../src/format.js";
+import pageDefinitions from "../src/pages.json" with { type: "json" };
+import { PAGES } from "../src/state.js";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const uiRoot = path.resolve(testDirectory, "..");
@@ -97,6 +99,20 @@ function dashboardMatches(pattern) {
 
 const invoked = dashboardMatches(/invoke\("([a-z0-9_]+)"/gu);
 const listened = dashboardMatches(/listen\("([a-z][a-z0-9:/-]+)"/gu);
+
+test("renderer pages are exactly the shared page contract", () => {
+  assert.strictEqual(PAGES, pageDefinitions);
+  assert.ok(PAGES.length > 0, "the renderer page contract must not be empty");
+  for (const page of PAGES) {
+    assert.deepEqual(Object.keys(page).sort(), ["id", "summary", "title"]);
+    assert.match(page.id, /^[a-z0-9]+(?:-[a-z0-9]+)*$/u);
+    assert.equal(typeof page.title, "string");
+    assert.notEqual(page.title.trim(), "");
+    assert.equal(typeof page.summary, "string");
+    assert.notEqual(page.summary.trim(), "");
+  }
+  assert.equal(new Set(PAGES.map(({ id }) => id)).size, PAGES.length);
+});
 
 test("every command the dashboard invokes exists in generate_handler!", () => {
   const handlers = handlerCommands();

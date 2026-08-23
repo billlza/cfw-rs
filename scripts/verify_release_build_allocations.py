@@ -21,6 +21,7 @@ STATUSES: Final = frozenset(
         "retired_after_notarization_before_install",
         "retired_after_notarization_before_install_preflight_protocol_incompatible",
         "retired_after_notarization_before_install_runtime_preflight_failed",
+        "retired_after_notarization_before_install_runtime_preflight_toolchain_binding_mismatch",
         "retired_unbuilt_reserved_final_companion",
     }
 )
@@ -38,6 +39,12 @@ IMMUTABLE_RETIRED_PREFIX: Final = (
         "retired_after_notarization_before_install_runtime_preflight_failed",
     ),
     ("40025", "final", "retired_unbuilt_reserved_final_companion"),
+    (
+        "40026",
+        "validation",
+        "retired_after_notarization_before_install_runtime_preflight_toolchain_binding_mismatch",
+    ),
+    ("40027", "final", "retired_unbuilt_reserved_final_companion"),
 )
 
 

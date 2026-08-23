@@ -94,6 +94,94 @@ def validation_native_products_root(repository: Path, build_version: str) -> Pat
     return repository / f"target/candidates/0.4.0/validation/{canonical}/native-products"
 
 
+def _candidate_directory_output(
+    repository: Path,
+    output: str,
+    allowed: set[Path],
+    label: str,
+) -> Path:
+    if (
+        not isinstance(output, str)
+        or not output.startswith("/")
+        or "\x00" in output
+        or any(part in ("", ".", "..") for part in output.split("/")[1:])
+    ):
+        raise BuildIdentityError(
+            f"{label} must be a canonical absolute path"
+        )
+    try:
+        canonical_repository = repository.resolve(strict=True)
+    except OSError as error:
+        raise BuildIdentityError("release repository is unavailable") from error
+    if repository != canonical_repository or not repository.is_dir():
+        raise BuildIdentityError("release repository path is not canonical")
+    output_path = Path(output)
+    if output_path not in allowed:
+        raise BuildIdentityError(f"{label} is not an approved build root")
+
+    current = canonical_repository
+    relative = output_path.relative_to(canonical_repository)
+    for component in relative.parts:
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as error:
+            raise BuildIdentityError(f"{label} ancestor is unreadable") from error
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise BuildIdentityError(
+                f"{label} ancestor is not a real directory"
+            )
+    if output_path.exists():
+        try:
+            if output_path.resolve(strict=True) != output_path:
+                raise BuildIdentityError(f"{label} is not canonical")
+        except OSError as error:
+            raise BuildIdentityError(f"{label} is unreadable") from error
+    return output_path
+
+
+def candidate_native_products_output(
+    repository: Path, output: str, build_version: str
+) -> Path:
+    """Validate one exact candidate output without following path aliases."""
+
+    canonical_build = canonical_build_version(
+        build_version, "candidate build version"
+    )
+    candidate_base = repository / "target/candidates/0.4.0"
+    allowed = {
+        candidate_base / "unsigned/native-products",
+        candidate_base / f"validation/{canonical_build}/native-products",
+        candidate_base / f"release-build/{canonical_build}/native-products",
+    }
+    return _candidate_directory_output(
+        repository,
+        output,
+        allowed,
+        "candidate native-products output",
+    )
+
+
+def candidate_native_derived_data_output(
+    repository: Path,
+    native_products_output: str,
+    derived_data_output: str,
+    build_version: str,
+) -> Path:
+    native_products = candidate_native_products_output(
+        repository, native_products_output, build_version
+    )
+    expected = native_products.parent / "xcode-derived-data"
+    return _candidate_directory_output(
+        repository,
+        derived_data_output,
+        {expected},
+        "candidate Xcode derived-data output",
+    )
+
+
 def require_newer_build(final_build: str, validated_build: str) -> None:
     final = int(canonical_build_version(final_build, "final release build"))
     validated = int(canonical_build_version(validated_build, "validated candidate build"))

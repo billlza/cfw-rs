@@ -16,6 +16,7 @@ import json
 import os
 import stat
 from pathlib import Path, PurePosixPath
+from typing import Iterable
 
 
 MAX_ARTIFACT_ENTRIES = 250_000
@@ -42,6 +43,23 @@ def _descriptor_digest(
 
 
 SUPPORTED_ALGORITHMS = ("sha256-tree-v1", "sha256-tree-v2")
+
+
+def tree_sha256_from_records(records: Iterable[dict[str, object]]) -> str:
+    """Hash canonical tree records using the artifact-manifest line format."""
+
+    tree_digest = hashlib.sha256()
+    for record in records:
+        tree_digest.update(
+            json.dumps(
+                record,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        tree_digest.update(b"\n")
+    return tree_digest.hexdigest()
 
 
 def _mode(metadata: os.stat_result) -> str:
@@ -628,8 +646,8 @@ def build_manifest(
         raise ValueError(f"unsupported artifact manifest algorithm: {algorithm}")
     root_metadata, entries = _capture_artifact(root, algorithm)
 
-    tree_digest = hashlib.sha256()
     root_mode: str | None = None
+    tree_records: list[dict[str, object]] = []
     if algorithm == "sha256-tree-v2":
         root_mode = _mode(root_metadata)
         root_record = {
@@ -639,24 +657,13 @@ def build_manifest(
             else "file",
             "mode": root_mode,
         }
-        tree_digest.update(
-            json.dumps(
-                root_record,
-                ensure_ascii=True,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        )
-        tree_digest.update(b"\n")
-    for entry in entries:
-        encoded = json.dumps(entry, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-        tree_digest.update(encoded.encode("utf-8"))
-        tree_digest.update(b"\n")
+        tree_records.append(root_record)
+    tree_records.extend(entries)
 
     manifest: dict[str, object] = {
         "algorithm": algorithm,
         "root": root.name,
-        "sha256": tree_digest.hexdigest(),
+        "sha256": tree_sha256_from_records(tree_records),
         "entries": entries,
     }
     if root_mode is not None:

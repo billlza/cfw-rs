@@ -1,17 +1,9 @@
+import pageDefinitions from "./pages.json" with { type: "json" };
+
 // Dashboard pages. 0.3.5 received this list from `boot_payload`; the 0.4.0
-// payload carries product identity only, so the page list lives here instead of
-// being invented from a stale backend field.
-export const PAGES = [
-  { id: "general", title: "General", summary: "Overview, runtime status, mode, system proxy and TUN switches." },
-  { id: "proxies", title: "Proxies", summary: "Proxy groups, selections, delay indicators and quick switching." },
-  { id: "profiles", title: "Profiles", summary: "Subscription import, update, validation and profile lifecycle." },
-  { id: "providers", title: "Providers", summary: "Proxy providers, rule providers, health checks and update actions." },
-  { id: "logs", title: "Logs", summary: "Engine logs and filtered runtime diagnostics." },
-  { id: "connections", title: "Connections", summary: "Live connection list, close-all action and traffic visibility." },
-  { id: "rules", title: "Rules", summary: "Rule matching visibility and router/provider diagnostics." },
-  { id: "settings", title: "Settings", summary: "Shell settings, startup, credentials and diagnostics." },
-  { id: "feedback", title: "Feedback", summary: "About, updates and build references." },
-];
+// payload carries product identity only, so the renderer imports the shared
+// source-owned page contract instead of inventing pages from a stale field.
+export const PAGES = pageDefinitions;
 
 /// Preference defaults, matching `UiPreferences::default()`. They are replaced
 /// by the real snapshot during bootstrap; nothing else is ever assumed.

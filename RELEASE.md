@@ -121,15 +121,36 @@ migration before release.
 ## 1. Prepare and seal networked release inputs
 
 ```sh
-./scripts/bootstrap_release_toolchain.sh
-./scripts/install_pinned_tauri_cli.sh
-./scripts/prepare_ui_dependencies.sh
-SING_BOX_SOURCE=/absolute/path/to/clean-upstream-sing-box \
-LIBBOX_PATCHED_SOURCE_OUTPUT=/absolute/path/to/patched-sing-box \
-  ./scripts/materialize_libbox_source.sh
-SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
-  ./scripts/prepare_libbox_modules.sh
+./scripts/run_release_ci_gate.sh prepare-cargo-workspace-inputs
+./scripts/run_release_ci_gate.sh bootstrap-policy-tools
+./scripts/run_release_ci_gate.sh bootstrap-release-toolchain
+./scripts/run_release_ci_gate.sh install-tauri-cli
+./scripts/run_release_ci_gate.sh prepare-ui-dependencies
+./scripts/run_release_ci_gate.sh fetch-libbox-upstream \
+  /absolute/path/to/clean-upstream-sing-box
+./scripts/run_release_ci_gate.sh materialize-libbox-source \
+  /absolute/path/to/clean-upstream-sing-box \
+  /absolute/path/to/patched-sing-box
+./scripts/run_release_ci_gate.sh prepare-libbox-modules \
+  /absolute/path/to/patched-sing-box
 ```
+
+`prepare-cargo-workspace-inputs` is the only networked admission path for the
+Rust workspace dependency sources. It fetches every `Cargo.lock` registry
+archive into a fresh private Cargo home, checks each archive against the lock
+file checksum, rejects unsafe archive contents, and records an archive-derived
+manifest for the complete vendor tree. Every later Cargo command that resolves
+or builds the workspace graph re-derives the vendor contents from those
+authenticated archives before and after use and runs through a fresh private
+runtime configuration; an ambient Cargo source directory or configuration is
+never a release input.
+
+Release preparation, build, and publication must run in a quiescent,
+single-operator maintenance window on a trusted release account with a trusted
+ACL state. Owner-owned, non-group/other-writable POSIX modes plus archive-derived
+revalidation detect persistent or static drift; they do not claim to defeat code
+already executing concurrently as the release UID, which could also race the
+repository, build outputs, or signing process.
 
 Review [`docs/supply-chain.md`](./docs/supply-chain.md). Verify that the release
 commit, submodule/reference state, version, changelog, and complete
@@ -141,13 +162,28 @@ Preparation is explicit and networked; the release build is offline:
 
 ```sh
 ./scripts/verify_release_environment.sh
-./scripts/verify_build_boundaries.sh
-cargo metadata --locked --format-version 1 >/dev/null
-SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
-  ./scripts/scan_libbox_vulnerabilities.sh
-SING_BOX_SOURCE=/absolute/path/to/patched-sing-box \
-  ./scripts/build_libbox.sh
+./scripts/run_release_ci_gate.sh build-script-boundary
+./scripts/run_release_ci_gate.sh rust-metadata
+./scripts/run_release_ci_gate.sh libbox-vulnerability-scan \
+  /absolute/path/to/patched-sing-box
+./scripts/run_release_ci_gate.sh build-libbox \
+  /absolute/path/to/patched-sing-box
 ```
+
+Release-critical shell entrypoints rebuild one closed execution environment
+from the effective macOS account rather than caller `HOME` or `PATH`.
+Production signing, publication, and physical-evidence entrypoints accept only
+the exact pinned Rust root and Python 3.14.6 Cellar path. The build-40000
+unsigned CI entrypoint alone may accept the absolute Python executable emitted
+by the SHA-pinned `setup-python` action; it verifies the same exact version and
+real executable/runtime identities and includes their content digests in the
+toolchain binding. Developer-ID and publication paths reject that selection.
+The environment keeps system Git/Bash/Zsh ahead of the owner-only, versioned
+policy-tool directory, validates one pinned Xcode Developer tree, and content-binds every
+executable used by the CI toolchain identity. Newly executed lane logs remain
+in an isolated attempt journal until the ending identity matches the starting
+identity; output beyond the fixed 64 MiB streaming limit terminates the
+complete lane process group.
 
 The Tauri installer verifies the official 2.11.4 crate and its published lock,
 applies the digest-pinned `spin` 0.9.9 lock update, verifies the resulting lock,
@@ -176,51 +212,36 @@ Reject any unproven binary.
 ## 3. Quality gates
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-targets
-cargo deny --locked --target aarch64-apple-darwin check
-
-pinned_node_bin="$PWD/target/toolchains/node-24.18.0/bin"
-PATH="$pinned_node_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-  "$pinned_node_bin/npm" --prefix apps/cfw-tauri-shell test
-./scripts/build_ui_with_pinned_node.sh
-PATH="$pinned_node_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-  "$pinned_node_bin/npm" --prefix apps/cfw-tauri-shell audit --audit-level=high
-
-cd native/macos
-swift test -Xswiftc -warnings-as-errors
-xcodebuild test \
-  -project CFWNative.xcodeproj \
-  -scheme CFWNativeTests \
-  -destination 'platform=macOS,arch=arm64' \
-  CODE_SIGNING_ALLOWED=NO
-xcodebuild analyze \
-  -project CFWNative.xcodeproj \
-  -scheme CFWPacketTunnelExtension \
-  -configuration Release \
-  -destination 'generic/platform=macOS' \
-  ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
-xcodebuild analyze \
-  -project CFWNative.xcodeproj \
-  -scheme CFWProxyAgent \
-  -configuration Release \
-  -destination 'generic/platform=macOS' \
-  ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+./scripts/run_release_ci_gate.sh rust-fmt
+./scripts/run_release_ci_gate.sh rust-clippy
+./scripts/run_release_ci_gate.sh rust-test
+./scripts/run_release_ci_gate.sh rust-target-audit
+./scripts/run_release_ci_gate.sh cargo-deny
+./scripts/run_release_ci_gate.sh ui-test
+./scripts/run_release_ci_gate.sh ui-build
+./scripts/run_release_ci_gate.sh ui-audit
+./scripts/run_release_ci_gate.sh swift-format-lint
+./scripts/run_release_ci_gate.sh swift-package-test
+./scripts/run_release_ci_gate.sh xcode-unsigned-test
+./scripts/run_release_ci_gate.sh xcode-analyze
 ```
 
 Every command must complete without project-owned errors or warnings. Upstream
 advisories without a safe compatible release remain release blockers unless the
 dependency is proven unreachable in the shipped target and the project owner
 accepts the exact documented boundary; advisory IDs are never silently ignored.
-`cargo deny` is the blocking RustSec/license/source/bans gate because it resolves
-the actual `aarch64-apple-darwin` graph. `cargo-audit` is not used as a release
-gate: its target flags filter vulnerabilities but not warning advisories, so the
-unified Tauri lockfile reports twelve Linux GTK warnings that do not resolve in
-the shipped macOS graph. No advisory is ignored or suppressed; a dependency that
-does resolve in the target graph remains blocking.
+`rust-target-audit` derives the exact `aarch64-apple-darwin` all-features resolve
+graph before running `cargo-audit` with vulnerability and warning advisories
+denied. It disables only cargo-audit's duplicate per-package yanked query.
+`cargo-deny` is the sole owner of current yanked status and consumes that same
+closed target metadata: bans, licenses and sources are evaluated against the
+verified offline Cargo inputs, while advisories and yanked status use a fresh
+private, bounded online policy-data directory that is deleted after the check
+and never becomes a compiler input. Its fixed policy explicitly denies yanked
+packages and forbids disabling yank checks. Its JSON output must contain one
+zero-error, zero-warning, zero-note summary and no diagnostic records. Both
+gates are mandatory; neither can authorize release alone. A dependency that
+resolves in the shipped target remains blocking.
 
 ## 4. Native data-plane evidence
 
@@ -454,22 +475,22 @@ Run the publication phases after the exact app has been signed, notarized, and
 stapled:
 
 ```bash
-scripts/prepare_publication_evidence.py review-template \
+scripts/prepare_publication_evidence.sh review-template \
   --libbox-source target/sources/sing-box-v1.13.15-patched
 
 # Resolve every item in component-review.json and every source blocker, then:
-scripts/prepare_publication_evidence.py prepare \
+scripts/prepare_publication_evidence.sh prepare \
   --libbox-source target/sources/sing-box-v1.13.15-patched \
   --reviewed-components target/candidates/0.4.0/review/component-review.json
 
-python3 scripts/publication_evidence.py draft \
+scripts/run_publication_evidence.sh draft \
   --prepared target/candidates/0.4.0/release/publication-prepared \
   --app "target/candidates/0.4.0/signed/Clash for Mac.app" \
   --output target/candidates/0.4.0/release/machine-closure.draft.json
 
 # A human legal reviewer must approve the exact printed closure digest and
 # component set in target/candidates/0.4.0/review/legal-review.json.
-python3 scripts/publication_evidence.py finalize \
+scripts/run_publication_evidence.sh finalize \
   --prepared target/candidates/0.4.0/release/publication-prepared \
   --app "target/candidates/0.4.0/signed/Clash for Mac.app" \
   --review target/candidates/0.4.0/review/legal-review.json \
@@ -479,7 +500,7 @@ scripts/release_publication_gate.sh \
   "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
 ```
 
-### Fixed 40026 to 40027 physical-candidate evidence sequence
+### Fixed 40028 to 40029 physical-candidate evidence sequence
 
 The canonical allocation ledger is
 [`docs/release/build-allocations-v040.json`](docs/release/build-allocations-v040.json).
@@ -488,7 +509,7 @@ immutable retired prefix.
 
 The production evidence composer has no fixture, path, output, build-number, or
 success-override option. Run this sequence exactly once from one clean release
-commit. Build identities through `40023` have already been allocated to older
+commit. Build identities through `40027` have already been allocated to older
 source closures or validation attempts. Build `40020` terminated at its
 fail-closed host-compatibility gate before Apple submission. Build `40021`
 completed Apple notarization, stapling, Gatekeeper, app, manifest, and sealed
@@ -519,6 +540,15 @@ retire those bytes as recorded in
 never rebuild, relabel, resubmit, install, or approve that build. Its fixed but
 unbuilt final companion, build `40025`, is also retired and must never be
 reassigned.
+Build `40026` completed signing, notarization, stapling, Gatekeeper, app,
+manifest, and transaction verification under Apple submission
+`448638ab-d0b4-4789-82b1-25dcb770f8ee`, but installation admission exposed
+that the sealed build used Apple Swift 6.3.3 through `/usr/bin/swift` while the
+ambient preflight recomputation used Swiftly 6.0.3. No Host/XPC startup,
+journal, service, application, or collector mutation occurred. Build 40026 and
+its reserved, unbuilt final companion 40027 are permanently retired; preserve
+their evidence exactly as recorded in
+[`docs/release/validation-build-40026-retirement.md`](docs/release/validation-build-40026-retirement.md).
 
 The 40019 compatibility path is read-only and exact-version only. Each legacy
 unregister action reproves Off before mutation. If a completed Authority
@@ -532,14 +562,12 @@ of guessing from service status, and it never labels recovery as a legacy v1.0
 wire proof.
 
 1. from the final clean release commit, create the fixed detached worktree
-   `target/release-worktrees/40026` and its otherwise empty direct `target`
+   `target/release-worktrees/40028` and its otherwise empty direct `target`
    directory. Before materializing any cache or build output, run this explicit
    enrollment once from the operator repository root:
 
    ```bash
-   PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B \
-     scripts/release_secret_material_blocker.py \
-     "$PWD" --authorize-release-worktree 40026
+   scripts/authorize_release_worktree.sh 40028
    ```
 
    The scanner never mints this receipt. The command atomically publishes a
@@ -549,7 +577,7 @@ wire proof.
    until the command returns. Only after that succeeds, materialize the real
    non-symlink `target/toolchains` and
    native dependency trees from the same pinned artifacts, then build and
-   notarize validation build `40026` directly in that worktree. The workspace
+   notarize validation build `40028` directly in that worktree. The workspace
    secret gate excludes only that authenticated worktree's direct managed-cache
    roots; it still scans the worktree source and every `target/candidates`,
    `target/tmp`, `target/release`, or unexpected tree;
@@ -567,11 +595,11 @@ wire proof.
    one-way legacy tombstone and run the fixed maintenance/install sequence:
 
    ```bash
-   python3 -B scripts/current_service_transaction.py --preflight
-   python3 -B scripts/current_service_transaction.py --decommission
-   python3 -B scripts/dormant_app_install.py --preflight
-   python3 -B scripts/dormant_app_install.py --install
-   python3 -B scripts/current_service_transaction.py --recommission
+   scripts/run_current_service_transaction.sh --preflight
+   scripts/run_current_service_transaction.sh --decommission
+   scripts/run_dormant_app_install.sh --preflight
+   scripts/run_dormant_app_install.sh --install
+   scripts/run_current_service_transaction.sh --recommission
    ```
 
    The first transaction unregisters only ProxyAgent and GlobalAuthority in
@@ -589,33 +617,33 @@ wire proof.
    recommission journal would leave an unproven mixed state. Never use
    `launchctl bootout`, `kill`, `sfltool resetbtm`, Finder, `ditto`, or a DMG
    drag as a substitute;
-3. install and exercise validation build `40026`, preserving its fixed
+3. install and exercise validation build `40028`, preserving its fixed
    CI/toolchain, app-manifest, notarization, service/install, and
    runtime-recovery records;
 4. have a human reviewer approve those exact bytes in
    `target/candidates/0.4.0/review/validated-candidate.json`;
 5. build, sign inside-out, notarize, staple, and Gatekeeper-verify final build
-   `40027` from the same clean source identity;
+   `40029` from the same clean source identity;
 6. repeat the fixed transaction using the independent final-generation
-   journals. This proves and installs only the exact `40026` to `40027`
+   journals. This proves and installs only the exact `40028` to `40029`
    transition without overwriting the validation-generation evidence:
 
    ```bash
-   python3 -B scripts/current_service_transaction.py --final --preflight
-   python3 -B scripts/current_service_transaction.py --final --decommission
-   python3 -B scripts/dormant_app_install.py --final --preflight
-   python3 -B scripts/dormant_app_install.py --final --install
-   python3 -B scripts/current_service_transaction.py --final --recommission
+   scripts/run_current_service_transaction.sh --final --preflight
+   scripts/run_current_service_transaction.sh --final --decommission
+   scripts/run_dormant_app_install.sh --final --preflight
+   scripts/run_dormant_app_install.sh --final --install
+   scripts/run_current_service_transaction.sh --final --recommission
    ```
 
    Any interruption must resume with the matching script's `--final
    --recover` form. Before collection, reopen both final journals, prove build
-   `40027` is installed, prove GlobalAuthority and ProxyAgent belong to build
-   `40027`, and prove the engine remains globally Off;
+   `40029` is installed, prove GlobalAuthority and ProxyAgent belong to build
+   `40029`, and prove the engine remains globally Off;
 7. freeze the signed/notarized runtime candidate before collection:
 
    ```bash
-   python3 -B scripts/production_release_evidence.py \
+   scripts/run_production_release_evidence.sh \
      prepare-physical-candidate-manifest
    ```
 
@@ -653,7 +681,7 @@ wire proof.
 9. after both OS-run archives are complete, seal the runtime evidence:
 
    ```bash
-   python3 -B scripts/production_release_evidence.py seal
+   scripts/run_production_release_evidence.sh seal
    ```
 
    The composer reopens every input, rehashes the final `.app` after all other
@@ -735,7 +763,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 40027. No updater key, Apple notarization key, local private key, or older
+build 40029. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable
@@ -841,7 +869,7 @@ from the release being checked is not a trust root. After all 15 allowlisted
 assets have been uploaded to the public `vVERSION` GitHub release, run:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/verify_remote_release.py \
+./scripts/run_verify_remote_release.sh \
   --version 0.4.0 \
   --trusted-distribution-seal /path/on/offline-media/distribution-set.seal.json \
   --trusted-distribution-seal-sha256 '<64-lowercase-hex>'

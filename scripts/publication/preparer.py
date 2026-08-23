@@ -17,8 +17,9 @@ from .common import (
     write_new,
 )
 from .graph_collectors import collect_all
-from .graph_model import CollectedGraphs, ComponentSeed, RELEASE_VERSION, run
+from .graph_model import CollectedGraphs, ComponentSeed, RELEASE_VERSION, load_pins, run
 from .license_resolution import resolve_license
+from .release_environment import release_tool_environment
 from .release_contract import (
     PRODUCT_NAME,
     blocker_report,
@@ -32,8 +33,13 @@ from .release_contract import (
 from .source_preparation import source_input_evidence
 if __package__.startswith("scripts."):
     from scripts.release_build_identity import bundle_build_identity
+    from scripts.repository_source_identity import (
+        SourceIdentityError,
+        require_clean_repository,
+    )
 else:
     from release_build_identity import bundle_build_identity
+    from repository_source_identity import SourceIdentityError, require_clean_repository
 
 
 def expected_signed_app(repository: Path) -> Path:
@@ -64,14 +70,16 @@ def require_fixed_signed_app(repository: Path, app: Path) -> Path:
     return app.resolve(strict=True)
 
 
-def _require_clean_repository(repository: Path) -> None:
-    status = run(
-        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], repository
-    )
-    if status:
+def _require_clean_repository(
+    repository: Path, release_environment: dict[str, str]
+) -> None:
+    try:
+        require_clean_repository(repository, release_environment)
+    except SourceIdentityError as error:
         raise PublicationError(
-            "release source tree is not clean; corresponding source must bind a committed state"
-        )
+            "cannot prove a clean release source tree for corresponding-source preparation: "
+            f"{error}"
+        ) from error
 
 
 def _application_seed(repository: Path) -> ComponentSeed:
@@ -94,10 +102,15 @@ def _application_seed(repository: Path) -> ComponentSeed:
     )
 
 
-def _complete_collected_graphs(repository: Path, libbox_source: Path) -> CollectedGraphs:
+def _complete_collected_graphs(
+    repository: Path,
+    libbox_source: Path,
+    release_environment: dict[str, str],
+) -> CollectedGraphs:
     run(
         [
             "/bin/bash",
+            "-p",
             "-c",
             'source "$1/scripts/dependency_pins.env"; '
             'source "$1/scripts/libbox_source_contract.sh"; '
@@ -107,8 +120,9 @@ def _complete_collected_graphs(repository: Path, libbox_source: Path) -> Collect
             str(libbox_source),
         ],
         repository,
+        release_environment,
     )
-    collected = collect_all(repository, libbox_source)
+    collected = collect_all(repository, libbox_source, release_environment)
     application = _application_seed(repository)
     collected.components[application.identifier] = application
     by_name = {seed.name: seed.identifier for seed in collected.components.values()}
@@ -219,6 +233,8 @@ def prepare(
     output: Path,
 ) -> Path:
     repository = repository.resolve(strict=True)
+    pins = load_pins(repository / "scripts/dependency_pins.env")
+    release_environment = release_tool_environment(repository, pins)
     app = require_fixed_signed_app(repository, app)
     fixed_output = prepared_root(repository)
     require_fixed_path(output, fixed_output, "prepared evidence")
@@ -228,14 +244,21 @@ def prepare(
     native_products = release_native_products_root(repository, build_identity.build_version)
     run(
         [
+            "/bin/bash",
+            "-p",
             str(repository / "scripts/verify_release_app.sh"),
             str(app),
             str(native_products),
         ],
         repository,
+        release_environment,
     )
-    _require_clean_repository(repository)
-    collected = _complete_collected_graphs(repository, libbox_source.resolve(strict=True))
+    _require_clean_repository(repository, release_environment)
+    collected = _complete_collected_graphs(
+        repository,
+        libbox_source.resolve(strict=True),
+        release_environment,
+    )
     reviews = _review_records(reviewed_components.resolve(strict=True), collected.components)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.parent.is_symlink():
@@ -250,8 +273,19 @@ def prepare(
                 "version": RELEASE_VERSION,
                 "build_number": build_identity.build_version,
             },
-            "components": component_specs(repository, staging, collected.components, reviews),
-            "build_tools": build_tool_specs(repository, collected.components, reviews),
+            "components": component_specs(
+                repository,
+                staging,
+                collected.components,
+                reviews,
+                release_environment,
+            ),
+            "build_tools": build_tool_specs(
+                repository,
+                collected.components,
+                reviews,
+                release_environment,
+            ),
             "relationships": [
                 {"source": source, "target": target, "type": relation_type}
                 for source, target, relation_type in sorted(collected.relationships)
@@ -263,6 +297,7 @@ def prepare(
                 native_products,
                 app,
                 build_identity.build_version,
+                release_environment,
             ),
             "graphs": write_graphs(staging, collected),
         }
@@ -520,12 +555,18 @@ def _blocker_document(
 
 def write_review_template(repository: Path, libbox_source: Path, output: Path) -> Path:
     repository = repository.resolve(strict=True)
+    pins = load_pins(repository / "scripts/dependency_pins.env")
+    release_environment = release_tool_environment(repository, pins)
     fixed_output = review_template(repository)
     require_fixed_path(output, fixed_output, "review template")
     blocker_path = blocker_report(repository)
     if output.exists() or output.is_symlink() or blocker_path.exists() or blocker_path.is_symlink():
         raise PublicationError("refusing to replace an existing component review or blocker report")
-    collected = _complete_collected_graphs(repository, libbox_source.resolve(strict=True))
+    collected = _complete_collected_graphs(
+        repository,
+        libbox_source.resolve(strict=True),
+        release_environment,
+    )
     records = []
     for identifier in sorted(collected.components):
         seed = collected.components[identifier]
@@ -538,7 +579,12 @@ def write_review_template(repository: Path, libbox_source: Path, output: Path) -
                 "copyright_text": "NOASSERTION",
                 "license_resolution": resolve_license(seed),
                 "source_override": None,
-                "source_evidence": source_input_evidence(repository, seed, seed.source_root),
+                "source_evidence": source_input_evidence(
+                    repository,
+                    seed,
+                    seed.source_root,
+                    release_environment,
+                ),
             }
         )
     document = {

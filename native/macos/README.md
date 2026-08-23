@@ -160,36 +160,27 @@ manager state after reloading preferences.
 Fast, unsigned validation:
 
 ```sh
-swift test --package-path native/macos -Xswiftc -warnings-as-errors
+./scripts/run_release_ci_gate.sh prepare-cargo-workspace-inputs
+./scripts/run_release_ci_gate.sh bootstrap-policy-tools
+./scripts/run_release_ci_gate.sh bootstrap-release-toolchain
+./scripts/run_release_ci_gate.sh swift-package-test
 ```
+
+The preparation gates are idempotent after their exact pinned inputs have been
+sealed. They must run before any validation gate so Rust and policy-tool
+execution cannot inherit an ambient Cargo source or configuration.
 
 Validate the tracked Xcode project against the pinned XcodeGen build, then
 build the four immutable native products in a candidate-specific directory:
 
 ```sh
-./scripts/verify_xcode_project.sh
-python3 -B scripts/verify_native_product_graph.py
-python3 -B scripts/verify_release_authority_gate.py .
-python3 -B scripts/verify_production_boundary_removal.py .
+./scripts/run_release_ci_gate.sh verify-xcode-project
+./scripts/run_release_ci_gate.sh build-script-boundary
 
-export CFW_BUILD_NUMBER=40026
-export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.4.0/validation/40026/native-products"
-./scripts/build_native_products.sh --unsigned
-
-cd native/macos
-xcodebuild test \
-  -project CFWNative.xcodeproj \
-  -scheme CFWNativeTests \
-  -destination 'platform=macOS,arch=arm64' \
-  CODE_SIGNING_ALLOWED=NO
-xcodebuild build \
-  -project CFWNative.xcodeproj \
-  -scheme CFWPacketTunnelExtension \
-  -configuration Release \
-  -destination 'generic/platform=macOS' \
-  ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
-  GCC_TREAT_WARNINGS_AS_ERRORS=YES SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+export CFW_BUILD_NUMBER=40000
+export CFW_NATIVE_PRODUCTS_OUTPUT="$PWD/target/candidates/0.4.0/native-validation/40000/native-products"
+./scripts/run_release_ci_gate.sh build-native-products-unsigned
+./scripts/run_release_ci_gate.sh xcode-unsigned-test
 ```
 
 Automatic Swift-to-Objective-C header installation is disabled for every native

@@ -110,7 +110,7 @@ CONTEXT_DOCUMENT = "cfw-physical-run-context-v1"
 CONTEXT_SCHEMA_VERSION = 1
 COLLECTOR_REQUEST_SCHEMA_VERSION = 1
 PRODUCT_VERSION = "0.4.0"
-FINAL_RELEASE_BUILD = "40027"
+FINAL_RELEASE_BUILD = "40029"
 MAX_INPUT_BYTES = 8 * 1024 * 1024
 MAX_COLLECTOR_REQUEST_BYTES = 1 << 20
 PRODUCTION_NONCE_TTL = timedelta(hours=6)
@@ -858,7 +858,7 @@ def self_check() -> None:
         or EVIDENCE_PROFILE["aggregator_version"]
         != "physical-evidence-aggregator-v5-single-machine"
         or EVIDENCE_PROFILE["soak_hours_per_run"] != 3
-        or FINAL_RELEASE_BUILD != "40027"
+        or FINAL_RELEASE_BUILD != "40029"
         or PINNED_RUNS != expected_runs
         or set(EXPECTED_REPORTS) != set(RAW_KINDS_BY_HARNESS)
         or MAX_COLLECTOR_REQUEST_BYTES != 1 << 20

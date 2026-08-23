@@ -14,6 +14,7 @@ import {
   listen,
   logEntry,
   normalizeLevel,
+  pageById,
   providerBatchSummary,
   providerBatchSucceeded,
   redactDiagnosticText,
@@ -22,6 +23,12 @@ import {
   withLogRows,
 } from "../src/format.js";
 import { MAX_LOG_ROWS } from "../src/state.js";
+
+test("page lookup accepts declared ids and rejects unknown ids", () => {
+  assert.equal(pageById("general").title, "General");
+  assert.throws(() => pageById("missing"), /unknown renderer page id: missing/u);
+  assert.throws(() => pageById(null), /unknown renderer page id: null/u);
+});
 
 test("keeps the 0.3.5 traffic and runtime formats", () => {
   assert.equal(formatRuntime(0), "00 : 00 : 00");

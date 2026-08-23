@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts.publication import graph_model
 from scripts.publication.build_tool_preparation import build_tool_specs
 from scripts.publication.common import PublicationError
 from scripts.publication.graph_model import ComponentSeed
@@ -21,6 +24,140 @@ in the Software without restriction.
 
 
 class PublicationBuildToolTests(unittest.TestCase):
+    def test_graph_output_limit_terminates_the_real_process(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            graph_model, "MAX_COMMAND_BYTES", 1024
+        ):
+            with self.assertRaisesRegex(PublicationError, "fixed bound"):
+                graph_model.run(
+                    ["/usr/bin/yes", "bounded-graph-output"],
+                    Path(directory).resolve(),
+                    {
+                        "HOME": str(Path.home()),
+                        "LANG": "C",
+                        "LC_ALL": "C",
+                        "PATH": "/usr/bin:/bin",
+                    },
+                )
+
+    def test_successful_graph_command_with_stderr_is_release_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(PublicationError, "emitted diagnostics"):
+                graph_model.run(
+                    [
+                        "/bin/bash",
+                        "-p",
+                        "-c",
+                        "printf '{}'; printf 'warning: degraded graph\\n' >&2",
+                    ],
+                    Path(directory).resolve(),
+                    {
+                        "HOME": str(Path.home()),
+                        "LANG": "C",
+                        "LC_ALL": "C",
+                        "PATH": "/usr/bin:/bin",
+                    },
+                )
+
+    def test_repository_source_enumeration_uses_fixed_git_with_closed_environment(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(repository), "init", "-q"],
+                check=True,
+                capture_output=True,
+            )
+            source = repository / "source"
+            source.mkdir()
+            source_file = source / "main.rs"
+            source_file.write_text("fn main() {}\n", encoding="utf-8")
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(repository), "add", "source/main.rs"],
+                check=True,
+                capture_output=True,
+            )
+            fake_bin = repository / "fake-bin"
+            fake_bin.mkdir()
+            marker = repository / "ambient-git-ran"
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                f"#!/bin/sh\n/usr/bin/touch '{marker}'\nexit 97\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o755)
+            seed = ComponentSeed(
+                identifier="cargo:fixture:0000000000000000",
+                name="fixture",
+                version="1.0.0",
+                ecosystem="cargo",
+                scope="runtime",
+                purl="pkg:cargo/fixture@1.0.0",
+                source_root=source,
+                repository_source=True,
+            )
+
+            evidence = source_input_evidence(
+                repository,
+                seed,
+                source,
+                {
+                    "HOME": str(repository / "hostile-home"),
+                    "PATH": str(fake_bin),
+                    "GIT_DIR": str(repository / "attacker-git-dir"),
+                },
+            )
+
+            self.assertEqual(evidence["method"], "git-tracked-files-v1")
+            self.assertEqual(evidence["file_count"], 1)
+            self.assertFalse(marker.exists())
+
+    def test_repository_root_source_uses_the_release_identity_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(repository), "init", "-q"],
+                check=True,
+                capture_output=True,
+            )
+            (repository / "README.md").write_text(
+                "release source\n", encoding="utf-8"
+            )
+            workspace_settings = repository / ".vscode/settings.json"
+            workspace_settings.parent.mkdir()
+            workspace_settings.write_text(
+                '{"editor.tabSize": 4}\n', encoding="utf-8"
+            )
+            subprocess.run(
+                [
+                    "/usr/bin/git",
+                    "-C",
+                    str(repository),
+                    "add",
+                    "README.md",
+                    ".vscode/settings.json",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            seed = ComponentSeed(
+                identifier="application:fixture:0000000000000000",
+                name="fixture",
+                version="1.0.0",
+                ecosystem="application",
+                scope="runtime",
+                purl="pkg:generic/fixture@1.0.0",
+                source_root=repository,
+                repository_source=True,
+            )
+
+            evidence = source_input_evidence(repository, seed, repository)
+
+            self.assertEqual(evidence["method"], "git-tracked-files-v1")
+            self.assertEqual(evidence["file_count"], 1)
+            self.assertEqual(evidence["total_bytes"], len(b"release source\n"))
+
     def test_external_build_tool_keeps_hashes_but_not_corresponding_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)

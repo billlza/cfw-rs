@@ -479,6 +479,8 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
             / "bin/cargo-tauri"
         )
         if not signer.is_file():
+            if os.environ.get("CFW_REQUIRE_PINNED_SIGNER_INTEGRATION") == "1":
+                self.fail("pinned Tauri signer is required by this integration lane")
             self.skipTest("pinned Tauri signer is not installed")
         with tempfile.TemporaryDirectory() as temporary:
             fixture = SigningHome(Path(temporary))

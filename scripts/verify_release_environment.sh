@@ -1,11 +1,17 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_tool_environment.sh
+source "$repo_root/scripts/release_tool_environment.sh"
+cfw_seal_release_tool_environment production
+readonly python_bin="$CFW_RELEASE_PYTHON_EXECUTABLE"
 # shellcheck source=scripts/release_toolchain_contract.sh
 source "$repo_root/scripts/release_toolchain_contract.sh"
+cfw_select_release_apple_toolchain
 toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 go_bin="$toolchain_root/go-$GO_VERSION/bin/go"
 node_bin="$toolchain_root/node-$NODE_VERSION/bin/node"
@@ -18,11 +24,12 @@ source "$repo_root/scripts/release_workspace_secret_gate.sh"
 verify_release_workspace_has_no_key_material "$repo_root"
 
 "$repo_root/scripts/assert_apple_silicon.sh"
-cfw_require_supported_python
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_version_contract.py"
-PYTHONDONTWRITEBYTECODE=1 python3 -B \
+cfw_require_supported_python "$python_bin"
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/verify_version_contract.py"
+cfw_run_release_python_script "$repo_root" \
   "$repo_root/scripts/verify_physical_capture_readiness.py"
-PYTHONDONTWRITEBYTECODE=1 python3 -B - "$repo_root" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - "$repo_root" <<'PY'
 import importlib
 import sys
 
@@ -59,7 +66,8 @@ if [[ "$("$node_bin" --version)" != "v$NODE_VERSION" ]]; then
   echo "error: pinned Node.js $NODE_VERSION toolchain is unavailable" >&2
   exit 1
 fi
-if [[ "$(xcodebuild -version)" != "Xcode $XCODE_VERSION"$'\n'"Build version $XCODE_BUILD_VERSION" ]]; then
+if [[ "$(/usr/bin/xcodebuild -version)" != \
+  "Xcode $XCODE_VERSION"$'\n'"Build version $XCODE_BUILD_VERSION" ]]; then
   echo "error: Xcode $XCODE_VERSION ($XCODE_BUILD_VERSION) is required" >&2
   exit 1
 fi
@@ -67,15 +75,17 @@ if [[ "$("$xcodegen_bin" --version)" != "Version: $XCODEGEN_VERSION" ]]; then
   echo "error: pinned XcodeGen $XCODEGEN_VERSION toolchain is unavailable" >&2
   exit 1
 fi
-if [[ "$(lipo -archs "$xcodegen_bin")" != "arm64" ]]; then
+if [[ "$(/usr/bin/lipo -archs "$xcodegen_bin")" != "arm64" ]]; then
   echo "error: pinned XcodeGen must be thin arm64" >&2
   exit 1
 fi
-if [[ "$(cargo audit --version)" != "cargo-audit-audit $CARGO_AUDIT_VERSION" ]]; then
+if [[ "$($CFW_RELEASE_CARGO_AUDIT_EXECUTABLE --version)" != \
+  "cargo-audit $CARGO_AUDIT_VERSION" ]]; then
   echo "error: cargo-audit $CARGO_AUDIT_VERSION is required" >&2
   exit 1
 fi
-if [[ "$(cargo deny --version)" != "cargo-deny $CARGO_DENY_VERSION" ]]; then
+if [[ "$($CFW_RELEASE_CARGO_DENY_EXECUTABLE --version)" != \
+  "cargo-deny $CARGO_DENY_VERSION" ]]; then
   echo "error: cargo-deny $CARGO_DENY_VERSION is required" >&2
   exit 1
 fi
@@ -84,14 +94,13 @@ if [[ "$("$tauri_bin" --version)" != "tauri-cli $TAURI_CLI_VERSION" ]]; then
   exit 1
 fi
 
-swift_version="$(swift --version 2>&1)"
-swift_major="$(printf '%s\n' "$swift_version" | awk 'NR == 1 {for (i=1; i<=NF; i++) if ($i == "version") {split($(i+1), v, "."); print v[1]; exit}}')"
-if [[ "$swift_major" != "6" ]]; then
-  echo "error: Swift 6 is required" >&2
+swift_version="$(/usr/bin/swift --version 2>&1)"
+if [[ -z "$swift_version" ]]; then
+  echo "error: selected Xcode Swift identity is empty" >&2
   exit 1
 fi
 
-python3 - \
+"$python_bin" -I -S -B -W error - \
   "$repo_root/native/macos/Dependencies.lock.json" \
   "$repo_root/apps/cfw-tauri-shell/package.json" \
   "$repo_root/apps/cfw-tauri-shell/tauri.conf.json" \

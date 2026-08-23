@@ -1,4 +1,5 @@
 import CFWSharedProtocol
+import Darwin
 import Foundation
 import ServiceManagement
 
@@ -142,13 +143,96 @@ public protocol ProxyAgentTransporting: Sendable {
   ) async throws
 }
 
+/// The one-release, read-only compatibility boundary for the installed 40019
+/// ProxyAgent. It is deliberately separate from `ProxyAgentTransporting`: the
+/// current engine protocol remains strictly v6 and has no legacy fallback.
+package protocol Installed40019ProxySnapshotting: Sendable {
+  func snapshotInstalled40019ForMigration() async throws -> EngineSnapshot
+}
+
+private struct Installed40019ProxySnapshotRequest: Encodable, Sendable {
+  let schemaVersion: UInt16 = 5
+  let requestID: RequestID
+  let command: NativeCommand
+
+  init(requestID: RequestID) throws {
+    self.requestID = requestID
+    command = try NativeCommand(kind: .snapshot)
+  }
+}
+
+private struct Installed40019ProxySnapshotResponse: Decodable, Sendable {
+  let schemaVersion: UInt16
+  let requestID: RequestID
+  let result: CommandResult?
+  let failure: EngineFailure?
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    schemaVersion = try container.decode(UInt16.self, forKey: .schemaVersion)
+    guard schemaVersion == 5 else {
+      throw ProtocolValidationError.unsupportedSchemaVersion(schemaVersion)
+    }
+    requestID = try container.decode(RequestID.self, forKey: .requestID)
+    result = try container.decodeIfPresent(CommandResult.self, forKey: .result)
+    failure = try container.decodeIfPresent(EngineFailure.self, forKey: .failure)
+    guard (result != nil) != (failure != nil) else {
+      throw ProtocolValidationError.invalidResponse
+    }
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case schemaVersion
+    case requestID
+    case result
+    case failure
+  }
+}
+
+enum Installed40019ProxySnapshotCodec {
+  static func encodeRequest(requestID: RequestID) throws -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    let data = try encoder.encode(Installed40019ProxySnapshotRequest(requestID: requestID))
+    guard !data.isEmpty, data.count <= NativeProtocolConstants.maximumMessageBytes else {
+      throw ProtocolValidationError.messageTooLarge(
+        actual: data.count, maximum: NativeProtocolConstants.maximumMessageBytes)
+    }
+    return data
+  }
+
+  static func decodeResponse(_ data: Data) throws -> (
+    requestID: RequestID, result: CommandResult?, failure: EngineFailure?
+  ) {
+    guard !data.isEmpty, data.count <= NativeProtocolConstants.maximumMessageBytes else {
+      throw ProtocolValidationError.messageTooLarge(
+        actual: data.count, maximum: NativeProtocolConstants.maximumMessageBytes)
+    }
+    let response = try JSONDecoder().decode(Installed40019ProxySnapshotResponse.self, from: data)
+    if let result = response.result {
+      guard result.kind == .snapshot,
+        let snapshot = result.snapshot,
+        snapshot.mode != .tunnel
+      else { throw ProtocolValidationError.invalidResponse }
+    }
+    return (response.requestID, response.result, response.failure)
+  }
+}
+
+private enum ProxyAgentConnectionProfile: Equatable, Sendable {
+  case current
+  case installed40019Migration
+}
+
 private final class ProxyAgentConnectionReference: @unchecked Sendable {
   let identifier = UUID()
   let connection: NSXPCConnection
   let lifecycle: ProxyAgentConnectionLifecycle
+  let profile: ProxyAgentConnectionProfile
 
-  init(_ connection: NSXPCConnection) {
+  init(_ connection: NSXPCConnection, profile: ProxyAgentConnectionProfile) {
     self.connection = connection
+    self.profile = profile
     let box = UncheckedProxyAgentXPCConnection(connection)
     lifecycle = ProxyAgentConnectionLifecycle {
       box.value.invalidate()
@@ -237,11 +321,61 @@ struct BoundedProxyAgentRequestRegistry: Sendable {
   }
 }
 
-public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
+struct Installed40019ProxyTransportDependencies: @unchecked Sendable {
+  typealias ConnectionFactory = @Sendable (String) -> NSXPCConnection
+  typealias Execute =
+    @Sendable (
+      NSXPCConnection,
+      Data,
+      @escaping @Sendable (Data?, NSError?) -> Void
+    ) -> Void
+
+  let observeProcess: @Sendable () throws -> Installed40019ServiceProcessIdentity
+  let makeConnection: ConnectionFactory
+  let prepareConnection: @Sendable (NSXPCConnection, String) -> Void
+  let activateConnection: @Sendable (NSXPCConnection) -> Void
+  let execute: Execute
+  let peerProcessIdentifier: @Sendable (NSXPCConnection) -> pid_t
+  let peerUserIdentifier: @Sendable (NSXPCConnection) -> uid_t
+
+  static let production = Installed40019ProxyTransportDependencies(
+    observeProcess: { try Installed40019ServiceProcessObserver().observe(.proxyAgent) },
+    makeConnection: { NSXPCConnection(machServiceName: $0) },
+    prepareConnection: { connection, requirement in
+      connection.setCodeSigningRequirement(requirement)
+      connection.remoteObjectInterface = NSXPCInterface(with: CFWProxyAgentXPCProtocol.self)
+    },
+    activateConnection: { $0.activate() },
+    execute: { connection, request, reply in
+      guard
+        let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+          reply(nil, NSError(domain: NSCocoaErrorDomain, code: NSXPCConnectionInterrupted))
+        }) as? CFWProxyAgentXPCProtocol
+      else {
+        reply(nil, NSError(domain: NSCocoaErrorDomain, code: NSXPCConnectionInvalid))
+        return
+      }
+      proxy.execute(request, withReply: reply)
+    },
+    peerProcessIdentifier: { $0.processIdentifier },
+    peerUserIdentifier: { $0.effectiveUserIdentifier }
+  )
+}
+
+private struct ProxyAgentDecodedResponse: Sendable {
+  let requestID: RequestID
+  let result: CommandResult?
+  let failure: EngineFailure?
+}
+
+public actor AuthenticatedProxyAgentTransport:
+  ProxyAgentTransporting, Installed40019ProxySnapshotting
+{
   private let machServiceName: String
   private let identity: CodeIdentityRequirement
   private let serviceController: any ProxyAgentServiceControlling
   private let replyDeadline: CallbackDeadlineScheduler
+  private let installed40019Dependencies: Installed40019ProxyTransportDependencies
   private var connectionReference: ProxyAgentConnectionReference?
   private var outstandingRequests = BoundedProxyAgentRequestRegistry()
 
@@ -262,6 +396,28 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
     )
     self.serviceController = serviceController
     replyDeadline = CallbackDeadlineScheduler(timeout: replyTimeout)
+    installed40019Dependencies = .production
+  }
+
+  init(
+    machServiceName: String,
+    teamIdentifier: String,
+    proxyAgentBundleIdentifier: String,
+    serviceController: any ProxyAgentServiceControlling,
+    replyTimeout: Duration = .seconds(5),
+    installed40019Dependencies: Installed40019ProxyTransportDependencies
+  ) throws {
+    guard !machServiceName.isEmpty, replyTimeout > .zero else {
+      throw ProxyAgentHostError.transportUnavailable("invalid transport configuration")
+    }
+    self.machServiceName = machServiceName
+    identity = try CodeIdentityRequirement(
+      expectedTeamIdentifier: teamIdentifier,
+      expectedBundleIdentifier: proxyAgentBundleIdentifier
+    )
+    self.serviceController = serviceController
+    replyDeadline = CallbackDeadlineScheduler(timeout: replyTimeout)
+    self.installed40019Dependencies = installed40019Dependencies
   }
 
   public func registrationStatus() -> ProxyAgentRegistrationStatus {
@@ -356,6 +512,93 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
     return snapshot
   }
 
+  package func snapshotInstalled40019ForMigration() async throws -> EngineSnapshot {
+    guard serviceController.registrationStatus() == .enabled else {
+      throw ProxyAgentHostError.registrationUnavailable
+    }
+    let first = try observeInstalled40019Process()
+    let second = try observeInstalled40019Process()
+    guard first == second, serviceController.registrationStatus() == .enabled else {
+      throw ProxyAgentHostError.responseMismatch
+    }
+
+    let requestID = RequestID()
+    let requestData: Data
+    do {
+      requestData = try Installed40019ProxySnapshotCodec.encodeRequest(requestID: requestID)
+    } catch {
+      throw ProxyAgentHostError.malformedResponse
+    }
+
+    let dependencies = installed40019Dependencies
+    let serviceController = serviceController
+    let result = try await awaitProxyAgentResult(
+      requestID: requestID,
+      expectedKind: .snapshot,
+      connect: {
+        try connectedInstalled40019Session(
+          codeSigningRequirement: second.xpcCodeSigningRequirement)
+      },
+      decode: { data in
+        let response = try Installed40019ProxySnapshotCodec.decodeResponse(data)
+        return ProxyAgentDecodedResponse(
+          requestID: response.requestID,
+          result: response.result,
+          failure: response.failure
+        )
+      },
+      operation: { connection, finish in
+        // Foundation cannot expose an outbound Mach-service peer PID before the
+        // first message. The request is therefore deliberately secret-free and
+        // read-only. Its response is accepted only after the exact pre-observed
+        // PID/UID and full 40019 identity have been re-established.
+        let connectionBox = UncheckedProxyAgentXPCConnection(connection)
+        dependencies.execute(connection, requestData) { data, error in
+          let connection = connectionBox.value
+          guard error == nil, let data else {
+            finish(.failure(ProxyAgentHostError.transportUnavailable("remote-error")))
+            return
+          }
+          let peerBefore = dependencies.peerProcessIdentifier(connection)
+          let userBefore = dependencies.peerUserIdentifier(connection)
+          guard peerBefore == second.processIdentifier,
+            userBefore == second.userIdentifier
+          else {
+            finish(.failure(ProxyAgentHostError.responseMismatch))
+            return
+          }
+          let after: Installed40019ServiceProcessIdentity
+          do {
+            after = try dependencies.observeProcess()
+          } catch {
+            finish(.failure(ProxyAgentHostError.responseMismatch))
+            return
+          }
+          guard after == second,
+            serviceController.registrationStatus() == .enabled,
+            dependencies.peerProcessIdentifier(connection) == second.processIdentifier,
+            dependencies.peerUserIdentifier(connection) == second.userIdentifier
+          else {
+            finish(.failure(ProxyAgentHostError.responseMismatch))
+            return
+          }
+          finish(.success(data))
+        }
+      })
+    guard let snapshot = result.snapshot else {
+      throw ProxyAgentHostError.malformedResponse
+    }
+    return snapshot
+  }
+
+  private func observeInstalled40019Process() throws -> Installed40019ServiceProcessIdentity {
+    do {
+      return try installed40019Dependencies.observeProcess()
+    } catch {
+      throw ProxyAgentHostError.responseMismatch
+    }
+  }
+
   public func validateConfiguration(
     _ configuration: Data,
     descriptor: ConfigurationDescriptor
@@ -441,9 +684,36 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
         @escaping @Sendable (Result<Data, Error>) -> Void
       ) -> Void
   ) async throws -> CommandResult {
+    try await awaitProxyAgentResult(
+      requestID: requestID,
+      expectedKind: expectedKind,
+      connect: { try connectedSession() },
+      decode: { data in
+        let response = try ProtocolCodec.decodeResponse(data)
+        return ProxyAgentDecodedResponse(
+          requestID: response.requestID,
+          result: response.result,
+          failure: response.failure
+        )
+      },
+      operation: operation
+    )
+  }
+
+  private func awaitProxyAgentResult(
+    requestID: RequestID,
+    expectedKind: CommandResultKind,
+    connect: () throws -> ProxyAgentConnectionReference,
+    decode: @escaping @Sendable (Data) throws -> ProxyAgentDecodedResponse,
+    operation:
+      @escaping @Sendable (
+        NSXPCConnection,
+        @escaping @Sendable (Result<Data, Error>) -> Void
+      ) -> Void
+  ) async throws -> CommandResult {
     let token = try outstandingRequests.reserve()
     defer { outstandingRequests.release(token) }
-    let reference = try connectedSession()
+    let reference = try connect()
     defer { reference.lifecycle.release(token: token) }
     do {
       let responseData: Data = try await awaitBoundedCallback(
@@ -467,9 +737,9 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
           finish(result)
         }
       }
-      let response: ResponseEnvelope
+      let response: ProxyAgentDecodedResponse
       do {
-        response = try ProtocolCodec.decodeResponse(responseData)
+        response = try decode(responseData)
       } catch {
         throw ProxyAgentHostError.malformedResponse
       }
@@ -513,22 +783,42 @@ public actor AuthenticatedProxyAgentTransport: ProxyAgentTransporting {
   }
 
   private func connectedSession() throws -> ProxyAgentConnectionReference {
-    if let connectionReference {
+    if let connectionReference, connectionReference.profile == .current {
       return connectionReference
     }
+    if let connectionReference { retireConnection(connectionReference) }
     let connection = NSXPCConnection(machServiceName: machServiceName)
     try identity.configure(connection)
     connection.remoteObjectInterface = NSXPCInterface(with: CFWProxyAgentXPCProtocol.self)
-    let reference = ProxyAgentConnectionReference(connection)
-    let owner = self
-    connection.invalidationHandler = {
-      Task {
-        await owner.clearConnection(reference.identifier)
-      }
-    }
+    let reference = ProxyAgentConnectionReference(connection, profile: .current)
+    installConnectionLifecycle(reference)
     connection.activate()
     connectionReference = reference
     return reference
+  }
+
+  private func connectedInstalled40019Session(
+    codeSigningRequirement: String
+  ) throws -> ProxyAgentConnectionReference {
+    if let connectionReference { retireConnection(connectionReference) }
+    let connection = installed40019Dependencies.makeConnection(machServiceName)
+    installed40019Dependencies.prepareConnection(connection, codeSigningRequirement)
+    let reference = ProxyAgentConnectionReference(
+      connection, profile: .installed40019Migration)
+    installConnectionLifecycle(reference)
+    installed40019Dependencies.activateConnection(connection)
+    connectionReference = reference
+    return reference
+  }
+
+  private func installConnectionLifecycle(_ reference: ProxyAgentConnectionReference) {
+    let owner = self
+    let identifier = reference.identifier
+    reference.connection.invalidationHandler = {
+      Task {
+        await owner.clearConnection(identifier)
+      }
+    }
   }
 
   private func clearConnection(_ identifier: UUID) {

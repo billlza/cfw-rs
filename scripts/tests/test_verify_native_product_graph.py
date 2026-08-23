@@ -134,6 +134,58 @@ class RepositoryContractTests(unittest.TestCase):
                 pbx + "\nCopy Swift Objective-C Interface Header\n"
             )
 
+    def test_generated_project_requires_swift_package_access_identity(self) -> None:
+        pbx = (REPO_ROOT / "native/macos/CFWNative.xcodeproj/project.pbxproj").read_text(
+            encoding="utf-8"
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "package-access identity"):
+            verify_generated_project(
+                pbx.replace(
+                    "SWIFT_PACKAGE_NAME = macos;",
+                    "SWIFT_PACKAGE_NAME = wrong_package;",
+                    1,
+                )
+            )
+
+    def test_generated_project_rejects_extra_swift_package_access_identity(self) -> None:
+        pbx = (REPO_ROOT / "native/macos/CFWNative.xcodeproj/project.pbxproj").read_text(
+            encoding="utf-8"
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "package-access identity"):
+            verify_generated_project(pbx + "\nSWIFT_PACKAGE_NAME = macos;\n")
+
+    def test_generated_project_rejects_package_identity_moved_to_target(self) -> None:
+        pbx = (REPO_ROOT / "native/macos/CFWNative.xcodeproj/project.pbxproj").read_text(
+            encoding="utf-8"
+        )
+        mutated = pbx.replace("\t\t\t\tSWIFT_PACKAGE_NAME = macos;\n", "", 1)
+        mutated = mutated.replace(
+            "\t\t\t\tPRODUCT_MODULE_NAME = CFWSharedProtocol;",
+            "\t\t\t\tPRODUCT_MODULE_NAME = CFWSharedProtocol;\n"
+            "\t\t\t\tSWIFT_PACKAGE_NAME = macos;",
+            1,
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "package-access identity"):
+            verify_generated_project(mutated)
+
+    def test_generated_project_rejects_wrong_project_identity_with_target_padding(self) -> None:
+        pbx = (REPO_ROOT / "native/macos/CFWNative.xcodeproj/project.pbxproj").read_text(
+            encoding="utf-8"
+        )
+        mutated = pbx.replace(
+            "SWIFT_PACKAGE_NAME = macos;",
+            "SWIFT_PACKAGE_NAME = wrong_package;",
+            1,
+        )
+        mutated = mutated.replace(
+            "\t\t\t\tPRODUCT_MODULE_NAME = CFWSharedProtocol;",
+            "\t\t\t\tPRODUCT_MODULE_NAME = CFWSharedProtocol;\n"
+            "\t\t\t\tSWIFT_PACKAGE_NAME = macos;",
+            1,
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "package-access identity"):
+            verify_generated_project(mutated)
+
 
 class TauriEmbeddingTests(unittest.TestCase):
     def test_complete_embedding_passes(self) -> None:

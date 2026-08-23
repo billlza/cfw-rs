@@ -68,7 +68,7 @@ private func contractFixture(_ name: String) throws -> Data {
   return try Data(
     contentsOf:
       root
-      .appendingPathComponent("contracts/native-bridge-v7", isDirectory: true)
+      .appendingPathComponent("contracts/native-bridge-v8", isDirectory: true)
       .appendingPathComponent(name)
   )
 }
@@ -76,7 +76,7 @@ private func contractFixture(_ name: String) throws -> Data {
 @Test func validMinimalQueryRequestIsAccepted() throws {
   let request = try decode(
     """
-    {"schema_version":7,"request_id":"\(requestID)","command":{"opcode":"query_status"}}
+    {"schema_version":8,"request_id":"\(requestID)","command":{"opcode":"query_status"}}
     """
   )
   #expect(request.requestID.uuidString.lowercased() == requestID)
@@ -106,34 +106,34 @@ private func contractFixture(_ name: String) throws -> Data {
   #expect(throws: (any Error).self) {
     try decode(
       """
-      {"schema_version":7,"request_id":"\(requestID)","command":{"opcode":"query_status"},"unexpected":true}
+      {"schema_version":8,"request_id":"\(requestID)","command":{"opcode":"query_status"},"unexpected":true}
       """
     )
   }
   #expect(throws: (any Error).self) {
     try decode(
       """
-      {"schema_version":7,"request_id":"\(requestID)","command":{"opcode":"query_status","unexpected":true}}
+      {"schema_version":8,"request_id":"\(requestID)","command":{"opcode":"query_status","unexpected":true}}
       """
     )
   }
   #expect(throws: (any Error).self) {
     try decode(
       """
-      {"schema_version":7,"request_id":"\(requestID)","command":{"opcode":"stop_system_proxy","payload":{"context":{"installation_id":"\(installationID)","config_epoch":1,"generation":1,"unexpected":true}}}}
+      {"schema_version":8,"request_id":"\(requestID)","command":{"opcode":"stop_system_proxy","payload":{"context":{"installation_id":"\(installationID)","config_epoch":1,"generation":1,"unexpected":true}}}}
       """
     )
   }
   #expect(throws: (any Error).self) {
     try decode(
       """
-      {"schema_version":7,"request_id":"\(requestID)","command":{"opcode":"preview_credential_garbage_collection","payload":{"request":{"snapshot_digest":"\(String(repeating: "ab", count: 32))","catalog":[{"audience":{"profile_id":"\(requestID)","profile_digest":"\(String(repeating: "ee", count: 32))"},"references":[{"id":"\(credentialID)","kind":"trojan_password","unexpected":true}]}]}}}}
+      {"schema_version":8,"request_id":"\(requestID)","command":{"opcode":"preview_credential_garbage_collection","payload":{"request":{"snapshot_digest":"\(String(repeating: "ab", count: 32))","catalog":[{"audience":{"profile_id":"\(requestID)","profile_digest":"\(String(repeating: "ee", count: 32))"},"references":[{"id":"\(credentialID)","kind":"trojan_password","unexpected":true}]}]}}}}
       """
     )
   }
 }
 
-@Test func nativeBridgeV7ContractFixturesDecodeInSwift() throws {
+@Test func nativeBridgeV8ContractFixturesDecodeInSwift() throws {
   let query = try NativeBridgeProtocolCodec.decodeRequest(
     contractFixture("query-request.json")
   )
@@ -145,7 +145,10 @@ private func contractFixture(_ name: String) throws -> Data {
   let maintenance = try NativeBridgeProtocolCodec.decodeRequest(
     contractFixture("maintenance-request.json")
   )
-  guard case .maintainCurrentServices(.unregisterProxyAgent) = maintenance.command else {
+  guard
+    case .maintainCurrentServices(.unregisterInstalled40019ProxyAgent) =
+      maintenance.command
+  else {
     Issue.record("maintenance fixture decoded as the wrong command")
     return
   }
@@ -157,10 +160,37 @@ private func contractFixture(_ name: String) throws -> Data {
     Issue.record("maintenance response fixture decoded as the wrong result")
     return
   }
-  #expect(maintenanceResult.action == .unregisterProxyAgent)
+  #expect(maintenanceResult.action == .unregisterInstalled40019ProxyAgent)
   #expect(maintenanceResult.engineStatus == .off)
+  #expect(
+    maintenanceResult.offProofProfile == .installed40019EngineV5AuthorityV10)
   #expect(maintenanceResult.proxyAgent == .notRegistered)
   #expect(maintenanceResult.globalAuthority == .enabled)
+
+  let recovery = try NativeBridgeProtocolCodec.decodeRequest(
+    contractFixture("recovery-maintenance-request.json")
+  )
+  guard
+    case .maintainCurrentServices(.recoverInstalled40019GlobalAuthority) =
+      recovery.command
+  else {
+    Issue.record("recovery maintenance fixture decoded as the wrong command")
+    return
+  }
+  let recoveryResponse = try JSONDecoder().decode(
+    NativeResponseEnvelope.self,
+    from: contractFixture("recovery-maintenance-response.json")
+  )
+  guard case .serviceMaintenance(let recoveryResult) = recoveryResponse.result else {
+    Issue.record("recovery maintenance response fixture decoded as the wrong result")
+    return
+  }
+  #expect(recoveryResult.action == .recoverInstalled40019GlobalAuthority)
+  #expect(recoveryResult.engineStatus == .off)
+  #expect(
+    recoveryResult.offProofProfile == .installed40019RecoveryCurrentAuthorityV11)
+  #expect(recoveryResult.proxyAgent == .notRegistered)
+  #expect(recoveryResult.globalAuthority == .notRegistered)
 
   let request = try NativeBridgeProtocolCodec.decodeRequest(
     contractFixture("gc-preview-request.json")

@@ -15,10 +15,14 @@ one atomic, typed security response that:
 5. requires the trust-domain-specific rotation action when backup, archive, or
    sharing exposure is plausible.
 
-This module scans **by path and name only**.  It never calls ``open`` and never
-reads a candidate's bytes: detection uses directory entry names and entry
-type/symlink metadata (a ``stat``-level fact, not file content).  Exposure
-plausibility is likewise decided from path/name signals alone.
+This module detects secret candidates **by path and name only**. It never opens
+or reads a candidate's bytes: detection uses directory entry names and entry
+type/symlink metadata (a ``stat``-level fact, not file content). To authenticate
+nested release-worktree cache boundaries, it performs
+bounded, descriptor-relative reads of fixed control files in Git's independent
+administrative registry and the reciprocal worktree marker. It never opens a
+source, cache, candidate, or secret-material file. Exposure plausibility is
+likewise decided from path/name signals alone.
 
 The blocker fails **closed**: an unavailable, symlinked, or malformed workspace
 root, or any traversal error, raises :class:`SecretMaterialReleaseBlock` rather than
@@ -29,10 +33,13 @@ warning and the response can never omit a mandated domain-specific step.
 from __future__ import annotations
 
 import argparse
+import fcntl
+import json
 import os
 import re
 import stat
 import sys
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -41,6 +48,166 @@ from pathlib import Path
 class SecretMaterialReleaseBlock(RuntimeError):
     """Raised when the blocker must fail closed because an input required by
     the path/name scan is unavailable, untrustworthy, or malformed."""
+
+
+RELEASE_WORKTREE_CACHE_SCOPE_SCHEMA = "cfm-release-worktree-cache-scope-v1"
+RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT = (
+    "cfm-release-worktree-cache-scope-v1.json"
+)
+RELEASE_WORKTREE_CACHE_SCOPE_PENDING = (
+    ".cfm-release-worktree-cache-scope-v1.json.pending"
+)
+RELEASE_WORKTREE_CACHE_SCOPE_LOCK = ".cfm-release-worktree-cache-scope-v1.lock"
+
+
+class ReleaseWorktreeCacheScopeError(ValueError):
+    """The lifecycle receipt is malformed or non-canonical."""
+
+
+@dataclass(frozen=True)
+class StablePathIdentity:
+    device: int
+    inode: int
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.device, bool)
+            or isinstance(self.inode, bool)
+            or not isinstance(self.device, int)
+            or not isinstance(self.inode, int)
+            or self.device <= 0
+            or self.inode <= 0
+        ):
+            raise ReleaseWorktreeCacheScopeError(
+                "release-worktree path identity is invalid"
+            )
+
+    def as_dict(self) -> dict[str, int]:
+        return {"device": self.device, "inode": self.inode}
+
+
+@dataclass(frozen=True)
+class ReleaseWorktreeCacheScopeReceipt:
+    build: str
+    worktree_path: str
+    head: str
+    admin: StablePathIdentity
+    worktree: StablePathIdentity
+    marker: StablePathIdentity
+    target: StablePathIdentity
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "adminIdentity": self.admin.as_dict(),
+            "build": self.build,
+            "head": self.head,
+            "markerIdentity": self.marker.as_dict(),
+            "schema": RELEASE_WORKTREE_CACHE_SCOPE_SCHEMA,
+            "targetIdentity": self.target.as_dict(),
+            "worktreeIdentity": self.worktree.as_dict(),
+            "worktreePath": self.worktree_path,
+        }
+
+
+def canonical_scope_receipt_bytes(
+    receipt: ReleaseWorktreeCacheScopeReceipt,
+) -> bytes:
+    return (
+        json.dumps(
+            receipt.as_dict(),
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        + b"\n"
+    )
+
+
+def _unique_scope_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ReleaseWorktreeCacheScopeError(
+                "release-worktree receipt contains a duplicate key"
+            )
+        value[key] = item
+    return value
+
+
+def _reject_scope_constant(token: str) -> object:
+    raise ReleaseWorktreeCacheScopeError(
+        f"release-worktree receipt contains {token}"
+    )
+
+
+def _scope_path_identity(value: object, label: str) -> StablePathIdentity:
+    if not isinstance(value, dict) or set(value) != {"device", "inode"}:
+        raise ReleaseWorktreeCacheScopeError(
+            f"release-worktree receipt {label} identity is malformed"
+        )
+    return StablePathIdentity(device=value["device"], inode=value["inode"])
+
+
+def parse_scope_receipt(data: bytes) -> ReleaseWorktreeCacheScopeReceipt:
+    try:
+        value = json.loads(
+            data.decode("ascii"),
+            object_pairs_hook=_unique_scope_object,
+            parse_constant=_reject_scope_constant,
+        )
+    except ReleaseWorktreeCacheScopeError:
+        raise
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        ValueError,
+    ) as exc:
+        raise ReleaseWorktreeCacheScopeError(
+            "release-worktree receipt is not canonical JSON"
+        ) from exc
+    expected_keys = {
+        "adminIdentity",
+        "build",
+        "head",
+        "markerIdentity",
+        "schema",
+        "targetIdentity",
+        "worktreeIdentity",
+        "worktreePath",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ReleaseWorktreeCacheScopeError(
+            "release-worktree receipt fields are malformed"
+        )
+    if value["schema"] != RELEASE_WORKTREE_CACHE_SCOPE_SCHEMA:
+        raise ReleaseWorktreeCacheScopeError(
+            "release-worktree receipt schema is unsupported"
+        )
+    if not all(
+        isinstance(value[field], str)
+        for field in ("build", "head", "worktreePath")
+    ):
+        raise ReleaseWorktreeCacheScopeError(
+            "release-worktree receipt string fields are malformed"
+        )
+    receipt = ReleaseWorktreeCacheScopeReceipt(
+        build=value["build"],
+        worktree_path=value["worktreePath"],
+        head=value["head"],
+        admin=_scope_path_identity(value["adminIdentity"], "admin"),
+        worktree=_scope_path_identity(value["worktreeIdentity"], "worktree"),
+        marker=_scope_path_identity(value["markerIdentity"], "marker"),
+        target=_scope_path_identity(value["targetIdentity"], "target"),
+    )
+    if canonical_scope_receipt_bytes(receipt) != data:
+        raise ReleaseWorktreeCacheScopeError(
+            "release-worktree receipt is not in canonical form"
+        )
+    return receipt
 
 
 # Secret material is detected by extension only; classification additionally
@@ -74,6 +241,15 @@ MANAGED_TARGET_ROOTS: frozenset[str] = frozenset(
         "ui-build",
     }
 )
+
+# Fixed release builds use five-digit numeric directory names. The numeric
+# shape is necessary but never sufficient to grant an exclusion: the main
+# repository's independent Git administrative registry and the reciprocal
+# worktree marker must identify the path as a live detached worktree.
+RELEASE_WORKTREE_BUILD_RE = re.compile(r"^[1-9][0-9]{4}$")
+GIT_DETACHED_HEAD_RE = re.compile(rb"^[0-9a-f]{40}\n$")
+MAXIMUM_GIT_CONTROL_FILE_BYTES = 4_096
+_SCOPE_ENROLLMENT_LOCK = threading.Lock()
 
 # Path segments that make backup/archive/sharing exposure plausible from the
 # path alone.  Matched case-insensitively against each path component.
@@ -139,6 +315,21 @@ class DetectedSecretMaterial:
 
 
 @dataclass(frozen=True)
+class _RegisteredReleaseWorktreeIdentity:
+    owner: int
+    admin_path: Path
+    admin: tuple[int, int]
+    path: Path
+    head: str
+    worktree: tuple[int, int]
+    marker: tuple[int, int]
+    marker_data: bytes
+    target: tuple[int, int]
+    receipt: tuple[int, int] | None
+    receipt_data: bytes | None
+
+
+@dataclass(frozen=True)
 class SecurityResponse:
     """The one atomic security response for one detected secret candidate.
 
@@ -181,16 +372,1067 @@ def classify_secret_material(path: Path, name: str) -> SecretMaterialKind:
     return SecretMaterialKind.UNKNOWN_PRIVATE_KEY
 
 
-def _is_pruned_target(root: Path, path: Path) -> bool:
+def _is_release_worktree_target_parts(parts: tuple[str, ...]) -> bool:
+    """Return whether parts name an exact release-worktree target directory."""
+    return (
+        len(parts) == 4
+        and parts[0] == "target"
+        and parts[1] == "release-worktrees"
+        and RELEASE_WORKTREE_BUILD_RE.fullmatch(parts[2]) is not None
+        and parts[3] == "target"
+    )
+
+
+def _open_verified_directory(
+    path: str | os.PathLike[str],
+    *,
+    expected_owner: int,
+    label: str,
+    dir_fd: int | None = None,
+) -> tuple[int, tuple[int, int]]:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, dir_fd=dir_fd)
+    except OSError as exc:
+        raise SecretMaterialReleaseBlock(
+            f"{label} is unavailable or is not a trustworthy real directory"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        os.close(descriptor)
+        raise SecretMaterialReleaseBlock(
+            f"{label} identity could not be inspected"
+        ) from exc
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != expected_owner:
+        os.close(descriptor)
+        raise SecretMaterialReleaseBlock(
+            f"{label} has an unsafe type or owner"
+        )
+    return descriptor, (metadata.st_dev, metadata.st_ino)
+
+
+def _read_git_control_file(
+    directory_fd: int,
+    name: str,
+    *,
+    expected_owner: int,
+) -> tuple[bytes, tuple[int, int]]:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as exc:
+        raise SecretMaterialReleaseBlock(
+            f"Git worktree control file is unavailable: {name}"
+        ) from exc
+    try:
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_uid != expected_owner
+                or before.st_nlink != 1
+                or before.st_mode & 0o022
+                or before.st_size <= 0
+                or before.st_size > MAXIMUM_GIT_CONTROL_FILE_BYTES
+            ):
+                raise SecretMaterialReleaseBlock(
+                    f"Git worktree control file has unsafe metadata: {name}"
+                )
+            data = bytearray()
+            while len(data) <= MAXIMUM_GIT_CONTROL_FILE_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(1_024, MAXIMUM_GIT_CONTROL_FILE_BYTES + 1 - len(data)),
+                )
+                if not chunk:
+                    break
+                data.extend(chunk)
+            after = os.fstat(descriptor)
+        except OSError as exc:
+            raise SecretMaterialReleaseBlock(
+                f"Git worktree control file could not be read safely: {name}"
+            ) from exc
+        if (
+            len(data) > MAXIMUM_GIT_CONTROL_FILE_BYTES
+            or len(data) != before.st_size
+            or (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_uid,
+                before.st_nlink,
+                before.st_size,
+            )
+            != (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_uid,
+                after.st_nlink,
+                after.st_size,
+            )
+        ):
+            raise SecretMaterialReleaseBlock(
+                f"Git worktree control file changed while reading: {name}"
+            )
+        return bytes(data), (before.st_dev, before.st_ino)
+    finally:
+        os.close(descriptor)
+
+
+def _decode_gitdir_control(data: bytes) -> Path:
+    if (
+        not data.endswith(b"\n")
+        or data.count(b"\n") != 1
+        or b"\0" in data
+    ):
+        raise SecretMaterialReleaseBlock("Git worktree gitdir control is malformed")
+    try:
+        path = Path(os.fsdecode(data[:-1]))
+    except (UnicodeError, ValueError) as exc:
+        raise SecretMaterialReleaseBlock(
+            "Git worktree gitdir path is malformed"
+        ) from exc
+    if not path.is_absolute() or path.name != ".git":
+        raise SecretMaterialReleaseBlock(
+            "Git worktree gitdir path is not an absolute marker path"
+        )
+    return path
+
+
+def _scope_identity(identity: tuple[int, int]) -> StablePathIdentity:
+    return StablePathIdentity(device=identity[0], inode=identity[1])
+
+
+def _scope_receipt(
+    *,
+    build: str,
+    worktree_path: Path,
+    head: str,
+    admin: tuple[int, int],
+    worktree: tuple[int, int],
+    marker: tuple[int, int],
+    target: tuple[int, int],
+) -> ReleaseWorktreeCacheScopeReceipt:
+    return ReleaseWorktreeCacheScopeReceipt(
+        build=build,
+        worktree_path=str(worktree_path),
+        head=head,
+        admin=_scope_identity(admin),
+        worktree=_scope_identity(worktree),
+        marker=_scope_identity(marker),
+        target=_scope_identity(target),
+    )
+
+
+def _registered_release_worktree_targets(
+    canonical_root: Path,
+    *,
+    require_scope_receipt: bool = True,
+) -> dict[str, _RegisteredReleaseWorktreeIdentity]:
+    """Authenticate nested release targets through fixed Git control files."""
+    try:
+        root_metadata = canonical_root.stat(follow_symlinks=False)
+        git_metadata = (canonical_root / ".git").stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise SecretMaterialReleaseBlock(
+            "workspace Git administrative root could not be inspected"
+        ) from exc
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise SecretMaterialReleaseBlock("canonical workspace root is not a directory")
+    root_owner = root_metadata.st_uid
+    if not stat.S_ISDIR(git_metadata.st_mode):
+        return {}
+
+    git_fd, _ = _open_verified_directory(
+        canonical_root / ".git",
+        expected_owner=root_owner,
+        label="workspace Git administrative root",
+    )
+    try:
+        try:
+            registry_fd, registry_identity = _open_verified_directory(
+                "worktrees",
+                expected_owner=root_owner,
+                label="Git worktree registry",
+                dir_fd=git_fd,
+            )
+        except SecretMaterialReleaseBlock as exc:
+            try:
+                os.stat("worktrees", dir_fd=git_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return {}
+            except OSError:
+                pass
+            raise exc
+        try:
+            admin_names: list[str] = []
+            try:
+                with os.scandir(registry_fd) as entries:
+                    for entry in entries:
+                        admin_names.append(entry.name)
+                        if len(admin_names) > 4_096:
+                            raise SecretMaterialReleaseBlock(
+                                "Git worktree registry entry count exceeds the parser limit"
+                            )
+            except OSError as exc:
+                raise SecretMaterialReleaseBlock(
+                    "Git worktree registry could not be enumerated"
+                ) from exc
+            admin_names.sort()
+            targets: dict[str, _RegisteredReleaseWorktreeIdentity] = {}
+            for admin_name in admin_names:
+                admin_fd, admin_identity = _open_verified_directory(
+                    admin_name,
+                    expected_owner=root_owner,
+                    label="Git worktree administrative entry",
+                    dir_fd=registry_fd,
+                )
+                try:
+                    gitdir_data, _ = _read_git_control_file(
+                        admin_fd, "gitdir", expected_owner=root_owner
+                    )
+                    commondir_data, _ = _read_git_control_file(
+                        admin_fd, "commondir", expected_owner=root_owner
+                    )
+                    head_data, _ = _read_git_control_file(
+                        admin_fd, "HEAD", expected_owner=root_owner
+                    )
+                    if commondir_data != b"../..\n":
+                        raise SecretMaterialReleaseBlock(
+                            "Git worktree commondir control is malformed"
+                        )
+                    marker_path = _decode_gitdir_control(gitdir_data)
+                    worktree_path = marker_path.parent
+                    try:
+                        relative = worktree_path.relative_to(canonical_root)
+                    except ValueError:
+                        continue
+                    if (
+                        len(relative.parts) != 3
+                        or relative.parts[:2] != (
+                            "target",
+                            "release-worktrees",
+                        )
+                        or RELEASE_WORKTREE_BUILD_RE.fullmatch(relative.parts[2])
+                        is None
+                    ):
+                        continue
+                    build = relative.parts[2]
+                    expected_worktree = (
+                        canonical_root / "target/release-worktrees" / build
+                    )
+                    try:
+                        resolved_worktree = expected_worktree.resolve(strict=True)
+                    except FileNotFoundError:
+                        # A stale administrative entry has no live surface to prune.
+                        continue
+                    except (OSError, RuntimeError) as exc:
+                        raise SecretMaterialReleaseBlock(
+                            "registered release worktree could not be resolved"
+                        ) from exc
+                    if (
+                        worktree_path != expected_worktree
+                        or resolved_worktree != expected_worktree
+                    ):
+                        raise SecretMaterialReleaseBlock(
+                            "registered release worktree path is not canonical"
+                        )
+                    if GIT_DETACHED_HEAD_RE.fullmatch(head_data) is None:
+                        raise SecretMaterialReleaseBlock(
+                            "registered release worktree is not detached"
+                        )
+                    if build in targets:
+                        raise SecretMaterialReleaseBlock(
+                            "registered release worktree build is duplicated"
+                        )
+                    worktree_fd, worktree_identity = _open_verified_directory(
+                        expected_worktree,
+                        expected_owner=root_owner,
+                        label="registered release worktree",
+                    )
+                    try:
+                        marker_data, marker_identity = _read_git_control_file(
+                            worktree_fd, ".git", expected_owner=root_owner
+                        )
+                        expected_admin_path = (
+                            canonical_root / ".git/worktrees" / admin_name
+                        )
+                        if marker_data != (
+                            b"gitdir: " + os.fsencode(expected_admin_path) + b"\n"
+                        ):
+                            raise SecretMaterialReleaseBlock(
+                                "registered release worktree marker is not reciprocal"
+                            )
+                        target_fd, target_identity = _open_verified_directory(
+                            "target",
+                            expected_owner=root_owner,
+                            label="registered release worktree target",
+                            dir_fd=worktree_fd,
+                        )
+                        os.close(target_fd)
+                    finally:
+                        os.close(worktree_fd)
+                    head = head_data[:-1].decode("ascii")
+                    expected_scope_receipt = _scope_receipt(
+                        build=build,
+                        worktree_path=expected_worktree,
+                        head=head,
+                        admin=admin_identity,
+                        worktree=worktree_identity,
+                        marker=marker_identity,
+                        target=target_identity,
+                    )
+                    receipt_identity: tuple[int, int] | None = None
+                    receipt_data: bytes | None = None
+                    try:
+                        receipt_metadata = os.stat(
+                            RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+                            dir_fd=admin_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        if require_scope_receipt:
+                            continue
+                    except OSError as exc:
+                        raise SecretMaterialReleaseBlock(
+                            "release-worktree cache-scope receipt could not be inspected"
+                        ) from exc
+                    else:
+                        recoverable_linked_publish = False
+                        if (
+                            not require_scope_receipt
+                            and receipt_metadata.st_nlink == 2
+                        ):
+                            try:
+                                pending_metadata = os.stat(
+                                    RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+                                    dir_fd=admin_fd,
+                                    follow_symlinks=False,
+                                )
+                            except OSError as exc:
+                                raise SecretMaterialReleaseBlock(
+                                    "release-worktree linked receipt lacks its pending peer"
+                                ) from exc
+                            recoverable_linked_publish = (
+                                pending_metadata.st_nlink == 2
+                                and (
+                                    receipt_metadata.st_dev,
+                                    receipt_metadata.st_ino,
+                                )
+                                == (
+                                    pending_metadata.st_dev,
+                                    pending_metadata.st_ino,
+                                )
+                            )
+                            if not recoverable_linked_publish:
+                                raise SecretMaterialReleaseBlock(
+                                    "release-worktree linked receipt state is contradictory"
+                                )
+                        if not recoverable_linked_publish:
+                            receipt_data, receipt_identity = _read_scope_file(
+                                admin_fd,
+                                RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+                                expected_owner=root_owner,
+                            )
+                            try:
+                                parsed_receipt = parse_scope_receipt(receipt_data)
+                            except ReleaseWorktreeCacheScopeError as exc:
+                                raise SecretMaterialReleaseBlock(
+                                    "release-worktree cache-scope receipt is malformed"
+                                ) from exc
+                            if parsed_receipt != expected_scope_receipt:
+                                raise SecretMaterialReleaseBlock(
+                                    "release-worktree cache-scope receipt identity is stale"
+                                )
+                    try:
+                        current_admin = os.fstat(admin_fd)
+                        visible_admin = os.stat(
+                            admin_name,
+                            dir_fd=registry_fd,
+                            follow_symlinks=False,
+                        )
+                    except OSError as exc:
+                        raise SecretMaterialReleaseBlock(
+                            "Git worktree administrative entry could not be revalidated"
+                        ) from exc
+                    if (
+                        (current_admin.st_dev, current_admin.st_ino)
+                        != admin_identity
+                        or not stat.S_ISDIR(visible_admin.st_mode)
+                        or visible_admin.st_uid != root_owner
+                        or (visible_admin.st_dev, visible_admin.st_ino)
+                        != admin_identity
+                    ):
+                        raise SecretMaterialReleaseBlock(
+                            "Git worktree administrative entry changed while reading"
+                        )
+                    targets[build] = _RegisteredReleaseWorktreeIdentity(
+                        owner=root_owner,
+                        admin_path=expected_admin_path,
+                        admin=admin_identity,
+                        path=expected_worktree,
+                        head=head,
+                        worktree=worktree_identity,
+                        marker=marker_identity,
+                        marker_data=marker_data,
+                        target=target_identity,
+                        receipt=receipt_identity,
+                        receipt_data=receipt_data,
+                    )
+                finally:
+                    os.close(admin_fd)
+            try:
+                current_registry = os.fstat(registry_fd)
+                visible_registry = os.stat(
+                    "worktrees", dir_fd=git_fd, follow_symlinks=False
+                )
+            except OSError as exc:
+                raise SecretMaterialReleaseBlock(
+                    "Git worktree registry could not be revalidated"
+                ) from exc
+            if (
+                current_registry.st_dev,
+                current_registry.st_ino,
+            ) != registry_identity or (
+                not stat.S_ISDIR(visible_registry.st_mode)
+                or visible_registry.st_uid != root_owner
+                or (visible_registry.st_dev, visible_registry.st_ino)
+                != registry_identity
+            ):
+                raise SecretMaterialReleaseBlock(
+                    "Git worktree registry changed while reading"
+                )
+            return targets
+        finally:
+            os.close(registry_fd)
+    finally:
+        os.close(git_fd)
+
+
+def _scope_file_metadata_is_safe(
+    metadata: os.stat_result,
+    *,
+    expected_owner: int,
+    expected_links: int = 1,
+) -> bool:
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == expected_owner
+        and metadata.st_nlink == expected_links
+        and stat.S_IMODE(metadata.st_mode) == 0o600
+    )
+
+
+def _read_scope_file(
+    admin_fd: int,
+    name: str,
+    *,
+    expected_owner: int,
+    expected_links: int = 1,
+) -> tuple[bytes, tuple[int, int]]:
+    return _read_linked_scope_file(
+        admin_fd,
+        name,
+        expected_owner=expected_owner,
+        expected_links=expected_links,
+    )
+
+
+def _read_linked_scope_file(
+    admin_fd: int,
+    name: str,
+    *,
+    expected_owner: int,
+    expected_links: int,
+) -> tuple[bytes, tuple[int, int]]:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        descriptor = os.open(name, flags, dir_fd=admin_fd)
+    except OSError as exc:
+        raise SecretMaterialReleaseBlock(
+            f"release-worktree cache-scope file is unavailable: {name}"
+        ) from exc
+    try:
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not _scope_file_metadata_is_safe(
+                    before,
+                    expected_owner=expected_owner,
+                    expected_links=expected_links,
+                )
+                or before.st_size <= 0
+                or before.st_size > MAXIMUM_GIT_CONTROL_FILE_BYTES
+            ):
+                raise SecretMaterialReleaseBlock(
+                    f"release-worktree cache-scope file has unsafe metadata: {name}"
+                )
+            data = bytearray()
+            while len(data) <= MAXIMUM_GIT_CONTROL_FILE_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(1_024, MAXIMUM_GIT_CONTROL_FILE_BYTES + 1 - len(data)),
+                )
+                if not chunk:
+                    break
+                data.extend(chunk)
+            after = os.fstat(descriptor)
+        except OSError as exc:
+            raise SecretMaterialReleaseBlock(
+                f"release-worktree cache-scope file could not be read: {name}"
+            ) from exc
+        if (
+            len(data) != before.st_size
+            or len(data) > MAXIMUM_GIT_CONTROL_FILE_BYTES
+            or (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_uid,
+                before.st_nlink,
+                before.st_size,
+            )
+            != (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_uid,
+                after.st_nlink,
+                after.st_size,
+            )
+        ):
+            raise SecretMaterialReleaseBlock(
+                f"release-worktree cache-scope file changed while reading: {name}"
+            )
+        return bytes(data), (before.st_dev, before.st_ino)
+    finally:
+        os.close(descriptor)
+
+
+def _scope_file_exists(admin_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=admin_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise SecretMaterialReleaseBlock(
+            f"release-worktree cache-scope file could not be inspected: {name}"
+        ) from exc
+    return True
+
+
+def _write_scope_pending(admin_fd: int, data: bytes, owner: int) -> None:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | os.O_CLOEXEC
+        | os.O_NOFOLLOW
+        | os.O_NONBLOCK
+    )
+    try:
+        descriptor = os.open(
+            RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+            flags,
+            0o600,
+            dir_fd=admin_fd,
+        )
+    except OSError as exc:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree cache-scope pending file could not be created"
+        ) from exc
+    try:
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                raise SecretMaterialReleaseBlock(
+                    "release-worktree cache-scope pending write made no progress"
+                )
+            offset += written
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not _scope_file_metadata_is_safe(metadata, expected_owner=owner)
+            or metadata.st_size != len(data)
+        ):
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope pending file is not stable"
+            )
+    except OSError as exc:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree cache-scope pending file could not be committed"
+        ) from exc
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_scope_pending(
+    admin_fd: int,
+    *,
+    expected_owner: int,
+    expected_identity: tuple[int, int],
+    expected_size: int,
+) -> None:
+    flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        descriptor = os.open(
+            RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+            flags,
+            dir_fd=admin_fd,
+        )
+    except OSError as exc:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree cache-scope pending file could not be reopened"
+        ) from exc
+    try:
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not _scope_file_metadata_is_safe(
+                    before, expected_owner=expected_owner
+                )
+                or (before.st_dev, before.st_ino) != expected_identity
+                or before.st_size != expected_size
+            ):
+                raise SecretMaterialReleaseBlock(
+                    "release-worktree cache-scope pending identity is stale"
+                )
+            os.fsync(descriptor)
+            after = os.fstat(descriptor)
+        except OSError as exc:
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope pending durability could not be proven"
+            ) from exc
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_nlink,
+            before.st_size,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_nlink,
+            after.st_size,
+        ):
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope pending changed during fsync"
+            )
+    finally:
+        os.close(descriptor)
+
+
+def _publish_scope_receipt(
+    registered: _RegisteredReleaseWorktreeIdentity,
+) -> None:
+    expected_receipt = _scope_receipt(
+        build=registered.path.name,
+        worktree_path=registered.path,
+        head=registered.head,
+        admin=registered.admin,
+        worktree=registered.worktree,
+        marker=registered.marker,
+        target=registered.target,
+    )
+    expected_data = canonical_scope_receipt_bytes(expected_receipt)
+    admin_fd, admin_identity = _open_verified_directory(
+        registered.admin_path,
+        expected_owner=registered.owner,
+        label="release-worktree administrative entry",
+    )
+    if admin_identity != registered.admin:
+        os.close(admin_fd)
+        raise SecretMaterialReleaseBlock(
+            "release-worktree administrative identity changed before enrollment"
+        )
+    lock_fd: int | None = None
+    lock_acquired = False
+    try:
+        lock_flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_CLOEXEC
+            | os.O_NOFOLLOW
+            | os.O_NONBLOCK
+        )
+        try:
+            lock_fd = os.open(
+                RELEASE_WORKTREE_CACHE_SCOPE_LOCK,
+                lock_flags,
+                0o600,
+                dir_fd=admin_fd,
+            )
+            lock_metadata = os.fstat(lock_fd)
+        except OSError as exc:
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope lock is unavailable"
+            ) from exc
+        if not _scope_file_metadata_is_safe(
+            lock_metadata, expected_owner=registered.owner
+        ):
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope lock has unsafe metadata"
+            )
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_acquired = True
+        except OSError as exc:
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope enrollment is already active"
+            ) from exc
+
+        final_exists = _scope_file_exists(
+            admin_fd, RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT
+        )
+        pending_exists = _scope_file_exists(
+            admin_fd, RELEASE_WORKTREE_CACHE_SCOPE_PENDING
+        )
+        if final_exists and pending_exists:
+            try:
+                final_metadata = os.stat(
+                    RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+                    dir_fd=admin_fd,
+                    follow_symlinks=False,
+                )
+                pending_metadata = os.stat(
+                    RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+                    dir_fd=admin_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise SecretMaterialReleaseBlock(
+                    "release-worktree cache-scope publish state could not be inspected"
+                ) from exc
+            if (
+                (final_metadata.st_dev, final_metadata.st_ino)
+                != (pending_metadata.st_dev, pending_metadata.st_ino)
+                or final_metadata.st_nlink != 2
+                or pending_metadata.st_nlink != 2
+            ):
+                raise SecretMaterialReleaseBlock(
+                    "release-worktree cache-scope publish state is contradictory"
+                )
+            linked_data, _ = _read_linked_scope_file(
+                admin_fd,
+                RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+                expected_owner=registered.owner,
+                expected_links=2,
+            )
+            if linked_data != expected_data:
+                raise SecretMaterialReleaseBlock(
+                    "release-worktree cache-scope linked receipt is stale"
+                )
+            try:
+                os.unlink(RELEASE_WORKTREE_CACHE_SCOPE_PENDING, dir_fd=admin_fd)
+                os.fsync(admin_fd)
+            except OSError as exc:
+                raise SecretMaterialReleaseBlock(
+                    "release-worktree cache-scope linked publish could not recover"
+                ) from exc
+            pending_exists = False
+
+        if final_exists:
+            final_data, _ = _read_scope_file(
+                admin_fd,
+                RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+                expected_owner=registered.owner,
+            )
+            if final_data != expected_data:
+                raise SecretMaterialReleaseBlock(
+                    "release-worktree cache-scope receipt is stale"
+                )
+            return
+
+        if pending_exists:
+            pending_data, pending_identity = _read_scope_file(
+                admin_fd,
+                RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+                expected_owner=registered.owner,
+            )
+        else:
+            _write_scope_pending(admin_fd, expected_data, registered.owner)
+            pending_data, pending_identity = _read_scope_file(
+                admin_fd,
+                RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+                expected_owner=registered.owner,
+            )
+        if pending_data != expected_data:
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope pending receipt is stale"
+            )
+        _fsync_scope_pending(
+            admin_fd,
+            expected_owner=registered.owner,
+            expected_identity=pending_identity,
+            expected_size=len(expected_data),
+        )
+
+        try:
+            os.link(
+                RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+                RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+                src_dir_fd=admin_fd,
+                dst_dir_fd=admin_fd,
+                follow_symlinks=False,
+            )
+            os.fsync(admin_fd)
+            os.unlink(RELEASE_WORKTREE_CACHE_SCOPE_PENDING, dir_fd=admin_fd)
+            os.fsync(admin_fd)
+        except OSError as exc:
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope receipt could not be published"
+            ) from exc
+        final_data, _ = _read_scope_file(
+            admin_fd,
+            RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+            expected_owner=registered.owner,
+        )
+        if final_data != expected_data:
+            raise SecretMaterialReleaseBlock(
+                "published release-worktree cache-scope receipt is stale"
+            )
+    finally:
+        active_exception = sys.exception()
+        cleanup_error: OSError | None = None
+        if lock_fd is not None:
+            if lock_acquired:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError as exc:
+                    cleanup_error = exc
+            try:
+                os.close(lock_fd)
+            except OSError as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        try:
+            os.close(admin_fd)
+        except OSError as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+        if cleanup_error is not None and active_exception is None:
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope enrollment cleanup failed"
+            ) from cleanup_error
+
+
+def _authorize_release_worktree_cache_scope(
+    workspace_root: str | os.PathLike[str],
+    build: str,
+) -> Path:
+    """Explicitly enroll one trusted detached worktree before cache writes."""
+    if RELEASE_WORKTREE_BUILD_RE.fullmatch(build) is None:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree cache-scope build is not five digits"
+        )
+    root = Path(workspace_root)
+    try:
+        if root.is_symlink():
+            raise SecretMaterialReleaseBlock(
+                "workspace root is a symlink during cache-scope enrollment"
+            )
+        canonical_root = root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise SecretMaterialReleaseBlock(
+            "workspace root could not be resolved for cache-scope enrollment"
+        ) from exc
+    registered_targets = _registered_release_worktree_targets(
+        canonical_root, require_scope_receipt=False
+    )
+    registered = registered_targets.get(build)
+    if registered is None:
+        raise SecretMaterialReleaseBlock(
+            "release worktree is not an exact live detached Git registration"
+        )
+    if registered.receipt_data is not None:
+        return registered.admin_path / RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT
+    try:
+        with os.scandir(registered.path / "target") as entries:
+            target_has_entries = next(entries, None) is not None
+    except OSError as exc:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree target could not be checked before enrollment"
+        ) from exc
+    if target_has_entries:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree target must be empty before cache-scope enrollment"
+        )
+    refreshed = _registered_release_worktree_targets(
+        canonical_root, require_scope_receipt=False
+    ).get(build)
+    if refreshed is None:
+        raise SecretMaterialReleaseBlock(
+            "release worktree changed before cache-scope enrollment"
+        )
+    _publish_scope_receipt(refreshed)
+    verified = _registered_release_worktree_targets(canonical_root).get(build)
+    if verified is None or verified.receipt_data is None:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree cache-scope enrollment did not verify"
+        )
+    return verified.admin_path / RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT
+
+
+def authorize_release_worktree_cache_scope(
+    workspace_root: str | os.PathLike[str],
+    build: str,
+) -> Path:
+    """Serialize explicit enrollment within this process and across processes."""
+    with _SCOPE_ENROLLMENT_LOCK:
+        return _authorize_release_worktree_cache_scope(workspace_root, build)
+
+
+def _require_current_release_worktree_identity(
+    build: str,
+    registered_release_targets: dict[str, _RegisteredReleaseWorktreeIdentity],
+) -> _RegisteredReleaseWorktreeIdentity | None:
+    registered = registered_release_targets.get(build)
+    if registered is None:
+        return None
+    worktree = registered.path
+    if worktree.name != build:
+        raise SecretMaterialReleaseBlock(
+            "registered release worktree build identity changed during the scan"
+        )
+    try:
+        if worktree.resolve(strict=True) != worktree:
+            raise SecretMaterialReleaseBlock(
+                "registered release worktree path changed during the scan"
+            )
+    except (OSError, RuntimeError) as exc:
+        raise SecretMaterialReleaseBlock(
+            "registered release worktree path changed during the scan"
+        ) from exc
+    if registered.receipt is None or registered.receipt_data is None:
+        raise SecretMaterialReleaseBlock(
+            "registered release worktree lacks a cache-scope receipt"
+        )
+    try:
+        if registered.admin_path.resolve(strict=True) != registered.admin_path:
+            raise SecretMaterialReleaseBlock(
+                "release-worktree administrative path changed during the scan"
+            )
+    except (OSError, RuntimeError) as exc:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree administrative path changed during the scan"
+        ) from exc
+    admin_fd, current_admin = _open_verified_directory(
+        registered.admin_path,
+        expected_owner=registered.owner,
+        label="release-worktree administrative entry",
+    )
+    try:
+        current_receipt_data, current_receipt = _read_scope_file(
+            admin_fd,
+            RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+            expected_owner=registered.owner,
+        )
+        current_head, _ = _read_git_control_file(
+            admin_fd, "HEAD", expected_owner=registered.owner
+        )
+    finally:
+        os.close(admin_fd)
+    if (
+        current_admin != registered.admin
+        or current_receipt != registered.receipt
+        or current_receipt_data != registered.receipt_data
+        or current_head != registered.head.encode("ascii") + b"\n"
+    ):
+        raise SecretMaterialReleaseBlock(
+            "release-worktree administrative identity changed during the scan"
+        )
+    worktree_fd, current_worktree = _open_verified_directory(
+        worktree,
+        expected_owner=registered.owner,
+        label="registered release worktree",
+    )
+    try:
+        current_marker_data, current_marker = _read_git_control_file(
+            worktree_fd, ".git", expected_owner=registered.owner
+        )
+        target_fd, current_target = _open_verified_directory(
+            "target",
+            expected_owner=registered.owner,
+            label="registered release worktree target",
+            dir_fd=worktree_fd,
+        )
+        os.close(target_fd)
+    finally:
+        os.close(worktree_fd)
+    if (
+        current_worktree != registered.worktree
+        or current_marker != registered.marker
+        or current_marker_data != registered.marker_data
+        or current_target != registered.target
+    ):
+        raise SecretMaterialReleaseBlock(
+            "registered release worktree identity changed during the scan"
+        )
+    return registered
+
+
+def _managed_target_owner(
+    root: Path,
+    path: Path,
+    current_identity: tuple[int, int],
+    registered_release_targets: dict[str, _RegisteredReleaseWorktreeIdentity],
+) -> int | None:
+    """Return the authenticated owner when managed children may be pruned."""
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return None
+    if parts == ("target",):
+        try:
+            return root.stat(follow_symlinks=False).st_uid
+        except OSError as exc:
+            raise SecretMaterialReleaseBlock(
+                "workspace root owner could not be revalidated"
+            ) from exc
+    if not _is_release_worktree_target_parts(parts):
+        return None
+    registered = _require_current_release_worktree_identity(
+        parts[2], registered_release_targets
+    )
+    if registered is None or registered.target != current_identity:
+        return None
+    return registered.owner
+
+
+def _is_pruned_target(
+    root: Path,
+    path: Path,
+    registered_release_targets: dict[str, _RegisteredReleaseWorktreeIdentity],
+) -> bool:
     """Return whether a canonical in-workspace path is outside scan scope."""
     relative = path.relative_to(root)
     if any(part in PRUNE_DIR_NAMES for part in relative.parts):
         return True
-    return (
+    if (
         len(relative.parts) >= 2
         and relative.parts[0] == "target"
         and relative.parts[1] in MANAGED_TARGET_ROOTS
+    ):
+        return True
+    if not (
+        len(relative.parts) >= 5
+        and _is_release_worktree_target_parts(relative.parts[:4])
+        and relative.parts[4] in MANAGED_TARGET_ROOTS
+    ):
+        return False
+    build = relative.parts[2]
+    registered = _require_current_release_worktree_identity(
+        build, registered_release_targets
     )
+    return registered is not None
 
 
 def _require_acyclic_symlink_edges(
@@ -222,8 +1464,9 @@ def scan_workspace(
 ) -> list[DetectedSecretMaterial]:
     """Scan the bounded release workspace by path and name only.
 
-    Never opens or reads a candidate.  Fails closed on an unavailable,
-    symlinked, or unreadable workspace root and on any traversal error.
+    Never opens or reads a candidate. Fails closed on an unavailable,
+    symlinked, or unreadable workspace root, an untrustworthy live Git
+    worktree registry, and any traversal error.
     """
     root = Path(workspace_root)
 
@@ -248,7 +1491,7 @@ def scan_workspace(
             f"workspace root could not be resolved: {root}"
         ) from exc
 
-    target = root / "target"
+    registered_release_targets = _registered_release_worktree_targets(canonical_root)
     detected: list[DetectedSecretMaterial] = []
     stack: list[Path] = [root]
     visited_directories: set[tuple[int, int]] = set()
@@ -281,11 +1524,50 @@ def scan_workspace(
                             f"workspace entry could not be classified: {entry.path}"
                         ) from exc
                     entry_path = Path(entry.path)
-                    if current == target and entry.name in MANAGED_TARGET_ROOTS:
+                    managed_target_owner = _managed_target_owner(
+                        root,
+                        current,
+                        current_identity,
+                        registered_release_targets,
+                    )
+                    if (
+                        managed_target_owner is not None
+                        and entry.name in MANAGED_TARGET_ROOTS
+                    ):
                         if not is_dir or is_symlink:
                             raise SecretMaterialReleaseBlock(
                                 "managed target root is not a trustworthy real "
                                 f"directory: {entry.path}"
+                            )
+                        try:
+                            entry_metadata = entry.stat(follow_symlinks=False)
+                            fresh_metadata = entry_path.stat(follow_symlinks=False)
+                        except OSError as exc:
+                            raise SecretMaterialReleaseBlock(
+                                "managed target root identity could not be verified: "
+                                f"{entry.path}"
+                            ) from exc
+                        if (
+                            not stat.S_ISDIR(entry_metadata.st_mode)
+                            or not stat.S_ISDIR(fresh_metadata.st_mode)
+                            or entry_metadata.st_uid != managed_target_owner
+                            or fresh_metadata.st_uid != managed_target_owner
+                            or (
+                                entry_metadata.st_dev,
+                                entry_metadata.st_ino,
+                                entry_metadata.st_mode,
+                                entry_metadata.st_uid,
+                            )
+                            != (
+                                fresh_metadata.st_dev,
+                                fresh_metadata.st_ino,
+                                fresh_metadata.st_mode,
+                                fresh_metadata.st_uid,
+                            )
+                        ):
+                            raise SecretMaterialReleaseBlock(
+                                "managed target root changed or has an unsafe owner: "
+                                f"{entry.path}"
                             )
                         continue
                     if is_dir:
@@ -324,7 +1606,11 @@ def scan_workspace(
                                     "workspace directory symlink escapes, loops, or "
                                     f"is unavailable: {entry.path}"
                                 ) from exc
-                            if _is_pruned_target(canonical_root, resolved_target):
+                            if _is_pruned_target(
+                                canonical_root,
+                                resolved_target,
+                                registered_release_targets,
+                            ):
                                 raise SecretMaterialReleaseBlock(
                                     "workspace directory symlink reaches an excluded "
                                     f"tree only through an alias: {entry.path}"
@@ -370,7 +1656,11 @@ def scan_workspace(
                                 "workspace file symlink escapes, loops, or is unavailable: "
                                 f"{entry.path}"
                             ) from exc
-                        if _is_pruned_target(canonical_root, resolved_target):
+                        if _is_pruned_target(
+                            canonical_root,
+                            resolved_target,
+                            registered_release_targets,
+                        ):
                             raise SecretMaterialReleaseBlock(
                                 "workspace file symlink reaches an excluded tree only "
                                 f"through an alias: {entry.path}"
@@ -609,7 +1899,8 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Atomically block release when secret material exists in the "
             "reviewable source/candidate/release workspace (path/name scan "
-            "only; never reads file contents)."
+            "only; never reads candidate contents), or explicitly enroll one "
+            "trusted detached release worktree before managed-cache writes."
         )
     )
     parser.add_argument(
@@ -618,9 +1909,24 @@ def main(argv: list[str] | None = None) -> int:
         default=os.getcwd(),
         help="Absolute path to the repository workspace root to scan.",
     )
+    parser.add_argument(
+        "--authorize-release-worktree",
+        metavar="BUILD",
+        help=(
+            "Explicitly publish the main-Git-admin cache-scope receipt for one "
+            "live detached five-digit release worktree."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
+        if args.authorize_release_worktree:
+            receipt = authorize_release_worktree_cache_scope(
+                args.workspace_root,
+                args.authorize_release_worktree,
+            )
+            print(f"release-worktree cache scope enrolled: {receipt}")
+            return 0
         responses = evaluate_workspace(args.workspace_root)
     except SecretMaterialReleaseBlock as exc:
         print(

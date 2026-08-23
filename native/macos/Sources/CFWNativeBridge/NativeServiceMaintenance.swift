@@ -17,7 +17,17 @@ extension NativeBridgeCoordinator {
         authority: [.enabled],
         operation: "Off proof"
       )
-      try await requireMaintenanceOwnersOff(for: before, requireAuthorityProof: true)
+      try await requireCurrentMaintenanceOwnersOff(
+        for: before, requireAuthorityProof: true)
+    case .proveInstalled40019Off:
+      try requirePair(
+        before,
+        proxy: [.enabled],
+        authority: [.enabled],
+        operation: "installed 40019 Off proof"
+      )
+      try await requireInstalled40019MaintenanceOwnersOff(
+        for: before, requireAuthorityProof: true)
     case .unregisterProxyAgent:
       try requirePair(
         before,
@@ -25,12 +35,28 @@ extension NativeBridgeCoordinator {
         authority: [.enabled],
         operation: "ProxyAgent unregister"
       )
-      try await requireMaintenanceOwnersOff(for: before, requireAuthorityProof: true)
+      try await requireCurrentMaintenanceOwnersOff(
+        for: before, requireAuthorityProof: true)
       if before.proxy == .enabled {
         try perform(.unregister, on: .proxyAgent)
       }
       try await waitForServiceProcessAbsence(.proxyAgent)
-      try await requireMaintenanceOwnersOff(
+      try await requireCurrentMaintenanceOwnersOff(
+        for: servicePair(), requireAuthorityProof: true)
+    case .unregisterInstalled40019ProxyAgent:
+      try requirePair(
+        before,
+        proxy: [.enabled, .notRegistered],
+        authority: [.enabled],
+        operation: "installed 40019 ProxyAgent unregister"
+      )
+      try await requireInstalled40019MaintenanceOwnersOff(
+        for: before, requireAuthorityProof: true)
+      if before.proxy == .enabled {
+        try perform(.unregister, on: .proxyAgent)
+      }
+      try await waitForServiceProcessAbsence(.proxyAgent)
+      try await requireInstalled40019MaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: true)
     case .unregisterGlobalAuthority:
       try requirePair(
@@ -45,15 +71,46 @@ extension NativeBridgeCoordinator {
         // durable state Off, and then return it to NotRegistered. This avoids
         // the hidden auto-registration side effect of querying the gated
         // Authority client while preserving a self-contained retry proof.
-        try await requireMaintenanceOwnersOff(
+        try await requireCurrentMaintenanceOwnersOff(
           for: before, requireAuthorityProof: false)
         try perform(.register, on: .globalAuthority)
       }
-      try await requireMaintenanceOwnersOff(
+      try await requireCurrentMaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: true)
       try perform(.unregister, on: .globalAuthority)
       try await waitForServiceProcessAbsence(.globalAuthority)
-      try await requireMaintenanceOwnersOff(
+      try await requireCurrentMaintenanceOwnersOff(
+        for: servicePair(), requireAuthorityProof: false)
+    case .unregisterInstalled40019GlobalAuthority:
+      try requirePair(
+        before,
+        proxy: [.notRegistered],
+        authority: [.enabled],
+        operation: "installed 40019 GlobalAuthority unregister"
+      )
+      try await requireInstalled40019MaintenanceOwnersOff(
+        for: before, requireAuthorityProof: true)
+      try perform(.unregister, on: .globalAuthority)
+      try await waitForServiceProcessAbsence(.globalAuthority)
+      try await requireInstalled40019MaintenanceOwnersOff(
+        for: servicePair(), requireAuthorityProof: false)
+    case .recoverInstalled40019GlobalAuthority:
+      try requirePair(
+        before,
+        proxy: [.notRegistered],
+        authority: [.enabled, .notRegistered],
+        operation: "installed 40019 GlobalAuthority recovery"
+      )
+      if before.authority == .notRegistered {
+        try await requireCurrentMaintenanceOwnersOff(
+          for: before, requireAuthorityProof: false)
+        try perform(.register, on: .globalAuthority)
+      }
+      try await requireCurrentMaintenanceOwnersOff(
+        for: servicePair(), requireAuthorityProof: true)
+      try perform(.unregister, on: .globalAuthority)
+      try await waitForServiceProcessAbsence(.globalAuthority)
+      try await requireCurrentMaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: false)
     case .registerGlobalAuthority:
       try requirePair(
@@ -63,11 +120,11 @@ extension NativeBridgeCoordinator {
         operation: "GlobalAuthority register"
       )
       if before.authority == .notRegistered {
-        try await requireMaintenanceOwnersOff(
+        try await requireCurrentMaintenanceOwnersOff(
           for: before, requireAuthorityProof: false)
         try perform(.register, on: .globalAuthority)
       }
-      try await requireMaintenanceOwnersOff(
+      try await requireCurrentMaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: true)
     case .registerProxyAgent:
       try requirePair(
@@ -76,11 +133,12 @@ extension NativeBridgeCoordinator {
         authority: [.enabled],
         operation: "ProxyAgent register"
       )
-      try await requireMaintenanceOwnersOff(for: before, requireAuthorityProof: true)
+      try await requireCurrentMaintenanceOwnersOff(
+        for: before, requireAuthorityProof: true)
       if before.proxy == .notRegistered {
         try perform(.register, on: .proxyAgent)
       }
-      try await requireMaintenanceOwnersOff(
+      try await requireCurrentMaintenanceOwnersOff(
         for: servicePair(), requireAuthorityProof: true)
     }
     let result = maintenanceResult(action: action, engineStatus: .off)
@@ -91,30 +149,11 @@ extension NativeBridgeCoordinator {
   /// Proves every available owner Off without implicitly registering a service.
   /// A registered endpoint must answer with a stable snapshot. An unregistered
   /// endpoint must instead have a stable, exact process-absence observation.
-  private func requireMaintenanceOwnersOff(
+  private func requireCurrentMaintenanceOwnersOff(
     for pair: (proxy: CurrentAppServiceStatus, authority: CurrentAppServiceStatus),
     requireAuthorityProof: Bool
   ) async throws {
-    do {
-      if try await tunnel.pendingPreferenceMutationConfiguration() != nil {
-        throw NativeBridgeExecutionError.failure(
-          .cleanupUnproven,
-          "A durable Tunnel preference mutation blocks service maintenance."
-        )
-      }
-    } catch {
-      throw Self.map(error)
-    }
-
-    let tunnelSnapshot = try Self.requireObservation(
-      await Self.observe { try await self.tunnel.snapshot() },
-      component: "Packet Tunnel"
-    )
-    guard Self.isStableOff(tunnelSnapshot) else {
-      throw NativeBridgeExecutionError.failure(
-        .busy, "Packet Tunnel is not at the stable Off barrier."
-      )
-    }
+    try await requireMaintenanceTunnelOff()
 
     switch pair.proxy {
     case .enabled:
@@ -156,6 +195,94 @@ extension NativeBridgeCoordinator {
         )
       }
       try requireServiceProcessAbsent(.globalAuthority)
+    }
+    try requireUnchangedServicePair(pair)
+  }
+
+  private func requireInstalled40019MaintenanceOwnersOff(
+    for pair: (proxy: CurrentAppServiceStatus, authority: CurrentAppServiceStatus),
+    requireAuthorityProof: Bool
+  ) async throws {
+    try await requireMaintenanceTunnelOff()
+
+    switch pair.proxy {
+    case .enabled:
+      let proxySnapshot = try Self.requireObservation(
+        await Self.observe {
+          try await self.installed40019Proxy.snapshotInstalled40019ForMigration()
+        },
+        component: "installed 40019 ProxyAgent"
+      )
+      guard Self.isStableOff(proxySnapshot) else {
+        throw NativeBridgeExecutionError.failure(
+          .busy, "Installed 40019 ProxyAgent is not at the stable Off barrier."
+        )
+      }
+    case .notRegistered:
+      try requireServiceProcessAbsent(.proxyAgent)
+    case .requiresApproval, .notFound, .unknown:
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "Installed 40019 ProxyAgent registration cannot prove the Off barrier."
+      )
+    }
+
+    if requireAuthorityProof {
+      guard pair.authority == .enabled else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Installed 40019 GlobalAuthority must remain registered for Off proof."
+        )
+      }
+      do {
+        try await installed40019Authority.proveOff()
+      } catch {
+        throw Self.map(error)
+      }
+    } else {
+      guard pair.authority == .notRegistered else {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "Installed 40019 GlobalAuthority differs from the absence boundary."
+        )
+      }
+      try requireServiceProcessAbsent(.globalAuthority)
+    }
+    try requireUnchangedServicePair(pair)
+  }
+
+  private func requireMaintenanceTunnelOff() async throws {
+    do {
+      if try await tunnel.pendingPreferenceMutationConfiguration() != nil {
+        throw NativeBridgeExecutionError.failure(
+          .cleanupUnproven,
+          "A durable Tunnel preference mutation blocks service maintenance."
+        )
+      }
+    } catch {
+      throw Self.map(error)
+    }
+
+    let tunnelSnapshot = try Self.requireObservation(
+      await Self.observe { try await self.tunnel.snapshot() },
+      component: "Packet Tunnel"
+    )
+    guard Self.isStableOff(tunnelSnapshot) else {
+      throw NativeBridgeExecutionError.failure(
+        .busy, "Packet Tunnel is not at the stable Off barrier."
+      )
+    }
+  }
+
+  private func requireUnchangedServicePair(
+    _ expected: (proxy: CurrentAppServiceStatus, authority: CurrentAppServiceStatus)
+  ) throws {
+    let actual = servicePair()
+    guard actual.proxy == expected.proxy, actual.authority == expected.authority else {
+      throw NativeBridgeExecutionError.failure(
+        .cleanupUnproven,
+        "A current service registration changed during maintenance Off proof."
+      )
     }
   }
 
@@ -272,6 +399,7 @@ extension NativeBridgeCoordinator {
       action: action,
       engineStatus: engineStatus,
       globalAuthority: nativeStatus(pair.authority),
+      offProofProfile: offProofProfile(for: action),
       proxyAgent: nativeStatus(pair.proxy)
     )
   }
@@ -282,25 +410,50 @@ extension NativeBridgeCoordinator {
     let valid: Bool =
       switch result.action {
       case .status:
-        result.engineStatus == nil
+        result.engineStatus == nil && result.offProofProfile == nil
       case .proveOff:
         result.engineStatus == .off
+          && result.offProofProfile == .currentEngineV6AuthorityV11
+          && result.proxyAgent == .enabled
+          && result.globalAuthority == .enabled
+      case .proveInstalled40019Off:
+        result.engineStatus == .off
+          && result.offProofProfile == .installed40019EngineV5AuthorityV10
           && result.proxyAgent == .enabled
           && result.globalAuthority == .enabled
       case .unregisterProxyAgent:
         result.engineStatus == .off
+          && result.offProofProfile == .currentEngineV6AuthorityV11
+          && result.proxyAgent == .notRegistered
+          && result.globalAuthority == .enabled
+      case .unregisterInstalled40019ProxyAgent:
+        result.engineStatus == .off
+          && result.offProofProfile == .installed40019EngineV5AuthorityV10
           && result.proxyAgent == .notRegistered
           && result.globalAuthority == .enabled
       case .unregisterGlobalAuthority:
         result.engineStatus == .off
+          && result.offProofProfile == .currentEngineV6AuthorityV11
+          && result.proxyAgent == .notRegistered
+          && result.globalAuthority == .notRegistered
+      case .unregisterInstalled40019GlobalAuthority:
+        result.engineStatus == .off
+          && result.offProofProfile == .installed40019EngineV5AuthorityV10
+          && result.proxyAgent == .notRegistered
+          && result.globalAuthority == .notRegistered
+      case .recoverInstalled40019GlobalAuthority:
+        result.engineStatus == .off
+          && result.offProofProfile == .installed40019RecoveryCurrentAuthorityV11
           && result.proxyAgent == .notRegistered
           && result.globalAuthority == .notRegistered
       case .registerGlobalAuthority:
         result.engineStatus == .off
+          && result.offProofProfile == .currentEngineV6AuthorityV11
           && result.proxyAgent == .notRegistered
           && result.globalAuthority == .enabled
       case .registerProxyAgent:
         result.engineStatus == .off
+          && result.offProofProfile == .currentEngineV6AuthorityV11
           && result.proxyAgent == .enabled
           && result.globalAuthority == .enabled
       }
@@ -308,6 +461,23 @@ extension NativeBridgeCoordinator {
       throw NativeBridgeExecutionError.failure(
         .cleanupUnproven, "Service maintenance postcondition was not proven."
       )
+    }
+  }
+
+  private func offProofProfile(
+    for action: NativeServiceMaintenanceAction
+  ) -> NativeServiceOffProofProfile? {
+    switch action {
+    case .status:
+      nil
+    case .proveInstalled40019Off, .unregisterInstalled40019ProxyAgent,
+      .unregisterInstalled40019GlobalAuthority:
+      .installed40019EngineV5AuthorityV10
+    case .recoverInstalled40019GlobalAuthority:
+      .installed40019RecoveryCurrentAuthorityV11
+    case .proveOff, .unregisterProxyAgent, .unregisterGlobalAuthority,
+      .registerGlobalAuthority, .registerProxyAgent:
+      .currentEngineV6AuthorityV11
     }
   }
 

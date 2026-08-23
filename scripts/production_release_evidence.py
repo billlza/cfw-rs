@@ -37,7 +37,7 @@ def main() -> None:
         if arguments.command == "prepare-physical-candidate-manifest":
             result = prepare_physical_candidate_manifest(_repository())
             print(
-                "physical 40023 candidate artifact-hash manifest prepared: "
+                "physical 40025 candidate artifact-hash manifest prepared: "
                 f"{result['sha256']}"
             )
         elif arguments.command == "seal":

@@ -90,6 +90,14 @@ class XcodeGenSpecTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeProductGraphError, "header boundary"):
             verify_xcodegen_spec(mutated)
 
+    def test_missing_swift_package_access_identity_fails_closed(self) -> None:
+        mutated = self.project.replace(
+            "SWIFT_PACKAGE_NAME: macos",
+            "SWIFT_PACKAGE_NAME: wrong-package",
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "package-access identity"):
+            verify_xcodegen_spec(mutated)
+
     def test_development_base_entitlement_injection_fails_closed(self) -> None:
         mutated = self.project.replace(
             "CODE_SIGN_INJECT_BASE_ENTITLEMENTS: false",

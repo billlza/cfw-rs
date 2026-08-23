@@ -36,6 +36,10 @@ settings:
     # its generated `ditto` phase performs undeclared directory metadata writes
     # that Xcode's required User Script Sandbox correctly rejects.
     SWIFT_INSTALL_OBJC_HEADER: false
+    # SwiftPM derives the package access identifier from this directory name.
+    # Keep Xcode targets in the same package-access group so package-scoped
+    # cross-target implementation details do not need to become public API.
+    SWIFT_PACKAGE_NAME: macos
     SWIFT_TREAT_WARNINGS_AS_ERRORS: true
     SWIFT_VERSION: "6.0"
 targets:

@@ -1,0 +1,1 @@
+{"schema_version":8,"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","command":{"opcode":"maintain_current_services","payload":{"action":"recover_installed_40019_global_authority"}}}

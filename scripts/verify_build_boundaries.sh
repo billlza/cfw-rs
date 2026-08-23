@@ -79,14 +79,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'from scripts.publication.final_candidat
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/sealed_evidence_manifest.py self-check
 
 # The production composer is deliberately distinct from the generic fixture-
-# capable validators. Its source-bound self-check fixes the 40022 -> 40023
+# capable validators. Its source-bound self-check fixes the 40024 -> 40025
 # sequence and proves that the requirements-derived nine-capability inventory
 # is complete before any physical or publication evidence is considered.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/production_release_evidence.py self-check
 
 for fragment in \
-  'VALIDATION_BUILD = "40022"' \
-  'FINAL_BUILD = "40023"' \
+  'VALIDATION_BUILD = "40024"' \
+  'FINAL_BUILD = "40025"' \
   'prepare_physical_candidate_manifest' \
   'seal_production_evidence' \
   'require_clean=True' \
@@ -107,14 +107,18 @@ for fragment in \
 done
 
 for fragment in \
-  'BUILD_NUMBER: Final = "40022"' \
-  'FINAL_BUILD_NUMBER: Final = "40023"' \
-  'target/release-worktrees/40022' \
-  'target/candidates/0.4.0/validation/40022/signed' \
+  'BUILD_NUMBER: Final = "40024"' \
+  'FINAL_BUILD_NUMBER: Final = "40025"' \
+  'target/release-worktrees/40024' \
+  'target/candidates/0.4.0/validation/40024/signed' \
   'target/candidates/0.4.0/signed' \
   'notarized-release-v1' \
   '_matching_clean_source_identity' \
   'parse_service_maintenance_receipt' \
+  'cfw-current-service-authority-recovery-intent-v1' \
+  'recover-installed-40019-global-authority' \
+  'AUTHORITY_RECOVERY_PENDING_INTENT_NAME' \
+  'service_event_contract' \
   'exclusive_release_maintenance_lock' \
   'require_decommissioned_service_transaction' \
   'candidate_toolchain_override' \
@@ -126,7 +130,11 @@ for fragment in \
 done
 
 for fragment in \
-  'cfw-current-service-transaction-v1' \
+  'cfw-current-service-transaction-v2' \
+  'cfw-current-service-authority-recovery-intent-v1' \
+  'recover-installed-40019-global-authority' \
+  'AUTHORITY_RECOVERY_PENDING_INTENT_NAME' \
+  'prepare_authority_recovery' \
   'unregister-proxy-agent' \
   'unregister-global-authority' \
   'register-global-authority' \

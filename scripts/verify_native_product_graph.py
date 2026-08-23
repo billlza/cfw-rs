@@ -115,6 +115,119 @@ def require_text(text: str, expected: str, label: str) -> None:
         raise NativeProductGraphError(f"{label} is missing {expected!r}")
 
 
+def _pbx_section_objects(pbx: str, section: str) -> dict[str, tuple[str, str]]:
+    begin = f"/* Begin {section} section */"
+    end = f"/* End {section} section */"
+    if pbx.count(begin) != 1 or pbx.count(end) != 1:
+        raise NativeProductGraphError(
+            f"generated Xcode project {section} section is missing or ambiguous"
+        )
+    body = pbx.split(begin, 1)[1].split(end, 1)[0]
+    objects: dict[str, tuple[str, str]] = {}
+    identifier: str | None = None
+    label = ""
+    lines: list[str] = []
+    for line in body.splitlines():
+        if identifier is None:
+            if not line.startswith("\t\t") or line.startswith("\t\t\t"):
+                continue
+            prefix, separator, suffix = line.partition(" /* ")
+            object_label, closing, tail = suffix.partition(" */ = {")
+            candidate = prefix.strip()
+            if (
+                not separator
+                or not closing
+                or tail
+                or len(candidate) != 24
+                or any(character not in "0123456789ABCDEF" for character in candidate)
+            ):
+                continue
+            identifier = candidate
+            label = object_label
+            lines = [line]
+            continue
+        lines.append(line)
+        if line != "\t\t};":
+            continue
+        if identifier in objects:
+            raise NativeProductGraphError(
+                f"generated Xcode project {section} contains duplicate object {identifier}"
+            )
+        objects[identifier] = (label, "\n".join(lines))
+        identifier = None
+        label = ""
+        lines = []
+    if identifier is not None:
+        raise NativeProductGraphError(
+            f"generated Xcode project {section} contains an unterminated object"
+        )
+    return objects
+
+
+def _verify_pbx_project_package_access(pbx: str) -> None:
+    setting = "SWIFT_PACKAGE_NAME = macos;"
+    if pbx.count("SWIFT_PACKAGE_NAME =") != 2 or pbx.count(setting) != 2:
+        raise NativeProductGraphError(
+            "generated Xcode project Swift package-access identity must exist only "
+            "in the Debug and Release project configurations"
+        )
+
+    configuration_lists = _pbx_section_objects(pbx, "XCConfigurationList")
+    project_lists = [
+        block
+        for label, block in configuration_lists.values()
+        if label == 'Build configuration list for PBXProject "CFWNative"'
+    ]
+    if len(project_lists) != 1:
+        raise NativeProductGraphError(
+            "generated Xcode project Swift package-access identity lacks one "
+            "unambiguous PBXProject configuration list"
+        )
+
+    configuration_ids: dict[str, str] = {}
+    for line in project_lists[0].splitlines():
+        stripped = line.strip()
+        for name in ("Debug", "Release"):
+            suffix = f" /* {name} */,"
+            if not stripped.endswith(suffix):
+                continue
+            candidate = stripped[: -len(suffix)]
+            if (
+                len(candidate) != 24
+                or any(character not in "0123456789ABCDEF" for character in candidate)
+                or name in configuration_ids
+            ):
+                raise NativeProductGraphError(
+                    "generated Xcode project Swift package-access identity has an "
+                    "invalid PBXProject configuration reference"
+                )
+            configuration_ids[name] = candidate
+    if set(configuration_ids) != {"Debug", "Release"}:
+        raise NativeProductGraphError(
+            "generated Xcode project Swift package-access identity must bind both "
+            "Debug and Release project configurations"
+        )
+
+    build_configurations = _pbx_section_objects(pbx, "XCBuildConfiguration")
+    for name, identifier in configuration_ids.items():
+        configuration = build_configurations.get(identifier)
+        if configuration is None:
+            raise NativeProductGraphError(
+                "generated Xcode project Swift package-access identity references "
+                f"a missing {name} project configuration"
+            )
+        label, block = configuration
+        if (
+            label != name
+            or block.count(f"\n\t\t\tname = {name};") != 1
+            or block.count(setting) != 1
+        ):
+            raise NativeProductGraphError(
+                "generated Xcode project Swift package-access identity differs in "
+                f"the PBXProject {name} configuration"
+            )
+
+
 # ---------------------------------------------------------------------------
 # XcodeGen spec, SwiftPM manifest, generated project, build script.
 # ---------------------------------------------------------------------------
@@ -130,6 +243,11 @@ def verify_xcodegen_spec(project: str) -> None:
         project,
         "SWIFT_INSTALL_OBJC_HEADER: false",
         "XcodeGen Swift-to-Objective-C header boundary",
+    )
+    require_text(
+        project,
+        "SWIFT_PACKAGE_NAME: macos",
+        "XcodeGen Swift package-access identity",
     )
     require_text(
         project,
@@ -244,6 +362,7 @@ def verify_generated_project(pbx: str) -> None:
         "SWIFT_INSTALL_OBJC_HEADER = NO;",
         "generated Xcode project Swift-to-Objective-C header boundary",
     )
+    _verify_pbx_project_package_access(pbx)
     require_text(
         pbx,
         "CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;",

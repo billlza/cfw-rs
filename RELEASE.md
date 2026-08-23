@@ -479,11 +479,11 @@ scripts/release_publication_gate.sh \
   "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
 ```
 
-### Fixed 40022 to 40023 physical-candidate evidence sequence
+### Fixed 40024 to 40025 physical-candidate evidence sequence
 
 The production evidence composer has no fixture, path, output, build-number, or
 success-override option. Run this sequence exactly once from one clean release
-commit. Build identities through `40021` have already been allocated to older
+commit. Build identities through `40023` have already been allocated to older
 source closures or validation attempts. Build `40020` terminated at its
 fail-closed host-compatibility gate before Apple submission. Build `40021`
 completed Apple notarization, stapling, Gatekeeper, app, manifest, and sealed
@@ -496,12 +496,58 @@ and global-claim roots permanently; do not rename, relabel, resubmit, install,
 or write a validated review for those bytes. The exact immutable identities and
 reason are recorded in
 [`docs/release/validation-build-40021-retirement.md`](docs/release/validation-build-40021-retirement.md).
+Build `40022` later completed Apple notarization, stapling, Gatekeeper, app,
+manifest, and transaction verification under submission
+`498a2113-725d-42c6-8738-0715ef156a26`, but its read-only preflight exposed the
+installed 40019 Proxy schema 5 / Authority v1.0 compatibility gap before any
+service or app mutation. Build 40022 and its reserved, unbuilt final companion
+40023 are both retired; preserve their identities and evidence exactly as
+recorded in
+[`docs/release/validation-build-40022-retirement.md`](docs/release/validation-build-40022-retirement.md).
+
+The 40019 compatibility path is read-only and exact-version only. Each legacy
+unregister action reproves Off before mutation. If a completed Authority
+unregister lost its receipt, the transaction first atomically publishes and
+fsyncs a lineage-bound current-only recovery intent. It then proves both legacy
+processes absent, explicitly registers the current candidate Authority, proves
+v1.1 Off, unregisters it again, and records the distinct
+`installed_40019_recovery_current_authority_v1_1` profile in the append-only
+event. A retry after current registration follows that durable intent instead
+of guessing from service status, and it never labels recovery as a legacy v1.0
+wire proof.
 
 1. from the final clean release commit, create the fixed detached worktree
-   `target/release-worktrees/40022`, materialize its real non-symlink
-   `target/toolchains` and native dependency trees from the same pinned
-   artifacts, then build and notarize validation build `40022` directly in that
-   worktree;
+   `target/release-worktrees/40024` and its otherwise empty direct `target`
+   directory. Before materializing any cache or build output, run this explicit
+   enrollment once from the operator repository root:
+
+   ```bash
+   PYTHONDONTWRITEBYTECODE=1 python3 -I -S -B \
+     scripts/release_secret_material_blocker.py \
+     "$PWD" --authorize-release-worktree 40024
+   ```
+
+   The scanner never mints this receipt. The command atomically publishes a
+   main-Git-admin lifecycle receipt bound to the current admin, worktree,
+   reciprocal marker, detached HEAD, and empty target identities. Enrollment
+   is a quiescent, single-writer step: no other process may add target content
+   until the command returns. Only after that succeeds, materialize the real
+   non-symlink `target/toolchains` and
+   native dependency trees from the same pinned artifacts, then build and
+   notarize validation build `40024` directly in that worktree. The workspace
+   secret gate excludes only that authenticated worktree's direct managed-cache
+   roots; it still scans the worktree source and every `target/candidates`,
+   `target/tmp`, `target/release`, or unexpected tree;
+
+   This is a Level 1 lifecycle/inode capability, not a signature or protection
+   against a malicious same-UID process. It specifically prevents an actor who
+   can plant paths under the workspace or `target` but cannot write the
+   owner-only main `.git` administrative tree from replaying a stale worktree
+   record. If that main Git administrative boundary is writable by the
+   attacker, this exclusion is not trusted and the release remains blocked;
+   the receipt authenticates only the cache path lifecycle and identity, not
+   cache bytes. Toolchain and native-dependency content must still pass their
+   existing `sha256-tree-v2` and manifest gates before use;
 2. while the old CFM is Off and its Host is absent, preserve the inactive
    one-way legacy tombstone and run the fixed maintenance/install sequence:
 
@@ -528,15 +574,15 @@ reason are recorded in
    recommission journal would leave an unproven mixed state. Never use
    `launchctl bootout`, `kill`, `sfltool resetbtm`, Finder, `ditto`, or a DMG
    drag as a substitute;
-3. install and exercise validation build `40022`, preserving its fixed
+3. install and exercise validation build `40024`, preserving its fixed
    CI/toolchain, app-manifest, notarization, service/install, and
    runtime-recovery records;
 4. have a human reviewer approve those exact bytes in
    `target/candidates/0.4.0/review/validated-candidate.json`;
 5. build, sign inside-out, notarize, staple, and Gatekeeper-verify final build
-   `40023` from the same clean source identity;
+   `40025` from the same clean source identity;
 6. repeat the fixed transaction using the independent final-generation
-   journals. This proves and installs only the exact `40022` to `40023`
+   journals. This proves and installs only the exact `40024` to `40025`
    transition without overwriting the validation-generation evidence:
 
    ```bash
@@ -549,8 +595,8 @@ reason are recorded in
 
    Any interruption must resume with the matching script's `--final
    --recover` form. Before collection, reopen both final journals, prove build
-   `40023` is installed, prove GlobalAuthority and ProxyAgent belong to build
-   `40023`, and prove the engine remains globally Off;
+   `40025` is installed, prove GlobalAuthority and ProxyAgent belong to build
+   `40025`, and prove the engine remains globally Off;
 7. freeze the signed/notarized runtime candidate before collection:
 
    ```bash
@@ -674,7 +720,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 40022. No updater key, Apple notarization key, local private key, or older
+build 40025. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable

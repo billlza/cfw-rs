@@ -1,9 +1,9 @@
-import CFWAppleNetwork
 import CFWCredentialTransport
 import CFWCredentialVault
 import Foundation
 import Testing
 
+@testable import CFWAppleNetwork
 @testable import CFWNativeBridge
 @testable import CFWSharedProtocol
 
@@ -95,7 +95,7 @@ private struct StubLease: NativeEngineLeaseInspecting {
   }
 }
 
-private actor StubProxyAgent: ProxyAgentTransporting {
+private actor StubProxyAgent: ProxyAgentTransporting, Installed40019ProxySnapshotting {
   let observed: EngineSnapshot
   init(_ observed: EngineSnapshot) { self.observed = observed }
   func registrationStatus() -> ProxyAgentRegistrationStatus { .notRegistered }
@@ -112,7 +112,89 @@ private actor StubProxyAgent: ProxyAgentTransporting {
   }
   func stop(configuration: ConfigurationDescriptor) throws {}
   func snapshot() -> EngineSnapshot { observed }
+  func snapshotInstalled40019ForMigration() -> EngineSnapshot { observed }
   func validateConfiguration(_ configuration: Data, descriptor: ConfigurationDescriptor) throws {}
+}
+
+private struct StubInstalled40019Authority: Installed40019AuthorityOffProving {
+  let observation: AuthorityOwnershipObservation
+  let onObservation: @Sendable () -> Void
+
+  func proveOff() async throws {
+    onObservation()
+    guard observation.state == .off, observation.lease == nil else {
+      throw AuthorityDomainError(code: .cleanupUnproven)
+    }
+  }
+}
+
+private struct FixedInstalled40019ProxyServiceController: ProxyAgentServiceControlling {
+  func registrationStatus() -> ProxyAgentRegistrationStatus { .enabled }
+  func ensureRegistered() throws {}
+}
+
+private struct Installed40019ProxyRequestIdentity: Decodable {
+  let schemaVersion: UInt16
+  let requestID: RequestID
+  let command: NativeCommand
+}
+
+private struct Installed40019ProxyResponseEnvelope: Encodable {
+  let schemaVersion: UInt16 = 5
+  let requestID: RequestID
+  let result: CommandResult
+}
+
+private func realInstalled40019ProxyTransport(
+  snapshot: EngineSnapshot
+) throws -> AuthenticatedProxyAgentTransport {
+  let uid: uid_t = 501
+  let identity = Installed40019ServiceProcessIdentity(
+    service: .proxyAgent,
+    processIdentifier: 4_242,
+    userIdentifier: uid,
+    startSeconds: 1_700_000_000,
+    startMicroseconds: 123_456,
+    xpcCodeSigningRequirement: Installed40019ServiceProcessObserver.codeSigningRequirement(
+      for: .proxyAgent,
+      invokingUserIdentifier: uid
+    )
+  )
+  let dependencies = Installed40019ProxyTransportDependencies(
+    observeProcess: { identity },
+    makeConnection: { _ in
+      NSXPCConnection(machServiceName: "com.bill.clashformac.tests.never-activated")
+    },
+    prepareConnection: { _, _ in },
+    activateConnection: { _ in },
+    execute: { _, data, reply in
+      do {
+        let request = try JSONDecoder().decode(
+          Installed40019ProxyRequestIdentity.self,
+          from: data
+        )
+        guard request.schemaVersion == 5, request.command.kind == .snapshot else {
+          throw ProtocolValidationError.invalidCommand
+        }
+        let response = Installed40019ProxyResponseEnvelope(
+          requestID: request.requestID,
+          result: try CommandResult(kind: .snapshot, snapshot: snapshot)
+        )
+        reply(try JSONEncoder().encode(response), nil)
+      } catch {
+        reply(nil, error as NSError)
+      }
+    },
+    peerProcessIdentifier: { _ in identity.processIdentifier },
+    peerUserIdentifier: { _ in identity.userIdentifier }
+  )
+  return try AuthenticatedProxyAgentTransport(
+    machServiceName: "com.bill.clashformac.proxy-agent",
+    teamIdentifier: "YKUPL7Z869",
+    proxyAgentBundleIdentifier: "com.bill.clashformac.proxy-agent",
+    serviceController: FixedInstalled40019ProxyServiceController(),
+    installed40019Dependencies: dependencies
+  )
 }
 
 private actor StubTunnelHost: TunnelHostBridging {
@@ -188,7 +270,7 @@ private final class StubServiceMaintainer: CurrentAppServiceMaintaining,
   private let onPerform:
     @Sendable (
       CurrentAppServiceMutation, CurrentAppService
-    ) -> Void
+    ) throws -> Void
   private(set) var registerCalls = 0
   private(set) var unregisterCalls = 0
 
@@ -198,7 +280,7 @@ private final class StubServiceMaintainer: CurrentAppServiceMaintaining,
     onPerform:
       @escaping @Sendable (
         CurrentAppServiceMutation, CurrentAppService
-      ) -> Void = { _, _ in }
+      ) throws -> Void = { _, _ in }
   ) {
     self.proxy = proxy
     self.authority = authority
@@ -213,8 +295,7 @@ private final class StubServiceMaintainer: CurrentAppServiceMaintaining,
     _ mutation: CurrentAppServiceMutation,
     on service: CurrentAppService
   ) throws -> CurrentAppServiceStatus {
-    onPerform(mutation, service)
-    return lock.withLock {
+    let result = lock.withLock {
       switch mutation {
       case .observe:
         return service == .proxyAgent ? proxy : authority
@@ -232,6 +313,29 @@ private final class StubServiceMaintainer: CurrentAppServiceMaintaining,
         return .notRegistered
       }
     }
+    try onPerform(mutation, service)
+    return result
+  }
+}
+
+private enum SimulatedServiceMutationInterruption: Error { case afterRegister }
+
+private final class FailAfterFirstAuthorityRegister: @unchecked Sendable {
+  private let lock = NSLock()
+  private var armed = true
+
+  func check(
+    _ mutation: CurrentAppServiceMutation,
+    _ service: CurrentAppService
+  ) throws {
+    let shouldFail = lock.withLock { () -> Bool in
+      guard armed, mutation == .register, service == .globalAuthority else {
+        return false
+      }
+      armed = false
+      return true
+    }
+    if shouldFail { throw SimulatedServiceMutationInterruption.afterRegister }
   }
 }
 
@@ -351,17 +455,24 @@ private func coordinator(
   observation: AuthorityOwnershipObservation,
   onAuthorityObservation: @escaping @Sendable () -> Void = {},
   pendingPreference: ConfigurationDescriptor? = nil,
+  installed40019Proxy: (any Installed40019ProxySnapshotting)? = nil,
   serviceMaintainer: any CurrentAppServiceMaintaining = StubServiceMaintainer(),
   serviceRuntimeObserver: any CurrentAppServiceRuntimeObserving =
     StubServiceRuntimeObserver(),
   hostOperationLease: any NativeHostOperationLeaseAcquiring =
     AvailableNativeHostOperationLease()
 ) -> NativeBridgeCoordinator {
-  NativeBridgeCoordinator(
-    proxy: StubProxyAgent(proxy),
+  let proxyTransport = StubProxyAgent(proxy)
+  return NativeBridgeCoordinator(
+    proxy: proxyTransport,
+    installed40019Proxy: installed40019Proxy ?? proxyTransport,
     systemProxyPreparer: UnusedSystemProxyStartPreparer(),
     tunnel: StubTunnelHost(tunnel, pendingPreference: pendingPreference),
     engineLease: StubLease(
+      observation: observation,
+      onObservation: onAuthorityObservation
+    ),
+    installed40019Authority: StubInstalled40019Authority(
       observation: observation,
       onObservation: onAuthorityObservation
     ),
@@ -467,6 +578,105 @@ private func maintenanceErrorCode(
   #expect(maintainer.status(of: .globalAuthority) == .enabled)
 }
 
+@Test func installed40019MaintenanceSequenceReprovesLegacyOffBeforeEachMutation()
+  async throws
+{
+  let ledger = EventLedger()
+  let maintainer = StubServiceMaintainer { mutation, service in
+    guard mutation == .unregister else { return }
+    ledger.append(
+      service == .proxyAgent ? "unregister_proxy" : "unregister_authority")
+  }
+  let subject = coordinator(
+    proxy: .off,
+    tunnel: .off,
+    observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+    onAuthorityObservation: { ledger.append("authority_off") },
+    serviceMaintainer: maintainer
+  )
+
+  for action in [
+    NativeServiceMaintenanceAction.proveInstalled40019Off,
+    .unregisterInstalled40019ProxyAgent,
+    .unregisterInstalled40019GlobalAuthority,
+  ] {
+    guard
+      case .serviceMaintenance(let result) = try await subject.execute(
+        .maintainCurrentServices(action))
+    else {
+      Issue.record("installed 40019 maintenance returned the wrong result")
+      return
+    }
+    #expect(result.action == action)
+    #expect(result.engineStatus == .off)
+    #expect(
+      result.offProofProfile == .installed40019EngineV5AuthorityV10)
+  }
+
+  #expect(
+    ledger.snapshot == [
+      "authority_off",
+      "authority_off",
+      "unregister_proxy",
+      "authority_off",
+      "authority_off",
+      "unregister_authority",
+    ])
+  #expect(maintainer.unregisterCalls == 2)
+  #expect(maintainer.registerCalls == 0)
+}
+
+@Test func installed40019NonOffProofNeverReachesServiceMutation() async throws {
+  let descriptor = try descriptor(slot: .systemProxy)
+  let maintainer = StubServiceMaintainer()
+  let subject = coordinator(
+    proxy: .proxyActive(configuration: descriptor, sequence: 1),
+    tunnel: .off,
+    observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+    serviceMaintainer: maintainer
+  )
+
+  #expect(
+    await maintenanceErrorCode(
+      subject, action: .unregisterInstalled40019ProxyAgent) == .busy)
+  #expect(maintainer.unregisterCalls == 0)
+  #expect(maintainer.registerCalls == 0)
+}
+
+@Test func installed40019RealTransportClassifiesActiveAndFailedAsBusy() async throws {
+  let active = EngineSnapshot.proxyActive(
+    configuration: try descriptor(slot: .systemProxy),
+    sequence: 1
+  )
+  let failed = try EngineSnapshot(
+    mode: .off,
+    state: .failed(
+      EngineFailure(code: "test-failure", message: "test failure", isRetryable: false)
+    ),
+    configuration: nil,
+    sequence: 1
+  )
+
+  for snapshot in [active, failed] {
+    let maintainer = StubServiceMaintainer()
+    let subject = coordinator(
+      proxy: .off,
+      tunnel: .off,
+      observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+      installed40019Proxy: try realInstalled40019ProxyTransport(snapshot: snapshot),
+      serviceMaintainer: maintainer
+    )
+    #expect(
+      await maintenanceErrorCode(
+        subject,
+        action: .unregisterInstalled40019ProxyAgent
+      ) == .busy
+    )
+    #expect(maintainer.unregisterCalls == 0)
+    #expect(maintainer.registerCalls == 0)
+  }
+}
+
 @Test func maintenanceStatusIsPureAndDoesNotClaimEngineOff() async throws {
   let maintainer = StubServiceMaintainer(proxy: .notFound, authority: .unknown)
   let coordinator = coordinator(
@@ -533,6 +743,101 @@ private func maintenanceErrorCode(
     serviceMaintainer: maintainer
   )
   #expect(await maintenanceErrorCode(coordinator, action: .proveOff) != nil)
+  #expect(maintainer.registerCalls == 0)
+  #expect(maintainer.unregisterCalls == 0)
+}
+
+@Test func installed40019LostAuthorityReceiptUsesExplicitCurrentRecoveryProfile()
+  async throws
+{
+  let maintainer = StubServiceMaintainer(
+    proxy: .notRegistered,
+    authority: .notRegistered)
+  let subject = coordinator(
+    proxy: .off,
+    tunnel: .off,
+    observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+    serviceMaintainer: maintainer,
+    serviceRuntimeObserver: StubServiceRuntimeObserver()
+  )
+
+  guard
+    case .serviceMaintenance(let result) = try await subject.execute(
+      .maintainCurrentServices(.recoverInstalled40019GlobalAuthority))
+  else {
+    Issue.record("installed 40019 recovery returned the wrong result")
+    return
+  }
+
+  #expect(result.engineStatus == .off)
+  #expect(result.proxyAgent == .notRegistered)
+  #expect(result.globalAuthority == .notRegistered)
+  #expect(
+    result.offProofProfile == .installed40019RecoveryCurrentAuthorityV11)
+  #expect(maintainer.registerCalls == 1)
+  #expect(maintainer.unregisterCalls == 1)
+}
+
+@Test func installed40019RecoveryConvergesAfterCurrentAuthorityRegisterInterruption()
+  async throws
+{
+  let interruption = FailAfterFirstAuthorityRegister()
+  let maintainer = StubServiceMaintainer(
+    proxy: .notRegistered,
+    authority: .notRegistered,
+    onPerform: interruption.check)
+  let first = coordinator(
+    proxy: .off,
+    tunnel: .off,
+    observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+    serviceMaintainer: maintainer,
+    serviceRuntimeObserver: StubServiceRuntimeObserver()
+  )
+
+  await #expect(throws: (any Error).self) {
+    _ = try await first.execute(
+      .maintainCurrentServices(.recoverInstalled40019GlobalAuthority))
+  }
+  #expect(maintainer.status(of: .globalAuthority) == .enabled)
+  #expect(maintainer.registerCalls == 1)
+  #expect(maintainer.unregisterCalls == 0)
+
+  let retry = coordinator(
+    proxy: .off,
+    tunnel: .off,
+    observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+    serviceMaintainer: maintainer,
+    serviceRuntimeObserver: StubServiceRuntimeObserver()
+  )
+  guard
+    case .serviceMaintenance(let result) = try await retry.execute(
+      .maintainCurrentServices(.recoverInstalled40019GlobalAuthority))
+  else {
+    Issue.record("installed 40019 recovery retry returned the wrong result")
+    return
+  }
+  #expect(result.offProofProfile == .installed40019RecoveryCurrentAuthorityV11)
+  #expect(maintainer.status(of: .globalAuthority) == .notRegistered)
+  #expect(maintainer.registerCalls == 1)
+  #expect(maintainer.unregisterCalls == 1)
+}
+
+@Test func installed40019LegacyAuthorityActionDoesNotRepairAnAbsentService() async {
+  let maintainer = StubServiceMaintainer(
+    proxy: .notRegistered,
+    authority: .notRegistered)
+  let subject = coordinator(
+    proxy: .off,
+    tunnel: .off,
+    observation: AuthorityOwnershipObservation(state: .off, lease: nil),
+    serviceMaintainer: maintainer,
+    serviceRuntimeObserver: StubServiceRuntimeObserver()
+  )
+
+  #expect(
+    await maintenanceErrorCode(
+      subject,
+      action: .unregisterInstalled40019GlobalAuthority) == .cleanupUnproven)
   #expect(maintainer.registerCalls == 0)
   #expect(maintainer.unregisterCalls == 0)
 }

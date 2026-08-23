@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 public enum NativeBridgeProtocolConstants {
-  public static let schemaVersion: UInt16 = 7
+  public static let schemaVersion: UInt16 = 8
   public static let maximumRequestBytes = 1_048_576
   public static let maximumResponseBytes = 1_048_576
   public static let maximumFailureMessageBytes = 1_024

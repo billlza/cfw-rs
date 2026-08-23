@@ -22,8 +22,22 @@
   registers GlobalAuthority before ProxyAgent. Append-only recovery events bind
   every step to an unchanged Clash for Windows process and network projection.
   One inode-bound outer lock serializes service and bundle mutations, and
-  independent fixed journals cover both 40019→40022 validation and
-  40022→40023 final installation without overwriting earlier evidence.
+  independent fixed journals cover both 40019→40024 validation and
+  40024→40025 final installation without overwriting earlier evidence. The
+  validation-only compatibility island can prove the already-installed 40019
+  ProxyAgent schema 5 and GlobalAuthority v1.0 Off without weakening the
+  current schema 6 / Authority v1.1 runtime path. A lost unregister receipt is
+  recovered only after an atomically published, fsynced current-only intent;
+  its distinct proof profile records the exact switch from installed-service
+  absence to a current Authority v1.1 Off proof and survives interruption after
+  the current Authority is registered.
+- Authenticate nested release-worktree managed caches through bounded,
+  descriptor-relative Git administrative control files plus an explicit
+  empty-target lifecycle receipt before excluding them from the path/name-only
+  secret scan. Stale Git records cannot be replayed by recreating a target
+  path. Release-worktree source and generated candidate roots remain scanned,
+  aliases into excluded caches fail closed, and candidate or secret bytes are
+  never opened.
 
 ### Network architecture
 

@@ -16,11 +16,10 @@ pub use cfw_singbox_config::{
     MAX_CREDENTIAL_SLOTS, ValidatedSingBoxProfile,
 };
 
-// Version 7 adds the closed, action-level current-service maintenance command.
-// Older native bridges cannot hold the Host operation lease across its Off
-// proof and service mutation, so the complete Host/native graph advances
-// together.
-pub const ENGINE_PROTOCOL_VERSION: u16 = 7;
+// Version 8 adds the closed installed-40019 migration actions and proof
+// profiles. Older native bridges cannot express the exact legacy/current
+// service boundary, so the complete Host/native graph advances together.
+pub const ENGINE_PROTOCOL_VERSION: u16 = 8;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1148,10 +1147,29 @@ pub trait EngineBackend: Send + Sync + 'static {
 pub enum NativeServiceMaintenanceAction {
     Status,
     ProveOff,
+    #[serde(rename = "prove_installed_40019_off")]
+    ProveInstalled40019Off,
     UnregisterProxyAgent,
+    #[serde(rename = "unregister_installed_40019_proxy_agent")]
+    UnregisterInstalled40019ProxyAgent,
     UnregisterGlobalAuthority,
+    #[serde(rename = "unregister_installed_40019_global_authority")]
+    UnregisterInstalled40019GlobalAuthority,
+    #[serde(rename = "recover_installed_40019_global_authority")]
+    RecoverInstalled40019GlobalAuthority,
     RegisterGlobalAuthority,
     RegisterProxyAgent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeServiceOffProofProfile {
+    #[serde(rename = "installed_40019_engine_v5_authority_v1_0")]
+    Installed40019EngineV5AuthorityV1_0,
+    #[serde(rename = "installed_40019_recovery_current_authority_v1_1")]
+    Installed40019RecoveryCurrentAuthorityV1_1,
+    #[serde(rename = "current_engine_v6_authority_v1_1")]
+    CurrentEngineV6AuthorityV1_1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1175,6 +1193,7 @@ pub struct NativeServiceMaintenanceResult {
     pub action: NativeServiceMaintenanceAction,
     pub engine_status: Option<NativeServiceEngineStatus>,
     pub global_authority: NativeServiceRegistrationStatus,
+    pub off_proof_profile: Option<NativeServiceOffProofProfile>,
     pub proxy_agent: NativeServiceRegistrationStatus,
 }
 
@@ -1184,29 +1203,68 @@ impl NativeServiceMaintenanceResult {
         use NativeServiceRegistrationStatus as Status;
 
         match self.action {
-            Action::Status => self.engine_status.is_none(),
+            Action::Status => self.engine_status.is_none() && self.off_proof_profile.is_none(),
             Action::ProveOff => {
                 self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
+                    && self.proxy_agent == Status::Enabled
+                    && self.global_authority == Status::Enabled
+            }
+            Action::ProveInstalled40019Off => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0)
                     && self.proxy_agent == Status::Enabled
                     && self.global_authority == Status::Enabled
             }
             Action::UnregisterProxyAgent => {
                 self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::Enabled
+            }
+            Action::UnregisterInstalled40019ProxyAgent => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0)
                     && self.proxy_agent == Status::NotRegistered
                     && self.global_authority == Status::Enabled
             }
             Action::UnregisterGlobalAuthority => {
                 self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
                     && self.proxy_agent == Status::NotRegistered
                     && self.global_authority == Status::NotRegistered
             }
+            Action::UnregisterInstalled40019GlobalAuthority => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0)
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::NotRegistered
+            }
+            Action::RecoverInstalled40019GlobalAuthority => self.engine_status
+                == Some(NativeServiceEngineStatus::Off)
+                && self.off_proof_profile
+                    == Some(
+                        NativeServiceOffProofProfile::Installed40019RecoveryCurrentAuthorityV1_1,
+                    )
+                && self.proxy_agent == Status::NotRegistered
+                && self.global_authority == Status::NotRegistered,
             Action::RegisterGlobalAuthority => {
                 self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
                     && self.proxy_agent == Status::NotRegistered
                     && self.global_authority == Status::Enabled
             }
             Action::RegisterProxyAgent => {
                 self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
                     && self.proxy_agent == Status::Enabled
                     && self.global_authority == Status::Enabled
             }
@@ -1537,27 +1595,27 @@ mod tests {
     }
 
     #[test]
-    fn native_bridge_v7_contract_fixtures_decode_in_rust() {
+    fn native_bridge_v8_contract_fixtures_decode_in_rust() {
         let query: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v7/query-request.json"
+            "../../../contracts/native-bridge-v8/query-request.json"
         ))
         .expect("query fixture");
         assert_eq!(query.schema_version, ENGINE_PROTOCOL_VERSION);
         assert!(matches!(query.command, NativeBridgeCommand::QueryStatus));
 
         let maintenance: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v7/maintenance-request.json"
+            "../../../contracts/native-bridge-v8/maintenance-request.json"
         ))
         .expect("maintenance request fixture");
         assert!(matches!(
             maintenance.command,
             NativeBridgeCommand::MaintainCurrentServices {
-                action: NativeServiceMaintenanceAction::UnregisterProxyAgent
+                action: NativeServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent
             }
         ));
 
         let maintenance_response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v7/maintenance-response.json"
+            "../../../contracts/native-bridge-v8/maintenance-response.json"
         ))
         .expect("maintenance response fixture");
         let Some(NativeBridgeResult::ServiceMaintenance(maintenance_result)) =
@@ -1568,11 +1626,40 @@ mod tests {
         assert!(maintenance_result.validate());
         assert_eq!(
             maintenance_result.action,
-            NativeServiceMaintenanceAction::UnregisterProxyAgent
+            NativeServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent
+        );
+
+        let recovery: NativeRequestEnvelope = serde_json::from_str(include_str!(
+            "../../../contracts/native-bridge-v8/recovery-maintenance-request.json"
+        ))
+        .expect("recovery maintenance request fixture");
+        assert!(matches!(
+            recovery.command,
+            NativeBridgeCommand::MaintainCurrentServices {
+                action: NativeServiceMaintenanceAction::RecoverInstalled40019GlobalAuthority
+            }
+        ));
+        let recovery_response: NativeResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../contracts/native-bridge-v8/recovery-maintenance-response.json"
+        ))
+        .expect("recovery maintenance response fixture");
+        let Some(NativeBridgeResult::ServiceMaintenance(recovery_result)) =
+            recovery_response.result
+        else {
+            panic!("recovery maintenance fixture response kind");
+        };
+        assert!(recovery_result.validate());
+        assert_eq!(
+            recovery_result.action,
+            NativeServiceMaintenanceAction::RecoverInstalled40019GlobalAuthority
+        );
+        assert_eq!(
+            recovery_result.off_proof_profile,
+            Some(NativeServiceOffProofProfile::Installed40019RecoveryCurrentAuthorityV1_1)
         );
 
         let preview: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v7/gc-preview-request.json"
+            "../../../contracts/native-bridge-v8/gc-preview-request.json"
         ))
         .expect("GC preview fixture");
         let NativeBridgeCommand::PreviewCredentialGarbageCollection { request } = preview.command
@@ -1595,7 +1682,7 @@ mod tests {
         );
 
         let response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v7/gc-preview-response.json"
+            "../../../contracts/native-bridge-v8/gc-preview-response.json"
         ))
         .expect("GC preview response fixture");
         let Some(NativeBridgeResult::CredentialGarbageCollectionPreview(preview)) = response.result
@@ -1609,7 +1696,7 @@ mod tests {
         );
 
         let conflict: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v7/endpoint-conflict-response.json"
+            "../../../contracts/native-bridge-v8/endpoint-conflict-response.json"
         ))
         .expect("endpoint conflict response fixture");
         assert!(conflict.result.is_none());
@@ -1629,40 +1716,104 @@ mod tests {
                 action: Action::Status,
                 engine_status: None,
                 global_authority: Status::Unknown,
+                off_proof_profile: None,
                 proxy_agent: Status::NotFound,
             },
             NativeServiceMaintenanceResult {
                 action: Action::ProveOff,
                 engine_status: Some(NativeServiceEngineStatus::Off),
                 global_authority: Status::Enabled,
+                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
+                proxy_agent: Status::Enabled,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::ProveInstalled40019Off,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                off_proof_profile: Some(
+                    NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0,
+                ),
                 proxy_agent: Status::Enabled,
             },
             NativeServiceMaintenanceResult {
                 action: Action::UnregisterProxyAgent,
                 engine_status: Some(NativeServiceEngineStatus::Off),
                 global_authority: Status::Enabled,
+                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::UnregisterInstalled40019ProxyAgent,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                off_proof_profile: Some(
+                    NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0,
+                ),
                 proxy_agent: Status::NotRegistered,
             },
             NativeServiceMaintenanceResult {
                 action: Action::UnregisterGlobalAuthority,
                 engine_status: Some(NativeServiceEngineStatus::Off),
                 global_authority: Status::NotRegistered,
+                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::UnregisterInstalled40019GlobalAuthority,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::NotRegistered,
+                off_proof_profile: Some(
+                    NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0,
+                ),
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::RecoverInstalled40019GlobalAuthority,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::NotRegistered,
+                off_proof_profile: Some(
+                    NativeServiceOffProofProfile::Installed40019RecoveryCurrentAuthorityV1_1,
+                ),
                 proxy_agent: Status::NotRegistered,
             },
             NativeServiceMaintenanceResult {
                 action: Action::RegisterGlobalAuthority,
                 engine_status: Some(NativeServiceEngineStatus::Off),
                 global_authority: Status::Enabled,
+                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
                 proxy_agent: Status::NotRegistered,
             },
             NativeServiceMaintenanceResult {
                 action: Action::RegisterProxyAgent,
                 engine_status: Some(NativeServiceEngineStatus::Off),
                 global_authority: Status::Enabled,
+                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
                 proxy_agent: Status::Enabled,
             },
         ];
         assert!(valid.iter().all(NativeServiceMaintenanceResult::validate));
+
+        for (action, off_proof_profile) in [
+            (
+                Action::UnregisterInstalled40019GlobalAuthority,
+                NativeServiceOffProofProfile::Installed40019RecoveryCurrentAuthorityV1_1,
+            ),
+            (
+                Action::RecoverInstalled40019GlobalAuthority,
+                NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0,
+            ),
+        ] {
+            assert!(
+                !NativeServiceMaintenanceResult {
+                    action,
+                    engine_status: Some(NativeServiceEngineStatus::Off),
+                    global_authority: Status::NotRegistered,
+                    off_proof_profile: Some(off_proof_profile),
+                    proxy_agent: Status::NotRegistered,
+                }
+                .validate()
+            );
+        }
 
         for mut result in valid {
             result.engine_status = match result.engine_status {
@@ -1759,7 +1910,7 @@ mod tests {
 
     #[test]
     fn native_public_query_json_contract_is_unchanged() {
-        let bytes = include_bytes!("../../../contracts/native-bridge-v7/query-request.json");
+        let bytes = include_bytes!("../../../contracts/native-bridge-v8/query-request.json");
         let request: NativeRequestEnvelope =
             serde_json::from_slice(bytes).expect("public query request fixture");
         assert_eq!(

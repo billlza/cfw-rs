@@ -4,7 +4,7 @@ use crate::legacy::{LaunchArguments, parse_launch_arguments};
 
 pub(crate) const STARTUP_USAGE_EXIT_CODE: i32 = 64;
 pub(crate) const STARTUP_ADMISSION_EXIT_CODE: i32 = 78;
-pub(crate) const SERVICE_MAINTENANCE_FLAG: &str = "--service-maintenance-v1";
+pub(crate) const SERVICE_MAINTENANCE_FLAG: &str = "--service-maintenance-v2";
 
 #[cfg(feature = "physical-release-evidence")]
 pub(crate) const PACKET_EVIDENCE_FLAG: &str = "--physical-packet-evidence-v5";
@@ -12,9 +12,13 @@ pub(crate) const PACKET_EVIDENCE_FLAG: &str = "--physical-packet-evidence-v5";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceMaintenanceAction {
     ProveOff,
+    ProveInstalled40019Off,
     Status,
     UnregisterProxyAgent,
+    UnregisterInstalled40019ProxyAgent,
     UnregisterGlobalAuthority,
+    UnregisterInstalled40019GlobalAuthority,
+    RecoverInstalled40019GlobalAuthority,
     RegisterGlobalAuthority,
     RegisterProxyAgent,
 }
@@ -57,14 +61,24 @@ pub(crate) fn parse_launch_mode(arguments: &[OsString]) -> Result<LaunchMode, St
     {
         let action = match action.to_str() {
             Some("prove-off") => ServiceMaintenanceAction::ProveOff,
+            Some("prove-installed-40019-off") => ServiceMaintenanceAction::ProveInstalled40019Off,
             Some("status") => ServiceMaintenanceAction::Status,
             Some("unregister-proxy-agent") => ServiceMaintenanceAction::UnregisterProxyAgent,
+            Some("unregister-installed-40019-proxy-agent") => {
+                ServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent
+            }
             Some("unregister-global-authority") => {
                 ServiceMaintenanceAction::UnregisterGlobalAuthority
             }
+            Some("unregister-installed-40019-global-authority") => {
+                ServiceMaintenanceAction::UnregisterInstalled40019GlobalAuthority
+            }
+            Some("recover-installed-40019-global-authority") => {
+                ServiceMaintenanceAction::RecoverInstalled40019GlobalAuthority
+            }
             Some("register-global-authority") => ServiceMaintenanceAction::RegisterGlobalAuthority,
             Some("register-proxy-agent") => ServiceMaintenanceAction::RegisterProxyAgent,
-            _ => return Err("service maintenance action is not one fixed v1 operation".into()),
+            _ => return Err("service maintenance action is not one fixed v2 operation".into()),
         };
         return Ok(LaunchMode::ServiceMaintenance(action));
     }
@@ -108,14 +122,30 @@ mod tests {
     fn service_maintenance_modes_are_exact_and_closed() {
         let cases = [
             ("prove-off", ServiceMaintenanceAction::ProveOff),
+            (
+                "prove-installed-40019-off",
+                ServiceMaintenanceAction::ProveInstalled40019Off,
+            ),
             ("status", ServiceMaintenanceAction::Status),
             (
                 "unregister-proxy-agent",
                 ServiceMaintenanceAction::UnregisterProxyAgent,
             ),
             (
+                "unregister-installed-40019-proxy-agent",
+                ServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent,
+            ),
+            (
                 "unregister-global-authority",
                 ServiceMaintenanceAction::UnregisterGlobalAuthority,
+            ),
+            (
+                "unregister-installed-40019-global-authority",
+                ServiceMaintenanceAction::UnregisterInstalled40019GlobalAuthority,
+            ),
+            (
+                "recover-installed-40019-global-authority",
+                ServiceMaintenanceAction::RecoverInstalled40019GlobalAuthority,
             ),
             (
                 "register-global-authority",

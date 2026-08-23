@@ -1,12 +1,13 @@
 use cfw_apple_network::NativeFrameworkBridge;
 use cfw_engine_api::{
-    NativeServiceEngineStatus, NativeServiceMaintenanceAction, NativeServiceRegistrationStatus,
+    NativeServiceEngineStatus, NativeServiceMaintenanceAction, NativeServiceOffProofProfile,
+    NativeServiceRegistrationStatus,
 };
 use serde::Serialize;
 
 use crate::launch::ServiceMaintenanceAction;
 
-const DOCUMENT: &str = "cfw-current-service-maintenance-v1";
+const DOCUMENT: &str = "cfw-current-service-maintenance-v2";
 
 #[derive(Serialize)]
 struct MaintenanceReceipt {
@@ -14,6 +15,7 @@ struct MaintenanceReceipt {
     document: &'static str,
     engine_status: Option<NativeServiceEngineStatus>,
     global_authority: NativeServiceRegistrationStatus,
+    off_proof_profile: Option<NativeServiceOffProofProfile>,
     proxy_agent: NativeServiceRegistrationStatus,
 }
 
@@ -33,6 +35,7 @@ pub(crate) fn run(action: ServiceMaintenanceAction) -> Result<(), String> {
         document: DOCUMENT,
         engine_status: result.engine_status,
         global_authority: result.global_authority,
+        off_proof_profile: result.off_proof_profile,
         proxy_agent: result.proxy_agent,
     };
     println!(
@@ -46,12 +49,24 @@ pub(crate) fn run(action: ServiceMaintenanceAction) -> Result<(), String> {
 const fn native_action(action: ServiceMaintenanceAction) -> NativeServiceMaintenanceAction {
     match action {
         ServiceMaintenanceAction::ProveOff => NativeServiceMaintenanceAction::ProveOff,
+        ServiceMaintenanceAction::ProveInstalled40019Off => {
+            NativeServiceMaintenanceAction::ProveInstalled40019Off
+        }
         ServiceMaintenanceAction::Status => NativeServiceMaintenanceAction::Status,
         ServiceMaintenanceAction::UnregisterProxyAgent => {
             NativeServiceMaintenanceAction::UnregisterProxyAgent
         }
+        ServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent => {
+            NativeServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent
+        }
         ServiceMaintenanceAction::UnregisterGlobalAuthority => {
             NativeServiceMaintenanceAction::UnregisterGlobalAuthority
+        }
+        ServiceMaintenanceAction::UnregisterInstalled40019GlobalAuthority => {
+            NativeServiceMaintenanceAction::UnregisterInstalled40019GlobalAuthority
+        }
+        ServiceMaintenanceAction::RecoverInstalled40019GlobalAuthority => {
+            NativeServiceMaintenanceAction::RecoverInstalled40019GlobalAuthority
         }
         ServiceMaintenanceAction::RegisterGlobalAuthority => {
             NativeServiceMaintenanceAction::RegisterGlobalAuthority
@@ -74,6 +89,10 @@ mod tests {
                 NativeServiceMaintenanceAction::ProveOff,
             ),
             (
+                ServiceMaintenanceAction::ProveInstalled40019Off,
+                NativeServiceMaintenanceAction::ProveInstalled40019Off,
+            ),
+            (
                 ServiceMaintenanceAction::Status,
                 NativeServiceMaintenanceAction::Status,
             ),
@@ -82,8 +101,20 @@ mod tests {
                 NativeServiceMaintenanceAction::UnregisterProxyAgent,
             ),
             (
+                ServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent,
+                NativeServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent,
+            ),
+            (
                 ServiceMaintenanceAction::UnregisterGlobalAuthority,
                 NativeServiceMaintenanceAction::UnregisterGlobalAuthority,
+            ),
+            (
+                ServiceMaintenanceAction::UnregisterInstalled40019GlobalAuthority,
+                NativeServiceMaintenanceAction::UnregisterInstalled40019GlobalAuthority,
+            ),
+            (
+                ServiceMaintenanceAction::RecoverInstalled40019GlobalAuthority,
+                NativeServiceMaintenanceAction::RecoverInstalled40019GlobalAuthority,
             ),
             (
                 ServiceMaintenanceAction::RegisterGlobalAuthority,

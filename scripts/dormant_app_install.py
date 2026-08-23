@@ -84,8 +84,8 @@ else:
 DOCUMENT: Final = "cfw-dormant-app-install-v1"
 SCHEMA_VERSION: Final = 1
 VERSION: Final = "0.4.0"
-BUILD_NUMBER: Final = "40022"
-FINAL_BUILD_NUMBER: Final = "40023"
+BUILD_NUMBER: Final = "40024"
+FINAL_BUILD_NUMBER: Final = "40025"
 TEAM_ID: Final = "YKUPL7Z869"
 TARGET_NAME: Final = "Clash for Mac.app"
 PAYLOAD_NAME: Final = TARGET_NAME
@@ -99,16 +99,16 @@ FINAL_JOURNAL_NAME: Final = ".com.bill.clashformac.final-install.json"
 FINAL_JOURNAL_PENDING_NAME: Final = ".com.bill.clashformac.final-install.pending"
 FINAL_LOCK_NAME: Final = ".com.bill.clashformac.final-install.lock"
 FINAL_STAGING_PREFIX: Final = ".com.bill.clashformac.final-install."
-RELEASE_WORKTREE_RELATIVE: Final = Path("target/release-worktrees/40022")
+RELEASE_WORKTREE_RELATIVE: Final = Path("target/release-worktrees/40024")
 CANDIDATE_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/validation/40022/signed"
+    "target/candidates/0.4.0/validation/40024/signed"
 )
 FINAL_CANDIDATE_RELATIVE: Final = Path("target/candidates/0.4.0/signed")
 VALIDATION_NATIVE_PRODUCTS_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/validation/40022/native-products"
+    "target/candidates/0.4.0/validation/40024/native-products"
 )
 FINAL_NATIVE_PRODUCTS_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/release-build/40023/native-products"
+    "target/candidates/0.4.0/release-build/40025/native-products"
 )
 MAX_JOURNAL_BYTES: Final = 1024 * 1024
 MAX_GUARD_SEGMENTS: Final = 8
@@ -143,20 +143,33 @@ LEGACY_TOMBSTONE_LABEL: Final = "com.bill.clashformac.helper"
 LEGACY_TOMBSTONE_PROGRAM: Final = (
     "Contents/Library/HelperTools/cfw-helper-tombstone"
 )
-SERVICE_MAINTENANCE_FLAG: Final = "--service-maintenance-v1"
-SERVICE_TRANSACTION_DOCUMENT: Final = "cfw-current-service-transaction-v1"
-SERVICE_TRANSACTION_SCHEMA_VERSION: Final = 1
+SERVICE_MAINTENANCE_FLAG: Final = "--service-maintenance-v2"
+SERVICE_MAINTENANCE_DOCUMENT: Final = "cfw-current-service-maintenance-v2"
+SERVICE_TRANSACTION_DOCUMENT: Final = "cfw-current-service-transaction-v2"
+SERVICE_TRANSACTION_SCHEMA_VERSION: Final = 2
+INSTALLED_40019_OFF_PROOF_PROFILE: Final = (
+    "installed_40019_engine_v5_authority_v1_0"
+)
+INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE: Final = (
+    "installed_40019_recovery_current_authority_v1_1"
+)
+INSTALLED_40019_RECOVERY_ACTION: Final = (
+    "recover-installed-40019-global-authority"
+)
+AUTHORITY_RECOVERY_INTENT_DOCUMENT: Final = (
+    "cfw-current-service-authority-recovery-intent-v1"
+)
+AUTHORITY_RECOVERY_INTENT_NAME: Final = "authority-recovery-intent.json"
+AUTHORITY_RECOVERY_PENDING_INTENT_NAME: Final = (
+    ".authority-recovery-intent.json.pending"
+)
+AUTHORITY_RECOVERY_INTENT_SCHEMA_VERSION: Final = 1
+CURRENT_OFF_PROOF_PROFILE: Final = "current_engine_v6_authority_v1_1"
 SERVICE_DECOMMISSION_PHASES: Final = (
     "prepared",
     "proxy_unregistered",
     "authority_unregistered",
     "decommissioned",
-)
-SERVICE_DECOMMISSION_ACTIONS: Final = (
-    "prepare",
-    "unregister-proxy-agent",
-    "unregister-global-authority",
-    "verify-dormant",
 )
 CFM_SYSTEM_EXTENSION_IDENTITY: Final = (
     TEAM_ID,
@@ -198,6 +211,10 @@ class InstallProfile:
     lock_name: str
     staging_prefix: str
     service_transaction_directory: str
+    off_proof_profile: str
+    prove_off_action: str
+    unregister_proxy_action: str
+    unregister_authority_action: str
 
     @property
     def service_pending_directory(self) -> str:
@@ -206,6 +223,115 @@ class InstallProfile:
     @property
     def service_lock_name(self) -> str:
         return f"{self.service_transaction_directory}.lock"
+
+    @property
+    def service_actions(self) -> tuple[str, ...]:
+        return (
+            "prepare",
+            self.unregister_proxy_action,
+            self.unregister_authority_action,
+            "verify-dormant",
+            "register-global-authority",
+            "register-proxy-agent",
+            "prove-off",
+        )
+
+    @property
+    def service_event_proof_profiles(self) -> tuple[str, ...]:
+        return (
+            self.off_proof_profile,
+            self.off_proof_profile,
+            self.off_proof_profile,
+            self.off_proof_profile,
+            CURRENT_OFF_PROOF_PROFILE,
+            CURRENT_OFF_PROOF_PROFILE,
+            CURRENT_OFF_PROOF_PROFILE,
+        )
+
+    @property
+    def service_event_allowed_proof_profiles(self) -> tuple[frozenset[str], ...]:
+        profiles = tuple(
+            frozenset({profile}) for profile in self.service_event_proof_profiles
+        )
+        if self.unregister_authority_action != (
+            "unregister-installed-40019-global-authority"
+        ):
+            return profiles
+        recovery_index = self.service_actions.index(self.unregister_authority_action)
+        mutable = list(profiles)
+        mutable[recovery_index] = frozenset(
+            {
+                INSTALLED_40019_OFF_PROOF_PROFILE,
+                INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE,
+            }
+        )
+        return tuple(mutable)
+
+    @property
+    def service_event_allowed_actions(self) -> tuple[frozenset[str], ...]:
+        actions = tuple(frozenset({action}) for action in self.service_actions)
+        if self.unregister_authority_action != (
+            "unregister-installed-40019-global-authority"
+        ):
+            return actions
+        recovery_index = self.service_actions.index(self.unregister_authority_action)
+        mutable = list(actions)
+        mutable[recovery_index] = frozenset(
+            {
+                self.unregister_authority_action,
+                INSTALLED_40019_RECOVERY_ACTION,
+            }
+        )
+        return tuple(mutable)
+
+    def service_event_contract(
+        self,
+        sequence: int,
+        *,
+        authority_recovery_prepared: bool,
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        if not 0 <= sequence < len(self.service_actions):
+            raise InstallError(
+                "service_journal_invalid",
+                "service event contract sequence is out of range",
+            )
+        actions = self.service_event_allowed_actions[sequence]
+        proof_profiles = self.service_event_allowed_proof_profiles[sequence]
+        if self.unregister_authority_action != (
+            "unregister-installed-40019-global-authority"
+        ):
+            if authority_recovery_prepared:
+                raise InstallError(
+                    "service_journal_invalid",
+                    "Authority recovery intent is forbidden for this generation",
+                )
+            return actions, proof_profiles
+
+        authority_sequence = self.service_actions.index(
+            self.unregister_authority_action
+        )
+        if sequence == authority_sequence:
+            if authority_recovery_prepared:
+                return (
+                    frozenset({INSTALLED_40019_RECOVERY_ACTION}),
+                    frozenset({INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE}),
+                )
+            return (
+                frozenset({self.unregister_authority_action}),
+                frozenset({INSTALLED_40019_OFF_PROOF_PROFILE}),
+            )
+        if sequence == authority_sequence + 1:
+            return (
+                actions,
+                frozenset(
+                    {
+                        INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
+                        if authority_recovery_prepared
+                        else INSTALLED_40019_OFF_PROOF_PROFILE
+                    }
+                ),
+            )
+        return actions, proof_profiles
 
 
 VALIDATION_INSTALL_PROFILE: Final = InstallProfile(
@@ -220,7 +346,11 @@ VALIDATION_INSTALL_PROFILE: Final = InstallProfile(
     journal_pending_name=JOURNAL_PENDING_NAME,
     lock_name=LOCK_NAME,
     staging_prefix=STAGING_PREFIX,
-    service_transaction_directory=".com.bill.clashformac.service-transaction-v1",
+    service_transaction_directory=".com.bill.clashformac.service-transaction-v2",
+    off_proof_profile=INSTALLED_40019_OFF_PROOF_PROFILE,
+    prove_off_action="prove-installed-40019-off",
+    unregister_proxy_action="unregister-installed-40019-proxy-agent",
+    unregister_authority_action="unregister-installed-40019-global-authority",
 )
 FINAL_INSTALL_PROFILE: Final = InstallProfile(
     name="final",
@@ -235,8 +365,12 @@ FINAL_INSTALL_PROFILE: Final = InstallProfile(
     lock_name=FINAL_LOCK_NAME,
     staging_prefix=FINAL_STAGING_PREFIX,
     service_transaction_directory=(
-        ".com.bill.clashformac.final-service-transaction-v1"
+        ".com.bill.clashformac.final-service-transaction-v2"
     ),
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
 )
 INSTALL_PROFILES: Final = {
     VALIDATION_INSTALL_PROFILE.name: VALIDATION_INSTALL_PROFILE,
@@ -553,9 +687,13 @@ def _require_fixed_command(arguments: tuple[str, ...]) -> None:
         and arguments[2]
         in {
             "prove-off",
+            "prove-installed-40019-off",
             "status",
             "unregister-proxy-agent",
+            "unregister-installed-40019-proxy-agent",
             "unregister-global-authority",
+            "unregister-installed-40019-global-authority",
+            INSTALLED_40019_RECOVERY_ACTION,
             "register-global-authority",
             "register-proxy-agent",
         }
@@ -1213,15 +1351,45 @@ def parse_service_maintenance_receipt(
         "document",
         "engine_status",
         "global_authority",
+        "off_proof_profile",
         "proxy_agent",
     }
+    proof_profiles: dict[str, frozenset[str | None]] = {
+        "status": frozenset({None}),
+        "prove-off": frozenset({CURRENT_OFF_PROOF_PROFILE}),
+        "unregister-proxy-agent": frozenset({CURRENT_OFF_PROOF_PROFILE}),
+        "unregister-global-authority": frozenset({CURRENT_OFF_PROOF_PROFILE}),
+        "register-global-authority": frozenset({CURRENT_OFF_PROOF_PROFILE}),
+        "register-proxy-agent": frozenset({CURRENT_OFF_PROOF_PROFILE}),
+        "prove-installed-40019-off": frozenset(
+            {INSTALLED_40019_OFF_PROOF_PROFILE}
+        ),
+        "unregister-installed-40019-proxy-agent": frozenset(
+            {INSTALLED_40019_OFF_PROOF_PROFILE}
+        ),
+        "unregister-installed-40019-global-authority": frozenset(
+            {INSTALLED_40019_OFF_PROOF_PROFILE}
+        ),
+        INSTALLED_40019_RECOVERY_ACTION: frozenset(
+            {INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE}
+        ),
+    }
+    if expected_action not in proof_profiles:
+        raise InstallError(
+            "cfm_service_status_invalid",
+            "service maintenance action is outside the fixed receipt contract",
+        )
     if (
         not isinstance(receipt, dict)
         or set(receipt) != expected_keys
         or receipt.get("action") != expected_action.replace("-", "_")
-        or receipt.get("document") != "cfw-current-service-maintenance-v1"
+        or receipt.get("document") != SERVICE_MAINTENANCE_DOCUMENT
         or receipt.get("engine_status")
         != (None if expected_action == "status" else "off")
+        or all(
+            receipt.get("off_proof_profile") != profile
+            for profile in proof_profiles[expected_action]
+        )
         or receipt.get("global_authority")
         not in {
             "enabled",
@@ -2022,7 +2190,15 @@ def require_decommissioned_service_transaction(
             f"event-{sequence:08d}.json"
             for sequence in range(len(SERVICE_DECOMMISSION_PHASES))
         ]
-        if set(os.listdir(directory_fd)) != {"intent.json", *event_names}:
+        inventory = set(os.listdir(directory_fd))
+        authority_recovery_prepared = AUTHORITY_RECOVERY_INTENT_NAME in inventory
+        expected_inventory = {"intent.json", *event_names}
+        if authority_recovery_prepared:
+            expected_inventory.add(AUTHORITY_RECOVERY_INTENT_NAME)
+        if (
+            AUTHORITY_RECOVERY_PENDING_INTENT_NAME in inventory
+            or inventory != expected_inventory
+        ):
             raise InstallError(
                 "service_decommission_evidence_invalid",
                 "service transaction is not exactly at the decommissioned phase",
@@ -2036,6 +2212,7 @@ def require_decommissioned_service_transaction(
         if set(intent) != {
             "candidate",
             "document",
+            "off_proof_profile",
             "previous",
             "schema_version",
             "transaction_id",
@@ -2057,6 +2234,7 @@ def require_decommissioned_service_transaction(
             or transaction_id != intent["transaction_id"]
             or intent["candidate"] != candidate.document()
             or intent["previous"] != previous.document()
+            or intent["off_proof_profile"] != paths.profile.off_proof_profile
         ):
             raise InstallError(
                 "service_decommission_evidence_invalid",
@@ -2066,8 +2244,10 @@ def require_decommissioned_service_transaction(
         intent_sha256 = _sha256_bytes(intent_data)
         previous_event_sha256: str | None = None
         baseline_guard: dict[str, Any] | None = None
+        validated_events: list[dict[str, Any]] = []
+        event_documents: list[bytes] = []
         for sequence, name in enumerate(event_names):
-            event, event_data = _read_private_service_document(
+            event, event_bytes = _read_private_service_document(
                 directory_fd,
                 name,
                 f"service event {sequence}",
@@ -2078,6 +2258,7 @@ def require_decommissioned_service_transaction(
                 "guard_after",
                 "guard_before",
                 "intent_sha256",
+                "off_proof_profile",
                 "phase",
                 "previous_event_sha256",
                 "schema_version",
@@ -2089,8 +2270,13 @@ def require_decommissioned_service_transaction(
                 )
             before = _validate_guard(event["guard_before"])
             after = _validate_guard(event["guard_after"])
+            allowed_actions, allowed_profiles = paths.profile.service_event_contract(
+                sequence,
+                authority_recovery_prepared=authority_recovery_prepared,
+            )
             if (
-                event["action"] != SERVICE_DECOMMISSION_ACTIONS[sequence]
+                not isinstance(event["action"], str)
+                or event["action"] not in allowed_actions
                 or event["document"] != SERVICE_TRANSACTION_DOCUMENT
                 or event["intent_sha256"] != intent_sha256
                 or event["phase"] != SERVICE_DECOMMISSION_PHASES[sequence]
@@ -2098,6 +2284,9 @@ def require_decommissioned_service_transaction(
                 or event["schema_version"]
                 != SERVICE_TRANSACTION_SCHEMA_VERSION
                 or event["sequence"] != sequence
+                or not isinstance(event["off_proof_profile"], str)
+                or event["off_proof_profile"]
+                not in allowed_profiles
                 or before != after
                 or (baseline_guard is not None and before != baseline_guard)
             ):
@@ -2107,7 +2296,51 @@ def require_decommissioned_service_transaction(
                 )
             if baseline_guard is None:
                 baseline_guard = after
-            previous_event_sha256 = _sha256_bytes(event_data)
+            previous_event_sha256 = _sha256_bytes(event_bytes)
+            validated_events.append(event)
+            event_documents.append(event_bytes)
+
+        if authority_recovery_prepared:
+            recovery, _recovery_data = _read_private_service_document(
+                directory_fd,
+                AUTHORITY_RECOVERY_INTENT_NAME,
+                "Authority recovery intent",
+            )
+            if set(recovery) != {
+                "action",
+                "document",
+                "guard",
+                "intent_sha256",
+                "off_proof_profile",
+                "previous_event_sha256",
+                "schema_version",
+                "sequence",
+                "transaction_id",
+            }:
+                raise InstallError(
+                    "service_decommission_evidence_invalid",
+                    "Authority recovery intent shape is invalid",
+                )
+            recovery_guard = _validate_guard(recovery["guard"])
+            if (
+                len(validated_events) < 3
+                or recovery["action"] != INSTALLED_40019_RECOVERY_ACTION
+                or recovery["document"] != AUTHORITY_RECOVERY_INTENT_DOCUMENT
+                or recovery["intent_sha256"] != intent_sha256
+                or recovery["off_proof_profile"]
+                != INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
+                or recovery["previous_event_sha256"]
+                != _sha256_bytes(event_documents[1])
+                or recovery["schema_version"]
+                != AUTHORITY_RECOVERY_INTENT_SCHEMA_VERSION
+                or recovery["sequence"] != 2
+                or recovery["transaction_id"] != intent["transaction_id"]
+                or recovery_guard != baseline_guard
+            ):
+                raise InstallError(
+                    "service_decommission_evidence_invalid",
+                    "Authority recovery intent lineage is invalid",
+                )
 
         visible_after = os.stat(
             directory_name,
@@ -2895,7 +3128,7 @@ def main() -> None:
     parser.add_argument(
         "--final",
         action="store_true",
-        help="operate on the fixed 40022 to 40023 final generation",
+        help="operate on the fixed 40024 to 40025 final generation",
     )
     arguments = parser.parse_args()
     try:

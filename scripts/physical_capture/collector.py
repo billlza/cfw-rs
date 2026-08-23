@@ -133,11 +133,11 @@ FINAL_CANDIDATE: Final = (
 )
 LANES: Final = {
     "macos15": {
-        "run_id": "run-40023-macos15",
+        "run_id": "run-40025-macos15",
         "session_prefix": "physical-capture/v040/macos15",
     },
     "current-macos": {
-        "run_id": "run-40023-current-macos",
+        "run_id": "run-40025-current-macos",
         "session_prefix": "physical-capture/v040/current-macos",
     },
 }

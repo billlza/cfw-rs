@@ -173,6 +173,27 @@ protocol NativeEngineLeaseInspecting: Sendable {
   func completeStop(_ context: NativeAuthorityStopContext) async throws
 }
 
+protocol Installed40019AuthorityOffProving: Sendable {
+  func proveOff() async throws
+}
+
+private struct UnavailableInstalled40019AuthorityOffProver:
+  Installed40019AuthorityOffProving
+{
+  func proveOff() async throws {
+    throw AuthorityDomainError(code: .globalAuthorityUnavailable)
+  }
+}
+
+private struct UnavailableInstalled40019ProxySnapshotter:
+  Installed40019ProxySnapshotting
+{
+  func snapshotInstalled40019ForMigration() async throws -> EngineSnapshot {
+    throw ProxyAgentHostError.transportUnavailable(
+      "installed-40019 compatibility transport is unavailable")
+  }
+}
+
 extension NativeEngineLeaseInspecting {
   func reconcileOff(
     managedTunnel: RecoveryManagedTunnelStatus
@@ -188,9 +209,11 @@ extension NativeEngineLeaseInspecting {
 
 actor NativeBridgeCoordinator {
   let proxy: any ProxyAgentTransporting
+  let installed40019Proxy: any Installed40019ProxySnapshotting
   let systemProxyPreparer: any SystemProxyStartPreparing
   let tunnel: any TunnelHostBridging
   let engineLease: any NativeEngineLeaseInspecting
+  let installed40019Authority: any Installed40019AuthorityOffProving
   let credentialVault: any NativeCredentialVaulting
   let hostOperationLease: any NativeHostOperationLeaseAcquiring
   let serviceMaintainer: any CurrentAppServiceMaintaining
@@ -205,9 +228,12 @@ actor NativeBridgeCoordinator {
 
   init(
     proxy: any ProxyAgentTransporting,
+    installed40019Proxy: (any Installed40019ProxySnapshotting)? = nil,
     systemProxyPreparer: any SystemProxyStartPreparing,
     tunnel: any TunnelHostBridging,
     engineLease: any NativeEngineLeaseInspecting,
+    installed40019Authority: any Installed40019AuthorityOffProving =
+      UnavailableInstalled40019AuthorityOffProver(),
     credentialVault: any NativeCredentialVaulting,
     hostOperationLease: any NativeHostOperationLeaseAcquiring,
     serviceMaintainer: any CurrentAppServiceMaintaining = CurrentAppServiceMaintainer(),
@@ -215,9 +241,12 @@ actor NativeBridgeCoordinator {
       CurrentAppServiceRuntimeObserver()
   ) {
     self.proxy = proxy
+    self.installed40019Proxy =
+      installed40019Proxy ?? UnavailableInstalled40019ProxySnapshotter()
     self.systemProxyPreparer = systemProxyPreparer
     self.tunnel = tunnel
     self.engineLease = engineLease
+    self.installed40019Authority = installed40019Authority
     self.credentialVault = credentialVault
     self.hostOperationLease = hostOperationLease
     self.serviceMaintainer = serviceMaintainer

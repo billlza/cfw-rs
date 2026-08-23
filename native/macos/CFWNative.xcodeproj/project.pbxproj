@@ -80,6 +80,7 @@
 		475830CF5D7C81A74FAB01A7 /* GlobalAuthorityEngineLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D38301056AC5EB130EFAC2C /* GlobalAuthorityEngineLease.swift */; };
 		47D66A4F268C4362E623AA3C /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2A0E3A08746263766406F990 /* SystemConfiguration.framework */; };
 		47D8833530B85167D3AA4421 /* NativeBridgeCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24B2949D961A95CDC43CD78D /* NativeBridgeCoordinator.swift */; };
+		499B718FA23AACFE683C7CDC /* Installed40019AuthorityOffProofTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CA605C796C85852F7AF6583 /* Installed40019AuthorityOffProofTests.swift */; };
 		4B04ED1016A779264EC64778 /* TicketOnlyTunnelStartTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02A4D48E5387D9535AE9A0FC /* TicketOnlyTunnelStartTests.swift */; };
 		4C9D42835844FAEADAC1EDBF /* EngineProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82685BB8910588272D53CC8C /* EngineProtocol.swift */; };
 		4D05F08409109821B778BD63 /* AuthorityServiceBoundsRecoveryExampleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 798493FD5036CAA1A89CC00D /* AuthorityServiceBoundsRecoveryExampleTests.swift */; };
@@ -90,6 +91,7 @@
 		4E62E118E3CD0A571B5AE8C3 /* libCFWSharedProtocol.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1382358BF9A0F2942FF7CC0 /* libCFWSharedProtocol.a */; };
 		4E8E86078AA5C36AC5295445 /* HostOperationLeaseTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A9E96FE6465933256FE3F0 /* HostOperationLeaseTestSupport.swift */; };
 		50126BEDAEECE79D002EB2DD /* NativeServiceMaintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F5C955BE3888C734719F8C /* NativeServiceMaintenance.swift */; };
+		51617AF3C09BB388D3E907E9 /* Installed40019ServiceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = D52F90CAACC8058CD237E904 /* Installed40019ServiceIdentity.swift */; };
 		51A66433541E7BFA56D8349F /* AuthorityOwnerLiveness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B6B108B86A1999F6F49DC65 /* AuthorityOwnerLiveness.swift */; };
 		527D00F15E863BCF363DE5B9 /* CredentialVaultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62F4C3519285AD3E4A9D9EF7 /* CredentialVaultTests.swift */; };
 		5283C405277D91501B4B1EF6 /* AuthorityClients.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F8D726F2FF199DD6FE4F89A /* AuthorityClients.swift */; };
@@ -245,6 +247,7 @@
 		F8FEF7D4BF2CDEE11149470E /* CFWNativeBridge.h in Headers */ = {isa = PBXBuildFile; fileRef = A599F022076399B5B2D7CFDC /* CFWNativeBridge.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		F948CD3D92BFAE63DD295613 /* GlobalAuthorityReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCE7A0D3AB0837E035620FF1 /* GlobalAuthorityReducer.swift */; };
 		F97D0D94B77C0D3C98CF0ADF /* GlobalAuthorityServiceControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 142BEACC628DDBF81D3767B7 /* GlobalAuthorityServiceControllerTests.swift */; };
+		F9F9255B305DE38462682FAB /* Installed40019AuthorityOffProof.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D9514DF7F517CDCE49C0E21 /* Installed40019AuthorityOffProof.swift */; };
 		FA01AAC837E291166601C01F /* libCFWCredentialTransport.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 328EB7DE4CF3F18880C309E9 /* libCFWCredentialTransport.a */; };
 		FBE529D59774224B2089F234 /* AuthorityV1Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7AAC3C84790FF6D3B9BCE2B /* AuthorityV1Models.swift */; };
 		FBFD168627E6B687B0CF32D1 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C72C5ECB90D52B622ED1FD9E /* PacketTunnelProvider.swift */; };
@@ -813,6 +816,7 @@
 		4A6CEC2D04B4AFAA3A8C03B8 /* SystemProxyPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyPreferencesTests.swift; sourceTree = "<group>"; };
 		4B3D6FE468EE9DC213A01F76 /* AuthorityV1CodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityV1CodecTests.swift; sourceTree = "<group>"; };
 		4C1C7294DC7B1EC48166FB01 /* PacketPump.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketPump.swift; sourceTree = "<group>"; };
+		4D9514DF7F517CDCE49C0E21 /* Installed40019AuthorityOffProof.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Installed40019AuthorityOffProof.swift; sourceTree = "<group>"; };
 		4F8D726F2FF199DD6FE4F89A /* AuthorityClients.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityClients.swift; sourceTree = "<group>"; };
 		537C67153E58D0DDE5BC19A0 /* NativeBridgeProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridgeProtocolTests.swift; sourceTree = "<group>"; };
 		5424424668278B46A475D684 /* GlobalAuthorityDaemon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalAuthorityDaemon.swift; sourceTree = "<group>"; };
@@ -868,6 +872,7 @@
 		9596FFAAFEEE04BFFAD05FA1 /* VersionedJournalQueryContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionedJournalQueryContractTests.swift; sourceTree = "<group>"; };
 		979C7849A2B06E17A7103C64 /* NativeEngineRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEngineRequest.swift; sourceTree = "<group>"; };
 		9C9FB4A929A9CCB2ACF903FF /* libCFWGlobalAuthority.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libCFWGlobalAuthority.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		9CA605C796C85852F7AF6583 /* Installed40019AuthorityOffProofTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Installed40019AuthorityOffProofTests.swift; sourceTree = "<group>"; };
 		9E268B51C6991B1CF2349D47 /* AuthorityRecoveryReconciliationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityRecoveryReconciliationTests.swift; sourceTree = "<group>"; };
 		9EDC3E7FF288ADF389D53B04 /* NetworkSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkSettingsTests.swift; sourceTree = "<group>"; };
 		9F20FCBF1974166C58E956B5 /* RoleScopedConnectionAuthorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoleScopedConnectionAuthorization.swift; sourceTree = "<group>"; };
@@ -917,6 +922,7 @@
 		D2F4658B4AD92ECE5D6CC765 /* CutoverPreflightProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CutoverPreflightProtocol.swift; sourceTree = "<group>"; };
 		D320F573306DC97645B252C1 /* SourceBuiltLibboxServiceRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceBuiltLibboxServiceRuntime.swift; sourceTree = "<group>"; };
 		D3BB877A7812177051275480 /* SystemExtensions.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemExtensions.framework; path = System/Library/Frameworks/SystemExtensions.framework; sourceTree = SDKROOT; };
+		D52F90CAACC8058CD237E904 /* Installed40019ServiceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Installed40019ServiceIdentity.swift; sourceTree = "<group>"; };
 		D5625795A2E9D9E5CB7179D5 /* TunnelPreferenceCompensationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelPreferenceCompensationTests.swift; sourceTree = "<group>"; };
 		DA94A600EF7112AD91C6D809 /* SensitiveDataBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensitiveDataBuffer.swift; sourceTree = "<group>"; };
 		DADB303F05659F2AF32743C0 /* AuthorityXPCWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorityXPCWire.swift; sourceTree = "<group>"; };
@@ -1481,6 +1487,7 @@
 			isa = PBXGroup;
 			children = (
 				6D38301056AC5EB130EFAC2C /* GlobalAuthorityEngineLease.swift */,
+				4D9514DF7F517CDCE49C0E21 /* Installed40019AuthorityOffProof.swift */,
 				CE28F39D69E303AB9E76F5AF /* NativeBridgeABI.swift */,
 				549C6CE42BEA4E142DEC1109 /* NativeBridgeActiveAgreement.swift */,
 				24B2949D961A95CDC43CD78D /* NativeBridgeCoordinator.swift */,
@@ -1510,6 +1517,7 @@
 				C4146744E5941DE00451B081 /* CurrentAppServiceMaintenance.swift */,
 				C0968AA95D99B0ADFCE2E644 /* GlobalAuthorityServiceController.swift */,
 				AAB9983F5D70393D8DB8FEE9 /* HostBridge.swift */,
+				D52F90CAACC8058CD237E904 /* Installed40019ServiceIdentity.swift */,
 				565BFA9F05D311A350FAD7E1 /* ProxyAgentHostClient.swift */,
 				C8D1087E4240395AF8575F55 /* TunnelPreferenceCompensation.swift */,
 				555F6945E61FBF4D8E6CF44A /* TunnelPreferenceMutationJournal.swift */,
@@ -1604,6 +1612,7 @@
 				F31C7A64D276147B0B903D0D /* CutoverPreflightTests.swift */,
 				CB44296713539DAD97D0A561 /* GlobalAuthorityEngineLeaseInspectorTests.swift */,
 				54A9E96FE6465933256FE3F0 /* HostOperationLeaseTestSupport.swift */,
+				9CA605C796C85852F7AF6583 /* Installed40019AuthorityOffProofTests.swift */,
 				116FB108DAEC7A1D5A893E63 /* NativeBridgeABIRequestRegistryTests.swift */,
 				537C67153E58D0DDE5BC19A0 /* NativeBridgeProtocolTests.swift */,
 				7E78C153A23537769A7F8D59 /* NativeBridgeStartCommandIntegrationTests.swift */,
@@ -2285,6 +2294,7 @@
 				D8F9FEF2F102E74E39B225C2 /* CurrentAppServiceMaintenance.swift in Sources */,
 				703A033D0A61E301C5E42F54 /* GlobalAuthorityServiceController.swift in Sources */,
 				31892327BE3A489CF3944978 /* HostBridge.swift in Sources */,
+				51617AF3C09BB388D3E907E9 /* Installed40019ServiceIdentity.swift in Sources */,
 				F2C247BBF6E09E5A31EA663E /* ProxyAgentHostClient.swift in Sources */,
 				D58EB627A7B41A1787FD437F /* TunnelPreferenceCompensation.swift in Sources */,
 				4D2C8F7E4BB4187B906E9504 /* TunnelPreferenceMutationJournal.swift in Sources */,
@@ -2308,6 +2318,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				475830CF5D7C81A74FAB01A7 /* GlobalAuthorityEngineLease.swift in Sources */,
+				F9F9255B305DE38462682FAB /* Installed40019AuthorityOffProof.swift in Sources */,
 				1C6F96E208D25447B809914D /* NativeBridgeABI.swift in Sources */,
 				40EC0C6D4963E9C828D66B38 /* NativeBridgeActiveAgreement.swift in Sources */,
 				47D8833530B85167D3AA4421 /* NativeBridgeCoordinator.swift in Sources */,
@@ -2364,6 +2375,7 @@
 				C03936D210F6FF968A349F09 /* CutoverPreflightTests.swift in Sources */,
 				2228BBD79E09BC5D4CF6384B /* GlobalAuthorityEngineLeaseInspectorTests.swift in Sources */,
 				4E8E86078AA5C36AC5295445 /* HostOperationLeaseTestSupport.swift in Sources */,
+				499B718FA23AACFE683C7CDC /* Installed40019AuthorityOffProofTests.swift in Sources */,
 				B46F8298D75E6A4CDBB4C26A /* NativeBridgeABIRequestRegistryTests.swift in Sources */,
 				930613C9BEEDDD2FFC874965 /* NativeBridgeProtocolTests.swift in Sources */,
 				8402C24BB67D937A1496B15D /* NativeBridgeStartCommandIntegrationTests.swift in Sources */,
@@ -3149,6 +3161,7 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_INSTALL_OBJC_HEADER = NO;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_PACKAGE_NAME = macos;
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
 				SWIFT_VERSION = 6.0;
@@ -3294,6 +3307,7 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_INSTALL_OBJC_HEADER = NO;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_PACKAGE_NAME = macos;
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
 				SWIFT_VERSION = 6.0;

@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import call, patch
 
 from scripts.candidate_artifact_binding import CandidateBindingError
+from scripts import dormant_app_install as install
 
 from scripts.dormant_app_install import (
     AppIdentity,
@@ -56,7 +57,7 @@ from scripts.dormant_app_install import (
 
 
 OLD = AppIdentity("0.4.0", "40019", "a" * 64)
-NEW = AppIdentity("0.4.0", "40022", "b" * 64)
+NEW = AppIdentity("0.4.0", "40024", "b" * 64)
 CANDIDATE = CandidateIdentity(
     app=NEW,
     manifest_sha256="c" * 64,
@@ -71,9 +72,10 @@ def service_status_fixture(
     return json.dumps(
         {
             "action": "status",
-            "document": "cfw-current-service-maintenance-v1",
+            "document": "cfw-current-service-maintenance-v2",
             "engine_status": None,
             "global_authority": authority,
+            "off_proof_profile": None,
             "proxy_agent": proxy,
         },
         sort_keys=True,
@@ -765,8 +767,12 @@ class DormantInstallValidationTests(unittest.TestCase):
         actions = (
             "status",
             "prove-off",
+            "prove-installed-40019-off",
             "unregister-proxy-agent",
+            "unregister-installed-40019-proxy-agent",
             "unregister-global-authority",
+            "unregister-installed-40019-global-authority",
+            install.INSTALLED_40019_RECOVERY_ACTION,
             "register-global-authority",
             "register-proxy-agent",
         )
@@ -774,9 +780,22 @@ class DormantInstallValidationTests(unittest.TestCase):
             expected_engine_status = None if action == "status" else "off"
             receipt = {
                 "action": action.replace("-", "_"),
-                "document": "cfw-current-service-maintenance-v1",
+                "document": "cfw-current-service-maintenance-v2",
                 "engine_status": expected_engine_status,
                 "global_authority": "not_registered",
+                "off_proof_profile": (
+                    None
+                    if action == "status"
+                    else (
+                        install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
+                        if action == install.INSTALLED_40019_RECOVERY_ACTION
+                        else (
+                            install.INSTALLED_40019_OFF_PROOF_PROFILE
+                            if "installed-40019" in action
+                            else install.CURRENT_OFF_PROOF_PROFILE
+                        )
+                    )
+                ),
                 "proxy_agent": "not_registered",
             }
             stdout = json.dumps(
@@ -814,6 +833,122 @@ class DormantInstallValidationTests(unittest.TestCase):
                     "cfm_service_status_invalid",
                 )
 
+                if action != "status":
+                    wrong_profile = {
+                        **receipt,
+                        "off_proof_profile": (
+                            install.CURRENT_OFF_PROOF_PROFILE
+                            if receipt["off_proof_profile"]
+                            == install.INSTALLED_40019_OFF_PROOF_PROFILE
+                            else install.INSTALLED_40019_OFF_PROOF_PROFILE
+                        ),
+                    }
+                    with self.assertRaises(InstallError) as profile_error:
+                        parse_service_maintenance_receipt(
+                            CommandResult(
+                                0,
+                                json.dumps(
+                                    wrong_profile,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                )
+                                + "\n",
+                                "",
+                            ),
+                            action,
+                        )
+                    self.assertEqual(
+                        profile_error.exception.code,
+                        "cfm_service_status_invalid",
+                    )
+
+        recovery_receipt = {
+            "action": "recover_installed_40019_global_authority",
+            "document": "cfw-current-service-maintenance-v2",
+            "engine_status": "off",
+            "global_authority": "not_registered",
+            "off_proof_profile": (
+                install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
+            ),
+            "proxy_agent": "not_registered",
+        }
+        recovery_stdout = json.dumps(
+            recovery_receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+        ) + "\n"
+        self.assertEqual(
+            parse_service_maintenance_receipt(
+                CommandResult(0, recovery_stdout, ""),
+                install.INSTALLED_40019_RECOVERY_ACTION,
+            ),
+            recovery_receipt,
+        )
+        wrong_profile_for_proxy = {
+            **recovery_receipt,
+            "action": "unregister_installed_40019_proxy_agent",
+            "global_authority": "enabled",
+        }
+        wrong_profile_stdout = json.dumps(
+            wrong_profile_for_proxy,
+            sort_keys=True,
+            separators=(",", ":"),
+        ) + "\n"
+        with self.assertRaises(InstallError) as wrong_action:
+            parse_service_maintenance_receipt(
+                CommandResult(0, wrong_profile_stdout, ""),
+                "unregister-installed-40019-proxy-agent",
+            )
+        self.assertEqual(wrong_action.exception.code, "cfm_service_status_invalid")
+
+        malformed_profile = {
+            **recovery_receipt,
+            "off_proof_profile": [
+                install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
+            ],
+        }
+        with self.assertRaises(InstallError) as malformed_error:
+            parse_service_maintenance_receipt(
+                CommandResult(
+                    0,
+                    json.dumps(
+                        malformed_profile,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    "",
+                ),
+                install.INSTALLED_40019_RECOVERY_ACTION,
+            )
+        self.assertEqual(
+            malformed_error.exception.code,
+            "cfm_service_status_invalid",
+        )
+
+        legacy_mislabel = {
+            **recovery_receipt,
+            "action": "unregister_installed_40019_global_authority",
+        }
+        with self.assertRaises(InstallError) as legacy_error:
+            parse_service_maintenance_receipt(
+                CommandResult(
+                    0,
+                    json.dumps(
+                        legacy_mislabel,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    "",
+                ),
+                "unregister-installed-40019-global-authority",
+            )
+        self.assertEqual(
+            legacy_error.exception.code,
+            "cfm_service_status_invalid",
+        )
+
     def test_candidate_admission_rejects_toolchain_environment_override(self) -> None:
         with patch.dict(
             os.environ,
@@ -832,8 +967,8 @@ class DormantInstallValidationTests(unittest.TestCase):
         paths = InstallPaths.production("final")
 
         self.assertEqual(paths.profile, FINAL_INSTALL_PROFILE)
-        self.assertEqual(paths.profile.build_number, "40023")
-        self.assertEqual(paths.profile.previous_build_number, "40022")
+        self.assertEqual(paths.profile.build_number, "40025")
+        self.assertEqual(paths.profile.previous_build_number, "40024")
         self.assertTrue(
             str(paths.candidate_app).endswith(
                 "/target/candidates/0.4.0/signed/Clash for Mac.app"
@@ -847,14 +982,14 @@ class DormantInstallValidationTests(unittest.TestCase):
         document = {
             "candidate": {
                 **CANDIDATE.document(),
-                "build_number": "40023",
+                "build_number": "40025",
             },
             "document": "cfw-dormant-app-install-v1",
             "guards": [
                 {"after": None, "before": guard(), "operation": "install"}
             ],
             "phase": "prepared",
-            "previous": {**OLD.document(), "build_number": "40022"},
+            "previous": {**OLD.document(), "build_number": "40024"},
             "schema_version": 1,
             "sequence": 1,
             "staging_name": f"{FINAL_STAGING_PREFIX}{transaction_id}",
@@ -939,12 +1074,12 @@ class DormantInstallValidationTests(unittest.TestCase):
             ".com.bill.clashformac.dormant-install.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         )
 
-    def test_production_candidate_is_fixed_to_40022_validation_worktree(self) -> None:
+    def test_production_candidate_is_fixed_to_40024_validation_worktree(self) -> None:
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                "/target/release-worktrees/40022/target/candidates/0.4.0/"
-                "validation/40022/signed/Clash for Mac.app"
+                "/target/release-worktrees/40024/target/candidates/0.4.0/"
+                "validation/40024/signed/Clash for Mac.app"
             )
         )
 
@@ -1073,7 +1208,7 @@ class DormantInstallValidationTests(unittest.TestCase):
                     "",
                     'Could not find service "fixture" in domain\n',
                 )
-            if arguments[1:] == ("--service-maintenance-v1", "status"):
+            if arguments[1:] == ("--service-maintenance-v2", "status"):
                 return CommandResult(0, service_status_fixture(), "")
             if arguments == ("/usr/bin/systemextensionsctl", "list"):
                 return CommandResult(
@@ -1106,7 +1241,7 @@ class DormantInstallValidationTests(unittest.TestCase):
                     "",
                     'Could not find service "fixture" in domain\n',
                 )
-            if arguments[1:] == ("--service-maintenance-v1", "status"):
+            if arguments[1:] == ("--service-maintenance-v2", "status"):
                 return CommandResult(0, service_status_fixture(), "")
             if arguments == ("/usr/bin/systemextensionsctl", "list"):
                 return CommandResult(0, "0 extension(s)\n", "")
@@ -1115,7 +1250,7 @@ class DormantInstallValidationTests(unittest.TestCase):
         require_cfm_dormant(guard(), runner)
         self.assertEqual(sum(command[0] == "/bin/launchctl" for command in observed), 3)
         self.assertTrue(
-            any(command[1:] == ("--service-maintenance-v1", "status") for command in observed)
+            any(command[1:] == ("--service-maintenance-v2", "status") for command in observed)
         )
         self.assertIn(("/usr/bin/systemextensionsctl", "list"), observed)
 
@@ -1133,7 +1268,7 @@ class DormantInstallValidationTests(unittest.TestCase):
                     "",
                     'Could not find service "fixture" in domain\n',
                 )
-            if arguments[1:] == ("--service-maintenance-v1", "status"):
+            if arguments[1:] == ("--service-maintenance-v2", "status"):
                 return CommandResult(0, service_status_fixture(), "")
             if arguments == ("/usr/bin/systemextensionsctl", "list"):
                 return CommandResult(
@@ -1162,7 +1297,7 @@ class DormantInstallValidationTests(unittest.TestCase):
                     return CommandResult(
                         113, "", 'Could not find service "fixture" in domain\n'
                     )
-                if arguments[1:] == ("--service-maintenance-v1", "status"):
+                if arguments[1:] == ("--service-maintenance-v2", "status"):
                     return CommandResult(0, service_status, "")
                 if arguments == ("/usr/bin/systemextensionsctl", "list"):
                     return CommandResult(0, "0 extension(s)\n", "")
@@ -1478,20 +1613,24 @@ class BoundedCommandRunnerTests(unittest.TestCase):
         for executable in executables:
             for action in (
                 "prove-off",
+                "prove-installed-40019-off",
                 "status",
                 "unregister-proxy-agent",
+                "unregister-installed-40019-proxy-agent",
                 "unregister-global-authority",
+                "unregister-installed-40019-global-authority",
+                install.INSTALLED_40019_RECOVERY_ACTION,
                 "register-global-authority",
                 "register-proxy-agent",
             ):
                 _require_fixed_command(
-                    (executable, "--service-maintenance-v1", action)
+                    (executable, "--service-maintenance-v2", action)
                 )
         executable = executables[0]
         for command in (
-            (executable, "--service-maintenance-v1", "unknown"),
-            (executable, "--service-maintenance-v1", "status", "extra"),
-            ("/tmp/clash-for-mac", "--service-maintenance-v1", "status"),
+            (executable, "--service-maintenance-v2", "unknown"),
+            (executable, "--service-maintenance-v2", "status", "extra"),
+            ("/tmp/clash-for-mac", "--service-maintenance-v2", "status"),
         ):
             with self.subTest(command=command), self.assertRaises(InstallError):
                 _require_fixed_command(command)

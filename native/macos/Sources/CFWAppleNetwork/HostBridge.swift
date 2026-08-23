@@ -75,10 +75,10 @@ public struct NetworkExtensionOperationFailure: Codable, Equatable, Sendable {
 /// Schedules a callback deadline independently of the caller task. Production
 /// uses a monotonic dispatch deadline; tests inject a manual scheduler so timeout
 /// and late-callback races do not depend on wall-clock sleeps.
-struct CallbackDeadlineScheduler: Sendable {
+package struct CallbackDeadlineScheduler: Sendable {
   private let scheduleBody: @Sendable (@escaping @Sendable () -> Void) -> Void
 
-  init(timeout: Duration) {
+  package init(timeout: Duration) {
     precondition(timeout > .zero, "Callback deadline must be positive")
     let components = timeout.components
     let seconds =
@@ -154,7 +154,7 @@ typealias ProviderResponseGate = CallbackContinuationGate<Data>
 /// Adapts a single callback operation to async/await with an internal deadline.
 /// The deadline is owned by the Swift boundary rather than a Rust waiter, so a
 /// missing framework callback cannot retain a coordinator mutation forever.
-func awaitBoundedCallback<Value: Sendable>(
+package func awaitBoundedCallback<Value: Sendable>(
   deadline: CallbackDeadlineScheduler,
   timeoutError: any Error,
   operation:

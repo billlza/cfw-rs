@@ -89,11 +89,13 @@ private enum ProductionNativeBridge {
     )
     return NativeBridgeCoordinator(
       proxy: proxy,
+      installed40019Proxy: proxy,
       systemProxyPreparer: AuthorityBackedSystemProxyStartPreparer(
         authority: authorityClient,
         enrollment: enrollment),
       tunnel: tunnel,
       engineLease: GlobalAuthorityEngineLeaseInspector(authority: authorityClient),
+      installed40019Authority: Installed40019AuthorityOffProver(),
       credentialVault: credentialVault,
       hostOperationLease: KernelNativeHostOperationLeaseAcquirer()
     )

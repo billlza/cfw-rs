@@ -69,7 +69,7 @@ REQUIRED_RELEASE_CI_GATE_SHA256 = (
     "faaf58cc890c2f61e374760a2431279e573d75ed483be085dcc99fcc2462b53e"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "0549d8b826e0cd30c22e0ad8ea9cda31c258048e0d0fa9fcb87870c02e4ef206"
+    "299712e99a20f9b738696ea38773c62ca4b7e3cf43a4a4a43004fdde24225f22"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -928,6 +928,42 @@ def _check_release_tool_test_dependencies(jobs: dict[str, str]) -> list[str]:
     return findings
 
 
+def _check_tauri_frontend_dependencies(jobs: dict[str, str]) -> list[str]:
+    """Require the real frontend build before Rust expands Tauri context macros."""
+
+    findings: list[str] = []
+    rust_consumers = ("rust-clippy", "rust-test")
+    ui_producers = ("bootstrap-node-toolchain", "prepare-ui-dependencies", "ui-build")
+    for name, body in jobs.items():
+        gates = _release_gate_commands(body)
+        active_consumers = tuple(gate for gate in rust_consumers if gate in gates)
+        if not active_consumers:
+            continue
+        for producer in ui_producers:
+            if gates.count(producer) != 1:
+                findings.append(
+                    f"job {name!r} must run exactly one {producer!r} before Tauri Rust gates"
+                )
+        if any(gates.count(producer) != 1 for producer in ui_producers):
+            continue
+        producer_indexes = {producer: gates.index(producer) for producer in ui_producers}
+        if not (
+            producer_indexes["bootstrap-node-toolchain"]
+            < producer_indexes["prepare-ui-dependencies"]
+            < producer_indexes["ui-build"]
+        ):
+            findings.append(
+                f"job {name!r} must bootstrap Node and prepare UI dependencies "
+                "before ui-build"
+            )
+        for consumer in active_consumers:
+            if producer_indexes["ui-build"] > gates.index(consumer):
+                findings.append(
+                    f"job {name!r} must run ui-build before {consumer}"
+                )
+    return findings
+
+
 def _single(values: set[str], label: str, expected: str, findings: list[str]) -> None:
     if not values:
         findings.append(f"workflow never references the {label} toolchain")
@@ -996,6 +1032,7 @@ def audit_workflow(workflow_path: Path, pins_path: Path) -> None:
     findings += _check_source_checkout(jobs)
     findings += _check_job_bounds(jobs)
     findings += _check_release_tool_test_dependencies(jobs)
+    findings += _check_tauri_frontend_dependencies(jobs)
     findings += _check_single_toolchain(active_text, pins)
 
     if findings:

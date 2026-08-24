@@ -790,6 +790,7 @@
       "def _check_apple_driver_boundary(",
       "def _check_yaml_mapping_policy(",
       "def _check_source_checkout(",
+      "def _check_tauri_frontend_dependencies(",
       "forbidden_keys = {\"if\", \"continue-on-error\", \"working-directory\", \"BASH_ENV\"}",
       "REQUIRED_RUN_SHELL = \"/bin/bash --noprofile --norc -p -e -o pipefail {0}\"",
       "REQUIRED_CHECKOUT_ACTION = (",
@@ -1967,7 +1968,7 @@
     ]
   },
   "artifactSourceSha256": {
-    ".github/workflows/ci.yml": "0549d8b826e0cd30c22e0ad8ea9cda31c258048e0d0fa9fcb87870c02e4ef206",
+    ".github/workflows/ci.yml": "299712e99a20f9b738696ea38773c62ca4b7e3cf43a4a4a43004fdde24225f22",
     "CHANGELOG.md": "990d7998db5fc3f20d4cf655c0745be28295afb493f9b1abf39922b04f54c7cf",
     "RELEASE.md": "1e58b399606c1e19ae33c93eb8fbe8ef3234b47ca440aeb2e498c0f8aaa8fb93",
     "crates/cfw-release-verifier/src/main.rs": "0ab2b47e53ccbbff56524c4f90259e915d0bf5a8aa55a0785fa677b34ecff4a1",
@@ -2065,7 +2066,7 @@
     "scripts/verify_build_boundaries.sh": "78a86b0dd87c61155d737e9e6eafb98be693572221ed9482d3443f55d297a781",
     "scripts/verify_candidate_bundle.py": "1a464052a04e9722cb2339a477cc7c96d5f218e6a6e6d6dceaf3ab6976f2be73",
     "scripts/verify_candidate_bundle.sh": "d9634239574fd9f6ab8554b09b315bcaf72ba54a44be1c3db48908bc4a069454",
-    "scripts/verify_ci_no_masking.py": "b5a042c999d379482ea92cd71cbe8fed37d0ae82962f0ca17e264cd28c5075ce",
+    "scripts/verify_ci_no_masking.py": "32c2ff634b935ec3974ba3730501a0943d513e105a28ac60b123519af2d8f21b",
     "scripts/verify_physical_capture_readiness.py": "4641c4f6cd6cc6086b7e2d3327146a99436dc2731182bd1e0dfcb59db1577c90",
     "scripts/verify_pinned_source_contract.py": "e5521232297924b4538ffe48c928f3d2e2072fc6ba8f046aa79b5c4ab8dfe291",
     "scripts/verify_release_app.sh": "8d05487ead17e1f96d9f3727a638bd8e8147fcd4c6193a14699edab34cb4bd4b",

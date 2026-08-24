@@ -63,10 +63,6 @@ jobs:
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-fmt
       - name: Verify locked Rust dependency graph
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-metadata
-      - name: Lint Rust workspace
-        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-clippy
-      - name: Test Rust workspace
-        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test
       - name: Bootstrap verified Node toolchain
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-node-toolchain
       - name: Prepare and seal UI dependencies
@@ -77,6 +73,10 @@ jobs:
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' ui-build
       - name: Audit UI dependencies
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' ui-audit
+      - name: Lint Rust workspace
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-clippy
+      - name: Test Rust workspace
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test
       - name: Test release tooling
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' release-tool-tests
       - name: Validate shell scripts

@@ -71,10 +71,6 @@ jobs:
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-fmt
       - name: Metadata
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-metadata
-      - name: Lint
-        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-clippy
-      - name: Rust test
-        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test
       - name: Rust target audit
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-target-audit
       - name: Cargo deny
@@ -95,6 +91,10 @@ jobs:
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' ui-build
       - name: Audit UI
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' ui-audit
+      - name: Lint
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-clippy
+      - name: Rust test
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test
       - name: Build boundaries
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' build-script-boundary
       - name: CI policy
@@ -252,6 +252,74 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workflow_path, pins_path = self._write(Path(tmp), GOOD_WORKFLOW)
             audit_workflow(workflow_path, pins_path)
+
+    def test_tauri_rust_gates_require_the_built_frontend_in_the_same_job(self) -> None:
+        ui_build = (
+            "      - name: Build UI\n"
+            "        run: ./scripts/run_release_ci_gate.sh "
+            "--validation-python-executable "
+            "'${{ steps.validation-python.outputs.python-path }}' ui-build\n"
+        )
+        rust_clippy = (
+            "      - name: Lint\n"
+            "        run: ./scripts/run_release_ci_gate.sh "
+            "--validation-python-executable "
+            "'${{ steps.validation-python.outputs.python-path }}' rust-clippy\n"
+        )
+        rust_test = (
+            "      - name: Rust test\n"
+            "        run: ./scripts/run_release_ci_gate.sh "
+            "--validation-python-executable "
+            "'${{ steps.validation-python.outputs.python-path }}' rust-test\n"
+        )
+        variants = (
+            GOOD_WORKFLOW.replace(ui_build, "", 1),
+            GOOD_WORKFLOW.replace(ui_build, "", 1).replace(
+                rust_clippy, rust_clippy + ui_build, 1
+            ),
+            GOOD_WORKFLOW.replace(ui_build, "", 1).replace(
+                rust_test, rust_test + ui_build, 1
+            ),
+        )
+        for workflow in variants:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as tmp:
+                workflow_path, pins_path = self._write(Path(tmp), workflow)
+                with self.assertRaisesRegex(CiPolicyError, "ui-build"):
+                    audit_workflow(workflow_path, pins_path)
+
+    def test_ui_build_requires_node_and_prepared_dependencies_first(self) -> None:
+        ui_build = (
+            "      - name: Build UI\n"
+            "        run: ./scripts/run_release_ci_gate.sh "
+            "--validation-python-executable "
+            "'${{ steps.validation-python.outputs.python-path }}' ui-build\n"
+        )
+        producers = (
+            (
+                "      - name: Bootstrap Node\n"
+                "        run: ./scripts/run_release_ci_gate.sh "
+                "--validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' "
+                "bootstrap-node-toolchain\n"
+            ),
+            (
+                "      - name: Prepare UI\n"
+                "        run: ./scripts/run_release_ci_gate.sh "
+                "--validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' "
+                "prepare-ui-dependencies\n"
+            ),
+        )
+        for producer in producers:
+            workflow = GOOD_WORKFLOW.replace(producer, "", 1).replace(
+                ui_build, ui_build + producer, 1
+            )
+            with self.subTest(producer=producer), tempfile.TemporaryDirectory() as tmp:
+                workflow_path, pins_path = self._write(Path(tmp), workflow)
+                with self.assertRaisesRegex(
+                    CiPolicyError, "bootstrap Node and prepare UI dependencies"
+                ):
+                    audit_workflow(workflow_path, pins_path)
 
     def test_checkout_is_required_exactly_once_per_job(self) -> None:
         variants = (

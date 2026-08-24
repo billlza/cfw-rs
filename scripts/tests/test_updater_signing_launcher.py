@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from typing import Callable, NoReturn, Sequence
@@ -15,6 +18,7 @@ from scripts import updater_signing_launcher as launcher
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+INTEGRATION_CHILD = REPO_ROOT / "scripts/tests/updater_signing_integration_child.py"
 
 
 class _ExecveCaptured(RuntimeError):
@@ -75,6 +79,199 @@ class SigningHome:
             f'    "acct"<blob>="{launcher.KEYCHAIN_ACCOUNT}"\n'
             f'    "svce"<blob>="{launcher.KEYCHAIN_SERVICE}"\n'
         ).encode("utf-8")
+
+
+def _verified_signer_entry(signer: Path) -> bytes:
+    entry = {
+        "mode": "0755",
+        "path": "bin/cargo-tauri",
+        "sha256": hashlib.sha256(signer.read_bytes()).hexdigest(),
+        "size": signer.stat().st_size,
+        "type": "file",
+    }
+    return (
+        json.dumps(
+            entry,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        + b"\n"
+    )
+
+
+class PinnedSignerVerificationTests(unittest.TestCase):
+    def _repository(self, root: Path, signer_bytes: bytes) -> tuple[Path, Path, Path]:
+        repository = root / "repository"
+        scripts = repository / "scripts"
+        scripts.mkdir(parents=True)
+        verifier = scripts / "verify_artifact_manifest.py"
+        verifier.write_text("# fixture verifier\n", encoding="utf-8")
+        verifier.chmod(0o755)
+
+        toolchain = (
+            repository
+            / "target/toolchains"
+            / f"tauri-cli-{launcher.TAURI_CLI_VERSION}"
+        )
+        (toolchain / "bin").mkdir(parents=True)
+        signer = toolchain / "bin/cargo-tauri"
+        signer.write_bytes(signer_bytes)
+        signer.chmod(0o755)
+        manifest = toolchain.with_name(f"{toolchain.name}.manifest.json")
+        manifest.write_text("{}\n", encoding="utf-8")
+        manifest.chmod(0o600)
+        return repository, signer, manifest
+
+    def _verify(
+        self,
+        repository: Path,
+        *,
+        stdout: bytes,
+        stderr: bytes = b"",
+        returncode: int = 0,
+        mutation: Callable[[], None] | None = None,
+    ) -> tuple[launcher.HeldSigner, list[str], dict[str, object]]:
+        captured_arguments: list[str] = []
+        captured_kwargs: dict[str, object] = {}
+
+        def runner(arguments: list[str], **kwargs: object):
+            captured_arguments.extend(arguments)
+            captured_kwargs.update(kwargs)
+            if mutation is not None:
+                mutation()
+            return _completed(
+                arguments,
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        with mock.patch.object(
+            launcher,
+            "_canonical_python_runtime",
+            return_value=Path("/usr/bin/python3"),
+        ):
+            held = launcher.verify_pinned_tauri_signer(
+                repository,
+                runner=runner,
+            )
+        return held, captured_arguments, captured_kwargs
+
+    def test_distinct_source_bound_signer_outputs_are_accepted(self) -> None:
+        for signer_bytes in (b"first-host-signer", b"second-host-signer-output"):
+            with self.subTest(signer_bytes=signer_bytes):
+                with tempfile.TemporaryDirectory() as temporary:
+                    repository, signer, _manifest = self._repository(
+                        Path(temporary), signer_bytes
+                    )
+                    held, arguments, kwargs = self._verify(
+                        repository,
+                        stdout=_verified_signer_entry(signer),
+                    )
+                    try:
+                        self.assertEqual(held.path, signer)
+                        self.assertEqual(
+                            hashlib.sha256(os.pread(held.descriptor, 1024, 0)).hexdigest(),
+                            hashlib.sha256(signer_bytes).hexdigest(),
+                        )
+                    finally:
+                        os.close(held.descriptor)
+                    self.assertIn("--exact-metadata", arguments)
+                    self.assertEqual(
+                        arguments[arguments.index("--print-entry") + 1],
+                        "bin/cargo-tauri",
+                    )
+                    for metadata in launcher.PINNED_TAURI_METADATA:
+                        self.assertIn(metadata, arguments)
+                    self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+                    self.assertEqual(
+                        kwargs["timeout"], launcher.TOOLCHAIN_VERIFY_TIMEOUT_SECONDS
+                    )
+
+    def test_manifest_entry_mismatch_and_noncanonical_output_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, signer, _manifest = self._repository(
+                Path(temporary), b"fixture-signer"
+            )
+            valid = json.loads(_verified_signer_entry(signer))
+            cases: dict[str, bytes] = {}
+            for name, field, value in (
+                ("mode", "mode", "0700"),
+                ("type", "type", "directory"),
+                ("size", "size", valid["size"] + 1),
+                ("zero-size", "size", 0),
+                ("boolean-size", "size", True),
+                ("oversized", "size", launcher.MAX_TAURI_SIGNER_BYTES + 1),
+                ("digest", "sha256", "0" * 64),
+                ("uppercase-digest", "sha256", "A" * 64),
+                ("short-digest", "sha256", "0" * 63),
+                ("path", "path", "bin/other"),
+            ):
+                entry = dict(valid)
+                entry[field] = value
+                cases[name] = (
+                    json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()
+                    + b"\n"
+                )
+            cases.update(
+                {
+                    "missing-newline": _verified_signer_entry(signer).rstrip(b"\n"),
+                    "extra-field": _verified_signer_entry(signer).replace(
+                        b"{", b'{"extra":true,', 1
+                    ),
+                    "duplicate-field": _verified_signer_entry(signer).replace(
+                        b"{", b'{"mode":"0755",', 1
+                    ),
+                    "empty": b"",
+                    "invalid-utf8": b"\xff\n",
+                    "oversized-output": b"{" + b"x" * 1024,
+                    "not-json": b"not-json\n",
+                }
+            )
+            for name, output in cases.items():
+                with self.subTest(name=name):
+                    with self.assertRaises(launcher.UpdaterSigningLaunchError):
+                        self._verify(repository, stdout=output)
+
+            for name, returncode, stderr in (
+                ("nonzero", 1, b""),
+                ("stderr", 0, b"unexpected diagnostic\n"),
+            ):
+                with self.subTest(name=name):
+                    with self.assertRaises(launcher.UpdaterSigningLaunchError):
+                        self._verify(
+                            repository,
+                            stdout=_verified_signer_entry(signer),
+                            returncode=returncode,
+                            stderr=stderr,
+                        )
+
+    def test_manifest_and_signer_drift_are_rejected(self) -> None:
+        for mutation_name in ("manifest", "signer", "verifier"):
+            with self.subTest(mutation=mutation_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    repository, signer, manifest = self._repository(
+                        Path(temporary), b"fixture-signer"
+                    )
+                    verifier = repository / "scripts/verify_artifact_manifest.py"
+                    output = _verified_signer_entry(signer)
+
+                    def mutate() -> None:
+                        if mutation_name == "manifest":
+                            manifest.write_text('{"changed":true}\n', encoding="utf-8")
+                            manifest.chmod(0o600)
+                        else:
+                            target = signer if mutation_name == "signer" else verifier
+                            target.write_bytes(b"changed-source")
+                            target.chmod(0o755)
+
+                    with self.assertRaises(launcher.UpdaterSigningLaunchError):
+                        self._verify(
+                            repository,
+                            stdout=output,
+                            mutation=mutate,
+                        )
 
 
 class AclPolicyTests(unittest.TestCase):
@@ -470,7 +667,6 @@ class LauncherBoundaryTests(unittest.TestCase):
 
 
 class PinnedSignerIntegrationTests(unittest.TestCase):
-    @unittest.skipUnless(hasattr(os, "fork"), "requires fork/exec")
     def test_real_pinned_signer_reads_temporary_key_from_dev_fd(self) -> None:
         signer = (
             REPO_ROOT
@@ -505,31 +701,68 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
                 env={"PATH": launcher.SYSTEM_PATH},
             )
             self.assertEqual(generated.returncode, 0, generated.stderr.decode())
+            self.assertEqual(generated.stderr, b"")
+            self.assertLessEqual(len(generated.stdout), 4096)
+            self.assertNotIn(password_text.encode("utf-8"), generated.stdout)
             fixture.key.chmod(0o600)
             before = hashlib.sha256(fixture.key.read_bytes()).hexdigest()
-
-            child = os.fork()
-            if child == 0:
-                try:
-                    output = os.open(os.devnull, os.O_WRONLY)
-                    os.dup2(output, 1)
-                    os.dup2(output, 2)
-                    os.close(output)
-                    for name in launcher.SECRET_ENVIRONMENT_NAMES:
-                        os.environ.pop(name, None)
-                    launcher.launch_updater_signer(
-                        fixture.archive,
-                        home=fixture.home,
-                        password_reader=lambda: bytearray(password_text, "utf-8"),
-                        acl_checker=lambda _path: None,
-                    )
-                except BaseException:
-                    os._exit(120)
-            _, status = os.waitpid(child, 0)
-            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            password = password_text.encode("utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-B",
+                    "-W",
+                    "error",
+                    str(INTEGRATION_CHILD),
+                    str(fixture.home),
+                    str(fixture.archive),
+                ],
+                input=password,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=launcher.TOOLCHAIN_VERIFY_TIMEOUT_SECONDS + 60,
+                env={
+                    "PATH": launcher.SYSTEM_PATH,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "LC_ALL": "C",
+                    "LANG": "C",
+                },
+            )
+            self.assertNotIn(password, completed.stdout)
+            self.assertNotIn(password, completed.stderr)
+            self.assertLessEqual(len(completed.stdout), 4096)
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stderr.decode("utf-8", errors="replace"),
+            )
+            self.assertEqual(completed.stderr, b"")
             signature = fixture.archive.with_name(f"{fixture.archive.name}.sig")
             self.assertTrue(signature.is_file())
             self.assertGreater(signature.stat().st_size, 0)
+            output_lines = completed.stdout.decode(
+                "utf-8", errors="strict"
+            ).splitlines()
+            self.assertEqual(len(output_lines), 8)
+            self.assertEqual(output_lines[0], "")
+            self.assertEqual(
+                output_lines[1],
+                "Your file was signed successfully, You can find the signature here:",
+            )
+            self.assertEqual(output_lines[2], str(signature.resolve(strict=True)))
+            self.assertEqual(output_lines[3:5], ["", "Public signature:"])
+            decoded_signature = base64.b64decode(
+                output_lines[5].encode("ascii"), validate=True
+            )
+            self.assertGreater(len(decoded_signature), 0)
+            self.assertEqual(output_lines[6], "")
+            self.assertEqual(
+                output_lines[7],
+                "Make sure to include this into the signature field of your update server.",
+            )
             self.assertEqual(hashlib.sha256(fixture.key.read_bytes()).hexdigest(), before)
 
 

@@ -95,6 +95,35 @@ class TreeManifestV2Tests(unittest.TestCase):
     def test_unchanged_tree_is_accepted(self) -> None:
         self.assertEqual(self.verify().returncode, 0)
 
+    def test_verified_entry_is_printed_as_canonical_json(self) -> None:
+        completed = self.verify("--print-entry", "bin/tool")
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        entry = next(
+            item for item in manifest["entries"] if item["path"] == "bin/tool"
+        )
+        expected = (
+            json.dumps(
+                entry,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+            + b"\n"
+        )
+        self.assertEqual(completed.stdout, expected)
+        self.assertEqual(completed.stderr, b"")
+
+    def test_print_entry_rejects_missing_noncanonical_and_competing_output(self) -> None:
+        for arguments in (
+            ("--print-entry", "bin/missing"),
+            ("--print-entry", "bin/../bin/tool"),
+            ("--print-entry", "/bin/tool"),
+            ("--print-entry", "bin/tool", "--print-tree-sha256"),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertNotEqual(self.verify(*arguments).returncode, 0)
+
     def test_content_addition_deletion_and_mode_changes_are_rejected(self) -> None:
         mutations = (
             (
@@ -759,16 +788,22 @@ class ReleaseConsumerContractTests(unittest.TestCase):
 
         # Updater signing deliberately delegates custody to one fixed launcher.
         # Keep the cross-file contract stronger than the former shell-local
-        # path check: the launcher must pin the same version as the release
-        # toolchain, verify both the complete tree and signer bytes, and derive
-        # the executable only from the repository-owned toolchain root.
+        # path check: the launcher must pin the same version and exact source
+        # metadata as the release toolchain, bind the held signer bytes to the
+        # unique verified manifest entry, and derive the executable only from
+        # the repository-owned toolchain root. Compiled Mach-O output identity
+        # is generated evidence, not a cross-host source constant.
         self.assertNotIn("cargo tauri", launcher)
         self.assertIn(
             f'TAURI_CLI_VERSION = "{_pins()["TAURI_CLI_VERSION"]}"', launcher
         )
-        self.assertIn("PINNED_TAURI_TREE_SHA256", launcher)
-        self.assertIn("PINNED_TAURI_SIGNER_SHA256", launcher)
-        self.assertIn("PINNED_TAURI_SIGNER_BYTES", launcher)
+        self.assertNotIn("PINNED_TAURI_TREE_SHA256", launcher)
+        self.assertNotIn("PINNED_TAURI_SIGNER_SHA256", launcher)
+        self.assertNotIn("PINNED_TAURI_SIGNER_BYTES", launcher)
+        self.assertIn("MAX_TAURI_SIGNER_BYTES", launcher)
+        self.assertIn('"--print-entry"', launcher)
+        self.assertIn('"bin/cargo-tauri"', launcher)
+        self.assertIn("_parse_verified_signer_entry", launcher)
         self.assertIn(
             f'"cacheContractSha256={_pins()["TAURI_CARGO_CACHE_CONTRACT_SHA256"]}"',
             launcher,

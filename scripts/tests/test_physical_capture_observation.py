@@ -31,6 +31,23 @@ def _digest(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
+def _wait_for_path(path: Path, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.01)
+    return path.exists()
+
+
+_PHASE_CLOSURE_PROBE = (
+    'if [ "$1" = ready ]; then printf "READY\\n"; '
+    'elif [ "$1" != silent ]; then exit 64; fi; '
+    '( /usr/bin/touch "$2"; while [ ! -e "$3" ]; do /bin/sleep 0.01; done; '
+    '/usr/bin/touch "$4" ) & /bin/sleep 30'
+)
+
+
 class PhysicalCaptureObservationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -355,33 +372,40 @@ class PhysicalCaptureObservationTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "phase-closed-descendant"
-            script = Path(directory) / "phase-closed-probe"
-            script.write_text(
-                "#!/bin/sh\n"
-                f"(sleep 0.5; /usr/bin/touch '{marker}') &\n"
-                "sleep 30\n",
-                encoding="utf-8",
-            )
-            script.chmod(0o700)
+            descendant_started = Path(directory) / "phase-closed-descendant-started"
+            release_descendant = Path(directory) / "release-phase-closed-descendant"
             command = capture.start_command(
                 CommandSpec(
                     role="phase-closed-probe",
-                    argv=(str(script),),
+                    argv=(
+                        "/bin/sh",
+                        "-c",
+                        _PHASE_CLOSURE_PROBE,
+                        "phase-closed-probe",
+                        "silent",
+                        str(descendant_started),
+                        str(release_descendant),
+                        str(marker),
+                    ),
                     cwd=Path(directory),
-                    timeout_seconds=2,
+                    timeout_seconds=5,
                     stdout_limit=64,
                 )
             )
-            session.complete_observations(
-                {retained.subject: retained.descriptor.as_dict()}
-            )
-            with self.assertRaises(PhysicalCaptureSessionError) as raised:
-                command.wait_for_readiness(
-                    ReadinessSpec("stdout", b"READY\n", 1.0)
+            try:
+                self.assertTrue(_wait_for_path(descendant_started, 2.0))
+                session.complete_observations(
+                    {retained.subject: retained.descriptor.as_dict()}
                 )
-            self.assertEqual(raised.exception.code, "observation_phase_closed")
-            time.sleep(0.7)
-            self.assertFalse(marker.exists())
+                with self.assertRaises(PhysicalCaptureSessionError) as raised:
+                    command.wait_for_readiness(
+                        ReadinessSpec("stdout", b"READY\n", 1.0)
+                    )
+                self.assertEqual(raised.exception.code, "observation_phase_closed")
+                release_descendant.touch()
+                self.assertFalse(_wait_for_path(marker, 0.5))
+            finally:
+                command.cancel()
         session.close()
 
     def test_phase_closure_between_readiness_and_finish_cancels_command(self) -> None:
@@ -395,33 +419,39 @@ class PhysicalCaptureObservationTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "finish-after-phase-close"
-            script = Path(directory) / "ready-then-wait"
-            script.write_text(
-                "#!/bin/sh\n"
-                "printf 'READY\\n'\n"
-                f"(sleep 0.5; /usr/bin/touch '{marker}') &\n"
-                "sleep 30\n",
-                encoding="utf-8",
-            )
-            script.chmod(0o700)
+            descendant_started = Path(directory) / "finish-descendant-started"
+            release_descendant = Path(directory) / "release-finish-descendant"
             command = capture.start_command(
                 CommandSpec(
                     role="phase-ready-probe",
-                    argv=(str(script),),
+                    argv=(
+                        "/bin/sh",
+                        "-c",
+                        _PHASE_CLOSURE_PROBE,
+                        "phase-ready-probe",
+                        "ready",
+                        str(descendant_started),
+                        str(release_descendant),
+                        str(marker),
+                    ),
                     cwd=Path(directory),
                     timeout_seconds=5,
                     stdout_limit=64,
                 )
             )
-            command.wait_for_readiness(ReadinessSpec("stdout", b"READY\n", 5.0))
-            session.complete_observations(
-                {retained.subject: retained.descriptor.as_dict()}
-            )
-            with self.assertRaises(PhysicalCaptureSessionError) as raised:
-                command.finish()
-            self.assertEqual(raised.exception.code, "observation_phase_closed")
-            time.sleep(0.7)
-            self.assertFalse(marker.exists())
+            try:
+                command.wait_for_readiness(ReadinessSpec("stdout", b"READY\n", 5.0))
+                self.assertTrue(_wait_for_path(descendant_started, 2.0))
+                session.complete_observations(
+                    {retained.subject: retained.descriptor.as_dict()}
+                )
+                with self.assertRaises(PhysicalCaptureSessionError) as raised:
+                    command.finish()
+                self.assertEqual(raised.exception.code, "observation_phase_closed")
+                release_descendant.touch()
+                self.assertFalse(_wait_for_path(marker, 0.5))
+            finally:
+                command.cancel()
         session.close()
 
     def test_deleted_observation_prevents_restart(self) -> None:

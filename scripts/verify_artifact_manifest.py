@@ -240,10 +240,16 @@ def main() -> None:
     )
     parser.add_argument("--algorithm", choices=("sha256-tree-v1", "sha256-tree-v2"))
     parser.add_argument("--exact-metadata", action="store_true")
-    parser.add_argument(
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument(
         "--print-tree-sha256",
         action="store_true",
         help="print only the digest from this successfully verified manifest read",
+    )
+    output.add_argument(
+        "--print-entry",
+        metavar="RELATIVE_PATH",
+        help="print one verified manifest entry as canonical JSON",
     )
     arguments = parser.parse_args()
 
@@ -287,7 +293,32 @@ def main() -> None:
             raise SystemExit(f"error: artifact metadata {key} mismatch")
     if _read_manifest(arguments.manifest) != manifest_text:
         raise SystemExit("error: artifact manifest changed during verification")
-    if arguments.print_tree_sha256:
+    if arguments.print_entry is not None:
+        relative = PurePosixPath(arguments.print_entry)
+        if (
+            relative.is_absolute()
+            or relative.as_posix() != arguments.print_entry
+            or relative.name in ("", ".", "..")
+            or any(part in ("", ".", "..") for part in relative.parts)
+        ):
+            raise SystemExit("error: requested artifact entry path is not canonical")
+        entries = expected["entries"]
+        matches = [
+            entry
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("path") == arguments.print_entry
+        ]
+        if len(matches) != 1:
+            raise SystemExit("error: requested artifact entry is not unique")
+        print(
+            json.dumps(
+                matches[0],
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    elif arguments.print_tree_sha256:
         print(expected["sha256"])
     else:
         print(f"artifact manifest verified: {arguments.artifact}")

@@ -66,7 +66,10 @@ Network access is isolated to explicit preparation:
    each complete registry-tree measurement. The exact normalization contract
    is SHA-256 pinned into both the build-input policy and final toolchain
    manifest; unknown metadata, registry drift, or any fetch/install warning
-   fails closed.
+   fails closed. The compiled Mach-O tree digest is generated evidence for that
+   build and is carried into downstream candidate manifests; it is not treated
+   as a cross-host source constant because this workflow does not claim a
+   byte-reproducible Tauri CLI build across machines.
 3. `scripts/prepare_ui_dependencies.sh` runs the pinned npm `ci` operation in
    an isolated networked workspace, copies regular files into a self-contained
    tree without npm cache hard links, and seals the complete `node_modules`
@@ -362,13 +365,16 @@ password in the explicit login Keychain under service
 must run through the executable `#!/bin/bash -p` entrypoint, never `bash
 scripts/make_updater_manifest.sh`. The entrypoint resets caller process state
 and invokes a source-pinned Python launcher with only the archive path. That
-launcher verifies the exact Tauri tree/signer before reading the one fixed
-non-synchronizable Keychain item, holds and revalidates the key/archive/signer
-identities, accepts only strengthening deny-only macOS ACLs, and rejects any ACL
-grant. Every custody Python process disables site customization; the launcher
-itself receives an empty, explicit environment. Release signing injects the
-password only into the final pinned signer
-environment. Shell tracing, startup hooks, caller secret variables,
+launcher verifies the complete Tauri tree against its installer-produced
+manifest and exact source/toolchain metadata before reading the one fixed
+non-synchronizable Keychain item. It binds the fixed signer path, mode, size,
+and SHA-256 to the unique verified manifest entry through a held descriptor,
+then holds and revalidates the key/archive/signer identities. It accepts only
+strengthening deny-only macOS ACLs and rejects any ACL grant. Every custody
+Python process disables site customization; the launcher itself receives a
+minimal, scrubbed explicit environment. Release signing injects the password
+only into the final source-bound signer environment. Shell tracing, startup
+hooks, caller secret variables,
 repository-local key material, symlinks, hard links, ACL grants, path drift,
 and ambient signer-process inheritance are release failures.
 

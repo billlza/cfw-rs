@@ -4,10 +4,11 @@
 The production CLI accepts only the archive to sign. Repository, signer, key,
 login Keychain, service, and account paths are source constants. Before the
 password is requested, the complete Tauri toolchain tree is verified against
-its exact source-pinned digest and the signer executable is independently
-hashed through a held ``O_NOFOLLOW`` descriptor. The password never enters
-this launcher's argv or caller-provided environment; Tauri receives it only in
-the final direct ``execve`` environment because its signer API requires that
+its installer-produced manifest and exact source/toolchain metadata. The
+signer executable is then bound byte-for-byte to its unique verified manifest
+entry through a held ``O_NOFOLLOW`` descriptor. The password never enters this
+launcher's argv or caller-provided environment; Tauri receives it only in the
+final direct ``execve`` environment because its signer API requires that
 variable.
 """
 
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import pwd
@@ -29,13 +31,6 @@ from typing import Callable, NoReturn, Sequence
 
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 TAURI_CLI_VERSION = "2.11.4"
-PINNED_TAURI_TREE_SHA256 = (
-    "b824fd2404eaeb3b678761e0be8b1d593c3c53bef9450eb60d0a6c1668fdb2fd"
-)
-PINNED_TAURI_SIGNER_SHA256 = (
-    "65e8b47fd326646e62cd501191a690232da4071826f7286c1eec0c2ce4b6027f"
-)
-PINNED_TAURI_SIGNER_BYTES = 37_901_376
 PINNED_TAURI_METADATA = (
     "artifactKind=pinned-tauri-cli-v2",
     "cacheContractSha256=25d57ed8856960d32edf748f59ff13b65eebc23b7b426e4b662afc5e1aa7521b",
@@ -63,6 +58,7 @@ PRIVATE_KEY_RELATIVE = Path(
 LOGIN_KEYCHAIN_RELATIVE = Path("Library/Keychains/login.keychain-db")
 MAX_PASSWORD_BYTES = 1024
 MAX_PRIVATE_KEY_BYTES = 1024 * 1024
+MAX_TAURI_SIGNER_BYTES = 512 * 1024 * 1024
 TOOLCHAIN_VERIFY_TIMEOUT_SECONDS = 300
 CREDENTIAL_LOOKUP_TIMEOUT_SECONDS = 15
 SECRET_ENVIRONMENT_NAMES = frozenset(
@@ -126,6 +122,14 @@ class HeldReleaseFile:
     path: Path
     descriptor: int
     identity: PathIdentity
+
+
+@dataclass(frozen=True)
+class VerifiedSignerEntry:
+    """The fixed signer identity returned by the complete tree verifier."""
+
+    size: int
+    sha256: str
 
 
 def _home_directory(home: Path | None = None) -> Path:
@@ -328,6 +332,71 @@ def _sha256_descriptor(descriptor: int) -> str:
     return digest.hexdigest()
 
 
+def _parse_verified_signer_entry(output: bytes) -> VerifiedSignerEntry:
+    if not output or len(output) > 1024:
+        raise UpdaterSigningLaunchError(
+            "verified Tauri signer entry output is outside its bound"
+        )
+
+    def strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise UpdaterSigningLaunchError(
+                    "verified Tauri signer entry repeats a field"
+                )
+            value[key] = item
+        return value
+
+    try:
+        decoded = output.decode("utf-8", errors="strict")
+        entry = json.loads(decoded, object_pairs_hook=strict_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise UpdaterSigningLaunchError(
+            "verified Tauri signer entry is not canonical JSON"
+        ) from error
+    if not isinstance(entry, dict) or set(entry) != {
+        "mode",
+        "path",
+        "sha256",
+        "size",
+        "type",
+    }:
+        raise UpdaterSigningLaunchError(
+            "verified Tauri signer entry has an unexpected field set"
+        )
+    size = entry["size"]
+    digest = entry["sha256"]
+    if (
+        entry["path"] != "bin/cargo-tauri"
+        or entry["type"] != "file"
+        or entry["mode"] != "0755"
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 1
+        or size > MAX_TAURI_SIGNER_BYTES
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise UpdaterSigningLaunchError(
+            "verified Tauri signer entry violates the fixed signer policy"
+        )
+    canonical = (
+        json.dumps(
+            entry,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        + b"\n"
+    )
+    if output != canonical:
+        raise UpdaterSigningLaunchError(
+            "verified Tauri signer entry is not canonically encoded"
+        )
+    return VerifiedSignerEntry(size=size, sha256=digest)
+
+
 def _repository_from_source() -> Path:
     source = Path(__file__)
     try:
@@ -353,7 +422,7 @@ def verify_pinned_tauri_signer(
     *,
     runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
 ) -> HeldSigner:
-    """Verify the exact toolchain tree, then hold and hash its fixed signer."""
+    """Bind the fixed signer fd to its source-bound generated manifest entry."""
 
     if not repository.is_absolute():
         raise UpdaterSigningLaunchError("release repository path must be absolute")
@@ -361,42 +430,20 @@ def verify_pinned_tauri_signer(
     manifest = toolchain.with_name(f"{toolchain.name}.manifest.json")
     verifier = repository / "scripts/verify_artifact_manifest.py"
     python = _canonical_python_runtime()
-    for path, label, executable in (
-        (verifier, "artifact-manifest verifier", False),
-        (manifest, "Tauri toolchain manifest", False),
-    ):
-        _validate_input_file(path, label, executable=executable)
-
-    command = [
-        str(python),
-        "-S",
-        "-B",
-        str(verifier),
-        str(toolchain),
-        str(manifest),
-        "--algorithm",
-        "sha256-tree-v2",
-        "--exact-metadata",
-        "--print-tree-sha256",
-    ]
-    for metadata in PINNED_TAURI_METADATA:
-        command.extend(("--metadata", metadata))
-    result = _run_without_input(
-        runner,
-        command,
-        environment={
-            "PATH": SYSTEM_PATH,
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "LC_ALL": "C",
-            "LANG": "C",
-        },
-        timeout_seconds=TOOLCHAIN_VERIFY_TIMEOUT_SECONDS,
+    _validate_input_file(
+        verifier,
+        "artifact-manifest verifier",
+        executable=True,
+        exact_mode=0o755,
     )
-    expected_output = f"{PINNED_TAURI_TREE_SHA256}\n".encode("ascii")
-    if result.returncode != 0 or result.stdout != expected_output or result.stderr:
-        raise UpdaterSigningLaunchError(
-            "pinned Tauri toolchain tree or exact source metadata did not verify"
-        )
+    _validate_input_file(
+        manifest,
+        "Tauri toolchain manifest",
+        executable=False,
+        exact_mode=0o600,
+    )
+    verifier_identity = _lstat_identity(verifier)
+    manifest_identity = _lstat_identity(manifest)
 
     signer_path = toolchain / "bin/cargo-tauri"
     nofollow = getattr(os, "O_NOFOLLOW", None)
@@ -410,17 +457,56 @@ def verify_pinned_tauri_signer(
             signer_identity,
             owner=os.getuid(),
             exact_mode=0o755,
-            maximum_bytes=PINNED_TAURI_SIGNER_BYTES,
+            maximum_bytes=MAX_TAURI_SIGNER_BYTES,
         )
-        if signer_identity.size != PINNED_TAURI_SIGNER_BYTES:
-            raise UpdaterSigningLaunchError("pinned Tauri signer size mismatch")
         if _lstat_identity(signer_path) != signer_identity:
             raise UpdaterSigningLaunchError(
                 "pinned Tauri signer path differs from its held descriptor"
             )
-        if _sha256_descriptor(signer_fd) != PINNED_TAURI_SIGNER_SHA256:
-            raise UpdaterSigningLaunchError("pinned Tauri signer digest mismatch")
+        signer_digest = _sha256_descriptor(signer_fd)
+
+        command = [
+            str(python),
+            "-S",
+            "-B",
+            str(verifier),
+            str(toolchain),
+            str(manifest),
+            "--algorithm",
+            "sha256-tree-v2",
+            "--exact-metadata",
+            "--print-entry",
+            "bin/cargo-tauri",
+        ]
+        for metadata in PINNED_TAURI_METADATA:
+            command.extend(("--metadata", metadata))
+        result = _run_without_input(
+            runner,
+            command,
+            environment={
+                "PATH": SYSTEM_PATH,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "LC_ALL": "C",
+                "LANG": "C",
+            },
+            timeout_seconds=TOOLCHAIN_VERIFY_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0 or result.stderr:
+            raise UpdaterSigningLaunchError(
+                "source-bound Tauri toolchain tree or exact metadata did not verify"
+            )
+        entry = _parse_verified_signer_entry(result.stdout)
+        if signer_identity.size != entry.size or signer_digest != entry.sha256:
+            raise UpdaterSigningLaunchError(
+                "held Tauri signer differs from its verified manifest entry"
+            )
+        _require_unchanged(verifier_identity)
+        _require_unchanged(manifest_identity)
         _require_unchanged(signer_identity, signer_fd)
+        if _sha256_descriptor(signer_fd) != entry.sha256:
+            raise UpdaterSigningLaunchError(
+                "held Tauri signer changed after manifest verification"
+            )
         return HeldSigner(signer_path, signer_fd, signer_identity)
     except (OSError, UpdaterSigningLaunchError) as error:
         if signer_fd >= 0:
@@ -470,14 +556,20 @@ def require_no_macos_acl_grants(
             )
 
 
-def _validate_input_file(path: Path, label: str, *, executable: bool) -> None:
+def _validate_input_file(
+    path: Path,
+    label: str,
+    *,
+    executable: bool,
+    exact_mode: int | None = None,
+) -> None:
     if not path.is_absolute():
         raise UpdaterSigningLaunchError(f"{label} path must be absolute")
     identity = _lstat_identity(path)
     _require_regular_file(
         identity,
         owner=os.getuid(),
-        exact_mode=None,
+        exact_mode=exact_mode,
         maximum_bytes=512 * 1024 * 1024,
     )
     if executable and not os.access(path, os.X_OK):

@@ -123,6 +123,8 @@ jobs:
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' build-libbox /tmp/patched
       - name: Install Tauri
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' install-tauri-cli
+        env:
+          TMPDIR: ${{ runner.temp }}
       - name: Signer integration
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' updater-signer-integration
 """
@@ -198,6 +200,47 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
                 "scripts.verify_ci_no_masking.RELEASE_CI_GATE", drifted_gate
             ), self.assertRaisesRegex(
                 CiPolicyError, "deterministic Swift package test command"
+            ):
+                audit_workflow(DEFAULT_WORKFLOW, DEFAULT_PINS)
+
+    def test_tauri_install_requires_runner_owned_temporary_directory(self) -> None:
+        required = "        env:\n          TMPDIR: ${{ runner.temp }}\n"
+        self.assertIn(required, GOOD_WORKFLOW)
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow_path, pins_path = self._write(
+                Path(temporary),
+                GOOD_WORKFLOW.replace(required, "", 1),
+            )
+            with self.assertRaisesRegex(
+                CiPolicyError,
+                "runner-owned temporary directory",
+            ):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_tauri_gate_cannot_drop_explicit_temporary_forwarding(self) -> None:
+        source_gate = Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
+        source = source_gate.read_text(encoding="utf-8")
+        required = (
+            '    TMPDIR="$tauri_temporary_parent" \\\n'
+            '      /bin/bash -p "$repo_root/scripts/install_pinned_tauri_cli.sh"\n'
+        )
+        self.assertIn(required, source)
+        with tempfile.TemporaryDirectory() as temporary:
+            drifted_gate = Path(temporary) / "run_release_ci_gate.sh"
+            drifted_gate.write_text(
+                source.replace(
+                    required,
+                    '    /bin/bash -p "$repo_root/scripts/install_pinned_tauri_cli.sh"\n',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with patch(
+                "scripts.verify_ci_no_masking.RELEASE_CI_GATE",
+                drifted_gate,
+            ), self.assertRaisesRegex(
+                CiPolicyError,
+                "temporary-directory forwarding",
             ):
                 audit_workflow(DEFAULT_WORKFLOW, DEFAULT_PINS)
 

@@ -63,13 +63,14 @@ REQUIRED_SOURCE_REF = (
 REQUIRED_HEAD_ASSERTION = (
     f'/bin/test "$(/usr/bin/git rev-parse HEAD)" = "{REQUIRED_SOURCE_REF}"'
 )
+REQUIRED_TAURI_TMPDIR = "${{ runner.temp }}"
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
-    "30a4e04ceebbed51efb8c7b7b684e0167bda55e6e5624865c231bf86b8795d77"
+    "1450ed92f69d442847626e802823965e2c3ea66892f14e7f50824048ef7101ec"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "299712e99a20f9b738696ea38773c62ca4b7e3cf43a4a4a43004fdde24225f22"
+    "4ee1ea0ef79b52c164750f4069b681c385c6cfc89dde57e1787c1c38b475eab4"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -704,6 +705,32 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         command = f"./scripts/run_release_ci_gate.sh ... {gate}"
         if not _uses_release_gate(text, gate):
             findings.append(f"workflow lacks closed release CI gate {command!r}")
+
+    tauri_steps = tuple(
+        (job_name, step)
+        for job_name, body in _split_jobs(text).items()
+        for step in _split_job_steps(body)
+        if "install-tauri-cli" in _release_gate_commands(step)
+    )
+    if len(tauri_steps) != 1:
+        findings.append(
+            "workflow must contain exactly one direct pinned Tauri CLI install step"
+        )
+    else:
+        job_name, tauri_step = tauri_steps[0]
+        required_temporary_binding = (
+            "        env:\n"
+            f"          TMPDIR: {REQUIRED_TAURI_TMPDIR}"
+        )
+        if (
+            required_temporary_binding not in tauri_step
+            or tauri_step.count("        env:") != 1
+            or tauri_step.count("          TMPDIR:") != 1
+        ):
+            findings.append(
+                f"job {job_name!r} must bind the pinned Tauri CLI install step "
+                "to exactly one runner-owned temporary directory"
+            )
     raw_cargo = re.compile(r"(?<![A-Za-z0-9_./-])cargo(?:\s|$)")
     for number, line in enumerate(text.splitlines(), start=1):
         if raw_cargo.search(line):
@@ -797,6 +824,12 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         "core.hooksPath=/dev/null",
         "empty_git_template",
         "init -q",
+        'tauri_temporary_parent_input="${TMPDIR:-}"',
+        "export -n TMPDIR",
+        "/bin/pwd -P",
+        "tauri_temporary_mode=",
+        "must not be group- or other-writable",
+        'TMPDIR="$tauri_temporary_parent"',
     )
     for fragment in required_implementation:
         if fragment not in gate_source:
@@ -890,6 +923,16 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         findings.append(
             "closed release CI gate omits deterministic Swift package test command "
             + repr(" ".join(expected_swift_test_command))
+        )
+    expected_tauri_install_command = (
+        "TMPDIR=$tauri_temporary_parent",
+        "/bin/bash",
+        "-p",
+        "$repo_root/scripts/install_pinned_tauri_cli.sh",
+    )
+    if not _source_contains_token_sequence(gate_source, expected_tauri_install_command):
+        findings.append(
+            "closed release CI gate omits explicit Tauri temporary-directory forwarding"
         )
     return findings
 

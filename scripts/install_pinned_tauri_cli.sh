@@ -188,10 +188,24 @@ readonly lock_patch="$repo_root/$TAURI_CLI_LOCK_PATCH_PATH"
 printf '%s  %s\n' "$TAURI_CLI_LOCK_PATCH_SHA256" "$lock_patch" |
   shasum -a 256 --check
 
-readonly temporary_parent="${TMPDIR:-/tmp}"
-[[ -d "$temporary_parent" && ! -L "$temporary_parent" ]] ||
-  die "the temporary directory is missing, not a directory, or a symlink"
-staging="$(mktemp -d "$temporary_parent/cfw-tauri-cli.XXXXXX")"
+readonly temporary_parent_input="${TMPDIR:-}"
+[[ "$temporary_parent_input" == /* && -d "$temporary_parent_input" && \
+  ! -L "$temporary_parent_input" ]] ||
+  die "the temporary directory must be an explicit absolute real directory"
+temporary_parent="$(cd "$temporary_parent_input" && /bin/pwd -P)" ||
+  die "the temporary directory cannot be resolved"
+readonly temporary_parent
+[[ "$temporary_parent" == "$temporary_parent_input" ]] ||
+  die "the temporary directory must use its canonical physical path"
+[[ "$(/usr/bin/stat -f '%u' "$temporary_parent")" == "$(/usr/bin/id -u)" ]] ||
+  die "the temporary directory must belong to the release account"
+temporary_mode="$(/usr/bin/stat -f '%Lp' "$temporary_parent")"
+readonly temporary_mode
+[[ "$temporary_mode" =~ ^[0-7]{3,4}$ ]] ||
+  die "the temporary directory mode is malformed"
+(( (8#$temporary_mode & 8#22) == 0 )) ||
+  die "the temporary directory must not be group- or other-writable"
+staging="$(/usr/bin/mktemp -d "$temporary_parent/cfw-tauri-cli.XXXXXX")"
 cleanup() {
   /bin/rm -rf -- "$staging"
 }

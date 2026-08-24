@@ -72,6 +72,35 @@ _OPERATIONAL_ENVIRONMENT = {
     "PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER",
     "PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER",
 }
+_BOOTSTRAP_ENVIRONMENT = _OPERATIONAL_ENVIRONMENT | {"DEVELOPER_DIR"}
+_BOOTSTRAP_FIXED_ENVIRONMENT = {
+    "LANG": "C",
+    "LC_ALL": "C",
+    "PATH": ":".join(SYSTEM_PATH),
+}
+
+
+def _release_environment_bootstrap(
+    source_environment: dict[str, str],
+) -> dict[str, str]:
+    """Close the environment before starting the shell that seals it."""
+    if any(name.startswith("BASH_FUNC_") for name in source_environment):
+        raise PublicationError(
+            "exported shell functions are forbidden in the release environment"
+        )
+    if source_environment.get("POSIXLY_CORRECT") or source_environment.get(
+        "BASH_COMPAT"
+    ):
+        raise PublicationError(
+            "alternate Bash compatibility modes are forbidden for release tooling"
+        )
+    bootstrap = dict(_BOOTSTRAP_FIXED_ENVIRONMENT)
+    bootstrap.update(
+        (name, source_environment[name])
+        for name in _BOOTSTRAP_ENVIRONMENT
+        if name in source_environment
+    )
+    return bootstrap
 
 
 def identity_output(
@@ -150,6 +179,7 @@ def release_tool_environment(
     if not environment_contract.is_file() or environment_contract.is_symlink():
         raise PublicationError("release tool environment contract is missing or a symlink")
     source = dict(os.environ if source_environment is None else source_environment)
+    bootstrap_environment = _release_environment_bootstrap(source)
     try:
         completed = run_bounded_process(
             [
@@ -162,7 +192,7 @@ def release_tool_environment(
                 role,
             ],
             cwd=repository,
-            environment=source,
+            environment=bootstrap_environment,
             timeout=IDENTITY_TIMEOUT_SECONDS,
             output_limit=MAX_RELEASE_ENVIRONMENT_PROCESS_BYTES,
         )

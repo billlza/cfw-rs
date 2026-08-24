@@ -103,7 +103,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "f1875037eb66794d8ff5b21578125062e73f452da977759f4bb71a48c1a11a2b"
+    "d03c5ce7bf8c6ad1ad20dbe72a9098aa4b927b7d517db1f53bf051f4d5540a2c"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -111,7 +111,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "fdbb3d3c6155c6f5d8e884d71370527eefbfe7f3b1479c188ab0a8ce8517aaad"
+    "1dbd0a4bfacd0c8b75c8776132d4b5a4479907967b27aa0c7fe44dd17d893435"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -311,9 +311,9 @@ _ADB_RUNTIME_TOOL_SHA256 = (
 )
 _ANDROID_LAN_PEER_SOURCE_PATH = "scripts/physical_capture/android_lan_peer.py"
 _ANDROID_LAN_PEER_SOURCE_SHA256 = (
-    "b7c8fa35c93d5e55310d9a48407c0c555e09f0f477deb9f6a98f2aafcb08764f"
+    "bed9e81cd7e11eb4251a3324acee88e8e9195d0f8ac33f59f9c755fff25148b2"
 )
-_ANDROID_LAN_PEER_SOURCE_SIZE = 137097
+_ANDROID_LAN_PEER_SOURCE_SIZE = 137417
 _PACKET_LAN_PEER_SOURCE_TREE_SHA256 = (
     "8437dce5e85780a49e882dd1594b188ce0f5188c44b7a020fe7a42d7efaa08a4"
 )

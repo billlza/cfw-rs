@@ -30,6 +30,23 @@ gate="$1"
 shift
 readonly gate ci_release_role
 
+# The sealed release environment deliberately stops exporting ambient TMPDIR.
+# Capture only the workflow-bound Tauri staging parent before sealing, then
+# pass it explicitly to the installer after validating it at the dispatch
+# boundary. Other gates do not inherit this ambient path.
+tauri_temporary_parent_input=""
+if [[ "$gate" == "install-tauri-cli" ]]; then
+  tauri_temporary_parent_input="${TMPDIR:-}"
+  while [[ "$tauri_temporary_parent_input" != "/" && \
+    "$tauri_temporary_parent_input" == */ ]]; do
+    tauri_temporary_parent_input="${tauri_temporary_parent_input%/}"
+  done
+  [[ -n "$tauri_temporary_parent_input" ]] ||
+    die "install-tauri-cli requires an explicit temporary directory"
+  export -n TMPDIR
+fi
+readonly tauri_temporary_parent_input
+
 if [[ "$gate" == "bootstrap-policy-tools" ]]; then
   [[ $# -eq 0 ]] || die "bootstrap-policy-tools accepts no arguments"
   cfw_seal_release_tool_environment tool-bootstrap
@@ -320,7 +337,28 @@ case "$gate" in
     ;;
   install-tauri-cli)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"
-    /bin/bash -p "$repo_root/scripts/install_pinned_tauri_cli.sh"
+    [[ "$tauri_temporary_parent_input" == /* && \
+      -d "$tauri_temporary_parent_input" && \
+      ! -L "$tauri_temporary_parent_input" ]] ||
+      die "the Tauri CLI temporary directory must be an absolute real directory"
+    tauri_temporary_parent="$(
+      cd "$tauri_temporary_parent_input" && /bin/pwd -P
+    )" || die "the Tauri CLI temporary directory cannot be resolved"
+    readonly tauri_temporary_parent
+    [[ "$tauri_temporary_parent" == /* && \
+      -d "$tauri_temporary_parent" && ! -L "$tauri_temporary_parent" ]] ||
+      die "the resolved Tauri CLI temporary directory is unsafe"
+    [[ "$(/usr/bin/stat -f '%u' "$tauri_temporary_parent")" == \
+      "$(/usr/bin/id -u)" ]] ||
+      die "the Tauri CLI temporary directory must belong to the release account"
+    tauri_temporary_mode="$(/usr/bin/stat -f '%Lp' "$tauri_temporary_parent")"
+    readonly tauri_temporary_mode
+    [[ "$tauri_temporary_mode" =~ ^[0-7]{3,4}$ ]] ||
+      die "the Tauri CLI temporary directory mode is malformed"
+    (( (8#$tauri_temporary_mode & 8#22) == 0 )) ||
+      die "the Tauri CLI temporary directory must not be group- or other-writable"
+    TMPDIR="$tauri_temporary_parent" \
+      /bin/bash -p "$repo_root/scripts/install_pinned_tauri_cli.sh"
     ;;
   materialize-libbox-source)
     [[ $# -eq 2 && "$1" == /* && "$2" == /* ]] ||

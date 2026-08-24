@@ -15,6 +15,54 @@ from scripts.release_python_runtime import require_closed_release_runtime
 REPOSITORY = Path(__file__).resolve().parents[2]
 
 
+class ReleaseEnvironmentBootstrapTests(unittest.TestCase):
+    def test_first_process_receives_only_fixed_and_reviewed_inputs(self) -> None:
+        source = {
+            "PATH": "/tmp/untrusted-bin:/usr/bin:/bin",
+            "HOME": "/tmp/untrusted-home",
+            "BASH_ENV": "/tmp/untrusted-startup",
+            "DYLD_INSERT_LIBRARIES": "/tmp/untrusted.dylib",
+            "DYLD_LIBRARY_PATH": "/tmp/untrusted-library",
+            "LD_PRELOAD": "/tmp/untrusted-preload.dylib",
+            "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
+            "CFW_BUILD_NUMBER": "40031",
+            "CFW_UNSIGNED_VALIDATION_PYTHON": "/opt/release/bin/python3",
+            "NOTARY_PROFILE": "release-profile",
+        }
+
+        bootstrap = release_environment._release_environment_bootstrap(source)
+
+        self.assertEqual(
+            bootstrap,
+            {
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
+                "CFW_BUILD_NUMBER": "40031",
+                "CFW_UNSIGNED_VALIDATION_PYTHON": "/opt/release/bin/python3",
+                "NOTARY_PROFILE": "release-profile",
+            },
+        )
+
+    def test_exported_shell_functions_are_rejected_before_bootstrap(self) -> None:
+        with self.assertRaisesRegex(
+            release_environment.PublicationError,
+            "exported shell functions",
+        ):
+            release_environment._release_environment_bootstrap(
+                {"BASH_FUNC_swift%%": "() { exit 0; }"}
+            )
+
+    def test_bash_execution_modes_are_rejected_before_bootstrap(self) -> None:
+        for name in ("BASH_COMPAT", "POSIXLY_CORRECT"):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                release_environment.PublicationError,
+                "alternate Bash compatibility modes",
+            ):
+                release_environment._release_environment_bootstrap({name: "1"})
+
+
 class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

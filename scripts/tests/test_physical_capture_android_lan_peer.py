@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import socket
 import tempfile
@@ -324,12 +325,18 @@ class _FakeRunner:
 
 class AndroidLanPeerAdmissionTests(unittest.TestCase):
     def setUp(self) -> None:
+        original_umask = os.umask(0o077)
+        self.addCleanup(os.umask, original_umask)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.repository = Path(self.temporary.name)
-        (self.repository / "target").mkdir()
+        target = self.repository / "target"
+        target.mkdir()
+        target.chmod(0o700)
         adb = self.repository / "sdk/platform-tools/adb"
         adb.parent.mkdir(parents=True)
+        (self.repository / "sdk").chmod(0o700)
+        adb.parent.chmod(0o700)
         self.adb_bytes = b"fixed-adb-test-binary"
         adb.write_bytes(self.adb_bytes)
         adb.chmod(0o755)
@@ -338,8 +345,25 @@ class AndroidLanPeerAdmissionTests(unittest.TestCase):
         artifact.write_bytes(self.artifact_bytes)
         artifact.chmod(0o555)
 
+        self.fixture_home = self.repository / "fixture-home"
+        fixture_android_home = self.fixture_home / ".android"
+        fixture_android_home.mkdir(parents=True)
+        self.fixture_home.chmod(0o700)
+        fixture_android_home.chmod(0o700)
+        self.fixture_adb_key = fixture_android_home / "adbkey"
+        self.fixture_adb_key_bytes = b"fixture-authorized-adb-private-key\n"
+        self.fixture_adb_key.write_bytes(self.fixture_adb_key_bytes)
+        self.fixture_adb_key.chmod(0o600)
+        self.fixture_adb_public_key = fixture_android_home / "adbkey.pub"
+        self.fixture_adb_public_key_bytes = b"fixture-authorized-adb-public-key\n"
+        self.fixture_adb_public_key.write_bytes(self.fixture_adb_public_key_bytes)
+        self.fixture_adb_public_key.chmod(0o644)
+
         self.patches = ExitStack()
         self.addCleanup(self.patches.close)
+        self.patches.enter_context(
+            patch.dict(os.environ, {"HOME": str(self.fixture_home)})
+        )
         for name, value in (
             ("REPOSITORY_ROOT", self.repository),
             ("ADB", adb),
@@ -392,6 +416,71 @@ class AndroidLanPeerAdmissionTests(unittest.TestCase):
             source,
         )
         self.assertIn("ARTIFACT_SIZE: Final = 2_359_422", source)
+
+    def test_private_adb_server_copies_explicit_fixture_credentials(self) -> None:
+        runner = _FakeRunner(self.artifact_bytes)
+        lease = self._admit(runner)
+        try:
+            environment = dict(runner.calls[0].environment)
+            private_android_home = Path(environment["ANDROID_USER_HOME"])
+            self.assertEqual(
+                (private_android_home / "adbkey").read_bytes(),
+                self.fixture_adb_key_bytes,
+            )
+            self.assertEqual(
+                (private_android_home / "adbkey.pub").read_bytes(),
+                self.fixture_adb_public_key_bytes,
+            )
+            self.assertEqual(
+                (private_android_home / "adbkey").stat().st_mode & 0o777,
+                0o600,
+            )
+            self.assertEqual(
+                (private_android_home / "adbkey.pub").stat().st_mode & 0o777,
+                0o644,
+            )
+            self.assertNotEqual(private_android_home, self.fixture_adb_key.parent)
+            private_adb = Path(runner.calls[0].argv[0])
+            self.assertEqual(private_adb.stat().st_mode & 0o777, 0o700)
+            expected_socket = (
+                f"localfilesystem:{private_android_home.parent.parent / 'adb.sock'}"
+            )
+            self.assertTrue(
+                all(
+                    spec.argv[1:3] == ("-L", expected_socket)
+                    for spec in runner.calls
+                )
+            )
+        finally:
+            lease.abort()
+
+    def test_missing_fixture_adb_key_fails_closed_without_workspace_leak(self) -> None:
+        self.fixture_adb_key.unlink()
+        runner = _FakeRunner(self.artifact_bytes)
+
+        with self.assertRaises(AndroidLanPeerAdmissionError) as raised:
+            self._admit(runner)
+
+        self.assertEqual(raised.exception.code, "android_peer_credentials_unavailable")
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(
+            list((self.repository / "target").glob("adb-server.*")),
+            [],
+        )
+
+    def test_unsafe_public_adb_key_cleans_partially_initialized_workspace(self) -> None:
+        self.fixture_adb_public_key.chmod(0o600)
+        runner = _FakeRunner(self.artifact_bytes)
+
+        with self.assertRaises(AndroidLanPeerAdmissionError) as raised:
+            self._admit(runner)
+
+        self.assertEqual(raised.exception.code, "android_peer_credentials_unsafe")
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(
+            list((self.repository / "target").glob("adb-server.*")),
+            [],
+        )
 
     def test_full_admission_returns_redacted_typed_identity_and_process_receipts(self) -> None:
         runner = _FakeRunner(self.artifact_bytes)

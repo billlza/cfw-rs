@@ -1123,6 +1123,10 @@ LIBBOX_VET_PACKAGES=(".")
     def test_tauri_installer_uses_isolated_clean_payload(self) -> None:
         installer = (SCRIPTS / "install_pinned_tauri_cli.sh").read_text(encoding="utf-8")
         for fragment in (
+            'readonly temporary_parent_input="${TMPDIR:-}"',
+            '"$(/usr/bin/stat -f \'%u\' "$temporary_parent")" == "$(/usr/bin/id -u)"',
+            '"$temporary_parent" == "$temporary_parent_input"',
+            "(( (8#$temporary_mode & 8#22) == 0 ))",
             "/usr/bin/env -i",
             'CARGO_HOME="$prepared_cargo_home"',
             'CARGO_HOME="$offline_cargo_home"',
@@ -1148,6 +1152,7 @@ LIBBOX_VET_PACKAGES=(".")
             "cacheNormalization=cargo-runtime-metadata-v1",
         ):
             self.assertIn(fragment, installer)
+        self.assertNotIn('${TMPDIR:-/tmp}', installer)
         preparation_call = 'verify_cargo_preparation_cache "$prepared_cargo_home"'
         normalization_call = 'normalize_cargo_offline_cache "$offline_cargo_home"'
         fetch_warning_call = (

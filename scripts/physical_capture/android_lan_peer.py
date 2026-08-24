@@ -1909,6 +1909,7 @@ def _write_private_adb_copy(root: Path, data: bytes) -> Path:
             | getattr(os, "O_NOFOLLOW", 0),
             0o700,
         )
+        os.fchmod(descriptor, 0o700)
         offset = 0
         while offset < len(data):
             written = os.write(descriptor, data[offset:])
@@ -2008,6 +2009,7 @@ def _write_private_file(root: Path, name: str, data: bytes, *, mode: int) -> Pat
             | getattr(os, "O_NOFOLLOW", 0),
             mode,
         )
+        os.fchmod(descriptor, mode)
         offset = 0
         while offset < len(data):
             written = os.write(descriptor, data[offset:])
@@ -2121,18 +2123,18 @@ def _remove_private_file(path: Path, *, expected_mode: int | None = None) -> Non
         ) from error
 
 
-def _cleanup_adb_server_workspace(server: _AdbServerLease) -> None:
+def _cleanup_adb_server_root(root: Path) -> None:
     for path, mode in (
-        (server.adb_path, 0o700),
-        (server.root / "adb.log", None),
-        (server.root / "home" / ".android" / "adbkey", 0o600),
-        (server.root / "home" / ".android" / "adbkey.pub", 0o644),
-        (server.root / "home" / ".android" / "adb_known_hosts.pb", None),
+        (root / "adb", 0o700),
+        (root / "adb.log", None),
+        (root / "home" / ".android" / "adbkey", 0o600),
+        (root / "home" / ".android" / "adbkey.pub", 0o644),
+        (root / "home" / ".android" / "adb_known_hosts.pb", None),
     ):
         _remove_private_file(path, expected_mode=mode)
     for directory in (
-        server.root / "home" / ".android",
-        server.root / "home",
+        root / "home" / ".android",
+        root / "home",
     ):
         try:
             metadata = directory.lstat()
@@ -2161,7 +2163,7 @@ def _cleanup_adb_server_workspace(server: _AdbServerLease) -> None:
                 "private ADB server directory was not empty after shutdown",
             ) from error
     try:
-        server.root.rmdir()
+        root.rmdir()
     except FileNotFoundError:
         return
     except OSError as error:
@@ -2169,6 +2171,10 @@ def _cleanup_adb_server_workspace(server: _AdbServerLease) -> None:
             "android_peer_server_cleanup_failed",
             "private ADB server workspace could not be removed",
         ) from error
+
+
+def _cleanup_adb_server_workspace(server: _AdbServerLease) -> None:
+    _cleanup_adb_server_root(server.root)
 
 
 def _start_adb_server(runner: AndroidLanPeerRunner) -> _AdbServerLease:
@@ -2190,6 +2196,7 @@ def _start_adb_server(runner: AndroidLanPeerRunner) -> _AdbServerLease:
             "android_peer_server_workspace_invalid",
             "ADB server target directory is not private and owner-bound",
         )
+    root: Path | None = None
     server: _AdbServerLease | None = None
     server_started = False
     try:
@@ -2279,6 +2286,11 @@ def _start_adb_server(runner: AndroidLanPeerRunner) -> _AdbServerLease:
                 except BaseException as error:
                     if cleanup_error is None:
                         cleanup_error = error
+        elif root is not None:
+            try:
+                _cleanup_adb_server_root(root)
+            except BaseException as error:
+                cleanup_error = error
         if cleanup_error is not None:
             _attach_cleanup_failure(primary, cleanup_error, phase="adb-server-start-cleanup")
         raise

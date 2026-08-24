@@ -197,6 +197,8 @@ jobs:
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' prepare-ui-dependencies
       - name: Install pinned Tauri CLI
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' install-tauri-cli
+        env:
+          TMPDIR: ${{ runner.temp }}
       - name: Exercise real pinned updater signer boundary
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' updater-signer-integration
       - name: Build and verify unsigned application skeleton

@@ -16,6 +16,9 @@ This checker enforces the *structural* half of that guarantee against
   ``BASH_ENV`` and exported functions cannot execute before a required gate;
 * every job pins a runner and an explicit ``timeout-minutes`` so a hung lane
   fails instead of blocking forever;
+* every job starts from the same explicit pull-request-head-or-event SHA,
+  disables persisted checkout credentials, and immediately verifies the
+  materialized ``HEAD`` through the absolute system Git executable;
 * the Rust, Node, and Xcode toolchains referenced by the workflow each resolve
   to exactly one version, and that version equals the pinned value in
   ``scripts/dependency_pins.env`` (single-toolchain binding); the Node lane must
@@ -50,13 +53,23 @@ DEFAULT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 DEFAULT_PINS = REPO_ROOT / "scripts" / "dependency_pins.env"
 RELEASE_CI_GATE = REPO_ROOT / "scripts" / "run_release_ci_gate.sh"
 REQUIRED_RUN_SHELL = "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
+REQUIRED_CHECKOUT_ACTION = (
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+)
+REQUIRED_SOURCE_REF = (
+    "${{ github.event_name == 'pull_request' && "
+    "github.event.pull_request.head.sha || github.sha }}"
+)
+REQUIRED_HEAD_ASSERTION = (
+    f'/usr/bin/test "$(/usr/bin/git rev-parse HEAD)" = "{REQUIRED_SOURCE_REF}"'
+)
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
     "faaf58cc890c2f61e374760a2431279e573d75ed483be085dcc99fcc2462b53e"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "e31e6edf9d7d6d8409350d979605db57c0d4cf519f945afc9f2241659301fab6"
+    "f00e7aa3cd44862710407acdd475cb8af6ac8eb7326dc3d9b141d5cfb20ef0df"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -155,6 +168,105 @@ def _split_jobs(text: str) -> dict[str, str]:
     if not jobs:
         raise CiPolicyError("workflow declares no jobs")
     return {name: "\n".join(body) for name, body in jobs.items()}
+
+
+def _split_job_steps(body: str) -> tuple[str, ...]:
+    """Return direct step blocks from one job in the restricted CI dialect."""
+
+    lines = body.splitlines()
+    steps_headers = [
+        index for index, line in enumerate(lines) if line == "    steps:"
+    ]
+    if len(steps_headers) != 1:
+        return ()
+
+    first_child = steps_headers[0] + 1
+    end = len(lines)
+    for index in range(first_child, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= 4:
+            end = index
+            break
+
+    starts = [
+        index
+        for index in range(first_child, end)
+        if re.match(r"^      -\s+\S", lines[index])
+    ]
+    if not starts:
+        return ()
+    return tuple(
+        "\n".join(lines[start:stop]).rstrip()
+        for start, stop in zip(starts, (*starts[1:], end), strict=True)
+    )
+
+
+def _check_source_checkout(jobs: dict[str, str]) -> list[str]:
+    """Bind every release job to the exact event source before tool setup."""
+
+    findings: list[str] = []
+    checkout_use = re.compile(
+        r"^\s*(?:-\s+)?uses:\s*actions/checkout@(?P<revision>\S+)",
+        re.MULTILINE,
+    )
+    required_checkout = re.compile(
+        rf"^      - uses: {re.escape(REQUIRED_CHECKOUT_ACTION)}(?:\s+#.*)?\n"
+        r"        with:\n"
+        rf"          ref: {re.escape(REQUIRED_SOURCE_REF)}\n"
+        r"          persist-credentials: false$"
+    )
+    required_assertion_step = (
+        "      - name: Assert exact CI source identity\n"
+        f"        run: {REQUIRED_HEAD_ASSERTION}"
+    )
+
+    for name, body in jobs.items():
+        checkout_matches = tuple(checkout_use.finditer(body))
+        if len(checkout_matches) != 1:
+            findings.append(
+                f"job {name!r} must contain exactly one actions/checkout step"
+            )
+
+        steps = _split_job_steps(body)
+        checkout_steps = tuple(
+            index for index, step in enumerate(steps) if checkout_use.search(step)
+        )
+        if len(checkout_steps) != 1:
+            findings.append(
+                f"job {name!r} must expose exactly one direct actions/checkout step"
+            )
+            continue
+
+        checkout_index = checkout_steps[0]
+        checkout_step = steps[checkout_index]
+        if checkout_index != 0 or required_checkout.fullmatch(checkout_step) is None:
+            findings.append(
+                f"job {name!r} must start with pinned {REQUIRED_CHECKOUT_ACTION!r}, "
+                "the exact pull-request-head-or-event SHA ref, and only "
+                "'persist-credentials: false'"
+            )
+
+        assertion_steps = tuple(
+            index
+            for index, step in enumerate(steps)
+            if REQUIRED_HEAD_ASSERTION in step
+        )
+        if len(assertion_steps) != 1:
+            findings.append(
+                f"job {name!r} must contain exactly one exact-HEAD runtime assertion"
+            )
+        if (
+            checkout_index + 1 >= len(steps)
+            or steps[checkout_index + 1] != required_assertion_step
+        ):
+            findings.append(
+                f"job {name!r} must immediately assert the exact event SHA with "
+                "absolute /usr/bin/git after checkout"
+            )
+    return findings
 
 
 def _check_masking(text: str) -> list[str]:
@@ -881,6 +993,7 @@ def audit_workflow(workflow_path: Path, pins_path: Path) -> None:
     findings += _check_python_isolation(active_text)
     findings += _check_release_ci_boundary(active_text, pins)
     jobs = _split_jobs(active_text)
+    findings += _check_source_checkout(jobs)
     findings += _check_job_bounds(jobs)
     findings += _check_release_tool_test_dependencies(jobs)
     findings += _check_single_toolchain(active_text, pins)

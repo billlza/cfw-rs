@@ -4,6 +4,14 @@ This project releases only an arm64 application for macOS 15 or newer. A green
 Rust, JavaScript, or Swift unit-test lane is necessary but does not establish a
 releasable Network Extension product.
 
+> **v0.4.0 policy calibration:** the accepted ordinary-GA versus assurance
+> boundary is recorded in
+> [`docs/release/ga-assurance-policy-v040.md`](docs/release/ga-assurance-policy-v040.md).
+> Its implementation is pending. The current executable gate remains
+> authoritative until that migration lands, so the document alone cannot
+> authorize a build or release. Builds 40030 and 40031 remain reserved and have
+> not been consumed by the current source or CI corrections.
+
 Android and iOS are not release targets. Physical interoperability may use an
 iOS device as a test peer, but its harness, device identity, transport capture,
 and receipts must be independently source-bound; an Android peer record cannot

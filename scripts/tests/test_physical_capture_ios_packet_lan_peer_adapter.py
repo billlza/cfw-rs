@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from scripts.physical_capture import ios_packet_lan_peer_adapter
 from scripts.harness.packet_evidence import (
     PacketEvidenceError,
     packet_capture_filter_argv,
@@ -23,6 +24,7 @@ from scripts.physical_capture.ios_packet_lan_peer_adapter import (
     _parse_device_selection,
     _read_stable_file,
     _reconcile_sender_and_server,
+    _resolve_repository_path,
     _run,
     _source_tree_sha256,
     load_source_identity,
@@ -145,8 +147,54 @@ class IOSPacketLanPeerAdapterTests(unittest.TestCase):
             hashlib.sha256(canonical_json(source.as_identity())).hexdigest(),
             source.identity_sha256,
         )
-        static = validate_static_source_identity(source)
-        self.assertEqual(static["app_tree_sha256"], source.app_tree_sha256)
+
+    def test_source_path_allows_a_missing_generated_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text).resolve()
+            expected = root / "target/ios-packet-lan-peer/Peer.app"
+            with patch.object(
+                ios_packet_lan_peer_adapter, "REPOSITORY_ROOT", root
+            ):
+                resolved = _resolve_repository_path(
+                    "target/ios-packet-lan-peer/Peer.app", label="app bundle"
+                )
+            self.assertEqual(resolved, expected)
+            self.assertFalse(expected.parent.exists())
+
+    def test_source_path_rejects_an_existing_symlink_escape(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as root_text,
+            tempfile.TemporaryDirectory() as outside_text,
+        ):
+            root = Path(root_text).resolve()
+            outside = Path(outside_text).resolve()
+            (root / "target").symlink_to(outside, target_is_directory=True)
+            with patch.object(
+                ios_packet_lan_peer_adapter, "REPOSITORY_ROOT", root
+            ), self.assertRaisesRegex(
+                IOSPacketLanPeerError, "escapes the repository"
+            ):
+                _resolve_repository_path(
+                    "target/ios-packet-lan-peer/Peer.app", label="app bundle"
+                )
+
+    def test_static_validation_still_requires_the_real_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            missing = Path(root_text).resolve() / "missing/Peer.app"
+            source = replace(self.source, artifact_path=missing)
+            with patch.object(
+                ios_packet_lan_peer_adapter,
+                "load_source_identity",
+                return_value=source,
+            ), patch.object(
+                ios_packet_lan_peer_adapter,
+                "_source_tree_sha256",
+                return_value=source.source_tree_sha256,
+            ), self.assertRaisesRegex(
+                IOSPacketLanPeerError, "signed iOS peer app is invalid"
+            ) as raised:
+                validate_static_source_identity(source)
+            self.assertEqual(raised.exception.code, "ios_packet_lan_artifact_invalid")
 
     def test_workspace_creation_failure_removes_new_owned_directory(self) -> None:
         workspace = Path(

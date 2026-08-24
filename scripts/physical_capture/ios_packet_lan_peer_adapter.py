@@ -282,10 +282,16 @@ def _resolve_repository_path(value: object, *, label: str) -> Path:
         )
     path = REPOSITORY_ROOT.joinpath(*value.split("/"))
     try:
-        resolved_parent = path.parent.resolve(strict=True)
-    except OSError as error:
+        # The checked-in source identity describes release artifacts that do not
+        # exist in a fresh checkout yet. Resolve the ancestors that exist at this
+        # import boundary so an already-present symlink escape is rejected, but
+        # do not require a generated target directory. The release workspace is
+        # owner-controlled and quiescent; later artifact boundaries reopen and
+        # validate the actual app, profile, and entitlements.
+        resolved_parent = path.parent.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
         raise IOSPacketLanPeerError(
-            "ios_packet_lan_source_invalid", f"{label} parent is unavailable"
+            "ios_packet_lan_source_invalid", f"{label} parent cannot be resolved"
         ) from error
     if REPOSITORY_ROOT not in (resolved_parent, *resolved_parent.parents):
         raise IOSPacketLanPeerError(

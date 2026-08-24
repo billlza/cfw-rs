@@ -42,6 +42,12 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 60
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Assert exact CI source identity
+        run: /usr/bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -120,6 +126,22 @@ jobs:
       - name: Signer integration
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' updater-signer-integration
 """
+
+EXACT_SOURCE_EXPRESSION = (
+    "${{ github.event_name == 'pull_request' && "
+    "github.event.pull_request.head.sha || github.sha }}"
+)
+CHECKOUT_STEP = (
+    "      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803\n"
+    "        with:\n"
+    f"          ref: {EXACT_SOURCE_EXPRESSION}\n"
+    "          persist-credentials: false\n"
+)
+HEAD_ASSERTION_STEP = (
+    "      - name: Assert exact CI source identity\n"
+    "        run: /usr/bin/test \"$(/usr/bin/git rev-parse HEAD)\" = "
+    f'\"{EXACT_SOURCE_EXPRESSION}\"\n'
+)
 
 
 class VerifyCiNoMaskingTests(unittest.TestCase):
@@ -230,6 +252,101 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workflow_path, pins_path = self._write(Path(tmp), GOOD_WORKFLOW)
             audit_workflow(workflow_path, pins_path)
+
+    def test_checkout_is_required_exactly_once_per_job(self) -> None:
+        variants = (
+            GOOD_WORKFLOW.replace(CHECKOUT_STEP, "", 1),
+            GOOD_WORKFLOW.replace(CHECKOUT_STEP, CHECKOUT_STEP * 2, 1),
+        )
+        for workflow in variants:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as tmp:
+                workflow_path, pins_path = self._write(Path(tmp), workflow)
+                with self.assertRaisesRegex(CiPolicyError, "exactly one actions/checkout"):
+                    audit_workflow(workflow_path, pins_path)
+
+    def test_checkout_action_must_remain_commit_pinned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_checkout = CHECKOUT_STEP.replace(
+                "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+                "actions/checkout@v6",
+            )
+            workflow_path, pins_path = self._write(
+                Path(tmp), GOOD_WORKFLOW.replace(CHECKOUT_STEP, bad_checkout, 1)
+            )
+            with self.assertRaisesRegex(CiPolicyError, "must start with pinned"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_checkout_ref_must_bind_pull_request_head_or_event_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_checkout = CHECKOUT_STEP.replace(
+                EXACT_SOURCE_EXPRESSION,
+                "${{ github.sha }}",
+            )
+            workflow_path, pins_path = self._write(
+                Path(tmp), GOOD_WORKFLOW.replace(CHECKOUT_STEP, bad_checkout, 1)
+            )
+            with self.assertRaisesRegex(
+                CiPolicyError, "exact pull-request-head-or-event SHA ref"
+            ):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_checkout_cannot_persist_or_accept_explicit_credentials(self) -> None:
+        variants = (
+            CHECKOUT_STEP.replace("          persist-credentials: false\n", ""),
+            CHECKOUT_STEP.replace("persist-credentials: false", "persist-credentials: true"),
+            CHECKOUT_STEP.replace(
+                "          persist-credentials: false\n",
+                "          persist-credentials: false\n"
+                "          token: ${{ secrets.RELEASE_TOKEN }}\n",
+            ),
+        )
+        for checkout in variants:
+            with self.subTest(checkout=checkout), tempfile.TemporaryDirectory() as tmp:
+                workflow_path, pins_path = self._write(
+                    Path(tmp), GOOD_WORKFLOW.replace(CHECKOUT_STEP, checkout, 1)
+                )
+                with self.assertRaisesRegex(CiPolicyError, "persist-credentials: false"):
+                    audit_workflow(workflow_path, pins_path)
+
+    def test_exact_head_assertion_must_immediately_follow_checkout(self) -> None:
+        intervening_step = (
+            "      - name: Intervening step\n"
+            "        run: /usr/bin/true\n"
+        )
+        variants = (
+            GOOD_WORKFLOW.replace(HEAD_ASSERTION_STEP, "", 1),
+            GOOD_WORKFLOW.replace(
+                HEAD_ASSERTION_STEP,
+                intervening_step + HEAD_ASSERTION_STEP,
+                1,
+            ),
+        )
+        for workflow in variants:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as tmp:
+                workflow_path, pins_path = self._write(Path(tmp), workflow)
+                with self.assertRaisesRegex(CiPolicyError, "immediately assert"):
+                    audit_workflow(workflow_path, pins_path)
+
+    def test_exact_head_assertion_requires_absolute_system_git(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_assertion = HEAD_ASSERTION_STEP.replace("/usr/bin/git", "git")
+            workflow_path, pins_path = self._write(
+                Path(tmp), GOOD_WORKFLOW.replace(HEAD_ASSERTION_STEP, bad_assertion, 1)
+            )
+            with self.assertRaisesRegex(CiPolicyError, "absolute /usr/bin/git"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_runtime_assertion_must_use_the_checkout_event_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_assertion = HEAD_ASSERTION_STEP.replace(
+                EXACT_SOURCE_EXPRESSION,
+                "${{ github.sha }}",
+            )
+            workflow_path, pins_path = self._write(
+                Path(tmp), GOOD_WORKFLOW.replace(HEAD_ASSERTION_STEP, bad_assertion, 1)
+            )
+            with self.assertRaisesRegex(CiPolicyError, "exact event SHA"):
+                audit_workflow(workflow_path, pins_path)
 
     def test_fixed_privileged_shell_boundary_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -456,7 +456,13 @@ def verify_pinned_toolchain(repository: Path, root: Path) -> VerifiedRustToolcha
     rustc = _member(root, "bin/rustc", directory=False)
     surface = build_toolchain_surface(root)
     if surface["sha256"] != expected_digest:
-        raise ReleaseRustToolchainError("Rust toolchain surface differs from its pin")
+        raise ReleaseRustToolchainError(
+            "Rust toolchain surface differs from its pin "
+            f"(expected_sha256={expected_digest}, "
+            f"actual_sha256={surface['sha256']}, "
+            f"file_count={surface['file_count']}, "
+            f"total_size={surface['total_size']})"
+        )
     _require_executable(cargo, MAX_TOOLCHAIN_FILE_BYTES, "Rust Cargo executable")
     _require_executable(rustc, MAX_TOOLCHAIN_FILE_BYTES, "Rust compiler executable")
     return VerifiedRustToolchain(channel, toolchain, root, cargo, rustc, surface)

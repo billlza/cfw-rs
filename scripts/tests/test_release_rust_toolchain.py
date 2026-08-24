@@ -156,7 +156,16 @@ class ReleaseRustToolchainTests(unittest.TestCase):
         temporary, fixture = self.fixture()
         self.addCleanup(temporary.cleanup)
         fixture.write_repository_contract("0" * 64)
-        with self.assertRaisesRegex(ReleaseRustToolchainError, "differs from its pin"):
+        with self.assertRaisesRegex(
+            ReleaseRustToolchainError,
+            "differs from its pin.*expected_sha256=" + "0" * 64
+            + ".*actual_sha256="
+            + str(fixture.surface["sha256"])
+            + ".*file_count="
+            + str(fixture.surface["file_count"])
+            + ".*total_size="
+            + str(fixture.surface["total_size"]),
+        ):
             verify_pinned_toolchain(fixture.repository, fixture.root)
 
         fixture.write_repository_contract(fixture.surface["sha256"])

@@ -47,7 +47,7 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Assert exact CI source identity
-        run: /usr/bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+        run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -139,7 +139,7 @@ CHECKOUT_STEP = (
 )
 HEAD_ASSERTION_STEP = (
     "      - name: Assert exact CI source identity\n"
-    "        run: /usr/bin/test \"$(/usr/bin/git rev-parse HEAD)\" = "
+    "        run: /bin/test \"$(/usr/bin/git rev-parse HEAD)\" = "
     f'\"{EXACT_SOURCE_EXPRESSION}\"\n'
 )
 
@@ -333,7 +333,20 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             workflow_path, pins_path = self._write(
                 Path(tmp), GOOD_WORKFLOW.replace(HEAD_ASSERTION_STEP, bad_assertion, 1)
             )
-            with self.assertRaisesRegex(CiPolicyError, "absolute /usr/bin/git"):
+            with self.assertRaisesRegex(
+                CiPolicyError, "absolute /bin/test and /usr/bin/git"
+            ):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_exact_head_assertion_requires_macos_system_test(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_assertion = HEAD_ASSERTION_STEP.replace(
+                "/bin/test", "/usr/bin/test"
+            )
+            workflow_path, pins_path = self._write(
+                Path(tmp), GOOD_WORKFLOW.replace(HEAD_ASSERTION_STEP, bad_assertion, 1)
+            )
+            with self.assertRaisesRegex(CiPolicyError, "absolute /bin/test"):
                 audit_workflow(workflow_path, pins_path)
 
     def test_runtime_assertion_must_use_the_checkout_event_sha(self) -> None:

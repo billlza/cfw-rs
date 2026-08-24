@@ -61,7 +61,7 @@ REQUIRED_SOURCE_REF = (
     "github.event.pull_request.head.sha || github.sha }}"
 )
 REQUIRED_HEAD_ASSERTION = (
-    f'/usr/bin/test "$(/usr/bin/git rev-parse HEAD)" = "{REQUIRED_SOURCE_REF}"'
+    f'/bin/test "$(/usr/bin/git rev-parse HEAD)" = "{REQUIRED_SOURCE_REF}"'
 )
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
@@ -69,7 +69,7 @@ REQUIRED_RELEASE_CI_GATE_SHA256 = (
     "faaf58cc890c2f61e374760a2431279e573d75ed483be085dcc99fcc2462b53e"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "f00e7aa3cd44862710407acdd475cb8af6ac8eb7326dc3d9b141d5cfb20ef0df"
+    "0549d8b826e0cd30c22e0ad8ea9cda31c258048e0d0fa9fcb87870c02e4ef206"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -264,7 +264,7 @@ def _check_source_checkout(jobs: dict[str, str]) -> list[str]:
         ):
             findings.append(
                 f"job {name!r} must immediately assert the exact event SHA with "
-                "absolute /usr/bin/git after checkout"
+                "absolute /bin/test and /usr/bin/git after checkout"
             )
     return findings
 

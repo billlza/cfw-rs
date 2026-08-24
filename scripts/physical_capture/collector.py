@@ -35,6 +35,7 @@ from scripts.harness.packet_evidence import (
 from scripts.harness.physical_collector_request import (
     PhysicalCollectorRequestError,
     initialize_context,
+    physical_candidate_artifact_manifest_sha256,
     validate_context,
 )
 from scripts.harness.raw_artifacts import (
@@ -46,6 +47,8 @@ from scripts.harness.raw_artifacts import (
     load_json_bytes,
     load_json_file,
     parse_descriptor,
+    require_sha256,
+    utf8_size,
 )
 from scripts.physical_capture.adversarial import (
     PRE_NONCE_SUBJECTS as ADVERSARIAL_PRE_NONCE_SUBJECTS,
@@ -104,6 +107,7 @@ from scripts.physical_capture.session import (
     PhysicalCaptureSessionError,
     SessionEventView,
 )
+from scripts.release_build_identity import ACTIVE_RELEASE_GENERATION
 
 
 FAILURE_DOCUMENT: Final = "cfw-physical-performance-collector-failure-v2"
@@ -128,16 +132,19 @@ ROOT_PRODUCER_CHECKPOINT_SHA256: Final = "0" * 64
 REPOSITORY: Final = Path(__file__).resolve().parents[2]
 FINAL_CANDIDATE: Final = (
     REPOSITORY
-    / "target/candidates/0.4.0/release/final-candidate/"
+    / f"target/candidates/{ACTIVE_RELEASE_GENERATION.product_version}/release/final-candidate/"
     "physical-collector-candidate.json"
+)
+FINAL_CANDIDATE_MANIFEST: Final = FINAL_CANDIDATE.with_name(
+    "physical-candidate-artifact-hash-manifest.json"
 )
 LANES: Final = {
     "macos15": {
-        "run_id": "run-40029-macos15",
+        "run_id": f"run-{ACTIVE_RELEASE_GENERATION.final_build}-macos15",
         "session_prefix": "physical-capture/v040/macos15",
     },
     "current-macos": {
-        "run_id": "run-40029-current-macos",
+        "run_id": f"run-{ACTIVE_RELEASE_GENERATION.final_build}-current-macos",
         "session_prefix": "physical-capture/v040/current-macos",
     },
 }
@@ -161,6 +168,9 @@ _LIFECYCLE_SPECIAL_KINDS: Final = {
 }
 
 _ERROR_CODE_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_CANDIDATE_MANIFEST_FIELDS: Final = {"entries", "sha256"}
+_CANDIDATE_MANIFEST_ENTRY_FIELDS: Final = {"path", "sha256"}
+_MAX_CANDIDATE_MANIFEST_ENTRIES: Final = 256
 
 
 class PhysicalCollectorDriverError(RuntimeError):
@@ -169,6 +179,94 @@ class PhysicalCollectorDriverError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _load_committed_candidate() -> dict[str, Any]:
+    """Load the candidate commit marker and its exact durable manifest."""
+
+    candidate = load_json_file(
+        FINAL_CANDIDATE,
+        maximum=MAX_CANDIDATE_BYTES,
+        label="fixed final physical candidate commit marker",
+    )
+    manifest = exact_object(
+        load_json_file(
+            FINAL_CANDIDATE_MANIFEST,
+            maximum=MAX_CANDIDATE_BYTES,
+            label="fixed final physical candidate artifact manifest",
+        ),
+        _CANDIDATE_MANIFEST_FIELDS,
+        "fixed final physical candidate artifact manifest",
+    )
+    raw_entries = manifest["entries"]
+    if (
+        not isinstance(raw_entries, list)
+        or not raw_entries
+        or len(raw_entries) > _MAX_CANDIDATE_MANIFEST_ENTRIES
+    ):
+        raise RawArtifactError(
+            "fixed final physical candidate artifact manifest has an invalid entry count"
+        )
+    entries: list[dict[str, str]] = []
+    for index, value in enumerate(raw_entries):
+        entry = exact_object(
+            value,
+            _CANDIDATE_MANIFEST_ENTRY_FIELDS,
+            f"fixed final physical candidate artifact manifest.entries[{index}]",
+        )
+        path = entry["path"]
+        if (
+            not isinstance(path, str)
+            or not path
+            or "\\" in path
+            or utf8_size(
+                path,
+                "fixed final physical candidate artifact manifest path",
+            )
+            > 1024
+        ):
+            raise RawArtifactError(
+                "fixed final physical candidate artifact manifest path is not bounded text"
+            )
+        relative = PurePosixPath(path)
+        if (
+            relative.is_absolute()
+            or relative.as_posix() != path
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise RawArtifactError(
+                "fixed final physical candidate artifact manifest path is not canonical"
+            )
+        entries.append(
+            {
+                "path": path,
+                "sha256": require_sha256(
+                    entry["sha256"],
+                    "fixed final physical candidate artifact manifest entry",
+                ),
+            }
+        )
+    paths = [entry["path"] for entry in entries]
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise RawArtifactError(
+            "fixed final physical candidate artifact manifest entries are not unique and sorted"
+        )
+    manifest_sha256 = require_sha256(
+        manifest["sha256"],
+        "fixed final physical candidate artifact manifest",
+    )
+    if physical_candidate_artifact_manifest_sha256(entries) != manifest_sha256:
+        raise RawArtifactError(
+            "fixed final physical candidate artifact manifest digest is invalid"
+        )
+    if not isinstance(candidate, dict) or require_sha256(
+        candidate.get("artifact_hash_manifest_sha256"),
+        "fixed final physical candidate artifact manifest binding",
+    ) != manifest_sha256:
+        raise RawArtifactError(
+            "fixed final physical candidate does not bind its committed artifact manifest"
+        )
+    return candidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -2429,11 +2527,7 @@ def _initialize(arguments: argparse.Namespace) -> None:
     lane = _lane(arguments.lane)
     _require_previous_attempt_abandoned(arguments.lane, arguments.attempt)
     try:
-        candidate = load_json_file(
-            FINAL_CANDIDATE,
-            maximum=MAX_CANDIDATE_BYTES,
-            label="fixed final physical candidate",
-        )
+        candidate = _load_committed_candidate()
         context = initialize_context(
             candidate,
             run_id=lane["run_id"],

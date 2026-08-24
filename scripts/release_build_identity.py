@@ -37,6 +37,32 @@ def canonical_build_version(value: Any, label: str = "CFBundleVersion") -> str:
     return value
 
 
+@dataclass(frozen=True)
+class ReleaseGeneration:
+    """One fixed validation/final build pair for the active product release."""
+
+    product_version: str
+    validation_build: str
+    final_build: str
+
+    def __post_init__(self) -> None:
+        if self.product_version != PRODUCT_VERSION:
+            raise BuildIdentityError(
+                "active release generation product version differs from policy"
+            )
+        validation = canonical_build_version(
+            self.validation_build, "active validation build"
+        )
+        final = canonical_build_version(self.final_build, "active final build")
+        if int(final) != int(validation) + 1:
+            raise BuildIdentityError(
+                "active final build must immediately follow its validation build"
+            )
+
+
+ACTIVE_RELEASE_GENERATION = ReleaseGeneration(PRODUCT_VERSION, "40030", "40031")
+
+
 def _read_plist(path: Path) -> dict[str, Any]:
     metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode) or path.is_symlink() or metadata.st_nlink != 1:
@@ -86,12 +112,18 @@ def bundle_build_identity(app: Path) -> BundleBuildIdentity:
 
 def release_native_products_root(repository: Path, build_version: str) -> Path:
     canonical = canonical_build_version(build_version, "release build version")
-    return repository / f"target/candidates/0.4.0/release-build/{canonical}/native-products"
+    return (
+        repository
+        / f"target/candidates/{PRODUCT_VERSION}/release-build/{canonical}/native-products"
+    )
 
 
 def validation_native_products_root(repository: Path, build_version: str) -> Path:
     canonical = canonical_build_version(build_version, "validation build version")
-    return repository / f"target/candidates/0.4.0/validation/{canonical}/native-products"
+    return (
+        repository
+        / f"target/candidates/{PRODUCT_VERSION}/validation/{canonical}/native-products"
+    )
 
 
 def _candidate_directory_output(
@@ -150,7 +182,7 @@ def candidate_native_products_output(
     canonical_build = canonical_build_version(
         build_version, "candidate build version"
     )
-    candidate_base = repository / "target/candidates/0.4.0"
+    candidate_base = repository / f"target/candidates/{PRODUCT_VERSION}"
     allowed = {
         candidate_base / "unsigned/native-products",
         candidate_base / f"validation/{canonical_build}/native-products",

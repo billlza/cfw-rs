@@ -2033,7 +2033,10 @@ def main() -> None:
     parser.add_argument(
         "--final",
         action="store_true",
-        help="operate on the fixed 40028 to 40029 final generation",
+        help=(
+            "operate on the fixed "
+            f"{install.BUILD_NUMBER} to {install.FINAL_BUILD_NUMBER} final generation"
+        ),
     )
     arguments = parser.parse_args()
     try:

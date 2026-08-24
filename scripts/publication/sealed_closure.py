@@ -1,9 +1,10 @@
 """Sealed-release source, license, vulnerability, and SBOM closure (Task 12.1).
 
 This module extends the existing offline publication tooling (it reuses
-``publication.common`` and ``publication.sbom`` and the pinned-input verifier in
-``scripts/verify_pinned_build_inputs.py``) with a single content-addressed
-supply-chain closure that binds, in one canonical document, the exact:
+``publication.common`` and ``publication.sbom`` and the pinned source-contract
+verifier in ``scripts/verify_pinned_build_inputs.py``) with a single
+content-addressed supply-chain closure that binds, in one canonical document,
+the exact:
 
 * GPL complete corresponding source (CCS) archive and tree digests;
 * GPL modification notice and third-party notices;
@@ -118,13 +119,15 @@ def _require_module_sum(value: str, label: str) -> str:
 def derive_supply_chain(repository: Path) -> dict[str, Any]:
     """Derive the canonical, content-addressed toolchain and patched-source graph.
 
-    This first runs the fail-closed pinned-input verifier so a missing tool
-    input, a partial/legacy patch digest, or a combined diff that collapses to a
-    single patch digest is rejected before anything is bound. It then extracts
-    the exact pinned identities into a canonical structure.
+    This first runs the fail-closed static pinned source-contract verifier so a
+    missing tool input, a partial/legacy patch digest, or a combined diff that
+    collapses to a single patch digest is rejected before anything is bound.
+    Generated packet-peer output is proved by its independent CI lane and is
+    not an input to this source/toolchain derivation. The exact pinned
+    identities are then extracted into a canonical structure.
     """
     try:
-        pinned.verify(repository)
+        pinned.verify_source_contract(repository)
     except pinned.PinnedInputError as error:
         raise PublicationError(f"pinned supply-chain inputs failed: {error}") from error
 

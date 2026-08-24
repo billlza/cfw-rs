@@ -19,6 +19,7 @@ import re
 from typing import Any, Final
 
 if __package__:
+    from ..release_build_identity import ACTIVE_RELEASE_GENERATION
     from .physical_machine_identity import (
         BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
         DOCUMENT as MACHINE_IDENTITY_SCHEME,
@@ -38,6 +39,8 @@ else:  # pragma: no cover - direct-script import path
     from pathlib import Path
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from release_build_identity import ACTIVE_RELEASE_GENERATION  # type: ignore
     from physical_machine_identity import (  # type: ignore
         BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
         DOCUMENT as MACHINE_IDENTITY_SCHEME,
@@ -67,8 +70,8 @@ REQUIRED_PERFORMANCE_SUBJECTS: Final = frozenset(
     {LEDGER_SUBJECT, SHAPING_INTENT_SUBJECT, SHAPING_RESTORATION_SUBJECT}
 )
 
-PRODUCT_VERSION: Final = "0.4.0"
-FINAL_BUILD: Final = "40029"
+PRODUCT_VERSION: Final = ACTIVE_RELEASE_GENERATION.product_version
+FINAL_BUILD: Final = ACTIVE_RELEASE_GENERATION.final_build
 PRODUCT_OBSERVATION_PREFIX: Final = "cfw-release-observation-v1 "
 PRODUCT_OBSERVATION_DOCUMENT: Final = "cfw-product-observation-event-v1"
 PRODUCT_LOG_SUBSYSTEM: Final = "com.bill.clashformac"

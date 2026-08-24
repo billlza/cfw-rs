@@ -53,7 +53,9 @@ if __package__:
         validate_evidence as validate_gatekeeper_evidence,
     )
     from .hash_artifact import build_manifest
+    from .macos_durability import full_fsync
     from .release_build_identity import (
+        ACTIVE_RELEASE_GENERATION,
         BuildIdentityError,
         bundle_build_identity,
         canonical_build_version,
@@ -72,7 +74,9 @@ else:
         validate_evidence as validate_gatekeeper_evidence,
     )
     from hash_artifact import build_manifest
+    from macos_durability import full_fsync
     from release_build_identity import (
+        ACTIVE_RELEASE_GENERATION,
         BuildIdentityError,
         bundle_build_identity,
         canonical_build_version,
@@ -83,9 +87,9 @@ else:
 
 DOCUMENT: Final = "cfw-dormant-app-install-v1"
 SCHEMA_VERSION: Final = 1
-VERSION: Final = "0.4.0"
-BUILD_NUMBER: Final = "40028"
-FINAL_BUILD_NUMBER: Final = "40029"
+VERSION: Final = ACTIVE_RELEASE_GENERATION.product_version
+BUILD_NUMBER: Final = ACTIVE_RELEASE_GENERATION.validation_build
+FINAL_BUILD_NUMBER: Final = ACTIVE_RELEASE_GENERATION.final_build
 TEAM_ID: Final = "YKUPL7Z869"
 TARGET_NAME: Final = "Clash for Mac.app"
 PAYLOAD_NAME: Final = TARGET_NAME
@@ -99,16 +103,16 @@ FINAL_JOURNAL_NAME: Final = ".com.bill.clashformac.final-install.json"
 FINAL_JOURNAL_PENDING_NAME: Final = ".com.bill.clashformac.final-install.pending"
 FINAL_LOCK_NAME: Final = ".com.bill.clashformac.final-install.lock"
 FINAL_STAGING_PREFIX: Final = ".com.bill.clashformac.final-install."
-RELEASE_WORKTREE_RELATIVE: Final = Path("target/release-worktrees/40028")
+RELEASE_WORKTREE_RELATIVE: Final = Path(f"target/release-worktrees/{BUILD_NUMBER}")
 CANDIDATE_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/validation/40028/signed"
+    f"target/candidates/{VERSION}/validation/{BUILD_NUMBER}/signed"
 )
-FINAL_CANDIDATE_RELATIVE: Final = Path("target/candidates/0.4.0/signed")
+FINAL_CANDIDATE_RELATIVE: Final = Path(f"target/candidates/{VERSION}/signed")
 VALIDATION_NATIVE_PRODUCTS_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/validation/40028/native-products"
+    f"target/candidates/{VERSION}/validation/{BUILD_NUMBER}/native-products"
 )
 FINAL_NATIVE_PRODUCTS_RELATIVE: Final = Path(
-    "target/candidates/0.4.0/release-build/40029/native-products"
+    f"target/candidates/{VERSION}/release-build/{FINAL_BUILD_NUMBER}/native-products"
 )
 MAX_JOURNAL_BYTES: Final = 1024 * 1024
 MAX_GUARD_SEGMENTS: Final = 8
@@ -1792,7 +1796,16 @@ def fsync_tree(root: Path) -> None:
         try:
             if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
                 raise InstallError("staging_unsafe", "staged directory identity changed")
-            os.fsync(descriptor)
+            try:
+                if directory == root:
+                    full_fsync(descriptor)
+                else:
+                    os.fsync(descriptor)
+            except OSError as error:
+                raise InstallError(
+                    "directory_fsync_failed",
+                    "staged directory stable-storage durability is unknown",
+                ) from error
         finally:
             os.close(descriptor)
 
@@ -1898,9 +1911,12 @@ def _open_directory(path: Path) -> int:
 
 def _fsync_directory_fd(descriptor: int) -> None:
     try:
-        os.fsync(descriptor)
+        full_fsync(descriptor)
     except OSError as error:
-        raise InstallError("directory_fsync_failed", "installation directory durability is unknown") from error
+        raise InstallError(
+            "directory_fsync_failed",
+            "installation directory stable-storage durability is unknown",
+        ) from error
 
 
 def _require_private_container(descriptor: int) -> None:
@@ -3128,7 +3144,10 @@ def main() -> None:
     parser.add_argument(
         "--final",
         action="store_true",
-        help="operate on the fixed 40028 to 40029 final generation",
+        help=(
+            "operate on the fixed "
+            f"{BUILD_NUMBER} to {FINAL_BUILD_NUMBER} final generation"
+        ),
     )
     arguments = parser.parse_args()
     try:

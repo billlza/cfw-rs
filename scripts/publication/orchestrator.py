@@ -2,8 +2,8 @@
 
 This module is the missing orchestration boundary between the existing strict
 validators.  It has no fixture mode, caller-selected build numbers, optional
-evidence, or success override.  The fixed 40028 validation candidate must be
-approved before the fixed 40029 final candidate, and every request field is
+evidence, or success override.  The fixed 40030 validation candidate must be
+approved before the fixed 40031 final candidate, and every request field is
 derived by reopening canonical release artifacts.
 
 The workflow is intentionally layered. ``prepare_physical_candidate_manifest``
@@ -23,12 +23,11 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
-import tempfile
 from typing import Any
 
 from .common import (
+    MAX_JSON_BYTES,
     PublicationError,
     canonical_json,
     enumerate_tree,
@@ -39,9 +38,18 @@ from .common import (
     sha256_bytes,
     sha256_file,
     tree_digest,
-    write_new,
 )
 from .bounded_process import BoundedProcessError, run_bounded_process
+from .durable_file import (
+    DurabilityOutcomeUnknown,
+    RootedDirectoryChanged,
+    ensure_private_directory_locked,
+    exclusive_rooted_directory_lock,
+    publish_private_directory_locked,
+    read_private_directory_contents_locked,
+    read_private_pending_locked,
+    write_private_pending_locked,
+)
 from .final_candidate import (
     REQUIRED_NESTED_CODE,
     TEAM_ID,
@@ -76,6 +84,9 @@ from scripts.harness.physical_evidence_aggregator import (
     PhysicalEvidenceError,
     load_physical_evidence_artifact,
 )
+from scripts.harness.physical_collector_request import (
+    physical_candidate_artifact_manifest_sha256,
+)
 from scripts.harness.raw_artifacts import (
     CollectorTrustNotConfiguredError,
     CollectorTrustPolicy,
@@ -89,7 +100,10 @@ from scripts.notarization_transaction import (
     TransactionError,
     validate_published_transaction_receipt,
 )
-from scripts.release_build_identity import bundle_build_identity
+from scripts.release_build_identity import (
+    ACTIVE_RELEASE_GENERATION,
+    bundle_build_identity,
+)
 from scripts.release_capability_inventory import (
     CAPABILITY_IDS,
     expected_capability_levels,
@@ -104,11 +118,13 @@ from scripts.validated_candidate_evidence import (
 from scripts.verify_notary_log import NotaryLogError, validate_files as validate_notary_files
 
 
-PRODUCT_VERSION = RELEASE_VERSION
-VALIDATION_BUILD = "40028"
-FINAL_BUILD = "40029"
+PRODUCT_VERSION = ACTIVE_RELEASE_GENERATION.product_version
+VALIDATION_BUILD = ACTIVE_RELEASE_GENERATION.validation_build
+FINAL_BUILD = ACTIVE_RELEASE_GENERATION.final_build
+if PRODUCT_VERSION != RELEASE_VERSION:
+    raise RuntimeError("active release generation differs from publication version")
 
-CANDIDATE_ROOT = Path("target/candidates/0.4.0")
+CANDIDATE_ROOT = Path(f"target/candidates/{PRODUCT_VERSION}")
 FINAL_NATIVE_PRODUCTS = CANDIDATE_ROOT / "release-build" / FINAL_BUILD / "native-products"
 SIGNED_ROOT = CANDIDATE_ROOT / "signed"
 SIGNED_APP = SIGNED_ROOT / "Clash for Mac.app"
@@ -127,6 +143,20 @@ PHYSICAL_COLLECTOR_CANDIDATE = (
 )
 PHYSICAL_EVIDENCE_INPUT = FINAL_CANDIDATE_INPUT / "physical-evidence.json"
 SEALED_OUTPUT = CANDIDATE_ROOT / "release" / "sealed-manifest"
+SEALED_OUTPUT_NAMES = frozenset(
+    {
+        "p0-source-gates.json",
+        "unsigned-ci-lanes.json",
+        "physical-evidence.json",
+        "sealed-closure.request.json",
+        "sealed-closure.json",
+        "final-candidate.request.json",
+        "final-candidate.json",
+        "evidence-manifest.json",
+        "sealed-evidence-manifest.request.json",
+        "sealed-evidence-manifest.json",
+    }
+)
 
 NOTARY_ARCHIVE_NAME = f"Clash.for.Mac_{PRODUCT_VERSION}_{FINAL_BUILD}_notary.zip"
 NOTARY_ARCHIVE = SIGNED_ROOT / NOTARY_ARCHIVE_NAME
@@ -172,24 +202,26 @@ def _repo_relative(repository: Path, path: Path) -> str:
     return safe_relative(relative.as_posix(), "release evidence path").as_posix()
 
 
-def _load_strict_json(path: Path, *, canonical: bool = False) -> Any:
-    data = read_regular(path)
-
+def _parse_strict_json(data: bytes, label: Path, *, canonical: bool = False) -> Any:
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in pairs:
             if key in result:
-                raise PublicationError(f"JSON evidence repeats the field {key!r}: {path}")
+                raise PublicationError(f"JSON evidence repeats the field {key!r}: {label}")
             result[key] = value
         return result
 
     try:
         value = json.loads(data, object_pairs_hook=reject_duplicates)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise PublicationError(f"JSON evidence is invalid: {path}") from error
+        raise PublicationError(f"JSON evidence is invalid: {label}") from error
     if canonical and canonical_json(value) != data:
-        raise PublicationError(f"JSON evidence is not canonical: {path}")
+        raise PublicationError(f"JSON evidence is not canonical: {label}")
     return value
+
+
+def _load_strict_json(path: Path, *, canonical: bool = False) -> Any:
+    return _parse_strict_json(read_regular(path), path, canonical=canonical)
 
 
 def _run_checked(
@@ -506,7 +538,10 @@ def _physical_candidate_hash_manifest(context: ProductionContext) -> dict[str, A
         },
     ]
     entries.sort(key=lambda entry: entry["path"])
-    return {"entries": entries, "sha256": tree_digest(entries)}
+    return {
+        "entries": entries,
+        "sha256": physical_candidate_artifact_manifest_sha256(entries),
+    }
 
 
 def _physical_collector_candidate(
@@ -542,24 +577,74 @@ def prepare_physical_candidate_manifest(repository: Path) -> dict[str, Any]:
     collector_candidate = _physical_collector_candidate(context, manifest)
     output = _path(context.repository, PHYSICAL_CANDIDATE_MANIFEST)
     candidate_output = _path(context.repository, PHYSICAL_COLLECTOR_CANDIDATE)
-    _require_real_directory(output.parent.parent)
-    _require_real_directory(output.parent, create=True)
-    if (
-        output.exists()
-        or output.is_symlink()
-        or candidate_output.exists()
-        or candidate_output.is_symlink()
-    ):
-        raise PublicationError(
-            "refusing to replace physical candidate preparation outputs"
+    release_parent = output.parent.parent
+    _require_real_directory(release_parent)
+    with exclusive_rooted_directory_lock(
+        context.repository,
+        release_parent,
+    ) as release_parent_descriptor:
+        ensure_private_directory_locked(
+            release_parent_descriptor,
+            release_parent,
+            output.parent.name,
         )
-    try:
-        write_new(candidate_output, canonical_json(collector_candidate))
-        write_new(output, canonical_json(manifest))
-    except BaseException:
-        if not output.exists() and not output.is_symlink():
-            candidate_output.unlink(missing_ok=True)
-        raise
+
+    documents = {
+        candidate_output.name: canonical_json(collector_candidate),
+        output.name: canonical_json(manifest),
+    }
+    # The artifact manifest is durable first. The collector candidate is the
+    # final commit marker and consumers must validate that it binds this exact
+    # manifest before a physical collection can start.
+    publication_order = (output.name, candidate_output.name)
+    with exclusive_rooted_directory_lock(
+        context.repository,
+        output.parent,
+        require_private=True,
+    ) as output_parent_descriptor:
+        for name in publication_order:
+            try:
+                os.stat(
+                    name,
+                    dir_fd=output_parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                write_private_pending_locked(
+                    output_parent_descriptor,
+                    output.parent,
+                    name,
+                    documents[name],
+                )
+                continue
+            except OSError as error:
+                raise PublicationError(
+                    "cannot inspect physical candidate preparation output: "
+                    f"{output.parent / name}"
+                ) from error
+            observed = read_private_pending_locked(
+                output_parent_descriptor,
+                output.parent,
+                name,
+                len(documents[name]),
+            )
+            if observed != documents[name]:
+                raise PublicationError(
+                    "refusing to replace physical candidate preparation output: "
+                    f"{output.parent / name}"
+                )
+
+        for name in sorted(documents):
+            observed = read_private_pending_locked(
+                output_parent_descriptor,
+                output.parent,
+                name,
+                len(documents[name]),
+            )
+            if observed != documents[name]:
+                raise PublicationError(
+                    f"physical candidate preparation output changed: {output.parent / name}"
+                )
     if _load_strict_json(candidate_output, canonical=True) != collector_candidate:
         raise PublicationError(
             "physical collector candidate changed after publication"
@@ -752,6 +837,46 @@ def _observe_signed_app_tree(context: ProductionContext) -> dict[str, str]:
     return {"app_tree_sha256": digest, "observed_at": observed_at}
 
 
+def _final_candidate_request(
+    context: ProductionContext,
+    physical_candidate_manifest: dict[str, Any],
+    descriptor: dict[str, Any],
+    post_verification: dict[str, str],
+) -> dict[str, Any]:
+    nested_code = _nested_code(context)
+    notarization_evidence, staple_evidence = _receipt_finalization_evidence(context)
+    supply_chain = derive_supply_chain(context.repository)
+    return {
+        "product": {"version": PRODUCT_VERSION, "build_number": FINAL_BUILD},
+        "commit": context.source_identity["repositoryCommit"],
+        "final_artifacts": {
+            "signed_app_tree_sha256": context.app_manifest["sha256"],
+            "app_manifest_sha256": sha256_file(
+                _path(context.repository, SIGNED_APP_MANIFEST)
+            ),
+            "built_at": context.transaction.prepared_at,
+            "artifact_hash_manifest": physical_candidate_manifest,
+        },
+        "xcframework": {
+            "path": LIBBOX.as_posix(),
+            "xcframework_sha256": context.libbox_manifest["sha256"],
+            "manifest_sha256": sha256_file(
+                _path(context.repository, LIBBOX_MANIFEST)
+            ),
+            "upstream_commit": supply_chain["patched_source"]["upstream_commit"],
+            "combined_diff_sha256": supply_chain["patched_source"][
+                "combined_diff_sha256"
+            ],
+        },
+        "nested_code": nested_code,
+        "notarization": notarization_evidence,
+        "staple": staple_evidence,
+        "gatekeeper": context.gatekeeper,
+        "physical_evidence": descriptor,
+        "post_verification": post_verification,
+    }
+
+
 def _sealed_closure_request(
     context: ProductionContext, artifact_manifest: dict[str, Any]
 ) -> dict[str, Any]:
@@ -868,35 +993,91 @@ def _inner_evidence_manifest(context: ProductionContext) -> dict[str, Any]:
     }
 
 
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
+def _publish_outputs_locked(
+    destination: Path,
+    parent: Path,
+    expected_files: dict[str, bytes],
+    parent_descriptor: int,
+) -> tuple[Path, bool]:
+    destination_name = destination.name
     try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        os.stat(
+            destination_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        publish_private_directory_locked(
+            parent_descriptor,
+            parent,
+            destination_name,
+            expected_files,
+        )
+        return destination, True
+    except OSError as error:
+        raise PublicationError(
+            f"cannot inspect sealed production evidence: {destination}"
+        ) from error
+
+    try:
+        observed = read_private_directory_contents_locked(
+            parent_descriptor,
+            parent,
+            destination_name,
+            {name: len(data) for name, data in expected_files.items()},
+        )
+    except PublicationError as error:
+        raise PublicationError(
+            f"refusing to replace sealed production evidence: {destination}"
+        ) from error
+    if observed != expected_files:
+        raise PublicationError(
+            f"refusing to replace sealed production evidence: {destination}"
+        )
+    return destination, False
 
 
 def _publish_outputs(repository: Path, documents: dict[str, object]) -> Path:
+    repository = Path(repository).absolute()
     destination = _path(repository, SEALED_OUTPUT)
     parent = destination.parent
     _require_real_directory(parent)
-    if destination.exists() or destination.is_symlink():
-        raise PublicationError(f"refusing to replace sealed production evidence: {destination}")
-    staging = Path(tempfile.mkdtemp(prefix=".sealed-manifest.", dir=parent))
+
+    if type(documents) is not dict or not documents:
+        raise PublicationError("sealed production evidence has no output documents")
+    expected_files: dict[str, bytes] = {}
+    for name, document in documents.items():
+        if (
+            type(name) is not str
+            or not name
+            or "\x00" in name
+            or Path(name).name != name
+        ):
+            raise PublicationError(f"sealed output name is unsafe: {name!r}")
+        try:
+            expected_files[name] = canonical_json(document)
+        except (TypeError, ValueError) as error:
+            raise PublicationError(
+                f"sealed output document is not canonical JSON: {name}"
+            ) from error
+
+    published_new = False
     try:
-        os.chmod(staging, 0o700)
-        for name in sorted(documents):
-            if Path(name).name != name:
-                raise PublicationError(f"sealed output name is unsafe: {name}")
-            write_new(staging / name, canonical_json(documents[name]))
-        _fsync_directory(staging)
-        staging.rename(destination)
-        _fsync_directory(parent)
-    except BaseException:
-        if staging.exists() and not staging.is_symlink():
-            shutil.rmtree(staging)
+        with exclusive_rooted_directory_lock(repository, parent) as parent_descriptor:
+            published, published_new = _publish_outputs_locked(
+                destination,
+                parent,
+                expected_files,
+                parent_descriptor,
+            )
+        return published
+    except RootedDirectoryChanged as error:
+        if published_new:
+            raise DurabilityOutcomeUnknown(
+                "sealed production evidence parent changed after publication: "
+                f"{destination}"
+            ) from error
         raise
-    return destination
 
 
 def _require_physical_candidate_binding(
@@ -999,6 +1180,156 @@ def _require_final_inputs_unchanged(
         )
 
 
+def _recover_sealed_outputs(
+    context: ProductionContext,
+    physical_candidate_manifest: dict[str, Any],
+    normalized_source: dict[str, Any],
+    normalized_ci: dict[str, Any],
+    descriptor: dict[str, Any],
+    trust_policy: CollectorTrustPolicy,
+) -> dict[str, Any] | None:
+    destination = _path(context.repository, SEALED_OUTPUT)
+    parent = destination.parent
+    with exclusive_rooted_directory_lock(
+        context.repository,
+        parent,
+    ) as parent_descriptor:
+        try:
+            os.stat(
+                destination.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise PublicationError(
+                f"cannot inspect existing sealed production evidence: {destination}"
+            ) from error
+
+        raw_documents = read_private_directory_contents_locked(
+            parent_descriptor,
+            parent,
+            destination.name,
+            {name: MAX_JSON_BYTES for name in SEALED_OUTPUT_NAMES},
+        )
+        documents = {
+            name: _parse_strict_json(
+                raw_documents[name],
+                destination / name,
+                canonical=True,
+            )
+            for name in sorted(SEALED_OUTPUT_NAMES)
+        }
+
+        if documents["p0-source-gates.json"] != normalized_source:
+            raise PublicationError(
+                "existing sealed evidence differs from current P0 source gates"
+            )
+        if documents["unsigned-ci-lanes.json"] != normalized_ci:
+            raise PublicationError(
+                "existing sealed evidence differs from current unsigned CI lanes"
+            )
+        if documents["physical-evidence.json"] != descriptor:
+            raise PublicationError(
+                "existing sealed evidence differs from current physical evidence"
+            )
+
+        closure_request = _sealed_closure_request(
+            context,
+            physical_candidate_manifest,
+        )
+        if closure_request != documents["sealed-closure.request.json"]:
+            raise PublicationError(
+                "existing sealed-closure request differs from current release inputs"
+            )
+        closure = build_sealed_closure(
+            context.repository,
+            closure_request,
+            fixture=False,
+        )
+        if closure != documents["sealed-closure.json"]:
+            raise PublicationError(
+                "existing sealed closure differs from its current validated request"
+            )
+        validate_sealed_closure(
+            context.repository,
+            closure,
+            fixture=False,
+            require_sealed=True,
+        )
+
+        inner_manifest = _inner_evidence_manifest(context)
+        if inner_manifest != documents["evidence-manifest.json"]:
+            raise PublicationError(
+                "existing evidence manifest differs from current release inputs"
+            )
+
+        stored_final_request = documents["final-candidate.request.json"]
+        if not isinstance(stored_final_request, dict):
+            raise PublicationError("existing final-candidate request is not an object")
+        recorded_post_verification = require_exact_keys(
+            stored_final_request.get("post_verification"),
+            {"app_tree_sha256", "observed_at"},
+            "existing final-candidate post-verification",
+        )
+        final_request = _final_candidate_request(
+            context,
+            physical_candidate_manifest,
+            descriptor,
+            recorded_post_verification,
+        )
+        if final_request != stored_final_request:
+            raise PublicationError(
+                "existing final-candidate request differs from current release inputs"
+            )
+        final_binding = _validated_final_binding(
+            context,
+            final_request,
+            trust_policy,
+        )
+        if final_binding != documents["final-candidate.json"]:
+            raise PublicationError(
+                "existing final-candidate binding differs from its validated request"
+            )
+
+        outer_request = documents["sealed-evidence-manifest.request.json"]
+        expected_outer_request = {
+            "product": {"version": PRODUCT_VERSION, "build_number": FINAL_BUILD},
+            "commit": context.source_identity["repositoryCommit"],
+            "evidence_manifest": inner_manifest,
+            "p0_source": normalized_source,
+            "unsigned_ci": normalized_ci,
+            "signed_installed": descriptor,
+            "sealed_closure": closure,
+            "final_candidate": final_binding,
+        }
+        if outer_request != expected_outer_request:
+            raise PublicationError(
+                "existing sealed-evidence request differs from current release inputs"
+            )
+        outer = _validated_outer_manifest(
+            context,
+            outer_request,
+            trust_policy,
+        )
+        if outer != documents["sealed-evidence-manifest.json"]:
+            raise PublicationError(
+                "existing sealed-evidence manifest differs from its validated request"
+            )
+
+        _require_final_inputs_unchanged(context, physical_candidate_manifest)
+        current_app = _observe_signed_app_tree(context)
+        if (
+            current_app["app_tree_sha256"]
+            != recorded_post_verification["app_tree_sha256"]
+        ):
+            raise PublicationError(
+                "existing sealed evidence differs from the current signed app tree"
+            )
+        return outer
+
+
 def seal_production_evidence(repository: Path) -> dict[str, Any]:
     """Compose every production request and seal only complete real evidence."""
     context = _production_context(repository)
@@ -1067,43 +1398,30 @@ def seal_production_evidence(repository: Path) -> dict[str, Any]:
         physical_candidate_manifest,
     )
 
-    nested_code = _nested_code(context)
+    recovered = _recover_sealed_outputs(
+        context,
+        physical_candidate_manifest,
+        normalized_source,
+        normalized_ci,
+        descriptor,
+        trust_policy,
+    )
+    if recovered is not None:
+        return recovered
+
     closure_request = _sealed_closure_request(context, physical_candidate_manifest)
     closure = build_sealed_closure(context.repository, closure_request, fixture=False)
     validate_sealed_closure(
         context.repository, closure, fixture=False, require_sealed=True
     )
     inner_manifest = _inner_evidence_manifest(context)
-    notarization_evidence, staple_evidence = _receipt_finalization_evidence(context)
-    supply_chain = derive_supply_chain(context.repository)
     post_verification = _observe_signed_app_tree(context)
-    final_request = {
-        "product": {"version": PRODUCT_VERSION, "build_number": FINAL_BUILD},
-        "commit": context.source_identity["repositoryCommit"],
-        "final_artifacts": {
-            "signed_app_tree_sha256": context.app_manifest["sha256"],
-            "app_manifest_sha256": sha256_file(_path(context.repository, SIGNED_APP_MANIFEST)),
-            "built_at": context.transaction.prepared_at,
-            "artifact_hash_manifest": physical_candidate_manifest,
-        },
-        "xcframework": {
-            "path": LIBBOX.as_posix(),
-            "xcframework_sha256": context.libbox_manifest["sha256"],
-            "manifest_sha256": sha256_file(_path(context.repository, LIBBOX_MANIFEST)),
-            "upstream_commit": supply_chain["patched_source"][
-                "upstream_commit"
-            ],
-            "combined_diff_sha256": supply_chain["patched_source"][
-                "combined_diff_sha256"
-            ],
-        },
-        "nested_code": nested_code,
-        "notarization": notarization_evidence,
-        "staple": staple_evidence,
-        "gatekeeper": context.gatekeeper,
-        "physical_evidence": descriptor,
-        "post_verification": post_verification,
-    }
+    final_request = _final_candidate_request(
+        context,
+        physical_candidate_manifest,
+        descriptor,
+        post_verification,
+    )
     final_binding = _validated_final_binding(context, final_request, trust_policy)
 
     outer_request = {
@@ -1122,7 +1440,12 @@ def seal_production_evidence(repository: Path) -> dict[str, Any]:
     # app-tree observation only after that pass, then rebuild both seals so the
     # recorded timestamp and digest are the ones publication actually binds.
     post_verification = _observe_signed_app_tree(context)
-    final_request["post_verification"] = post_verification
+    final_request = _final_candidate_request(
+        context,
+        physical_candidate_manifest,
+        descriptor,
+        post_verification,
+    )
     final_binding = _validated_final_binding(context, final_request, trust_policy)
     outer_request["final_candidate"] = final_binding
     outer = _validated_outer_manifest(context, outer_request, trust_policy)
@@ -1162,7 +1485,15 @@ def seal_production_evidence(repository: Path) -> dict[str, Any]:
 
 
 def self_check(repository: Path) -> None:
-    if (PRODUCT_VERSION, VALIDATION_BUILD, FINAL_BUILD) != ("0.4.0", "40028", "40029"):
+    if (
+        PRODUCT_VERSION,
+        VALIDATION_BUILD,
+        FINAL_BUILD,
+    ) != (
+        ACTIVE_RELEASE_GENERATION.product_version,
+        ACTIVE_RELEASE_GENERATION.validation_build,
+        ACTIVE_RELEASE_GENERATION.final_build,
+    ):
         raise PublicationError("production release build identity drifted")
     if len(CAPABILITY_IDS) != 9:
         raise PublicationError("production release capability inventory is not fixed to nine")
@@ -1180,11 +1511,11 @@ def self_check(repository: Path) -> None:
     }
     expected_paths = {
         "unsigned_artifact": {
-            f"target/candidates/0.4.0/validation/{VALIDATION_BUILD}/signed/"
+            f"target/candidates/{PRODUCT_VERSION}/validation/{VALIDATION_BUILD}/signed/"
             "Clash for Mac.app.manifest.json"
         },
         "deterministic_test": {
-            f"target/candidates/0.4.0/validation/{VALIDATION_BUILD}/evidence/"
+            f"target/candidates/{PRODUCT_VERSION}/validation/{VALIDATION_BUILD}/evidence/"
             "unsigned-ci-lanes.json"
         },
         "physical_machine": {PHYSICAL_EVIDENCE_INPUT.as_posix()},

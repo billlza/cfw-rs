@@ -2,7 +2,7 @@
 
 This record binds the v0.4.0 production collector trust root and its external
 control plane. It does not grant `Signed_Installed_Verified`, replace the
-same-machine two-clean-OS requirement, or authorize validation build 40028.
+same-machine two-clean-OS requirement, or authorize validation build 40030.
 
 ## Source and image binding
 

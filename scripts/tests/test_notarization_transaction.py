@@ -7674,6 +7674,31 @@ class BoundedProcessTests(unittest.TestCase):
 
 
 class FsyncTreeTests(unittest.TestCase):
+    def test_full_fsync_failure_after_evidence_rename_is_outcome_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            pending = root / "evidence.pending"
+            destination = root / "evidence.json"
+            with patch.object(
+                transaction_module,
+                "full_fsync",
+                side_effect=OSError(errno.EIO, "injected full-fsync failure"),
+            ):
+                with self.assertRaises(TransactionError) as raised:
+                    transaction_module._publish_pending_evidence(
+                        pending_path=pending,
+                        destination_path=destination,
+                        data=b'{"status":"passed"}\n',
+                        allow_partial_rebuild=False,
+                    )
+            self.assertEqual(
+                raised.exception.code,
+                "atomic_evidence_durability_unknown",
+            )
+            self.assertEqual(raised.exception.terminal_state, "outcome_unknown")
+            self.assertTrue(destination.is_file())
+            self.assertFalse(pending.exists())
+
     def test_walk_error_is_not_silently_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "publish-ready"

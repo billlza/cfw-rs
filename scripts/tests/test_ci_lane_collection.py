@@ -83,6 +83,24 @@ class CiLaneTableTests(unittest.TestCase):
             self.assertLessEqual(len(lane.command), 1024, lane.identifier)
             self.assertEqual(lane.command.strip(), lane.command, lane.identifier)
 
+    def test_packet_lan_peer_lane_uses_full_verifier(self) -> None:
+        lane = ci_lanes.LANE_INDEX["packet-lan-peer"]
+        self.assertEqual(
+            lane.command,
+            "./scripts/run_release_ci_gate.sh packet-lan-peer",
+        )
+        wrapper = (
+            Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '/bin/bash -p "$repo_root/scripts/verify_packet_lan_peer.sh"',
+            wrapper,
+        )
+        self.assertIn(
+            '"$repo_root" "$repo_root/scripts/verify_pinned_build_inputs.py"',
+            wrapper,
+        )
+
     def test_python_lanes_disable_site_initialization(self) -> None:
         for lane in ci_lanes.LANES:
             if "python3 " in lane.command:

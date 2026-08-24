@@ -18,7 +18,7 @@ cfw_require_supported_python "$python_bin"
 cfw_run_release_python_script "$repo_root" \
   "$repo_root/scripts/verify_release_authority_gate.py"
 cfw_run_release_python_script "$repo_root" \
-  "$repo_root/scripts/verify_pinned_build_inputs.py"
+  "$repo_root/scripts/verify_pinned_source_contract.py"
 cfw_run_release_python_script "$repo_root" \
   "$repo_root/scripts/verify_release_build_allocations.py"
 cfw_run_release_python_script "$repo_root" \
@@ -91,8 +91,9 @@ cfw_run_release_python_script "$repo_root" \
   "$repo_root/scripts/production_release_evidence.py" self-check
 
 for fragment in \
-  'VALIDATION_BUILD = "40028"' \
-  'FINAL_BUILD = "40029"' \
+  'ACTIVE_RELEASE_GENERATION' \
+  'VALIDATION_BUILD = ACTIVE_RELEASE_GENERATION.validation_build' \
+  'FINAL_BUILD = ACTIVE_RELEASE_GENERATION.final_build' \
   'prepare_physical_candidate_manifest' \
   'seal_production_evidence' \
   'require_clean=True' \
@@ -113,11 +114,12 @@ for fragment in \
 done
 
 for fragment in \
-  'BUILD_NUMBER: Final = "40028"' \
-  'FINAL_BUILD_NUMBER: Final = "40029"' \
-  'target/release-worktrees/40028' \
-  'target/candidates/0.4.0/validation/40028/signed' \
-  'target/candidates/0.4.0/signed' \
+  'ACTIVE_RELEASE_GENERATION' \
+  'BUILD_NUMBER: Final = ACTIVE_RELEASE_GENERATION.validation_build' \
+  'FINAL_BUILD_NUMBER: Final = ACTIVE_RELEASE_GENERATION.final_build' \
+  'target/release-worktrees/{BUILD_NUMBER}' \
+  'target/candidates/{VERSION}/validation/{BUILD_NUMBER}/signed' \
+  'target/candidates/{VERSION}/signed' \
   'notarized-release-v1' \
   '_matching_clean_source_identity' \
   'parse_service_maintenance_receipt' \

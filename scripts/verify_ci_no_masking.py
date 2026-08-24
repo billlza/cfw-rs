@@ -3,14 +3,17 @@
 
 Task 8.4 requires the deterministic unsigned CI lanes to be bound to exactly one
 commit and one toolchain and to fail on unavailable tools, missing artifacts,
-timeouts, malformed output, nonzero exits, unconditional skips, swallowed exit
+timeouts, malformed output, nonzero exits, conditional skips, swallowed exit
 status, warning suppression, or ``|| true`` (Requirements 4.1, 5.1, 6.5).
 
 This checker enforces the *structural* half of that guarantee against
 ``.github/workflows/ci.yml``:
 
 * no masking construct appears anywhere in the workflow (``|| true``, ``|| :``,
-  ``set +e``, ``continue-on-error: true``, or an unconditional ``if: false``);
+  ``set +e``, any ``continue-on-error:``, or any conditional ``if:``); release
+  evidence jobs and steps must always execute when the workflow executes;
+* every ``run`` step inherits one exact privileged-mode Bash boundary, so
+  ``BASH_ENV`` and exported functions cannot execute before a required gate;
 * every job pins a runner and an explicit ``timeout-minutes`` so a hung lane
   fails instead of blocking forever;
 * the Rust, Node, and Xcode toolchains referenced by the workflow each resolve
@@ -36,6 +39,7 @@ and the pins file.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 import re
 import shlex
@@ -45,20 +49,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 DEFAULT_PINS = REPO_ROOT / "scripts" / "dependency_pins.env"
 RELEASE_CI_GATE = REPO_ROOT / "scripts" / "run_release_ci_gate.sh"
+REQUIRED_RUN_SHELL = "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
+# Level 1 integrity identity for the complete dispatch program. This detects
+# unreviewed control-flow drift; it is not an authentication mechanism.
+REQUIRED_RELEASE_CI_GATE_SHA256 = (
+    "faaf58cc890c2f61e374760a2431279e573d75ed483be085dcc99fcc2462b53e"
+)
+REQUIRED_WORKFLOW_SHA256 = (
+    "e31e6edf9d7d6d8409350d979605db57c0d4cf519f945afc9f2241659301fab6"
+)
 
-# Constructs that swallow a failure, suppress warnings, or unconditionally skip a
+# Constructs that swallow a failure, suppress warnings, or conditionally skip a
 # step. Each maps to a human-readable reason used in the failure report.
 MASKING_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\|\|\s*true\b"), "'|| true' swallows a failing command"),
     (re.compile(r"\|\|\s*:(?:\s|$)"), "'|| :' swallows a failing command"),
     (re.compile(r"\bset\s+\+e\b"), "'set +e' disables fail-fast shell behavior"),
-    (re.compile(r"continue-on-error\s*:\s*true"), "'continue-on-error: true' masks a failing step"),
-    (re.compile(r"if\s*:\s*false\b"), "'if: false' unconditionally skips a step"),
-    (
-        re.compile(r"if\s*:\s*\$\{\{\s*false\s*\}\}"),
-        "'if: ${{ false }}' unconditionally skips a step",
-    ),
     (re.compile(r"2>\s*/dev/null"), "redirecting stderr to /dev/null can hide malformed output"),
+    (re.compile(r"\bBASH_ENV\b"), "BASH_ENV can execute before a required release gate"),
+    (re.compile(r"\bBASH_FUNC_"), "an exported Bash function can replace a release command"),
 )
 
 # Warning-as-error gates that must remain present exactly once so a lane cannot
@@ -154,6 +163,169 @@ def _check_masking(text: str) -> list[str]:
         for pattern, reason in MASKING_PATTERNS:
             if pattern.search(line):
                 findings.append(f"line {number}: {reason}: {line.strip()!r}")
+    return findings
+
+
+def _unquoted_yaml_syntax(line: str) -> str:
+    """Return structural YAML characters while removing scalar/comment content."""
+
+    output: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(line):
+        character = line[index]
+        if quote == "'":
+            if character == "'" and index + 1 < len(line) and line[index + 1] == "'":
+                index += 2
+                continue
+            if character == "'":
+                quote = None
+            output.append(" ")
+            index += 1
+            continue
+        if quote == '"':
+            if character == "\\" and index + 1 < len(line):
+                output.extend((" ", " "))
+                index += 2
+                continue
+            if character == '"':
+                quote = None
+            output.append(" ")
+            index += 1
+            continue
+        if line.startswith("${{", index):
+            end = line.find("}}", index + 3)
+            if end < 0:
+                output.extend(" " for _ in line[index:])
+                break
+            output.extend(" " for _ in line[index : end + 2])
+            index = end + 2
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            output.append(" ")
+            index += 1
+            continue
+        if character == "#" and (index == 0 or line[index - 1].isspace()):
+            output.extend(" " for _ in line[index:])
+            break
+        output.append(character)
+        index += 1
+    return "".join(output)
+
+
+def _yaml_structural_lines(text: str) -> list[tuple[int, str, str]]:
+    """Exclude block-scalar bodies and return original plus unquoted syntax."""
+
+    result: list[tuple[int, str, str]] = []
+    block_parent_indent: int | None = None
+    block_header = re.compile(r":\s*[|>](?:[1-9][+-]?|[+-][1-9]?)?\s*$")
+    for number, line in enumerate(text.splitlines(), start=1):
+        if "\t" in line[: len(line) - len(line.lstrip("\t "))]:
+            result.append((number, line, "\t"))
+            continue
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if block_parent_indent is not None:
+            if not stripped or indent > block_parent_indent:
+                continue
+            block_parent_indent = None
+        syntax = _unquoted_yaml_syntax(line)
+        result.append((number, line, syntax))
+        if block_header.search(syntax):
+            # A compact sequence mapping starts its first key after ``- ``.
+            # Sibling keys align with that key, not with the sequence marker.
+            # Track every leading sequence indicator so a sibling ``if`` or
+            # ``continue-on-error`` cannot be mistaken for scalar content.
+            structural_content = syntax[indent:]
+            sequence_prefix = re.match(r"(?:-[ ]+)+", structural_content)
+            block_parent_indent = indent + (
+                len(sequence_prefix.group(0)) if sequence_prefix is not None else 0
+            )
+    return result
+
+
+def _check_yaml_mapping_policy(text: str) -> list[str]:
+    """Enforce one non-conditional YAML dialect without a third-party parser."""
+
+    findings: list[str] = []
+    forbidden_keys = {"if", "continue-on-error", "working-directory", "BASH_ENV"}
+    quoted_key = re.compile(r"^(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*')\s*:")
+    anchor_or_alias = re.compile(r"(?<![A-Za-z0-9_])[&*][A-Za-z_][A-Za-z0-9_-]*")
+    defaults_lines: list[int] = []
+    shell_lines: list[int] = []
+    required_shell_line = f'    shell: "{REQUIRED_RUN_SHELL}"'
+    for number, original, syntax in _yaml_structural_lines(text):
+        if syntax == "\t":
+            findings.append(f"line {number}: tab-indented YAML is outside the release dialect")
+            continue
+        candidate = original.lstrip(" ")
+        syntax_candidate = syntax.lstrip(" ")
+        while candidate.startswith("-") and candidate[1:2].isspace():
+            candidate = candidate[1:].lstrip(" ")
+            syntax_candidate = syntax_candidate[1:].lstrip(" ")
+        structural_candidate = syntax_candidate.rstrip(" ")
+        if structural_candidate == "?" or (
+            structural_candidate.startswith("?")
+            and structural_candidate[1:2].isspace()
+        ):
+            findings.append(
+                f"line {number}: explicit YAML mapping keys are outside the release dialect"
+            )
+        if structural_candidate == ":" or (
+            structural_candidate.startswith(":")
+            and structural_candidate[1:2].isspace()
+        ):
+            findings.append(
+                f"line {number}: explicit YAML mapping values are outside the release dialect"
+            )
+        if quoted_key.match(candidate):
+            findings.append(
+                f"line {number}: quoted YAML mapping keys are outside the release dialect"
+            )
+        plain_key = re.match(r"^([A-Za-z0-9_-]+)\s*:", syntax_candidate)
+        if plain_key is not None and plain_key.group(1) in forbidden_keys:
+            key = plain_key.group(1)
+            findings.append(
+                f"line {number}: {key!r} can conditionally skip or mask a required release job or step"
+            )
+        if plain_key is not None and plain_key.group(1) == "defaults":
+            defaults_lines.append(number)
+            if original != "defaults:":
+                findings.append(
+                    f"line {number}: job or step defaults are outside the release dialect"
+                )
+        if plain_key is not None and plain_key.group(1) == "shell":
+            shell_lines.append(number)
+            if original != required_shell_line:
+                findings.append(
+                    f"line {number}: shell override differs from the fixed release boundary"
+                )
+        if "{" in syntax or "}" in syntax:
+            findings.append(
+                f"line {number}: flow-style YAML mappings are outside the release dialect"
+            )
+        if "<<" in syntax or anchor_or_alias.search(syntax):
+            findings.append(
+                f"line {number}: YAML anchors, aliases, and merges are outside the release dialect"
+            )
+        if re.match(r"^[!&*]", syntax_candidate):
+            findings.append(
+                f"line {number}: tagged or anchored YAML keys are outside the release dialect"
+            )
+    required_shell_block = (
+        "defaults:\n"
+        "  run:\n"
+        f"{required_shell_line}\n"
+    )
+    if (
+        len(defaults_lines) != 1
+        or len(shell_lines) != 1
+        or text.count(required_shell_block) != 1
+    ):
+        findings.append(
+            "workflow must declare exactly one top-level fixed privileged Bash boundary"
+        )
     return findings
 
 
@@ -395,6 +567,7 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         "rust-test",
         "rust-target-audit",
         "cargo-deny",
+        "packet-lan-peer",
         "bootstrap-node-toolchain",
         "prepare-ui-dependencies",
         "ui-test",
@@ -454,11 +627,31 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
                 findings.append(
                     f"job {name!r} prepares verified Cargo inputs after policy bootstrap"
                 )
+        if "packet-lan-peer" in job_gates:
+            if "bootstrap-release-toolchain" not in job_gates:
+                findings.append(
+                    f"job {name!r} verifies the packet LAN peer without the pinned release toolchain"
+                )
+            elif job_gates.index("bootstrap-release-toolchain") > job_gates.index(
+                "packet-lan-peer"
+            ):
+                findings.append(
+                    f"job {name!r} verifies the packet LAN peer before release-toolchain bootstrap"
+                )
 
     if RELEASE_CI_GATE.is_symlink() or not RELEASE_CI_GATE.is_file():
         findings.append("closed release CI gate script is missing or is a symlink")
         return findings
-    raw_gate_source = RELEASE_CI_GATE.read_text(encoding="utf-8")
+    raw_gate_bytes = RELEASE_CI_GATE.read_bytes()
+    if hashlib.sha256(raw_gate_bytes).hexdigest() != REQUIRED_RELEASE_CI_GATE_SHA256:
+        findings.append(
+            "closed release CI gate differs from the exact reviewed dispatch policy"
+        )
+    try:
+        raw_gate_source = raw_gate_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        findings.append("closed release CI gate is not UTF-8 source")
+        return findings
     gate_source = _without_full_line_comments(raw_gate_source)
     if not raw_gate_source.startswith("#!/bin/bash -p\n"):
         findings.append("closed release CI gate lacks the privileged-mode Bash shebang")
@@ -474,6 +667,8 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         "cfw_run_release_python_script",
         '"$repo_root/scripts/run_release_python_tests.py"',
         '"$repo_root/scripts/audit_cargo_policy.py"',
+        '"$repo_root/scripts/verify_packet_lan_peer.sh"',
+        '"$repo_root/scripts/verify_pinned_build_inputs.py"',
         '/bin/bash -p "$test_script"',
         "/usr/bin/swift format lint --recursive --strict",
         "/usr/bin/swift test --package-path native/macos",
@@ -550,6 +745,25 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
                 "closed release CI gate omits required Cargo command "
                 + repr(" ".join(expected))
             )
+    expected_packet_command = (
+        "/bin/bash",
+        "-p",
+        "$repo_root/scripts/verify_packet_lan_peer.sh",
+    )
+    if not _source_contains_token_sequence(gate_source, expected_packet_command):
+        findings.append(
+            "closed release CI gate omits required packet LAN peer command "
+            + repr(" ".join(expected_packet_command))
+        )
+    expected_complete_pin_command = (
+        "cfw_run_release_python_script",
+        "$repo_root",
+        "$repo_root/scripts/verify_pinned_build_inputs.py",
+    )
+    if not _source_contains_token_sequence(gate_source, expected_complete_pin_command):
+        findings.append(
+            "closed release CI gate omits the complete packet artifact pin verifier"
+        )
     return findings
 
 
@@ -644,11 +858,22 @@ def _check_single_toolchain(text: str, pins: dict[str, str]) -> list[str]:
 def audit_workflow(workflow_path: Path, pins_path: Path) -> None:
     if workflow_path.is_symlink() or not workflow_path.is_file():
         raise CiPolicyError(f"CI workflow is missing: {workflow_path}")
-    text = workflow_path.read_text(encoding="utf-8")
+    raw_workflow = workflow_path.read_bytes()
+    workflow_identity_drifted = (
+        workflow_path.absolute() == DEFAULT_WORKFLOW.absolute()
+        and hashlib.sha256(raw_workflow).hexdigest() != REQUIRED_WORKFLOW_SHA256
+    )
+    try:
+        text = raw_workflow.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise CiPolicyError("CI workflow is not UTF-8 source") from error
     active_text = _without_full_line_comments(text)
     pins = _read_pins(pins_path)
 
     findings: list[str] = []
+    if workflow_identity_drifted:
+        findings.append("CI workflow differs from the exact reviewed execution policy")
+    findings += _check_yaml_mapping_policy(active_text)
     findings += _check_masking(active_text)
     findings += _check_gates(active_text)
     findings += _check_ui_boundary(active_text)

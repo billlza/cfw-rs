@@ -180,17 +180,17 @@ class DeriveSupplyChainTests(unittest.TestCase):
     def test_missing_tool_inputs_fail_closed(self) -> None:
         from scripts.publication import sealed_closure
 
-        original = sealed_closure.pinned.verify
+        original = sealed_closure.pinned.verify_source_contract
 
         def _raise(_repository):
             raise sealed_closure.pinned.PinnedInputError("dependency_pins.env is missing GO_VERSION")
 
-        sealed_closure.pinned.verify = _raise
+        sealed_closure.pinned.verify_source_contract = _raise
         try:
             with self.assertRaisesRegex(PublicationError, "pinned supply-chain inputs failed"):
                 derive_supply_chain(REPOSITORY)
         finally:
-            sealed_closure.pinned.verify = original
+            sealed_closure.pinned.verify_source_contract = original
 
 
 class SealedClosureRoundTripTests(unittest.TestCase):

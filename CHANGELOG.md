@@ -22,8 +22,8 @@
   registers GlobalAuthority before ProxyAgent. Append-only recovery events bind
   every step to an unchanged Clash for Windows process and network projection.
   One inode-bound outer lock serializes service and bundle mutations, and
-  independent fixed journals cover both 40019→40028 validation and
-  40028→40029 final installation without overwriting earlier evidence. The
+  independent fixed journals cover both 40019→40030 validation and
+  40030→40031 final installation without overwriting earlier evidence. The
   canonical allocation ledger prevents a retired validation build or its
   reserved final companion from being reused by a later source closure. The
   validation-only compatibility island can prove the already-installed 40019
@@ -44,7 +44,12 @@
   select only the exact SHA-pinned setup-python executable; production paths
   reject that unsigned-only input. Publication source enumeration uses fixed
   system Git with user/system configuration, unsafe local excludes, fsmonitor,
-  and untracked-cache influence removed. The successor pair is 40028/40029.
+  and untracked-cache influence removed. Build 40028 and its unbuilt companion
+  40029 were then retired before candidate construction because the P0
+  source-gate v2 layout could not preserve retries while identifying one
+  authoritative success without ambiguity or overwriting failure evidence.
+  The corrected append-only source-gate contract starts with successor pair
+  40030/40031.
 - Authenticate nested release-worktree managed caches through bounded,
   descriptor-relative Git administrative control files plus an explicit
   empty-target lifecycle receipt before excluding them from the path/name-only

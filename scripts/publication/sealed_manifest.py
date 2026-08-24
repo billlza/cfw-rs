@@ -7,7 +7,7 @@ black box, into one canonical, self-sealing, immutable document:
 * the P0 source / build-boundary gates (``scripts/verify_release_authority_gate.py``,
   ``scripts/verify_production_boundary_removal.py``,
   ``scripts/verify_native_product_graph.py``,
-  ``scripts/verify_pinned_build_inputs.py``,
+  ``scripts/verify_pinned_source_contract.py``,
   ``scripts/verify_physical_capture_readiness.py``,
   ``scripts/verify_build_boundaries.sh``,
   ``scripts/release_workspace_secret_gate.sh``) recorded as content-addressed
@@ -179,8 +179,12 @@ RESULT_STATUSES = frozenset(
 MACOS_MIN = "15.0"
 ARCH = "arm64"
 LICENSE = "GPL-3.0-or-later"
-SOURCE_GATE_SCHEMA_VERSION = 2
-SOURCE_GATE_DOCUMENT = "p0-source-gates-v2"
+SOURCE_GATE_SCHEMA_VERSION = 3
+SOURCE_GATE_DOCUMENT = "p0-source-gates-v3"
+SOURCE_GATE_MAX_ATTEMPTS = 64
+SOURCE_GATE_MAX_DOCUMENT_BYTES = 256 * 1024
+SOURCE_GATE_COMPLETED = "completed"
+SOURCE_GATE_OUTCOME_UNKNOWN = "outcome-unknown"
 
 # The evidence hierarchy is imported from the canonical Evidence_Manifest so the
 # level names can never drift: Source_Implemented < Unsigned_CI_Verified <
@@ -226,7 +230,7 @@ REQUIRED_SOURCE_GATES: dict[str, str] = {
     "release-authority-gate": "scripts/verify_release_authority_gate.py",
     "production-boundary-removal": "scripts/verify_production_boundary_removal.py",
     "native-product-graph": "scripts/verify_native_product_graph.py",
-    "pinned-build-inputs": "scripts/verify_pinned_build_inputs.py",
+    "pinned-source-contract": "scripts/verify_pinned_source_contract.py",
     "physical-capture-readiness": "scripts/verify_physical_capture_readiness.py",
     "build-script-boundary": "scripts/verify_build_boundaries.sh",
     "workspace-secret-gate": "scripts/release_workspace_secret_gate.sh",
@@ -246,6 +250,7 @@ REQUIRED_CI_LANES: tuple[str, ...] = (
     "rust-test",
     "rust-target-audit",
     "cargo-deny",
+    "packet-lan-peer",
     "node-install",
     "node-test",
     "node-build",
@@ -482,6 +487,9 @@ def _source_gate_document(
         {
             "schema_version",
             "document",
+            "attempt_number",
+            "attempt_outcome",
+            "prior_attempt_sha256s",
             "repository_commit",
             "release_source_sha256",
             "gates",
@@ -494,6 +502,29 @@ def _source_gate_document(
         or payload["document"] != SOURCE_GATE_DOCUMENT
     ):
         raise PublicationError("p0 source gate document has an unsupported schema")
+    attempt_number = payload["attempt_number"]
+    if (
+        type(attempt_number) is not int
+        or attempt_number < 1
+        or attempt_number > SOURCE_GATE_MAX_ATTEMPTS
+    ):
+        raise PublicationError("p0 source gate attempt number is outside its fixed bound")
+    attempt_outcome = payload["attempt_outcome"]
+    if not isinstance(attempt_outcome, str) or attempt_outcome not in {
+        SOURCE_GATE_COMPLETED,
+        SOURCE_GATE_OUTCOME_UNKNOWN,
+    }:
+        raise PublicationError("p0 source gate attempt outcome is unsupported")
+    prior_attempt_sha256s = payload["prior_attempt_sha256s"]
+    if (
+        not isinstance(prior_attempt_sha256s, list)
+        or len(prior_attempt_sha256s) != attempt_number - 1
+    ):
+        raise PublicationError("p0 source gate prior-attempt closure is malformed")
+    normalized_prior_attempts = [
+        require_sha256(value, f"p0 source gate prior attempt {index} SHA-256")
+        for index, value in enumerate(prior_attempt_sha256s, start=1)
+    ]
     document_commit = _require_commit(
         payload["repository_commit"], "p0 source gate repository commit"
     )
@@ -509,23 +540,29 @@ def _source_gate_document(
         raise PublicationError(
             "p0 source gate document is bound to a different release source"
         )
-    gates, failures = _result_set(
-        payload["gates"],
-        "p0 source gate",
-        {
-            "id",
-            "script",
-            "status",
-            "exit_code",
-            "log_sha256",
-            "commit",
-            "release_source_sha256",
-        },
-        tuple(REQUIRED_SOURCE_GATES),
-        commit,
-        None,
-        release_source_sha256,
-    )
+    if attempt_outcome == SOURCE_GATE_OUTCOME_UNKNOWN:
+        if payload["gates"] != []:
+            raise PublicationError("outcome-unknown p0 source gate attempt has results")
+        gates: list[dict[str, Any]] = []
+        failures = [SOURCE_GATE_OUTCOME_UNKNOWN]
+    else:
+        gates, failures = _result_set(
+            payload["gates"],
+            "p0 source gate",
+            {
+                "id",
+                "script",
+                "status",
+                "exit_code",
+                "log_sha256",
+                "commit",
+                "release_source_sha256",
+            },
+            tuple(REQUIRED_SOURCE_GATES),
+            commit,
+            None,
+            release_source_sha256,
+        )
     for gate in gates:
         expected = REQUIRED_SOURCE_GATES[gate["id"]]
         if gate["script"] != expected:
@@ -539,6 +576,9 @@ def _source_gate_document(
     return {
         "schema_version": SOURCE_GATE_SCHEMA_VERSION,
         "document": SOURCE_GATE_DOCUMENT,
+        "attempt_number": attempt_number,
+        "attempt_outcome": attempt_outcome,
+        "prior_attempt_sha256s": normalized_prior_attempts,
         "repository_commit": document_commit,
         "release_source_sha256": release_source_sha256,
         "gates": gates,

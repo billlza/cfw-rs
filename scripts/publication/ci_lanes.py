@@ -26,9 +26,9 @@ machine:
   change to any pin (including tool archive digests such as
   ``SHELLCHECK_DARWIN_ARM64_SHA256``) changes the toolchain digest;
 * ``toolchain_versions`` / ``toolchain_digests`` - the pinned tool identities
-  extracted by ``derive_supply_chain``, which first runs the fail-closed
-  ``scripts/verify_pinned_build_inputs.py`` verifier, so a drifted or partial pin
-  set can never produce a digest at all;
+  extracted by ``derive_supply_chain``, which first runs the fail-closed static
+  pinned source-contract verifier, so a drifted or partial pin set can never
+  produce a digest at all;
 * ``apple_toolchain`` - the pinned Xcode marketing/build version and the pinned
   macOS deployment target; and
 * ``resolved`` - the exact identity strings reported by the tools that actually
@@ -156,10 +156,11 @@ class Lane:
     runner_temp: bool = False
 
 
-# The 26 required lanes, in dependency order: the UI install lane precedes the
+# The 27 required lanes, in dependency order: the UI install lane precedes the
 # lanes that consume ``node_modules``, the libbox module lane precedes the scan
-# and build lanes, and the unsigned candidate lane runs last because it consumes
-# the UI dependency tree and the native products.
+# and build lanes, the packet LAN peer lane independently proves its generated
+# Linux/arm64 artifact, and the unsigned candidate lane runs last because it
+# consumes the UI dependency tree and the native products.
 LANES: tuple[Lane, ...] = (
     Lane(
         "build-script-boundary",
@@ -199,6 +200,11 @@ LANES: tuple[Lane, ...] = (
         timeout=1800,
     ),
     Lane("cargo-deny", "./scripts/run_release_ci_gate.sh cargo-deny", timeout=1800),
+    Lane(
+        "packet-lan-peer",
+        "./scripts/run_release_ci_gate.sh packet-lan-peer",
+        timeout=1800,
+    ),
     Lane(
         "node-install",
         "./scripts/run_release_ci_gate.sh prepare-ui-dependencies",
@@ -791,9 +797,9 @@ def derive_toolchain_identity(
 ) -> dict[str, Any]:
     """Derive the canonical toolchain identity the CI lanes are bound to.
 
-    Fail closed: ``derive_supply_chain`` first runs the pinned-input verifier, and
-    every resolved tool identity must match its pin. No digest exists for an
-    unverified or drifted toolchain.
+    Fail closed: ``derive_supply_chain`` first runs the static pinned
+    source-contract verifier, and every resolved tool identity must match its
+    pin. No digest exists for an unverified or drifted toolchain.
     """
     supply = derive_supply_chain(repository)
     pins = _pins(repository)

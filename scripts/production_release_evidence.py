@@ -47,12 +47,14 @@ def main() -> None:
 
     if __package__:
         from .publication.orchestrator import (
+            FINAL_BUILD,
             prepare_physical_candidate_manifest,
             seal_production_evidence,
             self_check,
         )
     else:
         from publication.orchestrator import (
+            FINAL_BUILD,
             prepare_physical_candidate_manifest,
             seal_production_evidence,
             self_check,
@@ -62,7 +64,7 @@ def main() -> None:
         if arguments.command == "prepare-physical-candidate-manifest":
             result = prepare_physical_candidate_manifest(_repository())
             print(
-                "physical 40029 candidate artifact-hash manifest prepared: "
+                f"physical {FINAL_BUILD} candidate artifact-hash manifest prepared: "
                 f"{result['sha256']}"
             )
         elif arguments.command == "seal":

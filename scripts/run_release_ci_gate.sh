@@ -211,6 +211,12 @@ case "$gate" in
       "$repo_root" cfw_run_release_python_script \
       "$repo_root" "$repo_root/scripts/audit_cargo_policy.py"
     ;;
+  packet-lan-peer)
+    [[ $# -eq 0 ]] || die "$gate accepts no arguments"
+    /bin/bash -p "$repo_root/scripts/verify_packet_lan_peer.sh"
+    cfw_run_release_python_script \
+      "$repo_root" "$repo_root/scripts/verify_pinned_build_inputs.py"
+    ;;
   bootstrap-node-toolchain)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"
     /bin/bash -p "$repo_root/scripts/bootstrap_release_toolchain.sh" --node-only

@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -145,6 +149,8 @@ jobs:
           test "$("$policy_root/cargo-deny" --version)" = "cargo-deny $CARGO_DENY_VERSION"
       - name: Bootstrap verified release tools
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-release-toolchain
+      - name: Build and verify pinned packet LAN peer
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' packet-lan-peer
       - name: Verify generated Xcode project
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' verify-xcode-project
       - name: Materialize pinned libbox source

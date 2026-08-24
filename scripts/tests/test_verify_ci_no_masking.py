@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import shlex
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -9,6 +12,7 @@ from scripts.verify_ci_no_masking import (
     CiPolicyError,
     DEFAULT_PINS,
     DEFAULT_WORKFLOW,
+    REQUIRED_RUN_SHELL,
     audit_shell_test_python_isolation,
     audit_workflow,
 )
@@ -25,6 +29,10 @@ PINS = "\n".join(
 )
 
 GOOD_WORKFLOW = """name: CI
+
+defaults:
+  run:
+    shell: "/bin/bash --noprofile --norc -p -e -o pipefail {0}"
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
@@ -93,6 +101,8 @@ jobs:
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' release-tool-tests
       - name: Bootstrap release tools
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-release-toolchain
+      - name: Verify packet LAN peer
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' packet-lan-peer
       - name: Verify Xcode project
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' verify-xcode-project
       - name: Materialize libbox
@@ -151,6 +161,56 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             ):
                 audit_workflow(DEFAULT_WORKFLOW, DEFAULT_PINS)
 
+    def test_packet_gate_commands_cannot_be_made_unreachable(self) -> None:
+        source_gate = Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
+        source = source_gate.read_text(encoding="utf-8")
+        active = (
+            '    /bin/bash -p "$repo_root/scripts/verify_packet_lan_peer.sh"\n'
+            "    cfw_run_release_python_script \\\n"
+            '      "$repo_root" "$repo_root/scripts/verify_pinned_build_inputs.py"'
+        )
+        unreachable = (
+            "    if false; then\n"
+            + "\n".join(f"  {line}" for line in active.splitlines())
+            + "\n    fi"
+        )
+        self.assertIn(active, source)
+        with tempfile.TemporaryDirectory() as temporary:
+            drifted_gate = Path(temporary) / "run_release_ci_gate.sh"
+            drifted_gate.write_text(
+                source.replace(active, unreachable, 1),
+                encoding="utf-8",
+            )
+            with patch(
+                "scripts.verify_ci_no_masking.RELEASE_CI_GATE",
+                drifted_gate,
+            ), self.assertRaisesRegex(CiPolicyError, "exact reviewed dispatch policy"):
+                audit_workflow(DEFAULT_WORKFLOW, DEFAULT_PINS)
+
+    def test_workflow_cannot_replace_the_gate_after_self_audit(self) -> None:
+        source = DEFAULT_WORKFLOW.read_text(encoding="utf-8")
+        anchor = (
+            "      - name: Verify evidence manifest lane (positive and negative)\n"
+            "        run: ./scripts/run_release_ci_gate.sh "
+        )
+        injected = (
+            "      - name: Replace reviewed gate\n"
+            "        run: cp scripts/run_release_ci_gate.sh /tmp/release-gate.bak; "
+            "cp /usr/bin/true scripts/run_release_ci_gate.sh\n"
+            "      - name: Restore reviewed gate\n"
+            "        run: cp /tmp/release-gate.bak scripts/run_release_ci_gate.sh\n"
+            + anchor
+        )
+        self.assertIn(anchor, source)
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow = Path(temporary) / "ci.yml"
+            workflow.write_text(source.replace(anchor, injected, 1), encoding="utf-8")
+            with patch(
+                "scripts.verify_ci_no_masking.DEFAULT_WORKFLOW",
+                workflow,
+            ), self.assertRaisesRegex(CiPolicyError, "exact reviewed execution policy"):
+                audit_workflow(workflow, DEFAULT_PINS)
+
     def test_fetch_gate_does_not_read_account_git_state(self) -> None:
         wrapper = (
             Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
@@ -170,6 +230,154 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workflow_path, pins_path = self._write(Path(tmp), GOOD_WORKFLOW)
             audit_workflow(workflow_path, pins_path)
+
+    def test_fixed_privileged_shell_boundary_is_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = GOOD_WORKFLOW.replace(
+                "defaults:\n"
+                "  run:\n"
+                f'    shell: "{REQUIRED_RUN_SHELL}"\n\n',
+                "",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), missing)
+            with self.assertRaisesRegex(CiPolicyError, "privileged Bash boundary"):
+                audit_workflow(workflow_path, pins_path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            drifted = GOOD_WORKFLOW.replace(REQUIRED_RUN_SHELL, "bash {0}")
+            workflow_path, pins_path = self._write(Path(tmp), drifted)
+            with self.assertRaisesRegex(CiPolicyError, "shell override|privileged Bash"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_privileged_shell_ignores_bash_env_before_a_failing_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            startup = root / "startup.sh"
+            step = root / "step.sh"
+            startup.write_text("exit 0\n", encoding="utf-8")
+            step.write_text("false\n", encoding="utf-8")
+            environment = dict(os.environ)
+            environment["BASH_ENV"] = str(startup)
+
+            ordinary = subprocess.run(
+                [
+                    "/bin/bash",
+                    "--noprofile",
+                    "--norc",
+                    "-e",
+                    "-o",
+                    "pipefail",
+                    str(step),
+                ],
+                check=False,
+                capture_output=True,
+                env=environment,
+                text=True,
+            )
+            self.assertEqual(ordinary.returncode, 0)
+
+            privileged = subprocess.run(
+                shlex.split(REQUIRED_RUN_SHELL.replace("{0}", str(step))),
+                check=False,
+                capture_output=True,
+                env=environment,
+                text=True,
+            )
+            self.assertNotEqual(privileged.returncode, 0)
+
+    def test_privileged_shell_ignores_exported_function_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            step = Path(tmp) / "step.sh"
+            step.write_text("false\n", encoding="utf-8")
+            environment = dict(os.environ)
+            environment.pop("BASH_ENV", None)
+            environment["BASH_FUNC_false%%"] = "() { return 0; }"
+
+            ordinary = subprocess.run(
+                [
+                    "/bin/bash",
+                    "--noprofile",
+                    "--norc",
+                    "-e",
+                    "-o",
+                    "pipefail",
+                    str(step),
+                ],
+                check=False,
+                capture_output=True,
+                env=environment,
+                text=True,
+            )
+            self.assertEqual(ordinary.returncode, 0)
+
+            privileged = subprocess.run(
+                shlex.split(REQUIRED_RUN_SHELL.replace("{0}", str(step))),
+                check=False,
+                capture_output=True,
+                env=environment,
+                text=True,
+            )
+            self.assertNotEqual(privileged.returncode, 0)
+
+    def test_bash_env_is_rejected_at_every_workflow_scope(self) -> None:
+        variants = (
+            GOOD_WORKFLOW.replace(
+                "env:\n",
+                "env:\n  BASH_ENV: .github/ci-bootstrap.sh\n",
+                1,
+            ),
+            GOOD_WORKFLOW.replace(
+                "    timeout-minutes: 60\n",
+                "    timeout-minutes: 60\n"
+                "    env:\n"
+                "      BASH_ENV: .github/ci-bootstrap.sh\n",
+                1,
+            ),
+            GOOD_WORKFLOW.replace(
+                "      - name: Verify packet LAN peer\n",
+                "      - name: Verify packet LAN peer\n"
+                "        env:\n"
+                "          BASH_ENV: .github/ci-bootstrap.sh\n",
+            ),
+        )
+        for workflow in variants:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as tmp:
+                workflow_path, pins_path = self._write(Path(tmp), workflow)
+                with self.assertRaisesRegex(CiPolicyError, "BASH_ENV"):
+                    audit_workflow(workflow_path, pins_path)
+
+    def test_github_env_cannot_inject_bash_env_for_later_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "      - name: Verify packet LAN peer",
+                "      - name: Inject startup hook\n"
+                "        run: echo 'BASH_ENV=.github/ci-bootstrap.sh' >>\"$GITHUB_ENV\"\n"
+                "      - name: Verify packet LAN peer",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "BASH_ENV"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_packet_lan_peer_requires_release_toolchain_bootstrap_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            packet_step = (
+                "      - name: Verify packet LAN peer\n"
+                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer\n"
+            )
+            bad = GOOD_WORKFLOW.replace(packet_step, "", 1).replace(
+                "      - name: Bootstrap release tools\n"
+                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' bootstrap-release-toolchain\n",
+                packet_step
+                + "      - name: Bootstrap release tools\n"
+                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' bootstrap-release-toolchain\n",
+                1,
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "before release-toolchain bootstrap"):
+                audit_workflow(workflow_path, pins_path)
 
     def test_or_true_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -191,6 +399,68 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             with self.assertRaisesRegex(CiPolicyError, "continue-on-error"):
                 audit_workflow(workflow_path, pins_path)
 
+    def test_continue_on_error_false_is_still_rejected_as_mutable_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "      - name: Lint",
+                "      - name: Lint\n        continue-on-error: false",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "continue-on-error"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_step_shell_override_cannot_mask_a_release_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "      - name: Verify packet LAN peer\n",
+                "      - name: Verify packet LAN peer\n"
+                "        shell: bash --noprofile --norc -c 'source {0}; exit 0'\n",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "shell"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_job_default_shell_override_cannot_mask_release_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "    timeout-minutes: 60\n",
+                "    timeout-minutes: 60\n"
+                "    defaults:\n"
+                "      run:\n"
+                "        shell: bash --noprofile --norc -c 'source {0}; exit 0'\n",
+                1,
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "shell"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_step_working_directory_cannot_substitute_a_release_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "      - name: Verify packet LAN peer\n",
+                "      - name: Verify packet LAN peer\n"
+                "        working-directory: /tmp/substitute\n",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "working-directory"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_job_default_working_directory_cannot_substitute_release_gates(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "    timeout-minutes: 60\n",
+                "    timeout-minutes: 60\n"
+                "    defaults:\n"
+                "      run:\n"
+                "        working-directory: /tmp/substitute\n",
+                1,
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "working-directory"):
+                audit_workflow(workflow_path, pins_path)
+
     def test_unconditional_skip_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = GOOD_WORKFLOW.replace(
@@ -198,7 +468,143 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
                 "      - name: Lint\n        if: false",
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
-            with self.assertRaisesRegex(CiPolicyError, "if: false"):
+            with self.assertRaisesRegex(CiPolicyError, "conditionally skip"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_expression_condition_on_required_step_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "      - name: Verify packet LAN peer",
+                "      - name: Verify packet LAN peer\n"
+                "        if: github.event_name == 'schedule'",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "conditionally skip"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_sequence_first_condition_key_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "      - name: Verify packet LAN peer",
+                "      - if: false\n        name: Verify packet LAN peer",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "conditionally skip"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_sequence_first_continue_on_error_key_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "      - name: Verify packet LAN peer",
+                "      - continue-on-error: true\n"
+                "        name: Verify packet LAN peer",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "mask"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_condition_after_compact_sequence_block_scalar_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old = (
+                "      - name: Verify packet LAN peer\n"
+                "        run: ./scripts/run_release_ci_gate.sh "
+                "--validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer"
+            )
+            new = (
+                "      - run: |\n"
+                "          ./scripts/run_release_ci_gate.sh "
+                "--validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer\n"
+                "        if: false\n"
+                "        name: Verify packet LAN peer"
+            )
+            workflow_path, pins_path = self._write(Path(tmp), GOOD_WORKFLOW.replace(old, new))
+            with self.assertRaisesRegex(CiPolicyError, "conditionally skip"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_quoted_condition_key_is_outside_the_release_yaml_dialect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "      - name: Verify packet LAN peer",
+                "      - name: Verify packet LAN peer\n        \"if\": false",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "quoted YAML mapping keys"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_flow_mapping_condition_is_outside_the_release_yaml_dialect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old = (
+                "      - name: Verify packet LAN peer\n"
+                "        run: ./scripts/run_release_ci_gate.sh "
+                "--validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer"
+            )
+            new = (
+                "      - {name: Verify packet LAN peer, if: false, run: "
+                "./scripts/run_release_ci_gate.sh --validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer}"
+            )
+            workflow_path, pins_path = self._write(Path(tmp), GOOD_WORKFLOW.replace(old, new))
+            with self.assertRaisesRegex(CiPolicyError, "flow-style YAML mappings"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_anchor_merge_condition_is_outside_the_release_yaml_dialect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "      - name: Verify packet LAN peer",
+                "      - &conditional\n"
+                "        \"if\": false\n"
+                "        name: Conditional template\n"
+                "        run: echo template\n"
+                "      - <<: *conditional\n"
+                "        name: Verify packet LAN peer",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "anchors, aliases, and merges"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_multiline_explicit_condition_key_is_outside_release_dialect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old = (
+                "      - name: Verify packet LAN peer\n"
+                "        run: ./scripts/run_release_ci_gate.sh "
+                "--validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer"
+            )
+            new = (
+                "      - ?\n"
+                "          if\n"
+                "        : false\n"
+                "        name: Verify packet LAN peer\n"
+                "        run: ./scripts/run_release_ci_gate.sh "
+                "--validation-python-executable "
+                "'${{ steps.validation-python.outputs.python-path }}' packet-lan-peer"
+            )
+            workflow_path, pins_path = self._write(Path(tmp), GOOD_WORKFLOW.replace(old, new))
+            with self.assertRaisesRegex(CiPolicyError, "explicit YAML mapping"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_explicit_mapping_value_is_outside_release_dialect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "      - name: Verify packet LAN peer",
+                "      - : false\n        name: Verify packet LAN peer",
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "explicit YAML mapping values"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_expression_condition_on_release_job_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = GOOD_WORKFLOW.replace(
+                "    runs-on: macos-26",
+                "    if: ${{ github.ref_protected }}\n    runs-on: macos-26",
+                1,
+            )
+            workflow_path, pins_path = self._write(Path(tmp), bad)
+            with self.assertRaisesRegex(CiPolicyError, "conditionally skip"):
                 audit_workflow(workflow_path, pins_path)
 
     def test_set_plus_e_is_rejected(self) -> None:

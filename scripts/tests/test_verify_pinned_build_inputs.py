@@ -1,23 +1,34 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
+from scripts import verify_pinned_build_inputs as pinned_verifier
 from scripts.verify_pinned_build_inputs import (
     MANIFEST_RELATIVE_PATH,
     MAX_NATIVE_LOCK_BYTES,
     MAX_PINNED_MANIFEST_BYTES,
     PinnedInputError,
-    REQUIRED_RELEASE_BOUNDARY_BINDINGS,
+    REQUIRED_REJECTED_PATCH_DIGESTS,
     verify,
+    verify_source_contract,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+SHIPPED_PINNED_MANIFEST = json.loads(
+    (REPO_ROOT / MANIFEST_RELATIVE_PATH).read_text(encoding="utf-8")
+)
+SHIPPED_ARTIFACT_BINDINGS = SHIPPED_PINNED_MANIFEST["artifactBindings"]
+SHIPPED_ARTIFACT_SOURCE_SHA256 = SHIPPED_PINNED_MANIFEST[
+    "artifactSourceSha256"
+]
 PACKET_ENDPOINT_BINARY_SHA = (
     "c63c202b22823197ad12cb2d5f484c95be25904260ed266083dcca6fc766db6c"
 )
@@ -156,7 +167,6 @@ PATCH_BODIES = {
     "dns": b"synthetic dns failover patch body\n",
     "endpoint": b"synthetic endpoint conflict patch body\n",
 }
-LEGACY_BODY = b"synthetic legacy partial digest body\n"
 TAURI_LOCK_PATCH_BODY = b"synthetic tauri-cli spin lock patch body\n"
 TAURI_CACHE_CONTRACT_BODY = b"synthetic Tauri Cargo cache contract\n"
 LIBBOX_MODULE_CACHE_CONTRACT_BODY = b"""\
@@ -174,7 +184,7 @@ RAW_SHA = _sha(PATCH_BODIES["raw"])
 DNS_SHA = _sha(PATCH_BODIES["dns"])
 ENDPOINT_SHA = _sha(PATCH_BODIES["endpoint"])
 COMBINED_SHA = _sha(b"synthetic combined diff body\n")
-LEGACY_SHA = _sha(LEGACY_BODY)
+REJECTED_PATCH_DIGESTS = sorted(REQUIRED_REJECTED_PATCH_DIGESTS)
 TAURI_CRATE_SHA = _sha(b"synthetic official tauri-cli crate archive")
 TAURI_UPSTREAM_LOCK_SHA = _sha(b"synthetic upstream tauri-cli Cargo.lock")
 TAURI_LOCK_PATCH_SHA = _sha(TAURI_LOCK_PATCH_BODY)
@@ -203,7 +213,7 @@ PATCH_PATHS = {
 BUILD_LIBBOX = """\
 #!/usr/bin/env bash
 set -euo pipefail
-echo "$GO_VERSION $GOMOBILE_VERSION $GOMOBILE_COMMIT $GOMOBILE_MODULE_SUM $SING_BOX_VERSION $SING_BOX_COMMIT"
+echo "$GO_VERSION $GOMOBILE_VERSION $GOMOBILE_COMMIT $GOMOBILE_MODULE_SUM $SING_BOX_VERSION $SING_BOX_COMMIT $LIBBOX_BUILD_TAGS"
 python3 hash_artifact.py "$out" \\
   --metadata "sourceCommit=$SING_BOX_COMMIT" \\
   --metadata "gomobileCommit=$GOMOBILE_COMMIT" \\
@@ -244,7 +254,10 @@ BUILD_NATIVE = (
     '#!/usr/bin/env bash\necho "--metadata singBoxCommit=$SING_BOX_COMMIT"\n'
     "libbox_verify_xcframework_artifact\n"
 )
-BUILD_TAGS = "with_quic,with_clash_api,grpcnotrace"
+BUILD_TAGS = (
+    "with_quic,with_utls,with_clash_api,badlinkname,"
+    "tfogo_checklinkname0,grpcnotrace"
+)
 CONTROLLER_RELATIVE_PATH = "crates/cfw-singbox-config/src/controller.rs"
 CONTROLLER_TRIGGER = '"clash_api": {'
 CONTROLLER_SOURCE = (
@@ -255,6 +268,11 @@ CONTROLLER_SOURCE = (
     "    })\n"
     "}\n"
 )
+PROJECTION_RELATIVE_PATH = "crates/cfw-singbox-config/src/projection.rs"
+PROJECTION_TRIGGER = (
+    'root.insert("experimental".into(), clash_api.experimental_value());'
+)
+PROJECTION_SOURCE = f"fn project() {{\n    {PROJECTION_TRIGGER}\n}}\n"
 BUILD_UNSIGNED = (
     "#!/usr/bin/env bash\n"
     "libbox_verify_xcframework_artifact\n"
@@ -361,7 +379,12 @@ class Fixture:
 
     def __init__(self) -> None:
         self.env: dict[str, str] = {
+            "PYTHON_VERSION": "3.14.6",
             "RUST_VERSION": "1.97.1",
+            "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": (
+                "703ac1d600f6919f9d7a961848ecfb88834ece25684572a7f5eb53e405fde6db"
+            ),
+            "CARGO_AUDIT_VERSION": "0.22.2",
             "CARGO_DENY_VERSION": "0.20.2",
             "XCODEGEN_VERSION": "2.46.0",
             "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
@@ -438,13 +461,19 @@ class Fixture:
             for relative in PHYSICAL_COLLECTOR_PATHS
         }
         self.controller_source = CONTROLLER_SOURCE
+        self.projection_source = PROJECTION_SOURCE
         self.manifest = {
             "schema": "cfw-pinned-build-inputs-v1",
             "description": "synthetic pinned build inputs",
             "dependencyPinsPath": "scripts/dependency_pins.env",
             "nativeLockPath": "native/macos/Dependencies.lock.json",
             "tools": {
+                "PYTHON_VERSION": "3.14.6",
                 "RUST_VERSION": "1.97.1",
+                "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": (
+                    "703ac1d600f6919f9d7a961848ecfb88834ece25684572a7f5eb53e405fde6db"
+                ),
+                "CARGO_AUDIT_VERSION": "0.22.2",
                 "CARGO_DENY_VERSION": "0.20.2",
                 "XCODEGEN_VERSION": "2.46.0",
                 "XCODEGEN_COMMIT": "8445e778451c7e44237b90281bde622d764b0084",
@@ -693,25 +722,25 @@ class Fixture:
             "singBoxCommit": COMMIT,
             "patches": [
                 {
-                    "name": "security",
+                    "name": "sing-box security dependencies patch",
                     "pathKey": "SING_BOX_SECURITY_PATCH_PATH",
                     "sha256Key": "SING_BOX_SECURITY_PATCH_SHA256",
                     "sha256": SECURITY_SHA,
                 },
                 {
-                    "name": "raw packet",
+                    "name": "sing-box raw packet tun patch",
                     "pathKey": "SING_BOX_RAW_PACKET_PATCH_PATH",
                     "sha256Key": "SING_BOX_RAW_PACKET_PATCH_SHA256",
                     "sha256": RAW_SHA,
                 },
                 {
-                    "name": "DNS failover",
+                    "name": "sing-box DNS failover patch",
                     "pathKey": "SING_BOX_DNS_FAILOVER_PATCH_PATH",
                     "sha256Key": "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
                     "sha256": DNS_SHA,
                 },
                 {
-                    "name": "endpoint conflict",
+                    "name": "sing-box endpoint conflict patch",
                     "pathKey": "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
                     "sha256Key": "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
                     "sha256": ENDPOINT_SHA,
@@ -742,13 +771,19 @@ class Fixture:
                 "SING_BOX_PATCHED_GO_MOD_SHA256",
                 "SING_BOX_PATCHED_GO_SUM_SHA256",
             ],
-            "rejectedPatchDigests": [LEGACY_SHA],
+            "rejectedPatchDigests": list(REJECTED_PATCH_DIGESTS),
             "libboxBuildTags": {
                 "pinKey": "LIBBOX_BUILD_TAGS",
                 "value": BUILD_TAGS,
                 "required": [
                     {"tag": "with_quic", "reason": "QUIC outbounds"},
+                    {"tag": "with_utls", "reason": "uTLS fingerprints"},
                     {"tag": "with_clash_api", "reason": "engine start path needs the server"},
+                    {"tag": "badlinkname", "reason": "Go linkname compatibility"},
+                    {
+                        "tag": "tfogo_checklinkname0",
+                        "reason": "tfo-go linkname compatibility",
+                    },
                     {"tag": "grpcnotrace", "reason": "no gRPC trace surface"},
                 ],
                 "engineStartPathBindings": [
@@ -758,6 +793,13 @@ class Fixture:
                         "requiredWhenContains": CONTROLLER_TRIGGER,
                         "triggerRequired": True,
                         "reason": "the projected controller block needs the real server",
+                    },
+                    {
+                        "tag": "with_clash_api",
+                        "path": PROJECTION_RELATIVE_PATH,
+                        "requiredWhenContains": PROJECTION_TRIGGER,
+                        "triggerRequired": True,
+                        "reason": "every projected configuration needs the real server",
                     }
                 ],
             },
@@ -770,6 +812,7 @@ class Fixture:
                         "$GOMOBILE_MODULE_SUM",
                         "$SING_BOX_VERSION",
                         "$SING_BOX_COMMIT",
+                        "$LIBBOX_BUILD_TAGS",
                         "$SING_BOX_COMBINED_DIFF_SHA256",
                         "$SING_BOX_SECURITY_PATCH_SHA256",
                         "$SING_BOX_RAW_PACKET_PATCH_SHA256",
@@ -779,22 +822,10 @@ class Fixture:
                     "forbidNetworkRecursion": True,
                 }
             },
-            "artifactBindings": {
-                "scripts/libbox_source_contract.sh": list(LIBBOX_ARTIFACT_BINDINGS),
-                "scripts/build_libbox.sh": [
-                    "sourceCommit=$SING_BOX_COMMIT",
-                    "gomobileCommit=$GOMOBILE_COMMIT",
-                    "gomobileModuleSum=$GOMOBILE_MODULE_SUM",
-                    "combinedDiffSha256=$SING_BOX_COMBINED_DIFF_SHA256",
-                ],
-                "scripts/build_native_products.sh": [
-                    "singBoxCommit=$SING_BOX_COMMIT",
-                    "libbox_verify_xcframework_artifact",
-                ],
-                "scripts/build_unsigned_candidate.sh": [
-                    "libbox_verify_xcframework_artifact",
-                ],
-            },
+            "artifactBindings": copy.deepcopy(SHIPPED_ARTIFACT_BINDINGS),
+            "artifactSourceSha256": copy.deepcopy(
+                SHIPPED_ARTIFACT_SOURCE_SHA256
+            ),
         }
         self.lock = {
             "go": "1.26.6",
@@ -820,29 +851,37 @@ class Fixture:
             },
             "singBoxForAppleReference": {"commit": APPLE_REFERENCE_COMMIT},
         }
-        self.build_libbox = BUILD_LIBBOX
-        self.libbox_contract = LIBBOX_CONTRACT
-        self.build_native = BUILD_NATIVE
-        self.build_unsigned = BUILD_UNSIGNED
+        self.build_libbox = (REPO_ROOT / "scripts/build_libbox.sh").read_text(
+            encoding="utf-8"
+        )
+        self.libbox_contract = (
+            REPO_ROOT / "scripts/libbox_source_contract.sh"
+        ).read_text(encoding="utf-8")
+        self.build_native = (
+            REPO_ROOT / "scripts/build_native_products.sh"
+        ).read_text(encoding="utf-8")
+        self.build_unsigned = (
+            REPO_ROOT / "scripts/build_unsigned_candidate.sh"
+        ).read_text(encoding="utf-8")
         self.tauri_lock_patch = TAURI_LOCK_PATCH_BODY
         self.libbox_module_cache_contract = LIBBOX_MODULE_CACHE_CONTRACT_BODY
         self.xcodegen_patch = XCODEGEN_PATCH_BODY
         self.xcodegen_bootstrap = XCODEGEN_BOOTSTRAP
         self.tauri_installer = TAURI_INSTALLER
-        self.ci_workflow = CI_WORKFLOW
-        for relative in REQUIRED_RELEASE_BOUNDARY_BINDINGS:
-            self.manifest["artifactBindings"].setdefault(
-                relative, ["fixture-release-boundary"]
-            )
+        self.ci_workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+        special_artifact_files = {
+            ".github/workflows/ci.yml",
+            "scripts/build_libbox.sh",
+            "scripts/build_native_products.sh",
+            "scripts/build_unsigned_candidate.sh",
+            "scripts/libbox_source_contract.sh",
+        }
         self.extra_artifact_files: dict[str, str] = {
-            relative: "fixture-release-boundary\n"
-            for relative in REQUIRED_RELEASE_BOUNDARY_BINDINGS
-            if relative not in {
-                "scripts/build_libbox.sh",
-                "scripts/build_native_products.sh",
-                "scripts/build_unsigned_candidate.sh",
-                "scripts/libbox_source_contract.sh",
-            }
+            relative: (REPO_ROOT / relative).read_text(encoding="utf-8")
+            for relative in self.manifest["artifactBindings"]
+            if relative not in special_artifact_files
         }
         self._extra_env_text = ""
 
@@ -865,6 +904,9 @@ class Fixture:
         controller = root / CONTROLLER_RELATIVE_PATH
         controller.parent.mkdir(parents=True, exist_ok=True)
         controller.write_text(self.controller_source, encoding="utf-8")
+        projection = root / PROJECTION_RELATIVE_PATH
+        projection.parent.mkdir(parents=True, exist_ok=True)
+        projection.write_text(self.projection_source, encoding="utf-8")
         (root / MANIFEST_RELATIVE_PATH).write_text(json.dumps(self.manifest), encoding="utf-8")
         (root / "scripts/dependency_pins.env").write_text(self.env_text(), encoding="utf-8")
         for key, body in self.patch_bodies.items():
@@ -929,9 +971,9 @@ class Fixture:
 
 
 class PinnedBuildInputsTests(unittest.TestCase):
-    def _verify_written_fixture(self, fixture: Fixture, root: Path) -> None:
+    def _pinned_identity_patches(self, fixture: Fixture) -> tuple[object, ...]:
         source_binding = fixture.manifest["runtimeTools"]["adb"]["sourceBinding"]
-        with (
+        return (
             mock.patch(
                 "scripts.verify_pinned_build_inputs._PACKET_LAN_PEER_ARTIFACT_SHA256",
                 _sha(fixture.packet_lan_peer_artifact),
@@ -948,8 +990,19 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 "scripts.verify_pinned_build_inputs._ANDROID_LAN_PEER_SOURCE_SIZE",
                 source_binding["size"],
             ),
-        ):
+        )
+
+    def _verify_written_fixture(self, fixture: Fixture, root: Path) -> None:
+        with ExitStack() as stack:
+            for identity_patch in self._pinned_identity_patches(fixture):
+                stack.enter_context(identity_patch)
             verify(root)
+
+    def _verify_source_written_fixture(self, fixture: Fixture, root: Path) -> None:
+        with ExitStack() as stack:
+            for identity_patch in self._pinned_identity_patches(fixture):
+                stack.enter_context(identity_patch)
+            verify_source_contract(root)
 
     def _verify_fixture(self, fixture: Fixture) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -967,10 +1020,39 @@ class PinnedBuildInputsTests(unittest.TestCase):
     def test_correct_pins_pass(self) -> None:
         self._verify_fixture(Fixture())
 
-    def test_real_repository_passes(self) -> None:
+    def test_source_contract_does_not_require_generated_packet_artifact(self) -> None:
+        fixture = Fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = fixture.write(Path(temporary))
+            artifact = root / "target/packet-lan-peer-linux-arm64"
+            artifact.unlink()
+            artifact.parent.rmdir()
+            self._verify_source_written_fixture(fixture, root)
+
+    def test_source_contract_still_rejects_packet_source_drift(self) -> None:
+        fixture = Fixture()
+        fixture.packet_lan_peer_files["tools/packet-lan-peer/main.go"] += b"// drift\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = fixture.write(Path(temporary))
+            artifact = root / "target/packet-lan-peer-linux-arm64"
+            artifact.unlink()
+            artifact.parent.rmdir()
+            with self.assertRaisesRegex(PinnedInputError, "packet LAN peer source tree"):
+                self._verify_source_written_fixture(fixture, root)
+
+    def test_real_repository_source_contract_passes(self) -> None:
         # Binds the shipped manifest, dependency_pins.env, patch files, native lock,
-        # and offline build scripts together.
-        verify(REPO_ROOT)
+        # and offline build scripts together without relying on a generated target.
+        verify_source_contract(REPO_ROOT)
+
+    def test_build_boundary_uses_source_only_pinned_contract(self) -> None:
+        boundary = (REPO_ROOT / "scripts/verify_build_boundaries.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            '"$repo_root/scripts/verify_pinned_source_contract.py"', boundary
+        )
+        self.assertNotIn('"$repo_root/scripts/verify_pinned_build_inputs.py"', boundary)
 
     def test_packet_endpoint_source_drift_fails(self) -> None:
         fixture = Fixture()
@@ -1361,6 +1443,12 @@ class PinnedBuildInputsTests(unittest.TestCase):
         del fixture.env["GOVULNCHECK_VERSION"]
         self._assert_fails(fixture, "GOVULNCHECK_VERSION")
 
+    def test_coordinated_tool_pin_deletion_fails_fixed_policy(self) -> None:
+        fixture = Fixture()
+        del fixture.manifest["tools"]["GOVULNCHECK_VERSION"]
+        del fixture.env["GOVULNCHECK_VERSION"]
+        self._assert_fails(fixture, "fixed tool pin set")
+
     def test_wrong_commit_fails(self) -> None:
         fixture = Fixture()
         fixture.env["SING_BOX_COMMIT"] = "0" * 40
@@ -1375,6 +1463,44 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         del fixture.env["GOMOBILE_MODULE_SUM"]
         self._assert_fails(fixture, "GOMOBILE_MODULE_SUM")
+
+    def test_coordinated_go_module_input_deletion_fails_fixed_policy(self) -> None:
+        fixture = Fixture()
+        fixture.manifest["verifiedGoModuleInputKeys"].remove(
+            "GOVULNCHECK_MODULE_SUM"
+        )
+        fixture.env["GOVULNCHECK_MODULE_SUM"] = "not-an-h1-sum"
+        self._assert_fails(fixture, "fixed verified Go module input set")
+
+    def test_go_module_input_policy_requires_strings_and_unique_keys(self) -> None:
+        invalid_values = (
+            None,
+            {},
+            [],
+            [
+                "GOMOBILE_MODULE_SUM",
+                "GOVULNCHECK_MODULE_SUM",
+                "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+                "SING_BOX_UPSTREAM_GO_MOD_SHA256",
+                "SING_BOX_UPSTREAM_GO_SUM_SHA256",
+                "SING_BOX_PATCHED_GO_MOD_SHA256",
+                7,
+            ],
+            [
+                "GOMOBILE_MODULE_SUM",
+                "GOVULNCHECK_MODULE_SUM",
+                "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+                "SING_BOX_UPSTREAM_GO_MOD_SHA256",
+                "SING_BOX_UPSTREAM_GO_SUM_SHA256",
+                "SING_BOX_PATCHED_GO_MOD_SHA256",
+                "SING_BOX_PATCHED_GO_MOD_SHA256",
+            ],
+        )
+        for value in invalid_values:
+            with self.subTest(value=value):
+                fixture = Fixture()
+                fixture.manifest["verifiedGoModuleInputKeys"] = value
+                self._assert_fails(fixture, "fixed verified Go module input set")
 
     def test_libbox_module_cache_contract_content_drift_fails(self) -> None:
         fixture = Fixture()
@@ -1584,14 +1710,55 @@ class PinnedBuildInputsTests(unittest.TestCase):
         del fixture.patch_bodies["raw"]
         self._assert_fails(fixture, "missing, a symlink, or has an unsafe path")
 
+    def test_coordinated_patch_policy_replacement_fails_fixed_policy(self) -> None:
+        fixture = Fixture()
+        replacement = "synthetic unrelated patch policy body\n"
+        replacement_sha256 = _sha(replacement.encode("utf-8"))
+        fixture.env["UNRELATED_PATCH_PATH"] = "scripts/unrelated.patch"
+        fixture.env["UNRELATED_PATCH_SHA256"] = replacement_sha256
+        fixture.extra_artifact_files["scripts/unrelated.patch"] = replacement
+        fixture.manifest["patches"][3] = {
+            "name": "unrelated replacement patch",
+            "pathKey": "UNRELATED_PATCH_PATH",
+            "sha256Key": "UNRELATED_PATCH_SHA256",
+            "sha256": replacement_sha256,
+        }
+        self._assert_fails(fixture, "fixed patch policy set")
+
     def test_legacy_partial_digest_rejected(self) -> None:
         # Point the raw-packet patch entirely at the rejected legacy digest.
         fixture = Fixture()
-        fixture.patch_bodies["raw"] = LEGACY_BODY
-        fixture.env["SING_BOX_RAW_PACKET_PATCH_SHA256"] = LEGACY_SHA
-        fixture.manifest["patches"][1]["sha256"] = LEGACY_SHA
-        fixture.lock["singBox"]["rawPacketPatch"]["sha256"] = LEGACY_SHA
+        rejected_digest = REJECTED_PATCH_DIGESTS[0]
+        fixture.env["SING_BOX_RAW_PACKET_PATCH_SHA256"] = rejected_digest
+        fixture.manifest["patches"][1]["sha256"] = rejected_digest
+        fixture.lock["singBox"]["rawPacketPatch"]["sha256"] = rejected_digest
         self._assert_fails(fixture, "rejected/legacy digest")
+
+    def test_rejected_patch_digest_policy_cannot_be_disabled_or_malformed(self) -> None:
+        invalid_values = (
+            None,
+            [],
+            {},
+            [REJECTED_PATCH_DIGESTS[0]],
+            [
+                REJECTED_PATCH_DIGESTS[0],
+                REJECTED_PATCH_DIGESTS[0],
+                REJECTED_PATCH_DIGESTS[2],
+                REJECTED_PATCH_DIGESTS[3],
+            ],
+            [
+                REJECTED_PATCH_DIGESTS[0],
+                REJECTED_PATCH_DIGESTS[1],
+                REJECTED_PATCH_DIGESTS[2],
+                "not-a-digest",
+            ],
+            ["a" * 64, "b" * 64, "c" * 64, "d" * 64],
+        )
+        for value in invalid_values:
+            with self.subTest(value=value):
+                fixture = Fixture()
+                fixture.manifest["rejectedPatchDigests"] = value
+                self._assert_fails(fixture, "rejected patch")
 
     def test_combined_diff_equal_to_patch_rejected(self) -> None:
         fixture = Fixture()
@@ -1607,7 +1774,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
         # projection still injects experimental.clash_api, which makes box.New fail
         # on every engine start.
         fixture = Fixture()
-        reduced = "with_quic,grpcnotrace"
+        reduced = "with_quic,with_utls,badlinkname,tfogo_checklinkname0,grpcnotrace"
         fixture.env["LIBBOX_BUILD_TAGS"] = reduced
         fixture.manifest["libboxBuildTags"]["value"] = reduced
         self._assert_fails(fixture, "required tag 'with_clash_api'")
@@ -1636,12 +1803,32 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture.manifest["libboxBuildTags"]["value"] = repeated
         self._assert_fails(fixture, "repeat")
 
+    def test_coordinated_build_tag_deletion_still_fails_fixed_policy(self) -> None:
+        fixture = Fixture()
+        reduced = BUILD_TAGS.replace("with_quic,", "", 1)
+        fixture.env["LIBBOX_BUILD_TAGS"] = reduced
+        fixture.manifest["libboxBuildTags"]["value"] = reduced
+        fixture.manifest["libboxBuildTags"]["required"] = [
+            entry
+            for entry in fixture.manifest["libboxBuildTags"]["required"]
+            if entry["tag"] != "with_quic"
+        ]
+        self._assert_fails(fixture, "differ from release policy")
+
+    def test_same_cardinality_build_tag_replacement_fails_fixed_policy(self) -> None:
+        fixture = Fixture()
+        replaced = BUILD_TAGS.replace("with_quic", "with_fake", 1)
+        fixture.env["LIBBOX_BUILD_TAGS"] = replaced
+        fixture.manifest["libboxBuildTags"]["value"] = replaced
+        fixture.manifest["libboxBuildTags"]["required"][0]["tag"] = "with_fake"
+        self._assert_fails(fixture, "differ from release policy")
+
     def test_source_binding_without_required_tag_fails(self) -> None:
         # A source trigger may not be satisfied by the required-tag table alone:
         # removing the tag from both the pin and the required table still fails
         # because the tracked source still needs it.
         fixture = Fixture()
-        reduced = "with_quic,grpcnotrace"
+        reduced = "with_quic,with_utls,badlinkname,tfogo_checklinkname0,grpcnotrace"
         fixture.env["LIBBOX_BUILD_TAGS"] = reduced
         fixture.manifest["libboxBuildTags"]["value"] = reduced
         fixture.manifest["libboxBuildTags"]["required"] = [
@@ -1664,7 +1851,37 @@ class PinnedBuildInputsTests(unittest.TestCase):
     def test_required_tag_without_reason_fails(self) -> None:
         fixture = Fixture()
         del fixture.manifest["libboxBuildTags"]["required"][1]["reason"]
-        self._assert_fails(fixture, "no recorded reason")
+        self._assert_fails(fixture, "required-tag entry is malformed")
+
+    def test_engine_start_bindings_cannot_be_disabled_or_partial(self) -> None:
+        invalid_values = (
+            None,
+            [],
+            {},
+            [Fixture().manifest["libboxBuildTags"]["engineStartPathBindings"][0]],
+        )
+        for value in invalid_values:
+            with self.subTest(value=value):
+                fixture = Fixture()
+                fixture.manifest["libboxBuildTags"]["engineStartPathBindings"] = value
+                self._assert_fails(fixture, "engine-start|source bindings")
+
+    def test_engine_start_binding_schema_and_trigger_are_strict(self) -> None:
+        fixture = Fixture()
+        fixture.manifest["libboxBuildTags"]["engineStartPathBindings"][0][
+            "triggerRequired"
+        ] = False
+        self._assert_fails(fixture, "must require its trigger")
+
+        fixture = Fixture()
+        del fixture.manifest["libboxBuildTags"]["engineStartPathBindings"][0][
+            "reason"
+        ]
+        self._assert_fails(fixture, "source binding is malformed")
+
+        fixture = Fixture()
+        fixture.manifest["libboxBuildTags"]["engineStartPathBindings"].pop()
+        self._assert_fails(fixture, "fixed engine-start paths")
 
     # --- malformed / unavailable inputs -------------------------------------
 
@@ -1855,38 +2072,100 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture.build_libbox += "git clone https://example.com/sing-box\n"
         self._assert_fails(fixture, "network or recursive")
 
+    def test_build_script_policy_set_cannot_be_disabled_or_replaced(self) -> None:
+        canonical_rules = Fixture().manifest["buildScripts"]["scripts/build_libbox.sh"]
+        invalid_values = (
+            None,
+            {},
+            [],
+            {"scripts/unrelated.sh": canonical_rules},
+        )
+        for value in invalid_values:
+            with self.subTest(value=value):
+                fixture = Fixture()
+                fixture.manifest["buildScripts"] = value
+                self._assert_fails(fixture, "fixed build-script policy set")
+
+    def test_build_script_policy_schema_cannot_weaken_checks(self) -> None:
+        mutations = (
+            lambda rules: rules.clear(),
+            lambda rules: rules.pop("requirePinReferences"),
+            lambda rules: rules.update(requirePinReferences=[]),
+            lambda rules: rules.update(requirePinReferences=None),
+            lambda rules: rules["requirePinReferences"].pop(),
+            lambda rules: rules.update(forbidNetworkRecursion=False),
+            lambda rules: rules.update(forbidNetworkRecursion=None),
+            lambda rules: rules.update(unexpected=True),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                fixture = Fixture()
+                rules = fixture.manifest["buildScripts"]["scripts/build_libbox.sh"]
+                mutate(rules)
+                self._assert_fails(
+                    fixture,
+                    "build-script policy|required pin references|pin-reference policy|"
+                    "must forbid network",
+                )
+
     def test_missing_artifact_binding_fails(self) -> None:
         fixture = Fixture()
         fixture.build_native = '#!/usr/bin/env bash\necho "no binding"\n'
-        self._assert_fails(fixture, "artifact-hash binding")
+        self._assert_fails(fixture, "artifact source digest|artifact-hash binding")
 
-    def test_missing_release_boundary_binding_fails(self) -> None:
+    def test_artifact_binding_policy_cannot_delete_one_path(self) -> None:
         fixture = Fixture()
-        missing = sorted(REQUIRED_RELEASE_BOUNDARY_BINDINGS)[0]
+        missing = sorted(fixture.manifest["artifactBindings"])[0]
         del fixture.manifest["artifactBindings"][missing]
-        self._assert_fails(fixture, "required release boundary bindings")
+        self._assert_fails(fixture, "artifact bindings differ from release policy")
+
+    def test_artifact_binding_policy_cannot_delete_one_fragment(self) -> None:
+        fixture = Fixture()
+        bindings = fixture.manifest["artifactBindings"][
+            "scripts/notarization_transaction.py"
+        ]
+        bindings.pop()
+        self._assert_fails(fixture, "artifact bindings differ from release policy")
+
+    def test_artifact_source_digest_policy_cannot_delete_or_change_one_path(self) -> None:
+        fixture = Fixture()
+        relative = sorted(fixture.manifest["artifactSourceSha256"])[0]
+        del fixture.manifest["artifactSourceSha256"][relative]
+        self._assert_fails(fixture, "artifact source digest map")
+
+        fixture = Fixture()
+        relative = sorted(fixture.manifest["artifactSourceSha256"])[0]
+        fixture.manifest["artifactSourceSha256"][relative] = "0" * 64
+        self._assert_fails(fixture, "artifact source digest map identity")
+
+    def test_dependency_pins_path_cannot_redirect(self) -> None:
+        fixture = Fixture()
+        fixture.manifest["dependencyPinsPath"] = "scripts/alternate-pins.env"
+        self._assert_fails(fixture, "dependency pins path differs from release policy")
+
+    def test_native_lock_path_cannot_redirect(self) -> None:
+        fixture = Fixture()
+        fixture.manifest["nativeLockPath"] = "native/macos/Alternate.lock.json"
+        self._assert_fails(fixture, "native lock path differs from release policy")
 
     def test_ci_unsigned_python_must_match_the_dependency_pin(self) -> None:
         fixture = Fixture()
         fixture.env["PYTHON_VERSION"] = "3.14.6"
         fixture.manifest["tools"]["PYTHON_VERSION"] = "3.14.6"
-        fixture.manifest["artifactBindings"][".github/workflows/ci.yml"] = [
-            "python-version:"
-        ]
         self._verify_fixture(fixture)
 
         fixture.ci_workflow = fixture.ci_workflow.replace(
             'python-version: "3.14.6"', 'python-version: "3.14.7"'
         )
-        self._assert_fails(fixture, "Python version does not exactly match")
+        self._assert_fails(
+            fixture,
+            "artifact source digest|Python version does not exactly match",
+        )
 
-    def test_each_release_job_has_one_exact_python_binding(self) -> None:
+    def test_release_workflow_cannot_add_an_unreviewed_job(self) -> None:
         fixture = Fixture()
         fixture.env["PYTHON_VERSION"] = "3.14.6"
         fixture.manifest["tools"]["PYTHON_VERSION"] = "3.14.6"
-        fixture.manifest["artifactBindings"][".github/workflows/ci.yml"] = [
-            "python-version:"
-        ]
         fixture.ci_workflow += """
   release-two:
     runs-on: macos-26
@@ -1900,53 +2179,111 @@ class PinnedBuildInputsTests(unittest.TestCase):
           update-environment: false
       - run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test
 """
-        self._verify_fixture(fixture)
-
-        fixture.ci_workflow = fixture.ci_workflow.replace(
-            '          python-version: "3.14.6"\n'
-            "          architecture: arm64\n"
-            "          update-environment: false\n"
-            "      - run: ./scripts/run_release_ci_gate.sh "
-            "--validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test",
-            '          python-version: "3.14.7"\n'
-            "          architecture: arm64\n"
-            "          update-environment: false\n"
-            "      - run: ./scripts/run_release_ci_gate.sh "
-            "--validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-test",
-        )
-        self._assert_fails(fixture, "release-two.*Python version")
+        self._assert_fails(fixture, "artifact source digest")
 
     def test_libbox_exact_contract_missing_metadata_binding_fails(self) -> None:
         fixture = Fixture()
         fixture.libbox_contract = fixture.libbox_contract.replace(
             "patchedGoSumSha256=$SING_BOX_PATCHED_GO_SUM_SHA256", "missing-binding"
         )
-        self._assert_fails(fixture, "artifact-hash binding")
+        self._assert_fails(fixture, "artifact source digest|artifact-hash binding")
 
     def test_production_orchestrator_binding_drift_fails(self) -> None:
         fixture = Fixture()
         path = "scripts/publication/orchestrator.py"
-        fixture.manifest["artifactBindings"][path] = [
-            'VALIDATION_BUILD = "40028"',
-            'FINAL_BUILD = "40029"',
-            "seal_production_evidence",
-            "require_verified=True",
-        ]
-        fixture.extra_artifact_files[path] = (
-            'VALIDATION_BUILD = "40028"\n'
-            'FINAL_BUILD = "40029"\n'
-            "def seal_production_evidence():\n"
-            "    require_verified=True\n"
-        )
         self._verify_fixture(fixture)
         fixture.extra_artifact_files[path] = fixture.extra_artifact_files[path].replace(
             "require_verified=True", "require_verified=False"
         )
-        self._assert_fails(fixture, "artifact-hash binding")
+        self._assert_fails(fixture, "artifact source digest")
+
+    def test_python_artifact_binding_cannot_be_satisfied_by_a_comment(self) -> None:
+        fixture = Fixture()
+        path = "scripts/evidence_manifest.py"
+        binding = 'type(document["schema_version"]) is not int'
+        source = fixture.extra_artifact_files[path]
+        self.assertIn(binding, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            binding,
+            'not isinstance(document["schema_version"], int)',
+            1,
+        ) + f"\n# {binding}\n"
+        binding_surface = pinned_verifier._artifact_binding_surface(
+            fixture.extra_artifact_files[path],
+            path,
+        )
+        self.assertNotIn(binding, binding_surface)
+        self._assert_fails(fixture, "artifact source digest")
+
+    def test_artifact_source_digest_rejects_shell_comment_only_binding(self) -> None:
+        fixture = Fixture()
+        binding = "/usr/bin/xcodebuild build"
+        self.assertIn(binding, fixture.build_native)
+        fixture.build_native = fixture.build_native.replace(
+            binding,
+            "/usr/bin/xcodebuild analyze",
+            1,
+        ) + f"\n# {binding}\n"
+        self._assert_fails(fixture, "artifact source digest")
+
+    def test_artifact_source_digest_rejects_python_dead_string_binding(self) -> None:
+        fixture = Fixture()
+        path = "scripts/evidence_manifest.py"
+        binding = 'type(document["schema_version"]) is not int'
+        source = fixture.extra_artifact_files[path]
+        fixture.extra_artifact_files[path] = source.replace(
+            binding,
+            'not isinstance(document["schema_version"], int)',
+            1,
+        ) + f"\nDEAD_POLICY_TEXT = {binding!r}\n"
+        self._assert_fails(fixture, "artifact source digest")
+
+    def test_final_input_guard_cannot_be_removed_and_retained_as_a_comment(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/orchestrator.py"
+        source = fixture.extra_artifact_files[path]
+        guarded_publish = (
+            "    _require_final_inputs_unchanged(context, physical_candidate_manifest)\n"
+            "    final_guard = _observe_signed_app_tree(context)"
+        )
+        self.assertIn(guarded_publish, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded_publish,
+            "    pass\n    final_guard = _observe_signed_app_tree(context)",
+            1,
+        ) + "\n# _require_final_inputs_unchanged(context, physical_candidate_manifest)\n"
+        with self.assertRaisesRegex(PinnedInputError, "release guard calls"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+        self._assert_fails(fixture, "artifact source digest")
+
+    def test_self_excluded_verifier_still_requires_real_entrypoints(self) -> None:
+        fixture = Fixture()
+        path = "scripts/verify_pinned_build_inputs.py"
+        source = fixture.extra_artifact_files[path]
+        binding = "def verify_source_contract(repository: Path) -> None:"
+        self.assertIn(binding, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            binding,
+            "def disabled_source_contract(repository: Path) -> None:",
+            1,
+        ) + f"\nDEAD_POLICY_TEXT = {binding!r}\n"
+        with self.assertRaisesRegex(PinnedInputError, "entrypoint structure"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+        self._assert_fails(fixture, "entrypoint structure")
 
     def test_real_manifest_pins_complete_production_orchestrator_surface(self) -> None:
         manifest = json.loads((REPO_ROOT / MANIFEST_RELATIVE_PATH).read_text(encoding="utf-8"))
         bindings = manifest["artifactBindings"]
+        self.assertEqual(
+            set(manifest["artifactSourceSha256"]),
+            set(bindings) - {"scripts/verify_pinned_build_inputs.py"},
+        )
         for path in (
             "scripts/release_capability_inventory.json",
             "scripts/release_capability_inventory.py",

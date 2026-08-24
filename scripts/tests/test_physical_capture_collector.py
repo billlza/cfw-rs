@@ -14,6 +14,7 @@ from unittest.mock import patch
 from scripts.harness import performance_ledger as performance_contract
 from scripts.harness.raw_artifacts import (
     EVIDENCE_PROFILE,
+    RawArtifactError,
     canonical_json,
     load_json_bytes,
 )
@@ -24,6 +25,7 @@ from scripts.physical_capture.collector import (
     PRODUCER_REGISTRY,
     PhysicalCollectorDriverError,
     _collect_harness_session,
+    _load_committed_candidate,
     _load_producer_checkpoint,
     _parser,
     _require_previous_attempt_abandoned,
@@ -54,6 +56,7 @@ from scripts.physical_capture.session import (
     PhysicalCaptureSession,
     PhysicalCaptureSessionError,
 )
+from scripts.publication.common import tree_digest
 from scripts.tests.performance_evidence_fixture import (
     _command as performance_command,
 )
@@ -113,6 +116,46 @@ class PhysicalCaptureCollectorTests(unittest.TestCase):
         self.addCleanup(session.close)
         return session
 
+    def test_collector_requires_the_manifest_bound_candidate_commit_marker(self) -> None:
+        entries = [
+            {
+                "path": "artifacts/signed-app",
+                "sha256": hashlib.sha256(b"signed-app").hexdigest(),
+            }
+        ]
+        manifest_sha256 = tree_digest(entries)
+        manifest = {"entries": entries, "sha256": manifest_sha256}
+        candidate = {"artifact_hash_manifest_sha256": manifest_sha256}
+        candidate_path = self.repository / "physical-collector-candidate.json"
+        manifest_path = self.repository / "physical-candidate-manifest.json"
+        manifest_path.write_bytes(canonical_json(manifest))
+
+        with patch.object(
+            collector_driver,
+            "FINAL_CANDIDATE",
+            candidate_path,
+        ), patch.object(
+            collector_driver,
+            "FINAL_CANDIDATE_MANIFEST",
+            manifest_path,
+        ):
+            with self.assertRaisesRegex(RawArtifactError, "openable"):
+                _load_committed_candidate()
+
+            candidate_path.write_bytes(canonical_json(candidate))
+            self.assertEqual(_load_committed_candidate(), candidate)
+
+            manifest_path.unlink()
+            with self.assertRaisesRegex(RawArtifactError, "openable"):
+                _load_committed_candidate()
+            manifest_path.write_bytes(canonical_json(manifest))
+
+            candidate_path.write_bytes(
+                canonical_json({"artifact_hash_manifest_sha256": "0" * 64})
+            )
+            with self.assertRaisesRegex(RawArtifactError, "does not bind"):
+                _load_committed_candidate()
+
     @staticmethod
     def abandon_with_source_failure(
         session: PhysicalCaptureSession, harness: str = "lifecycle"
@@ -126,7 +169,7 @@ class PhysicalCaptureCollectorTests(unittest.TestCase):
         )
 
     @staticmethod
-    def release_context(run_id: str = "run-40029-macos15") -> dict[str, object]:
+    def release_context(run_id: str = "run-40031-macos15") -> dict[str, object]:
         def digest(value: str) -> str:
             return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -138,7 +181,7 @@ class PhysicalCaptureCollectorTests(unittest.TestCase):
             ).hexdigest(),
             "candidate": {
                 "version": "0.4.0",
-                "build_number": "40029",
+                "build_number": "40031",
                 "app_manifest_sha256": digest("app-manifest"),
                 "signed_app_tree_sha256": digest("signed-app-tree"),
                 "artifact_hash_manifest_sha256": digest("artifact-manifest"),

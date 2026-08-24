@@ -178,6 +178,9 @@ def source_gates(
     return {
         "schema_version": SOURCE_GATE_SCHEMA_VERSION,
         "document": SOURCE_GATE_DOCUMENT,
+        "attempt_number": 1,
+        "attempt_outcome": "completed",
+        "prior_attempt_sha256s": [],
         "repository_commit": commit,
         "release_source_sha256": release_source,
         "gates": [
@@ -649,6 +652,14 @@ class SealedManifestBindingTests(_CleanWorkspace):
                 payload = request(0, self.workspace)
                 payload["p0_source"]["schema_version"] = invalid
                 with self.assertRaisesRegex(PublicationError, "unsupported schema"):
+                    self.build(payload)
+
+    def test_source_gate_attempt_outcome_rejects_non_string_values(self) -> None:
+        for invalid in (None, False, [], {}):
+            with self.subTest(invalid=invalid):
+                payload = request(0, self.workspace)
+                payload["p0_source"]["attempt_outcome"] = invalid
+                with self.assertRaisesRegex(PublicationError, "outcome is unsupported"):
                     self.build(payload)
 
     def test_inner_manifest_schema_rejects_float_and_bool(self) -> None:

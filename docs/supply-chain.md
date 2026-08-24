@@ -99,10 +99,24 @@ Network access is isolated to explicit preparation:
    checks formatting, imports, absence of non-standard dependencies and cgo,
    unit tests, vet, race tests, target metadata, empty build ID, and the
    deterministic build. It also compares the just-built artifact directly with
-   the fixed SHA-256, size, and mode. The static pinned-input verifier opens that
+   the fixed SHA-256, size, and mode. The complete pinned-input verifier opens that
    same target with `O_NOFOLLOW`, holds the descriptor while hashing, and rejects
    non-regular files, hard links, ownership or mode drift, size or digest drift,
-   and any before/after metadata change.
+   and any before/after metadata change. These checks are intentionally layered:
+   `scripts/verify_pinned_source_contract.py` validates the complete static
+   source/script/protocol/deployment contract without requiring generated output,
+   while the independent `packet-lan-peer` CI lane runs
+   `scripts/verify_packet_lan_peer.sh` after the pinned release toolchain is
+   bootstrapped. The default `scripts/verify_pinned_build_inputs.py` entrypoint
+   remains the complete source-plus-generated-artifact verification used when
+   the fixed artifact is expected to exist.
+   The pinned manifest also freezes the exact SHA-256 of every artifact-bound
+   source except the verifier itself, whose recursive self-hash is replaced by
+   an AST-owned entrypoint contract. A code-owned digest of the complete
+   path-to-source-digest map makes deleted paths, comment-only bindings, dead
+   string bindings, and unreviewed shell/Python source changes fail closed. This
+   is Level 1 drift detection for reviewed release source, not authentication
+   against a repository owner.
 9. The retained `runtimeTools.adb` section pins the exact Android platform
    tool path, `37.0.0-14910828` version, and executable digest. The static gate
    opens the complete Android admission source through a repository-rooted,
@@ -205,6 +219,13 @@ what makes the application-owned, loopback-bound `experimental.clash_api` block
 in the projection (`crates/cfw-singbox-config/src/controller.rs`) reachable.
 `scripts/verify_pinned_build_inputs.py` pins the tag list and fails closed if
 that block exists without the tag.
+
+P0 source collection, build-boundary validation, and sealed supply-chain
+derivation use the source-only wrapper. They therefore remain valid in a clean
+hosted checkout and cannot accidentally treat a missing generated packet peer
+as source drift. The generated binary is not skipped: `packet-lan-peer` is a
+mandatory unsigned-CI lane, and only its full format/test/vet/race/rebuild/
+metadata/digest verification can satisfy that artifact gate.
 
 ## Artifact identity
 

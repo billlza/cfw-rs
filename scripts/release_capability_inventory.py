@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 if __package__:
+    from .release_build_identity import ACTIVE_RELEASE_GENERATION
     from .evidence_manifest import KIND_LEVEL, LEVEL_ORDER
     from .publication.common import (
         PublicationError,
@@ -26,6 +27,7 @@ if __package__:
         safe_identifier,
     )
 else:
+    from release_build_identity import ACTIVE_RELEASE_GENERATION
     from evidence_manifest import KIND_LEVEL, LEVEL_ORDER
     from publication.common import (
         PublicationError,
@@ -39,6 +41,8 @@ else:
 INVENTORY_PATH = "scripts/release_capability_inventory.json"
 REQUIREMENTS_PATH = "docs/release/macos15-network-extension-migration/requirements.md"
 DOCUMENT_KIND = "cfw-release-capability-inventory-v1"
+PRODUCT_VERSION = ACTIVE_RELEASE_GENERATION.product_version
+VALIDATION_BUILD = ACTIVE_RELEASE_GENERATION.validation_build
 
 CAPABILITY_SECTION: tuple[tuple[str, str], ...] = (
     ("platform-command-boundary", "1"),
@@ -86,58 +90,58 @@ LEVEL_REPORT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         (
             "boundary",
             "boundary_scan",
-            "target/candidates/0.4.0/release/evidence-inputs/p0-source-gates.json",
+            f"target/candidates/{PRODUCT_VERSION}/release/evidence-inputs/p0-source-gates.json",
         ),
     ),
     "Unsigned_CI_Verified": (
         (
             "unsigned-artifact",
             "unsigned_artifact",
-            "target/candidates/0.4.0/validation/40028/signed/Clash for Mac.app.manifest.json",
+            f"target/candidates/{PRODUCT_VERSION}/validation/{VALIDATION_BUILD}/signed/Clash for Mac.app.manifest.json",
         ),
         (
             "deterministic-ci",
             "deterministic_test",
-            "target/candidates/0.4.0/validation/40028/evidence/unsigned-ci-lanes.json",
+            f"target/candidates/{PRODUCT_VERSION}/validation/{VALIDATION_BUILD}/evidence/unsigned-ci-lanes.json",
         ),
     ),
     "Signed_Installed_Verified": (
         (
             "signed-identity",
             "signed_identity",
-            "target/candidates/0.4.0/signed/Clash for Mac.app.manifest.json",
+            f"target/candidates/{PRODUCT_VERSION}/signed/Clash for Mac.app.manifest.json",
         ),
         (
             "physical-machine",
             "physical_machine",
-            "target/candidates/0.4.0/release/final-candidate/physical-evidence.json",
+            f"target/candidates/{PRODUCT_VERSION}/release/final-candidate/physical-evidence.json",
         ),
         (
             "packet-evidence",
             "packet_evidence",
-            "target/candidates/0.4.0/release/final-candidate/physical-evidence.json",
+            f"target/candidates/{PRODUCT_VERSION}/release/final-candidate/physical-evidence.json",
         ),
     ),
     "Sealed_Release_Evidence": (
         (
             "notarization",
             "notarization",
-            "target/candidates/0.4.0/signed/notarization-log.json",
+            f"target/candidates/{PRODUCT_VERSION}/signed/notarization-log.json",
         ),
         (
             "publication",
             "publication",
-            "target/candidates/0.4.0/release/publication/evidence-manifest.json",
+            f"target/candidates/{PRODUCT_VERSION}/release/publication/evidence-manifest.json",
         ),
         (
             "spdx-sbom",
             "sbom",
-            "target/candidates/0.4.0/release/publication/sbom.spdx.json",
+            f"target/candidates/{PRODUCT_VERSION}/release/publication/sbom.spdx.json",
         ),
         (
             "cyclonedx-sbom",
             "sbom",
-            "target/candidates/0.4.0/release/publication/sbom.cyclonedx.json",
+            f"target/candidates/{PRODUCT_VERSION}/release/publication/sbom.cyclonedx.json",
         ),
     ),
 }

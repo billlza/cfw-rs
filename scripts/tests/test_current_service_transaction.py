@@ -13,14 +13,14 @@ from scripts import dormant_app_install as install
 
 PREVIOUS = install.AppIdentity("0.4.0", "40019", "a" * 64)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40028", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40030", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
 )
 FINAL_PREVIOUS = CANDIDATE.app
 FINAL_CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40029", "f" * 64),
+    app=install.AppIdentity("0.4.0", "40031", "f" * 64),
     manifest_sha256="1" * 64,
     repository_commit="2" * 40,
     release_source_sha256="3" * 64,
@@ -149,10 +149,10 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_final_generation_uses_independent_fixed_service_journals(self) -> None:
         paths = service.ServicePaths.production("final")
 
-        self.assertEqual(paths.install_paths.profile.build_number, "40029")
+        self.assertEqual(paths.install_paths.profile.build_number, "40031")
         self.assertEqual(
             paths.install_paths.profile.previous_build_number,
-            "40028",
+            "40030",
         )
         self.assertEqual(
             paths.transaction_directory.name,

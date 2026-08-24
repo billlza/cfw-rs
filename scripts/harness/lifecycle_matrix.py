@@ -19,6 +19,7 @@ import re
 from typing import Any, Callable
 
 if __package__:
+    from ..release_build_identity import ACTIVE_RELEASE_GENERATION
     from .physical_machine_identity import (
         BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
         DOCUMENT as MACHINE_IDENTITY_SCHEME,
@@ -45,6 +46,8 @@ else:  # pragma: no cover - direct-script import path
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from release_build_identity import ACTIVE_RELEASE_GENERATION  # type: ignore
     from physical_machine_identity import (  # type: ignore
         BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
         DOCUMENT as MACHINE_IDENTITY_SCHEME,
@@ -75,7 +78,7 @@ EVENT_SCHEMA_VERSION = 3
 EVENT_DOCUMENT = "cfw-lifecycle-proof-event-v3"
 OBSERVATION_SCHEMA_VERSION = 1
 OBSERVATION_DOCUMENT = "cfw-lifecycle-observation-v1"
-PRODUCT_VERSION = "0.4.0"
+PRODUCT_VERSION = ACTIVE_RELEASE_GENERATION.product_version
 REQUIRED_ARCHITECTURE = "arm64"
 MAX_REPORT_BYTES = 1 * 1024 * 1024
 MACOS_BUILD_RE = re.compile(r"^[0-9]{2}[A-Z][0-9]{1,5}[a-z]?$")
@@ -163,7 +166,7 @@ if {
 } != set(IDENTITY_PROBE_IDS):
     raise RuntimeError("lifecycle identity probe contract drifted")
 
-IDENTITY_FINAL_BUILD = "40029"
+IDENTITY_FINAL_BUILD = ACTIVE_RELEASE_GENERATION.final_build
 IDENTITY_OBSERVATION_DOCUMENT = "cfw-physical-identity-observation-v2"
 IDENTITY_OBSERVATION_SCHEMA_VERSION = 2
 IDENTITY_OBSERVATION_MAXIMUM_BYTES = 1024 * 1024
@@ -171,8 +174,11 @@ IDENTITY_VERIFIER_OUTPUT_LIMIT = 384 * 1024
 IDENTITY_VERIFIER_ROLE = "release-identity-verifier"
 IDENTITY_FIXED_COMMAND = (
     "scripts/verify_release_app.sh",
-    "target/candidates/0.4.0/signed/Clash for Mac.app",
-    f"target/candidates/0.4.0/release-build/{IDENTITY_FINAL_BUILD}/native-products",
+    f"target/candidates/{ACTIVE_RELEASE_GENERATION.product_version}/signed/Clash for Mac.app",
+    (
+        f"target/candidates/{ACTIVE_RELEASE_GENERATION.product_version}/release-build/"
+        f"{IDENTITY_FINAL_BUILD}/native-products"
+    ),
 )
 IDENTITY_FIXED_COMMAND_SHA256 = hashlib.sha256(
     canonical_json(list(IDENTITY_FIXED_COMMAND))

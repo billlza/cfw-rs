@@ -9,10 +9,15 @@ import sys
 from pathlib import Path
 from typing import Final
 
+if __package__:
+    from .release_build_identity import ACTIVE_RELEASE_GENERATION
+else:
+    from release_build_identity import ACTIVE_RELEASE_GENERATION
+
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parent.parent
 CONTRACT_PATH: Final = REPOSITORY_ROOT / "docs/release/build-allocations-v040.json"
 DOCUMENT: Final = "cfm-release-build-allocation-v1"
-PRODUCT_VERSION: Final = "0.4.0"
+PRODUCT_VERSION: Final = ACTIVE_RELEASE_GENERATION.product_version
 BUILD_PATTERN: Final = re.compile(r"\A[1-9][0-9]{4}\Z")
 ROLES: Final = frozenset({"validation", "final"})
 STATUSES: Final = frozenset(
@@ -22,6 +27,7 @@ STATUSES: Final = frozenset(
         "retired_after_notarization_before_install_preflight_protocol_incompatible",
         "retired_after_notarization_before_install_runtime_preflight_failed",
         "retired_after_notarization_before_install_runtime_preflight_toolchain_binding_mismatch",
+        "retired_before_candidate_build_source_gate_contract_incomplete",
         "retired_unbuilt_reserved_final_companion",
     }
 )
@@ -45,6 +51,12 @@ IMMUTABLE_RETIRED_PREFIX: Final = (
         "retired_after_notarization_before_install_runtime_preflight_toolchain_binding_mismatch",
     ),
     ("40027", "final", "retired_unbuilt_reserved_final_companion"),
+    (
+        "40028",
+        "validation",
+        "retired_before_candidate_build_source_gate_contract_incomplete",
+    ),
+    ("40029", "final", "retired_unbuilt_reserved_final_companion"),
 )
 
 
@@ -184,9 +196,20 @@ def verify_source_bindings(value: dict[str, object]) -> None:
     import dormant_app_install
     from publication import orchestrator
 
-    validation = dormant_app_install.BUILD_NUMBER
-    final = dormant_app_install.FINAL_BUILD_NUMBER
-    if orchestrator.VALIDATION_BUILD != validation or orchestrator.FINAL_BUILD != final:
+    validation = ACTIVE_RELEASE_GENERATION.validation_build
+    final = ACTIVE_RELEASE_GENERATION.final_build
+    installer_identity = (
+        dormant_app_install.VERSION,
+        dormant_app_install.BUILD_NUMBER,
+        dormant_app_install.FINAL_BUILD_NUMBER,
+    )
+    orchestrator_identity = (
+        orchestrator.PRODUCT_VERSION,
+        orchestrator.VALIDATION_BUILD,
+        orchestrator.FINAL_BUILD,
+    )
+    expected_identity = (PRODUCT_VERSION, validation, final)
+    if installer_identity != expected_identity or orchestrator_identity != expected_identity:
         raise ReleaseBuildAllocationError("release entrypoints disagree on the active build pair")
     validate_contract(value, expected_validation=validation, expected_final=final)
 

@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from scripts.release_build_identity import (
+    ACTIVE_RELEASE_GENERATION,
     BuildIdentityError,
+    ReleaseGeneration,
     bundle_build_identity,
     candidate_native_derived_data_output,
     candidate_native_products_output,
@@ -17,6 +19,23 @@ from scripts.release_build_identity import (
 
 
 class ReleaseBuildIdentityTests(unittest.TestCase):
+    def test_active_generation_is_one_consecutive_fixed_pair(self) -> None:
+        self.assertEqual(
+            ACTIVE_RELEASE_GENERATION,
+            ReleaseGeneration("0.4.0", "40030", "40031"),
+        )
+
+    def test_release_generation_rejects_version_or_sequence_drift(self) -> None:
+        for generation in (
+            ("0.4.1", "40030", "40031"),
+            ("0.4.0", "40030", "40032"),
+            ("0.4.0", "040030", "40031"),
+        ):
+            with self.subTest(generation=generation), self.assertRaises(
+                BuildIdentityError
+            ):
+                ReleaseGeneration(*generation)
+
     def make_app(self, root: Path, builds: tuple[str, str, str, str]) -> Path:
         app = root / "Clash for Mac.app"
         paths = (

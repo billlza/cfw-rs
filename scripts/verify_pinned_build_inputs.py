@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Offline, fail-closed verifier for the design-pinned libbox and toolchain inputs.
+"""Fail-closed verifier for the design-pinned libbox and toolchain inputs.
 
-This static verifier binds the pinned-input manifest (scripts/pinned_build_inputs.json)
-to the tracked release configuration without invoking any toolchain or the network:
+The source-contract layer binds the pinned-input manifest
+(``scripts/pinned_build_inputs.json``) to the tracked release configuration
+without invoking any toolchain or the network. The default :func:`verify`
+entrypoint additionally requires the generated packet LAN peer artifact, while
+:func:`verify_source_contract` intentionally stops at its pinned identity:
 
 * every pinned tool version and the sing-box/gomobile upstream commits in
   scripts/dependency_pins.env match the manifest exactly;
@@ -20,7 +23,7 @@ to the tracked release configuration without invoking any toolchain or the netwo
 * the verified Go module inputs (module sums and go.mod/go.sum digests) are present
   and well formed;
 * the Android packet LAN peer's complete source tree, reproducible Linux/arm64
-  build and verification scripts, bounded TCP contract, held-descriptor artifact
+  build and verification scripts, bounded TCP contract, generated artifact
   identity, and fixed shell-owned deployment layout are independently pinned;
 * the ADB runtime path, version, and executable digest are pinned independently
   and match the Android admission source constants exactly;
@@ -31,7 +34,9 @@ to the tracked release configuration without invoking any toolchain or the netwo
 * the offline libbox build script references the pins with no floating versions and
   no network or recursive build actions;
 * the build scripts bind the pinned commit, patch, and combined-diff hashes into the
-  produced artifact manifests (artifact-hash bindings).
+  produced artifact manifests (artifact-hash bindings);
+* every artifact-bound source except this self-referential verifier has an exact
+  release-freeze SHA-256 whose complete mapping has a code-owned Level 1 identity.
 
 Any unavailable, missing, malformed, wrong, or partial input fails closed.
 """
@@ -41,12 +46,14 @@ from __future__ import annotations
 import ast
 import errno
 import hashlib
+import io
 import json
 import math
 import os
 import re
 import stat
 import sys
+import tokenize
 from pathlib import Path, PurePosixPath
 
 if __package__:
@@ -56,12 +63,15 @@ else:
     from hash_artifact import build_manifest
 
 MANIFEST_RELATIVE_PATH = "scripts/pinned_build_inputs.json"
+DEPENDENCY_PINS_RELATIVE_PATH = "scripts/dependency_pins.env"
+NATIVE_LOCK_RELATIVE_PATH = "native/macos/Dependencies.lock.json"
 MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024
 MAX_PINNED_MANIFEST_BYTES = 512 * 1024
 MAX_NATIVE_LOCK_BYTES = 256 * 1024
 PINNED_MANIFEST_FIELDS = frozenset(
     {
         "artifactBindings",
+        "artifactSourceSha256",
         "buildScripts",
         "cargoDeny",
         "combinedDiffSha256",
@@ -89,28 +99,19 @@ PINNED_MANIFEST_FIELDS = frozenset(
         "xcodegen",
     }
 )
-REQUIRED_RELEASE_BOUNDARY_BINDINGS = frozenset(
-    {
-        "scripts/authorize_release_worktree.sh",
-        "scripts/hash_artifact.py",
-        "scripts/prepare_publication_evidence.sh",
-        "scripts/publication/bounded_process.py",
-        "scripts/publication/release_environment.py",
-        "scripts/release_cargo_inputs.py",
-        "scripts/release_cargo_inputs.sh",
-        "scripts/release_python_launcher.sh",
-        "scripts/release_policy_tool_directory.sh",
-        "scripts/release_python_runtime.py",
-        "scripts/release_rust_toolchain.py",
-        "scripts/release_tool_environment.sh",
-        "scripts/run_current_service_transaction.sh",
-        "scripts/run_dormant_app_install.sh",
-        "scripts/run_production_release_evidence.sh",
-        "scripts/run_publication_evidence.sh",
-        "scripts/run_release_ci_gate.sh",
-        "scripts/run_release_python_tests.py",
-        "scripts/run_sealed_evidence_manifest.sh",
-    }
+# This Level 1 identity detects accidental or unreviewed policy drift in the
+# complete path-to-fragment mapping. It is an exact policy checksum, not an
+# authentication mechanism or a claim that the repository resists its owner.
+REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
+    "c1c5d5c4be2936aca4ef67f58132a9327eb84b4e6fa69da10c512cf509f2593f"
+)
+# Level 1 identity of the complete path-to-source-digest release-freeze map.
+# It detects accidental or unreviewed drift; it is not authentication and does
+# not claim to protect the repository from its owner. The verifier itself is
+# excluded to avoid a recursive self-hash.
+ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
+REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
+    "7f37f45c431f49f452cbbbd24a87d20f6931711d9db78a57f5874c0c28b9f032"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -132,6 +133,119 @@ NATIVE_LOCK_SECURITY_PATCH_FIELDS = frozenset(
 )
 NATIVE_LOCK_PATCH_FIELDS = frozenset({"path", "sha256"})
 NATIVE_LOCK_APPLE_REFERENCE_FIELDS = frozenset({"commit"})
+PATCH_ENTRY_FIELDS = frozenset({"name", "pathKey", "sha256Key", "sha256"})
+LIBBOX_BUILD_TAG_FIELDS = frozenset(
+    {"pinKey", "value", "required", "engineStartPathBindings"}
+)
+LIBBOX_REQUIRED_TAG_FIELDS = frozenset({"tag", "reason"})
+LIBBOX_ENGINE_START_BINDING_FIELDS = frozenset(
+    {"tag", "path", "requiredWhenContains", "triggerRequired", "reason"}
+)
+BUILD_SCRIPT_RULE_FIELDS = frozenset(
+    {"requirePinReferences", "forbidNetworkRecursion"}
+)
+REQUIRED_TOOL_PIN_KEYS = frozenset(
+    {
+        "PYTHON_VERSION",
+        "RUST_VERSION",
+        "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256",
+        "CARGO_AUDIT_VERSION",
+        "CARGO_DENY_VERSION",
+        "XCODEGEN_VERSION",
+        "XCODEGEN_COMMIT",
+        "XCODEGEN_SOURCE_SHA256",
+        "XCODEGEN_PACKAGE_RESOLVED_SHA256",
+        "NODE_VERSION",
+        "GO_VERSION",
+        "GOMOBILE_VERSION",
+        "GOVULNCHECK_VERSION",
+        "TAURI_CLI_VERSION",
+        "SING_BOX_VERSION",
+    }
+)
+REQUIRED_VERIFIED_GO_MODULE_INPUT_KEYS = frozenset(
+    {
+        "GOMOBILE_MODULE_SUM",
+        "GOVULNCHECK_MODULE_SUM",
+        "LIBBOX_MODULE_CACHE_CONTRACT_SHA256",
+        "SING_BOX_UPSTREAM_GO_MOD_SHA256",
+        "SING_BOX_UPSTREAM_GO_SUM_SHA256",
+        "SING_BOX_PATCHED_GO_MOD_SHA256",
+        "SING_BOX_PATCHED_GO_SUM_SHA256",
+    }
+)
+REQUIRED_PATCH_POLICIES = {
+    "securityPatch": (
+        "sing-box security dependencies patch",
+        "SING_BOX_SECURITY_PATCH_PATH",
+        "SING_BOX_SECURITY_PATCH_SHA256",
+    ),
+    "rawPacketPatch": (
+        "sing-box raw packet tun patch",
+        "SING_BOX_RAW_PACKET_PATCH_PATH",
+        "SING_BOX_RAW_PACKET_PATCH_SHA256",
+    ),
+    "dnsFailoverPatch": (
+        "sing-box DNS failover patch",
+        "SING_BOX_DNS_FAILOVER_PATCH_PATH",
+        "SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+    ),
+    "endpointConflictPatch": (
+        "sing-box endpoint conflict patch",
+        "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
+        "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+    ),
+}
+REQUIRED_REJECTED_PATCH_DIGESTS = frozenset(
+    {
+        "3367a387fe58b9bb374bb08a7fae9ad2fd46d609e8e9aea49a92a14ec9de4cac",
+        "66128ca96ff613b0803cc92b3269b4e7822cd2532c43597e9e283acc6d9f4dde",
+        "ca751c4ec4b82a60d4dd8716627dc2665b154901a988603108bb5e4e718cf439",
+        "c618b69baa770e0afc3239f78acfeaaf354e3dc8105e2e61b149d4ede00a93b7",
+    }
+)
+REQUIRED_ENGINE_START_PATH_BINDINGS = frozenset(
+    {
+        (
+            "with_clash_api",
+            "crates/cfw-singbox-config/src/controller.rs",
+            '"clash_api": {',
+        ),
+        (
+            "with_clash_api",
+            "crates/cfw-singbox-config/src/projection.rs",
+            'root.insert("experimental".into(), clash_api.experimental_value());',
+        ),
+    }
+)
+REQUIRED_LIBBOX_BUILD_TAGS = frozenset(
+    {
+        "with_quic",
+        "with_utls",
+        "with_clash_api",
+        "badlinkname",
+        "tfogo_checklinkname0",
+        "grpcnotrace",
+    }
+)
+REQUIRED_BUILD_SCRIPT_POLICIES = {
+    "scripts/build_libbox.sh": frozenset(
+        {
+            "$GO_VERSION",
+            "$GOMOBILE_VERSION",
+            "$GOMOBILE_COMMIT",
+            "$GOMOBILE_MODULE_SUM",
+            "$SING_BOX_VERSION",
+            "$SING_BOX_COMMIT",
+            "$LIBBOX_BUILD_TAGS",
+            "$SING_BOX_COMBINED_DIFF_SHA256",
+            "$SING_BOX_SECURITY_PATCH_SHA256",
+            "$SING_BOX_RAW_PACKET_PATCH_SHA256",
+            "$SING_BOX_DNS_FAILOVER_PATCH_SHA256",
+            "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
+        }
+    )
+}
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 _ENV_LINE_RE = re.compile(r"\A([A-Za-z_][A-Za-z0-9_]*)=(.*)\Z")
 _NETWORK_RECURSION_RE = re.compile(
@@ -610,6 +724,238 @@ def _read_text(
         raise PinnedInputError(f"{description} is not strict UTF-8") from error
 
 
+def _python_binding_surface(source: str, relative: str) -> tuple[str, ast.Module]:
+    """Return Python source with comments and docstrings removed from policy use."""
+
+    try:
+        module = ast.parse(source, filename=relative)
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (SyntaxError, tokenize.TokenError, IndentationError) as error:
+        raise PinnedInputError(
+            f"artifact-bound Python source is malformed: {relative}: {error}"
+        ) from error
+
+    for node in ast.walk(module):
+        if (
+            isinstance(node, (ast.If, ast.While))
+            and isinstance(node.test, ast.Constant)
+            and not bool(node.test.value)
+        ):
+            raise PinnedInputError(
+                f"artifact-bound Python source contains a statically unreachable block: {relative}"
+            )
+
+    docstring_starts: set[tuple[int, int]] = set()
+    for owner in (module, *(
+        node
+        for node in ast.walk(module)
+        if isinstance(
+            node,
+            (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        )
+    )):
+        body = owner.body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            docstring_starts.add(
+                (body[0].value.lineno, body[0].value.col_offset)
+            )
+
+    lines = [list(line) for line in source.splitlines(keepends=True)]
+
+    def blank(start: tuple[int, int], end: tuple[int, int]) -> None:
+        start_line, start_column = start
+        end_line, end_column = end
+        for line_number in range(start_line, end_line + 1):
+            line = lines[line_number - 1]
+            first = start_column if line_number == start_line else 0
+            last = end_column if line_number == end_line else len(line)
+            for index in range(first, min(last, len(line))):
+                if line[index] not in {"\n", "\r"}:
+                    line[index] = " "
+
+    for token in tokens:
+        if token.type == tokenize.COMMENT or (
+            token.type == tokenize.STRING and token.start in docstring_starts
+        ):
+            blank(token.start, token.end)
+    return "".join("".join(line) for line in lines), module
+
+
+def _direct_call_positions(
+    function: ast.FunctionDef,
+    call_names: frozenset[str],
+) -> dict[str, list[int]]:
+    positions = {name: [] for name in call_names}
+    for index, statement in enumerate(function.body):
+        if any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+            for node in ast.iter_child_nodes(statement)
+        ):
+            raise PinnedInputError(
+                f"release guard function {function.name} contains a nested callable"
+            )
+        for node in ast.walk(statement):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in positions
+            ):
+                positions[node.func.id].append(index)
+    return positions
+
+
+def _verify_orchestrator_release_guard(module: ast.Module) -> None:
+    matches = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "seal_production_evidence"
+    ]
+    if len(matches) != 1:
+        raise PinnedInputError(
+            "production orchestrator must define one synchronous seal boundary"
+        )
+    seal = matches[0]
+    calls = _direct_call_positions(
+        seal,
+        frozenset(
+            {
+                "_recover_sealed_outputs",
+                "_observe_signed_app_tree",
+                "_require_final_inputs_unchanged",
+                "_publish_outputs",
+            }
+        ),
+    )
+    if (
+        len(calls["_recover_sealed_outputs"]) != 1
+        or len(calls["_observe_signed_app_tree"]) != 3
+        or len(calls["_require_final_inputs_unchanged"]) != 1
+        or len(calls["_publish_outputs"]) != 1
+    ):
+        raise PinnedInputError(
+            "production orchestrator release guard calls are incomplete or duplicated"
+        )
+    recover = calls["_recover_sealed_outputs"][0]
+    observations = calls["_observe_signed_app_tree"]
+    final_inputs = calls["_require_final_inputs_unchanged"][0]
+    publish = calls["_publish_outputs"][0]
+    if not (
+        recover
+        < observations[0]
+        < observations[1]
+        < final_inputs
+        < observations[2]
+        < publish
+    ):
+        raise PinnedInputError(
+            "production orchestrator release guard order differs from policy"
+        )
+    recovery_returns = [
+        index
+        for index, statement in enumerate(seal.body)
+        if isinstance(statement, ast.If)
+        and isinstance(statement.test, ast.Compare)
+        and isinstance(statement.test.left, ast.Name)
+        and statement.test.left.id == "recovered"
+        and len(statement.test.ops) == 1
+        and isinstance(statement.test.ops[0], ast.IsNot)
+        and len(statement.test.comparators) == 1
+        and isinstance(statement.test.comparators[0], ast.Constant)
+        and statement.test.comparators[0].value is None
+        and len(statement.body) == 1
+        and isinstance(statement.body[0], ast.Return)
+        and isinstance(statement.body[0].value, ast.Name)
+        and statement.body[0].value.id == "recovered"
+    ]
+    if recovery_returns != [recover + 1]:
+        raise PinnedInputError(
+            "production orchestrator must return the validated recovery before resealing"
+        )
+
+
+def _verify_pinned_verifier_structure(module: ast.Module) -> None:
+    functions = {
+        name: [
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        ]
+        for name in ("_verify", "verify_source_contract", "verify", "main")
+    }
+    if any(len(matches) != 1 for matches in functions.values()):
+        raise PinnedInputError(
+            "pinned-input verifier entrypoint structure differs from release policy"
+        )
+    assignments = {
+        target.id
+        for node in module.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        for target in (
+            node.targets if isinstance(node, ast.Assign) else (node.target,)
+        )
+        if isinstance(target, ast.Name)
+    }
+    required_constants = {
+        "DEPENDENCY_PINS_RELATIVE_PATH",
+        "NATIVE_LOCK_RELATIVE_PATH",
+        "REQUIRED_ARTIFACT_BINDINGS_SHA256",
+        "ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION",
+        "REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256",
+        "REQUIRED_TOOL_PIN_KEYS",
+        "REQUIRED_VERIFIED_GO_MODULE_INPUT_KEYS",
+        "REQUIRED_PATCH_POLICIES",
+        "REQUIRED_REJECTED_PATCH_DIGESTS",
+        "REQUIRED_ENGINE_START_PATH_BINDINGS",
+        "REQUIRED_LIBBOX_BUILD_TAGS",
+        "REQUIRED_BUILD_SCRIPT_POLICIES",
+    }
+    if not required_constants.issubset(assignments):
+        raise PinnedInputError(
+            "pinned-input verifier constants differ from release policy"
+        )
+
+    for function_name, expected_value in (
+        ("verify_source_contract", False),
+        ("verify", True),
+    ):
+        function = functions[function_name][0]
+        matching_calls = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_verify"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "repository"
+            and len(node.keywords) == 1
+            and node.keywords[0].arg == "require_packet_lan_peer_artifact"
+            and isinstance(node.keywords[0].value, ast.Constant)
+            and node.keywords[0].value.value is expected_value
+        ]
+        if len(matching_calls) != 1:
+            raise PinnedInputError(
+                f"pinned-input verifier entrypoint {function_name} differs from policy"
+            )
+
+
+def _artifact_binding_surface(source: str, relative: str) -> str:
+    if relative.endswith(".py"):
+        surface, module = _python_binding_surface(source, relative)
+        if relative == "scripts/publication/orchestrator.py":
+            _verify_orchestrator_release_guard(module)
+        elif relative == ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION:
+            _verify_pinned_verifier_structure(module)
+        return surface
+    return source
+
+
 def _load_strict_json(
     text: str,
     description: str,
@@ -758,8 +1104,10 @@ def _json_values_identical(actual: object, expected: object) -> bool:
 
 def _verify_tools(manifest: dict, env: dict[str, str]) -> None:
     tools = manifest.get("tools")
-    if not isinstance(tools, dict) or not tools:
-        raise PinnedInputError("pinned-input manifest has no tools table")
+    if not isinstance(tools, dict) or set(tools) != REQUIRED_TOOL_PIN_KEYS:
+        raise PinnedInputError(
+            "pinned-input manifest differs from the fixed tool pin set"
+        )
     for key, expected in tools.items():
         actual = _require_env(env, key)
         if actual != expected:
@@ -1293,9 +1641,9 @@ def _verify_packet_lan_peer_script(
             )
 
 
-def _verify_packet_lan_peer(
+def _verify_packet_lan_peer_source_contract(
     manifest: dict, env: dict[str, str], repository: Path
-) -> None:
+) -> dict[str, object]:
     source_files = [
         {"path": path, "sha256": sha256, "size": size, "mode": mode}
         for path, sha256, size, mode in _PACKET_LAN_PEER_SOURCE_FILES
@@ -1404,8 +1752,22 @@ def _verify_packet_lan_peer(
     _verify_packet_lan_peer_script(
         repository, expected["verifyScript"], "packet LAN peer verification script"
     )
+
     artifact = expected["artifact"]
     assert isinstance(artifact, dict)
+    return artifact
+
+
+def _verify_packet_lan_peer_artifact(
+    repository: Path, artifact: dict[str, object]
+) -> None:
+    """Verify the generated packet-peer artifact without weakening its source pin.
+
+    The static source contract deliberately remains usable in a clean checkout
+    before this artifact exists. The default :func:`verify` entrypoint calls
+    this function as a second layer and therefore retains the historical,
+    complete source-plus-artifact check.
+    """
     artifact_relative = artifact["path"]
     assert isinstance(artifact_relative, str)
     read_repository_regular_file(
@@ -1787,18 +2149,51 @@ def _verify_patches(manifest: dict, env: dict[str, str], repository: Path) -> li
     patches = manifest.get("patches")
     if not isinstance(patches, list) or len(patches) != 4:
         raise PinnedInputError("pinned-input manifest must pin exactly four patches")
-    rejected = set(manifest.get("rejectedPatchDigests") or [])
-    seen: set[str] = set()
-    digests: list[str] = []
+    rejected_values = manifest.get("rejectedPatchDigests")
+    if (
+        not isinstance(rejected_values, list)
+        or len(rejected_values) != len(REQUIRED_REJECTED_PATCH_DIGESTS)
+        or any(not isinstance(digest, str) for digest in rejected_values)
+        or len(rejected_values) != len(set(rejected_values))
+    ):
+        raise PinnedInputError(
+            "pinned-input manifest must provide exactly four unique rejected patch digests"
+        )
+    for digest in rejected_values:
+        _require_sha256(digest, "rejected patch digest")
+    rejected = set(rejected_values)
+    if rejected != REQUIRED_REJECTED_PATCH_DIGESTS:
+        raise PinnedInputError(
+            "pinned-input manifest rejected patch digests differ from release policy"
+        )
+    normalized_patches: list[tuple[str, str, str, str]] = []
+    policy_identities: set[tuple[str, str, str]] = set()
     for patch in patches:
-        if not isinstance(patch, dict):
+        if not isinstance(patch, dict) or set(patch) != PATCH_ENTRY_FIELDS:
             raise PinnedInputError("pinned-input manifest has a malformed patch entry")
-        name = patch.get("name", "<unnamed>")
+        name = patch.get("name")
         path_key = patch.get("pathKey")
         sha_key = patch.get("sha256Key")
         expected = patch.get("sha256")
-        if not all(isinstance(item, str) for item in (path_key, sha_key, expected)):
+        if not all(
+            isinstance(item, str) and item
+            for item in (name, path_key, sha_key, expected)
+        ):
             raise PinnedInputError(f"patch entry {name} is missing pin keys")
+        identity = (name, path_key, sha_key)
+        if identity in policy_identities:
+            raise PinnedInputError("pinned-input manifest repeats a patch policy identity")
+        policy_identities.add(identity)
+        normalized_patches.append((name, path_key, sha_key, expected))
+
+    if policy_identities != frozenset(REQUIRED_PATCH_POLICIES.values()):
+        raise PinnedInputError(
+            "pinned-input manifest patches differ from the fixed patch policy set"
+        )
+
+    seen: set[str] = set()
+    digests: list[str] = []
+    for name, path_key, sha_key, expected in normalized_patches:
         _require_sha256(expected, f"manifest digest for {name}")
         if expected in rejected:
             raise PinnedInputError(f"patch {name} pins a rejected/legacy digest: {expected}")
@@ -1872,8 +2267,16 @@ def _verify_source_contract(manifest: dict, env: dict[str, str]) -> None:
 
 def _verify_go_module_inputs(manifest: dict, env: dict[str, str]) -> None:
     keys = manifest.get("verifiedGoModuleInputKeys")
-    if not isinstance(keys, list) or not keys:
-        raise PinnedInputError("pinned-input manifest has no verified Go module input keys")
+    if (
+        not isinstance(keys, list)
+        or len(keys) != len(REQUIRED_VERIFIED_GO_MODULE_INPUT_KEYS)
+        or any(not isinstance(key, str) for key in keys)
+        or len(keys) != len(set(keys))
+        or set(keys) != REQUIRED_VERIFIED_GO_MODULE_INPUT_KEYS
+    ):
+        raise PinnedInputError(
+            "pinned-input manifest differs from the fixed verified Go module input set"
+        )
     for key in keys:
         value = _require_env(env, key)
         if key.endswith("_SHA256"):
@@ -1942,7 +2345,7 @@ def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: P
     reachable, so the same class of defect fails closed statically.
     """
     spec = manifest.get("libboxBuildTags")
-    if not isinstance(spec, dict):
+    if not isinstance(spec, dict) or set(spec) != LIBBOX_BUILD_TAG_FIELDS:
         raise PinnedInputError("pinned-input manifest has no libbox build tag binding")
     pin_key = spec.get("pinKey")
     expected_value = spec.get("value")
@@ -1967,8 +2370,9 @@ def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: P
     required = spec.get("required")
     if not isinstance(required, list) or not required:
         raise PinnedInputError("libbox build tag binding pins no required tags")
+    required_tags: set[str] = set()
     for entry in required:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or set(entry) != LIBBOX_REQUIRED_TAG_FIELDS:
             raise PinnedInputError("libbox required-tag entry is malformed")
         tag = entry.get("tag")
         reason = entry.get("reason")
@@ -1976,13 +2380,23 @@ def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: P
             raise PinnedInputError("libbox required-tag entry has no tag")
         if not isinstance(reason, str) or not reason:
             raise PinnedInputError(f"libbox required tag {tag} has no recorded reason")
+        if tag in required_tags:
+            raise PinnedInputError(f"libbox required tags repeat {tag!r}")
+        required_tags.add(tag)
         if tag not in seen:
             raise PinnedInputError(
                 f"pinned libbox build tags are missing the required tag {tag!r}: {reason}"
             )
 
-    for binding in spec.get("engineStartPathBindings") or []:
-        if not isinstance(binding, dict):
+    engine_bindings = spec.get("engineStartPathBindings")
+    if not isinstance(engine_bindings, list) or not engine_bindings:
+        raise PinnedInputError("libbox build tag binding pins no engine-start paths")
+    binding_identities: set[tuple[str, str, str]] = set()
+    for binding in engine_bindings:
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != LIBBOX_ENGINE_START_BINDING_FIELDS
+        ):
             raise PinnedInputError("libbox tag source binding is malformed")
         tag = binding.get("tag")
         relative = binding.get("path")
@@ -1990,6 +2404,12 @@ def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: P
         reason = binding.get("reason")
         if not all(isinstance(item, str) and item for item in (tag, relative, trigger, reason)):
             raise PinnedInputError("libbox tag source binding is incomplete")
+        if binding.get("triggerRequired") is not True:
+            raise PinnedInputError("libbox tag source binding must require its trigger")
+        identity = (tag, relative, trigger)
+        if identity in binding_identities:
+            raise PinnedInputError("libbox tag source bindings contain a duplicate")
+        binding_identities.add(identity)
         text = _read_text(
             repository,
             relative,
@@ -2006,12 +2426,22 @@ def _verify_libbox_build_tags(manifest: dict, env: dict[str, str], repository: P
                 f"{relative} requires libbox build tag {tag!r} but the pinned tag list "
                 f"omits it: {reason}"
             )
+    if binding_identities != REQUIRED_ENGINE_START_PATH_BINDINGS:
+        raise PinnedInputError(
+            "libbox tag source bindings differ from the fixed engine-start paths"
+        )
+    if seen != REQUIRED_LIBBOX_BUILD_TAGS:
+        raise PinnedInputError("pinned libbox build tags differ from release policy")
+    if required_tags != REQUIRED_LIBBOX_BUILD_TAGS:
+        raise PinnedInputError("libbox required tags differ from release policy")
 
 
 def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -> None:
     relative = manifest.get("nativeLockPath")
-    if not isinstance(relative, str):
-        raise PinnedInputError("pinned-input manifest has no native lock path")
+    if relative != NATIVE_LOCK_RELATIVE_PATH:
+        raise PinnedInputError(
+            "pinned-input manifest native lock path differs from release policy"
+        )
     text = _read_text(
         repository,
         relative,
@@ -2063,13 +2493,8 @@ def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -
         "singBox.combinedDiffSha256",
     )
     lock_patches = {
-        "securityPatch": ("SING_BOX_SECURITY_PATCH_PATH", "SING_BOX_SECURITY_PATCH_SHA256"),
-        "rawPacketPatch": ("SING_BOX_RAW_PACKET_PATCH_PATH", "SING_BOX_RAW_PACKET_PATCH_SHA256"),
-        "dnsFailoverPatch": ("SING_BOX_DNS_FAILOVER_PATCH_PATH", "SING_BOX_DNS_FAILOVER_PATCH_SHA256"),
-        "endpointConflictPatch": (
-            "SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH",
-            "SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256",
-        ),
+        lock_key: (path_key, sha_key)
+        for lock_key, (_name, path_key, sha_key) in REQUIRED_PATCH_POLICIES.items()
     }
     for lock_key, (path_key, sha_key) in lock_patches.items():
         entry = sing_box.get(lock_key)
@@ -2099,36 +2524,62 @@ def _verify_native_lock(manifest: dict, env: dict[str, str], repository: Path) -
 def _verify_build_scripts(
     manifest: dict, repository: Path, environment_pins: dict[str, str]
 ) -> None:
-    build_scripts = manifest.get("buildScripts") or {}
+    build_scripts = manifest.get("buildScripts")
+    if (
+        not isinstance(build_scripts, dict)
+        or set(build_scripts) != set(REQUIRED_BUILD_SCRIPT_POLICIES)
+    ):
+        raise PinnedInputError(
+            "pinned-input manifest differs from the fixed build-script policy set"
+        )
     for relative, rules in build_scripts.items():
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or not isinstance(rules, dict)
+            or set(rules) != BUILD_SCRIPT_RULE_FIELDS
+        ):
+            raise PinnedInputError("pinned-input manifest has malformed build-script policy")
+        required_references = rules.get("requirePinReferences")
+        if (
+            not isinstance(required_references, list)
+            or not required_references
+            or any(
+                not isinstance(reference, str) or not reference
+                for reference in required_references
+            )
+            or len(required_references) != len(set(required_references))
+        ):
+            raise PinnedInputError(
+                f"build script {relative} has malformed required pin references"
+            )
+        if set(required_references) != REQUIRED_BUILD_SCRIPT_POLICIES[relative]:
+            raise PinnedInputError(
+                f"build script {relative} differs from its fixed pin-reference policy"
+            )
+        if rules.get("forbidNetworkRecursion") is not True:
+            raise PinnedInputError(
+                f"build script {relative} must forbid network and recursive actions"
+            )
         text = _read_text(
             repository,
             relative,
             f"build script {relative}",
         )
-        for reference in rules.get("requirePinReferences", []):
+        for reference in required_references:
             if reference not in text:
                 raise PinnedInputError(
                     f"build script {relative} does not reference pin {reference} (floating version risk)"
                 )
-        if rules.get("forbidNetworkRecursion"):
-            match = _NETWORK_RECURSION_RE.search(text)
-            if match:
-                raise PinnedInputError(
-                    f"build script {relative} contains a network or recursive action: {match.group(0)!r}"
-                )
+        match = _NETWORK_RECURSION_RE.search(text)
+        if match:
+            raise PinnedInputError(
+                f"build script {relative} contains a network or recursive action: {match.group(0)!r}"
+            )
 
     artifact_bindings = manifest.get("artifactBindings")
-    if not isinstance(artifact_bindings, dict):
+    if not isinstance(artifact_bindings, dict) or not artifact_bindings:
         raise PinnedInputError("pinned-input manifest has no artifact bindings")
-    missing_release_boundaries = sorted(
-        REQUIRED_RELEASE_BOUNDARY_BINDINGS - set(artifact_bindings)
-    )
-    if missing_release_boundaries:
-        raise PinnedInputError(
-            "pinned-input manifest omits required release boundary bindings: "
-            f"{missing_release_boundaries}"
-        )
     for relative, bindings in artifact_bindings.items():
         if (
             not isinstance(relative, str)
@@ -2141,15 +2592,66 @@ def _verify_build_scripts(
             raise PinnedInputError(
                 "pinned-input manifest has a malformed artifact binding"
             )
+    artifact_binding_identity = hashlib.sha256(
+        json.dumps(
+            artifact_bindings,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if artifact_binding_identity != REQUIRED_ARTIFACT_BINDINGS_SHA256:
+        raise PinnedInputError(
+            "pinned-input manifest artifact bindings differ from release policy"
+        )
+    artifact_source_digests = manifest.get("artifactSourceSha256")
+    expected_source_paths = set(artifact_bindings) - {
+        ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION
+    }
+    if (
+        not isinstance(artifact_source_digests, dict)
+        or set(artifact_source_digests) != expected_source_paths
+        or any(
+            type(relative) is not str
+            or type(digest) is not str
+            or not _SHA256_RE.fullmatch(digest)
+            for relative, digest in artifact_source_digests.items()
+        )
+    ):
+        raise PinnedInputError(
+            "artifact source digest map differs from the complete release policy"
+        )
+    artifact_source_identity = hashlib.sha256(
+        json.dumps(
+            artifact_source_digests,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if artifact_source_identity != REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256:
+        raise PinnedInputError(
+            "artifact source digest map identity differs from release policy"
+        )
+    for relative, bindings in artifact_bindings.items():
         text = _read_text(
             repository,
             relative,
             f"build script {relative}",
         )
+        if relative != ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION and (
+            hashlib.sha256(text.encode("utf-8")).hexdigest()
+            != artifact_source_digests[relative]
+        ):
+            raise PinnedInputError(
+                f"artifact source digest differs from release policy: {relative}"
+            )
+        binding_surface = _artifact_binding_surface(text, relative)
         for binding in bindings:
-            if binding not in text:
+            if binding not in binding_surface:
                 raise PinnedInputError(
-                    f"build script {relative} is missing artifact-hash binding {binding!r}"
+                    f"build script {relative} is missing executable artifact-hash binding "
+                    f"{binding!r}"
                 )
 
     workflow_relative = ".github/workflows/ci.yml"
@@ -2235,12 +2737,15 @@ def _verify_build_scripts(
                 )
 
 
-def verify(repository: Path) -> None:
-    """Verify all pinned build inputs for the repository. Raises PinnedInputError."""
+def _verify(
+    repository: Path, *, require_packet_lan_peer_artifact: bool
+) -> None:
     manifest = _load_manifest(repository)
     dependency_pins_path = manifest.get("dependencyPinsPath")
-    if not isinstance(dependency_pins_path, str):
-        raise PinnedInputError("pinned-input manifest has no dependency pins path")
+    if dependency_pins_path != DEPENDENCY_PINS_RELATIVE_PATH:
+        raise PinnedInputError(
+            "pinned-input manifest dependency pins path differs from release policy"
+        )
     env = _parse_env(
         _read_text(
             repository,
@@ -2251,7 +2756,11 @@ def verify(repository: Path) -> None:
     _verify_tools(manifest, env)
     _verify_runtime_tools(manifest, repository)
     _verify_packet_evidence_endpoint(manifest, env, repository)
-    _verify_packet_lan_peer(manifest, env, repository)
+    packet_lan_peer_artifact = _verify_packet_lan_peer_source_contract(
+        manifest, env, repository
+    )
+    if require_packet_lan_peer_artifact:
+        _verify_packet_lan_peer_artifact(repository, packet_lan_peer_artifact)
     _verify_physical_collector_module(manifest, env, repository)
     _verify_cargo_deny(manifest, repository)
     _verify_xcodegen(manifest, env, repository)
@@ -2265,6 +2774,16 @@ def verify(repository: Path) -> None:
     _verify_libbox_build_tags(manifest, env, repository)
     _verify_native_lock(manifest, env, repository)
     _verify_build_scripts(manifest, repository, env)
+
+
+def verify_source_contract(repository: Path) -> None:
+    """Verify static pinned inputs without requiring generated packet output."""
+    _verify(repository, require_packet_lan_peer_artifact=False)
+
+
+def verify(repository: Path) -> None:
+    """Verify all pinned inputs, including the generated packet-peer artifact."""
+    _verify(repository, require_packet_lan_peer_artifact=True)
 
 
 def main() -> int:
@@ -2285,7 +2804,8 @@ def main() -> int:
         "XcodeGen patch/source binding, sing-box and gomobile commits, four libbox patch "
         "digests, combined diff, Go module inputs and module-cache closure contract, "
         "libbox build tags required by the engine start path, native lock binding, "
-        "and offline artifact-hash build-script references"
+        "offline artifact-hash build-script references, and the exact artifact-source "
+        "release-freeze map"
     )
     return 0
 

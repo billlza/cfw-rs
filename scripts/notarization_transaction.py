@@ -46,6 +46,7 @@ if __package__:
         validate_evidence as validate_gatekeeper_evidence,
     )
     from .hash_artifact import build_manifest, write_new_manifest
+    from .macos_durability import full_fsync
     from .release_build_identity import canonical_build_version
     from .repository_source_identity import (
         SourceIdentityError,
@@ -72,6 +73,7 @@ else:
         validate_evidence as validate_gatekeeper_evidence,
     )
     from hash_artifact import build_manifest, write_new_manifest
+    from macos_durability import full_fsync
     from release_build_identity import canonical_build_version
     from repository_source_identity import (
         SourceIdentityError,
@@ -690,7 +692,7 @@ def _sha256_file(path: Path) -> str:
     return _hash_regular_file(path)[0]
 
 
-def _fsync_directory(path: Path) -> None:
+def _sync_directory(path: Path, *, stable_storage: bool) -> None:
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
@@ -698,9 +700,16 @@ def _fsync_directory(path: Path) -> None:
         flags |= os.O_NOFOLLOW
     descriptor = os.open(path, flags)
     try:
-        os.fsync(descriptor)
+        if stable_storage:
+            full_fsync(descriptor)
+        else:
+            os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _fsync_directory(path: Path) -> None:
+    _sync_directory(path, stable_storage=True)
 
 
 def _fsync_regular_file(path: Path) -> None:
@@ -862,7 +871,10 @@ def _fsync_tree(root: Path) -> None:
                     f"publish tree contains an unsupported entry: {path.name}",
                 )
     for directory in reversed(directories):
-        _fsync_directory(directory)
+        if directory == root:
+            _fsync_directory(directory)
+        else:
+            _sync_directory(directory, stable_storage=False)
 
 
 def _require_real_directory(

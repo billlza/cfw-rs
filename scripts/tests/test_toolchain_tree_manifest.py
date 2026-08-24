@@ -1116,7 +1116,7 @@ LIBBOX_VET_PACKAGES=(".")
             readme,
         )
         self.assertNotIn(
-            "target/candidates/0.4.0/validation/40028/native-products",
+            "target/candidates/0.4.0/validation/40030/native-products",
             readme,
         )
 

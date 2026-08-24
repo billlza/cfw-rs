@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,195 @@ def _verified_signer_entry(signer: Path) -> bytes:
         ).encode("ascii")
         + b"\n"
     )
+
+
+class CanonicalPythonRuntimeTests(unittest.TestCase):
+    def _identity(
+        self,
+        path: Path,
+        *,
+        mode: int = stat.S_IFREG | 0o755,
+        owner: int = 0,
+        group: int = 0,
+        links: int = 1,
+        size: int = 135_696,
+    ) -> launcher.PathIdentity:
+        return launcher.PathIdentity(
+            path=path,
+            device=1,
+            inode=2,
+            mode=mode,
+            owner=owner,
+            group=group,
+            links=links,
+            size=size,
+            modified_ns=3,
+            changed_ns=4,
+        )
+
+    def _canonical_runtime(
+        self,
+        executable: Path,
+        identity: launcher.PathIdentity,
+        *,
+        executable_by_user: bool = True,
+        writable_by_user: bool = False,
+    ) -> Path:
+        canonical = executable.resolve(strict=True)
+
+        def access(path: Path, mode: int, *, effective_ids: bool) -> bool:
+            self.assertEqual(Path(path), canonical)
+            self.assertTrue(effective_ids)
+            if mode == os.X_OK:
+                return executable_by_user
+            if mode == os.W_OK:
+                return writable_by_user
+            self.fail(f"unexpected access mode: {mode}")
+
+        with (
+            mock.patch.object(launcher.sys, "executable", str(executable)),
+            mock.patch.object(launcher, "_lstat_identity", return_value=identity),
+            mock.patch.object(launcher.os, "getuid", return_value=501),
+            mock.patch.object(launcher.os, "access", side_effect=access),
+        ):
+            return launcher._canonical_python_runtime()
+
+    def test_official_root_wheel_group_writable_runtime_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = (
+                root
+                / "Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
+            )
+            runtime.parent.mkdir(parents=True)
+            runtime.write_bytes(b"fixture runtime")
+            runtime.chmod(0o755)
+            (runtime.parent / "python").symlink_to(runtime.name)
+            toolcache = root / "hostedtoolcache/Python/3.14.6/arm64/bin"
+            toolcache.parent.mkdir(parents=True)
+            toolcache.symlink_to(runtime.parent, target_is_directory=True)
+            executable = toolcache / "python"
+            canonical = runtime.resolve(strict=True)
+            identity = self._identity(canonical, mode=stat.S_IFREG | 0o775)
+
+            self.assertEqual(
+                self._canonical_runtime(executable, identity),
+                canonical,
+            )
+
+    def test_hard_link_does_not_change_current_owner_runtime_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "python3.14"
+            runtime.write_bytes(b"fixture runtime")
+            runtime.chmod(0o755)
+            os.link(runtime, root / "python3.14.alias")
+            self.assertEqual(runtime.stat().st_nlink, 2)
+
+            with mock.patch.object(launcher.sys, "executable", str(runtime)):
+                self.assertEqual(
+                    launcher._canonical_python_runtime(),
+                    runtime.resolve(strict=True),
+                )
+
+    def test_unsafe_runtime_identities_fail_with_specific_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "python3.14"
+            runtime.write_bytes(b"fixture runtime")
+            runtime.chmod(0o755)
+            cases = (
+                (
+                    "non-regular",
+                    self._identity(runtime, mode=stat.S_IFDIR | 0o755),
+                    True,
+                    False,
+                    "not a regular file",
+                ),
+                (
+                    "foreign-owner",
+                    self._identity(runtime, owner=502),
+                    True,
+                    False,
+                    "owner is not trusted",
+                ),
+                (
+                    "empty",
+                    self._identity(runtime, size=0),
+                    True,
+                    False,
+                    "size is outside its bound",
+                ),
+                (
+                    "oversized",
+                    self._identity(runtime, size=512 * 1024 * 1024 + 1),
+                    True,
+                    False,
+                    "size is outside its bound",
+                ),
+                (
+                    "no-execute-bit",
+                    self._identity(runtime, mode=stat.S_IFREG | 0o644),
+                    True,
+                    False,
+                    "is not executable",
+                ),
+                (
+                    "not-executable-by-user",
+                    self._identity(runtime),
+                    False,
+                    False,
+                    "not executable by the release user",
+                ),
+                (
+                    "other-writable",
+                    self._identity(runtime, mode=stat.S_IFREG | 0o777),
+                    True,
+                    False,
+                    "writable by other users",
+                ),
+                (
+                    "root-staff-group-writable",
+                    self._identity(
+                        runtime,
+                        mode=stat.S_IFREG | 0o775,
+                        group=20,
+                    ),
+                    True,
+                    False,
+                    "not confined to root:wheel",
+                ),
+                (
+                    "current-owner-group-writable",
+                    self._identity(
+                        runtime,
+                        mode=stat.S_IFREG | 0o775,
+                        owner=501,
+                        group=20,
+                    ),
+                    True,
+                    False,
+                    "not confined to root:wheel",
+                ),
+                (
+                    "root-runtime-caller-writable",
+                    self._identity(runtime, mode=stat.S_IFREG | 0o775),
+                    True,
+                    True,
+                    "writable by the release user",
+                ),
+            )
+            for name, identity, executable, writable, message in cases:
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(
+                        launcher.UpdaterSigningLaunchError,
+                        message,
+                    ):
+                        self._canonical_runtime(
+                            runtime,
+                            identity,
+                            executable_by_user=executable,
+                            writable_by_user=writable,
+                        )
 
 
 class PinnedSignerVerificationTests(unittest.TestCase):

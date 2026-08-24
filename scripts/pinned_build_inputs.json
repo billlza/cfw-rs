@@ -2077,7 +2077,7 @@
     "scripts/run_verify_remote_release.sh": "57701f480360bec33ff66ad89cec4ae34e08c953ead08cd4555bce71a1062692",
     "scripts/sealed_evidence_manifest.py": "e0b1b7d41612305007450cd30c582f9778664bc56cbb00bf72073fc8f5ef55cc",
     "scripts/tauri_host_skeleton.sh": "d8a7560f9062083cba8dd53af9fefecf15e134396b460b3ba0ae898b6a17a56d",
-    "scripts/updater_signing_launcher.py": "7431cba23d41e0745d0ab250e4c08e660536b2a9ff65de3153704c3f13c4961f",
+    "scripts/updater_signing_launcher.py": "19c5b87a9cf063ac877f1c79eda775885a829a4abbac1afd8e890af2d7af3ca7",
     "scripts/validate_notary_archive.py": "099ff41742da304d34ec8b92dd3b3c4f96d064f21bde697b21f5c99c2393f283",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
     "scripts/validated_candidate_evidence.py": "61b8ffb306929539a7cc5a580659a7cdeb84366f0763c75a2b2f49e29be0e02c",

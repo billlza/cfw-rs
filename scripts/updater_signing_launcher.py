@@ -86,6 +86,7 @@ class PathIdentity:
     inode: int
     mode: int
     owner: int
+    group: int
     links: int
     size: int
     modified_ns: int
@@ -99,6 +100,7 @@ class PathIdentity:
             inode=metadata.st_ino,
             mode=metadata.st_mode,
             owner=metadata.st_uid,
+            group=metadata.st_gid,
             links=metadata.st_nlink,
             size=metadata.st_size,
             modified_ns=metadata.st_mtime_ns,
@@ -606,7 +608,7 @@ def _open_held_release_file(path: Path, label: str) -> HeldReleaseFile:
 
 
 def _canonical_python_runtime() -> Path:
-    """Return the running interpreter's canonical, non-writable executable."""
+    """Return the running interpreter's canonical trusted-owner executable."""
 
     try:
         python = Path(sys.executable).resolve(strict=True)
@@ -615,18 +617,47 @@ def _canonical_python_runtime() -> Path:
             "running Python interpreter cannot be resolved"
         ) from error
     identity = _lstat_identity(python)
-    if (
-        not stat.S_ISREG(identity.mode)
-        or identity.links != 1
-        or identity.owner not in {0, os.getuid()}
-        or identity.size < 1
-        or identity.size > 512 * 1024 * 1024
-        or stat.S_IMODE(identity.mode) & 0o022
-        or not stat.S_IMODE(identity.mode) & 0o111
-    ):
+    file_mode = stat.S_IMODE(identity.mode)
+    if not stat.S_ISREG(identity.mode):
         raise UpdaterSigningLaunchError(
-            "canonical Python interpreter is not an owner-bound executable"
+            f"canonical Python interpreter is not a regular file: {python}"
         )
+    if identity.owner not in {0, os.getuid()}:
+        raise UpdaterSigningLaunchError(
+            f"canonical Python interpreter owner is not trusted: {python}"
+        )
+    if identity.size < 1 or identity.size > 512 * 1024 * 1024:
+        raise UpdaterSigningLaunchError(
+            f"canonical Python interpreter size is outside its bound: {python}"
+        )
+    if not file_mode & 0o111:
+        raise UpdaterSigningLaunchError(
+            f"canonical Python interpreter is not executable: {python}"
+        )
+    if not os.access(python, os.X_OK, effective_ids=True):
+        raise UpdaterSigningLaunchError(
+            "canonical Python interpreter is not executable by the release user: "
+            f"{python}"
+        )
+    if file_mode & stat.S_IWOTH:
+        raise UpdaterSigningLaunchError(
+            f"canonical Python interpreter is writable by other users: {python}"
+        )
+    # The official macOS python.org package used by setup-python installs its
+    # interpreter as root:wheel 0775. Wheel-group write adds no writer outside
+    # the already-trusted root boundary; every other group-write class fails.
+    if file_mode & stat.S_IWGRP and (identity.owner, identity.group) != (0, 0):
+        raise UpdaterSigningLaunchError(
+            "canonical Python interpreter group-write permission is not confined "
+            f"to root:wheel: {python}"
+        )
+    if identity.owner == 0 and os.access(python, os.W_OK, effective_ids=True):
+        raise UpdaterSigningLaunchError(
+            "root-owned canonical Python interpreter is writable by the release "
+            f"user: {python}"
+        )
+    # Hard-link count does not alter the inode's writers and is not an origin
+    # proof. Custody and artifact inputs retain their exact single-link policy.
     return python
 
 

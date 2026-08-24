@@ -382,7 +382,7 @@ class Fixture:
             "PYTHON_VERSION": "3.14.6",
             "RUST_VERSION": "1.97.1",
             "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": (
-                "703ac1d600f6919f9d7a961848ecfb88834ece25684572a7f5eb53e405fde6db"
+                "472d78d9340576ca15b8f17f2eb4fe5fb709c0aae3a428e8c4dfd2cd65e5b6ae"
             ),
             "CARGO_AUDIT_VERSION": "0.22.2",
             "CARGO_DENY_VERSION": "0.20.2",
@@ -471,7 +471,7 @@ class Fixture:
                 "PYTHON_VERSION": "3.14.6",
                 "RUST_VERSION": "1.97.1",
                 "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": (
-                    "703ac1d600f6919f9d7a961848ecfb88834ece25684572a7f5eb53e405fde6db"
+                    "472d78d9340576ca15b8f17f2eb4fe5fb709c0aae3a428e8c4dfd2cd65e5b6ae"
                 ),
                 "CARGO_AUDIT_VERSION": "0.22.2",
                 "CARGO_DENY_VERSION": "0.20.2",

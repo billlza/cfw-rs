@@ -888,6 +888,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("self-check")
+    commands.add_parser("runtime-self-check")
     initialize = commands.add_parser("initialize")
     initialize.add_argument("--candidate", required=True, type=Path)
     initialize.add_argument("--run-id", required=True)
@@ -907,10 +908,13 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        _verify_cli_runtime()
         if arguments.command == "self-check":
             self_check()
             print("physical collector request self-check ok")
+            return 0
+        _verify_cli_runtime()
+        if arguments.command == "runtime-self-check":
+            print("physical collector runtime self-check ok")
             return 0
         if arguments.command == "initialize":
             value = initialize_context(

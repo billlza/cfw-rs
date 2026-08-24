@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stderr
 from datetime import datetime, timezone
+import io
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +31,7 @@ from scripts.harness.performance_ledger import (
     SHAPING_KIND as PERFORMANCE_SHAPING_KIND,
     SHAPING_RESTORATION_SUBJECT,
 )
+from scripts.harness import physical_collector_request
 from scripts.harness.physical_collector_request import (
     PhysicalCollectorRequestError,
     build_nonce_request,
@@ -269,6 +273,24 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
     def test_static_contract_self_check(self) -> None:
         self_check()
 
+    def test_static_cli_self_check_accepts_the_pinned_validation_runtime(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-B",
+                str(REQUEST_SCRIPT),
+                "self-check",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stderr, b"")
+
     def test_cli_requires_fixed_isolated_no_site_runtime(self) -> None:
         accepted = subprocess.run(
             [
@@ -277,7 +299,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
                 "-S",
                 "-B",
                 str(REQUEST_SCRIPT),
-                "self-check",
+                "runtime-self-check",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -292,7 +314,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
                 "-I",
                 "-B",
                 str(REQUEST_SCRIPT),
-                "self-check",
+                "runtime-self-check",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -302,6 +324,56 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         self.assertEqual(rejected.returncode, 1)
         self.assertIn(b"requires the fixed Python", rejected.stderr)
         self.assertNotIn(b"Traceback", rejected.stderr)
+
+    def test_evidence_commands_check_runtime_before_reading_or_writing(self) -> None:
+        commands = (
+            (
+                "initialize",
+                "--candidate",
+                "/missing/candidate.json",
+                "--run-id",
+                "run-40031-macos15",
+                "--confirm-clean-install",
+                "--output",
+                "/missing/context.json",
+            ),
+            (
+                "nonce-request",
+                "--context",
+                "/missing/context.json",
+                "--output",
+                "/missing/nonce-request.json",
+            ),
+            (
+                "receipt-request",
+                "--context",
+                "/missing/context.json",
+                "--nonce-response",
+                "/missing/nonce-response.json",
+                "--bindings",
+                "/missing/bindings.json",
+                "--output",
+                "/missing/receipt-request.json",
+            ),
+        )
+        for command in commands:
+            with self.subTest(command=command), patch.object(
+                physical_collector_request,
+                "_verify_cli_runtime",
+                side_effect=PhysicalCollectorRequestError("runtime sentinel"),
+            ) as verify_runtime, patch.object(
+                physical_collector_request, "_load"
+            ) as load, patch.object(
+                physical_collector_request, "_write_new"
+            ) as write:
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    result = physical_collector_request.main(command)
+                self.assertEqual(result, 1)
+                self.assertIn("runtime sentinel", stderr.getvalue())
+                verify_runtime.assert_called_once_with()
+                load.assert_not_called()
+                write.assert_not_called()
 
     def test_initialize_collects_machine_boot_and_os_without_raw_uuid(self) -> None:
         run = self.context["run"]

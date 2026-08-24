@@ -16,7 +16,7 @@ from typing import Any
 
 
 TARGET = "aarch64-apple-darwin"
-SURFACE_ALGORITHM = "rustup-component-file-tree-v1"
+SURFACE_ALGORITHM = "rustup-component-file-tree-v2"
 SURFACE_PIN = "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256"
 MAX_SMALL_DOCUMENT_BYTES = 64 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
@@ -299,6 +299,54 @@ def _file_record(root: Path, relative: str) -> dict[str, object]:
     }
 
 
+def _component_inventory_record(root: Path) -> tuple[list[str], dict[str, object]]:
+    """Return the exact component set with a canonical order-insensitive record."""
+
+    relative = "lib/rustlib/components"
+    path = _member(root, relative, directory=False)
+    data, metadata = _read_regular(
+        path, MAX_SMALL_DOCUMENT_BYTES, "Rust toolchain component inventory"
+    )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ReleaseRustToolchainError(
+            "Rust toolchain component inventory is not UTF-8"
+        ) from error
+    if (
+        not text.endswith("\n")
+        or text.endswith("\n\n")
+        or "\r" in text
+    ):
+        raise ReleaseRustToolchainError(
+            "Rust toolchain component inventory is not canonical LF text"
+        )
+    lines = text[:-1].split("\n")
+    if (
+        any(not line or line != line.strip() for line in lines)
+        or len(lines) != len(set(lines))
+    ):
+        raise ReleaseRustToolchainError(
+            "Rust toolchain component inventory entries are not canonical"
+        )
+    components = sorted(lines)
+    if components != list(EXPECTED_COMPONENTS):
+        raise ReleaseRustToolchainError(
+            "Rust toolchain component inventory is not exact"
+        )
+    canonical = ("\n".join(EXPECTED_COMPONENTS) + "\n").encode("utf-8")
+    if len(canonical) != len(data):
+        raise ReleaseRustToolchainError(
+            "Rust toolchain component inventory size is not canonical"
+        )
+    return components, {
+        "mode": f"{stat.S_IMODE(metadata.st_mode):04o}",
+        "path": relative,
+        "sha256": hashlib.sha256(canonical).hexdigest(),
+        "size": len(data),
+    }
+
+
 def _validate_exact_tree(
     root: Path,
     expected_files: set[str],
@@ -356,16 +404,7 @@ def _validate_exact_tree(
 
 def build_toolchain_surface(root: Path) -> dict[str, Any]:
     root = _canonical_root(root)
-    components_path = _member(root, "lib/rustlib/components", directory=False)
-    components = sorted(
-        _text(
-            components_path,
-            MAX_SMALL_DOCUMENT_BYTES,
-            "Rust toolchain component inventory",
-        ).splitlines()
-    )
-    if components != list(EXPECTED_COMPONENTS):
-        raise ReleaseRustToolchainError("Rust toolchain component inventory is not exact")
+    components, _initial_inventory_record = _component_inventory_record(root)
 
     relative_files = {
         "lib/rustlib/components",
@@ -407,8 +446,17 @@ def build_toolchain_surface(root: Path) -> dict[str, Any]:
     _validate_exact_tree(root, relative_files, relative_directories)
     records: list[dict[str, object]] = []
     total_size = 0
+    repeated_components, inventory_record = _component_inventory_record(root)
+    if repeated_components != components:
+        raise ReleaseRustToolchainError(
+            "Rust toolchain component inventory changed while validating"
+        )
     for relative in sorted(relative_files):
-        record = _file_record(root, relative)
+        record = (
+            inventory_record
+            if relative == "lib/rustlib/components"
+            else _file_record(root, relative)
+        )
         total_size += int(record["size"])
         if total_size > MAX_TOOLCHAIN_TOTAL_BYTES:
             raise ReleaseRustToolchainError("Rust toolchain surface exceeds its size bound")

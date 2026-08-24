@@ -152,6 +152,48 @@ class ReleaseRustToolchainTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseRustToolchainError, "path is unsafe"):
             build_toolchain_surface(fixture_two.root)
 
+    def test_component_inventory_order_is_semantically_canonical(self) -> None:
+        temporary, fixture = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        components = fixture.root / "lib/rustlib/components"
+        components.write_text(
+            "\n".join(reversed(EXPECTED_COMPONENTS)) + "\n", encoding="utf-8"
+        )
+        self.assertEqual(build_toolchain_surface(fixture.root), fixture.surface)
+
+    def test_component_inventory_rejects_noncanonical_serializations(self) -> None:
+        variants = (
+            "\n".join(EXPECTED_COMPONENTS),
+            "\r\n".join(EXPECTED_COMPONENTS) + "\r\n",
+            "\n".join(EXPECTED_COMPONENTS) + "\n\n",
+            "\n".join(EXPECTED_COMPONENTS[:-1]) + "\n",
+            "\n".join((*EXPECTED_COMPONENTS, EXPECTED_COMPONENTS[0])) + "\n",
+            "\n".join((f" {EXPECTED_COMPONENTS[0]}", *EXPECTED_COMPONENTS[1:]))
+            + "\n",
+        )
+        for value in variants:
+            with self.subTest(value=value):
+                temporary, fixture = self.fixture()
+                self.addCleanup(temporary.cleanup)
+                components = fixture.root / "lib/rustlib/components"
+                components.write_text(value, encoding="utf-8", newline="")
+                with self.assertRaisesRegex(
+                    ReleaseRustToolchainError,
+                    "component inventory",
+                ):
+                    build_toolchain_surface(fixture.root)
+
+    def test_payload_byte_drift_changes_the_surface_digest(self) -> None:
+        temporary, fixture = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        cargo = fixture.root / "bin/cargo"
+        original = cargo.read_bytes()
+        cargo.write_bytes(original[:-1] + bytes((original[-1] ^ 1,)))
+        changed = build_toolchain_surface(fixture.root)
+        self.assertEqual(changed["file_count"], fixture.surface["file_count"])
+        self.assertEqual(changed["total_size"], fixture.surface["total_size"])
+        self.assertNotEqual(changed["sha256"], fixture.surface["sha256"])
+
     def test_pin_and_declaration_drift_are_rejected(self) -> None:
         temporary, fixture = self.fixture()
         self.addCleanup(temporary.cleanup)

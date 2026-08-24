@@ -6,7 +6,7 @@
   "tools": {
     "PYTHON_VERSION": "3.14.6",
     "RUST_VERSION": "1.97.1",
-    "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": "703ac1d600f6919f9d7a961848ecfb88834ece25684572a7f5eb53e405fde6db",
+    "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256": "472d78d9340576ca15b8f17f2eb4fe5fb709c0aae3a428e8c4dfd2cd65e5b6ae",
     "CARGO_AUDIT_VERSION": "0.22.2",
     "CARGO_DENY_VERSION": "0.20.2",
     "XCODEGEN_VERSION": "2.46.0",
@@ -1196,9 +1196,11 @@
       "emitted a warning"
     ],
     "scripts/release_rust_toolchain.py": [
-      "SURFACE_ALGORITHM = \"rustup-component-file-tree-v1\"",
+      "SURFACE_ALGORITHM = \"rustup-component-file-tree-v2\"",
       "SURFACE_PIN = \"RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256\"",
       "EXPECTED_COMPONENTS = tuple(",
+      "def _component_inventory_record(",
+      "Rust toolchain component inventory is not canonical LF text",
       "def build_toolchain_surface(",
       "def validate_recorded_surface(",
       "def verify_pinned_toolchain(",
@@ -1650,7 +1652,9 @@
       "build_receipt_request",
       "_validated_receipt_bindings",
       "physical_candidate_artifact_manifest_sha256",
-      "self_check"
+      "self_check",
+      "_verify_cli_runtime",
+      "runtime-self-check"
     ],
     "scripts/harness/physical_evidence_aggregator.py": [
       "SCHEMA_VERSION = EVIDENCE_PROFILE[\"aggregate_schema_version\"]",
@@ -1982,7 +1986,7 @@
     "scripts/gatekeeper_assessment.py": "a4cee29500d0ada05455b5fed984253f99a484601c70c68cf2117792305ee433",
     "scripts/harness/performance_gates.py": "14f1fb992480bdb4e06da4c9f7c8ada7c7f337204aba2e3f9cb2c1cebae3aba4",
     "scripts/harness/performance_ledger.py": "b8d6ffb8c34e72619a49fc95b51f87a7cf45f224d20ab1e67d14706206f90425",
-    "scripts/harness/physical_collector_request.py": "05d35e59ad341489fd6923cf85acae9f7bf982f19b4e9919f0478c873e86923c",
+    "scripts/harness/physical_collector_request.py": "6b0a2f0a45cffcfd27507c57a39ebb6912521a54c5494821248d13789a00f676",
     "scripts/harness/physical_collector_trust_policy.json": "e95c2710371b3ba6f6899cb24fcbdc42038869934b1c89ddca651bd910601355",
     "scripts/harness/physical_evidence_aggregator.py": "cb98eed9f96e5e46ccce0c4e83c567f495b26356a0e4eb945d6d5590d6d669c8",
     "scripts/harness/physical_machine_identity.py": "03d15a92abe4e1e89e6343f3418e2e8d0cda20d21bcda19660066f581fb8fbf7",
@@ -2037,7 +2041,7 @@
     "scripts/release_publication_path_contract.sh": "bc83e5faf062fd44157541c32579c028cac2e0b273f576e6c6507691455743ee",
     "scripts/release_python_launcher.sh": "cd9bc4308a5f8c6336e01158f0d17c5113c50d6feca05f3abe1f769be6775163",
     "scripts/release_python_runtime.py": "dcb0bad2c02253d6cb5b9281f219510310308ee3b6047f3a8fbb7bc7a269ae17",
-    "scripts/release_rust_toolchain.py": "7900ad19cd004e3a94f187460f9dea959970af62468ee0afad0c9230afd77376",
+    "scripts/release_rust_toolchain.py": "15b4e5da8ca4c40b5d272218ab539249e39f36241a928bf3269599307baf7abe",
     "scripts/release_secret_material_blocker.py": "89658d553b95620da3e229b6c230ea1a735f30ecb80765dd617e52cb948d7049",
     "scripts/release_tool_environment.sh": "8f28973fb951a1026e4783d1671f7a442c42b89234836417902f9f065b639e65",
     "scripts/release_toolchain_contract.sh": "8679ced1eceff62e80d30a717278a021dce364c89307bb64b20488e6df090b7b",

@@ -103,7 +103,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "72334a06de556d03f066a25c06380ec59ab02675cba70f7872a82fabea47b31b"
+    "f1875037eb66794d8ff5b21578125062e73f452da977759f4bb71a48c1a11a2b"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -111,7 +111,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "2a218883d26ceedc16ada59d20e7c158e5a3dc8ee157d39418f83a24f5c5bd66"
+    "fdbb3d3c6155c6f5d8e884d71370527eefbfe7f3b1479c188ab0a8ce8517aaad"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}

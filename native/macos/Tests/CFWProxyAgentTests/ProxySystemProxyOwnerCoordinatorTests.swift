@@ -491,9 +491,10 @@ struct ProxySystemProxyOwnerCoordinatorTests {
       descriptor: fixture.descriptor,
       authorization: authorization
     ) { start.record($0) }
-    #expect(start.wait())
+    try #require(start.wait())
 
-    guard case .failure(.engineLease) = start.values[0] else {
+    let outcome = try #require(start.values.first)
+    guard case .failure(.engineLease) = outcome else {
       Issue.record("Expected fail-closed engine-lease (Authority) failure")
       return
     }

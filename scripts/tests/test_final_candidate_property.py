@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Property-based fail-closed test for the final-candidate binder.
 
-Exercises ``publication.final_candidate`` as a black box (Task 12.2,
-Requirements 4.1, 5.1, 6.1, 6.2, 6.3, 6.4, 6.5, 8.1). It is deterministic: the
-stdlib ``random`` module is seeded with fixed integers so any failure
-reproduces exactly. ``hypothesis`` is intentionally not required; at least 100
-generated bindings are validated per property and, on failure, the reproducing
-seed and offending document are printed.
+Exercises the public ``publication.final_candidate`` build/validate surface
+(Task 12.2, Requirements 4.1, 5.1, 6.1, 6.2, 6.3, 6.4, 6.5, 8.1). It is
+deterministic: the stdlib ``random`` module is seeded with fixed integers so any
+failure reproduces exactly. ``hypothesis`` is intentionally not required; at
+least 100 generated bindings are validated per property and, on failure, the
+reproducing seed and offending document are printed. Unchanged source and
+physical fixtures are validated for real at property-class entry and exit,
+then served by strict test-only snapshots inside the high-cardinality loop.
+Dedicated raw-evidence drift and TOCTOU suites remain uncached.
 
 Two properties are checked:
 
@@ -34,6 +37,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.publication import final_candidate as final_candidate_module
 from scripts.publication.common import PublicationError
 from scripts.publication.final_candidate import (
     BLOCKED,
@@ -65,6 +69,10 @@ from scripts.tests.physical_evidence_fixture import (
     fixture_packet_policy,
 )
 from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
+from scripts.tests.release_property_snapshots import (
+    PhysicalSnapshotInput,
+    StrictReleasePropertySnapshots,
+)
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 REPOSITORY_COMMIT = repository_commit(REPOSITORY)
@@ -308,6 +316,40 @@ MUTATORS = (
 
 
 class _CleanWorkspace(unittest.TestCase):
+    register_foreign_fixture = False
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        descriptors = [physical_fixture()]
+        if cls.register_foreign_fixture:
+            descriptors.append(foreign_tree_fixture())
+        cls._property_snapshots = StrictReleasePropertySnapshots(
+            repository=REPOSITORY,
+            source_deriver=final_candidate_module.derive_supply_chain,
+            source_consumers=((final_candidate_module, "derive_supply_chain"),),
+            physical_loader=final_candidate_module.load_physical_evidence_artifact,
+            physical_consumers=(
+                (final_candidate_module, "load_physical_evidence_artifact"),
+            ),
+            physical_inputs=tuple(
+                PhysicalSnapshotInput(
+                    descriptor=descriptor,
+                    evidence_root=PHYSICAL_EVIDENCE_ROOT,
+                    trust_policy=PHYSICAL_TRUST_POLICY,
+                )
+                for descriptor in descriptors
+            ),
+        )
+        cls._property_snapshots.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        try:
+            cls._property_snapshots.__exit__(None, None, None)
+        finally:
+            super().tearDownClass()
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self._tmp.name)
@@ -393,6 +435,8 @@ class FinalCandidateRoundTripProperty(_CleanWorkspace):
 
 
 class FinalCandidateFailClosedProperty(_CleanWorkspace):
+    register_foreign_fixture = True
+
     def test_schema_numeric_type_is_fail_closed_across_generated_bindings(self) -> None:
         for seed in range(40):
             rng = random.Random(55_000 + seed)

@@ -52,7 +52,10 @@ from scripts.release_secret_material_blocker import (
     format_response,
 )
 from scripts.verify_ci_no_masking import CiPolicyError, audit_workflow
-from scripts.verify_pinned_build_inputs import PinnedInputError, verify as verify_pinned
+from scripts.verify_pinned_build_inputs import (
+    PinnedInputError,
+    verify_source_contract as verify_pinned,
+)
 from scripts.verify_production_boundary_removal import (
     ProductionBoundaryViolation,
     scan_source,
@@ -264,11 +267,22 @@ def _copy_pinned_tree(destination: Path) -> Path:
     manifest = json.loads(
         (REPO_ROOT / "scripts/pinned_build_inputs.json").read_text(encoding="utf-8")
     )
+    lan_peer = manifest.get("packetLanPeer")
+    if not isinstance(lan_peer, dict):
+        raise AssertionError("shipped packet LAN peer closure is unavailable")
+    lan_artifact = lan_peer.get("artifact")
+    lan_artifact_path = (
+        lan_artifact.get("path") if isinstance(lan_artifact, dict) else None
+    )
+    if not isinstance(lan_artifact_path, str):
+        raise AssertionError("shipped packet LAN peer artifact path is malformed")
     artifact_bindings = manifest.get("artifactBindings")
     if not isinstance(artifact_bindings, dict):
         raise AssertionError("shipped artifact-binding closure is unavailable")
     fixture_inputs = tuple(
-        dict.fromkeys((*_PINNED_INPUTS, *sorted(artifact_bindings)))
+        relative
+        for relative in dict.fromkeys((*_PINNED_INPUTS, *sorted(artifact_bindings)))
+        if relative != lan_artifact_path
     )
     for relative in fixture_inputs:
         relative_path = Path(relative)
@@ -295,9 +309,6 @@ def _copy_pinned_tree(destination: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
 
-    lan_peer = manifest.get("packetLanPeer")
-    if not isinstance(lan_peer, dict):
-        raise AssertionError("shipped packet LAN peer closure is unavailable")
     lan_source = lan_peer.get("source")
     if not isinstance(lan_source, dict):
         raise AssertionError("shipped packet LAN peer source closure is malformed")
@@ -310,7 +321,7 @@ def _copy_pinned_tree(destination: Path) -> Path:
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
             raise AssertionError("shipped packet LAN peer source entry is malformed")
         lan_paths.add(f"{lan_root}/{entry['path']}")
-    for contract_name in ("buildScript", "verifyScript", "artifact"):
+    for contract_name in ("buildScript", "verifyScript"):
         contract = lan_peer.get(contract_name)
         if not isinstance(contract, dict) or not isinstance(contract.get("path"), str):
             raise AssertionError(f"shipped packet LAN peer {contract_name} is malformed")
@@ -363,9 +374,11 @@ def _copy_pinned_tree(destination: Path) -> Path:
 
 
 class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
-    def test_copied_shipped_pins_pass(self) -> None:
+    def test_copied_shipped_source_pins_pass_without_generated_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            verify_pinned(_copy_pinned_tree(Path(tmp)))
+            root = _copy_pinned_tree(Path(tmp))
+            self.assertFalse((root / "target/packet-lan-peer-linux-arm64").exists())
+            verify_pinned(root)
 
     def test_drifted_toolchain_version_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

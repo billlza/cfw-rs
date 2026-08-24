@@ -183,6 +183,24 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             ):
                 audit_workflow(DEFAULT_WORKFLOW, DEFAULT_PINS)
 
+    def test_swift_test_gate_cannot_drop_no_parallel(self) -> None:
+        source_gate = Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
+        source = source_gate.read_text(encoding="utf-8")
+        required = "      --no-parallel \\\n"
+        self.assertIn(required, source)
+        with tempfile.TemporaryDirectory() as temporary:
+            drifted_gate = Path(temporary) / "run_release_ci_gate.sh"
+            drifted_gate.write_text(
+                source.replace(required, "", 1),
+                encoding="utf-8",
+            )
+            with patch(
+                "scripts.verify_ci_no_masking.RELEASE_CI_GATE", drifted_gate
+            ), self.assertRaisesRegex(
+                CiPolicyError, "deterministic Swift package test command"
+            ):
+                audit_workflow(DEFAULT_WORKFLOW, DEFAULT_PINS)
+
     def test_packet_gate_commands_cannot_be_made_unreachable(self) -> None:
         source_gate = Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
         source = source_gate.read_text(encoding="utf-8")

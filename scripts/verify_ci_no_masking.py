@@ -66,7 +66,7 @@ REQUIRED_HEAD_ASSERTION = (
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
-    "faaf58cc890c2f61e374760a2431279e573d75ed483be085dcc99fcc2462b53e"
+    "30a4e04ceebbed51efb8c7b7b684e0167bda55e6e5624865c231bf86b8795d77"
 )
 REQUIRED_WORKFLOW_SHA256 = (
     "299712e99a20f9b738696ea38773c62ca4b7e3cf43a4a4a43004fdde24225f22"
@@ -784,6 +784,7 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         '/bin/bash -p "$test_script"',
         "/usr/bin/swift format lint --recursive --strict",
         "/usr/bin/swift test --package-path native/macos",
+        "--no-parallel",
         "-Xswiftc -warnings-as-errors",
         "/usr/bin/xcodebuild test",
         "/usr/bin/xcodebuild analyze",
@@ -875,6 +876,20 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
     if not _source_contains_token_sequence(gate_source, expected_complete_pin_command):
         findings.append(
             "closed release CI gate omits the complete packet artifact pin verifier"
+        )
+    expected_swift_test_command = (
+        "/usr/bin/swift",
+        "test",
+        "--package-path",
+        "native/macos",
+        "--no-parallel",
+        "-Xswiftc",
+        "-warnings-as-errors",
+    )
+    if not _source_contains_token_sequence(gate_source, expected_swift_test_command):
+        findings.append(
+            "closed release CI gate omits deterministic Swift package test command "
+            + repr(" ".join(expected_swift_test_command))
         )
     return findings
 

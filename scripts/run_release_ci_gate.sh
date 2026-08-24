@@ -250,7 +250,11 @@ case "$gate" in
     ;;
   swift-package-test)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"
+    # The current Swift test harness has synchronous semaphore recorders whose
+    # callbacks run on cooperative Tasks. Cross-suite parallelism can starve
+    # those callbacks; remove this only after every blocking recorder is async.
     /usr/bin/swift test --package-path native/macos \
+      --no-parallel \
       -Xswiftc -warnings-as-errors
     ;;
   xcode-unsigned-test)

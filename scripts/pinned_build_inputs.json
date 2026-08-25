@@ -488,6 +488,32 @@
     }
   },
   "artifactBindings": {
+    "apps/cfw-tauri-shell/build.rs": [
+      "#[path = \"build_support/native_product_input.rs\"]",
+      "CandidateNativeProducts, require_real_directory, require_single_link_regular_file,",
+      "const BUILD_NUMBER_ENV: &str = \"CFW_BUILD_NUMBER\";",
+      "cargo:rerun-if-env-changed={BUILD_NUMBER_ENV}",
+      "CandidateNativeProducts::resolve(&candidate_root, &declared, &build_number)",
+      ".require_manifest_identity(&product_manifest.metadata, product)?",
+      ".require_manifest_identity(&tombstone_manifest.metadata, \"CFWLegacyTombstone\")?",
+      "require_single_link_regular_file(&manifest_path)",
+      "require_single_link_regular_file(&tombstone_manifest)",
+      "require_utf8_relative_artifact_path(root, &path)?"
+    ],
+    "apps/cfw-tauri-shell/build_support/native_product_input.rs": [
+      "const UNSIGNED_RELATIVE_ROOT: &str = \"unsigned/native-products\";",
+      "const GA_PRE_SIGN_RELATIVE_ROOT: &str = \"ga-preflight/40031/native-products\";",
+      "pub enum NativeProductContext {",
+      "pub struct CandidateNativeProducts {",
+      "pub fn resolve(",
+      "NativeProductContext::UnsignedValidation",
+      "NativeProductContext::GaPreSign",
+      "require_canonical_real_directory(candidate_root, &root)?;",
+      "pub fn require_real_directory(",
+      "pub fn require_single_link_regular_file(",
+      "pub fn require_utf8_relative_artifact_path(",
+      "pub fn require_manifest_identity("
+    ],
     "scripts/libbox_source_contract.sh": [
       "sourceTag=$SING_BOX_VERSION",
       "sourceCommit=$SING_BOX_COMMIT",
@@ -536,6 +562,8 @@
       "source \"$repo_root/scripts/release_tool_environment.sh\"",
       "cfw_seal_release_tool_environment",
       "unsigned-validation",
+      "signing_mode=\"pre-sign\"",
+      "--metadata \"signingMode=$signing_mode\"",
       "cfw_select_release_apple_toolchain",
       "/usr/bin/xcodebuild build",
       "#!/bin/bash -p"
@@ -628,6 +656,8 @@
       "scripts/release_signing_plan.py\" verify-frozen",
       "scripts/updater_key_possession_proof.py\" verify-frozen",
       "scripts/signing_attempt_transaction.py",
+      "\"$repo_root/scripts/build_native_products.sh\" --pre-sign",
+      "--metadata \"signingMode=pre-sign\"",
       "\"$signing_transaction_command\"",
       "scripts/verify_signing_transformation.py\" verify",
       "--recover-submission-id",
@@ -2510,6 +2540,8 @@
     ]
   },
   "artifactSourceSha256": {
+    "apps/cfw-tauri-shell/build.rs": "7d5a88f32ac0573c0b119ddf92f0b275abe7c64b0ccb6e7a3dbe000863901da9",
+    "apps/cfw-tauri-shell/build_support/native_product_input.rs": "56d9b04263cf6ffa0bebac0df80e7bb65f6b9474ccbb963ebeb456c168517fbe",
     "scripts/ga_runtime_acceptance_cli.py": "4eba4652b847dc11c2422ccdf6b6ba846c08d5cb2b743326a61158f15a079a79",
     "scripts/hash_native_build_inputs.py": "7e7d327c3a1c3edd6a7c33cdf544d22d349ce40646e4c5ed26651e060f5bb0fa",
     "scripts/physical_capture/__init__.py": "f5fe405e071210b80f782a819991cf86c4a42ee286a08f1c77f63b1781cba193",

@@ -89,12 +89,11 @@ from .sealed_closure import derive_supply_chain
 from .sealed_manifest import REQUIRED_CI_LANES, _ci_lane_document, _require_command
 from .release_toolchains import verified_release_toolchain_trees
 from .release_environment import (
-    APPLE_SWIFT,
     APPLE_XCODEBUILD,
-    APPLE_XCRUN,
     SYSTEM_PATH,
     identity_output,
     release_tool_environment,
+    swift_toolchain_identity,
 )
 if __package__ and __package__.startswith("scripts."):
     from scripts.release_rust_toolchain import (
@@ -752,11 +751,13 @@ def _resolved_toolchain(
         f"Xcode {pins['XCODE_VERSION']}; Build version {pins['XCODE_BUILD_VERSION']}",
         "Xcode",
     )
-    # The workflow only asserts that the Swift driver reports an identity; there
-    # is no separate Swift pin (it ships inside the pinned Xcode).
-    resolved["swift"] = identity_output(
-        [APPLE_SWIFT, "--version"], repository, "Swift", base
-    )
+    # Swift ships inside the pinned Xcode. Its structured target identity is
+    # projected without the machine-local Xcode installation prefix.
+    resolved["swift"] = swift_toolchain_identity(
+        repository,
+        base,
+        pins["MACOS_DEPLOYMENT_TARGET"],
+    ).canonical
     resolved["node"] = _expect(
         identity_output([str(node_bin_dir / "node"), "--version"], repository, "Node.js", node_env),
         f"v{pins['NODE_VERSION']}",

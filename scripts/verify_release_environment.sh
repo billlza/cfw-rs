@@ -94,8 +94,26 @@ if [[ "$("$tauri_bin" --version)" != "tauri-cli $TAURI_CLI_VERSION" ]]; then
   exit 1
 fi
 
-swift_version="$(/usr/bin/swift --version 2>&1)"
-if [[ -z "$swift_version" ]]; then
+swift_identity="$(
+  PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+    "$repo_root" "$MACOS_DEPLOYMENT_TARGET" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+repository = Path(sys.argv[1]).resolve(strict=True)
+sys.path.insert(0, str(repository))
+
+from scripts.publication.release_environment import swift_toolchain_identity
+
+identity = swift_toolchain_identity(repository, dict(os.environ), sys.argv[2])
+print(identity.canonical)
+PY
+)" || {
+  echo "error: selected Xcode Swift identity is invalid" >&2
+  exit 1
+}
+if [[ -z "$swift_identity" ]]; then
   echo "error: selected Xcode Swift identity is empty" >&2
   exit 1
 fi

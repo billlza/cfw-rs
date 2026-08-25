@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import pwd
 import re
 
 from .bounded_process import BoundedProcessError, run_bounded_process
-from .common import PublicationError
+from .common import PublicationError, canonical_json
 from .graph_model import load_pins
 
 if __package__ and __package__.startswith("scripts."):
@@ -36,6 +38,7 @@ MAX_RELEASE_ENVIRONMENT_DIAGNOSTIC_BYTES = 64 * 1024
 MAX_RELEASE_ENVIRONMENT_PROCESS_BYTES = (
     MAX_RELEASE_ENVIRONMENT_BYTES + MAX_RELEASE_ENVIRONMENT_DIAGNOSTIC_BYTES
 )
+MAX_SWIFT_IDENTITY_BYTES = 64 * 1024
 RELEASE_ENVIRONMENT_COMMAND = r'''
 set -euo pipefail
 repository="$1"
@@ -103,13 +106,13 @@ def _release_environment_bootstrap(
     return bootstrap
 
 
-def identity_output(
+def _identity_stdout(
     argv: list[str],
     repository: Path,
     label: str,
     environment: dict[str, str],
     maximum: int = 512,
-) -> str:
+) -> bytes:
     try:
         completed = run_bounded_process(
             argv,
@@ -134,14 +137,229 @@ def identity_output(
         )
     if completed.stderr:
         raise PublicationError(f"the {label} toolchain identity emitted diagnostics")
+    return completed.stdout
+
+
+def identity_output(
+    argv: list[str],
+    repository: Path,
+    label: str,
+    environment: dict[str, str],
+    maximum: int = 512,
+) -> str:
+    stdout = _identity_stdout(
+        argv,
+        repository,
+        label,
+        environment,
+        maximum,
+    )
     try:
-        text = completed.stdout.decode("utf-8")
+        text = stdout.decode("utf-8")
     except UnicodeDecodeError as error:
         raise PublicationError(f"the {label} toolchain identity is not UTF-8") from error
     identity = "; ".join(line.strip() for line in text.splitlines() if line.strip())
     if not identity or len(identity) > maximum:
         raise PublicationError(f"the {label} toolchain identity is empty or unbounded")
     return identity
+
+
+class _DuplicateSwiftIdentityField(ValueError):
+    pass
+
+
+class _InvalidSwiftIdentityConstant(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class SwiftToolchainIdentity:
+    version: str
+    canonical: str
+
+
+def _strict_swift_identity_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateSwiftIdentityField(key)
+        value[key] = item
+    return value
+
+
+def _reject_swift_identity_constant(value: str) -> None:
+    raise _InvalidSwiftIdentityConstant(value)
+
+
+def _parse_swift_identity(stdout: bytes) -> dict[str, object]:
+    try:
+        document = json.loads(
+            stdout.decode("utf-8"),
+            object_pairs_hook=_strict_swift_identity_object,
+            parse_constant=_reject_swift_identity_constant,
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        _DuplicateSwiftIdentityField,
+        _InvalidSwiftIdentityConstant,
+    ) as error:
+        raise PublicationError("Swift toolchain identity is not strict JSON") from error
+    if not isinstance(document, dict) or set(document) != {
+        "compilerVersion",
+        "paths",
+        "swiftCompilerTag",
+        "target",
+    }:
+        raise PublicationError("Swift toolchain identity has an unexpected field set")
+    return document
+
+
+def _validated_swift_compiler(
+    document: dict[str, object],
+) -> tuple[str, str, str]:
+    compiler_version = document["compilerVersion"]
+    compiler_tag = document["swiftCompilerTag"]
+    compiler_match = (
+        re.fullmatch(
+            r"Apple Swift version "
+            r"(?P<version>[0-9]+(?:[.][0-9]+){1,3}) "
+            r"[(](?P<swift_tag>swiftlang-[A-Za-z0-9._+-]+) "
+            r"clang-[A-Za-z0-9._+-]+[)]",
+            compiler_version,
+        )
+        if isinstance(compiler_version, str)
+        else None
+    )
+    if (
+        compiler_match is None
+        or not compiler_match.group("version").startswith("6.")
+        or len(compiler_version) > 4096
+        or not isinstance(compiler_tag, str)
+        or len(compiler_tag) > 512
+        or compiler_match.group("swift_tag") != compiler_tag
+    ):
+        raise PublicationError("Swift compiler identity fields are malformed")
+    return compiler_match.group("version"), compiler_version, compiler_tag
+
+
+def _validated_swift_target(
+    document: dict[str, object], expected_triple: str
+) -> dict[str, object]:
+    target = document["target"]
+    if not isinstance(target, dict) or set(target) != {
+        "arch",
+        "compatibilityLibraries",
+        "librariesRequireRPath",
+        "moduleTriple",
+        "openbsdBTCFIEnabled",
+        "platform",
+        "pointerWidthInBits",
+        "pointerWidthInBytes",
+        "swiftRuntimeCompatibilityVersion",
+        "triple",
+        "unversionedTriple",
+    }:
+        raise PublicationError("Swift target identity fields are malformed")
+    fixed_target_fields = {
+        "arch": "arm64",
+        "moduleTriple": "arm64-apple-macos",
+        "openbsdBTCFIEnabled": False,
+        "platform": "macosx",
+        "pointerWidthInBits": 64,
+        "pointerWidthInBytes": 8,
+        "triple": expected_triple,
+        "unversionedTriple": "arm64-apple-macosx",
+    }
+    if any(
+        target.get(name) != expected
+        or type(target.get(name)) is not type(expected)
+        for name, expected in fixed_target_fields.items()
+    ):
+        raise PublicationError("Swift target identity differs from the release target")
+    compatibility_version = target["swiftRuntimeCompatibilityVersion"]
+    compatibility_libraries = target["compatibilityLibraries"]
+    if (
+        not isinstance(compatibility_version, str)
+        or len(compatibility_version) > 64
+        or not re.fullmatch(r"[0-9]+[.][0-9]+", compatibility_version)
+        or not isinstance(compatibility_libraries, list)
+        or not all(
+            isinstance(item, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,255}", item)
+            for item in compatibility_libraries
+        )
+        or type(target["librariesRequireRPath"]) is not bool
+    ):
+        raise PublicationError("Swift target compatibility identity is malformed")
+    return target
+
+
+def _validate_swift_paths(
+    document: dict[str, object], environment: dict[str, str]
+) -> None:
+    paths = document["paths"]
+    try:
+        developer_dir = Path(environment["DEVELOPER_DIR"]).resolve(strict=True)
+    except (KeyError, OSError) as error:
+        raise PublicationError(
+            "Swift identity environment has no resolved DEVELOPER_DIR"
+        ) from error
+    if (
+        not developer_dir.is_absolute()
+        or not isinstance(paths, dict)
+        or set(paths)
+        != {
+            "runtimeLibraryImportPaths",
+            "runtimeLibraryPaths",
+            "runtimeResourcePath",
+        }
+    ):
+        raise PublicationError("Swift toolchain path identity is malformed")
+    swift_resource_root = (
+        developer_dir
+        / "Toolchains/XcodeDefault.xctoolchain/usr/lib/swift"
+    )
+    swift_platform_root = swift_resource_root / "macosx"
+    if paths != {
+        "runtimeLibraryImportPaths": [str(swift_platform_root)],
+        "runtimeLibraryPaths": [str(swift_platform_root), "/usr/lib/swift"],
+        "runtimeResourcePath": str(swift_resource_root),
+    }:
+        raise PublicationError("Swift toolchain paths escaped the selected Xcode")
+
+
+def swift_toolchain_identity(
+    repository: Path,
+    environment: dict[str, str],
+    deployment_target: str,
+) -> SwiftToolchainIdentity:
+    """Return a path-independent identity from Swift's structured target API."""
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)[.][0-9]+", deployment_target):
+        raise PublicationError("Swift deployment target is malformed")
+    expected_triple = f"arm64-apple-macosx{deployment_target}"
+    stdout = _identity_stdout(
+        [APPLE_SWIFT, "-print-target-info", "-target", expected_triple],
+        repository,
+        "Swift",
+        environment,
+        maximum=MAX_SWIFT_IDENTITY_BYTES,
+    )
+    document = _parse_swift_identity(stdout)
+    version, compiler_version, compiler_tag = _validated_swift_compiler(document)
+    target = _validated_swift_target(document, expected_triple)
+    _validate_swift_paths(document, environment)
+    stable_identity = {
+        "compilerVersion": compiler_version,
+        "swiftCompilerTag": compiler_tag,
+        "target": target,
+    }
+    return SwiftToolchainIdentity(
+        version=version,
+        canonical=canonical_json(stable_identity).decode("utf-8").removesuffix("\n"),
+    )
 
 
 def _is_real_executable(path: Path) -> bool:
@@ -448,9 +666,12 @@ __all__ = [
     "APPLE_XCODEBUILD",
     "APPLE_XCRUN",
     "IDENTITY_TIMEOUT_SECONDS",
+    "MAX_SWIFT_IDENTITY_BYTES",
     "RELEASE_ENVIRONMENT_COMMAND",
     "RELEASE_ENVIRONMENT_SCRIPT",
     "SYSTEM_PATH",
+    "SwiftToolchainIdentity",
     "identity_output",
     "release_tool_environment",
+    "swift_toolchain_identity",
 ]

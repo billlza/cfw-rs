@@ -13,6 +13,7 @@ from scripts.verify_ci_no_masking import (
     DEFAULT_PINS,
     DEFAULT_WORKFLOW,
     REQUIRED_RUN_SHELL,
+    REQUIRED_SWIFT_TARGET_INFO_PROBE,
     audit_shell_test_python_isolation,
     audit_workflow,
 )
@@ -25,6 +26,7 @@ PINS = "\n".join(
         "PYTHON_VERSION=3.14.6",
         "XCODE_VERSION=26.6",
         "XCODE_BUILD_VERSION=17F113",
+        "MACOS_DEPLOYMENT_TARGET=15.0",
     ]
 )
 
@@ -1010,6 +1012,59 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "closed Apple driver"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_swift_host_probe_cannot_restore_noisy_version_identity(self) -> None:
+        source = DEFAULT_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn(REQUIRED_SWIFT_TARGET_INFO_PROBE, source)
+        noisy = (
+            'swift_target_info="$(/usr/bin/swift --version | /usr/bin/sed -n \'1p\')"\n'
+            '          test "$swift_target_info" != ""'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path, pins_path = self._write(
+                Path(tmp),
+                source.replace(REQUIRED_SWIFT_TARGET_INFO_PROBE, noisy, 1),
+            )
+            with self.assertRaisesRegex(CiPolicyError, "structured target info"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_swift_host_probe_cannot_ignore_diagnostics(self) -> None:
+        source = DEFAULT_WORKFLOW.read_text(encoding="utf-8")
+        required = '          if [[ -s "$swift_identity_stderr" ]]; then\n'
+        self.assertIn(required, source)
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path, pins_path = self._write(
+                Path(tmp), source.replace(required, "", 1)
+            )
+            with self.assertRaisesRegex(CiPolicyError, "reject stderr"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_swift_host_probe_cannot_use_internal_frontend_mode(self) -> None:
+        source = DEFAULT_WORKFLOW.read_text(encoding="utf-8")
+        required = "/usr/bin/swift -print-target-info"
+        self.assertIn(required, source)
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path, pins_path = self._write(
+                Path(tmp), source.replace(required, "/usr/bin/swift -frontend -version", 1)
+            )
+            with self.assertRaisesRegex(CiPolicyError, "closed Apple driver"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_swift_host_probe_cannot_accept_empty_identity(self) -> None:
+        source = DEFAULT_WORKFLOW.read_text(encoding="utf-8")
+        required = (
+            '          if [[ -z "$swift_target_info" ]]; then\n'
+            '            echo "error: Swift target identity is empty" >&2\n'
+            "            exit 1\n"
+            "          fi\n"
+        )
+        self.assertIn(required, source)
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path, pins_path = self._write(
+                Path(tmp), source.replace(required, "", 1)
+            )
+            with self.assertRaisesRegex(CiPolicyError, "pinned target"):
                 audit_workflow(workflow_path, pins_path)
 
     def test_python_site_initialization_is_rejected(self) -> None:

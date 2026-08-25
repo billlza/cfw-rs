@@ -156,7 +156,29 @@ jobs:
           source scripts/dependency_pins.env
           ./scripts/assert_apple_silicon.sh
           test "$(/usr/bin/xcodebuild -version)" = $'Xcode 26.6\nBuild version 17F113'
-          test "$(/usr/bin/swift --version | sed -n '1p')" != ""
+          swift_identity_stderr="$(/usr/bin/mktemp "$RUNNER_TEMP/swift-target-info.XXXXXX")"
+          cleanup_swift_identity_stderr() {
+            /bin/rm -f -- "$swift_identity_stderr"
+          }
+          trap cleanup_swift_identity_stderr EXIT
+          if ! swift_target_info="$(
+              /usr/bin/swift -print-target-info \
+                -target "arm64-apple-macosx$MACOS_DEPLOYMENT_TARGET" \
+                2>"$swift_identity_stderr"
+            )"; then
+            /bin/cat "$swift_identity_stderr" >&2
+            exit 1
+          fi
+          if [[ -s "$swift_identity_stderr" ]]; then
+            /bin/cat "$swift_identity_stderr" >&2
+            exit 1
+          fi
+          if [[ -z "$swift_target_info" ]]; then
+            echo "error: Swift target identity is empty" >&2
+            exit 1
+          fi
+          cleanup_swift_identity_stderr
+          trap - EXIT
           validation_python='${{ steps.validation-python.outputs.python-path }}'
           test "$("$validation_python" --version)" = "Python $PYTHON_VERSION"
           policy_root="$HOME/.cfm-release-tooling/policy-$CARGO_AUDIT_VERSION-$CARGO_DENY_VERSION/bin"

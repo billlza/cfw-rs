@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
-import re
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
@@ -10,6 +10,7 @@ from urllib.parse import quote
 from .cargo_collector import CollectorResult
 from .common import PublicationError
 from .graph_model import ComponentSeed, RELEASE_VERSION, run, run_json, seed
+from .release_environment import swift_toolchain_identity
 from .release_toolchains import verified_release_toolchain_trees
 if __package__ and __package__.startswith("scripts."):
     from scripts.release_rust_toolchain import (
@@ -21,6 +22,13 @@ else:
         ReleaseRustToolchainError,
         verify_pinned_toolchain,
     )
+
+
+@dataclass(frozen=True)
+class _CheckedToolchainObservation:
+    versions: tuple[tuple[str, str], ...]
+    toolchain_root: Path
+    swift_identity: str
 
 
 def _normalize_native_graph(value: Any, native_root: Path, path: str = "$") -> Any:
@@ -71,11 +79,11 @@ def _apple_tool_identity(
     )
     if xcode != expected_xcode:
         raise PublicationError("Xcode toolchain does not match the release pin")
-    swift = run(
-        ["/usr/bin/swift", "--version"], repository, release_environment
-    ).decode("utf-8").strip()
-    if not swift or len(swift) > 4096:
-        raise PublicationError("Swift toolchain identity is empty or unbounded")
+    swift = swift_toolchain_identity(
+        repository,
+        release_environment,
+        pins["MACOS_DEPLOYMENT_TARGET"],
+    ).canonical
     try:
         developer_dir = Path(release_environment["DEVELOPER_DIR"]).resolve(strict=True)
         swift_path = Path(
@@ -178,7 +186,7 @@ def _checked_versions(
     repository: Path,
     pins: dict[str, str],
     release_environment: dict[str, str],
-) -> tuple[dict[str, str], Path]:
+) -> _CheckedToolchainObservation:
     toolchain_root, _tree_digests = verified_release_toolchain_trees(
         repository, pins, release_environment
     )
@@ -208,13 +216,16 @@ def _checked_versions(
         raise PublicationError("Rust release toolchain surface is invalid") from error
     if not rustc_bin.exists() or not os.access(rustc_bin, os.X_OK):
         raise PublicationError("trusted Rust compiler is unavailable")
+    swift_identity = swift_toolchain_identity(
+        repository,
+        release_environment,
+        pins["MACOS_DEPLOYMENT_TARGET"],
+    )
     actual = {
         "rust": run([str(rustc_bin), "--version"], repository, release_environment)
         .decode()
         .strip(),
-        "swift": run(["/usr/bin/swift", "--version"], repository, release_environment)
-        .decode()
-        .strip(),
+        "swift": swift_identity.canonical,
         "xcode": run(
             ["/usr/bin/xcodebuild", "-version"], repository, release_environment
         )
@@ -250,9 +261,6 @@ def _checked_versions(
     for name in ("xcode", "node", "go", "xcodegen", "tauri-cli"):
         if actual[name] != expected[name]:
             raise PublicationError(f"{name} toolchain does not match the release pin")
-    swift_match = re.search(r"Swift version ([0-9][^ )]*)", actual["swift"])
-    if swift_match is None or not swift_match.group(1).startswith("6."):
-        raise PublicationError("Swift toolchain is not Swift 6")
     gomobile_identity = run(
         [str(go_bin), "version", "-m", str(gomobile_bin)],
         repository,
@@ -269,7 +277,7 @@ def _checked_versions(
         "node": pins["NODE_VERSION"],
         "go": pins["GO_VERSION"],
         "gomobile": pins["GOMOBILE_VERSION"],
-        "swift": swift_match.group(1),
+        "swift": swift_identity.version,
         "xcode": pins["XCODE_VERSION"],
         "xcodegen": pins["XCODEGEN_VERSION"],
         "tauri-cli": pins["TAURI_CLI_VERSION"],
@@ -283,7 +291,21 @@ def _checked_versions(
         raise PublicationError("Rust release toolchain surface cannot be rechecked") from error
     if rust_toolchain_end.surface != rust_toolchain_start.surface:
         raise PublicationError("Rust release toolchain changed during collection")
-    return versions, toolchain_root
+    return _CheckedToolchainObservation(
+        versions=tuple(sorted(versions.items())),
+        toolchain_root=toolchain_root,
+        swift_identity=swift_identity.canonical,
+    )
+
+
+def _require_unchanged_toolchains(
+    initial: _CheckedToolchainObservation,
+    ending: _CheckedToolchainObservation,
+) -> None:
+    if ending != initial:
+        raise PublicationError(
+            "release toolchain changed while collecting publication metadata"
+        )
 
 
 def collect_toolchains(
@@ -291,9 +313,11 @@ def collect_toolchains(
     pins: dict[str, str],
     release_environment: dict[str, str],
 ) -> tuple[dict[str, ComponentSeed], set[tuple[str, str, str]]]:
-    versions, toolchain_root = _checked_versions(
+    toolchain_start = _checked_versions(
         repository, pins, release_environment
     )
+    versions = dict(toolchain_start.versions)
+    toolchain_root = toolchain_start.toolchain_root
     try:
         rustc_bin = Path(release_environment["CFW_RELEASE_RUSTC_EXECUTABLE"])
     except KeyError as error:
@@ -412,11 +436,8 @@ def collect_toolchains(
             provenance_paths=provenance_paths[name],
         )
         components[candidate.identifier] = candidate
-    ending_versions, ending_toolchain_root = _checked_versions(
+    toolchain_end = _checked_versions(
         repository, pins, release_environment
     )
-    if ending_versions != versions or ending_toolchain_root != toolchain_root:
-        raise PublicationError(
-            "release toolchain changed while collecting publication metadata"
-        )
+    _require_unchanged_toolchains(toolchain_start, toolchain_end)
     return components, set()

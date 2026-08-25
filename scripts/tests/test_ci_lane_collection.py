@@ -429,6 +429,7 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
         rustc_bin = Path(environment["CFW_RELEASE_RUSTC_EXECUTABLE"])
         cargo_bin = Path(environment["CFW_RELEASE_CARGO_EXECUTABLE"])
         calls: list[list[str]] = []
+        swift_identity = Mock(canonical="Apple Swift fixture")
 
         def identity(argv, _repository, _label, _environment, maximum=512):
             del maximum
@@ -458,8 +459,6 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
                     f"Xcode {self.pins['XCODE_VERSION']}; "
                     f"Build version {self.pins['XCODE_BUILD_VERSION']}"
                 )
-            if argv == [ci_lanes.APPLE_SWIFT, "--version"]:
-                return "Apple Swift fixture"
             if argv[0].endswith("/node"):
                 return f"v{self.pins['NODE_VERSION']}"
             if argv[0].endswith("/npm"):
@@ -472,6 +471,10 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
             with patch.object(
                 ci_lanes, "identity_output", side_effect=identity
             ), patch.object(
+                ci_lanes,
+                "swift_toolchain_identity",
+                return_value=swift_identity,
+            ) as resolve_swift, patch.object(
                 ci_lanes,
                 "_go_module_identity",
                 return_value="fixture module",
@@ -491,7 +494,12 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
         self.assertIn(["/bin/bash", "--version"], calls)
         self.assertIn(["/bin/zsh", "--version"], calls)
         self.assertIn([ci_lanes.APPLE_XCODEBUILD, "-version"], calls)
-        self.assertIn([ci_lanes.APPLE_SWIFT, "--version"], calls)
+        resolve_swift.assert_called_once_with(
+            self.repository,
+            environment,
+            self.pins["MACOS_DEPLOYMENT_TARGET"],
+        )
+        self.assertEqual(resolved["swift"], swift_identity.canonical)
         for name in (
             "rustc",
             "cargo",

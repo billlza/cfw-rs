@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -8,11 +9,47 @@ import unittest
 from unittest import mock
 
 from scripts.publication import release_environment
+from scripts.publication.bounded_process import BoundedProcessError
 from scripts.publication.graph_model import load_pins
 from scripts.release_python_runtime import require_closed_release_runtime
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+
+
+def _swift_target_info(
+    developer_dir: Path,
+    deployment_target: str = "15.0",
+) -> dict[str, object]:
+    resource_root = (
+        developer_dir / "Toolchains/XcodeDefault.xctoolchain/usr/lib/swift"
+    )
+    platform_root = resource_root / "macosx"
+    return {
+        "compilerVersion": (
+            "Apple Swift version 6.3.3 "
+            "(swiftlang-6.3.3.1.3 clang-2100.1.1.101)"
+        ),
+        "swiftCompilerTag": "swiftlang-6.3.3.1.3",
+        "target": {
+            "triple": f"arm64-apple-macosx{deployment_target}",
+            "unversionedTriple": "arm64-apple-macosx",
+            "moduleTriple": "arm64-apple-macos",
+            "platform": "macosx",
+            "arch": "arm64",
+            "pointerWidthInBits": 64,
+            "pointerWidthInBytes": 8,
+            "swiftRuntimeCompatibilityVersion": "6.0",
+            "compatibilityLibraries": [],
+            "openbsdBTCFIEnabled": False,
+            "librariesRequireRPath": True,
+        },
+        "paths": {
+            "runtimeLibraryPaths": [str(platform_root), "/usr/lib/swift"],
+            "runtimeLibraryImportPaths": [str(platform_root)],
+            "runtimeResourcePath": str(resource_root),
+        },
+    }
 
 
 class ReleaseEnvironmentBootstrapTests(unittest.TestCase):
@@ -157,6 +194,246 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
                 "fixture",
                 {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
             )
+
+    def test_real_swift_identity_is_clean_repeatable_and_structured(self) -> None:
+        first = release_environment.swift_toolchain_identity(
+            REPOSITORY,
+            self.baseline,
+            self.pins["MACOS_DEPLOYMENT_TARGET"],
+        )
+        second = release_environment.swift_toolchain_identity(
+            REPOSITORY,
+            self.baseline,
+            self.pins["MACOS_DEPLOYMENT_TARGET"],
+        )
+
+        self.assertEqual(first, second)
+        self.assertRegex(first.version, r"^6[.][0-9]+[.][0-9]+$")
+        document = json.loads(first.canonical)
+        self.assertEqual(
+            document["target"]["triple"],
+            f"arm64-apple-macosx{self.pins['MACOS_DEPLOYMENT_TARGET']}",
+        )
+        self.assertNotIn(self.baseline["DEVELOPER_DIR"], first.canonical)
+
+    def test_real_swift_identity_ignores_ambient_driver_selection(self) -> None:
+        source = dict(os.environ)
+        source.update(
+            {
+                "HOME": "/tmp/untrusted-swift-home",
+                "PATH": "/tmp/untrusted-swift-bin:/usr/bin:/bin",
+                "SDKROOT": "/tmp/untrusted-swift-sdk",
+                "SWIFT_EXEC": "/tmp/untrusted-swift",
+                "SWIFT_DRIVER_SWIFT_FRONTEND_EXEC": "/tmp/untrusted-frontend",
+                "TOOLCHAINS": "untrusted",
+            }
+        )
+        isolated = release_environment.release_tool_environment(
+            REPOSITORY,
+            self.pins,
+            source,
+            role=self.role,
+        )
+
+        observed = release_environment.swift_toolchain_identity(
+            REPOSITORY,
+            isolated,
+            self.pins["MACOS_DEPLOYMENT_TARGET"],
+        )
+        expected = release_environment.swift_toolchain_identity(
+            REPOSITORY,
+            self.baseline,
+            self.pins["MACOS_DEPLOYMENT_TARGET"],
+        )
+        self.assertEqual(observed, expected)
+        self.assertNotEqual(isolated["HOME"], source["HOME"])
+        self.assertNotEqual(isolated["PATH"], source["PATH"])
+        for name in ("SDKROOT", "SWIFT_EXEC", "TOOLCHAINS"):
+            self.assertNotIn(name, isolated)
+
+    def test_swift_identity_normalizes_only_the_selected_xcode_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            developers = (
+                root / "Xcode-A.app/Contents/Developer",
+                root / "Xcode-B.app/Contents/Developer",
+            )
+            for developer in developers:
+                developer.mkdir(parents=True)
+            calls: list[list[str]] = []
+
+            def run_target_info(argv, **kwargs):
+                calls.append(list(argv))
+                developer = Path(
+                    kwargs["environment"]["DEVELOPER_DIR"]
+                ).resolve(strict=True)
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    json.dumps(_swift_target_info(developer)).encode("utf-8"),
+                    b"",
+                )
+
+            identities = []
+            with mock.patch.object(
+                release_environment,
+                "run_bounded_process",
+                side_effect=run_target_info,
+            ):
+                for developer in developers:
+                    identities.append(
+                        release_environment.swift_toolchain_identity(
+                            REPOSITORY,
+                            {"DEVELOPER_DIR": str(developer)},
+                            "15.0",
+                        )
+                    )
+
+        self.assertEqual(identities[0], identities[1])
+        self.assertEqual(
+            calls,
+            [
+                [
+                    "/usr/bin/swift",
+                    "-print-target-info",
+                    "-target",
+                    "arm64-apple-macosx15.0",
+                ]
+            ]
+            * 2,
+        )
+
+    def test_swift_identity_parser_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            developer = Path(temporary) / "Xcode.app/Contents/Developer"
+            developer.mkdir(parents=True)
+            base = _swift_target_info(developer)
+            cases: dict[str, tuple[bytes, str]] = {}
+
+            wrong_arch = json.loads(json.dumps(base))
+            wrong_arch["target"]["arch"] = "x86_64"
+            cases["wrong architecture"] = (
+                json.dumps(wrong_arch).encode(),
+                "differs from the release target",
+            )
+            extra_field = json.loads(json.dumps(base))
+            extra_field["target"]["unexpected"] = True
+            cases["unexpected field"] = (
+                json.dumps(extra_field).encode(),
+                "fields are malformed",
+            )
+            escaped_path = json.loads(json.dumps(base))
+            escaped_path["paths"]["runtimeResourcePath"] = "/tmp/other/swift"
+            cases["escaped path"] = (
+                json.dumps(escaped_path).encode(),
+                "escaped the selected Xcode",
+            )
+            mismatched_tag = json.loads(json.dumps(base))
+            mismatched_tag["swiftCompilerTag"] = "swiftlang-6.3.3.1.4"
+            cases["mismatched compiler tag"] = (
+                json.dumps(mismatched_tag).encode(),
+                "fields are malformed",
+            )
+            valid = json.dumps(base).encode()
+            cases["duplicate field"] = (
+                valid.replace(
+                    b'{"compilerVersion":',
+                    b'{"compilerVersion":"duplicate","compilerVersion":',
+                    1,
+                ),
+                "not strict JSON",
+            )
+            cases["non-finite number"] = (
+                valid.replace(b'"pointerWidthInBits": 64', b'"pointerWidthInBits": NaN'),
+                "not strict JSON",
+            )
+            cases["non UTF-8"] = (b"\xff", "not strict JSON")
+            cases["malformed JSON"] = (b"{", "not strict JSON")
+
+            for label, (payload, message) in cases.items():
+                completed = subprocess.CompletedProcess(
+                    ["/usr/bin/swift"], 0, payload, b""
+                )
+                with self.subTest(label=label), mock.patch.object(
+                    release_environment,
+                    "run_bounded_process",
+                    return_value=completed,
+                ), self.assertRaisesRegex(
+                    release_environment.PublicationError,
+                    message,
+                ):
+                    release_environment.swift_toolchain_identity(
+                        REPOSITORY,
+                        {"DEVELOPER_DIR": str(developer)},
+                        "15.0",
+                    )
+
+    def test_swift_identity_preserves_process_failure_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            developer = Path(temporary) / "Xcode.app/Contents/Developer"
+            developer.mkdir(parents=True)
+            payload = json.dumps(_swift_target_info(developer)).encode()
+            completions = (
+                (
+                    subprocess.CompletedProcess(
+                        ["/usr/bin/swift"], 0, payload, b"driver warning"
+                    ),
+                    "emitted diagnostics",
+                ),
+                (
+                    subprocess.CompletedProcess(["/usr/bin/swift"], 42, b"", b"failed"),
+                    "exit 42",
+                ),
+            )
+            for completed, message in completions:
+                with self.subTest(message=message), mock.patch.object(
+                    release_environment,
+                    "run_bounded_process",
+                    return_value=completed,
+                ), self.assertRaisesRegex(
+                    release_environment.PublicationError,
+                    message,
+                ):
+                    release_environment.swift_toolchain_identity(
+                        REPOSITORY,
+                        {"DEVELOPER_DIR": str(developer)},
+                        "15.0",
+                    )
+
+            boundary = BoundedProcessError(
+                "output-limit",
+                "fixture output limit",
+            )
+            with mock.patch.object(
+                release_environment,
+                "run_bounded_process",
+                side_effect=boundary,
+            ), self.assertRaisesRegex(
+                release_environment.PublicationError,
+                "output exceeded its fixed bound",
+            ):
+                release_environment.swift_toolchain_identity(
+                    REPOSITORY,
+                    {"DEVELOPER_DIR": str(developer)},
+                    "15.0",
+                )
+
+    def test_swift_identity_rejects_malformed_deployment_target(self) -> None:
+        for deployment_target in ("", "15", "015.0", "15.0 -module-name injected"):
+            with self.subTest(deployment_target=deployment_target), mock.patch.object(
+                release_environment,
+                "run_bounded_process",
+            ) as runner:
+                with self.assertRaisesRegex(
+                    release_environment.PublicationError,
+                    "deployment target is malformed",
+                ):
+                    release_environment.swift_toolchain_identity(
+                        REPOSITORY,
+                        self.baseline,
+                        deployment_target,
+                    )
+                runner.assert_not_called()
 
     def test_operational_values_round_trip_spaces_and_multiple_equals(self) -> None:
         environment = dict(self.baseline)

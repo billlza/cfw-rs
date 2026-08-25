@@ -64,13 +64,39 @@ REQUIRED_HEAD_ASSERTION = (
     f'/bin/test "$(/usr/bin/git rev-parse HEAD)" = "{REQUIRED_SOURCE_REF}"'
 )
 REQUIRED_TAURI_TMPDIR = "${{ runner.temp }}"
+REQUIRED_SWIFT_TARGET_INFO_PROBE = (
+    'swift_identity_stderr="$(/usr/bin/mktemp '
+    '"$RUNNER_TEMP/swift-target-info.XXXXXX")"\n'
+    "          cleanup_swift_identity_stderr() {\n"
+    '            /bin/rm -f -- "$swift_identity_stderr"\n'
+    "          }\n"
+    "          trap cleanup_swift_identity_stderr EXIT\n"
+    '          if ! swift_target_info="$(\n'
+    '              /usr/bin/swift -print-target-info \\\n'
+    '                -target "arm64-apple-macosx$MACOS_DEPLOYMENT_TARGET" \\\n'
+    '                2>"$swift_identity_stderr"\n'
+    '            )"; then\n'
+    '            /bin/cat "$swift_identity_stderr" >&2\n'
+    "            exit 1\n"
+    "          fi\n"
+    '          if [[ -s "$swift_identity_stderr" ]]; then\n'
+    '            /bin/cat "$swift_identity_stderr" >&2\n'
+    "            exit 1\n"
+    "          fi\n"
+    '          if [[ -z "$swift_target_info" ]]; then\n'
+    '            echo "error: Swift target identity is empty" >&2\n'
+    "            exit 1\n"
+    "          fi\n"
+    "          cleanup_swift_identity_stderr\n"
+    "          trap - EXIT"
+)
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
     "1450ed92f69d442847626e802823965e2c3ea66892f14e7f50824048ef7101ec"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "4ee1ea0ef79b52c164750f4069b681c385c6cfc89dde57e1787c1c38b475eab4"
+    "06443d9a15ec2aa9f2a7650610a1bb5d9f6114f780d384402e0c5703a0136a79"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -134,6 +160,7 @@ def _read_pins(pins_path: Path) -> dict[str, str]:
         "PYTHON_VERSION",
         "XCODE_VERSION",
         "XCODE_BUILD_VERSION",
+        "MACOS_DEPLOYMENT_TARGET",
     ):
         if required not in pins:
             raise CiPolicyError(f"pinned inputs file does not define {required}")
@@ -639,15 +666,32 @@ def _check_apple_driver_boundary(text: str) -> list[str]:
     for gate in required:
         if not _uses_release_gate(text, gate):
             findings.append(f"workflow lacks closed Apple driver gate {gate!r}")
+    probe_count = text.count("/usr/bin/swift -print-target-info")
+    if probe_count > 1:
+        findings.append("workflow contains multiple Swift target identity probes")
+    if probe_count and text.count(REQUIRED_SWIFT_TARGET_INFO_PROBE) != 1:
+        findings.append(
+            "Swift host identity probe must use the pinned target and reject stderr"
+        )
+    if re.search(r"(?:/usr/bin/)?swift\s+--?version\b", text):
+        findings.append(
+            "Swift host identity must use structured target info instead of --version"
+        )
     direct_driver = re.compile(r"(?:/usr/bin/)?(swift|xcodebuild)\s")
     for number, line in enumerate(text.splitlines(), start=1):
         match = direct_driver.search(line)
-        if (
-            match
-            and "run_release_ci_gate.sh" not in line
-            and "-version" not in line
-            and "--version" not in line
-        ):
+        if not match or "run_release_ci_gate.sh" in line:
+            continue
+        is_reviewed_swift_probe = (
+            match.group(1) == "swift"
+            and "/usr/bin/swift -print-target-info" in line
+            and probe_count == 1
+            and text.count(REQUIRED_SWIFT_TARGET_INFO_PROBE) == 1
+        )
+        is_xcode_version_probe = (
+            match.group(1) == "xcodebuild" and "-version" in line
+        )
+        if not is_reviewed_swift_probe and not is_xcode_version_probe:
             findings.append(
                 f"line {number}: direct {match.group(1)} command bypasses the closed Apple driver gate"
             )

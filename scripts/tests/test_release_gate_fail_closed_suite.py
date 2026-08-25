@@ -542,6 +542,7 @@ _PINS = "\n".join(
         "NODE_VERSION=24.18.0",
         "XCODE_VERSION=26.6",
         "XCODE_BUILD_VERSION=17F113",
+        "MACOS_DEPLOYMENT_TARGET=15.0",
     ]
 )
 

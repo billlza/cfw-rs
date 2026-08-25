@@ -1,7 +1,8 @@
 #!/bin/bash -p
-# Build the four native release products from the tracked Xcode project.
-# Unsigned mode is for CI validation only. Developer ID mode requires the
-# product's exact identity and target-specific provisioning profiles.
+# Build the four unsigned native products from the tracked Xcode project.
+# CI validation and the GA pre-sign transaction use distinct immutable roots;
+# Developer ID signing is deliberately forbidden until candidate-freeze has
+# consumed the complete application tree and signing plan.
 set -euo pipefail
 unset CDPATH
 
@@ -23,8 +24,6 @@ source "$repo_root/scripts/release_toolchain_contract.sh"
 cfw_select_release_apple_toolchain
 
 readonly expected_team_id="YKUPL7Z869"
-readonly authority_signing_identifier="com.bill.clashformac.global-authority"
-readonly authority_designated_requirement='designated => anchor apple generic and identifier "com.bill.clashformac.global-authority" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "YKUPL7Z869"'
 readonly project="$repo_root/native/macos/CFWNative.xcodeproj"
 readonly configuration="Release"
 readonly toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
@@ -40,12 +39,12 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-usage: scripts/build_native_products.sh --unsigned|--developer-id
+usage: scripts/build_native_products.sh --unsigned|--pre-sign
 
---unsigned      Build arm64 Release products with code signing disabled.
---developer-id  Build signed products. Requires MACOS_SIGN_IDENTITY,
-                PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER, and
-                PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER.
+--unsigned  Build the fixed CI-validation products with code signing disabled.
+--pre-sign Build the fixed GA products with code signing disabled. The complete
+           application and signing plan must be frozen before these bytes are
+           copied into the separate Developer ID signing transaction.
 EOF
   exit 2
 }
@@ -85,8 +84,8 @@ case "$1" in
   --unsigned)
     signing_mode="unsigned-validation"
     ;;
-  --developer-id)
-    signing_mode="developer-id"
+  --pre-sign)
+    signing_mode="pre-sign"
     ;;
   *)
     usage
@@ -191,34 +190,10 @@ common_arguments=(
   SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
 )
 
-if [[ "$signing_mode" == "unsigned-validation" ]]; then
-  signing_arguments=(
-    CODE_SIGNING_ALLOWED=NO
-    CODE_SIGNING_REQUIRED=NO
-  )
-else
-  : "${MACOS_SIGN_IDENTITY:?set the exact Developer ID Application identity}"
-  : "${PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER:?set the ProxyAgent Developer ID profile specifier}"
-  : "${PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER:?set the Packet Tunnel Developer ID profile specifier}"
-  profile_uuid_pattern='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
-  [[ "$PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER" =~ $profile_uuid_pattern ]] ||
-    die "ProxyAgent provisioning profile specifier must be an exact profile UUID"
-  [[ "$PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER" =~ $profile_uuid_pattern ]] ||
-    die "Packet Tunnel provisioning profile specifier must be an exact profile UUID"
-  [[ "$MACOS_SIGN_IDENTITY" == "Developer ID Application:"*"($expected_team_id)" ]] ||
-    die "signing identity must be a Developer ID Application identity for $expected_team_id"
-  /usr/bin/security find-identity -v -p codesigning | grep -Fq "\"$MACOS_SIGN_IDENTITY\"" ||
-    die "the requested Developer ID identity is not available in the keychain"
-  signing_arguments=(
-    CODE_SIGNING_ALLOWED=YES
-    CODE_SIGNING_REQUIRED=YES
-    CODE_SIGN_STYLE=Manual
-    DEVELOPMENT_TEAM="$expected_team_id"
-    CODE_SIGN_IDENTITY="$MACOS_SIGN_IDENTITY"
-    ENABLE_HARDENED_RUNTIME=YES
-    'OTHER_CODE_SIGN_FLAGS=--timestamp'
-  )
-fi
+signing_arguments=(
+  CODE_SIGNING_ALLOWED=NO
+  CODE_SIGNING_REQUIRED=NO
+)
 
 build_scheme() {
   local scheme="$1"
@@ -232,15 +207,8 @@ build_scheme() {
 
 build_scheme CFWNativeBridge
 build_scheme CFWGlobalAuthorityDaemon
-if [[ "$signing_mode" == "developer-id" ]]; then
-  build_scheme CFWProxyAgent \
-    CFW_PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER="$PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER"
-  build_scheme CFWPacketTunnelExtension \
-    CFW_PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER="$PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER"
-else
-  build_scheme CFWProxyAgent
-  build_scheme CFWPacketTunnelExtension
-fi
+build_scheme CFWProxyAgent
+build_scheme CFWPacketTunnelExtension
 
 built_root="$derived_data/Build/Products/$configuration"
 [[ -d "$built_root" && ! -L "$built_root" ]] || die "Xcode product directory is unavailable"
@@ -286,38 +254,6 @@ for binary in "$authority_binary" "$bridge_binary" "$agent_binary" "$tunnel_bina
   verify_macho "$binary"
 done
 
-if [[ "$signing_mode" == "developer-id" ]]; then
-  # Xcode's generic tool signature deliberately accepts both Apple Development
-  # and Developer ID certificates. The privileged launch daemon has a stricter
-  # release identity, so replace only this standalone Mach-O signature with the
-  # exact reviewed Developer ID designated requirement.
-  /usr/bin/codesign \
-    --force \
-    --options runtime \
-    --timestamp \
-    --identifier "$authority_signing_identifier" \
-    -r="$authority_designated_requirement" \
-    --entitlements "$repo_root/native/macos/Config/GlobalAuthority.entitlements" \
-    --sign "$MACOS_SIGN_IDENTITY" \
-    "$authority_binary"
-
-  authority_requirement_text="$staging/.authority-requirement.txt"
-  authority_requirement_expected="$staging/.authority-requirement.expected"
-  authority_requirement_actual="$staging/.authority-requirement.actual"
-  /usr/bin/codesign -d -r "$authority_requirement_text" "$authority_binary" \
-    >/dev/null 2>&1 || die "cannot extract the Global Authority designated requirement"
-  /usr/bin/csreq -r="$authority_designated_requirement" -b "$authority_requirement_expected" ||
-    die "cannot compile the expected Global Authority designated requirement"
-  /usr/bin/csreq -r "$authority_requirement_text" -b "$authority_requirement_actual" ||
-    die "cannot compile the signed Global Authority designated requirement"
-  cmp -s "$authority_requirement_expected" "$authority_requirement_actual" ||
-    die "Global Authority designated requirement mismatch"
-  /bin/rm \
-    "$authority_requirement_text" \
-    "$authority_requirement_expected" \
-    "$authority_requirement_actual"
-fi
-
 for info_plist in \
   "$staging/CFWNativeBridge.framework/Versions/A/Resources/Info.plist" \
   "$staging/CFWProxyAgent.app/Contents/Info.plist" \
@@ -327,24 +263,6 @@ for info_plist in \
   [[ "$built_version" == "$CFW_BUILD_NUMBER" ]] ||
     die "native product build number mismatch: $info_plist ($built_version)"
 done
-
-if [[ "$signing_mode" == "developer-id" ]]; then
-  for product in "${products[@]}"; do
-    /usr/bin/codesign --verify --strict --verbose=4 "$staging/$product"
-    signature="$(/usr/bin/codesign -d --verbose=4 "$staging/$product" 2>&1)"
-    [[ "$signature" == *"TeamIdentifier=$expected_team_id"* ]] ||
-      die "native product Team ID mismatch: $product"
-    [[ "$signature" == *"Authority=Developer ID Application:"*"($expected_team_id)"* ]] ||
-      die "native product does not have the expected Developer ID identity: $product"
-    [[ "$signature" == *"Timestamp="* && "$signature" != *"Timestamp=none"* ]] ||
-      die "native product has no secure timestamp: $product"
-    [[ "$signature" != *"Signature=adhoc"* ]] || die "ad-hoc native product is forbidden: $product"
-    if [[ "$product" == "CFWGlobalAuthority" ]]; then
-      [[ "$signature" == *"Identifier=$authority_signing_identifier"* ]] ||
-        die "Global Authority signing identifier mismatch"
-    fi
-  done
-fi
 
 libbox_manifest_sha256="$(
   shasum -a 256 "$repo_root/target/native-dependencies/Libbox.xcframework.manifest.json" |

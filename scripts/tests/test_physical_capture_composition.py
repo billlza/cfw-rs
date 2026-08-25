@@ -297,11 +297,11 @@ def _two_run_records() -> list[dict[str, object]]:
 
 
 def _prepare_repository(root: Path) -> None:
-    final_candidate = (
-        root / "target/candidates/0.4.0/release/final-candidate"
+    assurance_candidate = (
+        root / "target/candidates/0.4.0/assurance/physical-candidate"
     )
-    final_candidate.mkdir(parents=True, mode=0o700)
-    os.chmod(final_candidate, 0o700)
+    assurance_candidate.mkdir(parents=True, mode=0o700)
+    os.chmod(assurance_candidate, 0o700)
 
 
 class ReceiptBindingCompositionTests(unittest.TestCase):

@@ -107,7 +107,7 @@ from scripts.physical_capture.session import (
     PhysicalCaptureSessionError,
     SessionEventView,
 )
-from scripts.release_build_identity import ACTIVE_RELEASE_GENERATION
+from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY
 
 
 FAILURE_DOCUMENT: Final = "cfw-physical-performance-collector-failure-v2"
@@ -132,7 +132,7 @@ ROOT_PRODUCER_CHECKPOINT_SHA256: Final = "0" * 64
 REPOSITORY: Final = Path(__file__).resolve().parents[2]
 FINAL_CANDIDATE: Final = (
     REPOSITORY
-    / f"target/candidates/{ACTIVE_RELEASE_GENERATION.product_version}/release/final-candidate/"
+    / f"target/candidates/{ACTIVE_RELEASE_IDENTITY.product_version}/assurance/physical-candidate/"
     "physical-collector-candidate.json"
 )
 FINAL_CANDIDATE_MANIFEST: Final = FINAL_CANDIDATE.with_name(
@@ -140,11 +140,11 @@ FINAL_CANDIDATE_MANIFEST: Final = FINAL_CANDIDATE.with_name(
 )
 LANES: Final = {
     "macos15": {
-        "run_id": f"run-{ACTIVE_RELEASE_GENERATION.final_build}-macos15",
+        "run_id": f"run-{ACTIVE_RELEASE_IDENTITY.ga_build}-macos15",
         "session_prefix": "physical-capture/v040/macos15",
     },
     "current-macos": {
-        "run_id": f"run-{ACTIVE_RELEASE_GENERATION.final_build}-current-macos",
+        "run_id": f"run-{ACTIVE_RELEASE_IDENTITY.ga_build}-current-macos",
         "session_prefix": "physical-capture/v040/current-macos",
     },
 }

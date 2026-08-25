@@ -6,9 +6,21 @@ from pathlib import Path
 
 from .common import PublicationError
 if __package__.startswith("scripts."):
-    from scripts.release_build_identity import canonical_build_version
+    from scripts.release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        canonical_build_version,
+        ga_root,
+        ga_signed_native_products_root,
+        ga_signed_root,
+    )
 else:
-    from release_build_identity import canonical_build_version
+    from release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        canonical_build_version,
+        ga_root,
+        ga_signed_native_products_root,
+        ga_signed_root,
+    )
 
 
 PRODUCT_NAME = "Clash for Mac"
@@ -16,36 +28,40 @@ RELEASE_VERSION = "0.4.0"
 
 
 def signed_app(repository: Path) -> Path:
-    return repository / "target/candidates/0.4.0/signed/Clash for Mac.app"
+    return ga_signed_root(repository) / "Clash for Mac.app"
 
 
 def native_products_root(repository: Path, build_number: str) -> Path:
     build = canonical_build_version(build_number, "publication build number")
-    return repository / f"target/candidates/0.4.0/release-build/{build}/native-products"
+    if build != ACTIVE_RELEASE_IDENTITY.ga_build:
+        raise PublicationError(
+            "publication native products require the single active GA build"
+        )
+    return ga_signed_native_products_root(repository)
 
 
-def validated_candidate_review(repository: Path) -> Path:
-    return repository / "target/candidates/0.4.0/review/validated-candidate.json"
+def _stage_inputs(repository: Path) -> Path:
+    return ga_root(repository) / "stage-inputs"
 
 
 def prepared_root(repository: Path) -> Path:
-    return repository / "target/candidates/0.4.0/release/publication-prepared"
+    return _stage_inputs(repository) / "publication-prepared"
 
 
 def draft_path(repository: Path) -> Path:
-    return repository / "target/candidates/0.4.0/release/machine-closure.draft.json"
+    return _stage_inputs(repository) / "machine-closure.draft.json"
 
 
 def evidence_root(repository: Path) -> Path:
-    return repository / "target/candidates/0.4.0/release/publication"
+    return _stage_inputs(repository) / "publication"
 
 
 def review_template(repository: Path) -> Path:
-    return repository / "target/candidates/0.4.0/review/component-review.json"
+    return _stage_inputs(repository) / "component-review.json"
 
 
 def blocker_report(repository: Path) -> Path:
-    return repository / "target/candidates/0.4.0/review/publication-blockers.json"
+    return _stage_inputs(repository) / "publication-blockers.json"
 
 
 def require_fixed_path(actual: Path, expected: Path, label: str) -> None:

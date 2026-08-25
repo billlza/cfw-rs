@@ -27,26 +27,6 @@ import tempfile
 import tomllib
 from typing import Any, Callable
 import uuid
-import sys
-
-if __name__ == "__main__":
-    requested_command = sys.argv[1] if len(sys.argv) > 1 else ""
-    if requested_command in {
-        "seal-updater",
-        "verify-updater",
-        "verify-dmg",
-        "seal-release",
-        "verify-release",
-    }:
-        from release_python_runtime import (
-            ReleasePythonRuntimeError,
-            require_closed_release_runtime,
-        )
-
-        try:
-            require_closed_release_runtime()
-        except ReleasePythonRuntimeError as error:
-            raise SystemExit(f"error: release artifact set: {error}") from error
 
 if __package__:
     from .candidate_artifact_binding import TOOLCHAIN_METADATA_ORDER
@@ -58,6 +38,7 @@ if __package__:
     )
     from .hash_artifact import build_manifest, write_new_manifest
     from .notarization_transaction import (
+        NOTARY_PROFILE,
         TransactionError,
         _run_bounded_process as _run_transaction_process,
         _fsync_tree,
@@ -73,16 +54,15 @@ if __package__:
         regular_file_identity,
         tree_digest,
     )
-    from .publication.verify import verify_evidence as verify_publication_evidence
-    from .publication.sealed_manifest import (
-        DEFAULT_MANIFEST_PATH,
-        authorize_publication_artifacts,
-        load_sealed_manifest,
-    )
     from .publication.source_archive import (
         MAX_SOURCE_ARCHIVE_BYTES as MAX_CORRESPONDING_SOURCE_ARCHIVE_BYTES,
     )
     from .repository_source_identity import SourceIdentityError, current_identity
+    from .release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        ga_root,
+        ga_signed_root,
+    )
     from .release_cargo_inputs import (
         CRATES_IO_SOURCE,
         ReleaseCargoInputsError,
@@ -114,6 +94,7 @@ else:
     )
     from hash_artifact import build_manifest, write_new_manifest
     from notarization_transaction import (
+        NOTARY_PROFILE,
         TransactionError,
         _run_bounded_process as _run_transaction_process,
         _fsync_tree,
@@ -129,16 +110,15 @@ else:
         regular_file_identity,
         tree_digest,
     )
-    from publication.verify import verify_evidence as verify_publication_evidence
-    from publication.sealed_manifest import (
-        DEFAULT_MANIFEST_PATH,
-        authorize_publication_artifacts,
-        load_sealed_manifest,
-    )
     from publication.source_archive import (
         MAX_SOURCE_ARCHIVE_BYTES as MAX_CORRESPONDING_SOURCE_ARCHIVE_BYTES,
     )
     from repository_source_identity import SourceIdentityError, current_identity
+    from release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        ga_root,
+        ga_signed_root,
+    )
     from release_cargo_inputs import (
         CRATES_IO_SOURCE,
         ReleaseCargoInputsError,
@@ -165,20 +145,24 @@ else:
 PRODUCT = "Clash for Mac"
 TEAM_ID = "YKUPL7Z869"
 OFFICIAL_RELEASE_ORIGIN = "https://github.com/billlza/cfw-rs/releases/download"
-UPDATER_SEAL_DOCUMENT = "cfw-updater-release-set-seal-v1"
+UPDATER_SEAL_DOCUMENT = "cfw-updater-release-set-seal-v2"
 UPDATER_VERIFICATION_DOCUMENT = "cfw-updater-embedded-pubkey-verification-v1"
 RELEASE_VERIFIER_BINDING_DOCUMENT = "cfw-release-verifier-build-binding-v2"
-DMG_SEAL_DOCUMENT = "cfw-dmg-release-set-seal-v1"
-DMG_SUBMISSION_DOCUMENT = "cfw-dmg-notarization-submission-receipt-v1"
-DISTRIBUTION_SEAL_DOCUMENT = "cfw-distribution-release-set-seal-v1"
+DMG_SEAL_DOCUMENT = "cfw-dmg-release-set-seal-v2"
+DMG_SUBMISSION_DOCUMENT = "cfw-dmg-notarization-submission-receipt-v2"
+DISTRIBUTION_SEAL_DOCUMENT = "cfw-ga-distribution-package-set-seal-v1"
 UPDATER_SEAL_NAME = "updater-set.seal.json"
 UPDATER_VERIFICATION_NAME = "embedded-pubkey-verification.json"
 DMG_SEAL_NAME = "dmg-set.seal.json"
 DISTRIBUTION_SEAL_NAME = "distribution-set.seal.json"
 PUBLICATION_BUNDLE_MANIFEST_NAME = "publication-bundle.manifest.json"
-CANDIDATE_VERSION = "0.4.0"
-CANDIDATE_APP_RELATIVE = (
-    "target/candidates/0.4.0/signed/Clash for Mac.app"
+CANDIDATE_VERSION = ACTIVE_RELEASE_IDENTITY.product_version
+CANDIDATE_BUILD_NUMBER = ACTIVE_RELEASE_IDENTITY.ga_build
+GA_APP_ARTIFACT_KIND = "notarized-ga-candidate-v1"
+GA_CANDIDATE_RELATIVE = ga_root(Path("."))
+GA_PACKAGE_RELATIVE = GA_CANDIDATE_RELATIVE / "packages"
+CANDIDATE_APP_RELATIVE = str(
+    ga_signed_root(Path(".")) / "Clash for Mac.app"
 )
 CANDIDATE_APP_MANIFEST_NAME = "Clash for Mac.app.manifest.json"
 MAX_UPDATER_ARCHIVE_BYTES = 192 * 1024 * 1024
@@ -306,6 +290,8 @@ class _DuplicateFieldError(ValueError):
 Publisher = Callable[[Path, Path], None]
 PackagedAppManifestReader = Callable[[Path], dict[str, object]]
 PublicationSemanticVerifier = Callable[[Path, Path, Path], None]
+PublicationStageVerifier = Callable[[Path], dict[str, Any]]
+PrepackageStageVerifier = Callable[[Path], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -378,6 +364,50 @@ def _require_semver(value: object) -> str:
     if not isinstance(value, str) or not SEMVER_RE.fullmatch(value):
         raise ArtifactSetError("release version is not strict SemVer")
     return value
+
+
+def _require_active_version(value: object) -> str:
+    version = _require_semver(value)
+    if version != CANDIDATE_VERSION:
+        raise ArtifactSetError(
+            f"release asset tooling is fixed to GA version {CANDIDATE_VERSION}"
+        )
+    return version
+
+
+def _ga_candidate_root(repository: Path) -> Path:
+    return ga_root(repository)
+
+
+def _package_root(repository: Path) -> Path:
+    return _ga_candidate_root(repository) / "packages"
+
+
+def _updater_set_root(repository: Path) -> Path:
+    return _package_root(repository) / f"updater/v{CANDIDATE_VERSION}"
+
+
+def _dmg_set_root(repository: Path) -> Path:
+    return _package_root(repository) / f"dmg/v{CANDIDATE_VERSION}"
+
+
+def _dmg_transaction_final_set_root(repository: Path) -> Path:
+    return (
+        _ga_candidate_root(repository)
+        / f"transactions/dmg-notary/v{CANDIDATE_VERSION}/final-set"
+    )
+
+
+def _distribution_set_root(repository: Path) -> Path:
+    return _package_root(repository) / f"distribution/v{CANDIDATE_VERSION}"
+
+
+def _raw_publication_root(repository: Path) -> Path:
+    return _ga_candidate_root(repository) / "stage-inputs/publication"
+
+
+def _sealed_publication_root(repository: Path) -> Path:
+    return _ga_candidate_root(repository) / "publication"
 
 
 def _require_positive_decimal(value: object, label: str) -> str:
@@ -1208,10 +1238,7 @@ def _candidate_app_binding(
     expected_build_number: str | None = None,
 ) -> dict[str, Any]:
     """Recompute the final notarized candidate and its immutable manifest."""
-    if version != CANDIDATE_VERSION:
-        raise ArtifactSetError(
-            f"release asset tooling is fixed to candidate {CANDIDATE_VERSION}"
-        )
+    _require_active_version(version)
     source = _source_identity(source_identity)
     app, manifest_path = _candidate_app_paths(repository)
     _require_real_directory(app, "signed candidate application")
@@ -1254,11 +1281,13 @@ def _candidate_app_binding(
     build_number = _require_positive_decimal(
         metadata["buildNumber"], "signed candidate build number"
     )
+    if build_number != CANDIDATE_BUILD_NUMBER:
+        raise ArtifactSetError("signed candidate is not the active GA build")
     if expected_build_number is not None and build_number != expected_build_number:
         raise ArtifactSetError("signed candidate build differs from the release set")
     if (
         metadata["architecture"] != "arm64"
-        or metadata["artifactKind"] != "notarized-release-v1"
+        or metadata["artifactKind"] != GA_APP_ARTIFACT_KIND
         or metadata["deploymentTarget"] != "15.0"
         or metadata["releaseSourceSha256"] != source["release_source_sha256"]
         or metadata["repositoryCommit"] != source["repository_commit"]
@@ -1545,20 +1574,62 @@ def verify_publication_semantics(
     repository: Path, publication: Path, app: Path
 ) -> None:
     """Reuse the authoritative CCS/SBOM/legal verifier inside seal operations."""
+    if publication != _raw_publication_root(repository):
+        raise ArtifactSetError("publication verifier requires the fixed GA raw input root")
+    expected_app, _manifest = _candidate_app_paths(repository)
+    if app != expected_app:
+        raise ArtifactSetError("publication verifier requires the fixed GA signed app")
     try:
-        manifest_path = repository / DEFAULT_MANIFEST_PATH
-        if manifest_path.is_symlink() or not manifest_path.is_file():
-            raise ArtifactSetError(
-                "sealed Evidence Manifest is unavailable for distribution authorization"
-            )
-        document = load_sealed_manifest(manifest_path.resolve(strict=True))
-        authorize_publication_artifacts(repository, document, fixture=False)
-        verify_publication_evidence(publication, app, False)
-    except (OSError, PublicationError, ValueError) as error:
-        raise ArtifactSetError(
-            "publication evidence is not semantically authorized"
-        ) from error
+        if __package__:
+            from .publication.verify import verify_evidence
+        else:
+            from publication.verify import verify_evidence
 
+        verify_evidence(publication, app, False)
+    except (ImportError, OSError, PublicationError, ValueError) as error:
+        raise ArtifactSetError("GA publication evidence is invalid") from error
+
+
+def _prepackage_manifest_path(repository: Path) -> Path:
+    return _ga_candidate_root(repository) / "prepackage/manifest.json"
+
+
+def _validate_prepackage_binding(
+    value: object, repository: Path
+) -> dict[str, Any]:
+    """Validate a fixed-path prepackage authorization without trusting a caller record."""
+
+    value = _require_exact_keys(
+        value,
+        {"manifest", "manifest_path"},
+        "GA prepackage stage binding",
+    )
+    manifest_path = _prepackage_manifest_path(repository)
+    expected_relative = str(manifest_path.relative_to(repository))
+    if value["manifest_path"] != expected_relative:
+        raise ArtifactSetError("GA prepackage stage binding uses a noncanonical path")
+    manifest = _validate_artifact_record(
+        value["manifest"],
+        manifest_path,
+        MAX_PUBLICATION_DOCUMENT_BYTES,
+        "GA prepackage stage manifest",
+    )
+    return {"manifest": manifest, "manifest_path": expected_relative}
+
+
+def _reopen_prepackage_binding(
+    repository: Path, verifier: PrepackageStageVerifier | None
+) -> dict[str, Any]:
+    if verifier is None:
+        raise ArtifactSetError("fixed GA prepackage stage verifier is unavailable")
+    try:
+        return _validate_prepackage_binding(verifier(repository), repository)
+    except ArtifactSetError:
+        raise
+    except (ImportError, OSError, PublicationError, ValueError) as error:
+        raise ArtifactSetError(
+            "fixed GA prepackage stage authorization is invalid"
+        ) from error
 
 def _validate_updater_verification(
     path: Path,
@@ -1666,6 +1737,7 @@ def _build_updater_seal(
     sealed_at: str,
     repository: Path,
     release_verifier: dict[str, Any],
+    prepackage: dict[str, Any],
 ) -> dict[str, Any]:
     archive_name, signature_name, latest_name = _updater_names(version)
     archive = directory / archive_name
@@ -1727,10 +1799,11 @@ def _build_updater_seal(
         "document": UPDATER_SEAL_DOCUMENT,
         "embedded_public_key_sha256": verification["embedded_public_key_sha256"],
         "official_url": official_url,
+        "prepackage": _validate_prepackage_binding(prepackage, repository),
         "product": PRODUCT,
         "release_verifier": release_verifier,
         "repository": _source_identity(source_identity),
-        "schema_version": 1,
+        "schema_version": 2,
         "sealed_at": _require_utc_timestamp(sealed_at, "updater seal time"),
         "tauri_config_sha256": verification["tauri_config_sha256"],
         "version": version,
@@ -1746,15 +1819,29 @@ def seal_updater_set(
     sealed_at: str,
     repository: Path,
     publisher: Publisher = publish_exclusive,
+    prepackage_stage_verifier: PrepackageStageVerifier | None = None,
 ) -> Path:
     """Seal a complete updater group and publish the directory once."""
-    version = _require_semver(version)
+    version = _require_active_version(version)
+    expected_destination = _updater_set_root(repository)
+    if destination != expected_destination:
+        raise ArtifactSetError("updater destination is not the fixed GA package path")
+    if (
+        staging.parent != expected_destination.parent
+        or not staging.name.startswith("updater-stage.")
+        or staging.name == "updater-stage."
+    ):
+        raise ArtifactSetError("updater staging is not inside the fixed GA package path")
+    prepackage = _reopen_prepackage_binding(
+        repository, prepackage_stage_verifier
+    )
     if os.path.lexists(destination):
         verify_updater_set(
             destination,
             repository=repository,
             version=version,
             expected_source_identity=source_identity,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
         _confirm_existing_release_set_durable(
             destination, "updater release set"
@@ -1764,6 +1851,7 @@ def seal_updater_set(
             repository=repository,
             version=version,
             expected_source_identity=source_identity,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
         return destination
     _require_real_directory(staging, "updater staging directory")
@@ -1797,6 +1885,7 @@ def seal_updater_set(
         sealed_at,
         repository,
         release_verifier,
+        prepackage,
     )
     _write_canonical_new(staging / UPDATER_SEAL_NAME, seal)
     verify_updater_set(
@@ -1805,6 +1894,7 @@ def seal_updater_set(
         version=version,
         expected_source_identity=source_identity,
         require_version_directory=False,
+        prepackage_stage_verifier=prepackage_stage_verifier,
     )
     _fsync_release_set(staging, "updater release set")
     try:
@@ -1817,6 +1907,7 @@ def seal_updater_set(
                     repository=repository,
                     version=version,
                     expected_source_identity=source_identity,
+                    prepackage_stage_verifier=prepackage_stage_verifier,
                 )
                 _confirm_release_set_durable(
                     staging, destination, "updater release set"
@@ -1826,6 +1917,7 @@ def seal_updater_set(
                     repository=repository,
                     version=version,
                     expected_source_identity=source_identity,
+                    prepackage_stage_verifier=prepackage_stage_verifier,
                 )
             except (ArtifactSetError, OSError, ValueError) as recovery_error:
                 raise ArtifactSetError(
@@ -1841,6 +1933,7 @@ def seal_updater_set(
         repository=repository,
         version=version,
         expected_source_identity=source_identity,
+        prepackage_stage_verifier=prepackage_stage_verifier,
     )
     return destination
 
@@ -1852,10 +1945,23 @@ def verify_updater_set(
     version: str,
     expected_source_identity: dict[str, str] | None = None,
     require_version_directory: bool = True,
+    prepackage_stage_verifier: PrepackageStageVerifier | None = None,
 ) -> dict[str, Any]:
-    version = _require_semver(version)
-    if require_version_directory and directory.name != f"v{version}":
-        raise ArtifactSetError("updater release set uses the wrong version directory")
+    version = _require_active_version(version)
+    if require_version_directory and directory != _updater_set_root(repository):
+        raise ArtifactSetError("updater release set is not at the fixed GA package path")
+    if (
+        not require_version_directory
+        and (
+            directory.parent != _updater_set_root(repository).parent
+            or not directory.name.startswith("updater-stage.")
+            or directory.name == "updater-stage."
+        )
+    ):
+        raise ArtifactSetError("updater staging is not inside the fixed GA package path")
+    prepackage = _reopen_prepackage_binding(
+        repository, prepackage_stage_verifier
+    )
     archive_name, signature_name, latest_name = _updater_names(version)
     expected = {
         archive_name,
@@ -1878,6 +1984,7 @@ def verify_updater_set(
             "document",
             "embedded_public_key_sha256",
             "official_url",
+            "prepackage",
             "product",
             "release_verifier",
             "repository",
@@ -1893,7 +2000,7 @@ def verify_updater_set(
     )
     if (
         type(seal["schema_version"]) is not int
-        or seal["schema_version"] != 1
+        or seal["schema_version"] != 2
         or seal["document"] != UPDATER_SEAL_DOCUMENT
         or seal["product"] != PRODUCT
         or seal["version"] != version
@@ -1901,6 +2008,10 @@ def verify_updater_set(
         or seal["official_url"] != _official_url(version, archive_name)
     ):
         raise ArtifactSetError("updater release seal identity is inconsistent")
+    if _validate_prepackage_binding(seal["prepackage"], repository) != prepackage:
+        raise ArtifactSetError(
+            "updater release seal targets a different GA prepackage stage"
+        )
     source_identity = _source_identity(seal["repository"])
     if (
         expected_source_identity is not None
@@ -2026,6 +2137,10 @@ def verify_updater_set(
         != release_verifier
     ):
         raise ArtifactSetError("release verifier build inputs changed during verification")
+    if _reopen_prepackage_binding(repository, prepackage_stage_verifier) != prepackage:
+        raise ArtifactSetError(
+            "GA prepackage stage changed during updater verification"
+        )
     return seal
 
 
@@ -2034,6 +2149,7 @@ def _dmg_manifest_metadata(
     version: str,
     build_number: str,
     pre_staple_sha256: str,
+    prepackage_manifest_sha256: str,
     source_identity: dict[str, str],
 ) -> dict[str, str]:
     identity = _source_identity(source_identity)
@@ -2042,6 +2158,9 @@ def _dmg_manifest_metadata(
         "artifactKind": "notarized-dmg-v2",
         "buildNumber": build_number,
         "preStapleSha256": pre_staple_sha256,
+        "prepackageManifestSha256": _require_sha256(
+            prepackage_manifest_sha256, "GA prepackage manifest digest"
+        ),
         "releaseSourceSha256": identity["release_source_sha256"],
         "repositoryCommit": identity["repository_commit"],
         "teamID": TEAM_ID,
@@ -2064,6 +2183,7 @@ def _validate_dmg_submission(
         "document",
         "intent_sha256",
         "notary_created_at",
+        "notary_profile",
         "observed_at",
         "pre_staple_dmg_sha256",
         "schema_version",
@@ -2074,12 +2194,13 @@ def _validate_dmg_submission(
     value = _require_exact_keys(value, fields, "DMG submission receipt")
     if (
         type(value["schema_version"]) is not int
-        or value["schema_version"] != 1
+        or value["schema_version"] != 2
         or value["document"] != DMG_SUBMISSION_DOCUMENT
         or value["version"] != version
         or value["build_number"] != build_number
         or value["submitted_filename"] != dmg_name
         or value["pre_staple_dmg_sha256"] != pre_staple_sha256
+        or value["notary_profile"] != NOTARY_PROFILE
         or value["acquisition"] not in {"submit-no-wait", "explicit-recovery"}
     ):
         raise ArtifactSetError("DMG submission receipt identity is inconsistent")
@@ -2102,6 +2223,7 @@ def _build_dmg_seal(
     version: str,
     build_number: str,
     pre_staple_sha256: str,
+    prepackage: dict[str, Any],
     source_identity: dict[str, str],
     sealed_at: str,
     packaged_app_manifest_reader: PackagedAppManifestReader,
@@ -2168,9 +2290,10 @@ def _build_dmg_seal(
         "document": DMG_SEAL_DOCUMENT,
         "official_url": _official_url(version, dmg_name),
         "pre_staple_dmg_sha256": pre_staple_sha256,
+        "prepackage": _validate_prepackage_binding(prepackage, repository),
         "product": PRODUCT,
         "repository": _source_identity(source_identity),
-        "schema_version": 1,
+        "schema_version": 2,
         "sealed_at": _require_utc_timestamp(sealed_at, "DMG seal time"),
         "submission_id": submission["submission_id"],
         "version": version,
@@ -2184,16 +2307,30 @@ def seal_dmg_set(
     version: str,
     build_number: str,
     pre_staple_sha256: str,
+    prepackage: dict[str, Any],
     source_identity: dict[str, str],
     sealed_at: str,
     packaged_app_manifest_reader: PackagedAppManifestReader = read_dmg_app_manifest,
+    prepackage_stage_verifier: PrepackageStageVerifier | None = None,
 ) -> Path:
     """Create or confirm the canonical seal in one private DMG staging set."""
-    version = _require_semver(version)
+    version = _require_active_version(version)
     build_number = _require_positive_decimal(build_number, "DMG build number")
+    if build_number != CANDIDATE_BUILD_NUMBER:
+        raise ArtifactSetError("DMG set is not the active GA build")
+    if directory != _dmg_transaction_final_set_root(repository):
+        raise ArtifactSetError("DMG staging is not the fixed GA transaction final-set")
     pre_staple_sha256 = _require_sha256(
         pre_staple_sha256, "pre-staple DMG digest"
     )
+    bound_prepackage = _validate_prepackage_binding(prepackage, repository)
+    current_prepackage = _reopen_prepackage_binding(
+        repository, prepackage_stage_verifier
+    )
+    if bound_prepackage != current_prepackage:
+        raise ArtifactSetError(
+            "DMG transaction targets a different GA prepackage stage"
+        )
     dmg_name, manifest_name, result_name, log_name, gatekeeper_name, submission_name = (
         _dmg_names(version)
     )
@@ -2210,6 +2347,9 @@ def seal_dmg_set(
             version=version,
             build_number=build_number,
             pre_staple_sha256=pre_staple_sha256,
+            prepackage_manifest_sha256=str(
+                bound_prepackage["manifest"]["sha256"]
+            ),
             source_identity=source_identity,
         )
         manifest = build_manifest(
@@ -2227,6 +2367,7 @@ def seal_dmg_set(
             version=version,
             build_number=build_number,
             pre_staple_sha256=pre_staple_sha256,
+            prepackage=bound_prepackage,
             source_identity=source_identity,
             sealed_at=sealed_at,
             packaged_app_manifest_reader=packaged_app_manifest_reader,
@@ -2241,6 +2382,7 @@ def seal_dmg_set(
         expected_source_identity=source_identity,
         packaged_app_manifest_reader=packaged_app_manifest_reader,
         require_version_directory=False,
+        prepackage_stage_verifier=prepackage_stage_verifier,
     )
     return directory / DMG_SEAL_NAME
 
@@ -2253,10 +2395,19 @@ def verify_dmg_set(
     expected_source_identity: dict[str, str] | None = None,
     packaged_app_manifest_reader: PackagedAppManifestReader = read_dmg_app_manifest,
     require_version_directory: bool = True,
+    prepackage_stage_verifier: PrepackageStageVerifier | None = None,
 ) -> dict[str, Any]:
-    version = _require_semver(version)
-    if require_version_directory and directory.name != f"v{version}":
-        raise ArtifactSetError("DMG release set uses the wrong version directory")
+    version = _require_active_version(version)
+    if require_version_directory and directory != _dmg_set_root(repository):
+        raise ArtifactSetError("DMG release set is not at the fixed GA package path")
+    if (
+        not require_version_directory
+        and directory != _dmg_transaction_final_set_root(repository)
+    ):
+        raise ArtifactSetError("DMG staging is not the fixed GA transaction final-set")
+    prepackage = _reopen_prepackage_binding(
+        repository, prepackage_stage_verifier
+    )
     dmg_name, manifest_name, result_name, log_name, gatekeeper_name, submission_name = (
         _dmg_names(version)
     )
@@ -2282,6 +2433,7 @@ def verify_dmg_set(
             "document",
             "official_url",
             "pre_staple_dmg_sha256",
+            "prepackage",
             "product",
             "repository",
             "schema_version",
@@ -2296,7 +2448,7 @@ def verify_dmg_set(
     )
     if (
         type(seal["schema_version"]) is not int
-        or seal["schema_version"] != 1
+        or seal["schema_version"] != 2
         or seal["document"] != DMG_SEAL_DOCUMENT
         or seal["product"] != PRODUCT
         or seal["version"] != version
@@ -2304,7 +2456,13 @@ def verify_dmg_set(
         or seal["official_url"] != _official_url(version, dmg_name)
     ):
         raise ArtifactSetError("DMG release seal identity is inconsistent")
+    if _validate_prepackage_binding(seal["prepackage"], repository) != prepackage:
+        raise ArtifactSetError(
+            "DMG release seal targets a different GA prepackage stage"
+        )
     build_number = _require_positive_decimal(seal["build_number"], "DMG build number")
+    if build_number != CANDIDATE_BUILD_NUMBER:
+        raise ArtifactSetError("DMG release set is not the active GA build")
     pre_staple_sha256 = _require_sha256(
         seal["pre_staple_dmg_sha256"], "pre-staple DMG digest"
     )
@@ -2407,6 +2565,7 @@ def verify_dmg_set(
             version=version,
             build_number=build_number,
             pre_staple_sha256=pre_staple_sha256,
+            prepackage_manifest_sha256=str(prepackage["manifest"]["sha256"]),
             source_identity=source_identity,
         ),
         algorithm="sha256-tree-v2",
@@ -2440,6 +2599,8 @@ def verify_dmg_set(
         source_identity=source_identity,
         expected_build_number=build_number,
     )
+    if _reopen_prepackage_binding(repository, prepackage_stage_verifier) != prepackage:
+        raise ArtifactSetError("GA prepackage stage changed during DMG verification")
     return seal
 
 
@@ -2456,9 +2617,9 @@ def _gatekeeper_public_projection_name(version: str) -> str:
 
 
 def _private_gatekeeper_material(
-    release_root: Path, version: str
+    package_root: Path, version: str
 ) -> tuple[dict[str, Any], bytes, Path, tuple[bytes, ...]]:
-    dmg_directory = release_root / "dmg" / f"v{version}"
+    dmg_directory = package_root / "dmg" / f"v{version}"
     dmg_name, _manifest, _result, _log, gatekeeper_name, _submission = (
         _dmg_names(version)
     )
@@ -2550,7 +2711,7 @@ def _reject_private_public_source(data: bytes, path: Path) -> None:
 
 
 def _validate_gatekeeper_public_projection(
-    directory: Path, release_root: Path, version: str
+    directory: Path, package_root: Path, version: str
 ) -> tuple[dict[str, Any], tuple[bytes, ...]]:
     projection_path = directory / _gatekeeper_public_projection_name(version)
     projection, projection_bytes = _load_strict_json(
@@ -2563,7 +2724,7 @@ def _validate_gatekeeper_public_projection(
         "public Gatekeeper projection",
     )
     private_evidence, private_bytes, assessed_target, forbidden_paths = (
-        _private_gatekeeper_material(release_root, version)
+        _private_gatekeeper_material(package_root, version)
     )
     try:
         projection = validate_gatekeeper_public_projection(
@@ -2585,10 +2746,10 @@ def _validate_gatekeeper_public_projection(
 
 
 def _write_gatekeeper_public_projection(
-    directory: Path, release_root: Path, version: str
+    directory: Path, package_root: Path, version: str
 ) -> tuple[Path, tuple[bytes, ...]]:
     private_evidence, private_bytes, assessed_target, forbidden_paths = (
-        _private_gatekeeper_material(release_root, version)
+        _private_gatekeeper_material(package_root, version)
     )
     try:
         projection = build_gatekeeper_public_projection(
@@ -2645,7 +2806,7 @@ def _admit_publication_source_archive(path: Path) -> None:
 def _assert_public_source_inventory(
     sources: dict[str, tuple[str, Path, int]],
     *,
-    release_root: Path,
+    package_root: Path,
     distribution_directory: Path,
     version: str,
     forbidden_paths: tuple[bytes, ...],
@@ -2655,7 +2816,7 @@ def _assert_public_source_inventory(
     public_bundle_path = f"{root}/verification/{public_name}"
     public_source = distribution_directory / public_name
     expected_public_source_path = (
-        f"target/candidates/0.4.0/release/distribution/v{version}/{public_name}"
+        f"{GA_PACKAGE_RELATIVE}/distribution/v{version}/{public_name}"
     )
     if sources.get(public_bundle_path) != (
         expected_public_source_path,
@@ -2666,7 +2827,7 @@ def _assert_public_source_inventory(
             "public release bundle omits its canonical Gatekeeper projection"
         )
     private_gatekeeper = (
-        release_root / "dmg" / f"v{version}" / _dmg_names(version)[4]
+        package_root / "dmg" / f"v{version}" / _dmg_names(version)[4]
     )
     for source_path, path, maximum in sources.values():
         if path == private_gatekeeper or source_path.endswith(
@@ -2691,19 +2852,19 @@ def _assert_public_source_inventory(
 
 def _publication_bundle_sources(
     repository: Path,
-    release_root: Path,
+    package_root: Path,
     distribution_directory: Path,
     version: str,
     *,
     forbidden_paths: tuple[bytes, ...] | None = None,
 ) -> dict[str, tuple[str, Path, int]]:
     root = _publication_bundle_root(version)
-    publication = release_root / "publication"
+    publication = _raw_publication_root(repository)
     source_archive = publication / "corresponding-source.tar.gz"
     _admit_publication_source_archive(source_archive)
     if forbidden_paths is None:
         _projection, forbidden_paths = _validate_gatekeeper_public_projection(
-            distribution_directory, release_root, version
+            distribution_directory, package_root, version
         )
     public_name = _gatekeeper_public_projection_name(version)
     fixed = {
@@ -2714,7 +2875,7 @@ def _publication_bundle_sources(
             MAX_PUBLICATION_DOCUMENT_BYTES,
         ),
         f"{root}/verification/{public_name}": (
-            f"target/candidates/0.4.0/release/distribution/v{version}/{public_name}",
+            f"{GA_PACKAGE_RELATIVE}/distribution/v{version}/{public_name}",
             distribution_directory / public_name,
             MAX_SMALL_DOCUMENT_BYTES,
         ),
@@ -2750,7 +2911,7 @@ def _publication_bundle_sources(
             continue
         bundle_path = f"{root}/publication/{relative}"
         source_relative = (
-            f"target/candidates/0.4.0/release/publication/{relative}"
+            f"{GA_CANDIDATE_RELATIVE}/stage-inputs/publication/{relative}"
         )
         if bundle_path in fixed:
             raise ArtifactSetError("public release bundle contains a path collision")
@@ -2767,7 +2928,7 @@ def _publication_bundle_sources(
         raise ArtifactSetError("public release bundle file count exceeds its bound")
     _assert_public_source_inventory(
         fixed,
-        release_root=release_root,
+        package_root=package_root,
         distribution_directory=distribution_directory,
         version=version,
         forbidden_paths=forbidden_paths,
@@ -2777,7 +2938,7 @@ def _publication_bundle_sources(
 
 def _build_publication_bundle_manifest(
     repository: Path,
-    release_root: Path,
+    package_root: Path,
     distribution_directory: Path,
     version: str,
     *,
@@ -2785,7 +2946,7 @@ def _build_publication_bundle_manifest(
 ) -> tuple[dict[str, Any], dict[str, tuple[str, Path, int]]]:
     sources = _publication_bundle_sources(
         repository,
-        release_root,
+        package_root,
         distribution_directory,
         version,
         forbidden_paths=forbidden_paths,
@@ -2816,15 +2977,9 @@ def _build_publication_bundle_manifest(
         "document": "cfw-publication-upload-bundle-manifest-v1",
         "entries": entries,
         "excluded_private_documents": [
-            "target/candidates/0.4.0/release/final-candidate/"
-            "final-candidate.json",
-            "target/candidates/0.4.0/release/final-candidate/"
-            "physical-evidence.json",
-            f"target/candidates/0.4.0/release/dmg/v{version}/"
+            f"{GA_PACKAGE_RELATIVE}/dmg/v{version}/"
             f"{_dmg_names(version)[4]}",
-            "target/candidates/0.4.0/release/publication/legal-review.json",
-            "target/candidates/0.4.0/release/sealed-manifest/"
-            "sealed-evidence-manifest.json",
+            f"{GA_CANDIDATE_RELATIVE}/stage-inputs/publication/legal-review.json",
         ],
         "product": PRODUCT,
         "root": _publication_bundle_root(version),
@@ -2850,18 +3005,18 @@ def _tar_info(name: str, *, directory: bool, size: int = 0) -> tarfile.TarInfo:
 def _write_publication_bundle(
     directory: Path,
     repository: Path,
-    release_root: Path,
+    package_root: Path,
     version: str,
     *,
     forbidden_paths: tuple[bytes, ...] | None = None,
 ) -> tuple[Path, Path]:
     if forbidden_paths is None:
         _projection, forbidden_paths = _validate_gatekeeper_public_projection(
-            directory, release_root, version
+            directory, package_root, version
         )
     manifest, sources = _build_publication_bundle_manifest(
         repository,
-        release_root,
+        package_root,
         directory,
         version,
         forbidden_paths=forbidden_paths,
@@ -2943,7 +3098,7 @@ def _write_publication_bundle(
     if (
         _build_publication_bundle_manifest(
             repository,
-            release_root,
+            package_root,
             directory,
             version,
             forbidden_paths=forbidden_paths,
@@ -2952,7 +3107,7 @@ def _write_publication_bundle(
     ):
         raise ArtifactSetError("public release inputs changed while bundling")
     _validate_publication_bundle(
-        directory, repository=repository, release_root=release_root, version=version
+        directory, repository=repository, package_root=package_root, version=version
     )
     return archive_path, manifest_path
 
@@ -2961,11 +3116,11 @@ def _validate_publication_bundle(
     directory: Path,
     *,
     repository: Path,
-    release_root: Path,
+    package_root: Path,
     version: str,
 ) -> tuple[dict[str, object], dict[str, object], tuple[bytes, ...]]:
     _projection, forbidden_paths = _validate_gatekeeper_public_projection(
-        directory, release_root, version
+        directory, package_root, version
     )
     archive_path = directory / _publication_bundle_name(version)
     manifest_path = directory / PUBLICATION_BUNDLE_MANIFEST_NAME
@@ -2994,7 +3149,7 @@ def _validate_publication_bundle(
     )
     expected_manifest, _sources = _build_publication_bundle_manifest(
         repository,
-        release_root,
+        package_root,
         directory,
         version,
         forbidden_paths=forbidden_paths,
@@ -3113,7 +3268,7 @@ def _validate_publication_bundle(
         or manifest_record_after != manifest_record_before
         or _build_publication_bundle_manifest(
             repository,
-            release_root,
+            package_root,
             directory,
             version,
             forbidden_paths=forbidden_paths,
@@ -3125,13 +3280,13 @@ def _validate_publication_bundle(
 
 
 def _release_asset_paths(
-    release_root: Path,
+    package_root: Path,
     version: str,
     *,
     distribution_directory: Path | None = None,
 ) -> dict[str, tuple[Path, int]]:
-    updater = release_root / "updater" / f"v{version}"
-    dmg = release_root / "dmg" / f"v{version}"
+    updater = package_root / "updater" / f"v{version}"
+    dmg = package_root / "dmg" / f"v{version}"
     archive_name, signature_name, latest_name = _updater_names(version)
     (
         dmg_name,
@@ -3185,9 +3340,14 @@ def _release_asset_paths(
     return assets
 
 
-def _publication_binding(repository: Path, release_root: Path) -> dict[str, Any]:
-    publication = release_root / "publication"
-    _require_real_directory(publication, "publication evidence directory")
+def _publication_binding(
+    repository: Path,
+    stage_verifier: PublicationStageVerifier | None,
+) -> dict[str, Any]:
+    if stage_verifier is None:
+        raise ArtifactSetError("fixed GA publication stage verifier is unavailable")
+    publication = _raw_publication_root(repository)
+    _require_real_directory(publication, "raw GA publication evidence directory")
     bound_documents = {
         "corresponding_source_manifest": "corresponding-source.manifest.json",
         "cyclonedx_sbom": "sbom.cyclonedx.json",
@@ -3207,21 +3367,18 @@ def _publication_binding(repository: Path, release_root: Path) -> dict[str, Any]
         )
         for key, filename in bound_documents.items()
     }
+    stage_authorization = stage_verifier(repository)
     try:
         after = enumerate_tree(publication)
     except PublicationError as error:
         raise ArtifactSetError("cannot re-enumerate publication evidence") from error
     if after != before:
         raise ArtifactSetError("publication evidence changed while sealing")
-    authorization_manifest = repository / DEFAULT_MANIFEST_PATH
     return {
         "artifacts": artifacts,
-        "authorization_manifest": _artifact_record(
-            authorization_manifest, MAX_PUBLICATION_DOCUMENT_BYTES
-        ),
-        "authorization_manifest_path": DEFAULT_MANIFEST_PATH,
         "entry_count": len(after),
-        "path": "target/candidates/0.4.0/release/publication",
+        "path": str(publication.relative_to(repository)),
+        "stage_authorization": stage_authorization,
         "tree_algorithm": "sha256-inventory-v1",
         "tree_sha256": tree_digest(after),
     }
@@ -3229,13 +3386,13 @@ def _publication_binding(repository: Path, release_root: Path) -> dict[str, Any]
 
 def _authorized_publication_binding(
     repository: Path,
-    release_root: Path,
     verifier: PublicationSemanticVerifier,
+    stage_verifier: PublicationStageVerifier,
 ) -> dict[str, Any]:
-    before = _publication_binding(repository, release_root)
+    before = _publication_binding(repository, stage_verifier)
     app, _manifest = _candidate_app_paths(repository)
-    verifier(repository, release_root / "publication", app)
-    after = _publication_binding(repository, release_root)
+    verifier(repository, _raw_publication_root(repository), app)
+    after = _publication_binding(repository, stage_verifier)
     if after != before:
         raise ArtifactSetError(
             "publication evidence changed across semantic authorization"
@@ -3246,34 +3403,59 @@ def _authorized_publication_binding(
 def _validate_publication_binding(
     value: object,
     repository: Path,
-    release_root: Path,
     verifier: PublicationSemanticVerifier,
+    stage_verifier: PublicationStageVerifier,
 ) -> dict[str, Any]:
     value = _require_exact_keys(
         value,
         {
             "artifacts",
-            "authorization_manifest",
-            "authorization_manifest_path",
             "entry_count",
             "path",
+            "stage_authorization",
             "tree_algorithm",
             "tree_sha256",
         },
         "publication closure binding",
     )
     if (
-        value["path"] != "target/candidates/0.4.0/release/publication"
-        or value["authorization_manifest_path"] != DEFAULT_MANIFEST_PATH
+        value["path"]
+        != str(_raw_publication_root(repository).relative_to(repository))
         or value["tree_algorithm"] != "sha256-inventory-v1"
         or not isinstance(value["entry_count"], int)
         or isinstance(value["entry_count"], bool)
         or value["entry_count"] <= 0
     ):
         raise ArtifactSetError("publication closure binding identity is inconsistent")
+    stage_authorization = _require_exact_keys(
+        value["stage_authorization"],
+        {
+            "legal_source",
+            "prepackage_manifest",
+            "prepackage_manifest_path",
+            "publication_manifest",
+            "publication_manifest_path",
+        },
+        "GA publication stage authorization",
+    )
+    if (
+        stage_authorization["prepackage_manifest_path"]
+        != str(
+            (_ga_candidate_root(repository) / "prepackage/manifest.json").relative_to(
+                repository
+            )
+        )
+        or stage_authorization["publication_manifest_path"]
+        != str(
+            (_sealed_publication_root(repository) / "manifest.json").relative_to(
+                repository
+            )
+        )
+    ):
+        raise ArtifactSetError("GA publication stage paths are inconsistent")
     _require_sha256(value["tree_sha256"], "publication evidence tree digest")
     actual = _authorized_publication_binding(
-        repository, release_root, verifier
+        repository, verifier, stage_verifier
     )
     if value != actual:
         raise ArtifactSetError(
@@ -3284,7 +3466,6 @@ def _validate_publication_binding(
 
 def _build_distribution_seal(
     repository: Path,
-    release_root: Path,
     distribution_directory: Path,
     *,
     version: str,
@@ -3292,15 +3473,19 @@ def _build_distribution_seal(
     sealed_at: str,
     packaged_app_manifest_reader: PackagedAppManifestReader,
     publication_semantic_verifier: PublicationSemanticVerifier,
+    publication_stage_verifier: PublicationStageVerifier,
+    prepackage_stage_verifier: PrepackageStageVerifier,
 ) -> dict[str, Any]:
+    package_root = _package_root(repository)
     source = _source_identity(source_identity)
-    updater_directory = release_root / "updater" / f"v{version}"
-    dmg_directory = release_root / "dmg" / f"v{version}"
+    updater_directory = _updater_set_root(repository)
+    dmg_directory = _dmg_set_root(repository)
     updater = verify_updater_set(
         updater_directory,
         repository=repository,
         version=version,
         expected_source_identity=source,
+        prepackage_stage_verifier=prepackage_stage_verifier,
     )
     dmg = verify_dmg_set(
         dmg_directory,
@@ -3308,9 +3493,12 @@ def _build_distribution_seal(
         version=version,
         expected_source_identity=source,
         packaged_app_manifest_reader=packaged_app_manifest_reader,
+        prepackage_stage_verifier=prepackage_stage_verifier,
     )
     if updater["candidate_app"] != dmg["candidate_app"]:
         raise ArtifactSetError("DMG and updater sets bind different signed applications")
+    if updater["prepackage"] != dmg["prepackage"]:
+        raise ArtifactSetError("DMG and updater sets bind different prepackage stages")
     candidate_app = _validate_candidate_app_binding(
         updater["candidate_app"],
         repository,
@@ -3321,7 +3509,7 @@ def _build_distribution_seal(
     release_assets = {
         key: _artifact_record(path, maximum)
         for key, (path, maximum) in _release_asset_paths(
-            release_root,
+            package_root,
             version,
             distribution_directory=distribution_directory,
         ).items()
@@ -3335,7 +3523,9 @@ def _build_distribution_seal(
         ),
     }
     publication = _authorized_publication_binding(
-        repository, release_root, publication_semantic_verifier
+        repository,
+        publication_semantic_verifier,
+        publication_stage_verifier,
     )
     return {
         "build_number": candidate_app["build_number"],
@@ -3358,16 +3548,27 @@ def verify_distribution_set(
     directory: Path,
     *,
     repository: Path,
-    release_root: Path,
     version: str,
     expected_source_identity: dict[str, str] | None = None,
     packaged_app_manifest_reader: PackagedAppManifestReader = read_dmg_app_manifest,
     publication_semantic_verifier: PublicationSemanticVerifier = verify_publication_semantics,
+    publication_stage_verifier: PublicationStageVerifier | None = None,
+    prepackage_stage_verifier: PrepackageStageVerifier | None = None,
     require_version_directory: bool = True,
 ) -> dict[str, Any]:
-    version = _require_semver(version)
-    if require_version_directory and directory.name != f"v{version}":
-        raise ArtifactSetError("distribution set uses the wrong version directory")
+    version = _require_active_version(version)
+    package_root = _package_root(repository)
+    if require_version_directory and directory != _distribution_set_root(repository):
+        raise ArtifactSetError("distribution set is not at the fixed GA package path")
+    if (
+        not require_version_directory
+        and (
+            directory.parent != _distribution_set_root(repository).parent
+            or not directory.name.startswith("distribution-stage.")
+            or directory.name == "distribution-stage."
+        )
+    ):
+        raise ArtifactSetError("distribution staging is not inside the fixed GA package path")
     if _inventory(directory) != {
         DISTRIBUTION_SEAL_NAME,
         PUBLICATION_BUNDLE_MANIFEST_NAME,
@@ -3417,23 +3618,26 @@ def verify_distribution_set(
     build_number = _require_positive_decimal(
         seal["build_number"], "distribution build number"
     )
+    if build_number != CANDIDATE_BUILD_NUMBER:
+        raise ArtifactSetError("distribution set is not the active GA build")
     _require_utc_timestamp(seal["sealed_at"], "distribution seal time")
     _archive_record, _manifest_record, forbidden_paths = _validate_publication_bundle(
         directory,
         repository=repository,
-        release_root=release_root,
+        package_root=package_root,
         version=version,
     )
     _reject_gatekeeper_path_leak(
         seal_data, forbidden_paths, "distribution release seal"
     )
-    updater_directory = release_root / "updater" / f"v{version}"
-    dmg_directory = release_root / "dmg" / f"v{version}"
+    updater_directory = _updater_set_root(repository)
+    dmg_directory = _dmg_set_root(repository)
     updater = verify_updater_set(
         updater_directory,
         repository=repository,
         version=version,
         expected_source_identity=source,
+        prepackage_stage_verifier=prepackage_stage_verifier,
     )
     dmg = verify_dmg_set(
         dmg_directory,
@@ -3441,6 +3645,7 @@ def verify_distribution_set(
         version=version,
         expected_source_identity=source,
         packaged_app_manifest_reader=packaged_app_manifest_reader,
+        prepackage_stage_verifier=prepackage_stage_verifier,
     )
     candidate_app = _validate_candidate_app_binding(
         seal["candidate_app"],
@@ -3453,12 +3658,13 @@ def verify_distribution_set(
         updater["candidate_app"] != candidate_app
         or dmg["candidate_app"] != candidate_app
         or dmg["build_number"] != build_number
+        or updater["prepackage"] != dmg["prepackage"]
     ):
         raise ArtifactSetError(
             "distribution, DMG, and updater sets do not bind one exact application"
         )
     expected_asset_paths = _release_asset_paths(
-        release_root, version, distribution_directory=directory
+        package_root, version, distribution_directory=directory
     )
     release_assets = _require_exact_keys(
         seal["release_assets"], set(expected_asset_paths), "distribution assets"
@@ -3497,8 +3703,8 @@ def verify_distribution_set(
     _validate_publication_binding(
         seal["publication_closure"],
         repository,
-        release_root,
         publication_semantic_verifier,
+        publication_stage_verifier,
     )
     # Semantic closure verification can be materially slower than hashing one
     # package set. Reopen every package/seal binding and the candidate once more
@@ -3529,7 +3735,7 @@ def verify_distribution_set(
     _validate_publication_bundle(
         directory,
         repository=repository,
-        release_root=release_root,
+        package_root=package_root,
         version=version,
     )
     if _artifact_record(seal_path, MAX_SMALL_DOCUMENT_BYTES) != seal_record_before:
@@ -3553,7 +3759,6 @@ def _remove_private_distribution_stage(stage: Path) -> None:
 
 def seal_distribution_set(
     repository: Path,
-    release_root: Path,
     *,
     version: str,
     source_identity: dict[str, str],
@@ -3561,11 +3766,14 @@ def seal_distribution_set(
     publisher: Publisher = publish_exclusive,
     packaged_app_manifest_reader: PackagedAppManifestReader = read_dmg_app_manifest,
     publication_semantic_verifier: PublicationSemanticVerifier = verify_publication_semantics,
+    publication_stage_verifier: PublicationStageVerifier | None = None,
+    prepackage_stage_verifier: PrepackageStageVerifier | None = None,
 ) -> Path:
     """Atomically publish the final seal joining every release evidence lane."""
-    version = _require_semver(version)
-    _require_real_directory(release_root, "release root")
-    distribution_root = release_root / "distribution"
+    version = _require_active_version(version)
+    package_root = _package_root(repository)
+    _require_real_directory(package_root, "GA package root")
+    distribution_root = package_root / "distribution"
     try:
         distribution_root.mkdir(mode=0o700)
     except FileExistsError:
@@ -3576,11 +3784,12 @@ def seal_distribution_set(
         verify_distribution_set(
             destination,
             repository=repository,
-            release_root=release_root,
             version=version,
             expected_source_identity=source_identity,
             packaged_app_manifest_reader=packaged_app_manifest_reader,
             publication_semantic_verifier=publication_semantic_verifier,
+            publication_stage_verifier=publication_stage_verifier,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
         _confirm_existing_release_set_durable(
             destination, "distribution release set"
@@ -3588,11 +3797,12 @@ def seal_distribution_set(
         verify_distribution_set(
             destination,
             repository=repository,
-            release_root=release_root,
             version=version,
             expected_source_identity=source_identity,
             packaged_app_manifest_reader=packaged_app_manifest_reader,
             publication_semantic_verifier=publication_semantic_verifier,
+            publication_stage_verifier=publication_stage_verifier,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
         return destination
     if any(distribution_root.iterdir()):
@@ -3605,34 +3815,36 @@ def seal_distribution_set(
     os.chmod(stage, 0o700)
     try:
         _projection_path, forbidden_paths = _write_gatekeeper_public_projection(
-            stage, release_root, version
+            stage, package_root, version
         )
         _write_publication_bundle(
             stage,
             repository,
-            release_root,
+            package_root,
             version,
             forbidden_paths=forbidden_paths,
         )
         seal = _build_distribution_seal(
             repository,
-            release_root,
             stage,
             version=version,
             source_identity=source_identity,
             sealed_at=sealed_at,
             packaged_app_manifest_reader=packaged_app_manifest_reader,
             publication_semantic_verifier=publication_semantic_verifier,
+            publication_stage_verifier=publication_stage_verifier,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
         _write_canonical_new(stage / DISTRIBUTION_SEAL_NAME, seal)
         verify_distribution_set(
             stage,
             repository=repository,
-            release_root=release_root,
             version=version,
             expected_source_identity=source_identity,
             packaged_app_manifest_reader=packaged_app_manifest_reader,
             publication_semantic_verifier=publication_semantic_verifier,
+            publication_stage_verifier=publication_stage_verifier,
+            prepackage_stage_verifier=prepackage_stage_verifier,
             require_version_directory=False,
         )
         _fsync_release_set(stage, "distribution release set")
@@ -3644,11 +3856,12 @@ def seal_distribution_set(
                     verify_distribution_set(
                         destination,
                         repository=repository,
-                        release_root=release_root,
                         version=version,
                         expected_source_identity=source_identity,
                         packaged_app_manifest_reader=packaged_app_manifest_reader,
                         publication_semantic_verifier=publication_semantic_verifier,
+                        publication_stage_verifier=publication_stage_verifier,
+                        prepackage_stage_verifier=prepackage_stage_verifier,
                     )
                     _confirm_release_set_durable(
                         stage, destination, "distribution release set"
@@ -3656,11 +3869,12 @@ def seal_distribution_set(
                     verify_distribution_set(
                         destination,
                         repository=repository,
-                        release_root=release_root,
                         version=version,
                         expected_source_identity=source_identity,
                         packaged_app_manifest_reader=packaged_app_manifest_reader,
                         publication_semantic_verifier=publication_semantic_verifier,
+                        publication_stage_verifier=publication_stage_verifier,
+                        prepackage_stage_verifier=prepackage_stage_verifier,
                     )
                 except (ArtifactSetError, OSError, ValueError) as recovery_error:
                     raise ArtifactSetError(
@@ -3678,11 +3892,12 @@ def seal_distribution_set(
         verify_distribution_set(
             destination,
             repository=repository,
-            release_root=release_root,
             version=version,
             expected_source_identity=source_identity,
             packaged_app_manifest_reader=packaged_app_manifest_reader,
             publication_semantic_verifier=publication_semantic_verifier,
+            publication_stage_verifier=publication_stage_verifier,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
         return destination
     except BaseException:
@@ -3692,17 +3907,19 @@ def seal_distribution_set(
 
 def verify_release_sets(
     repository: Path,
-    release_root: Path,
     *,
     version: str,
     expected_source_identity: dict[str, str] | None = None,
     packaged_app_manifest_reader: PackagedAppManifestReader = read_dmg_app_manifest,
     publication_semantic_verifier: PublicationSemanticVerifier = verify_publication_semantics,
+    publication_stage_verifier: PublicationStageVerifier | None = None,
+    prepackage_stage_verifier: PrepackageStageVerifier | None = None,
 ) -> tuple[Path, ...]:
     """Return only files admitted by the complete final distribution seal."""
-    version = _require_semver(version)
-    updater = release_root / "updater" / f"v{version}"
-    dmg = release_root / "dmg" / f"v{version}"
+    version = _require_active_version(version)
+    package_root = _package_root(repository)
+    updater = _updater_set_root(repository)
+    dmg = _dmg_set_root(repository)
     archive_name, signature_name, latest_name = _updater_names(version)
     dmg_names = _dmg_names(version)
     forbidden_legacy = {
@@ -3712,11 +3929,11 @@ def verify_release_sets(
         *dmg_names,
     }
     for name in forbidden_legacy:
-        if os.path.lexists(release_root / name):
+        if os.path.lexists(package_root / name):
             raise ArtifactSetError(
                 f"legacy unsealed release asset is present at the release root: {name}"
             )
-    distribution_root = release_root / "distribution"
+    distribution_root = package_root / "distribution"
     _require_real_directory(distribution_root, "distribution release root")
     try:
         distribution_entries = list(distribution_root.iterdir())
@@ -3730,17 +3947,18 @@ def verify_release_sets(
     verify_distribution_set(
         distribution,
         repository=repository,
-        release_root=release_root,
         version=version,
         expected_source_identity=expected_source_identity,
         packaged_app_manifest_reader=packaged_app_manifest_reader,
         publication_semantic_verifier=publication_semantic_verifier,
+        publication_stage_verifier=publication_stage_verifier,
+        prepackage_stage_verifier=prepackage_stage_verifier,
     )
     paths = [
         *(
             path
             for path, _maximum in _release_asset_paths(
-                release_root,
+                package_root,
                 version,
                 distribution_directory=distribution,
             ).values()
@@ -3772,8 +3990,12 @@ def self_check() -> None:
         >= MAX_PUBLICATION_BUNDLE_BYTES
     ):
         raise ArtifactSetError("public release bundle has no container overhead reserve")
-    if DISTRIBUTION_SEAL_DOCUMENT != "cfw-distribution-release-set-seal-v1":
+    if DISTRIBUTION_SEAL_DOCUMENT != "cfw-ga-distribution-package-set-seal-v1":
         raise ArtifactSetError("distribution seal contract drifted")
+    if UPDATER_SEAL_DOCUMENT != "cfw-updater-release-set-seal-v2":
+        raise ArtifactSetError("updater seal contract drifted")
+    if DMG_SEAL_DOCUMENT != "cfw-dmg-release-set-seal-v2":
+        raise ArtifactSetError("DMG seal contract drifted")
     if _official_url("0.4.0", _updater_names("0.4.0")[0]) != (
         "https://github.com/billlza/cfw-rs/releases/download/v0.4.0/"
         "Clash.for.Mac_0.4.0_aarch64.app.tar.gz"
@@ -3782,7 +4004,11 @@ def self_check() -> None:
     print("release artifact set self-check ok")
 
 
-def main() -> None:
+def main(
+    *,
+    prepackage_stage_verifier: PrepackageStageVerifier | None = None,
+    publication_stage_verifier: PublicationStageVerifier | None = None,
+) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -3791,20 +4017,25 @@ def main() -> None:
     seal_updater = commands.add_parser("seal-updater")
     seal_updater.add_argument("--staging", type=Path, required=True)
     seal_updater.add_argument("--destination", type=Path, required=True)
-    seal_updater.add_argument("--version", required=True)
+    seal_updater.add_argument(
+        "--version", choices=(CANDIDATE_VERSION,), required=True
+    )
     seal_updater.add_argument("--repository", type=Path, required=True)
 
     for name in ("verify-updater", "verify-dmg"):
         command = commands.add_parser(name)
         command.add_argument("--directory", type=Path, required=True)
-        command.add_argument("--version", required=True)
+        command.add_argument(
+            "--version", choices=(CANDIDATE_VERSION,), required=True
+        )
         command.add_argument("--repository", type=Path, required=True)
 
     for name in ("seal-release", "verify-release"):
         command = commands.add_parser(name)
         command.add_argument("--repository", type=Path, required=True)
-        command.add_argument("--release-root", type=Path, required=True)
-        command.add_argument("--version", required=True)
+        command.add_argument(
+            "--version", choices=(CANDIDATE_VERSION,), required=True
+        )
 
     arguments = parser.parse_args()
     try:
@@ -3821,6 +4052,7 @@ def main() -> None:
                 source_identity=identity,
                 sealed_at=_utc_now(),
                 repository=arguments.repository,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             )
             print(f"updater release set published: {destination}")
         elif arguments.command == "verify-updater":
@@ -3832,6 +4064,7 @@ def main() -> None:
                 repository=arguments.repository,
                 version=arguments.version,
                 expected_source_identity=identity,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             )
             print(f"updater release set verified: {arguments.directory}")
         elif arguments.command == "verify-dmg":
@@ -3843,6 +4076,7 @@ def main() -> None:
                 repository=arguments.repository,
                 version=arguments.version,
                 expected_source_identity=identity,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             )
             print(f"DMG release set verified: {arguments.directory}")
         elif arguments.command == "seal-release":
@@ -3851,10 +4085,11 @@ def main() -> None:
             )
             destination = seal_distribution_set(
                 arguments.repository,
-                arguments.release_root,
                 version=arguments.version,
                 source_identity=identity,
                 sealed_at=_utc_now(),
+                publication_stage_verifier=publication_stage_verifier,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             )
             print(f"distribution release set published: {destination}")
         elif arguments.command == "verify-release":
@@ -3863,12 +4098,13 @@ def main() -> None:
             )
             for path in verify_release_sets(
                 arguments.repository,
-                arguments.release_root,
                 version=arguments.version,
                 expected_source_identity=identity,
+                publication_stage_verifier=publication_stage_verifier,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             ):
                 print(path)
-        else:  # pragma: no cover - argparse owns command exhaustiveness
+        else:
             raise ArtifactSetError("unsupported release artifact set command")
     except (
         ArtifactSetError,
@@ -3878,7 +4114,3 @@ def main() -> None:
         ValueError,
     ) as error:
         raise SystemExit(f"error: release artifact set: {error}") from error
-
-
-if __name__ == "__main__":
-    main()

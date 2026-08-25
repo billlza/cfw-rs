@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 import gzip
@@ -7,12 +8,15 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import tarfile
 import tempfile
+import threading
 from typing import Callable
 import unittest
 from unittest.mock import patch
 
+import scripts.dmg_notarization_transaction as dmg_transaction
 from scripts.dmg_notarization_transaction import (
     DmgContext,
     execute_transaction,
@@ -24,7 +28,13 @@ from scripts.hash_artifact import build_manifest
 from scripts.notarization_transaction import (
     CommandResult,
     CommandRole,
+    NOTARY_PROFILE,
     TransactionError,
+)
+from scripts.publication.common import PublicationError
+from scripts.publication.ga_release_contract import (
+    verify_prepackage_authorization as verify_ga_prepackage_stage,
+    verify_publication_authorization as verify_ga_publication_stages,
 )
 from scripts.release_artifact_set import (
     ArtifactSetError,
@@ -38,6 +48,7 @@ from scripts.release_artifact_set import (
     MAX_UPDATER_ARCHIVE_BYTES,
     ReleaseVerifierBuild,
     _release_toolchain_surface,
+    seal_dmg_set,
     seal_distribution_set,
     seal_updater_set,
     verify_distribution_set,
@@ -72,10 +83,36 @@ SEALED_SOURCE_IDENTITY = {
 }
 
 
-def create_signed_candidate(repository: Path, build_number: str = "40000") -> Path:
+def prepackage_binding(
+    repository: Path, manifest: Path
+) -> dict[str, object]:
+    data = manifest.read_bytes()
+    return {
+        "manifest": {
+            "filename": manifest.name,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+        },
+        "manifest_path": str(manifest.relative_to(repository)),
+    }
+
+
+def create_prepackage_stage(repository: Path) -> tuple[Path, dict[str, object]]:
+    manifest = (
+        repository
+        / "target/candidates/0.4.0/ga/40031/prepackage/manifest.json"
+    )
+    manifest.parent.mkdir(parents=True, mode=0o700)
+    manifest.write_text(
+        '{"fixture":"verified-prepackage-stage"}\n', encoding="utf-8"
+    )
+    return manifest, prepackage_binding(repository, manifest)
+
+
+def create_signed_candidate(repository: Path, build_number: str = "40031") -> Path:
     app = (
         repository
-        / "target/candidates/0.4.0/signed/Clash for Mac.app"
+        / "target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app"
     )
     executable = app / "Contents/MacOS/clash-for-mac"
     executable.parent.mkdir(parents=True)
@@ -84,7 +121,7 @@ def create_signed_candidate(repository: Path, build_number: str = "40000") -> Pa
     executable.chmod(0o755)
     metadata = {
         "architecture": "arm64",
-        "artifactKind": "notarized-release-v1",
+        "artifactKind": "notarized-ga-candidate-v1",
         "buildNumber": build_number,
         "deploymentTarget": "15.0",
         "releaseSourceSha256": SEALED_SOURCE_IDENTITY["release_source_sha256"],
@@ -428,22 +465,21 @@ class DmgFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.app = create_signed_candidate(self.repository)
-        self.release_root = self.repository / "target/candidates/0.4.0/release"
-        (self.release_root / "dmg").mkdir(parents=True)
-        self.transaction_root = (
-            self.repository / "target/candidates/0.4.0/release-transactions/dmg"
+        self.ga_root = self.repository / "target/candidates/0.4.0/ga/40031"
+        self.prepackage_manifest, self.prepackage = create_prepackage_stage(
+            self.repository
         )
-        staging = self.release_root / "dmg/stage"
+        self.package_root = self.ga_root / "packages"
+        (self.package_root / "dmg").mkdir(parents=True)
+        staging = self.package_root / "dmg/dmg-stage.fixture"
         staging.mkdir()
         self.dmg = staging / "Clash.for.Mac_0.4.0_arm64.dmg"
         self.dmg.write_bytes(ARCHIVE_BYTES)
         self.context = DmgContext(
             repository=self.repository,
-            release_root=self.release_root,
-            transaction_root=self.transaction_root,
             version="0.4.0",
-            build_number="40000",
-            notary_profile="fixture-profile",
+            build_number="40031",
+            notary_profile=NOTARY_PROFILE,
             source_identity=SOURCE_IDENTITY,
             staged_dmg=self.dmg,
         )
@@ -463,12 +499,18 @@ class DmgFixture:
     def package_manifest(self, _dmg: Path) -> dict[str, object]:
         return build_manifest(self.app, algorithm="sha256-tree-v2")
 
+    def prepackage_stage(self, repository: Path) -> dict[str, object]:
+        if repository != self.repository:
+            raise AssertionError("prepackage verifier used the wrong repository")
+        return prepackage_binding(repository, self.prepackage_manifest)
+
     def verify(self, destination: Path) -> dict:
         return verify_dmg_set(
             destination,
             repository=self.repository,
             version="0.4.0",
             packaged_app_manifest_reader=self.package_manifest,
+            prepackage_stage_verifier=self.prepackage_stage,
         )
 
     def arguments(self) -> dict[str, object]:
@@ -480,6 +522,7 @@ class DmgFixture:
             "packaged_app_manifest_reader": self.package_manifest,
             "clock": lambda: CLOCK,
             "attempt_id_factory": lambda: ATTEMPT_ID,
+            "prepackage_stage_verifier": self.prepackage_stage,
         }
 
     def execute(self, **overrides: object) -> Path:
@@ -520,7 +563,202 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
             SUBMISSION_ID,
         )
         self.assertTrue((destination / "dmg-set.seal.json").is_file())
-        self.assertFalse((self.fixture.release_root / self.fixture.context.dmg_name).exists())
+        self.assertFalse((self.fixture.package_root / self.fixture.context.dmg_name).exists())
+        intent = json.loads(
+            (self.fixture.context.attempt_root / "intent.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        receipt = json.loads(
+            (
+                self.fixture.context.attempt_root / "submission-receipt.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(intent["schema_version"], 3)
+        self.assertEqual(intent["notary_profile"], NOTARY_PROFILE)
+        self.assertEqual(receipt["schema_version"], 2)
+        self.assertEqual(receipt["notary_profile"], NOTARY_PROFILE)
+
+    def test_nonfixed_notary_profile_is_rejected_before_dmg_custody_or_remote_io(
+        self,
+    ) -> None:
+        with self.assertRaises(TransactionError) as raised:
+            execute_transaction(
+                replace(
+                    self.fixture.context,
+                    notary_profile="different-profile",
+                ),
+                **self.fixture.arguments(),
+            )
+        self.assertEqual(raised.exception.code, "invalid_notary_profile")
+        self.assertTrue(self.fixture.dmg.is_file())
+        self.assertFalse(self.fixture.context.attempt_root.exists())
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_initial_prepare_holds_recovery_lock_before_attempt_creation(self) -> None:
+        entered_prepare = threading.Event()
+        release_prepare = threading.Event()
+        real_prepare = dmg_transaction._prepare_attempt
+
+        def blocking_prepare(*args: object, **kwargs: object):
+            self.assertFalse(self.fixture.context.attempt_root.exists())
+            entered_prepare.set()
+            if not release_prepare.wait(5):
+                raise AssertionError("test did not release DMG preparation")
+            return real_prepare(*args, **kwargs)
+
+        with patch.object(
+            dmg_transaction,
+            "_prepare_attempt",
+            side_effect=blocking_prepare,
+        ), ThreadPoolExecutor(max_workers=2) as executor:
+            executing = executor.submit(self.fixture.execute)
+            try:
+                self.assertTrue(entered_prepare.wait(2))
+                self.assertTrue(self.fixture.context.transaction_root.is_dir())
+                self.assertFalse(self.fixture.context.attempt_root.exists())
+                with self.assertRaises(TransactionError) as raised:
+                    self.fixture.recover()
+                self.assertEqual(
+                    raised.exception.code,
+                    "recovery_in_progress",
+                )
+                self.assertEqual(self.fixture.runner.calls, [])
+            finally:
+                release_prepare.set()
+            self.assertTrue(executing.result(timeout=5).is_dir())
+
+    def test_context_derives_only_the_fixed_ga_package_and_transaction_roots(self) -> None:
+        self.assertEqual(
+            self.fixture.context.final_root,
+            self.fixture.repository
+            / "target/candidates/0.4.0/ga/40031/packages/dmg/v0.4.0",
+        )
+        self.assertEqual(
+            self.fixture.context.attempt_root,
+            self.fixture.repository
+            / "target/candidates/0.4.0/ga/40031/transactions/dmg-notary/v0.4.0",
+        )
+
+    def test_non_ga_build_is_rejected_before_any_remote_command(self) -> None:
+        runner = FakeRunner(self.fixture.context.dmg_name)
+        with self.assertRaisesRegex(TransactionError, "active GA build"):
+            execute_transaction(
+                replace(self.fixture.context, build_number="40030"),
+                runner=runner,
+                gatekeeper_capture=self.fixture.gatekeeper,
+                source_identity_reader=self.fixture.source_identity,
+                publisher=publisher,
+                clock=lambda: CLOCK,
+                attempt_id_factory=lambda: ATTEMPT_ID,
+                packaged_app_manifest_reader=self.fixture.package_manifest,
+            )
+        self.assertEqual(runner.calls, [])
+
+    def test_missing_prepackage_is_rejected_before_dmg_custody_or_submit(self) -> None:
+        self.fixture.prepackage_manifest.unlink()
+        with self.assertRaisesRegex(TransactionError, "prepackage stage authorization"):
+            self.fixture.execute()
+        self.assertTrue(self.fixture.dmg.is_file())
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_recovery_reopens_the_intent_bound_prepackage_stage(self) -> None:
+        self.fixture.runner.crash_role = CommandRole.WAIT
+        with self.assertRaises(SimulatedCrash):
+            self.fixture.execute()
+        self.fixture.prepackage_manifest.write_text(
+            '{"fixture":"drifted-prepackage-stage"}\n', encoding="utf-8"
+        )
+        recovery_runner = FakeRunner(self.fixture.context.dmg_name)
+        with self.assertRaisesRegex(TransactionError, "differs from the DMG transaction intent"):
+            self.fixture.recover(runner=recovery_runner)
+        self.assertEqual(recovery_runner.calls, [])
+
+    def test_recovery_rejects_notary_profile_drift_in_intent_before_apple_io(
+        self,
+    ) -> None:
+        self.fixture.runner.crash_role = CommandRole.WAIT
+        with self.assertRaises(SimulatedCrash):
+            self.fixture.execute()
+        intent_path = self.fixture.context.attempt_root / "intent.json"
+        intent = json.loads(intent_path.read_text(encoding="utf-8"))
+        intent["notary_profile"] = "different-profile"
+        intent_path.write_bytes(
+            dmg_transaction._canonical_json(intent).encode("utf-8")
+        )
+        recovery_runner = FakeRunner(self.fixture.context.dmg_name)
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(runner=recovery_runner)
+        self.assertEqual(raised.exception.code, "intent_identity_drift")
+        self.assertEqual(recovery_runner.calls, [])
+
+    def test_recovery_rejects_notary_profile_drift_in_receipt_before_apple_io(
+        self,
+    ) -> None:
+        self.fixture.runner.crash_role = CommandRole.WAIT
+        with self.assertRaises(SimulatedCrash):
+            self.fixture.execute()
+        receipt_path = self.fixture.context.attempt_root / "submission-receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["notary_profile"] = "different-profile"
+        receipt_path.write_bytes(
+            dmg_transaction._canonical_json(receipt).encode("utf-8")
+        )
+        recovery_runner = FakeRunner(self.fixture.context.dmg_name)
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(runner=recovery_runner)
+        self.assertEqual(
+            raised.exception.code,
+            "submission_receipt_identity_drift",
+        )
+        self.assertEqual(recovery_runner.calls, [])
+
+    def test_direct_preflight_cli_cannot_bypass_the_prepackage_stage(self) -> None:
+        from scripts import dmg_notarization_transaction as transaction
+
+        self.fixture.prepackage_manifest.unlink()
+        arguments = [
+            str(Path(transaction.__file__).resolve()),
+            "preflight",
+            "--repository",
+            str(self.fixture.repository),
+            "--version",
+            "0.4.0",
+            "--build-number",
+            "40031",
+            "--notary-profile",
+            NOTARY_PROFILE,
+        ]
+        with patch.object(sys, "argv", arguments), patch.object(
+            transaction, "current_identity", return_value=SOURCE_IDENTITY
+        ):
+            with self.assertRaisesRegex(SystemExit, "prepackage"):
+                transaction.main()
+
+    def test_dmg_sealer_rejects_a_caller_selected_staging_root(self) -> None:
+        with self.assertRaisesRegex(ArtifactSetError, "transaction final-set"):
+            seal_dmg_set(
+                self.fixture.dmg.parent,
+                repository=self.fixture.repository,
+                version="0.4.0",
+                build_number="40031",
+                pre_staple_sha256="a" * 64,
+                prepackage=self.fixture.prepackage,
+                source_identity=SEALED_SOURCE_IDENTITY,
+                sealed_at=CLOCK,
+                packaged_app_manifest_reader=self.fixture.package_manifest,
+                prepackage_stage_verifier=self.fixture.prepackage_stage,
+            )
+        with self.assertRaisesRegex(ArtifactSetError, "transaction final-set"):
+            verify_dmg_set(
+                self.fixture.dmg.parent,
+                repository=self.fixture.repository,
+                version="0.4.0",
+                require_version_directory=False,
+                prepackage_stage_verifier=self.fixture.prepackage_stage,
+            )
 
     def test_submit_reply_loss_recovers_by_unique_history_without_resubmit(self) -> None:
         self.fixture.runner.crash_role = CommandRole.SUBMIT
@@ -596,7 +834,7 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
         self.fixture.runner.crash_role = CommandRole.SUBMIT
         with self.assertRaises(SimulatedCrash):
             self.fixture.execute()
-        second_stage = self.fixture.release_root / "dmg/second"
+        second_stage = self.fixture.package_root / "dmg/dmg-stage.second"
         second_stage.mkdir()
         second_dmg = second_stage / self.fixture.context.dmg_name
         second_dmg.write_bytes(ARCHIVE_BYTES)
@@ -610,6 +848,7 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
                 publisher=publisher,
                 clock=lambda: CLOCK,
                 attempt_id_factory=lambda: "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+                prepackage_stage_verifier=self.fixture.prepackage_stage,
             )
         self.assertEqual(second_runner.calls, [])
 
@@ -772,9 +1011,17 @@ class UpdaterArtifactSetTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
         self.app = create_signed_candidate(self.root)
-        self.staging = self.root / "updater-stage"
+        self.prepackage_manifest, self.prepackage = create_prepackage_stage(
+            self.root
+        )
+        self.package_root = (
+            self.root / "target/candidates/0.4.0/ga/40031/packages"
+        )
+        updater_root = self.package_root / "updater"
+        updater_root.mkdir(parents=True, mode=0o700)
+        self.staging = updater_root / "updater-stage.fixture"
         self.staging.mkdir(mode=0o700)
-        self.destination = self.root / "v0.4.0"
+        self.destination = updater_root / "v0.4.0"
         self.archive_name = "Clash.for.Mac_0.4.0_aarch64.app.tar.gz"
         self.archive = self.staging / self.archive_name
         self.signature = self.staging / f"{self.archive_name}.sig"
@@ -826,6 +1073,11 @@ class UpdaterArtifactSetTests(unittest.TestCase):
         require_fixture_cargo_boundary(repository)
         yield self.verifier_build
 
+    def prepackage_stage(self, repository: Path) -> dict[str, object]:
+        if repository != self.root:
+            raise AssertionError("prepackage verifier used the wrong repository")
+        return prepackage_binding(repository, self.prepackage_manifest)
+
     def seal(self, publish: Callable[[Path, Path], None] = publisher) -> Path:
         with patch(
             "scripts.release_artifact_set._compiled_release_verifier",
@@ -839,6 +1091,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
                 sealed_at=CLOCK,
                 repository=self.root,
                 publisher=publish,
+                prepackage_stage_verifier=self.prepackage_stage,
             )
 
     def verify(self, directory: Path | None = None) -> dict:
@@ -850,18 +1103,115 @@ class UpdaterArtifactSetTests(unittest.TestCase):
                 directory or self.destination,
                 repository=self.root,
                 version="0.4.0",
+                prepackage_stage_verifier=self.prepackage_stage,
             )
 
     def test_complete_updater_group_is_published_as_one_directory(self) -> None:
         destination = self.seal()
         self.assertFalse(self.staging.exists())
+        seal = self.verify(destination)
+        self.assertEqual(seal["schema_version"], 2)
+        self.assertEqual(seal["document"], "cfw-updater-release-set-seal-v2")
+        self.assertEqual(seal["prepackage"], self.prepackage)
         self.assertEqual(
-            self.verify(destination)["official_url"],
+            seal["official_url"],
             (
                 "https://github.com/billlza/cfw-rs/releases/download/v0.4.0/"
                 + self.archive_name
             ),
         )
+
+    def test_missing_prepackage_fails_before_updater_verifier_or_publication(self) -> None:
+        self.prepackage_manifest.unlink()
+        with self.assertRaisesRegex(ArtifactSetError, "prepackage stage authorization"):
+            self.seal()
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(self.verification.exists())
+
+    def test_wrong_prepackage_digest_cannot_be_written_into_the_updater_seal(self) -> None:
+        wrong = {
+            "manifest": {**self.prepackage["manifest"], "sha256": "0" * 64},
+            "manifest_path": self.prepackage["manifest_path"],
+        }
+        with self.assertRaisesRegex(ArtifactSetError, "differs from the sealed release asset"):
+            seal_updater_set(
+                self.staging,
+                self.destination,
+                version="0.4.0",
+                source_identity=SEALED_SOURCE_IDENTITY,
+                sealed_at=CLOCK,
+                repository=self.root,
+                prepackage_stage_verifier=lambda _repository: wrong,
+            )
+        self.assertFalse(self.destination.exists())
+
+    def test_prepackage_drift_after_sealing_invalidates_updater_verification(self) -> None:
+        destination = self.seal()
+        self.prepackage_manifest.write_text(
+            '{"fixture":"drifted-after-updater-seal"}\n', encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ArtifactSetError, "prepackage"):
+            self.verify(destination)
+
+    def test_prepackage_manifest_mutation_during_authorization_is_rejected(self) -> None:
+        def mutate(_repository: Path, _stage: str) -> dict[str, object]:
+            self.prepackage_manifest.write_text(
+                '{"fixture":"mutated-during-stage-check"}\n', encoding="utf-8"
+            )
+            return {"document": "fixture"}
+
+        with patch(
+            "scripts.publication.ga_release_contract.verify_stage", side_effect=mutate
+        ):
+            with self.assertRaisesRegex(PublicationError, "changed during authorization"):
+                verify_ga_prepackage_stage(self.root)
+
+    def test_direct_seal_updater_cli_cannot_bypass_prepackage(self) -> None:
+        from scripts import release_artifact_set as artifact_sets
+        from scripts import release_artifact_set_cli as artifact_cli
+
+        self.prepackage_manifest.unlink()
+        arguments = [
+            str(Path(artifact_cli.__file__).resolve()),
+            "seal-updater",
+            "--staging",
+            str(self.staging),
+            "--destination",
+            str(self.destination),
+            "--version",
+            "0.4.0",
+            "--repository",
+            str(self.root),
+        ]
+        with patch.object(sys, "argv", arguments), patch(
+            "scripts.release_python_runtime.require_closed_release_runtime"
+        ), patch.object(
+            artifact_sets, "current_identity", return_value=SOURCE_IDENTITY
+        ):
+            with self.assertRaisesRegex(SystemExit, "prepackage"):
+                artifact_cli.main()
+
+    def test_caller_selected_destination_is_rejected_before_verifier_build(self) -> None:
+        with self.assertRaisesRegex(ArtifactSetError, "fixed GA package path"):
+            seal_updater_set(
+                self.staging,
+                self.root / "caller-selected/v0.4.0",
+                version="0.4.0",
+                source_identity=SEALED_SOURCE_IDENTITY,
+                sealed_at=CLOCK,
+                repository=self.root,
+            )
+
+    def test_unsealed_updater_verifier_rejects_a_caller_selected_stage(self) -> None:
+        caller_stage = self.root / "updater-stage.caller"
+        caller_stage.mkdir()
+        with self.assertRaisesRegex(ArtifactSetError, "fixed GA package path"):
+            verify_updater_set(
+                caller_stage,
+                repository=self.root,
+                version="0.4.0",
+                require_version_directory=False,
+            )
 
     def test_caller_supplied_verified_receipt_is_discarded_and_reproduced(self) -> None:
         self.verification.write_text(
@@ -1226,11 +1576,12 @@ class DistributionFixture:
         # exact verifier/configuration source inputs that sealed the updater.
         self.verifier_build = create_release_verifier_build(self.dmg.repository)
         updater_set = self.updater.seal()
-        destination_parent = self.dmg.release_root / "updater"
+        destination_parent = self.dmg.package_root / "updater"
         destination_parent.mkdir()
         os.rename(updater_set, destination_parent / "v0.4.0")
-        publication = self.dmg.release_root / "publication"
-        publication.mkdir()
+        publication = self.dmg.ga_root / "stage-inputs/publication"
+        publication.mkdir(parents=True)
+        self.raw_publication = publication
         (self.dmg.repository / "LICENSE").write_text(
             "GPL-3.0-or-later fixture\n", encoding="utf-8"
         )
@@ -1258,26 +1609,54 @@ class DistributionFixture:
         (license_directory / "LICENSE.txt").write_text(
             "fixture third-party license and notice\n", encoding="utf-8"
         )
-        authorization = (
-            self.dmg.repository
-            / "target/candidates/0.4.0/release/sealed-manifest"
+        prepackage = self.dmg.prepackage_manifest
+        sealed_publication = self.dmg.ga_root / "publication/manifest.json"
+        sealed_publication.parent.mkdir()
+        sealed_publication.write_text(
+            '{"fixture":"publication"}\n', encoding="utf-8"
         )
-        authorization.mkdir()
-        (authorization / "sealed-evidence-manifest.json").write_text(
-            '{"fixture":"sealed authorization"}\n', encoding="utf-8"
-        )
+        self.prepackage_manifest = prepackage
+        self.publication_manifest = sealed_publication
         self.publication_semantic_verifier = (
             lambda _repository, _publication, _app: None
         )
+
+        def stage_verifier(repository: Path) -> dict[str, object]:
+            self.assert_repository(repository)
+
+            def record(path: Path) -> dict[str, object]:
+                data = path.read_bytes()
+                return {
+                    "filename": path.name,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "size": len(data),
+                }
+
+            return {
+                "legal_source": {"fixture": "same-prepackage-publication-source"},
+                "prepackage_manifest": record(self.prepackage_manifest),
+                "prepackage_manifest_path": str(
+                    self.prepackage_manifest.relative_to(repository)
+                ),
+                "publication_manifest": record(self.publication_manifest),
+                "publication_manifest_path": str(
+                    self.publication_manifest.relative_to(repository)
+                ),
+            }
+
+        self.publication_stage_verifier = stage_verifier
 
     def close(self) -> None:
         self.updater.tearDown()
         self.dmg.close()
 
-    @contextmanager
-    def _compiled_verifier(self, repository: Path):
+    def assert_repository(self, repository: Path) -> None:
         if repository != self.dmg.repository:
             raise AssertionError("distribution verifier used the wrong repository")
+
+    @contextmanager
+    def _compiled_verifier(self, repository: Path):
+        self.assert_repository(repository)
         require_fixture_cargo_boundary(repository)
         yield self.verifier_build
 
@@ -1288,13 +1667,14 @@ class DistributionFixture:
         ), verified_cargo_fixture(self.verifier_build):
             return seal_distribution_set(
                 self.dmg.repository,
-                self.dmg.release_root,
                 version="0.4.0",
                 source_identity=SEALED_SOURCE_IDENTITY,
                 sealed_at=CLOCK,
                 publisher=publication_publisher,
                 packaged_app_manifest_reader=self.dmg.package_manifest,
                 publication_semantic_verifier=self.publication_semantic_verifier,
+                publication_stage_verifier=self.publication_stage_verifier,
+                prepackage_stage_verifier=self.dmg.prepackage_stage,
             )
 
     def verify_release(self) -> list[Path]:
@@ -1304,11 +1684,12 @@ class DistributionFixture:
         ), verified_cargo_fixture(self.verifier_build):
             return verify_release_sets(
                 self.dmg.repository,
-                self.dmg.release_root,
                 version="0.4.0",
                 expected_source_identity=SEALED_SOURCE_IDENTITY,
                 packaged_app_manifest_reader=self.dmg.package_manifest,
                 publication_semantic_verifier=self.publication_semantic_verifier,
+                publication_stage_verifier=self.publication_stage_verifier,
+                prepackage_stage_verifier=self.dmg.prepackage_stage,
             )
 
     def verify(self, destination: Path) -> dict:
@@ -1319,11 +1700,12 @@ class DistributionFixture:
             return verify_distribution_set(
                 destination,
                 repository=self.dmg.repository,
-                release_root=self.dmg.release_root,
                 version="0.4.0",
                 expected_source_identity=SEALED_SOURCE_IDENTITY,
                 packaged_app_manifest_reader=self.dmg.package_manifest,
                 publication_semantic_verifier=self.publication_semantic_verifier,
+                publication_stage_verifier=self.publication_stage_verifier,
+                prepackage_stage_verifier=self.dmg.prepackage_stage,
             )
 
 
@@ -1347,7 +1729,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
         self.assertEqual(len(uploadable), 15)
         self.assertIn(destination / DISTRIBUTION_SEAL_NAME, uploadable)
         private_gatekeeper = (
-            self.fixture.dmg.release_root
+            self.fixture.dmg.package_root
             / "dmg/v0.4.0/Clash.for.Mac_0.4.0_arm64.gatekeeper.json"
         )
         public_gatekeeper = (
@@ -1370,7 +1752,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
         self.assertEqual(public_evidence["assessment_type"], "open")
         self.assertIs(public_evidence["primary_signature_context"], True)
         final_dmg = (
-            self.fixture.dmg.release_root
+            self.fixture.dmg.package_root
             / "dmg/v0.4.0/Clash.for.Mac_0.4.0_arm64.dmg"
         )
         self.assertEqual(
@@ -1430,10 +1812,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
         )
 
     def test_nested_corresponding_source_has_a_separate_smaller_bound(self) -> None:
-        source = (
-            self.fixture.dmg.release_root
-            / "publication/corresponding-source.tar.gz"
-        )
+        source = self.fixture.raw_publication / "corresponding-source.tar.gz"
         with source.open("r+b") as handle:
             handle.truncate(MAX_CORRESPONDING_SOURCE_ARCHIVE_BYTES + 1)
         with patch(
@@ -1448,7 +1827,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
 
     def test_public_projection_requires_the_original_real_target_bytes(self) -> None:
         private_gatekeeper = (
-            self.fixture.dmg.release_root
+            self.fixture.dmg.package_root
             / "dmg/v0.4.0/Clash.for.Mac_0.4.0_arm64.gatekeeper.json"
         )
         assessed_target = Path(
@@ -1477,22 +1856,16 @@ class DistributionArtifactSetTests(unittest.TestCase):
 
     def test_private_gatekeeper_copy_cannot_enter_public_sources(self) -> None:
         private_gatekeeper = (
-            self.fixture.dmg.release_root
+            self.fixture.dmg.package_root
             / "dmg/v0.4.0/Clash.for.Mac_0.4.0_arm64.gatekeeper.json"
         )
-        leaked = (
-            self.fixture.dmg.release_root
-            / "publication/renamed-gatekeeper-evidence.json"
-        )
+        leaked = self.fixture.raw_publication / "renamed-gatekeeper-evidence.json"
         leaked.write_bytes(private_gatekeeper.read_bytes())
         with self.assertRaisesRegex(ArtifactSetError, "leaks a private Gatekeeper"):
             self.fixture.seal()
 
     def test_private_visibility_document_cannot_enter_public_sources(self) -> None:
-        private_document = (
-            self.fixture.dmg.release_root
-            / "publication/final-candidate.private.json"
-        )
+        private_document = self.fixture.raw_publication / "final-candidate.private.json"
         private_document.write_text(
             '{"evidence":{"visibility":"private-release-operations"}}\n',
             encoding="utf-8",
@@ -1503,10 +1876,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
             self.fixture.seal()
 
     def test_private_evidence_visibility_cannot_enter_public_sources(self) -> None:
-        private_document = (
-            self.fixture.dmg.release_root
-            / "publication/physical-archive.private.json"
-        )
+        private_document = self.fixture.raw_publication / "physical-archive.private.json"
         private_document.write_text(
             '{"visibility":"private-release-evidence"}\n',
             encoding="utf-8",
@@ -1515,10 +1885,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
             self.fixture.seal()
 
     def test_private_source_id_cannot_enter_public_sources(self) -> None:
-        private_document = (
-            self.fixture.dmg.release_root
-            / "publication/renamed-private-source.json"
-        )
+        private_document = self.fixture.raw_publication / "renamed-private-source.json"
         private_document.write_text(
             '{"sources":[{"id":"physical-evidence-private-archive"}]}\n',
             encoding="utf-8",
@@ -1527,22 +1894,56 @@ class DistributionArtifactSetTests(unittest.TestCase):
             self.fixture.seal()
 
     def test_private_evidence_filename_cannot_enter_public_sources(self) -> None:
-        private_document = (
-            self.fixture.dmg.release_root / "publication/physical-evidence.json"
-        )
+        private_document = self.fixture.raw_publication / "physical-evidence.json"
         private_document.write_text('{"fixture":true}\n', encoding="utf-8")
         with self.assertRaisesRegex(ArtifactSetError, "private evidence filename"):
             self.fixture.seal()
 
     def test_publication_closure_drift_is_rejected(self) -> None:
         destination = self.fixture.seal()
-        legal = self.fixture.dmg.release_root / "publication/legal-review.json"
+        legal = self.fixture.raw_publication / "legal-review.json"
         legal.write_text('{"fixture":"changed"}\n', encoding="utf-8")
         with self.assertRaisesRegex(ArtifactSetError, "publication evidence"):
             self.fixture.verify(destination)
 
+    def test_publication_stage_seal_drift_is_rejected(self) -> None:
+        destination = self.fixture.seal()
+        self.fixture.publication_manifest.write_text(
+            '{"fixture":"changed publication seal"}\n', encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ArtifactSetError, "publication evidence"):
+            self.fixture.verify(destination)
+
+    def test_direct_seal_release_rejects_missing_publication_stage(self) -> None:
+        def reject_stage(_repository: Path) -> dict[str, object]:
+            raise ArtifactSetError("fixture publication stage is unavailable")
+
+        self.fixture.publication_stage_verifier = reject_stage
+        with self.assertRaisesRegex(ArtifactSetError, "publication stage is unavailable"):
+            self.fixture.seal()
+
+    def test_direct_verify_release_reopens_publication_stage(self) -> None:
+        destination = self.fixture.seal()
+
+        def reject_stage(_repository: Path) -> dict[str, object]:
+            raise ArtifactSetError("fixture publication stage was tampered")
+
+        self.fixture.publication_stage_verifier = reject_stage
+        with self.assertRaisesRegex(ArtifactSetError, "publication stage was tampered"):
+            self.fixture.verify(destination)
+
+    def test_prepackage_and_publication_must_bind_one_legal_source(self) -> None:
+        prepackage = {"bindings": {"legal_source": {"tree": "a"}}}
+        publication = {"bindings": {"legal_source": {"tree": "b"}}}
+        with patch(
+            "scripts.publication.ga_release_contract.verify_stage",
+            side_effect=(prepackage, publication),
+        ):
+            with self.assertRaisesRegex(PublicationError, "legal sources differ"):
+                verify_ga_publication_stages(self.fixture.dmg.repository)
+
     def test_source_archive_or_sbom_cannot_be_omitted_from_public_bundle(self) -> None:
-        spdx = self.fixture.dmg.release_root / "publication/sbom.spdx.json"
+        spdx = self.fixture.raw_publication / "sbom.spdx.json"
         spdx.unlink()
         with self.assertRaisesRegex(ArtifactSetError, "omits CCS"):
             self.fixture.seal()
@@ -1558,10 +1959,7 @@ class DistributionArtifactSetTests(unittest.TestCase):
             self.fixture.verify(destination)
 
     def test_corresponding_source_cannot_be_omitted_from_public_bundle(self) -> None:
-        source = (
-            self.fixture.dmg.release_root
-            / "publication/corresponding-source.tar.gz"
-        )
+        source = self.fixture.raw_publication / "corresponding-source.tar.gz"
         source.unlink()
         with self.assertRaisesRegex(ArtifactSetError, "omits CCS"):
             self.fixture.seal()
@@ -1606,13 +2004,16 @@ class DistributionArtifactSetTests(unittest.TestCase):
         with self.assertRaisesRegex(ArtifactSetError, "distribution release root"):
             verify_release_sets(
                 self.fixture.dmg.repository,
-                self.fixture.dmg.release_root,
                 version="0.4.0",
                 expected_source_identity=SEALED_SOURCE_IDENTITY,
                 packaged_app_manifest_reader=self.fixture.dmg.package_manifest,
                 publication_semantic_verifier=(
                     self.fixture.publication_semantic_verifier
                 ),
+                publication_stage_verifier=(
+                    self.fixture.publication_stage_verifier
+                ),
+                prepackage_stage_verifier=self.fixture.dmg.prepackage_stage,
             )
 
     def test_python_sealer_requires_semantic_publication_authorization(self) -> None:
@@ -1630,13 +2031,16 @@ class DistributionArtifactSetTests(unittest.TestCase):
             ):
                 seal_distribution_set(
                     self.fixture.dmg.repository,
-                    self.fixture.dmg.release_root,
                     version="0.4.0",
                     source_identity=SEALED_SOURCE_IDENTITY,
                     sealed_at=CLOCK,
                     publisher=publisher,
                     packaged_app_manifest_reader=self.fixture.dmg.package_manifest,
                     publication_semantic_verifier=reject_semantics,
+                    publication_stage_verifier=(
+                        self.fixture.publication_stage_verifier
+                    ),
+                    prepackage_stage_verifier=self.fixture.dmg.prepackage_stage,
                 )
 
 
@@ -1646,24 +2050,69 @@ class ReleaseUploadGateTests(unittest.TestCase):
         fixture.setUp()
         try:
             fixture.seal()
-            release_root = fixture.root / "release"
-            (release_root / "updater").mkdir(parents=True)
-            os.rename(fixture.destination, release_root / "updater/v0.4.0")
             with self.assertRaisesRegex(ArtifactSetError, "unavailable"):
-                verify_release_sets(
-                    fixture.root, release_root, version="0.4.0"
-                )
+                verify_release_sets(fixture.root, version="0.4.0")
         finally:
             fixture.tearDown()
 
-    def test_gate_rejects_legacy_unsealed_assets_at_the_release_root(self) -> None:
+    def test_gate_rejects_legacy_unsealed_assets_at_the_package_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            release_root = Path(directory).resolve()
-            (release_root / "latest.json").write_text("{}\n", encoding="utf-8")
+            repository = Path(directory).resolve()
+            package_root = (
+                repository / "target/candidates/0.4.0/ga/40031/packages"
+            )
+            package_root.mkdir(parents=True)
+            (package_root / "latest.json").write_text("{}\n", encoding="utf-8")
             with self.assertRaisesRegex(ArtifactSetError, "legacy unsealed"):
-                verify_release_sets(
-                    release_root, release_root, version="0.4.0"
-                )
+                verify_release_sets(repository, version="0.4.0")
+
+
+class PackagingEntrypointContractTests(unittest.TestCase):
+    def test_shell_packagers_require_prepackage_and_fixed_ga_paths(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        for relative in ("make_dmg.sh", "make_updater_manifest.sh"):
+            source = (repository / "scripts" / relative).read_text(encoding="utf-8")
+            with self.subTest(script=relative):
+                self.assertIn("target/candidates/0.4.0/ga/40031", source)
+                self.assertIn("verify_release_prepackage_evidence", source)
+                self.assertNotIn("verify_release_" + "publication_evidence", source)
+                self.assertNotIn("target/candidates/0.4.0/" + "release", source)
+                self.assertNotIn("target/candidates/0.4.0/" + "signed", source)
+
+    def test_dmg_cli_has_no_caller_selected_output_roots(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        source = (
+            repository / "scripts/dmg_notarization_transaction.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("--release" + "-root", source)
+        self.assertNotIn("--transaction" + "-root", source)
+        self.assertIn('"transactions/dmg-notary"', source)
+        self.assertIn('"packages"', source)
+
+    def test_publication_gate_seals_and_verifies_the_distribution_allowlist(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        source = (repository / "scripts/release_publication_gate.sh").read_text(
+            encoding="utf-8"
+        )
+        seal_case = source[source.index("    --seal-publication)") : source.index(
+            "    --verify-prepackage)"
+        )]
+        self.assertLess(
+            seal_case.index("run_production_ga_stage publication"),
+            seal_case.index("run_production_ga_stage verify publication"),
+        )
+        self.assertLess(
+            seal_case.index("run_production_ga_stage verify publication"),
+            seal_case.index("seal-release"),
+        )
+        upload_start = source.index("verify_release_upload_artifacts()")
+        upload_function = source[
+            upload_start : source.index(
+                'if [[ "${BASH_SOURCE[0]}" == "$0" ]]', upload_start
+            )
+        ]
+        self.assertIn("verify_release_publication_evidence", upload_function)
+        self.assertIn("verify-release", upload_function)
 
 
 if __name__ == "__main__":

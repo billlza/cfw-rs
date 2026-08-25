@@ -45,12 +45,13 @@ if __package__:
         CommandResult,
         CommandRole,
         EventJournal,
+        NOTARY_PROFILE,
         TransactionError,
         _canonical_json,
         _capture_command_result,
         confirm_published_tree_durable,
         _decode_json_bytes,
-        _exclusive_recovery_lock,
+        _exclusive_attempt_recovery_lock,
         _fsync_directory,
         _fsync_tree,
         _hash_regular_file,
@@ -72,16 +73,20 @@ if __package__:
         publish_exclusive,
     )
     from .publication.common import PublicationError, copy_regular_new
+    from .publication.ga_release_contract import verify_prepackage_authorization
     from .release_artifact_set import (
         ArtifactSetError,
         DMG_SUBMISSION_DOCUMENT,
         MAX_DMG_BYTES,
+        MAX_PUBLICATION_DOCUMENT_BYTES,
         PackagedAppManifestReader,
+        PrepackageStageVerifier,
         read_dmg_app_manifest,
         seal_dmg_set,
         verify_dmg_set,
     )
     from .repository_source_identity import SourceIdentityError, current_identity
+    from .release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
     from .verify_notary_log import NotaryLogError, validate_documents
 else:
     from gatekeeper_assessment import (
@@ -93,12 +98,13 @@ else:
         CommandResult,
         CommandRole,
         EventJournal,
+        NOTARY_PROFILE,
         TransactionError,
         _canonical_json,
         _capture_command_result,
         confirm_published_tree_durable,
         _decode_json_bytes,
-        _exclusive_recovery_lock,
+        _exclusive_attempt_recovery_lock,
         _fsync_directory,
         _fsync_tree,
         _hash_regular_file,
@@ -120,32 +126,31 @@ else:
         publish_exclusive,
     )
     from publication.common import PublicationError, copy_regular_new
+    from publication.ga_release_contract import verify_prepackage_authorization
     from release_artifact_set import (
         ArtifactSetError,
         DMG_SUBMISSION_DOCUMENT,
         MAX_DMG_BYTES,
+        MAX_PUBLICATION_DOCUMENT_BYTES,
         PackagedAppManifestReader,
+        PrepackageStageVerifier,
         read_dmg_app_manifest,
         seal_dmg_set,
         verify_dmg_set,
     )
     from repository_source_identity import SourceIdentityError, current_identity
+    from release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
     from verify_notary_log import NotaryLogError, validate_documents
 
 
 EXPECTED_TEAM_ID = "YKUPL7Z869"
-INTENT_DOCUMENT = "cfw-dmg-notarization-intent-v1"
+_XCRUN = "/usr/bin/xcrun"
+INTENT_DOCUMENT = "cfw-dmg-notarization-intent-v3"
 OBSERVATION_DOCUMENT = "cfw-dmg-notarization-submission-observation-v1"
 MAX_DMG_EVENTS = 64
 MAX_RECOVERY_RUNS = 8
 MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
 STAPLE_PENDING_DIRECTORY = "staple-pending"
-SEMVER_RE = re.compile(
-    r"^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)"
-    r"(?:-((?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
-    r"(?:[.](?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?"
-    r"(?:[+]([0-9A-Za-z-]+(?:[.][0-9A-Za-z-]+)*))?$"
-)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 INTENT_FIELDS = {
@@ -155,7 +160,9 @@ INTENT_FIELDS = {
     "dmg_sha256",
     "dmg_size",
     "document",
+    "notary_profile",
     "prepared_at",
+    "prepackage",
     "release_source_sha256",
     "repository_commit",
     "schema_version",
@@ -181,6 +188,7 @@ SUBMISSION_FIELDS = {
     "document",
     "intent_sha256",
     "notary_created_at",
+    "notary_profile",
     "observed_at",
     "pre_staple_dmg_sha256",
     "schema_version",
@@ -254,8 +262,6 @@ SourceIdentityReader = Callable[[Path], dict[str, str]]
 @dataclass(frozen=True)
 class DmgContext:
     repository: Path
-    release_root: Path
-    transaction_root: Path
     version: str
     build_number: str
     notary_profile: str
@@ -267,12 +273,24 @@ class DmgContext:
         return f"Clash.for.Mac_{self.version}_arm64.dmg"
 
     @property
+    def ga_candidate_root(self) -> Path:
+        return ga_root(self.repository)
+
+    @property
+    def package_root(self) -> Path:
+        return self.ga_candidate_root / "packages"
+
+    @property
+    def transaction_root(self) -> Path:
+        return self.ga_candidate_root / "transactions/dmg-notary"
+
+    @property
     def attempt_root(self) -> Path:
-        return self.transaction_root / f"v{self.version}"
+        return self.transaction_root / f"v{ACTIVE_RELEASE_IDENTITY.product_version}"
 
     @property
     def final_root(self) -> Path:
-        return self.release_root / "dmg" / f"v{self.version}"
+        return self.package_root / "dmg" / f"v{ACTIVE_RELEASE_IDENTITY.product_version}"
 
 
 @dataclass
@@ -398,28 +416,31 @@ def _submitted_dmg_identity(path: Path) -> tuple[str, int]:
 def _validate_context(context: DmgContext, *, initial: bool) -> None:
     if not context.repository.is_absolute():
         raise TransactionError("unsafe_repository", "repository path must be absolute")
-    if not context.release_root.is_absolute() or not context.transaction_root.is_absolute():
-        raise TransactionError("unsafe_output_root", "release transaction paths must be absolute")
     for path, label in (
         (context.repository, "repository"),
-        (context.release_root, "release root"),
+        (context.ga_candidate_root, "GA candidate root"),
+        (context.package_root, "GA package root"),
         (context.transaction_root, "transaction root"),
     ):
         if path.resolve(strict=False) != path:
             raise TransactionError(
                 "unsafe_canonical_path", f"{label} path is not canonical"
             )
-    if not SEMVER_RE.fullmatch(context.version):
-        raise TransactionError("invalid_version", "DMG version is not strict SemVer")
-    if not re.fullmatch(r"[1-9][0-9]*", context.build_number) or len(context.build_number) > 18:
-        raise TransactionError("invalid_build_number", "DMG build number is not canonical")
-    if (
-        not context.notary_profile
-        or len(context.notary_profile) > 256
-        or "\0" in context.notary_profile
-        or any(ord(character) < 0x20 for character in context.notary_profile)
-    ):
-        raise TransactionError("invalid_notary_profile", "notary profile is malformed")
+    if context.version != ACTIVE_RELEASE_IDENTITY.product_version:
+        raise TransactionError(
+            "invalid_version",
+            "DMG transaction is fixed to the active GA product version",
+        )
+    if context.build_number != ACTIVE_RELEASE_IDENTITY.ga_build:
+        raise TransactionError(
+            "invalid_build_number",
+            "DMG transaction is fixed to the active GA build number",
+        )
+    if context.notary_profile != NOTARY_PROFILE:
+        raise TransactionError(
+            "invalid_notary_profile",
+            f"notary profile must be exactly {NOTARY_PROFILE}",
+        )
     if set(context.source_identity) != {"repositoryCommit", "releaseSourceSha256"}:
         raise TransactionError("source_identity_invalid", "release source identity is incomplete")
     if not COMMIT_RE.fullmatch(context.source_identity["repositoryCommit"]):
@@ -427,7 +448,8 @@ def _validate_context(context: DmgContext, *, initial: bool) -> None:
     if not SHA256_RE.fullmatch(context.source_identity["releaseSourceSha256"]):
         raise TransactionError("source_identity_invalid", "release source digest is malformed")
     _require_real_directory(context.repository, trusted=True)
-    _require_real_directory(context.release_root, trusted=True)
+    _require_real_directory(context.ga_candidate_root, trusted=True)
+    _require_real_directory(context.package_root, trusted=True)
     _require_real_directory(context.final_root.parent, trusted=True)
     if initial:
         if context.staged_dmg is None or not context.staged_dmg.is_absolute():
@@ -436,6 +458,15 @@ def _validate_context(context: DmgContext, *, initial: bool) -> None:
             raise TransactionError("unsafe_dmg_path", "staged DMG path is not canonical")
         if context.staged_dmg.name != context.dmg_name:
             raise TransactionError("dmg_name_mismatch", "staged DMG has the wrong release filename")
+        if (
+            context.staged_dmg.parent.parent != context.final_root.parent
+            or not context.staged_dmg.parent.name.startswith("dmg-stage.")
+            or context.staged_dmg.parent.name == "dmg-stage."
+        ):
+            raise TransactionError(
+                "unsafe_dmg_path",
+                "staged DMG must be inside the fixed GA DMG staging root",
+            )
         _dmg_identity(context.staged_dmg)
 
 
@@ -453,6 +484,73 @@ def _require_source_identity(
         raise TransactionError(
             "source_identity_drift", "release source identity changed during DMG notarization"
         )
+
+
+def _validate_prepackage_reference(
+    context: DmgContext, value: object
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"manifest", "manifest_path"}:
+        raise TransactionError(
+            "prepackage_identity_drift",
+            "DMG prepackage binding has an unexpected field set",
+        )
+    expected_path = context.ga_candidate_root / "prepackage/manifest.json"
+    if value["manifest_path"] != str(expected_path.relative_to(context.repository)):
+        raise TransactionError(
+            "prepackage_identity_drift",
+            "DMG prepackage binding uses a noncanonical path",
+        )
+    manifest = value["manifest"]
+    if not isinstance(manifest, dict) or set(manifest) != {
+        "filename",
+        "sha256",
+        "size",
+    }:
+        raise TransactionError(
+            "prepackage_identity_drift",
+            "DMG prepackage manifest binding has an unexpected field set",
+        )
+    if (
+        manifest["filename"] != "manifest.json"
+        or not isinstance(manifest["sha256"], str)
+        or not SHA256_RE.fullmatch(manifest["sha256"])
+        or not isinstance(manifest["size"], int)
+        or isinstance(manifest["size"], bool)
+        or manifest["size"] <= 0
+        or manifest["size"] > MAX_PUBLICATION_DOCUMENT_BYTES
+    ):
+        raise TransactionError(
+            "prepackage_identity_drift",
+            "DMG prepackage manifest identity is malformed",
+        )
+    return value
+
+
+def _require_prepackage_stage(
+    context: DmgContext,
+    verifier: PrepackageStageVerifier,
+    *,
+    expected: object | None = None,
+) -> dict[str, Any]:
+    try:
+        observed = _validate_prepackage_reference(
+            context, verifier(context.repository)
+        )
+    except TransactionError:
+        raise
+    except (ArtifactSetError, OSError, PublicationError, ValueError) as error:
+        raise TransactionError(
+            "prepackage_authorization_invalid",
+            "fixed GA prepackage stage authorization is invalid",
+        ) from error
+    if expected is not None and observed != _validate_prepackage_reference(
+        context, expected
+    ):
+        raise TransactionError(
+            "prepackage_identity_drift",
+            "current GA prepackage stage differs from the DMG transaction intent",
+        )
+    return observed
 
 
 def production_source_identity_reader(repository: Path) -> dict[str, str]:
@@ -498,8 +596,12 @@ def _ensure_private_roots(context: DmgContext) -> None:
         _mkdir_private(context.transaction_root, exclusive=True)
 
 
-def preflight_new(context: DmgContext) -> None:
+def preflight_new(
+    context: DmgContext,
+    prepackage_stage_verifier: PrepackageStageVerifier = verify_prepackage_authorization,
+) -> dict[str, Any]:
     _validate_context(context, initial=False)
+    prepackage = _require_prepackage_stage(context, prepackage_stage_verifier)
     if os.path.lexists(context.final_root):
         raise TransactionError(
             "release_set_exists", "refusing to replace an existing DMG release set"
@@ -511,6 +613,7 @@ def preflight_new(context: DmgContext) -> None:
         )
     if os.path.lexists(context.transaction_root):
         _require_real_directory(context.transaction_root, private=True)
+    return prepackage
 
 
 def _format_timestamp(value: datetime) -> str:
@@ -545,10 +648,11 @@ def _prepare_attempt(
     clock: Clock,
     attempt_id_factory: Callable[[], str],
     publisher: Publisher,
+    prepackage_stage_verifier: PrepackageStageVerifier,
 ) -> DmgAttempt:
     if context.staged_dmg is None:
         raise TransactionError("missing_dmg", "initial transaction has no staged DMG")
-    preflight_new(context)
+    prepackage = preflight_new(context, prepackage_stage_verifier)
     _ensure_private_roots(context)
     pending = context.transaction_root / (
         f".v{context.version}.pending-{_canonical_uuid(attempt_id_factory(), 'attempt id')}"
@@ -580,10 +684,12 @@ def _prepare_attempt(
             "dmg_sha256": after_digest,
             "dmg_size": after_size,
             "document": INTENT_DOCUMENT,
+            "notary_profile": context.notary_profile,
             "prepared_at": prepared_at,
+            "prepackage": prepackage,
             "release_source_sha256": context.source_identity["releaseSourceSha256"],
             "repository_commit": context.source_identity["repositoryCommit"],
-            "schema_version": 1,
+            "schema_version": 3,
             "submit_not_after": submit_not_after,
             "submit_not_before": prepared_at,
             "team_id": EXPECTED_TEAM_ID,
@@ -620,17 +726,20 @@ def _validate_intent(context: DmgContext, value: object) -> dict[str, Any]:
         raise TransactionError("intent_identity_drift", "DMG notarization intent has unexpected fields")
     if (
         type(value["schema_version"]) is not int
-        or value["schema_version"] != 1
+        or value["schema_version"] != 3
         or value["document"] != INTENT_DOCUMENT
         or value["version"] != context.version
         or value["build_number"] != context.build_number
         or value["dmg_name"] != context.dmg_name
         or value["team_id"] != EXPECTED_TEAM_ID
+        or value["notary_profile"] != NOTARY_PROFILE
+        or value["notary_profile"] != context.notary_profile
         or value["repository_commit"] != context.source_identity["repositoryCommit"]
         or value["release_source_sha256"]
         != context.source_identity["releaseSourceSha256"]
     ):
         raise TransactionError("intent_identity_drift", "DMG notarization intent identity differs")
+    _validate_prepackage_reference(context, value["prepackage"])
     _canonical_uuid(value["attempt_id"], "attempt id")
     if not SHA256_RE.fullmatch(value.get("dmg_sha256", "")):
         raise TransactionError("intent_identity_drift", "DMG intent digest is malformed")
@@ -687,7 +796,7 @@ def _validate_submission_receipt(
         )
     if (
         type(value["schema_version"]) is not int
-        or value["schema_version"] != 1
+        or value["schema_version"] != 2
         or value["document"] != DMG_SUBMISSION_DOCUMENT
         or value["attempt_id"] != intent["attempt_id"]
         or value["intent_sha256"] != intent_sha256
@@ -695,6 +804,8 @@ def _validate_submission_receipt(
         or value["build_number"] != intent["build_number"]
         or value["submitted_filename"] != intent["dmg_name"]
         or value["pre_staple_dmg_sha256"] != intent["dmg_sha256"]
+        or value["notary_profile"] != NOTARY_PROFILE
+        or value["notary_profile"] != intent["notary_profile"]
         or value["acquisition"] not in {"submit-no-wait", "explicit-recovery"}
     ):
         raise TransactionError(
@@ -901,9 +1012,10 @@ def _persist_submission_receipt(
         "document": DMG_SUBMISSION_DOCUMENT,
         "intent_sha256": attempt.intent_sha256,
         "notary_created_at": notary_created_at,
+        "notary_profile": attempt.context.notary_profile,
         "observed_at": clock(),
         "pre_staple_dmg_sha256": attempt.intent["dmg_sha256"],
-        "schema_version": 1,
+        "schema_version": 2,
         "submission_id": submission_id,
         "submitted_filename": attempt.intent["dmg_name"],
         "version": attempt.intent["version"],
@@ -937,7 +1049,7 @@ def _fetch_log(
         runner,
         CommandRole.FETCH_LOG,
         [
-            "/usr/bin/xcrun",
+            _XCRUN,
             "notarytool",
             "log",
             submission_id,
@@ -1060,13 +1172,13 @@ def _staple_and_verify(
     _command_ok(
         runner,
         CommandRole.STAPLE,
-        ["/usr/bin/xcrun", "stapler", "staple", str(dmg)],
+        [_XCRUN, "stapler", "staple", str(dmg)],
         600,
     )
     _command_ok(
         runner,
         CommandRole.STAPLE_VALIDATE,
-        ["/usr/bin/xcrun", "stapler", "validate", str(dmg)],
+        [_XCRUN, "stapler", "validate", str(dmg)],
         300,
     )
     stapled_digest, _stapled_size = _dmg_identity(dmg)
@@ -1217,6 +1329,7 @@ def _prepare_and_publish_set(
     clock: Clock,
     publisher: Publisher,
     packaged_app_manifest_reader: PackagedAppManifestReader,
+    prepackage_stage_verifier: PrepackageStageVerifier,
 ) -> Path:
     context = attempt.context
     if os.path.lexists(context.final_root):
@@ -1225,6 +1338,7 @@ def _prepare_and_publish_set(
             repository=context.repository,
             version=context.version,
             packaged_app_manifest_reader=packaged_app_manifest_reader,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
         if seal["submission_id"] != submission_id:
             raise TransactionError(
@@ -1238,6 +1352,7 @@ def _prepare_and_publish_set(
             repository=context.repository,
             version=context.version,
             packaged_app_manifest_reader=packaged_app_manifest_reader,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
         if seal["submission_id"] != submission_id:
             raise TransactionError(
@@ -1255,6 +1370,7 @@ def _prepare_and_publish_set(
                 version=context.version,
                 packaged_app_manifest_reader=packaged_app_manifest_reader,
                 require_version_directory=False,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             )
         except (ArtifactSetError, OSError, ValueError):
             _safe_remove_partial_final_set(final_set)
@@ -1287,12 +1403,14 @@ def _prepare_and_publish_set(
             version=context.version,
             build_number=context.build_number,
             pre_staple_sha256=attempt.intent["dmg_sha256"],
+            prepackage=attempt.intent["prepackage"],
             source_identity={
                 "repository_commit": context.source_identity["repositoryCommit"],
                 "release_source_sha256": context.source_identity["releaseSourceSha256"],
             },
             sealed_at=clock(),
             packaged_app_manifest_reader=packaged_app_manifest_reader,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
     if _validate_journal(attempt.journal) != "sealed":
         _append(attempt, "sealed", submission_id=submission_id)
@@ -1307,6 +1425,7 @@ def _prepare_and_publish_set(
                     repository=context.repository,
                     version=context.version,
                     packaged_app_manifest_reader=packaged_app_manifest_reader,
+                    prepackage_stage_verifier=prepackage_stage_verifier,
                 )
             except (ArtifactSetError, OSError, ValueError):
                 pass
@@ -1320,6 +1439,7 @@ def _prepare_and_publish_set(
                         repository=context.repository,
                         version=context.version,
                         packaged_app_manifest_reader=packaged_app_manifest_reader,
+                        prepackage_stage_verifier=prepackage_stage_verifier,
                     )
                     if seal["submission_id"] != submission_id:
                         raise TransactionError(
@@ -1343,6 +1463,7 @@ def _prepare_and_publish_set(
         repository=context.repository,
         version=context.version,
         packaged_app_manifest_reader=packaged_app_manifest_reader,
+        prepackage_stage_verifier=prepackage_stage_verifier,
     )
     if seal["submission_id"] != submission_id:
         raise TransactionError(
@@ -1361,6 +1482,7 @@ def _finalize_accepted(
     publisher: Publisher,
     clock: Clock,
     packaged_app_manifest_reader: PackagedAppManifestReader,
+    prepackage_stage_verifier: PrepackageStageVerifier,
 ) -> Path:
     _fetch_log(attempt, submission_id, runner=runner)
     _append(attempt, "log_verified", submission_id=submission_id)
@@ -1392,6 +1514,7 @@ def _finalize_accepted(
         clock=clock,
         publisher=publisher,
         packaged_app_manifest_reader=packaged_app_manifest_reader,
+        prepackage_stage_verifier=prepackage_stage_verifier,
     )
 
 
@@ -1440,11 +1563,17 @@ def _direct_submit(
     publisher: Publisher,
     clock: Clock,
     packaged_app_manifest_reader: PackagedAppManifestReader,
+    prepackage_stage_verifier: PrepackageStageVerifier,
 ) -> Path:
     context = attempt.context
+    _require_prepackage_stage(
+        context,
+        prepackage_stage_verifier,
+        expected=attempt.intent["prepackage"],
+    )
     _append(attempt, "submitting")
     command = [
-        "/usr/bin/xcrun",
+        _XCRUN,
         "notarytool",
         "submit",
         str(attempt.dmg_path),
@@ -1495,7 +1624,7 @@ def _direct_submit(
             runner,
             CommandRole.WAIT,
             [
-                "/usr/bin/xcrun",
+                _XCRUN,
                 "notarytool",
                 "wait",
                 submission_id,
@@ -1541,6 +1670,7 @@ def _direct_submit(
             publisher=publisher,
             clock=clock,
             packaged_app_manifest_reader=packaged_app_manifest_reader,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
     except Exception as error:
         _record_deferred(
@@ -1559,17 +1689,25 @@ def execute_transaction(
     packaged_app_manifest_reader: PackagedAppManifestReader = read_dmg_app_manifest,
     clock: Clock = _utc_now,
     attempt_id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
+    prepackage_stage_verifier: PrepackageStageVerifier = verify_prepackage_authorization,
 ) -> Path:
     _validate_context(context, initial=True)
     _require_source_identity(context, source_identity_reader)
-    attempt = _prepare_attempt(
-        context,
-        clock=clock,
-        attempt_id_factory=attempt_id_factory,
-        publisher=publisher,
-    )
-    with _exclusive_recovery_lock(context.attempt_root / "intent.json"):
+    _ensure_private_roots(context)
+    with _exclusive_attempt_recovery_lock(context):
+        attempt = _prepare_attempt(
+            context,
+            clock=clock,
+            attempt_id_factory=attempt_id_factory,
+            publisher=publisher,
+            prepackage_stage_verifier=prepackage_stage_verifier,
+        )
         _require_source_identity(context, source_identity_reader)
+        _require_prepackage_stage(
+            context,
+            prepackage_stage_verifier,
+            expected=attempt.intent["prepackage"],
+        )
         return _direct_submit(
             attempt,
             runner=runner,
@@ -1577,6 +1715,7 @@ def execute_transaction(
             publisher=publisher,
             clock=clock,
             packaged_app_manifest_reader=packaged_app_manifest_reader,
+            prepackage_stage_verifier=prepackage_stage_verifier,
         )
 
 
@@ -1591,7 +1730,7 @@ def _read_recovery_acceptance(
         runner,
         CommandRole.INFO,
         [
-            "/usr/bin/xcrun",
+            _XCRUN,
             "notarytool",
             "info",
             submission_id,
@@ -1644,7 +1783,7 @@ def _read_recovery_acceptance(
             runner,
             CommandRole.HISTORY,
             [
-                "/usr/bin/xcrun",
+                _XCRUN,
                 "notarytool",
                 "history",
                 "--keychain-profile",
@@ -1678,12 +1817,18 @@ def recover_transaction(
     publisher: Publisher = publish_exclusive,
     packaged_app_manifest_reader: PackagedAppManifestReader = read_dmg_app_manifest,
     clock: Clock = _utc_now,
+    prepackage_stage_verifier: PrepackageStageVerifier = verify_prepackage_authorization,
 ) -> Path:
     submission_id = _canonical_uuid(submission_id, "recovery submission id")
     _validate_context(context, initial=False)
     _require_source_identity(context, source_identity_reader)
-    with _exclusive_recovery_lock(context.attempt_root / "intent.json"):
+    with _exclusive_attempt_recovery_lock(context):
         attempt = _load_attempt(context, clock=clock)
+        _require_prepackage_stage(
+            context,
+            prepackage_stage_verifier,
+            expected=attempt.intent["prepackage"],
+        )
         state = _validate_journal(attempt.journal)
         if attempt.submission_id is not None and attempt.submission_id != submission_id:
             raise TransactionError(
@@ -1700,6 +1845,7 @@ def recover_transaction(
                 repository=context.repository,
                 version=context.version,
                 packaged_app_manifest_reader=packaged_app_manifest_reader,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             )
             if seal["submission_id"] != submission_id:
                 raise TransactionError(
@@ -1713,6 +1859,7 @@ def recover_transaction(
                 repository=context.repository,
                 version=context.version,
                 packaged_app_manifest_reader=packaged_app_manifest_reader,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             )
             if seal["submission_id"] != submission_id:
                 raise TransactionError(
@@ -1730,6 +1877,7 @@ def recover_transaction(
                 repository=context.repository,
                 version=context.version,
                 packaged_app_manifest_reader=packaged_app_manifest_reader,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             )
             if seal["submission_id"] != submission_id:
                 raise TransactionError(
@@ -1743,6 +1891,7 @@ def recover_transaction(
                 repository=context.repository,
                 version=context.version,
                 packaged_app_manifest_reader=packaged_app_manifest_reader,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             )
             if seal["submission_id"] != submission_id:
                 raise TransactionError(
@@ -1806,6 +1955,7 @@ def recover_transaction(
                 publisher=publisher,
                 clock=clock,
                 packaged_app_manifest_reader=packaged_app_manifest_reader,
+                prepackage_stage_verifier=prepackage_stage_verifier,
             )
         except Exception as error:
             _record_deferred(
@@ -1823,7 +1973,11 @@ def self_check() -> None:
         "submission_observed",
     }:
         raise TransactionError("self_check_failed", "DMG submit transition drifted")
-    if "/usr/bin/xcrun" != "/usr/bin/xcrun":
+    if INTENT_DOCUMENT != "cfw-dmg-notarization-intent-v3":
+        raise TransactionError("self_check_failed", "DMG intent contract drifted")
+    if NOTARY_PROFILE != "clashformac-notary":
+        raise TransactionError("self_check_failed", "DMG notary profile drifted")
+    if _XCRUN != "/usr/bin/xcrun":
         raise TransactionError("self_check_failed", "system-tool path drifted")
     print("DMG notarization transaction self-check ok")
 
@@ -1835,8 +1989,6 @@ def _context_from_arguments(
     identity = current_identity(repository, require_clean=True)
     return DmgContext(
         repository=repository,
-        release_root=arguments.release_root,
-        transaction_root=arguments.transaction_root,
         version=arguments.version,
         build_number=arguments.build_number,
         notary_profile=arguments.notary_profile,
@@ -1852,10 +2004,16 @@ def main() -> None:
     for name in ("preflight", "start", "recover"):
         command = commands.add_parser(name)
         command.add_argument("--repository", type=Path, required=True)
-        command.add_argument("--release-root", type=Path, required=True)
-        command.add_argument("--transaction-root", type=Path, required=True)
-        command.add_argument("--version", required=True)
-        command.add_argument("--build-number", required=True)
+        command.add_argument(
+            "--version",
+            choices=(ACTIVE_RELEASE_IDENTITY.product_version,),
+            required=True,
+        )
+        command.add_argument(
+            "--build-number",
+            choices=(ACTIVE_RELEASE_IDENTITY.ga_build,),
+            required=True,
+        )
         command.add_argument("--notary-profile", required=True)
         if name == "start":
             command.add_argument("--dmg", type=Path, required=True)

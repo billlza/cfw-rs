@@ -18,8 +18,11 @@ product graph the macOS 15 Network Extension migration requires:
   present for each signed product;
 * the canonical inside-out signing-order manifest lists every nested component
   before the outer host app, its destinations agree with the Tauri embedding
-  map, and the candidate signing script signs the outer app strictly after
-  every nested component.
+  map, and the transaction-owned GA signing helper signs the outer app strictly
+  after every nested component;
+* the candidate builder freezes and reopens the GA input before entering the
+  signing-attempt transaction, while the transaction is the only tracked caller
+  permitted to invoke the signing helper.
 
 The gate is offline and non-recursive: it only reads tracked files and never
 invokes another build system, a network client, or a solver.  It fails closed —
@@ -478,44 +481,30 @@ def verify_native_build_script(build: str) -> None:
         "build_scheme CFWPacketTunnelExtension",
     ):
         require_text(build, scheme, "candidate native build schemes")
-    # Provisioning inputs for the signed products must be required by the build.
-    require_text(
-        build,
-        "PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER",
-        "candidate native build provisioning",
+    # The builder is deliberately pre-sign only. Provisioning, designated
+    # requirements, and Developer ID mutations belong to the separate
+    # post-freeze signing transaction and must never move back into this step.
+    for contract in (
+        "usage: scripts/build_native_products.sh --unsigned|--pre-sign",
+        'signing_mode="pre-sign"',
+        "CODE_SIGNING_ALLOWED=NO",
+        "CODE_SIGNING_REQUIRED=NO",
+    ):
+        require_text(build, contract, "candidate native pre-sign contract")
+    forbidden_signing_fragments = (
+        "--developer-id",
+        "MACOS_SIGN_IDENTITY",
+        "PROVISIONING_PROFILE_SPECIFIER",
+        "codesign",
+        "authority_designated_requirement",
     )
-    require_text(
-        build,
-        "PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER",
-        "candidate native build provisioning",
-    )
-    require_text(
-        build,
-        "CFW_PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER=",
-        "candidate target-local ProxyAgent provisioning",
-    )
-    require_text(
-        build,
-        "CFW_PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER=",
-        "candidate target-local Packet Tunnel provisioning",
-    )
-    if '    PROVISIONING_PROFILE_SPECIFIER="' in build:
+    present = [fragment for fragment in forbidden_signing_fragments if fragment in build]
+    if present:
         raise NativeProductGraphError(
-            "candidate native build must not propagate a provisioning profile "
-            "specifier to dependency targets"
+            "candidate native builder contains pre-freeze signing operations: "
+            f"{present!r}"
         )
     require_text(build, "ARCHS=arm64", "candidate native build architecture")
-    for signing_contract in (
-        "authority_designated_requirement=",
-        '-r="$authority_designated_requirement"',
-        'csreq -r="$authority_designated_requirement"',
-        "Global Authority designated requirement mismatch",
-    ):
-        require_text(
-            build,
-            signing_contract,
-            "candidate Global Authority exact signing requirement",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -783,29 +772,97 @@ def verify_signing_order(
                 f"{destination}"
             )
 
-    # The candidate signing script must sign the outer app strictly after every
-    # nested component, proving the inside-out order in the executable pipeline.
-    # The single `--sign` of the Developer ID identity is the outer host app
-    # seal; nested components are pre-signed during the native product build.
-    outer_index = signing_script.find('--sign "$MACOS_SIGN_IDENTITY"')
-    if outer_index < 0 or signing_script.count('--sign "$MACOS_SIGN_IDENTITY"') != 1:
+    # The transaction-owned helper must sign every nested component and the
+    # legacy tombstone before applying the sole outer-app signature.  Bind the
+    # frozen certificate fingerprint rather than a mutable identity name.
+    signing_selector = '--sign "$CFW_SIGNING_CERTIFICATE_SHA1"'
+    if '"$MACOS_SIGN_IDENTITY"' in signing_script:
         raise NativeProductGraphError(
-            "candidate signing script does not sign the outer host app exactly once"
+            "GA signing helper must not use a mutable signing identity name"
         )
+    outer_fragment = f'{signing_selector} "$staged_app"'
+    outer_index = signing_script.find(outer_fragment)
+    if outer_index < 0 or signing_script.count(outer_fragment) != 1:
+        raise NativeProductGraphError(
+            "GA signing helper does not sign the outer host app exactly once"
+        )
+    if signing_script.count(signing_selector) != len(nested) + 1:
+        raise NativeProductGraphError(
+            "GA signing helper must apply exactly one signature per nested "
+            "component and one outer host signature"
+        )
+
+    nested_variables = {
+        f"Contents/{BRIDGE_EMBED}": "bridge",
+        f"Contents/{DAEMON_EMBED}": "authority",
+        f"Contents/{AGENT_EMBED}": "proxy_app",
+        f"Contents/{EXTENSION_EMBED}": "packet_extension",
+        "Contents/Library/HelperTools/cfw-helper-tombstone": "tombstone",
+    }
     for entry in nested:
         destination = entry["destination"]
-        staged_reference = f'"$staged_app/{destination}"'
-        nested_index = signing_script.find(staged_reference)
-        if nested_index < 0:
+        variable = nested_variables.get(destination)
+        if variable is None:
             raise NativeProductGraphError(
-                "candidate signing script does not reference nested component "
-                f"before the outer app: {destination}"
+                f"GA signing helper has no fixed variable for nested component: {destination}"
+            )
+        assignment = f'{variable}="$staged_app/{destination}"'
+        if signing_script.count(assignment) != 1:
+            raise NativeProductGraphError(
+                f"GA signing helper does not bind nested component exactly once: {destination}"
+            )
+        nested_fragment = f'{signing_selector} "${variable}"'
+        nested_index = signing_script.find(nested_fragment)
+        if nested_index < 0 or signing_script.count(nested_fragment) != 1:
+            raise NativeProductGraphError(
+                f"GA signing helper does not sign nested component exactly once: {destination}"
             )
         if nested_index > outer_index:
             raise NativeProductGraphError(
-                "candidate signing script signs the outer app before nested component: "
+                "GA signing helper signs the outer app before nested component: "
                 f"{destination}"
             )
+
+
+def verify_signing_transaction_boundary(
+    candidate_builder: str, transaction_script: str, signing_helper: str
+) -> None:
+    freeze = 'candidate_freeze.py" freeze'
+    reopen = 'candidate_freeze.py" verify'
+    transaction = 'signing_attempt_transaction.py"'
+    freeze_index = candidate_builder.find(freeze)
+    transaction_index = candidate_builder.find(transaction)
+    if freeze_index < 0 or transaction_index < 0 or freeze_index > transaction_index:
+        raise NativeProductGraphError(
+            "candidate builder must freeze the GA input before signing-attempt entry"
+        )
+    reopen_index = candidate_builder.rfind(reopen, 0, transaction_index)
+    if reopen_index < freeze_index:
+        raise NativeProductGraphError(
+            "candidate builder must reopen the frozen GA input immediately before signing"
+        )
+    if (
+        "run_ga_signing_attempt.sh" in candidate_builder
+        or "/usr/bin/codesign" in candidate_builder
+    ):
+        raise NativeProductGraphError(
+            "candidate builder must not bypass the signing-attempt transaction"
+        )
+    if transaction_script.count('"scripts/run_ga_signing_attempt.sh"') != 1:
+        raise NativeProductGraphError(
+            "signing-attempt transaction must own exactly one GA signing helper invocation"
+        )
+    if transaction_script.count('"--transaction-owned"') != 1:
+        raise NativeProductGraphError(
+            "signing-attempt transaction must invoke its helper through the private boundary"
+        )
+    if (
+        '[[ $# -eq 1 && "$1" == "--transaction-owned" ]]' not in signing_helper
+        or "CFW_SIGNING_ATTEMPT_WORK" not in signing_helper
+    ):
+        raise NativeProductGraphError(
+            "GA signing helper does not enforce transaction ownership"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -816,7 +873,9 @@ def verify_repository(root: Path) -> None:
     package = read_text(root, "native/macos/Package.swift")
     pbx = read_text(root, "native/macos/CFWNative.xcodeproj/project.pbxproj")
     native_build = read_text(root, "scripts/build_native_products.sh")
-    signing_script = read_text(root, "scripts/build_signed_candidate.sh")
+    candidate_builder = read_text(root, "scripts/build_signed_candidate.sh")
+    signing_transaction = read_text(root, "scripts/signing_attempt_transaction.py")
+    signing_helper = read_text(root, "scripts/run_ga_signing_attempt.sh")
     authority_contract = read_text(
         root,
         "native/macos/Sources/CFWSharedProtocol/GlobalAuthorityConnectionContract.swift",
@@ -874,7 +933,10 @@ def verify_repository(root: Path) -> None:
     verify_entitlements(root)
 
     manifest = read_json(root, "native/macos/Config/signing-order.json")
-    verify_signing_order(manifest, files, signing_script)
+    verify_signing_order(manifest, files, signing_helper)
+    verify_signing_transaction_boundary(
+        candidate_builder, signing_transaction, signing_helper
+    )
 
 
 def main() -> int:

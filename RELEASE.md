@@ -4,13 +4,15 @@ This project releases only an arm64 application for macOS 15 or newer. A green
 Rust, JavaScript, or Swift unit-test lane is necessary but does not establish a
 releasable Network Extension product.
 
-> **v0.4.0 policy calibration:** the accepted ordinary-GA versus assurance
+> **v0.4.0 policy calibration:** the executable ordinary-GA versus assurance
 > boundary is recorded in
 > [`docs/release/ga-assurance-policy-v040.md`](docs/release/ga-assurance-policy-v040.md).
-> Its implementation is pending. The current executable gate remains
-> authoritative until that migration lands, so the document alone cannot
-> authorize a build or release. Builds 40030 and 40031 remain reserved and have
-> not been consumed by the current source or CI corrections.
+> The release has one candidate identity: build 40031. Build 40030 is retired
+> unbuilt as `retired_unbuilt_policy_superseded`; it must never be rebuilt,
+> signed, installed, or used as a validation companion. A passing policy or
+> source check alone does not consume build 40031. Its first durable candidate
+> freeze does, after which signing and evidence retries reuse those exact frozen
+> bytes and their append-only transaction identities.
 
 The project-wide build-number design rule is
 [`docs/release/candidate-identity-lifecycle.md`](docs/release/candidate-identity-lifecycle.md#build-number-allocation-and-consumption).
@@ -467,8 +469,8 @@ the sealed publication evidence but remains fail closed until that evidence has
 been prepared, legally reviewed, and finalized for the exact signed app. It has
 no success override and accepts only:
 
-- `target/candidates/0.4.0/signed/Clash for Mac.app` as the signed binary root;
-- `target/candidates/0.4.0/release/publication` as the final evidence root.
+- `target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app` as the signed binary root;
+- `target/candidates/0.4.0/ga/40031/stage-inputs/publication` as the final evidence root.
 
 It never scans or accepts `target/release`, which retains historical 0.3.5
 signed artifacts containing the old core/helper layout.
@@ -508,83 +510,40 @@ scripts/prepare_publication_evidence.sh review-template \
 # Resolve every item in component-review.json and every source blocker, then:
 scripts/prepare_publication_evidence.sh prepare \
   --libbox-source target/sources/sing-box-v1.13.15-patched \
-  --reviewed-components target/candidates/0.4.0/review/component-review.json
+  --reviewed-components target/candidates/0.4.0/ga/40031/stage-inputs/component-review.json
 
 scripts/run_publication_evidence.sh draft \
-  --prepared target/candidates/0.4.0/release/publication-prepared \
-  --app "target/candidates/0.4.0/signed/Clash for Mac.app" \
-  --output target/candidates/0.4.0/release/machine-closure.draft.json
+  --prepared target/candidates/0.4.0/ga/40031/stage-inputs/publication-prepared \
+  --app "target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app" \
+  --output target/candidates/0.4.0/ga/40031/stage-inputs/machine-closure.draft.json
 
 # A human legal reviewer must approve the exact printed closure digest and
-# component set in target/candidates/0.4.0/review/legal-review.json.
+# component set in target/candidates/0.4.0/ga/40031/stage-inputs/legal-review.json.
 scripts/run_publication_evidence.sh finalize \
-  --prepared target/candidates/0.4.0/release/publication-prepared \
-  --app "target/candidates/0.4.0/signed/Clash for Mac.app" \
-  --review target/candidates/0.4.0/review/legal-review.json \
-  --output target/candidates/0.4.0/release/publication
+  --prepared target/candidates/0.4.0/ga/40031/stage-inputs/publication-prepared \
+  --app "target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app" \
+  --review target/candidates/0.4.0/ga/40031/stage-inputs/legal-review.json \
+  --output target/candidates/0.4.0/ga/40031/stage-inputs/publication
 
-scripts/release_publication_gate.sh \
-  "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
+scripts/release_publication_gate.sh --seal-prepackage
 ```
 
-### Fixed 40030 to 40031 physical-candidate evidence sequence
+### Single-GA 40031 release sequence
 
 The canonical allocation ledger is
 [`docs/release/build-allocations-v040.json`](docs/release/build-allocations-v040.json).
-The build-boundary gate rejects an active pair that overlaps or truncates its
-immutable retired prefix.
+The build-boundary gate rejects any active validation/final pair or any change
+to the immutable retired prefix. Builds 40021 through 40029 retain their
+historical retirement records and artifacts; none may be relabelled, rebuilt,
+resubmitted, installed, or reused. Build 40030 is retired unbuilt by policy.
+Build 40031 is the sole `active_ga` identity.
 
-The production evidence composer has no fixture, path, output, build-number, or
-success-override option. Run this sequence exactly once from one clean release
-commit. Build identities through `40029` have already been allocated to older
-source closures or validation attempts. Build `40020` terminated at its
-fail-closed host-compatibility gate before Apple submission. Build `40021`
-completed Apple notarization, stapling, Gatekeeper, app, manifest, and sealed
-transaction verification under submission
-`29f581a9-ee90-4c21-830d-9de9838c6e79`, but was retired after notarization and
-before installation: its source-bound dormant installer still selected build
-`40009`, and the current ProxyAgent/GlobalAuthority decommission/recommission
-transaction did not yet exist. Preserve all three `40021` candidate, attempt,
-and global-claim roots permanently; do not rename, relabel, resubmit, install,
-or write a validated review for those bytes. The exact immutable identities and
-reason are recorded in
-[`docs/release/validation-build-40021-retirement.md`](docs/release/validation-build-40021-retirement.md).
-Build `40022` later completed Apple notarization, stapling, Gatekeeper, app,
-manifest, and transaction verification under submission
-`498a2113-725d-42c6-8738-0715ef156a26`, but its read-only preflight exposed the
-installed 40019 Proxy schema 5 / Authority v1.0 compatibility gap before any
-service or app mutation. Build 40022 and its reserved, unbuilt final companion
-40023 are both retired; preserve their identities and evidence exactly as
-recorded in
-[`docs/release/validation-build-40022-retirement.md`](docs/release/validation-build-40022-retirement.md).
-Build `40024` completed notarization, stapling, Gatekeeper, app, and manifest
-verification under Apple submission
-`da1cd32b-2614-49a1-9d56-b25a1eb94431`, but its read-only preflight exposed
-main-thread callback starvation and two exact installed-40019 observation/wire
-contract errors. No service registration or app mutation occurred. Preserve and
-retire those bytes as recorded in
-[`docs/release/validation-build-40024-retirement.md`](docs/release/validation-build-40024-retirement.md);
-never rebuild, relabel, resubmit, install, or approve that build. Its fixed but
-unbuilt final companion, build `40025`, is also retired and must never be
-reassigned.
-Build `40026` completed signing, notarization, stapling, Gatekeeper, app,
-manifest, and transaction verification under Apple submission
-`448638ab-d0b4-4789-82b1-25dcb770f8ee`, but installation admission exposed
-that the sealed build used Apple Swift 6.3.3 through `/usr/bin/swift` while the
-ambient preflight recomputation used Swiftly 6.0.3. No Host/XPC startup,
-journal, service, application, or collector mutation occurred. Build 40026 and
-its reserved, unbuilt final companion 40027 are permanently retired; preserve
-their evidence exactly as recorded in
-[`docs/release/validation-build-40026-retirement.md`](docs/release/validation-build-40026-retirement.md).
-Build `40028` stopped at the P0 source-gate boundary before candidate
-construction. Its first fixed-path P0 result and later passing attempt bind the
-same source identity, but the source-gate v2 contract had no append-only attempt
-journal and unique authoritative-success projection. No validation or final
-candidate was built, signed, notarized, installed, or submitted, and no service,
-collector, or cloud mutation occurred. Build 40028 and its reserved, unbuilt
-final companion 40029 are permanently retired; preserve their worktree and P0
-records exactly as recorded in
-[`docs/release/validation-build-40028-retirement.md`](docs/release/validation-build-40028-retirement.md).
+Run the sequence below from one clean release commit. Source, CI, preflight, or
+evidence failures before candidate freeze use their own append-only attempt or
+run identity and do not allocate another application build. Once
+`candidate-freeze/intent.json` exists, all retries reuse the exact frozen 40031
+inputs. A changed application, entitlement, profile, or nested-code input is a
+new product lineage, not an evidence retry.
 
 The 40019 compatibility path is read-only and exact-version only. Each legacy
 unregister action reproves Off before mutation. If a completed Authority
@@ -597,57 +556,75 @@ event. A retry after current registration follows that durable intent instead
 of guessing from service status, and it never labels recovery as a legacy v1.0
 wire proof.
 
-1. from the final clean release commit, create the fixed detached worktree
-   `target/release-worktrees/40030` and its otherwise empty direct `target`
-   directory. Before materializing any cache or build output, run this explicit
-   enrollment once from the operator repository root:
+1. require every source gate and the three jobs in the `CI` GitHub Actions
+   workflow to pass for the exact clean release commit. Retain the numeric
+   GitHub run ID; no local result, older SHA, foreign repository/workflow, or
+   superseded run attempt can satisfy the hosted gate;
+2. run the fixed builder with the live Developer ID profiles, notary Keychain
+   profile, and updater-key custody configured on the release Mac:
 
    ```bash
-   scripts/authorize_release_worktree.sh 40030
+   CFW_BUILD_NUMBER=40031 \
+   NOTARY_PROFILE=clashformac-notary \
+   MACOS_SIGN_IDENTITY='Developer ID Application: Zi ang Li (YKUPL7Z869)' \
+   HOST_PROVISIONING_PROFILE_PATH=/absolute/path/to/host.provisionprofile \
+   PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER=379ef639-4fff-4301-b083-3e49578f0910 \
+   PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER=3f275eaf-0fca-4af6-97a3-c93c4e83dc15 \
+   scripts/build_signed_candidate.sh --ga
    ```
 
-   The scanner never mints this receipt. The command atomically publishes a
-   main-Git-admin lifecycle receipt bound to the current admin, worktree,
-   reciprocal marker, detached HEAD, and empty target identities. Enrollment
-   is a quiescent, single-writer step: no other process may add target content
-   until the command returns. Only after that succeeds, materialize the real
-   non-symlink `target/toolchains` and
-   native dependency trees from the same pinned artifacts. Before any candidate
-   build, create owner-private evidence directories and collect the canonical
-   P0 source-gate record with its distinct durable attempt journal:
+   The builder first creates a pre-sign app and native graph, proves current
+   updater-key possession against the embedded public key, and freezes the
+   complete candidate. Signing then runs in append-only private attempts and
+   atomically publishes one `signing-output` container. The notarization
+   transaction reopens that transformation before Apple submission and binds
+   it through stapling, Gatekeeper, and the final app manifest;
+3. after freeze, capture the hosted run through the fixed public GitHub API and
+   run the separate deterministic local lane reproduction. The capture command
+   creates the private `stage-inputs` directory and writes only
+   `hosted-ci.json`; the local record is distinct:
 
    ```bash
-   /usr/bin/install -d -m 0700 \
-     target/candidates/0.4.0/release/evidence-inputs \
-     target/candidates/0.4.0/release/evidence-attempts
-   scripts/run_sealed_evidence_manifest.sh collect-source-gates \
-     --output target/candidates/0.4.0/release/evidence-inputs/p0-source-gates.json \
-     --journal target/candidates/0.4.0/release/evidence-attempts/source-gates
+   scripts/release_publication_gate.sh --capture-hosted-ci RUN_ID
+   scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
+     --output target/candidates/0.4.0/ga/40031/stage-inputs/local-ci-lanes.json \
+     --journal target/candidates/0.4.0/ga/40031/stage-inputs/local-ci-journal
+   scripts/release_publication_gate.sh --verify-hosted-ci
    ```
 
-   The collector durably commits an intent before the first gate runs. A
-   complete failed attempt remains append-only and may be followed by a new
-   numbered attempt. An interrupted attempt is recorded as
-   `outcome-unknown` and is never silently rerun. Only after inspecting that
-   retained history may an operator deliberately start the next attempt by
-   repeating the command with `--retry-after-outcome-unknown`; the flag never
-   rewrites, deletes, or promotes the unknown attempt. A passing attempt is the
-   only payload projected byte-for-byte to the canonical output. Then build and
-   notarize validation build `40030` directly in that worktree. The workspace
-   secret gate excludes only that authenticated worktree's direct managed-cache
-   roots; it still scans the worktree source and every `target/candidates`,
-   `target/tmp`, `target/release`, or unexpected tree;
+   Hosted capture and live verification fix the public repository ID, workflow
+   ID/path/name, `pull_request` event, exact head SHA, run ID/number/attempt,
+   three exact job names, and every successful job step. They read the run both
+   before and after its attempt-specific jobs. `prepackage`, final publication,
+   and upload live-revalidate this receipt; ordinary sealed-stage verification
+   reopens it offline to avoid treating GitHub availability or API rate limits
+   as an immutable-stage failure. The local 27-lane record remains corroborating
+   toolchain evidence and can never replace `hosted-ci.json`;
+4. after a signing failure, inspect the retained attempt and resume the same
+   frozen bytes. Do not allocate another build:
 
-   This is a Level 1 lifecycle/inode capability, not a signature or protection
-   against a malicious same-UID process. It specifically prevents an actor who
-   can plant paths under the workspace or `target` but cannot write the
-   owner-only main `.git` administrative tree from replaying a stale worktree
-   record. If that main Git administrative boundary is writable by the
-   attacker, this exclusion is not trusted and the release remains blocked;
-   the receipt authenticates only the cache path lifecycle and identity, not
-   cache bytes. Toolchain and native-dependency content must still pass their
-   existing `sha256-tree-v2` and manifest gates before use;
-2. while the old CFM is Off and its Host is absent, preserve the inactive
+   ```bash
+   CFW_BUILD_NUMBER=40031 NOTARY_PROFILE=clashformac-notary \
+     scripts/build_signed_candidate.sh --resume-signing
+   ```
+
+   If an Apple submit reply was lost before its submission ID was persisted,
+   recover only with that observed ID:
+
+   ```bash
+   CFW_BUILD_NUMBER=40031 NOTARY_PROFILE=clashformac-notary \
+     scripts/build_signed_candidate.sh --recover-notarization-id UUID
+   ```
+5. regenerate and legally review the fixed publication source/SBOM closure,
+   then seal `prepackage`. Only that immutable stage may authorize DMG and
+   updater package creation:
+
+   ```bash
+   scripts/release_publication_gate.sh --seal-prepackage
+   NOTARY_PROFILE=clashformac-notary scripts/make_dmg.sh
+   scripts/make_updater_manifest.sh
+   ```
+6. while the old CFM is Off and its Host is absent, preserve the inactive
    one-way legacy tombstone and run the fixed maintenance/install sequence:
 
    ```bash
@@ -673,87 +650,50 @@ wire proof.
    recommission journal would leave an unproven mixed state. Never use
    `launchctl bootout`, `kill`, `sfltool resetbtm`, Finder, `ditto`, or a DMG
    drag as a substitute;
-3. install and exercise validation build `40030`, preserving its fixed
-   CI/toolchain, app-manifest, notarization, service/install, and
-   runtime-recovery records;
-4. have a human reviewer approve those exact bytes in
-   `target/candidates/0.4.0/review/validated-candidate.json`;
-5. build, sign inside-out, notarize, staple, and Gatekeeper-verify final build
-   `40031` from the same clean source identity;
-6. repeat the fixed transaction using the independent final-generation
-   journals. This proves and installs only the exact `40030` to `40031`
-   transition without overwriting the validation-generation evidence:
+7. after the service and install journals are durably closed, run the fixed GA
+   runtime collector. It independently reopens the DMG set, proves the DMG's
+   contained app equals the installed 40031 tree, derives all twelve required
+   checks from bounded command output and packet captures, and proves shutdown
+   restored the CFW guard:
 
    ```bash
-   scripts/run_current_service_transaction.sh --final --preflight
-   scripts/run_current_service_transaction.sh --final --decommission
-   scripts/run_dormant_app_install.sh --final --preflight
-   scripts/run_dormant_app_install.sh --final --install
-   scripts/run_current_service_transaction.sh --final --recommission
+   scripts/run_ga_runtime_acceptance.sh collect
+   # Only when collect reports that it crossed the runtime boundary:
+   scripts/run_ga_runtime_acceptance.sh recover
+   scripts/run_ga_runtime_acceptance.sh verify
+   scripts/release_publication_gate.sh --seal-ga-acceptance
    ```
 
-   Any interruption must resume with the matching script's `--final
-   --recover` form. Before collection, reopen both final journals, prove build
-   `40031` is installed, prove GlobalAuthority and ProxyAgent belong to build
-   `40031`, and prove the engine remains globally Off;
-7. freeze the signed/notarized runtime candidate before collection:
+   `recover` is not a normal step and must not follow a successful collection.
+   Use it only after `collect` explicitly reports an interrupted runtime
+   boundary; it performs fixed normal shutdown/Off/CFW checks, archives that
+   failed attempt, and requires a fresh `collect`. Missing System Extension
+   approval, absent traffic, an installed-Host rejection that does not occur,
+   an incomplete journal, or any cleanup drift blocks this stage. Never replace
+   a failed check with a hand-written `passed` summary;
+8. the two-clean-OS physical aggregate, three-hour soaks, full adversarial
+   matrix, collector HSM receipts, and capability-report graph remain the
+   separate assurance extension described in
+   [`docs/physical-evidence-v5.md`](./docs/physical-evidence-v5.md). They may
+   reference the immutable GA manifest but cannot replace a missing GA gate.
+   Missing assurance infrastructure is recorded as incomplete, not as ordinary
+   GA failure or fabricated success;
+9. once GA acceptance is sealed, close the final publication stage and create
+   the distribution set:
 
    ```bash
-   scripts/run_production_release_evidence.sh \
-     prepare-physical-candidate-manifest
+   scripts/release_publication_gate.sh --seal-publication
+   scripts/release_publication_gate.sh --upload-assets 0.4.0
    ```
 
-   This exclusively creates
-   `target/candidates/0.4.0/release/final-candidate/physical-candidate-artifact-hash-manifest.json`
-   and the exact collector projection
-   `target/candidates/0.4.0/release/final-candidate/physical-collector-candidate.json`.
-   It reopens the publish-ready notarization receipt and journal lineage and
-   binds the post-staple app, app manifest, libbox, notarization archive/result/
-   log, Gatekeeper evidence, publication closure, SBOMs, receipt, intent, and
-   event tree. It refuses to replace an existing file; any drift requires a new
-   build and clean evidence root, never an in-place rewrite;
-8. run the source-pinned production collector for both required clean OS
-   environments (`macos15` and `current-macos`) on the same physical Mac,
-   following
-   [`docs/physical-evidence-v5.md`](./docs/physical-evidence-v5.md). Both PS256
-   run receipts and the aggregate must bind the exact manifest digest from step
-   7. Retain all raw private bytes and place only the strict aggregate descriptor
-   at
-   `target/candidates/0.4.0/release/final-candidate/physical-evidence.json`;
-   the current policy requires a 3-hour operator-observed interval with no
-   reported crash on each pinned OS. This duration and timestamp/crash-list
-   evidence model are approved only for the small internal distribution; they
-   are neither a remote liveness attestation nor a public-GA stability claim;
-   before requesting either nonce, reopen the lifecycle-v4 Go collector source
-   closure `67fa4014...`, immutable image `d4fa73f5...`, trust-policy digest
-   `e95c2710...`, endpoint-policy revisions, traffic, IAM, and Binary
-   Authorization state, and install the reviewed root-owned lifecycle probe.
-   The 2026-08-22 activation recorded in
-   `docs/release/physical-collector-v040.md` is the source-bound authorization
-   for the current 72 lifecycle subjects and 265 total required raw subjects.
-   If any live binding differs, use a fresh fail-closed collector maintenance
-   transaction before collection; local tests or a root-owned binary without
-   the reviewed source/image binding are not production evidence;
-9. after both OS-run archives are complete, seal the runtime evidence:
-
-   ```bash
-   scripts/run_production_release_evidence.sh seal
-   ```
-
-   The composer reopens every input, rehashes the final `.app` after all other
-   evidence, validates the fixed 99 capability-owned report bindings, and
-   exclusively publishes the private documents under
-   `target/candidates/0.4.0/release/sealed-manifest/`. A pre-existing output,
-   absent raw archive, unconfigured collector trust policy, receipt ambiguity,
-   hash drift, stale timestamp, missing capability, or failed gate blocks the
-   seal.
-
-This physical-candidate manifest and sealed runtime evidence intentionally do
-not claim to contain a DMG, updater signature, or remote release asset. Only
-after step 9 may the post-signing DMG/updater packaging transactions run. Their
-later distribution artifact-set seal binds the final DMG, updater archive and
-signature, public projections, upload bundle, and remote-download verification;
-neither layer may be renamed or treated as the other.
+   `--seal-publication` reopens prepackage and GA acceptance before sealing the
+   distribution set. `--upload-assets` is read-only: it reopens the publication
+   stage and all package bindings, then prints the exact upload allowlist. It
+   does not create a tag, GitHub Release, or upload any file;
+10. retain the private signing, notarization, install, runtime, legal-review,
+   and raw-evidence roots. Publish only the allowlisted distribution artifacts
+   after a separate publication authorization, then perform the independent
+   remote-byte verification described below.
 
 Do not copy component or blocker counts from an older review into a release
 claim. `component-review.json`, `publication-blockers.json`, the SBOM, and every
@@ -829,8 +769,7 @@ the custody checks.
 
 ```bash
 set +x
-scripts/make_updater_manifest.sh \
-  "$PWD/target/candidates/0.4.0/signed/Clash for Mac.app"
+scripts/make_updater_manifest.sh
 ```
 
 The shell entrypoint rejects xtrace, exported shell-option state, startup-hook
@@ -852,10 +791,10 @@ Tauri; neither the password nor a caller-selected key/signer path enters argv.
 Release assets do not become uploadable as independent files. The updater
 archive, signature, `latest.json`, and the verifier's embedded-public-key
 receipt are sealed and atomically published as
-`target/candidates/0.4.0/release/updater/vVERSION/`. The DMG, accepted result,
+`target/candidates/0.4.0/ga/40031/packages/updater/vVERSION/`. The DMG, accepted result,
 normalized log, private Gatekeeper evidence, submission receipt, and artifact
 manifest are sealed and atomically published for release operations as
-`target/candidates/0.4.0/release/dmg/vVERSION/`. The canonical seals bind exact
+`target/candidates/0.4.0/ga/40031/packages/dmg/vVERSION/`. The canonical seals bind exact
 names, sizes, SHA-256 values, version/build/source identity, official URL, and
 verification result. Each component seal also binds the exact
 `Clash for Mac.app.manifest.json` digest and signed-app tree SHA-256. The
@@ -875,11 +814,12 @@ After both packaging commands succeed, create the distinct post-packaging
 distribution seal, then run the read-only upload-asset gate:
 
 ```bash
-scripts/release_publication_gate.sh --seal-assets 0.4.0
+scripts/release_publication_gate.sh --seal-publication
 scripts/release_publication_gate.sh --upload-assets 0.4.0
 ```
 
-The atomic `release/distribution/vVERSION/distribution-set.seal.json` joins the
+The atomic
+`ga/40031/packages/distribution/vVERSION/distribution-set.seal.json` joins the
 same signed app and app manifest to both package seals and every DMG/updater
 asset. It also binds the complete publication-evidence tree and records direct
 digests for the sealed outer Evidence Manifest, machine closure, inventory,

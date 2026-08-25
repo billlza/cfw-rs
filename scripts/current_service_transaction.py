@@ -28,8 +28,10 @@ import uuid
 
 if __package__:
     from . import dormant_app_install as install
+    from .release_build_identity import ACTIVE_RELEASE_IDENTITY
 else:
     import dormant_app_install as install
+    from release_build_identity import ACTIVE_RELEASE_IDENTITY
 
 
 DOCUMENT: Final = "cfw-current-service-transaction-v2"
@@ -40,12 +42,12 @@ if (
 ):
     raise RuntimeError("service transaction contract differs from installer binding")
 TRANSACTION_DIRECTORY: Final = (
-    install.VALIDATION_INSTALL_PROFILE.service_transaction_directory
+    install.GA_INSTALL_PROFILE.service_transaction_directory
 )
 PENDING_DIRECTORY: Final = (
-    install.VALIDATION_INSTALL_PROFILE.service_pending_directory
+    install.GA_INSTALL_PROFILE.service_pending_directory
 )
-LOCK_NAME: Final = install.VALIDATION_INSTALL_PROFILE.service_lock_name
+LOCK_NAME: Final = install.GA_INSTALL_PROFILE.service_lock_name
 INTENT_NAME: Final = "intent.json"
 EVENT_PREFIX: Final = "event-"
 PENDING_EVENT_PREFIX: Final = ".event-"
@@ -82,7 +84,7 @@ PHASES: Final = (
     "proxy_registered",
     "recommissioned",
 )
-ACTIONS: Final = install.VALIDATION_INSTALL_PROFILE.service_actions
+ACTIONS: Final = install.GA_INSTALL_PROFILE.service_actions
 if ACTIONS != (
     "prepare",
     "unregister-installed-40019-proxy-agent",
@@ -91,16 +93,14 @@ if ACTIONS != (
     "register-global-authority",
     "register-proxy-agent",
     "prove-off",
-) or install.FINAL_INSTALL_PROFILE.service_actions != (
-    "prepare",
-    "unregister-proxy-agent",
-    "unregister-global-authority",
-    "verify-dormant",
-    "register-global-authority",
-    "register-proxy-agent",
-    "prove-off",
 ):
     raise RuntimeError("service maintenance profile actions differ from fixed transaction")
+if (
+    install.VERSION != ACTIVE_RELEASE_IDENTITY.product_version
+    or install.GA_INSTALL_PROFILE.build_number != ACTIVE_RELEASE_IDENTITY.ga_build
+    or install.GA_INSTALL_PROFILE.previous_build_number != "40019"
+):
+    raise RuntimeError("service maintenance profile differs from active GA identity")
 PROXY_DOMAIN_TEMPLATE: Final = "gui/{uid}/com.bill.clashformac.proxy-agent"
 AUTHORITY_DOMAIN: Final = "system/com.bill.clashformac.global-authority"
 TOMBSTONE_DOMAIN: Final = "system/com.bill.clashformac.helper"
@@ -120,9 +120,9 @@ class ServicePaths:
     transaction_parent: Path
 
     @classmethod
-    def production(cls, generation: str = "validation") -> "ServicePaths":
+    def production(cls) -> "ServicePaths":
         return cls(
-            install_paths=install.InstallPaths.production(generation),
+            install_paths=install.InstallPaths.production(),
             transaction_parent=Path("/Applications"),
         )
 
@@ -414,7 +414,7 @@ class ServiceEventStore:
         ):
             raise install.InstallError(
                 "service_journal_invalid",
-                "service intent is not for the fixed release generation",
+                "service intent is not for the fixed GA identity",
             )
 
     @contextmanager
@@ -763,7 +763,7 @@ class ServiceEventStore:
         ):
             raise install.InstallError(
                 "service_journal_invalid",
-                "Authority recovery intent is outside the validation generation",
+                "Authority recovery intent is outside the fixed GA install profile",
             )
         return validate_authority_recovery_intent(
             _strict_json_bytes(
@@ -998,7 +998,7 @@ class ServiceEventStore:
             ):
                 raise install.InstallError(
                     "service_journal_invalid",
-                    "Authority recovery intent is forbidden for this generation",
+                    "Authority recovery intent is forbidden for this install profile",
                 )
             event_names = sorted(
                 entry
@@ -1625,8 +1625,8 @@ class CurrentServiceTransaction:
             or previous.build_number != profile.previous_build_number
         ):
             raise install.InstallError(
-                "service_generation_mismatch",
-                "candidate and installed application do not match the fixed service generation",
+                "service_identity_mismatch",
+                "candidate and installed application do not match the fixed GA identity",
             )
         return candidate, previous
 
@@ -2012,14 +2012,14 @@ class CurrentServiceTransaction:
         )
 
 
-def _transaction(generation: str = "validation") -> CurrentServiceTransaction:
+def _transaction() -> CurrentServiceTransaction:
     if os.geteuid() == 0:
         raise install.InstallError(
             "root_execution_refused",
             "service maintenance must run as the owning administrator, never through sudo",
         )
     return CurrentServiceTransaction(
-        ServicePaths.production(generation), ServiceRuntime.production()
+        ServicePaths.production(), ServiceRuntime.production()
     )
 
 
@@ -2030,17 +2030,15 @@ def main() -> None:
     mode.add_argument("--decommission", action="store_true")
     mode.add_argument("--recommission", action="store_true")
     mode.add_argument("--recover", action="store_true")
-    parser.add_argument(
-        "--final",
-        action="store_true",
-        help=(
-            "operate on the fixed "
-            f"{install.BUILD_NUMBER} to {install.FINAL_BUILD_NUMBER} final generation"
-        ),
-    )
+    if "--final" in sys.argv[1:]:
+        parser.error(
+            "--final is retired; "
+            f"{ACTIVE_RELEASE_IDENTITY.product_version} has exactly one GA build "
+            f"({ACTIVE_RELEASE_IDENTITY.ga_build})"
+        )
     arguments = parser.parse_args()
     try:
-        transaction = _transaction("final" if arguments.final else "validation")
+        transaction = _transaction()
         if arguments.preflight:
             candidate, previous, _guard = transaction.preflight()
             print(

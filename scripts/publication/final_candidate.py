@@ -89,7 +89,7 @@ try:  # pragma: no cover - import shim exercised by both invocation styles
         load_release_trust_policy,
         parse_descriptor,
     )
-    from scripts.release_build_identity import canonical_build_version
+    from scripts.release_build_identity import canonical_build_version, ga_root
     from scripts.release_secret_material_blocker import (
         SecretMaterialReleaseBlock,
         evaluate_workspace,
@@ -114,7 +114,7 @@ except ImportError:  # pragma: no cover - CLI invocation style
         load_release_trust_policy,
         parse_descriptor,
     )
-    from scripts.release_build_identity import canonical_build_version
+    from scripts.release_build_identity import canonical_build_version, ga_root
     from scripts.release_secret_material_blocker import (
         SecretMaterialReleaseBlock,
         evaluate_workspace,
@@ -761,9 +761,12 @@ def _secret_material_blocked(workspace_root: Path) -> bool:
 # Environment status (which final-candidate inputs exist at all)
 # --------------------------------------------------------------------------
 
-# Where the release pipeline stages the environment-gated final-candidate inputs
-# (alongside the existing 0.4.0 candidate/publication layout).
-DEFAULT_EVIDENCE_DIRECTORY = "target/candidates/0.4.0/release/final-candidate"
+# This legacy binder remains a callable validator, so its default input root is
+# confined to the one active GA identity.  It must never recreate the retired
+# parallel ``target/candidates/0.4.0/release`` namespace.
+DEFAULT_EVIDENCE_DIRECTORY = str(
+    ga_root(Path()) / "stage-inputs/final-candidate"
+)
 
 ENVIRONMENT_INPUT_FILES: dict[str, str] = {
     "notarization": "notarization.json",

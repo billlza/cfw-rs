@@ -24,7 +24,7 @@ from typing import Any, Callable, Final, Protocol, Sequence, runtime_checkable
 from scripts.harness import performance_ledger as contract
 from scripts.harness.performance_ledger import PerformanceLedgerError
 from scripts.harness.physical_collector_request import (
-    FINAL_RELEASE_BUILD,
+    GA_RELEASE_BUILD,
     PRODUCT_VERSION,
     PhysicalCollectorRequestError,
     validate_context,
@@ -351,11 +351,11 @@ def _capture_context(context: object) -> tuple[dict[str, Any], dict[str, Any]]:
         ) from error
     if (
         candidate["version"] != PRODUCT_VERSION
-        or candidate["build_number"] != FINAL_RELEASE_BUILD
+        or candidate["build_number"] != GA_RELEASE_BUILD
     ):
         raise PerformanceCaptureError(
             "not_final_candidate",
-            f"performance capture requires final 0.4.0 build {FINAL_RELEASE_BUILD}",
+            f"performance capture requires GA 0.4.0 build {GA_RELEASE_BUILD}",
         )
     return candidate, run
 

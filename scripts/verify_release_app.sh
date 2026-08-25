@@ -80,7 +80,7 @@ codesign_details() {
 assert_developer_id_signature() {
   local code="$1"
   local expected_identifier="${2:-}"
-  local details
+  local details certificate_prefix certificate_sha256
   codesign --verify --strict --verbose=4 "$code"
   details="$(codesign_details "$code")"
   local team_identifier
@@ -101,6 +101,17 @@ assert_developer_id_signature() {
     [[ "$signed_identifier" == "$expected_identifier" ]] ||
       die "code signature identifier mismatch for $code"
   fi
+  certificate_capture_sequence=$((certificate_capture_sequence + 1))
+  certificate_prefix="$temporary_root/leaf-certificate-$certificate_capture_sequence-"
+  codesign -d --extract-certificates="$certificate_prefix" "$code" >/dev/null 2>&1 ||
+    die "cannot extract the Developer ID leaf certificate from $code"
+  require_regular_file "${certificate_prefix}0"
+  certificate_sha256="$(
+    /usr/bin/shasum -a 256 "${certificate_prefix}0" |
+      /usr/bin/awk '{print toupper($1)}'
+  )"
+  [[ "$certificate_sha256" == "$expected_signing_certificate_sha256" ]] ||
+    die "Developer ID leaf certificate differs from the frozen preflight for $code"
 }
 
 extract_entitlements() {
@@ -425,7 +436,7 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
 
-for command in codesign dwarfdump file find lipo plutil security spctl stat vtool xcrun; do
+for command in codesign dwarfdump file find lipo plutil security shasum spctl stat vtool xcrun; do
   require_command "$command"
 done
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
@@ -458,11 +469,29 @@ from release_build_identity import bundle_build_identity
 print(bundle_build_identity(__import__("pathlib").Path(sys.argv[2])).build_version)
 PY
 )" || die "bundle build identity is invalid"
-case "$native_products_root" in
-  "$repo_root/target/candidates/0.4.0/release-build/$build_number/native-products" | \
-  "$repo_root/target/candidates/0.4.0/validation/$build_number/native-products") ;;
-  *) die "native products root is not the immutable root for app build $build_number" ;;
-esac
+[[ "$build_number" == "40031" ]] ||
+  die "release application is not the fixed GA build 40031"
+ga_root="$repo_root/target/candidates/0.4.0/ga/40031"
+canonical_signing_output="$ga_root/signing-output"
+signing_output="${native_products_root%/signed-native-products}"
+if [[ "$signing_output" != "$canonical_signing_output" ]]; then
+  signing_attempt_pattern="$ga_root/transactions/signing-attempts/"'[0-9]{8}/(work|publish-ready)'
+  [[ "$signing_output" =~ ^${signing_attempt_pattern}$ ]] ||
+    die "native products root is outside the fixed GA signing transaction"
+fi
+[[ "$native_products_root" == "$signing_output/signed-native-products" ]] ||
+  die "native products root is not the fixed signed-native-products directory"
+[[ "$app_path" == "$signing_output/signing-input/Clash for Mac.app" ]] ||
+  die "release application and native products do not share one signing-output"
+signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40031/profiles/signing-preflight.json"
+require_regular_file "$signing_preflight_manifest"
+expected_signing_certificate_sha256="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/release_signing_preflight.py" \
+  --print-certificate-sha256 "$signing_preflight_manifest")" ||
+  die "cannot reopen the frozen Developer ID certificate fingerprint"
+readonly expected_signing_certificate_sha256
+[[ "$expected_signing_certificate_sha256" =~ ^[0-9A-F]{64}$ ]] ||
+  die "frozen Developer ID certificate fingerprint is malformed"
 
 native_source_sha256="$(cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/hash_native_build_inputs.py")" ||
@@ -548,6 +577,7 @@ PY
 
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/cfw-release-verify.XXXXXX")"
 trap '/bin/rm -rf "$temporary_root"' EXIT
+certificate_capture_sequence=0
 
 assert_bundle_info "$app_path" "$expected_app_id" APPL
 

@@ -4,8 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.publication.artifact_preparation import _reject_absolute_graph_paths
-from scripts.publication.closure import ALLOWED_CODE_PATHS, scan_app_code
+from scripts.publication.artifact_preparation import (
+    _prepackage_evidence_sources,
+    _reject_absolute_graph_paths,
+)
+from scripts.publication.closure import (
+    ALLOWED_CODE_PATHS,
+    REQUIRED_ARTIFACT_KINDS,
+    scan_app_code,
+)
 from scripts.publication.common import PublicationError
 
 
@@ -51,6 +58,28 @@ class PublicationClosureTests(unittest.TestCase):
         _reject_absolute_graph_paths(
             {"targets": [{"path": "Sources/CFWNative"}], "repository": "pkg:swift/cfwnative"}
         )
+
+    def test_prepackage_evidence_has_no_future_stage_dependency(self) -> None:
+        root = Path("target/candidates/0.4.0/ga/40031")
+        sources = _prepackage_evidence_sources(root)
+        self.assertEqual(
+            set(sources),
+            {
+                "candidate-freeze-intent",
+                "ga-product-input",
+                "hosted-ci-receipt",
+                "local-deterministic-ci-lanes",
+                "signing-transformation",
+            },
+        )
+        for path in sources.values():
+            self.assertNotIn("prepackage", path.parts)
+            self.assertNotIn("ga-acceptance", path.parts)
+            self.assertNotIn("publication", path.parts)
+        self.assertNotIn("prepackage-manifest", REQUIRED_ARTIFACT_KINDS)
+        self.assertNotIn("ga-acceptance-manifest", REQUIRED_ARTIFACT_KINDS)
+        self.assertIn("hosted-ci-receipt", REQUIRED_ARTIFACT_KINDS)
+        self.assertIn("local-deterministic-ci-lanes", REQUIRED_ARTIFACT_KINDS)
 
 
 if __name__ == "__main__":

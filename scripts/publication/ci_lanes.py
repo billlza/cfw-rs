@@ -1,7 +1,9 @@
-"""Deterministic unsigned-CI lane collection and the single toolchain binding.
+"""Deterministic local unsigned-lane collection and toolchain binding.
 
-This module is the collector behind the ``unsigned_ci`` gate of the sealed outer
-Evidence Manifest (``publication.sealed_manifest``). It adds no competing
+This module records a local reproduction of the commands used by the
+``unsigned_ci`` gate of the sealed outer Evidence Manifest
+(``publication.sealed_manifest``).  It is not GitHub-hosted evidence and cannot
+satisfy ``github_hosted_ci_receipt``. It adds no competing
 framework: the lane identifiers come from
 :data:`publication.sealed_manifest.REQUIRED_CI_LANES`, the lane *commands* are
 transcribed from ``.github/workflows/ci.yml`` (the source of truth audited by
@@ -1299,7 +1301,7 @@ def collect_ci_lanes(
     reproduction_verifier: LibboxReproductionVerifier = verify_libbox_reproduction,
     report: Callable[[str], None] = print,
 ) -> dict[str, Any]:
-    """Run the required unsigned-CI lanes and write the canonical document.
+    """Run the required deterministic local lanes and write their document.
 
     Lanes already recorded in the journal against this commit, source tree, and
     toolchain are replayed instead of re-run; ``rerun`` forces a fresh run,
@@ -1327,7 +1329,7 @@ def collect_ci_lanes(
         )
     except (OSError, SourceIdentityError) as error:
         raise PublicationError(
-            "unsigned CI lanes require one clean release source identity"
+            "local deterministic CI lanes require one clean release source identity"
         ) from error
     if starting_source_identity != expected_source_identity:
         raise PublicationError(
@@ -1357,7 +1359,7 @@ def collect_ci_lanes(
         raise PublicationError(f"CI lane journal is not a real directory: {journal}")
 
     report(
-        "unsigned CI lanes: "
+        "local deterministic CI lanes: "
         f"commit={commit} release_source_sha256={release_source_sha256} "
         f"toolchain_sha256={digest}"
     )
@@ -1507,7 +1509,7 @@ def collect_ci_lanes(
         records, commit, release_source_sha256, digest
     )
     write_new(output, canonical_json(document))
-    report(f"unsigned CI lane record written: {output}")
+    report(f"local deterministic CI lane record written: {output}")
     report(f"lanes={len(document['lanes'])} failed={failures}")
     return {
         "document": document,

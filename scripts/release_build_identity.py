@@ -38,29 +38,22 @@ def canonical_build_version(value: Any, label: str = "CFBundleVersion") -> str:
 
 
 @dataclass(frozen=True)
-class ReleaseGeneration:
-    """One fixed validation/final build pair for the active product release."""
+class ReleaseIdentity:
+    """The one application identity eligible for the active product release."""
 
     product_version: str
-    validation_build: str
-    final_build: str
+    ga_build: str
 
     def __post_init__(self) -> None:
         if self.product_version != PRODUCT_VERSION:
             raise BuildIdentityError(
-                "active release generation product version differs from policy"
+                "active release identity product version differs from policy"
             )
-        validation = canonical_build_version(
-            self.validation_build, "active validation build"
-        )
-        final = canonical_build_version(self.final_build, "active final build")
-        if int(final) != int(validation) + 1:
-            raise BuildIdentityError(
-                "active final build must immediately follow its validation build"
-            )
+        canonical_build_version(self.ga_build, "active GA build")
 
 
-ACTIVE_RELEASE_GENERATION = ReleaseGeneration(PRODUCT_VERSION, "40030", "40031")
+ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40031")
+UNSIGNED_VALIDATION_BUILD = "40000"
 
 
 def _read_plist(path: Path) -> dict[str, Any]:
@@ -110,20 +103,40 @@ def bundle_build_identity(app: Path) -> BundleBuildIdentity:
     return BundleBuildIdentity(PRODUCT_VERSION, unique.pop())
 
 
-def release_native_products_root(repository: Path, build_version: str) -> Path:
-    canonical = canonical_build_version(build_version, "release build version")
+def ga_preflight_root(repository: Path) -> Path:
     return (
         repository
-        / f"target/candidates/{PRODUCT_VERSION}/release-build/{canonical}/native-products"
+        / f"target/candidates/{PRODUCT_VERSION}/ga-preflight/"
+        f"{ACTIVE_RELEASE_IDENTITY.ga_build}"
     )
 
 
-def validation_native_products_root(repository: Path, build_version: str) -> Path:
-    canonical = canonical_build_version(build_version, "validation build version")
+def ga_root(repository: Path) -> Path:
     return (
         repository
-        / f"target/candidates/{PRODUCT_VERSION}/validation/{canonical}/native-products"
+        / f"target/candidates/{PRODUCT_VERSION}/ga/"
+        f"{ACTIVE_RELEASE_IDENTITY.ga_build}"
     )
+
+
+def ga_pre_sign_native_products_root(repository: Path) -> Path:
+    return ga_preflight_root(repository) / "native-products"
+
+
+def ga_signed_root(repository: Path) -> Path:
+    return ga_root(repository) / "signed"
+
+
+def ga_signing_output_root(repository: Path) -> Path:
+    return ga_root(repository) / "signing-output"
+
+
+def ga_signing_input_root(repository: Path) -> Path:
+    return ga_signing_output_root(repository) / "signing-input"
+
+
+def ga_signed_native_products_root(repository: Path) -> Path:
+    return ga_signing_output_root(repository) / "signed-native-products"
 
 
 def _candidate_directory_output(
@@ -183,11 +196,14 @@ def candidate_native_products_output(
         build_version, "candidate build version"
     )
     candidate_base = repository / f"target/candidates/{PRODUCT_VERSION}"
-    allowed = {
-        candidate_base / "unsigned/native-products",
-        candidate_base / f"validation/{canonical_build}/native-products",
-        candidate_base / f"release-build/{canonical_build}/native-products",
-    }
+    if canonical_build == UNSIGNED_VALIDATION_BUILD:
+        allowed = {candidate_base / "unsigned/native-products"}
+    elif canonical_build == ACTIVE_RELEASE_IDENTITY.ga_build:
+        allowed = {ga_pre_sign_native_products_root(repository)}
+    else:
+        raise BuildIdentityError(
+            "candidate build is neither the unsigned validation build nor the active GA build"
+        )
     return _candidate_directory_output(
         repository,
         output,
@@ -212,12 +228,3 @@ def candidate_native_derived_data_output(
         {expected},
         "candidate Xcode derived-data output",
     )
-
-
-def require_newer_build(final_build: str, validated_build: str) -> None:
-    final = int(canonical_build_version(final_build, "final release build"))
-    validated = int(canonical_build_version(validated_build, "validated candidate build"))
-    if final <= validated:
-        raise BuildIdentityError(
-            "final release build must be strictly greater than the installed validated candidate"
-        )

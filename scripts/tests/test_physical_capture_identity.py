@@ -57,8 +57,8 @@ class IdentityProbeTests(unittest.TestCase):
             self.app, algorithm="sha256-tree-v2"
         )["sha256"]
         candidate = {
-            "version": identity.FINAL_VERSION,
-            "build_number": identity.FINAL_BUILD,
+            "version": identity.GA_VERSION,
+            "build_number": identity.GA_BUILD,
             "app_manifest_sha256": _sha256("app-manifest"),
             "signed_app_tree_sha256": self.tree_sha256,
             "artifact_hash_manifest_sha256": _sha256("artifact-manifest"),
@@ -134,7 +134,7 @@ class IdentityProbeTests(unittest.TestCase):
                 "com.bill.clashformac.packet-tunnel / "
                 "com.bill.clashformac.proxy-agent\n"
                 "platform: arm64 / macOS 15.0+\n"
-                f"build number: {identity.FINAL_BUILD}\n"
+                f"build number: {identity.GA_BUILD}\n"
             ).encode("utf-8")
         if stderr is None:
             stderr = (

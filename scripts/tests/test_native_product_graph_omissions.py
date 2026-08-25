@@ -156,11 +156,11 @@ class NativeBuildScriptTests(unittest.TestCase):
     def test_shipped_build_script_passes(self) -> None:
         verify_native_build_script(self.build)
 
-    def test_missing_packet_tunnel_provisioning_fails_closed(self) -> None:
+    def test_missing_ga_pre_sign_mode_fails_closed(self) -> None:
         mutated = self.build.replace(
-            "PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER", "REMOVED_SPECIFIER"
+            'signing_mode="pre-sign"', 'signing_mode="removed"'
         )
-        with self.assertRaisesRegex(NativeProductGraphError, "provisioning"):
+        with self.assertRaisesRegex(NativeProductGraphError, "pre-sign contract"):
             verify_native_build_script(mutated)
 
     def test_missing_product_graph_gate_fails_closed(self) -> None:
@@ -179,23 +179,17 @@ class NativeBuildScriptTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeProductGraphError, "architecture"):
             verify_native_build_script(mutated)
 
-    def test_unscoped_profile_setting_fails_closed(self) -> None:
-        mutated = self.build.replace(
-            "    CFW_PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER=",
-            "    PROVISIONING_PROFILE_SPECIFIER=",
-        )
+    def test_pre_freeze_profile_setting_fails_closed(self) -> None:
+        mutated = self.build + '\nPROVISIONING_PROFILE_SPECIFIER="forbidden"\n'
         with self.assertRaisesRegex(
-            NativeProductGraphError, "target-local ProxyAgent provisioning"
+            NativeProductGraphError, "pre-freeze signing operations"
         ):
             verify_native_build_script(mutated)
 
-    def test_missing_exact_authority_designated_requirement_fails_closed(self) -> None:
-        mutated = self.build.replace(
-            '-r="$authority_designated_requirement"',
-            '-r="$removed_authority_requirement"',
-        )
+    def test_pre_freeze_codesign_fails_closed(self) -> None:
+        mutated = self.build + '\n/usr/bin/codesign --sign forbidden product\n'
         with self.assertRaisesRegex(
-            NativeProductGraphError, "exact signing requirement"
+            NativeProductGraphError, "pre-freeze signing operations"
         ):
             verify_native_build_script(mutated)
 

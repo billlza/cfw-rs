@@ -19,7 +19,7 @@ import re
 from typing import Any, Final
 
 if __package__:
-    from ..release_build_identity import ACTIVE_RELEASE_GENERATION
+    from ..release_build_identity import ACTIVE_RELEASE_IDENTITY
     from .physical_machine_identity import (
         BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
         DOCUMENT as MACHINE_IDENTITY_SCHEME,
@@ -40,7 +40,7 @@ else:  # pragma: no cover - direct-script import path
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from release_build_identity import ACTIVE_RELEASE_GENERATION  # type: ignore
+    from release_build_identity import ACTIVE_RELEASE_IDENTITY  # type: ignore
     from physical_machine_identity import (  # type: ignore
         BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
         DOCUMENT as MACHINE_IDENTITY_SCHEME,
@@ -70,8 +70,8 @@ REQUIRED_PERFORMANCE_SUBJECTS: Final = frozenset(
     {LEDGER_SUBJECT, SHAPING_INTENT_SUBJECT, SHAPING_RESTORATION_SUBJECT}
 )
 
-PRODUCT_VERSION: Final = ACTIVE_RELEASE_GENERATION.product_version
-FINAL_BUILD: Final = ACTIVE_RELEASE_GENERATION.final_build
+PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
+GA_BUILD: Final = ACTIVE_RELEASE_IDENTITY.ga_build
 PRODUCT_OBSERVATION_PREFIX: Final = "cfw-release-observation-v1 "
 PRODUCT_OBSERVATION_DOCUMENT: Final = "cfw-product-observation-event-v1"
 PRODUCT_LOG_SUBSYSTEM: Final = "com.bill.clashformac"
@@ -448,9 +448,9 @@ def _sha256(value: Any, label: str) -> str:
 
 def _candidate(value: Any) -> dict[str, Any]:
     candidate = exact_object(value, CANDIDATE_FIELDS, "performance ledger.candidate")
-    if candidate["version"] != PRODUCT_VERSION or candidate["build_number"] != FINAL_BUILD:
+    if candidate["version"] != PRODUCT_VERSION or candidate["build_number"] != GA_BUILD:
         raise PerformanceLedgerError(
-            f"performance ledger is not final build {FINAL_BUILD}"
+            f"performance ledger is not GA build {GA_BUILD}"
         )
     for field in CANDIDATE_FIELDS - {"version", "build_number", "built_at"}:
         _sha256(candidate[field], f"performance ledger.candidate.{field}")

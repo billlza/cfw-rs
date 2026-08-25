@@ -173,8 +173,10 @@ fi
 }
 
 fixture_repo="$temporary_root/repository"
-app_path="$fixture_repo/candidate/Clash for Mac.app"
-mkdir -p "$fixture_repo/scripts" "$fixture_repo/native-products" \
+ga_root="$fixture_repo/target/candidates/0.4.0/ga/40031"
+app_path="$ga_root/signed/Clash for Mac.app"
+native_products="$ga_root/signing-output/signed-native-products"
+mkdir -p "$fixture_repo/scripts" "$native_products" \
   "$app_path/Contents"
 /bin/cp "$repo_root/scripts/make_updater_manifest.sh" "$fixture_repo/scripts/"
 
@@ -205,11 +207,12 @@ cfw_run_release_python_script() {
 }
 
 release_native_products_root_for_app() {
-  printf '%s\n' "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/native-products"
+  [[ "\$1" == "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app" ]]
+  printf '%s\n' "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40031/signing-output/signed-native-products"
 }
 
-verify_release_publication_evidence() {
-  [[ "\$1" == /* ]]
+verify_release_prepackage_evidence() {
+  [[ "\$#" -eq 1 && "\$1" == "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app" ]]
 }
 SH
 
@@ -259,7 +262,7 @@ if any(
 archive = Path(sys.argv[1])
 if not archive.is_absolute() or not archive.is_file():
     raise SystemExit("updater archive is unavailable")
-if "output-failure" in archive.parts:
+if Path(__file__).with_name("fail-signing").exists():
     raise SystemExit("synthetic signer failure")
 archive.with_name(f"{archive.name}.sig").write_text(
     "fixture-signature\n",
@@ -267,7 +270,7 @@ archive.with_name(f"{archive.name}.sig").write_text(
 )
 PY
 
-cat >"$fixture_repo/scripts/release_artifact_set.py" <<'PY'
+cat >"$fixture_repo/scripts/release_artifact_set_cli.py" <<'PY'
 from __future__ import annotations
 
 import os
@@ -299,29 +302,26 @@ cat >"$app_path/Contents/Info.plist" <<'PLIST'
 <dict>
   <key>CFBundleShortVersionString</key>
   <string>0.4.0</string>
+  <key>CFBundleVersion</key>
+  <string>40031</string>
 </dict>
 </plist>
 PLIST
 printf '%s\n' "fixture app" >"$app_path/Contents/fixture.txt"
 
 run_fixture() {
-  local output_directory="$1"
-  shift
   run_clean_environment \
     CFW_TOOLCHAIN_ROOT="$fixture_repo/target/toolchains" \
-    OUT_DIR="$output_directory" \
-    "$@" \
-    "$fixture_repo/scripts/make_updater_manifest.sh" "$app_path"
+    "$fixture_repo/scripts/make_updater_manifest.sh"
 }
 
-positive_output="$fixture_repo/output-positive"
 positive_log="$temporary_root/positive.log"
-if ! run_fixture "$positive_output" >"$positive_log" 2>&1; then
+if ! run_fixture >"$positive_log" 2>&1; then
   /bin/cat "$positive_log" >&2
   echo "error: updater custody positive fixture failed" >&2
   exit 1
 fi
-final_set="$positive_output/updater/v0.4.0"
+final_set="$ga_root/packages/updater/v0.4.0"
 for required in \
   "Clash.for.Mac_0.4.0_aarch64.app.tar.gz" \
   "Clash.for.Mac_0.4.0_aarch64.app.tar.gz.sig" \
@@ -334,19 +334,19 @@ do
   }
 done
 
-failure_output="$fixture_repo/output-failure"
+/bin/rm -rf "$final_set"
+touch "$fixture_repo/scripts/fail-signing"
 failure_log="$temporary_root/failure.log"
-if run_fixture "$failure_output" \
-  >"$failure_log" 2>&1; then
+if run_fixture >"$failure_log" 2>&1; then
   echo "error: synthetic signer failure unexpectedly passed" >&2
   exit 1
 fi
-if find "$failure_output" -name 'updater-stage.*' -print -quit 2>/dev/null | \
+if find "$ga_root/packages/updater" -name 'updater-stage.*' -print -quit 2>/dev/null | \
   /usr/bin/grep -q .; then
   echo "error: failed signer left updater staging material" >&2
   exit 1
 fi
-[[ ! -e "$failure_output/updater/v0.4.0" ]] || {
+[[ ! -e "$final_set" ]] || {
   echo "error: failed signer published a final updater set" >&2
   exit 1
 }

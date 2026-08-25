@@ -759,29 +759,68 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                 self.assertIn("--require-unsigned-host", source[verification:manifest])
 
         signed = (SCRIPTS / "build_signed_candidate.sh").read_text(encoding="utf-8")
-        staged_copy = signed.index('/usr/bin/ditto --noqtn "$built_app" "$staged_app"')
-        staged_verify = signed.index("verify_candidate_bundle.sh", staged_copy)
-        profile_install = signed.index("/usr/bin/install -m 0644", staged_verify)
-        profile_transform = signed.index("--added-file", profile_install)
-        final_unsigned_verify = signed.index(
-            "verify_candidate_bundle.sh", profile_transform
+        pre_sign_copy = signed.index(
+            '/usr/bin/ditto --noqtn "$built_app" "$pre_sign_app"'
         )
-        host_sign = signed.index('--sign "$MACOS_SIGN_IDENTITY"', final_unsigned_verify)
-        self.assertLess(staged_copy, staged_verify)
-        self.assertLess(staged_verify, profile_install)
-        self.assertLess(profile_install, profile_transform)
-        self.assertLess(profile_transform, final_unsigned_verify)
-        self.assertLess(final_unsigned_verify, host_sign)
+        pre_sign_verify = signed.index("verify_candidate_bundle.sh", pre_sign_copy)
+        freeze = signed.index("scripts/candidate_freeze.py\" freeze", pre_sign_verify)
+        frozen_verify = signed.index("scripts/candidate_freeze.py\" verify", freeze)
+        signing_transaction = signed.index(
+            "scripts/signing_attempt_transaction.py", frozen_verify
+        )
+        helper = (SCRIPTS / "run_ga_signing_attempt.sh").read_text(
+            encoding="utf-8"
+        )
+        signing_input_copy = helper.index(
+            '/usr/bin/ditto --noqtn "$pre_sign_app" "$staged_app"',
+        )
+        host_profile_install = helper.index(
+            '"$staged_app/Contents/embedded.provisionprofile"',
+            signing_input_copy,
+        )
+        bridge_sign = helper.index(
+            "--identifier com.bill.clashformac.native-bridge", host_profile_install
+        )
+        authority_sign = helper.index(
+            "--identifier com.bill.clashformac.global-authority", bridge_sign
+        )
+        proxy_sign = helper.index(
+            '--entitlements "$proxy_release_xcent"', authority_sign
+        )
+        packet_sign = helper.index(
+            '--entitlements "$packet_release_xcent"', proxy_sign
+        )
+        tombstone_sign = helper.index(
+            '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$tombstone"', packet_sign
+        )
+        host_sign = helper.index(
+            '--entitlements "$host_release_xcent"', tombstone_sign
+        )
+        self.assertLess(pre_sign_copy, pre_sign_verify)
+        self.assertLess(pre_sign_verify, freeze)
+        self.assertLess(freeze, frozen_verify)
+        self.assertLess(frozen_verify, signing_transaction)
+        self.assertLess(signing_input_copy, host_profile_install)
+        self.assertLess(host_profile_install, bridge_sign)
+        self.assertLess(bridge_sign, authority_sign)
+        self.assertLess(authority_sign, proxy_sign)
+        self.assertLess(proxy_sign, packet_sign)
+        self.assertLess(packet_sign, tombstone_sign)
+        self.assertLess(tombstone_sign, host_sign)
         self.assertIn(
-            "--require-unsigned-host", signed[staged_verify:profile_install]
+            "--require-unsigned-host", signed[pre_sign_verify:freeze]
         )
+        self.assertNotIn("/usr/bin/codesign --force", signed)
+        self.assertNotIn('--sign "$MACOS_SIGN_IDENTITY"', helper)
+        self.assertEqual(
+            helper.count('--sign "$CFW_SIGNING_CERTIFICATE_SHA1"'),
+            6,
+        )
+        self.assertIn('"$repo_root/scripts/build_native_products.sh" --pre-sign', signed)
         self.assertIn(
-            "Contents/embedded.provisionprofile=$host_profile_sha256:$host_profile_size",
-            signed[profile_install:host_sign],
+            '"$repo_root/scripts/build_legacy_tombstone.sh" --pre-sign', signed
         )
-        self.assertIn(
-            "--require-unsigned-host", signed[final_unsigned_verify:host_sign]
-        )
+        self.assertNotIn("--developer-id", signed)
 
         unsigned = (SCRIPTS / "build_unsigned_candidate.sh").read_text(
             encoding="utf-8"

@@ -1,794 +1,906 @@
 from __future__ import annotations
 
-from dataclasses import replace
-import errno
-import hashlib
-import inspect
-import json
+from contextlib import contextmanager
+import io
 import os
-import subprocess
+from pathlib import Path
 import stat
 import sys
 import tempfile
-import time
+from types import ModuleType
 import unittest
 from unittest.mock import patch
-from pathlib import Path
 
-from scripts.hash_artifact import build_manifest
-from scripts.notarization_transaction import PublishedTransactionEvidence
-from scripts.publication.common import (
-    PublicationError,
-    canonical_json,
-)
+from scripts import production_release_evidence
 from scripts.publication import durable_file
-from scripts.publication.orchestrator import (
-    CAPABILITY_IDS,
-    FINAL_BUILD,
+from scripts.publication.common import PublicationError, canonical_json, sha256_file
+from scripts.publication.ga_release_contract import (
+    ACCEPTANCE_INPUT_ROOT,
+    ASSURANCE_ROOT,
+    CANDIDATE_ROOT,
+    DMG_SET,
+    GA_APP_ARTIFACT_KIND,
+    GA_BUILD,
+    GA_NATIVE_PRODUCTS,
+    GA_ROOT,
+    GA_RUNTIME_CHECKS,
+    INSTALL_JOURNAL_INPUT,
+    LEGACY_PATHS,
+    PACKAGE_ROOT,
     PRODUCT_VERSION,
-    PHYSICAL_CANDIDATE_MANIFEST,
-    PHYSICAL_COLLECTOR_CANDIDATE,
-    SEALED_OUTPUT,
-    VALIDATION_BUILD,
-    ProductionContext,
-    _inner_evidence_manifest,
-    _observe_signed_app_tree,
-    _parse_codesign_details,
-    _physical_candidate_hash_manifest,
-    _physical_collector_candidate,
-    _production_context,
-    _publish_outputs,
-    _recover_sealed_outputs,
-    _require_final_inputs_unchanged,
-    _require_physical_candidate_binding,
-    _requirement_digest,
-    _run_checked,
-    prepare_physical_candidate_manifest,
-    seal_production_evidence,
+    RUNTIME_ACCEPTANCE_DOCUMENT,
+    RUNTIME_ACCEPTANCE_INPUT,
+    RUNTIME_EVIDENCE_INPUT,
+    SERVICE_JOURNAL_INPUT,
+    SIGNED_APP,
+    STAGES,
+    STAGE_FILE_NAMES,
+    STAGE_OUTPUTS,
+    UPDATER_SET,
+    _parse_strict_json,
+    _reject_legacy_paths,
+    _record,
+    _require_artifact_set_adapter,
+    _stage_manifest,
+    _tree_record,
+    _validate_signing_notarization_binding,
+    _validate_stage_manifest,
+    _verified_acceptance_inputs,
+    _verified_runtime_acceptance_adapter,
+    _verify_publication_adapter,
     self_check,
+    verify_stage,
 )
-from scripts.release_capability_inventory import expected_report_contracts
+from scripts.publication.orchestrator import (
+    _publish_stage,
+    seal_ga_acceptance,
+    seal_prepackage,
+    seal_publication,
+)
 
 
-REPOSITORY = Path(__file__).resolve().parent.parent.parent
+class StageFixture:
+    def __init__(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.repository = Path(self.temporary.name).resolve()
+        self.ga_root = self.repository.joinpath(*GA_ROOT.parts)
+        self.ga_root.mkdir(parents=True)
 
+    def cleanup(self) -> None:
+        self.temporary.cleanup()
 
-def _write(repository: Path, relative: str, data: bytes = b"evidence\n") -> Path:
-    path = repository / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-    return path
-
-
-def _context(repository: Path) -> ProductionContext:
-    ci_path = "target/candidates/0.4.0/validation/40030/evidence/unsigned-ci-lanes.json"
-    validation_manifest = (
-        "target/candidates/0.4.0/validation/40030/signed/"
-        "Clash for Mac.app.manifest.json"
-    )
-    receipt_path = repository / "target/notarization-receipt.json"
-    return ProductionContext(
-        repository=repository,
-        release_environment={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
-        source_identity={"repositoryCommit": "a" * 40, "releaseSourceSha256": "b" * 64},
-        review={
-            "candidate": {
-                "ci_evidence_path": ci_path,
-                "app_manifest_path": validation_manifest,
-            }
-        },
-        ci_document={"toolchain_sha256": "c" * 64},
-        toolchain_metadata={},
-        app_manifest={"sha256": "d" * 64},
-        machine_closure={},
-        publication_inventory={},
-        notary_log={"jobId": "submission-id", "sha256": "f" * 64},
-        gatekeeper={},
-        libbox_manifest={"sha256": "e" * 64},
-        transaction=PublishedTransactionEvidence(
-            receipt={
-                "state": "publish-ready",
-                "submission_id": "submission-id",
-                "archive_sha256": "f" * 64,
-                "post_staple_app_tree_sha256": "d" * 64,
-                "sealed_at": "2026-07-29T12:01:00.000000Z",
+    def prepackage_files(self, marker: str = "a") -> dict[str, bytes]:
+        manifest = _stage_manifest(
+            "prepackage",
+            {
+                "candidate": {"signed_app_tree_sha256": marker * 64},
+                "ci": {"sha256": "b" * 64},
+                "legal_source": {"sha256": "c" * 64},
+                "source": {
+                    "release_source_sha256": "d" * 64,
+                    "repository_commit": "e" * 40,
+                },
+                "toolchain": {"toolchainSha256": "f" * 64},
             },
-            receipt_path=receipt_path,
-            prepared_at="2026-07-29T12:00:00.000000Z",
-        ),
-    )
-
-
-class ProductionOrchestratorIdentityTests(unittest.TestCase):
-    def test_release_identity_has_no_caller_selected_builds(self) -> None:
-        self.assertEqual(
-            (PRODUCT_VERSION, VALIDATION_BUILD, FINAL_BUILD),
-            ("0.4.0", "40030", "40031"),
         )
-        self.assertEqual(int(FINAL_BUILD), int(VALIDATION_BUILD) + 1)
-        signature = inspect.signature(seal_production_evidence)
-        self.assertEqual(tuple(signature.parameters), ("repository",))
-
-    def test_retired_validation_reviews_cannot_authorize_the_final_build(self) -> None:
-        source_identity = {
-            "repositoryCommit": "a" * 40,
-            "releaseSourceSha256": "b" * 64,
-        }
-        for retired in ("40004", "40019", "40020", "40021"):
-            with self.subTest(retired=retired), patch(
-                "scripts.publication.orchestrator.release_tool_environment",
-                return_value={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
-            ), patch(
-                "scripts.publication.orchestrator.current_identity",
-                return_value=source_identity,
-            ), patch("scripts.publication.orchestrator.validate_inventory"), patch(
-                "scripts.publication.orchestrator.validate_candidate_review",
-                return_value={
-                    "product": {"version": PRODUCT_VERSION, "build_number": retired},
-                    "candidate": {},
-                },
-            ), self.assertRaisesRegex(
-                PublicationError, "validated candidate is not exactly build 40030"
-            ):
-                _production_context(REPOSITORY)
-
-    def test_cli_has_no_fixture_build_path_output_or_override_option(self) -> None:
-        completed = subprocess.run(
-            [
-                "/bin/bash",
-                "-p",
-                "-c",
-                'source "$1"; cfw_run_release_python_script "$2" '
-                '"$2/scripts/production_release_evidence.py" --help',
-                "production-release-help-test",
-                str(REPOSITORY / "scripts/release_python_launcher.sh"),
-                str(REPOSITORY),
-            ],
-            cwd=REPOSITORY,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        for forbidden in ("--fixture", "--build", "--path", "--output", "--override"):
-            self.assertNotIn(forbidden, completed.stdout)
-
-    def test_source_bound_self_check_passes(self) -> None:
-        self_check(REPOSITORY)
-
-
-class ProductionOrchestratorDerivationTests(unittest.TestCase):
-    def test_prepare_physical_candidate_outputs_are_transactional_and_reopened(self) -> None:
-        manifest = {"entries": [], "sha256": "a" * 64}
-        candidate = {
-            "version": PRODUCT_VERSION,
-            "build_number": FINAL_BUILD,
-            "app_manifest_sha256": "b" * 64,
-            "signed_app_tree_sha256": "c" * 64,
-            "artifact_hash_manifest_sha256": manifest["sha256"],
-            "built_at": "2026-07-29T12:00:00.000000Z",
-        }
-
-        def patches(repository: Path):
-            return (
-                patch(
-                    "scripts.publication.orchestrator._production_context",
-                    return_value=_context(repository),
-                ),
-                patch(
-                    "scripts.publication.orchestrator._physical_candidate_hash_manifest",
-                    return_value=manifest,
-                ),
-                patch(
-                    "scripts.publication.orchestrator._physical_collector_candidate",
-                    return_value=candidate,
-                ),
-            )
-
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            (repository / PHYSICAL_CANDIDATE_MANIFEST.parent.parent).mkdir(
-                parents=True
-            )
-            context_patch, manifest_patch, candidate_patch = patches(repository)
-            with context_patch, manifest_patch, candidate_patch:
-                self.assertEqual(
-                    prepare_physical_candidate_manifest(repository), manifest
-                )
-                self.assertEqual(
-                    json.loads((repository / PHYSICAL_CANDIDATE_MANIFEST).read_bytes()),
-                    manifest,
-                )
-                self.assertEqual(
-                    json.loads((repository / PHYSICAL_COLLECTOR_CANDIDATE).read_bytes()),
-                    candidate,
-                )
-                self.assertEqual(
-                    prepare_physical_candidate_manifest(repository), manifest
-                )
-
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            (repository / PHYSICAL_CANDIDATE_MANIFEST.parent.parent).mkdir(
-                parents=True
-            )
-
-            def fail_commit_marker(
-                directory_descriptor: int,
-                directory: Path,
-                name: str,
-                data: bytes,
-            ) -> None:
-                if name == PHYSICAL_COLLECTOR_CANDIDATE.name:
-                    raise PublicationError("simulated commit-marker failure")
-                durable_file.write_private_pending_locked(
-                    directory_descriptor,
-                    directory,
-                    name,
-                    data,
-                )
-
-            context_patch, manifest_patch, candidate_patch = patches(repository)
-            with context_patch, manifest_patch, candidate_patch, patch(
-                "scripts.publication.orchestrator.write_private_pending_locked",
-                side_effect=fail_commit_marker,
-            ), self.assertRaisesRegex(PublicationError, "commit-marker failure"):
-                prepare_physical_candidate_manifest(repository)
-            self.assertTrue((repository / PHYSICAL_CANDIDATE_MANIFEST).exists())
-            self.assertFalse((repository / PHYSICAL_COLLECTOR_CANDIDATE).exists())
-            context_patch, manifest_patch, candidate_patch = patches(repository)
-            with context_patch, manifest_patch, candidate_patch:
-                self.assertEqual(
-                    prepare_physical_candidate_manifest(repository), manifest
-                )
-            self.assertTrue((repository / PHYSICAL_CANDIDATE_MANIFEST).exists())
-            self.assertTrue((repository / PHYSICAL_COLLECTOR_CANDIDATE).exists())
-
-    def test_physical_candidate_manifest_and_final_guard_reject_input_drift(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            paths = (
-                "target/candidates/0.4.0/signed/Clash for Mac.app.manifest.json",
-                "target/native-dependencies/Libbox.xcframework.manifest.json",
-                "target/candidates/0.4.0/signed/Clash.for.Mac_0.4.0_40031_notary.zip",
-                "target/candidates/0.4.0/signed/notarization.json",
-                "target/candidates/0.4.0/signed/notarization-log.json",
-                "target/candidates/0.4.0/signed/gatekeeper.json",
-                "target/candidates/0.4.0/release/publication/machine-closure.json",
-                "target/candidates/0.4.0/release/publication/inventory.json",
-                "target/candidates/0.4.0/release/publication/evidence-manifest.json",
-                "target/candidates/0.4.0/release/publication/sbom.spdx.json",
-                "target/candidates/0.4.0/release/publication/sbom.cyclonedx.json",
-            )
-            for index, relative in enumerate(paths):
-                _write(repository, relative, f"evidence-{index}\n".encode())
-            libbox = repository / "target/native-dependencies/Libbox.xcframework"
-            _write(
-                repository,
-                "target/native-dependencies/Libbox.xcframework/Libbox",
-                b"libbox\n",
-            )
-            libbox_manifest = build_manifest(libbox, algorithm="sha256-tree-v2")
-            (repository / paths[1]).write_bytes(canonical_json(libbox_manifest))
-            context = replace(
-                _context(repository),
-                libbox_manifest=libbox_manifest,
-            )
-            _write(
-                repository,
-                "target/notarization-receipt.json",
-                canonical_json(context.transaction.receipt),
-            )
-            _write(
-                repository,
-                "target/candidates/0.4.0/notary-attempts/release/40031/intent.json",
-                b"intent\n",
-            )
-            _write(
-                repository,
-                "target/candidates/0.4.0/notary-attempts/release/40031/events/00000000.json",
-                b"event\n",
-            )
-            first = _physical_candidate_hash_manifest(context)
-            collector_candidate = _physical_collector_candidate(context, first)
-            self.assertEqual(
-                set(collector_candidate),
+        return {
+            "hosted-ci.json": canonical_json(
                 {
-                    "version",
-                    "build_number",
-                    "app_manifest_sha256",
-                    "signed_app_tree_sha256",
-                    "artifact_hash_manifest_sha256",
-                    "built_at",
-                },
-            )
-            self.assertEqual(collector_candidate["version"], "0.4.0")
-            self.assertEqual(collector_candidate["build_number"], "40031")
-            self.assertEqual(
-                collector_candidate["artifact_hash_manifest_sha256"],
-                first["sha256"],
-            )
-            with patch(
-                "scripts.publication.orchestrator.current_identity",
-                return_value=context.source_identity,
-            ), patch(
-                "scripts.publication.orchestrator.verify_publication_evidence"
-            ):
-                _require_final_inputs_unchanged(context, first)
-            with patch(
-                "scripts.publication.orchestrator.current_identity",
-                return_value={
-                    **context.source_identity,
-                    "releaseSourceSha256": "0" * 64,
-                },
-            ), self.assertRaisesRegex(PublicationError, "source identity changed"):
-                _require_final_inputs_unchanged(context, first)
-            with patch(
-                "scripts.publication.orchestrator.current_identity",
-                return_value=context.source_identity,
-            ), patch(
-                "scripts.publication.orchestrator.verify_publication_evidence",
-                side_effect=PublicationError("publication drift"),
-            ), self.assertRaisesRegex(PublicationError, "publication inputs changed"):
-                _require_final_inputs_unchanged(context, first)
-            manifest_path = repository / paths[0]
-            original_app_manifest = manifest_path.read_bytes()
-            manifest_path.write_bytes(b"drift\n")
-            second = _physical_candidate_hash_manifest(context)
-            self.assertNotEqual(first["sha256"], second["sha256"])
-            with patch(
-                "scripts.publication.orchestrator.current_identity",
-                return_value=context.source_identity,
-            ), patch(
-                "scripts.publication.orchestrator.verify_publication_evidence"
-            ), self.assertRaisesRegex(PublicationError, "inputs changed"):
-                _require_final_inputs_unchanged(context, first)
-            manifest_path.write_bytes(original_app_manifest)
-            (libbox / "Libbox").write_bytes(b"mutated libbox\n")
-            with patch(
-                "scripts.publication.orchestrator.current_identity",
-                return_value=context.source_identity,
-            ), patch(
-                "scripts.publication.orchestrator.verify_publication_evidence"
-            ), self.assertRaisesRegex(PublicationError, "libbox XCFramework differs"):
-                _require_final_inputs_unchanged(context, first)
-            self.assertEqual(len(first["entries"]), 16)
-            self.assertFalse(any("dmg" in entry["path"] for entry in first["entries"]))
-            self.assertFalse(any("updater" in entry["path"] for entry in first["entries"]))
-
-    def test_codesign_identity_parser_rejects_missing_duplicate_and_wrong_team(self) -> None:
-        valid = (
-            b"Identifier=com.bill.clashformac\n"
-            b"TeamIdentifier=YKUPL7Z869\n"
-            b"CDHash=0123456789abcdef0123456789abcdef01234567\n"
-        )
-        parsed = _parse_codesign_details(valid, "host")
-        self.assertEqual(parsed["Identifier"], "com.bill.clashformac")
-        with self.assertRaisesRegex(PublicationError, "omit identity"):
-            _parse_codesign_details(valid.replace(b"CDHash=", b"Other="), "host")
-        with self.assertRaisesRegex(PublicationError, "repeat Identifier"):
-            _parse_codesign_details(valid + b"Identifier=duplicate\n", "host")
-        with self.assertRaisesRegex(PublicationError, "Team ID"):
-            _parse_codesign_details(valid.replace(b"YKUPL7Z869", b"AAAAAAAAAA"), "host")
-
-    def test_designated_requirement_must_be_unique(self) -> None:
-        digest = _requirement_digest(b"Executable=/tmp/app\ndesignated => anchor apple\n", "host")
-        self.assertEqual(len(digest), 64)
-        with self.assertRaisesRegex(PublicationError, "no unique"):
-            _requirement_digest(b"Executable=/tmp/app\n", "host")
-
-    def test_inner_manifest_uses_all_nine_capabilities_and_real_report_hashes(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            report_paths = sorted({
-                contract["path"] for contract in expected_report_contracts()
-            })
-            for index, relative in enumerate(report_paths):
-                _write(repository, relative, f"report-{index}\n".encode())
-            manifest = _inner_evidence_manifest(_context(repository))
-            self.assertEqual(
-                [capability["id"] for capability in manifest["capabilities"]],
-                list(CAPABILITY_IDS),
-            )
-            self.assertEqual(len(manifest["capabilities"]), 9)
-            self.assertEqual(len(manifest["reports"]), 99)
-            self.assertNotIn("evidence_binding", json.dumps(manifest))
-            report = next(
-                entry
-                for entry in manifest["reports"]
-                if entry["id"] == "platform-command-boundary-physical-machine"
-            )
-            physical = repository / report["path"]
-            self.assertEqual(report["sha256"], hashlib.sha256(physical.read_bytes()).hexdigest())
-
-    def test_post_verification_performs_a_fresh_tree_v2_hash(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            app = repository / "target/candidates/0.4.0/signed/Clash for Mac.app"
-            _write(repository, app.relative_to(repository).as_posix() + "/Contents/data", b"one")
-            expected = build_manifest(app, algorithm="sha256-tree-v2")["sha256"]
-            context = replace(_context(repository), app_manifest={"sha256": expected})
-            observation = _observe_signed_app_tree(context)
-            self.assertEqual(observation["app_tree_sha256"], expected)
-            (app / "Contents/data").write_bytes(b"two")
-            with self.assertRaisesRegex(PublicationError, "differs"):
-                _observe_signed_app_tree(context)
-
-    def test_physical_candidate_built_at_must_equal_receipt_intent(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            app_manifest = _write(
-                repository,
-                "target/candidates/0.4.0/signed/Clash for Mac.app.manifest.json",
-                b"app manifest\n",
-            )
-            context = _context(repository)
-            physical_manifest = {"sha256": "9" * 64}
-            candidate = {
-                "version": PRODUCT_VERSION,
-                "build_number": FINAL_BUILD,
-                "signed_app_tree_sha256": context.app_manifest["sha256"],
-                "app_manifest_sha256": hashlib.sha256(app_manifest.read_bytes()).hexdigest(),
-                "artifact_hash_manifest_sha256": physical_manifest["sha256"],
-                "built_at": context.transaction.prepared_at,
-            }
-            _require_physical_candidate_binding(context, candidate, physical_manifest)
-            candidate["built_at"] = "2026-07-29T12:00:00.000001Z"
-            with self.assertRaisesRegex(PublicationError, "receipt-prepared"):
-                _require_physical_candidate_binding(context, candidate, physical_manifest)
-
-
-class ProductionOrchestratorProcessTests(unittest.TestCase):
-    def test_bounded_runner_terminates_oversized_process(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(PublicationError, "output exceeds"):
-                _run_checked(
-                    [sys.executable, "-c", "import os; os.write(1, b'x' * 4096)"],
-                    Path(temporary),
-                    "oversized test",
-                    dict(os.environ),
-                    timeout=5,
-                    output_limit=1024,
-                )
-
-    def test_bounded_runner_timeout_kills_descendant_process_group(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            pid_path = repository / "child.pid"
-            source = (
-                "import pathlib, subprocess, time; "
-                "p=subprocess.Popen(['/bin/sleep','30']); "
-                f"pathlib.Path({str(pid_path)!r}).write_text(str(p.pid)); "
-                "time.sleep(30)"
-            )
-            with self.assertRaisesRegex(PublicationError, "time limit"):
-                _run_checked(
-                    [sys.executable, "-c", source],
-                    repository,
-                    "timeout test",
-                    dict(os.environ),
-                    timeout=0.5,
-                    output_limit=1024,
-                )
-            child_pid = int(pid_path.read_text(encoding="utf-8"))
-            for _attempt in range(100):
-                try:
-                    os.kill(child_pid, 0)
-                except ProcessLookupError:
-                    break
-                time.sleep(0.01)
-            else:
-                self.fail("bounded runner left its descendant alive")
-
-
-class ProductionOrchestratorPublicationTests(unittest.TestCase):
-    def test_output_publication_rejects_concurrent_parent_lock(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            parent = repository / SEALED_OUTPUT.parent
-            parent.mkdir(parents=True)
-
-            with durable_file.exclusive_directory_lock(parent):
-                with self.assertRaisesRegex(PublicationError, "lock is already held"):
-                    _publish_outputs(repository, {"one.json": {"passed": True}})
-
-            self.assertFalse((repository / SEALED_OUTPUT).exists())
-
-    def test_output_publication_rejects_intermediate_symlink_escape(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            repository = root / "repository"
-            outside = root / "outside"
-            repository.mkdir()
-            outside_parent = outside / SEALED_OUTPUT.parent.relative_to("target")
-            outside_parent.mkdir(parents=True)
-            (repository / "target").symlink_to(outside, target_is_directory=True)
-
-            with self.assertRaisesRegex(PublicationError, "rooted publication directory"):
-                _publish_outputs(repository, {"one.json": {"passed": True}})
-
-            self.assertFalse((outside_parent / SEALED_OUTPUT.name).exists())
-
-    def test_output_publication_reports_parent_replacement_as_unknown(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            parent = repository / SEALED_OUTPUT.parent
-            parent.mkdir(parents=True)
-            displaced = repository / "displaced-release"
-
-            def publish_then_replace(
-                parent_descriptor: int,
-                parent_path: Path,
-                destination_name: str,
-                files: dict[str, bytes],
-            ) -> None:
-                durable_file.publish_private_directory_locked(
-                    parent_descriptor,
-                    parent_path,
-                    destination_name,
-                    files,
-                )
-                parent_path.rename(displaced)
-                parent_path.mkdir(mode=0o700)
-
-            with patch(
-                "scripts.publication.orchestrator.publish_private_directory_locked",
-                side_effect=publish_then_replace,
-            ):
-                with self.assertRaises(durable_file.DurabilityOutcomeUnknown):
-                    _publish_outputs(repository, {"one.json": {"passed": True}})
-
-            self.assertFalse((repository / SEALED_OUTPUT).exists())
-            self.assertTrue((displaced / SEALED_OUTPUT.name).exists())
-
-    def test_output_publication_reports_ancestor_rebinding_as_unknown(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            parent = repository / SEALED_OUTPUT.parent
-            parent.mkdir(parents=True)
-            ancestor = parent.parent
-            displaced = repository / "displaced-generation"
-
-            def publish_then_rebind_ancestor(
-                parent_descriptor: int,
-                parent_path: Path,
-                destination_name: str,
-                files: dict[str, bytes],
-            ) -> None:
-                durable_file.publish_private_directory_locked(
-                    parent_descriptor,
-                    parent_path,
-                    destination_name,
-                    files,
-                )
-                ancestor.rename(displaced)
-                ancestor.mkdir(mode=0o700)
-                (displaced / parent.name).rename(ancestor / parent.name)
-
-            with patch(
-                "scripts.publication.orchestrator.publish_private_directory_locked",
-                side_effect=publish_then_rebind_ancestor,
-            ):
-                with self.assertRaises(durable_file.DurabilityOutcomeUnknown):
-                    _publish_outputs(repository, {"one.json": {"passed": True}})
-
-            self.assertTrue((repository / SEALED_OUTPUT).is_dir())
-            self.assertEqual(
-                (repository / SEALED_OUTPUT / "one.json").read_bytes(),
-                canonical_json({"passed": True}),
-            )
-
-    def test_output_directory_is_atomic_and_never_replaced(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            (repository / SEALED_OUTPUT.parent).mkdir(parents=True)
-            destination = _publish_outputs(repository, {"one.json": {"passed": True}})
-            self.assertEqual(
-                (destination / "one.json").read_bytes(),
-                canonical_json({"passed": True}),
-            )
-            self.assertEqual(
-                _publish_outputs(repository, {"one.json": {"passed": True}}),
-                destination,
-            )
-            with self.assertRaisesRegex(PublicationError, "refusing to replace"):
-                _publish_outputs(repository, {"two.json": {"passed": True}})
-
-    def test_post_rename_durability_failure_is_recoverable_on_exact_retry(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            parent = repository / SEALED_OUTPUT.parent
-            parent.mkdir(parents=True)
-            destination = repository / SEALED_OUTPUT
-            parent_identity = (parent.stat().st_dev, parent.stat().st_ino)
-            documents = {"one.json": {"passed": True}}
-            real_full_fsync = durable_file.full_fsync
-
-            def fail_promoted_parent(descriptor: int) -> None:
-                metadata = os.fstat(descriptor)
-                if (
-                    stat.S_ISDIR(metadata.st_mode)
-                    and (metadata.st_dev, metadata.st_ino) == parent_identity
-                    and destination.exists()
-                ):
-                    raise OSError(errno.EIO, "injected parent full-fsync failure")
-                real_full_fsync(descriptor)
-
-            with patch.object(
-                durable_file,
-                "full_fsync",
-                side_effect=fail_promoted_parent,
-            ):
-                with self.assertRaises(durable_file.DurabilityOutcomeUnknown):
-                    _publish_outputs(repository, documents)
-
-            self.assertEqual(
-                (destination / "one.json").read_bytes(),
-                canonical_json({"passed": True}),
-            )
-            self.assertEqual(_publish_outputs(repository, documents), destination)
-
-    def test_production_recovery_reuses_valid_seal_with_original_observation_time(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary)
-            parent = repository / SEALED_OUTPUT.parent
-            parent.mkdir(parents=True)
-            destination = repository / SEALED_OUTPUT
-            context = _context(repository)
-            physical_candidate_manifest = {"sha256": "a" * 64}
-            normalized_source = {"source": "current"}
-            normalized_ci = {"ci": "current"}
-            descriptor = {"physical": "current"}
-            original_post = {
-                "app_tree_sha256": context.app_manifest["sha256"],
-                "observed_at": "2026-08-24T01:00:00.000000Z",
-            }
-            closure_request = {"closure_request": "current"}
-            closure = {"closure": "sealed"}
-            inner_manifest = {"inner": "current"}
-            final_request = {
-                "final_request": "current",
-                "post_verification": original_post,
-            }
-            final_binding = {"final": "sealed"}
-            outer_request = {
-                "product": {"version": PRODUCT_VERSION, "build_number": FINAL_BUILD},
-                "commit": context.source_identity["repositoryCommit"],
-                "evidence_manifest": inner_manifest,
-                "p0_source": normalized_source,
-                "unsigned_ci": normalized_ci,
-                "signed_installed": descriptor,
-                "sealed_closure": closure,
-                "final_candidate": final_binding,
-            }
-            outer = {"outer": "sealed"}
-            documents = {
-                "p0-source-gates.json": normalized_source,
-                "unsigned-ci-lanes.json": normalized_ci,
-                "physical-evidence.json": descriptor,
-                "sealed-closure.request.json": closure_request,
-                "sealed-closure.json": closure,
-                "final-candidate.request.json": final_request,
-                "final-candidate.json": final_binding,
-                "evidence-manifest.json": inner_manifest,
-                "sealed-evidence-manifest.request.json": outer_request,
-                "sealed-evidence-manifest.json": outer,
-            }
-            parent_identity = (parent.stat().st_dev, parent.stat().st_ino)
-            real_full_fsync = durable_file.full_fsync
-
-            def fail_promoted_parent(descriptor_fd: int) -> None:
-                metadata = os.fstat(descriptor_fd)
-                if (
-                    stat.S_ISDIR(metadata.st_mode)
-                    and (metadata.st_dev, metadata.st_ino) == parent_identity
-                    and destination.exists()
-                ):
-                    raise OSError(errno.EIO, "injected parent full-fsync failure")
-                real_full_fsync(descriptor_fd)
-
-            with patch.object(
-                durable_file,
-                "full_fsync",
-                side_effect=fail_promoted_parent,
-            ):
-                with self.assertRaises(durable_file.DurabilityOutcomeUnknown):
-                    _publish_outputs(repository, documents)
-
-            def current_final_request(
-                _context_value: ProductionContext,
-                _physical_manifest: dict[str, object],
-                _descriptor: dict[str, object],
-                post_verification: dict[str, str],
-            ) -> dict[str, object]:
-                return {
-                    "final_request": "current",
-                    "post_verification": post_verification,
+                    "document": "cfw-github-hosted-ci-receipt-v1",
+                    "run": {"id": 1, "run_attempt": 1},
+                    "schema_version": 1,
                 }
-
-            with patch(
-                "scripts.publication.orchestrator._sealed_closure_request",
-                return_value=closure_request,
-            ), patch(
-                "scripts.publication.orchestrator.build_sealed_closure",
-                return_value=closure,
-            ), patch(
-                "scripts.publication.orchestrator.validate_sealed_closure",
-            ), patch(
-                "scripts.publication.orchestrator._inner_evidence_manifest",
-                return_value=inner_manifest,
-            ), patch(
-                "scripts.publication.orchestrator._final_candidate_request",
-                side_effect=current_final_request,
-            ), patch(
-                "scripts.publication.orchestrator._validated_final_binding",
-                return_value=final_binding,
-            ), patch(
-                "scripts.publication.orchestrator._validated_outer_manifest",
-                return_value=outer,
-            ), patch(
-                "scripts.publication.orchestrator._require_final_inputs_unchanged",
-            ) as final_inputs_guard, patch(
-                "scripts.publication.orchestrator._observe_signed_app_tree",
-                return_value={
-                    "app_tree_sha256": context.app_manifest["sha256"],
-                    "observed_at": "2026-08-24T01:00:01.000000Z",
-                },
-            ) as observe_signed_app:
-                recovered = _recover_sealed_outputs(
-                    context,
-                    physical_candidate_manifest,
-                    normalized_source,
-                    normalized_ci,
-                    descriptor,
-                    object(),
-                )
-            self.assertEqual(recovered, outer)
-            final_inputs_guard.assert_called_once_with(
-                context,
-                physical_candidate_manifest,
-            )
-            observe_signed_app.assert_called_once_with(context)
-
-            (destination / "sealed-closure.request.json").write_bytes(
-                canonical_json({"closure_request": "forged"})
-            )
-            with patch(
-                "scripts.publication.orchestrator._sealed_closure_request",
-                return_value=closure_request,
-            ), self.assertRaisesRegex(
-                PublicationError,
-                "sealed-closure request differs from current release inputs",
-            ):
-                _recover_sealed_outputs(
-                    context,
-                    physical_candidate_manifest,
-                    normalized_source,
-                    normalized_ci,
-                    descriptor,
-                    object(),
-                )
-
-    def test_existing_output_recovery_rejects_tamper_mode_and_extra_entries(self) -> None:
-        mutations = {
-            "tampered bytes": lambda destination: (destination / "one.json").write_bytes(
-                canonical_json({"passed": False})
             ),
-            "non-private file mode": lambda destination: (destination / "one.json").chmod(
-                0o640
+            "local-ci-lanes.json": canonical_json(
+                {
+                    "document": "unsigned-ci-lanes-v2",
+                    "lanes": [],
+                    "release_source_sha256": "d" * 64,
+                    "schema_version": 2,
+                    "toolchain_sha256": "f" * 64,
+                }
             ),
-            "extra entry": lambda destination: (destination / "extra.json").write_bytes(b"{}\n"),
-            "non-private directory mode": lambda destination: destination.chmod(0o750),
+            "manifest.json": canonical_json(manifest),
         }
-        for label, mutate in mutations.items():
-            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
-                repository = Path(temporary)
-                (repository / SEALED_OUTPUT.parent).mkdir(parents=True)
-                documents = {"one.json": {"passed": True}}
-                destination = _publish_outputs(repository, documents)
-                mutate(destination)
 
-                with self.assertRaisesRegex(PublicationError, "refusing to replace"):
-                    _publish_outputs(repository, documents)
+    def ga_acceptance_files(
+        self, repository: Path, prepackage: dict[str, object]
+    ) -> dict[str, bytes]:
+        self.assert_repository(repository)
+        self.assert_stage(prepackage, "prepackage")
+        manifest = _stage_manifest(
+            "ga-acceptance",
+            {
+                "package_sets": {
+                    "dmg": {"seal": {"sha256": "1" * 64}},
+                    "updater": {"seal": {"sha256": "2" * 64}},
+                },
+                "prepackage_manifest_sha256": sha256_file(
+                    self.ga_root / "prepackage/manifest.json"
+                ),
+                "runtime_acceptance": {"adapter": {"sha256": "3" * 64}},
+            },
+        )
+        return {"manifest.json": canonical_json(manifest)}
+
+    def publication_files(
+        self,
+        repository: Path,
+        prepackage: dict[str, object],
+        ga_acceptance: dict[str, object],
+    ) -> dict[str, bytes]:
+        self.assert_repository(repository)
+        self.assert_stage(prepackage, "prepackage")
+        self.assert_stage(ga_acceptance, "ga-acceptance")
+        manifest = _stage_manifest(
+            "publication",
+            {
+                "ga_acceptance_manifest_sha256": sha256_file(
+                    self.ga_root / "ga-acceptance/manifest.json"
+                ),
+                "legal_source": {"sha256": "c" * 64},
+                "package_sets": ga_acceptance["bindings"]["package_sets"],
+                "prepackage_manifest_sha256": sha256_file(
+                    self.ga_root / "prepackage/manifest.json"
+                ),
+            },
+        )
+        return {
+            "legal-review.json": canonical_json({"status": "approved"}),
+            "manifest.json": canonical_json(manifest),
+            "sbom.cyclonedx.json": canonical_json({"bomFormat": "CycloneDX"}),
+            "sbom.spdx.json": canonical_json({"spdxVersion": "SPDX-2.3"}),
+        }
+
+    def patches(self, prepackage_files: dict[str, bytes] | None = None):
+        prepackage = prepackage_files or self.prepackage_files()
+        return (
+            patch(
+                "scripts.publication.ga_release_contract._prepackage_files",
+                return_value=prepackage,
+            ),
+            patch(
+                "scripts.publication.ga_release_contract._ga_acceptance_files",
+                side_effect=self.ga_acceptance_files,
+            ),
+            patch(
+                "scripts.publication.ga_release_contract._publication_files",
+                side_effect=self.publication_files,
+            ),
+        )
+
+    def assert_repository(self, repository: Path) -> None:
+        if repository != self.repository:
+            raise AssertionError(f"unexpected repository: {repository}")
+
+    @staticmethod
+    def assert_stage(manifest: dict[str, object], stage: str) -> None:
+        if manifest.get("stage") != stage:
+            raise AssertionError(f"unexpected stage: {manifest}")
+
+
+class ProductionStageIdentityTests(unittest.TestCase):
+    def test_contract_is_one_ga_root_and_three_ordered_stages(self) -> None:
+        self.assertEqual((PRODUCT_VERSION, GA_BUILD), ("0.4.0", "40031"))
+        self.assertEqual(GA_APP_ARTIFACT_KIND, "notarized-ga-candidate-v1")
+        self.assertEqual(
+            GA_ROOT,
+            Path("target/candidates/0.4.0/ga/40031"),
+        )
+        self.assertEqual(STAGES, ("prepackage", "ga-acceptance", "publication"))
+        self.assertEqual(SIGNED_APP, GA_ROOT / "signed/Clash for Mac.app")
+        self.assertEqual(
+            GA_NATIVE_PRODUCTS,
+            GA_ROOT / "signing-output/signed-native-products",
+        )
+        self.assertEqual(PACKAGE_ROOT, GA_ROOT / "packages")
+        self.assertEqual(DMG_SET, PACKAGE_ROOT / "dmg/v0.4.0")
+        self.assertEqual(UPDATER_SET, PACKAGE_ROOT / "updater/v0.4.0")
+
+    def test_assurance_namespace_is_not_a_ga_stage_input(self) -> None:
+        self.assertEqual(ASSURANCE_ROOT, CANDIDATE_ROOT / "assurance")
+        required = " ".join(
+            str(path)
+            for path in (
+                ACCEPTANCE_INPUT_ROOT,
+                DMG_SET,
+                INSTALL_JOURNAL_INPUT,
+                RUNTIME_ACCEPTANCE_INPUT,
+                RUNTIME_EVIDENCE_INPUT,
+                SERVICE_JOURNAL_INPUT,
+                UPDATER_SET,
+                *STAGE_OUTPUTS.values(),
+            )
+        )
+        for forbidden in ("physical", "performance", "99-report", "assurance"):
+            self.assertNotIn(forbidden, required)
+
+    def test_stage_status_and_authorization_are_closed(self) -> None:
+        for stage in STAGES:
+            manifest = _stage_manifest(stage, {"fixture": stage})
+            validated = _validate_stage_manifest(manifest, stage)
+            self.assertEqual(validated["gate_class"], "ga_required")
+            self.assertEqual(validated["gate_status"], "passed")
+            self.assertEqual(
+                validated["ga_status"],
+                "eligible" if stage == "publication" else "blocked",
+            )
+            self.assertEqual(
+                validated["authorization"],
+                {
+                    "create_packages": stage == "prepackage",
+                    "upload": stage == "publication",
+                },
+            )
+
+    def test_old_stage_schema_is_rejected_without_compatibility(self) -> None:
+        for document in (
+            "validated-candidate-v2",
+            "final-candidate-binding-v1",
+            "sealed-evidence-manifest-v1",
+        ):
+            with self.subTest(document=document):
+                value = _stage_manifest("prepackage", {"fixture": True})
+                value["document"] = document
+                with self.assertRaisesRegex(PublicationError, "identity or status"):
+                    _validate_stage_manifest(value, "prepackage")
+
+    def test_boolean_schema_or_integer_authorization_is_rejected(self) -> None:
+        for field, value in (
+            ("schema_version", True),
+            ("authorization", {"create_packages": 1, "upload": 0}),
+        ):
+            with self.subTest(field=field):
+                manifest = _stage_manifest("prepackage", {"fixture": True})
+                manifest[field] = value
+                with self.assertRaises(PublicationError):
+                    _validate_stage_manifest(manifest, "prepackage")
+
+    def test_duplicate_or_nonfinite_stage_json_is_rejected(self) -> None:
+        for raw in (b'{"field":1,"field":2}\n', b'{"field":NaN}\n'):
+            with self.subTest(raw=raw), self.assertRaises(PublicationError):
+                _parse_strict_json(raw, Path("manifest.json"))
+
+    def test_self_check_has_no_filesystem_side_effect(self) -> None:
+        fixture = StageFixture()
+        self.addCleanup(fixture.cleanup)
+        self_check(fixture.repository)
+        self.assertEqual(os.listdir(fixture.ga_root), [])
+
+    def test_self_check_does_not_require_or_create_the_runtime_ga_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve(strict=True)
+            self_check(repository)
+            self.assertEqual(os.listdir(repository), [])
+
+
+class DurableStageTransactionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = StageFixture()
+        self.addCleanup(self.fixture.cleanup)
+
+    def test_prepackage_is_atomic_private_and_idempotent(self) -> None:
+        files = self.fixture.prepackage_files()
+        first = _publish_stage(self.fixture.repository, "prepackage", files)
+        second = _publish_stage(self.fixture.repository, "prepackage", files)
+        self.assertEqual(first, second)
+        output = self.fixture.ga_root / "prepackage"
+        self.assertEqual(set(os.listdir(output)), set(STAGE_FILE_NAMES["prepackage"]))
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o700)
+        for name in STAGE_FILE_NAMES["prepackage"]:
+            self.assertEqual(stat.S_IMODE((output / name).stat().st_mode), 0o600)
+        self.assertFalse(
+            any(name.startswith(".publication-pending-") for name in os.listdir(self.fixture.ga_root))
+        )
+
+    def test_immutable_stage_refuses_replacement(self) -> None:
+        original = self.fixture.prepackage_files()
+        _publish_stage(self.fixture.repository, "prepackage", original)
+        changed = self.fixture.prepackage_files("9")
+        with self.assertRaisesRegex(PublicationError, "refusing to replace"):
+            _publish_stage(self.fixture.repository, "prepackage", changed)
+        self.assertEqual(
+            (self.fixture.ga_root / "prepackage/manifest.json").read_bytes(),
+            original["manifest.json"],
+        )
+
+    def test_malformed_stage_schema_fails_before_publication(self) -> None:
+        files = self.fixture.prepackage_files()
+        manifest = _stage_manifest("prepackage", {"fixture": True})
+        manifest["document"] = "validated-candidate-v2"
+        files["manifest.json"] = canonical_json(manifest)
+        with self.assertRaises(PublicationError):
+            _publish_stage(self.fixture.repository, "prepackage", files)
+        self.assertFalse((self.fixture.ga_root / "prepackage").exists())
+
+    def test_partial_stage_write_is_cleaned_without_success(self) -> None:
+        with patch(
+            "scripts.publication.durable_file._write_private_pending_at",
+            side_effect=PublicationError("simulated short write"),
+        ):
+            with self.assertRaisesRegex(PublicationError, "short write"):
+                _publish_stage(
+                    self.fixture.repository,
+                    "prepackage",
+                    self.fixture.prepackage_files(),
+                )
+        self.assertFalse((self.fixture.ga_root / "prepackage").exists())
+        self.assertFalse(
+            any(name.startswith(".publication-pending-") for name in os.listdir(self.fixture.ga_root))
+        )
+
+    def test_stage_file_addition_is_detected(self) -> None:
+        _publish_stage(
+            self.fixture.repository,
+            "prepackage",
+            self.fixture.prepackage_files(),
+        )
+        extra = self.fixture.ga_root / "prepackage/extra.json"
+        extra.write_bytes(b"{}\n")
+        extra.chmod(0o600)
+        with self.assertRaises(PublicationError):
+            _publish_stage(
+                self.fixture.repository,
+                "prepackage",
+                self.fixture.prepackage_files(),
+            )
+
+    def test_parent_identity_loss_after_publish_is_outcome_unknown(self) -> None:
+        real_lock = durable_file.exclusive_rooted_directory_lock
+        lock_calls = 0
+
+        @contextmanager
+        def lose_reply(root: Path, directory: Path):
+            nonlocal lock_calls
+            lock_calls += 1
+            call_number = lock_calls
+            with real_lock(root, directory) as descriptor:
+                yield descriptor
+            if call_number == 2:
+                raise durable_file.RootedDirectoryChanged("simulated parent rebind")
+
+        with patch(
+            "scripts.publication.orchestrator.exclusive_rooted_directory_lock",
+            lose_reply,
+        ), patch(
+            "scripts.publication.ga_release_contract.exclusive_rooted_directory_lock",
+            lose_reply,
+        ):
+            with self.assertRaises(durable_file.DurabilityOutcomeUnknown):
+                _publish_stage(
+                    self.fixture.repository,
+                    "prepackage",
+                    self.fixture.prepackage_files(),
+                )
+        self.assertTrue((self.fixture.ga_root / "prepackage/manifest.json").is_file())
+
+    def test_existing_stage_rejects_a_symlinked_ga_ancestor(self) -> None:
+        files = self.fixture.prepackage_files()
+        _publish_stage(self.fixture.repository, "prepackage", files)
+        target = self.fixture.repository / "target"
+        rebound = self.fixture.repository / "rebound-target"
+        os.rename(target, rebound)
+        os.symlink(rebound.name, target)
+        with patch(
+            "scripts.publication.ga_release_contract._prepackage_files",
+            return_value=files,
+        ), self.assertRaisesRegex(PublicationError, "without symlinks"):
+            verify_stage(self.fixture.repository, "prepackage")
+
+    def test_stage_cannot_be_created_after_a_later_stage(self) -> None:
+        publication_files = {
+            "legal-review.json": canonical_json({"status": "approved"}),
+            "manifest.json": canonical_json(
+                _stage_manifest("publication", {"fixture": True})
+            ),
+            "sbom.cyclonedx.json": canonical_json({"bomFormat": "CycloneDX"}),
+            "sbom.spdx.json": canonical_json({"spdxVersion": "SPDX-2.3"}),
+        }
+        _publish_stage(
+            self.fixture.repository,
+            "publication",
+            publication_files,
+        )
+        with self.assertRaisesRegex(PublicationError, "after a later GA stage"):
+            _publish_stage(
+                self.fixture.repository,
+                "prepackage",
+                self.fixture.prepackage_files(),
+            )
+
+
+class StageOrderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = StageFixture()
+        self.addCleanup(self.fixture.cleanup)
+        live = patch(
+            "scripts.publication.ga_release_contract.live_verify_hosted_ci_receipt",
+            return_value={"document": "live-hosted-ci-fixture"},
+        )
+        self.live_hosted_ci = live.start()
+        self.addCleanup(live.stop)
+
+    def test_prepackage_live_checks_once_but_plain_stage_verify_is_offline(self) -> None:
+        files = self.fixture.prepackage_files()
+        with patch(
+            "scripts.publication.ga_release_contract._prepackage_files",
+            return_value=files,
+        ) as compose:
+            sealed = seal_prepackage(self.fixture.repository)
+            self.assertEqual(self.live_hosted_ci.call_count, 1)
+            self.assertEqual(
+                compose.call_args_list[0].kwargs,
+                {"expected_live_hosted_ci": {"document": "live-hosted-ci-fixture"}},
+            )
+            self.live_hosted_ci.reset_mock()
+            self.assertEqual(verify_stage(self.fixture.repository, "prepackage"), sealed)
+            self.live_hosted_ci.assert_not_called()
+
+    def test_ga_acceptance_cannot_skip_prepackage(self) -> None:
+        pre, ga, publication = self.fixture.patches()
+        with pre, ga, publication:
+            with self.assertRaises(PublicationError):
+                seal_ga_acceptance(self.fixture.repository)
+        self.assertFalse((self.fixture.ga_root / "ga-acceptance").exists())
+
+    def test_publication_cannot_skip_ga_acceptance(self) -> None:
+        pre, ga, publication = self.fixture.patches()
+        with pre, ga, publication:
+            seal_prepackage(self.fixture.repository)
+            with self.assertRaises(PublicationError):
+                seal_publication(self.fixture.repository)
+        self.assertFalse((self.fixture.ga_root / "publication").exists())
+
+    def test_three_stages_publish_in_order_and_bind_predecessors(self) -> None:
+        pre, ga, publication = self.fixture.patches()
+        with pre, ga, publication:
+            prepackage = seal_prepackage(self.fixture.repository)
+            ga_acceptance = seal_ga_acceptance(self.fixture.repository)
+            final = seal_publication(self.fixture.repository)
+            self.assertEqual(verify_stage(self.fixture.repository, "publication"), final)
+        self.assertEqual(prepackage["stage"], "prepackage")
+        self.assertEqual(ga_acceptance["stage"], "ga-acceptance")
+        self.assertEqual(final["stage"], "publication")
+        self.assertEqual(
+            ga_acceptance["bindings"]["prepackage_manifest_sha256"],
+            sha256_file(self.fixture.ga_root / "prepackage/manifest.json"),
+        )
+        self.assertEqual(
+            final["bindings"]["ga_acceptance_manifest_sha256"],
+            sha256_file(self.fixture.ga_root / "ga-acceptance/manifest.json"),
+        )
+        self.assertTrue(final["authorization"]["upload"])
+
+    def test_reopened_input_drift_invalidates_existing_stage(self) -> None:
+        original = self.fixture.prepackage_files()
+        with patch(
+            "scripts.publication.ga_release_contract._prepackage_files",
+            return_value=original,
+        ):
+            seal_prepackage(self.fixture.repository)
+        with patch(
+            "scripts.publication.ga_release_contract._prepackage_files",
+            return_value=self.fixture.prepackage_files("9"),
+        ):
+            with self.assertRaisesRegex(PublicationError, "reopened GA inputs"):
+                verify_stage(self.fixture.repository, "prepackage")
+
+    def test_input_drift_during_publication_never_returns_authorization(self) -> None:
+        original = self.fixture.prepackage_files()
+        changed = self.fixture.prepackage_files("9")
+        with patch(
+            "scripts.publication.ga_release_contract._prepackage_files",
+            side_effect=(original, changed),
+        ):
+            with self.assertRaisesRegex(
+                durable_file.DurabilityOutcomeUnknown,
+                "post-publication input binding is unknown",
+            ):
+                seal_prepackage(self.fixture.repository)
+        self.assertTrue((self.fixture.ga_root / "prepackage/manifest.json").is_file())
+        self.assertEqual(
+            (self.fixture.ga_root / "prepackage/manifest.json").read_bytes(),
+            original["manifest.json"],
+        )
+
+    def test_publication_stage_contains_only_publication_legal_copies(self) -> None:
+        pre, ga, publication = self.fixture.patches()
+        with pre, ga, publication:
+            seal_prepackage(self.fixture.repository)
+            seal_ga_acceptance(self.fixture.repository)
+            manifest = seal_publication(self.fixture.repository)
+        output = self.fixture.ga_root / "publication"
+        self.assertEqual(set(os.listdir(output)), set(STAGE_FILE_NAMES["publication"]))
+        encoded = canonical_json(manifest)
+        for forbidden in (b"physical", b"performance", b"99-report", b"assurance"):
+            self.assertNotIn(forbidden, encoded)
+
+
+class AdapterContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = StageFixture()
+        self.addCleanup(self.fixture.cleanup)
+
+    def test_package_adapter_uses_the_fixed_ga_candidate_contract(self) -> None:
+        adapter = _require_artifact_set_adapter(self.fixture.repository)
+
+        self.assertEqual(
+            adapter.CANDIDATE_APP_RELATIVE,
+            "target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app",
+        )
+        self.assertTrue(callable(adapter.verify_dmg_set))
+        self.assertTrue(callable(adapter.verify_updater_set))
+
+    def test_publication_adapter_uses_the_fixed_ga_stage_inputs(self) -> None:
+        _verify_publication_adapter(self.fixture.repository)
+
+    def test_signing_notarization_binding_rejects_every_identity_drift(self) -> None:
+        transformation = {
+            "pre_sign_app_manifest_sha256": "1" * 64,
+            "pre_sign_app_tree_sha256": "2" * 64,
+            "signed_app_tree_sha256": "3" * 64,
+        }
+        receipt = {
+            "app_manifest_sha256": "4" * 64,
+            "candidate_freeze_intent_sha256": "5" * 64,
+            "post_staple_app_tree_sha256": "6" * 64,
+            "pre_sign_app_manifest_sha256": "1" * 64,
+            "pre_sign_app_tree_sha256": "2" * 64,
+            "pre_staple_app_tree_sha256": "3" * 64,
+            "signed_app_tree_sha256": "3" * 64,
+            "signing_transformation_receipt_sha256": "7" * 64,
+        }
+        arguments = {
+            "candidate_freeze_intent_sha256": "5" * 64,
+            "transformation": transformation,
+            "transformation_sha256": "7" * 64,
+            "notarization_receipt": receipt,
+            "app_manifest_tree_sha256": "6" * 64,
+            "app_manifest_sha256": "4" * 64,
+        }
+        _validate_signing_notarization_binding(**arguments)
+        for field in receipt:
+            with self.subTest(field=field):
+                drifted = dict(receipt)
+                drifted[field] = "8" * 64
+                with self.assertRaisesRegex(PublicationError, "differ"):
+                    _validate_signing_notarization_binding(
+                        **{**arguments, "notarization_receipt": drifted}
+                    )
+
+    def test_legacy_paths_are_rejected_even_when_the_ga_root_exists(self) -> None:
+        for relative in LEGACY_PATHS:
+            with self.subTest(path=relative):
+                fixture = StageFixture()
+                try:
+                    path = fixture.repository.joinpath(*relative.parts)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"legacy\n")
+                    with self.assertRaisesRegex(PublicationError, "retired"):
+                        _reject_legacy_paths(fixture.repository)
+                finally:
+                    fixture.cleanup()
+
+    def test_local_all_passed_summary_cannot_replace_a_real_runtime_verifier(self) -> None:
+        runtime_path = self.fixture.repository.joinpath(*RUNTIME_ACCEPTANCE_INPUT.parts)
+        runtime_path.parent.mkdir(parents=True)
+        runtime_path.write_bytes(
+            canonical_json(
+                {
+                    "checks": {name: "passed" for name in GA_RUNTIME_CHECKS},
+                    "document": RUNTIME_ACCEPTANCE_DOCUMENT,
+                    "schema_version": 1,
+                }
+            )
+        )
+        runtime_path.chmod(0o600)
+        raw_root = self.fixture.repository.joinpath(*RUNTIME_EVIDENCE_INPUT.parts)
+        raw_root.mkdir()
+        (raw_root / "arbitrary.txt").write_text("not runtime proof\n", encoding="utf-8")
+        with self.assertRaisesRegex(PublicationError, "runtime raw evidence is invalid"):
+            _verified_runtime_acceptance_adapter(
+                self.fixture.repository,
+                packages={
+                    "dmg": {
+                        "dmg_sha256": "6" * 64,
+                        "gatekeeper_sha256": "7" * 64,
+                        "seal": {"sha256": "8" * 64},
+                    }
+                },
+                install_journal_sha256="a" * 64,
+                service_journal_tree_sha256="b" * 64,
+            )
+
+    def _runtime_adapter_fixture(self) -> tuple[Path, Path]:
+        adapter = self.fixture.repository.joinpath(*RUNTIME_ACCEPTANCE_INPUT.parts)
+        adapter.parent.mkdir(parents=True, exist_ok=True)
+        adapter.write_bytes(canonical_json({"document": RUNTIME_ACCEPTANCE_DOCUMENT}))
+        adapter.chmod(0o600)
+        evidence = self.fixture.repository.joinpath(*RUNTIME_EVIDENCE_INPUT.parts)
+        evidence.mkdir()
+        raw = evidence / "launch.json"
+        raw.write_bytes(canonical_json({"status": "passed"}))
+        raw.chmod(0o600)
+        return adapter, evidence
+
+    def _runtime_packages(self) -> dict[str, object]:
+        return {
+            "dmg": {
+                "dmg_sha256": "6" * 64,
+                "gatekeeper_sha256": "7" * 64,
+                "seal": {"sha256": "8" * 64},
+            }
+        }
+
+    def test_runtime_verifier_must_return_the_fixed_reopened_records(self) -> None:
+        adapter, evidence = self._runtime_adapter_fixture()
+        module = ModuleType("scripts.ga_runtime_acceptance")
+        module.validate_ga_runtime_acceptance = lambda **_kwargs: {
+            "adapter": _record(self.fixture.repository, adapter),
+            "runtime_evidence": _tree_record(self.fixture.repository, evidence),
+        }
+        with patch.dict(sys.modules, {module.__name__: module}):
+            result = _verified_runtime_acceptance_adapter(
+                self.fixture.repository,
+                packages=self._runtime_packages(),
+                install_journal_sha256="a" * 64,
+                service_journal_tree_sha256="b" * 64,
+            )
+        self.assertEqual(result["adapter"]["path"], RUNTIME_ACCEPTANCE_INPUT.as_posix())
+        self.assertEqual(
+            result["runtime_evidence"]["path"],
+            RUNTIME_EVIDENCE_INPUT.as_posix(),
+        )
+
+    def test_runtime_verifier_cannot_return_a_legacy_or_caller_selected_path(self) -> None:
+        _adapter, evidence = self._runtime_adapter_fixture()
+        module = ModuleType("scripts.ga_runtime_acceptance")
+        module.validate_ga_runtime_acceptance = lambda **_kwargs: {
+            "adapter": {
+                "path": "target/candidates/0.4.0/validation/runtime-acceptance.json",
+                "sha256": "c" * 64,
+            },
+            "runtime_evidence": _tree_record(self.fixture.repository, evidence),
+        }
+        with patch.dict(sys.modules, {module.__name__: module}), self.assertRaisesRegex(
+            PublicationError,
+            "fixed adapter and raw-evidence paths",
+        ):
+            _verified_runtime_acceptance_adapter(
+                self.fixture.repository,
+                packages=self._runtime_packages(),
+                install_journal_sha256="a" * 64,
+                service_journal_tree_sha256="b" * 64,
+            )
+
+    def test_runtime_digest_drift_after_verification_is_rejected(self) -> None:
+        adapter, evidence = self._runtime_adapter_fixture()
+        module = ModuleType("scripts.ga_runtime_acceptance")
+
+        def validate(**_kwargs):
+            result = {
+                "adapter": _record(self.fixture.repository, adapter),
+                "runtime_evidence": _tree_record(self.fixture.repository, evidence),
+            }
+            adapter.write_bytes(canonical_json({"document": "changed-after-verification"}))
+            return result
+
+        module.validate_ga_runtime_acceptance = validate
+        with patch.dict(sys.modules, {module.__name__: module}), self.assertRaisesRegex(
+            PublicationError,
+            "fixed adapter and raw-evidence paths",
+        ):
+            _verified_runtime_acceptance_adapter(
+                self.fixture.repository,
+                packages=self._runtime_packages(),
+                install_journal_sha256="a" * 64,
+                service_journal_tree_sha256="b" * 64,
+            )
+
+    def test_acceptance_binds_prepackage_journals_and_trusted_runtime_result(self) -> None:
+        install = {
+            "candidate": {
+                "build_number": "40031",
+                "manifest_sha256": "1" * 64,
+                "release_source_sha256": "2" * 64,
+                "repository_commit": "3" * 40,
+                "tree_sha256": "4" * 64,
+                "version": "0.4.0",
+            },
+            "guards": [{"after": {"closed": True}}],
+            "phase": "installed",
+            "previous": {
+                "build_number": "40019",
+                "tree_sha256": "5" * 64,
+                "version": "0.4.0",
+            },
+        }
+        service_intent = {
+            "candidate": install["candidate"],
+            "previous": install["previous"],
+        }
+        packages = {
+            "dmg": {
+                "dmg_sha256": "6" * 64,
+                "gatekeeper_sha256": "7" * 64,
+                "seal": {"sha256": "8" * 64},
+            }
+        }
+        prepackage = _stage_manifest(
+            "prepackage",
+            {
+                "candidate": {
+                    "app_manifest": {"sha256": "1" * 64},
+                    "signed_app": {"tree_sha256": "4" * 64},
+                },
+                "source": {
+                    "release_source_sha256": "2" * 64,
+                    "repository_commit": "3" * 40,
+                },
+            },
+        )
+        def load(path: Path, *, canonical: bool = True):
+            del canonical
+            if path == self.fixture.repository.joinpath(*INSTALL_JOURNAL_INPUT.parts):
+                return install
+            raise AssertionError(path)
+
+        def digest(path: Path) -> str:
+            if path == self.fixture.repository.joinpath(*INSTALL_JOURNAL_INPUT.parts):
+                return "a" * 64
+            raise AssertionError(path)
+
+        with (
+            patch(
+                "scripts.publication.ga_release_contract._load_strict_json",
+                side_effect=load,
+            ),
+            patch("scripts.publication.ga_release_contract._require_private_regular"),
+            patch(
+                "scripts.publication.ga_release_contract.dormant_install.validate_journal",
+                return_value=install,
+            ),
+            patch(
+                "scripts.publication.ga_release_contract._verified_service_journal",
+                return_value=(service_intent, {"path": "service", "sha256": "b" * 64}),
+            ),
+            patch(
+                "scripts.publication.ga_release_contract._verified_runtime_acceptance_adapter",
+                return_value={
+                    "adapter": {"path": "runtime-acceptance.json", "sha256": "c" * 64},
+                    "runtime_evidence": {"path": "runtime-evidence", "sha256": "d" * 64},
+                },
+            ),
+            patch(
+                "scripts.publication.ga_release_contract.sha256_file",
+                side_effect=digest,
+            ),
+            patch(
+                "scripts.publication.ga_release_contract._record",
+                side_effect=lambda _repository, path: {
+                    "path": path.name,
+                    "sha256": "d" * 64,
+                },
+            ),
+        ):
+            accepted = _verified_acceptance_inputs(
+                self.fixture.repository,
+                prepackage,
+                packages,
+            )
+            self.assertEqual(accepted["runtime_evidence"]["sha256"], "d" * 64)
+            install["candidate"]["tree_sha256"] = "9" * 64
+            with self.assertRaises(PublicationError):
+                _verified_acceptance_inputs(
+                    self.fixture.repository,
+                    prepackage,
+                    packages,
+                )
+
+
+class CommandBoundaryTests(unittest.TestCase):
+    def test_retired_commands_are_explicitly_rejected(self) -> None:
+        for command in (
+            "prepare-physical-candidate-manifest",
+            "seal",
+            "validation",
+            "final",
+        ):
+            with self.subTest(command=command), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr, self.assertRaises(SystemExit) as captured:
+                production_release_evidence._arguments([command])
+            self.assertEqual(captured.exception.code, 2)
+            self.assertIn("is retired", stderr.getvalue())
+
+    def test_only_three_stage_commands_and_explicit_verification_are_admitted(self) -> None:
+        for stage in STAGES:
+            self.assertEqual(
+                production_release_evidence._arguments([stage]).command,
+                stage,
+            )
+            arguments = production_release_evidence._arguments(["verify", stage])
+            self.assertEqual((arguments.command, arguments.stage), ("verify", stage))
+
+    def test_main_dispatches_exactly_one_stage(self) -> None:
+        manifest = _stage_manifest("prepackage", {"fixture": True})
+        with (
+            patch.object(sys, "argv", ["production_release_evidence.py", "prepackage"]),
+            patch.object(production_release_evidence, "require_closed_release_runtime"),
+            patch(
+                "scripts.publication.orchestrator.seal_prepackage",
+                return_value=manifest,
+            ) as prepackage,
+            patch("scripts.publication.orchestrator.seal_ga_acceptance") as ga,
+            patch("scripts.publication.orchestrator.seal_publication") as publication,
+            patch("builtins.print"),
+        ):
+            production_release_evidence.main()
+        prepackage.assert_called_once_with(production_release_evidence._repository())
+        ga.assert_not_called()
+        publication.assert_not_called()
+
+    def test_main_self_check_is_exactly_source_only(self) -> None:
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["production_release_evidence.py", "self-check"],
+            ),
+            patch.object(
+                production_release_evidence,
+                "require_closed_release_runtime",
+                side_effect=AssertionError("source-only self-check requested admission"),
+            ) as admission,
+            patch(
+                "scripts.publication.ga_release_contract.self_check"
+            ) as source_self_check,
+            patch("builtins.print"),
+        ):
+            production_release_evidence.main()
+        admission.assert_not_called()
+        source_self_check.assert_called_once_with(
+            production_release_evidence._repository()
+        )
+
+    def test_main_production_commands_remain_closed_runtime_only(self) -> None:
+        commands = (
+            ["prepackage"],
+            ["ga-acceptance"],
+            ["publication"],
+            ["verify", "prepackage"],
+        )
+        for command in commands:
+            with self.subTest(command=command), patch.object(
+                sys,
+                "argv",
+                ["production_release_evidence.py", *command],
+            ), patch.object(
+                production_release_evidence,
+                "require_closed_release_runtime",
+                side_effect=production_release_evidence.ReleasePythonRuntimeError(
+                    "fixture admission rejected"
+                ),
+            ) as admission, self.assertRaisesRegex(
+                SystemExit, "fixture admission rejected"
+            ):
+                production_release_evidence.main()
+            admission.assert_called_once_with()
+
+    def test_main_rejects_broadened_self_check_shape(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            ["production_release_evidence.py", "self-check", "--unexpected"],
+        ), patch.object(
+            production_release_evidence,
+            "require_closed_release_runtime",
+        ) as admission, patch(
+            "sys.stderr", new_callable=io.StringIO
+        ), self.assertRaises(SystemExit) as captured:
+            production_release_evidence.main()
+        self.assertEqual(captured.exception.code, 2)
+        admission.assert_not_called()
 
 
 if __name__ == "__main__":

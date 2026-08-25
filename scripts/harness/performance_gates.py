@@ -18,7 +18,7 @@ from typing import Any
 
 if __package__:
     from .performance_ledger import (
-        FINAL_BUILD,
+        GA_BUILD,
         LEDGER_KIND,
         LEDGER_SUBJECT,
         SHAPING_INTENT_SUBJECT,
@@ -42,7 +42,7 @@ else:  # pragma: no cover - direct-script import path
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from performance_ledger import (  # type: ignore
-        FINAL_BUILD,
+        GA_BUILD,
         LEDGER_KIND,
         LEDGER_SUBJECT,
         SHAPING_INTENT_SUBJECT,
@@ -317,10 +317,10 @@ def _validate(value: Any, artifacts: ArtifactReader) -> dict[str, Any]:
     proof = parse_proof_binding(document["proof"])
     if (
         proof["candidate"]["version"] != PRODUCT_VERSION
-        or proof["candidate"]["build_number"] != FINAL_BUILD
+        or proof["candidate"]["build_number"] != GA_BUILD
     ):
         raise PerformanceGateError(
-            f"performance evidence is not final 0.4.0 build {FINAL_BUILD}"
+            f"performance evidence is not GA 0.4.0 build {GA_BUILD}"
         )
     ledger_descriptor, ledger = _read_ledger(artifacts, document["ledger_artifact"])
     derived = validate_performance_ledger(ledger, artifacts=artifacts)

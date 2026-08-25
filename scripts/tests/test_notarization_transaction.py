@@ -146,23 +146,65 @@ class Fixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.candidate = self.repository / "target/candidates/0.4.0"
-        self.build = self.candidate / "validation/40000"
-        self.native = self.build / "native-products"
-        self.staging = self.candidate / ".signed-stage.fixture"
+        self.build = self.candidate / "ga/40031"
+        self.signing_output = self.build / "signing-output"
+        self.native = self.signing_output / "signed-native-products"
+        self.staging = self.signing_output / "signing-input"
         self.app = self.staging / "Clash for Mac.app"
         self.native.mkdir(parents=True)
         executable = self.app / "Contents/MacOS/clash-for-mac"
         executable.parent.mkdir(parents=True)
         executable.write_bytes(b"signed-app")
         executable.chmod(0o755)
+        self.signed_app_tree_sha256 = build_manifest(
+            self.app, algorithm="sha256-tree-v2"
+        )["sha256"]
+        self.signing_transformation_receipt = {
+            "candidate_freeze_intent_sha256": "f" * 64,
+            "code_objects": [
+                "Contents/Frameworks/CFWNativeBridge.framework",
+                "Contents/Library/HelperTools/CFWGlobalAuthority",
+                "Contents/Library/LoginItems/CFWProxyAgent.app",
+                (
+                    "Contents/Library/SystemExtensions/"
+                    "com.bill.clashformac.packet-tunnel.systemextension"
+                ),
+                "Contents/Library/HelperTools/cfw-helper-tombstone",
+                ".",
+            ],
+            "document": "cfm-ga-signing-transformation-v1",
+            "normalized_app_tree_sha256": "9" * 64,
+            "pre_sign_app_manifest_sha256": "a" * 64,
+            "pre_sign_app_tree_sha256": "b" * 64,
+            "product": {"build_number": "40031", "version": "0.4.0"},
+            "profiles": {
+                "host": "c" * 64,
+                "packet_tunnel": "d" * 64,
+                "proxy_agent": "e" * 64,
+            },
+            "removed_signed_profiles": [
+                "Contents/embedded.provisionprofile",
+                (
+                    "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/"
+                    "embedded.provisionprofile"
+                ),
+                (
+                    "Contents/Library/SystemExtensions/"
+                    "com.bill.clashformac.packet-tunnel.systemextension/Contents/"
+                    "embedded.provisionprofile"
+                ),
+            ],
+            "schema_version": 1,
+            "signed_app_tree_sha256": self.signed_app_tree_sha256,
+        }
         (self.repository / "scripts").mkdir()
         self.context = TransactionContext(
             repository=self.repository,
-            build_kind="validation",
-            build_number="40000",
+            build_kind="ga",
+            build_number="40031",
             staged_app=self.app,
             native_products=self.native,
-            notary_profile="fixture-profile",
+            notary_profile=transaction_module.NOTARY_PROFILE,
             repository_commit="a" * 40,
             release_source_sha256="b" * 64,
             deployment_target="15.0",
@@ -198,6 +240,22 @@ class Fixture:
     def source_identity(self, _repository: Path) -> dict[str, str]:
         return self.context.source_identity
 
+    def signing_transformation(self, _repository: Path) -> dict[str, object]:
+        return json.loads(json.dumps(self.signing_transformation_receipt))
+
+    def signing_transformation_binding(self) -> dict[str, str]:
+        receipt = self.signing_transformation_receipt
+        return {
+            "signing_transformation_receipt_sha256": hashlib.sha256(
+                transaction_module.canonical_signing_transformation_json(receipt)
+            ).hexdigest(),
+            "pre_sign_app_manifest_sha256": receipt[
+                "pre_sign_app_manifest_sha256"
+            ],
+            "pre_sign_app_tree_sha256": receipt["pre_sign_app_tree_sha256"],
+            "signed_app_tree_sha256": receipt["signed_app_tree_sha256"],
+        }
+
     @staticmethod
     def publisher(source: Path, destination: Path) -> None:
         if os.path.lexists(destination):
@@ -217,6 +275,18 @@ class Fixture:
             "publisher": self.publisher,
             "clock": self.clock,
             "attempt_id_factory": lambda: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "candidate_freeze_verifier": lambda _repository: (
+                transaction_module.FrozenCandidate(
+                    root=self.build,
+                    intent_path=self.build / "candidate-freeze/intent.json",
+                    intent_sha256="f" * 64,
+                    product_version="0.4.0",
+                    build_number="40031",
+                    recovered=False,
+                )
+            ),
+            "signing_transformation_verifier": self.signing_transformation,
+            "signing_transformation_receipt_reader": self.signing_transformation,
         }
 
     def execute_context(self, context: TransactionContext, **overrides):
@@ -232,6 +302,8 @@ class Fixture:
         arguments.pop("archive_builder")
         arguments.pop("attempt_id_factory")
         arguments.pop("host_system_identity_reader", None)
+        arguments.pop("candidate_freeze_verifier")
+        arguments.pop("signing_transformation_verifier")
         arguments.update(
             recovery_tool_identity_reader=lambda _repository: {
                 "repositoryCommit": "c" * 40,
@@ -901,6 +973,208 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             self.assertEqual(event["intent_sha256"], intent_sha256)
             self.assertEqual(event["previous_event_sha256"], previous_sha256)
             previous_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        intent = json.loads(
+            (self.fixture.context.attempt_root / "intent.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        submission_receipt = json.loads(
+            (
+                self.fixture.context.attempt_root / "submission-receipt.json"
+            ).read_text(encoding="utf-8")
+        )
+        publish_ready_receipt = json.loads(
+            sole_finalization_receipt(self.fixture).read_text(encoding="utf-8")
+        )
+        self.assertEqual(intent["schema_version"], 4)
+        self.assertEqual(
+            intent["notary_profile"],
+            transaction_module.NOTARY_PROFILE,
+        )
+        self.assertNotIn("lane", intent)
+        self.assertEqual(intent["candidate_freeze_intent_sha256"], "f" * 64)
+        self.assertEqual(submission_receipt["schema_version"], 5)
+        self.assertEqual(
+            submission_receipt["notary_profile"],
+            transaction_module.NOTARY_PROFILE,
+        )
+        self.assertEqual(
+            submission_receipt["candidate_freeze_intent_sha256"],
+            "f" * 64,
+        )
+        self.assertEqual(publish_ready_receipt["schema_version"], 5)
+        self.assertEqual(
+            publish_ready_receipt["candidate_freeze_intent_sha256"],
+            "f" * 64,
+        )
+        expected_transformation = self.fixture.signing_transformation_binding()
+        for field, expected in expected_transformation.items():
+            self.assertEqual(intent[field], expected)
+            self.assertEqual(submission_receipt[field], expected)
+            self.assertEqual(publish_ready_receipt[field], expected)
+        self.assertEqual(
+            intent["pre_staple_app_tree_sha256"],
+            expected_transformation["signed_app_tree_sha256"],
+        )
+
+    def test_signing_transformation_is_verified_before_attempt_claim(self) -> None:
+        calls = 0
+
+        def rejecting_verifier(repository: Path) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            self.assertEqual(repository, self.fixture.repository)
+            self.assertFalse(self.fixture.context.attempt_root.exists())
+            self.assertTrue(self.fixture.app.is_dir())
+            raise ValueError("fixture transformation rejection")
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.execute(signing_transformation_verifier=rejecting_verifier)
+        self.assertEqual(calls, 1)
+        self.assertEqual(
+            raised.exception.code,
+            "signing_transformation_verification_failed",
+        )
+        self.assertFalse(self.fixture.context.attempt_root.exists())
+        self.assertTrue(self.fixture.app.is_dir())
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_signing_transformation_signed_tree_mismatch_fails_preclaim(self) -> None:
+        receipt = self.fixture.signing_transformation(self.fixture.repository)
+        receipt["signed_app_tree_sha256"] = "0" * 64
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.execute(
+                signing_transformation_verifier=lambda _repository: receipt
+            )
+        self.assertEqual(
+            raised.exception.code,
+            "signing_transformation_app_identity_mismatch",
+        )
+        self.assertFalse(self.fixture.context.attempt_root.exists())
+        self.assertTrue(self.fixture.app.is_dir())
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_signing_input_change_during_claim_is_detected_before_submit(self) -> None:
+        original_claim = transaction_module._claim_attempt
+
+        def claim_then_mutate(context: TransactionContext) -> tuple[Path, Path]:
+            claimed = original_claim(context)
+            executable = self.fixture.app / "Contents/MacOS/clash-for-mac"
+            executable.write_bytes(b"changed-after-transformation-check")
+            return claimed
+
+        with patch.object(
+            transaction_module,
+            "_claim_attempt",
+            side_effect=claim_then_mutate,
+        ):
+            with self.assertRaises(TransactionError) as raised:
+                self.fixture.execute()
+        self.assertEqual(
+            raised.exception.code,
+            "signing_transformation_app_identity_drift",
+        )
+        self.assertTrue(self.fixture.context.attempt_root.is_dir())
+        self.assertFalse(self.fixture.app.exists())
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_signing_receipt_change_during_claim_is_detected_before_submit(self) -> None:
+        changed = self.fixture.signing_transformation(self.fixture.repository)
+        changed["pre_sign_app_manifest_sha256"] = "0" * 64
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.execute(
+                signing_transformation_receipt_reader=lambda _repository: changed
+            )
+        self.assertEqual(
+            raised.exception.code,
+            "signing_transformation_receipt_drift",
+        )
+        self.assertTrue(self.fixture.context.attempt_root.is_dir())
+        self.assertFalse(self.fixture.app.exists())
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_candidate_freeze_is_verified_before_attempt_consumption(self) -> None:
+        verifier_called = False
+
+        def rejecting_verifier(repository: Path):
+            nonlocal verifier_called
+            verifier_called = True
+            self.assertEqual(repository, self.fixture.repository)
+            self.assertFalse(self.fixture.context.attempt_root.exists())
+            self.assertTrue(self.fixture.app.is_dir())
+            raise ValueError("fixture freeze rejection")
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.execute(candidate_freeze_verifier=rejecting_verifier)
+        self.assertTrue(verifier_called)
+        self.assertEqual(
+            raised.exception.code,
+            "candidate_freeze_verification_failed",
+        )
+        self.assertFalse(self.fixture.context.attempt_root.exists())
+        self.assertTrue(self.fixture.app.is_dir())
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_candidate_freeze_identity_near_matches_fail_closed(self) -> None:
+        exact = transaction_module.FrozenCandidate(
+            root=self.fixture.build,
+            intent_path=self.fixture.build / "candidate-freeze/intent.json",
+            intent_sha256="f" * 64,
+            product_version="0.4.0",
+            build_number="40031",
+            recovered=False,
+        )
+        mutations = {
+            "root": replace(exact, root=self.fixture.build / "other"),
+            "intent-path": replace(
+                exact,
+                intent_path=self.fixture.build / "candidate-freeze/other.json",
+            ),
+            "digest": replace(exact, intent_sha256="F" * 64),
+            "version": replace(exact, product_version="0.4.1"),
+            "build": replace(exact, build_number="40032"),
+        }
+        for label, frozen in mutations.items():
+            with self.subTest(label=label):
+                with self.assertRaises(TransactionError) as raised:
+                    self.fixture.execute(
+                        candidate_freeze_verifier=(
+                            lambda _repository, frozen=frozen: frozen
+                        )
+                    )
+                self.assertEqual(
+                    raised.exception.code,
+                    "candidate_freeze_identity_mismatch",
+                )
+                self.assertFalse(self.fixture.context.attempt_root.exists())
+                self.assertTrue(self.fixture.app.is_dir())
+                self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_noncanonical_ga_input_paths_are_rejected(self) -> None:
+        noncanonical_native = self.fixture.build / "native-products"
+        noncanonical_native.mkdir()
+        contexts = {
+            "native": replace(
+                self.fixture.context,
+                native_products=noncanonical_native,
+            ),
+            "app": replace(
+                self.fixture.context,
+                staged_app=self.fixture.build / "other/Clash for Mac.app",
+            ),
+        }
+        for label, context in contexts.items():
+            with self.subTest(label=label):
+                with self.assertRaises(TransactionError) as raised:
+                    self.fixture.execute_context(context)
+                self.assertIn(
+                    raised.exception.code,
+                    {"unsafe_native_products", "unsafe_staged_app"},
+                )
+                self.assertFalse(self.fixture.context.attempt_root.exists())
+                self.assertEqual(self.fixture.runner.calls, [])
 
     def test_exact_beta_compatibility_is_durable_and_never_claims_notary_ready(
         self,
@@ -1051,7 +1325,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         calls = list(fixture.runner.calls)
         with self.assertRaises(TransactionError) as repeated:
             fixture.execute()
-        self.assertEqual(repeated.exception.code, "build_number_claimed")
+        self.assertEqual(repeated.exception.code, "attempt_exists")
         with self.assertRaises(TransactionError) as recovery:
             fixture.recover()
         self.assertEqual(recovery.exception.code, "recovery_state_unsupported")
@@ -1177,47 +1451,52 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             self.fixture.execute()
         self.assertEqual(self.fixture.runner.calls, calls)
 
-    def test_release_lane_uses_the_global_signed_destination(self) -> None:
-        release_native = self.fixture.candidate / "release-build/40001/native-products"
-        release_native.mkdir(parents=True)
-        context = replace(
-            self.fixture.context,
-            build_kind="release",
-            build_number="40001",
-            native_products=release_native,
+    def test_ga_uses_the_fixed_candidate_destinations(self) -> None:
+        context = self.fixture.context
+        final_app = self.fixture.execute()
+        self.assertEqual(
+            final_app,
+            self.fixture.candidate / "ga/40031/signed/Clash for Mac.app",
         )
-        self.fixture.runner.archive_name = context.archive_name
-        self.fixture.runner.log = accepted_log(context.archive_name)
-        final_app = self.fixture.execute_context(context)
-        self.assertEqual(final_app, self.fixture.candidate / "signed/Clash for Mac.app")
+        self.assertEqual(
+            context.native_products,
+            (
+                self.fixture.candidate
+                / "ga/40031/signing-output/signed-native-products"
+            ),
+        )
+        self.assertEqual(
+            context.attempt_root,
+            self.fixture.candidate / "ga/40031/transactions/app-notary",
+        )
         manifest = json.loads(
             (final_app.parent / "Clash for Mac.app.manifest.json").read_text(
                 encoding="utf-8"
             )
         )
         self.assertEqual(manifest["algorithm"], "sha256-tree-v2")
-        self.assertEqual(manifest["metadata"]["artifactKind"], "notarized-release-v1")
-        self.assertEqual(manifest["metadata"]["buildNumber"], "40001")
+        self.assertEqual(
+            manifest["metadata"]["artifactKind"],
+            "notarized-ga-candidate-v1",
+        )
+        self.assertEqual(manifest["metadata"]["buildNumber"], "40031")
+
+    def test_nonfixed_notary_profile_is_rejected_before_attempt_or_remote_io(
+        self,
+    ) -> None:
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.execute_context(
+                replace(
+                    self.fixture.context,
+                    notary_profile="different-profile",
+                )
+            )
+        self.assertEqual(raised.exception.code, "invalid_notary_profile")
+        self.assertFalse(self.fixture.context.attempt_root.exists())
+        self.assertEqual(self.fixture.runner.calls, [])
 
 
 class NotarizationRecoveryTests(unittest.TestCase):
-    FROZEN_40001_INTENT_SHA256 = (
-        "fd7472abe80c110161d8d5c418372bc68694fb49e9bcea635b6c5b766ffc0bd4"
-    )
-    FROZEN_40001_EVENT_SHA256 = (
-        "17230348094bf28632d2d476cc07de1328cb68168bf6e6e78dbff0c1160fe461",
-        "ee1f32a475907d4df0a18b4b3e15c8141d29dea61e881d0271349c696e131065",
-        "af1a861a20ae8e4ceb80b3eaf0505e933c969e279bacfcecd8bdabd7293007d4",
-        "0010f34b95418759e9717924055b87ed791862c8e877118eaa06610d2f4d0925",
-    )
-    FROZEN_40001_ARCHIVE_SHA256 = (
-        "34976cb5eaeef4fd5547304405a305f794d8ddff95676733996971173273839a"
-    )
-    FROZEN_40001_ARCHIVE_SIZE = 30_062_052
-    FROZEN_40001_APP_SHA256 = (
-        "3aee7c561dd6bfee4a54e64ec3c1995f8948496157c907b0b4cec7932d9494af"
-    )
-
     def setUp(self) -> None:
         self.fixture = Fixture()
         self.fixture.create_orphaned_submit_attempt()
@@ -1238,27 +1517,113 @@ class NotarizationRecoveryTests(unittest.TestCase):
         self.fixture.runner.command_calls.clear()
         self.fixture.runner.role_counts.clear()
 
-    def test_historical_attempt_without_global_claim_remains_recoverable(self) -> None:
-        shutil.rmtree(self.fixture.context.build_number_claim)
+    def test_ga_recovery_has_no_parallel_build_claim(self) -> None:
         self._reset_runner_observations()
         final_app = self.fixture.recover()
         self.assertTrue(final_app.is_dir())
-        self.assertFalse(self.fixture.context.build_number_claim.exists())
+        self.assertEqual(
+            {path.name for path in self.fixture.candidate.iterdir()},
+            {"ga"},
+        )
 
-    def test_cross_lane_collision_blocks_recovery_before_external_commands(
+    def test_recovery_rejects_notary_profile_drift_in_intent_before_apple_io(
         self,
     ) -> None:
-        opposite = (
-            self.fixture.candidate
-            / "notary-attempts/release"
-            / self.fixture.context.build_number
+        intent_path = self.fixture.context.attempt_root / "intent.json"
+        intent = json.loads(intent_path.read_text(encoding="utf-8"))
+        intent["notary_profile"] = "different-profile"
+        intent_path.write_bytes(
+            transaction_module._canonical_json(intent).encode("utf-8")
         )
-        opposite.mkdir(parents=True, mode=0o700)
         self._reset_runner_observations()
+
         with self.assertRaises(TransactionError) as raised:
             self.fixture.recover()
-        self.assertEqual(raised.exception.code, "cross_lane_attempt_exists")
+        self.assertEqual(
+            raised.exception.code,
+            "notarization_intent_identity_drift",
+        )
         self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_recovery_rejects_notary_profile_drift_in_receipt_before_apple_io(
+        self,
+    ) -> None:
+        fixture = Fixture()
+        try:
+            fixture.runner.crash_role = CommandRole.WAIT
+            with self.assertRaises(SimulatedCrash):
+                fixture.execute()
+            receipt_path = fixture.context.attempt_root / "submission-receipt.json"
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["notary_profile"] = "different-profile"
+            receipt_path.write_bytes(
+                transaction_module._canonical_json(receipt).encode("utf-8")
+            )
+            fixture.runner.calls.clear()
+            fixture.runner.command_calls.clear()
+            fixture.runner.role_counts.clear()
+
+            with self.assertRaises(TransactionError) as raised:
+                fixture.recover()
+            self.assertEqual(
+                raised.exception.code,
+                "submission_receipt_identity_drift",
+            )
+            self.assertEqual(fixture.runner.calls, [])
+        finally:
+            fixture.close()
+
+    def test_recovery_reopens_exact_signing_transformation_before_apple_reads(
+        self,
+    ) -> None:
+        self._reset_runner_observations()
+        changed = self.fixture.signing_transformation(self.fixture.repository)
+        changed["pre_sign_app_tree_sha256"] = "0" * 64
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(
+                signing_transformation_receipt_reader=lambda _repository: changed
+            )
+        self.assertEqual(
+            raised.exception.code,
+            "signing_transformation_receipt_drift",
+        )
+        self.assertEqual(self.fixture.runner.calls, [])
+        self.assertFalse(self.fixture.context.final_root.exists())
+
+    def test_legacy_lane_contexts_are_rejected_before_external_commands(
+        self,
+    ) -> None:
+        for legacy_kind in ("validation", "release"):
+            with self.subTest(legacy_kind=legacy_kind):
+                self._reset_runner_observations()
+                with self.assertRaises(TransactionError) as raised:
+                    recover_transaction(
+                        replace(
+                            self.fixture.context,
+                            build_kind=legacy_kind,
+                            staged_app=None,
+                        ),
+                        SUBMISSION_ID,
+                        self.fixture.repository,
+                        **{
+                            key: value
+                            for key, value in self.fixture.arguments().items()
+                            if key
+                            not in {
+                                "archive_builder",
+                                "attempt_id_factory",
+                                "candidate_freeze_verifier",
+                                "signing_transformation_verifier",
+                            }
+                        },
+                        recovery_tool_identity_reader=lambda _repository: {
+                            "repositoryCommit": "c" * 40,
+                            "releaseSourceSha256": "d" * 64,
+                        },
+                    )
+                self.assertEqual(raised.exception.code, "invalid_build_kind")
+                self.assertEqual(self.fixture.runner.calls, [])
 
     @staticmethod
     def _clear_runner_observations(fixture: Fixture) -> None:
@@ -1577,172 +1942,22 @@ class NotarizationRecoveryTests(unittest.TestCase):
         self._clear_runner_observations(fixture)
         return fixture, monotonic_clock, failed_receipt_path
 
-    def _current_40001_compatibility_fixture(self) -> Fixture:
+    def _current_ga_failed_finalization_fixture(self) -> Fixture:
         fixture = Fixture()
         self.addCleanup(fixture.close)
-        snapshot_path = (
-            Path(__file__).parent
-            / "fixtures/notarization_40001_orphan.json"
-        )
-        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-        self.assertEqual(
-            snapshot["intentSha256"],
-            self.FROZEN_40001_INTENT_SHA256,
-        )
-        self.assertEqual(
-            snapshot["archiveSha256"],
-            self.FROZEN_40001_ARCHIVE_SHA256,
-        )
-        self.assertEqual(
-            snapshot["archiveSize"],
-            self.FROZEN_40001_ARCHIVE_SIZE,
-        )
-
-        fixture.build = fixture.candidate / "validation/40001"
-        fixture.native = fixture.build / "native-products"
-        fixture.native.mkdir(parents=True)
-        fixture.context = replace(
-            fixture.context,
-            build_number="40001",
-            native_products=fixture.native,
-            repository_commit=snapshot["intent"]["repository_commit"],
-            release_source_sha256=(
-                snapshot["intent"]["release_source_sha256"]
-            ),
-        )
-        fixture.runner = FakeRunner(fixture.context.archive_name)
-        fixture.runner.info_created_at = "2026-07-28T17:40:05Z"
+        fixture.create_orphaned_submit_attempt()
         fixture.runner.log = accepted_log(fixture.context.archive_name)
-        fixture.runner.log["sha256"] = self.FROZEN_40001_ARCHIVE_SHA256
-        fixture.runner.log["uploadDate"] = "2026-07-28T17:40:05.000Z"
-        fixture.clock = lambda: "2026-07-28T17:41:00Z"
-
-        attempts = fixture.candidate / "notary-attempts"
-        lane = attempts / "validation"
-        for directory in (
-            attempts,
-            lane,
-            fixture.context.attempt_root,
-            fixture.context.attempt_root / "events",
-            fixture.context.attempt_root / "work",
-        ):
-            transaction_module._mkdir_private(directory, exclusive=True)
-        work = fixture.context.attempt_root / "work"
-        shutil.copytree(
-            fixture.app,
-            work / "Clash for Mac.app",
-            symlinks=True,
-            copy_function=shutil.copy2,
-        )
-        archive = work / fixture.context.archive_name
-        archive.write_bytes(ARCHIVE_BYTES)
-        archive.chmod(0o600)
-        production_manifest_writer(
-            archive,
-            work / f"{fixture.context.archive_name}.manifest.json",
-            transaction_module._archive_metadata(fixture.context),
-        )
-        transaction_module._write_json_exclusive(
-            fixture.context.attempt_root / "intent.json",
-            snapshot["intent"],
-        )
-        for event in snapshot["events"]:
-            transaction_module._write_json_exclusive(
-                fixture.context.attempt_root
-                / "events"
-                / f"{event['sequence']:08d}.json",
-                event,
-            )
-
-        intent_path = fixture.context.attempt_root / "intent.json"
-        event_paths = sorted(
+        frozen_event_paths = sorted(
             (fixture.context.attempt_root / "events").glob("*.json")
         )
-        self.assertEqual(
-            hashlib.sha256(intent_path.read_bytes()).hexdigest(),
-            self.FROZEN_40001_INTENT_SHA256,
-        )
-        self.assertEqual(
-            tuple(
-                hashlib.sha256(path.read_bytes()).hexdigest()
-                for path in event_paths
-            ),
-            self.FROZEN_40001_EVENT_SHA256,
-        )
-        frozen_event_bytes = [path.read_bytes() for path in event_paths]
-
-        # The historical 30 MB archive and app bytes are intentionally not
-        # copied into the test suite.  Scope the frozen identity seam to this
-        # TemporaryDirectory while production manifests continue to validate
-        # the synthetic files actually copied and published by the fixture.
-        real_archive_identity = transaction_module._archive_identity
-        real_app_identity = transaction_module._app_tree_sha256
-        real_gatekeeper_identity = gatekeeper_module._target_identity
-
-        def frozen_archive_identity(path: Path) -> tuple[str, int]:
-            if (
-                path.name == fixture.context.archive_name
-                and fixture.repository in path.parents
-            ):
-                return (
-                    self.FROZEN_40001_ARCHIVE_SHA256,
-                    self.FROZEN_40001_ARCHIVE_SIZE,
-                )
-            return real_archive_identity(path)
-
-        def frozen_app_identity(
-            path: Path,
-            *,
-            failure_code: str,
-            failure_message: str,
-        ) -> str:
-            if (
-                path.name == "Clash for Mac.app"
-                and fixture.repository in path.parents
-            ):
-                return self.FROZEN_40001_APP_SHA256
-            return real_app_identity(
-                path,
-                failure_code=failure_code,
-                failure_message=failure_message,
-            )
-
-        def frozen_gatekeeper_identity(
-            path: Path,
-            assessment_type: str,
-        ) -> tuple[str, str]:
-            if (
-                path.name == "Clash for Mac.app"
-                and fixture.repository in path.parents
-                and assessment_type == "execute"
-            ):
-                return self.FROZEN_40001_APP_SHA256, "sha256-tree-v2"
-            return real_gatekeeper_identity(path, assessment_type)
-
-        identity_patchers = (
-            patch.object(
-                transaction_module,
-                "_archive_identity",
-                side_effect=frozen_archive_identity,
-            ),
-            patch.object(
-                transaction_module,
-                "_app_tree_sha256",
-                side_effect=frozen_app_identity,
-            ),
-            patch.object(
-                gatekeeper_module,
-                "_target_identity",
-                side_effect=frozen_gatekeeper_identity,
-            ),
-        )
-        for identity_patcher in identity_patchers:
-            identity_patcher.start()
-            self.addCleanup(identity_patcher.stop)
+        frozen_event_bytes = [path.read_bytes() for path in frozen_event_paths]
+        intent_path = fixture.context.attempt_root / "intent.json"
+        intent_sha256 = hashlib.sha256(intent_path.read_bytes()).hexdigest()
 
         def gatekeeper_failure(_app: Path, _digest: str) -> dict:
-            raise ValueError("frozen Gatekeeper failure")
+            raise ValueError("GA Gatekeeper fixture failure")
 
+        self._clear_runner_observations(fixture)
         with self.assertRaises(TransactionError) as raised:
             fixture.recover(gatekeeper_capture=gatekeeper_failure)
         self.assertEqual(
@@ -1758,7 +1973,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(
             hashlib.sha256(intent_path.read_bytes()).hexdigest(),
-            self.FROZEN_40001_INTENT_SHA256,
+            intent_sha256,
         )
         events = [
             json.loads(path.read_text(encoding="utf-8"))
@@ -1766,14 +1981,12 @@ class NotarizationRecoveryTests(unittest.TestCase):
         ]
         self.assertEqual(
             [event["state"] for event in events[:4]],
-            [
-                "prepared",
-                "pre_submission_policy_compatibility_applied",
-                "submitting",
-                "outcome_unknown",
-            ],
+            ["prepared", "notary_ready", "submitting", "outcome_unknown"],
         )
-        self.assertIn("recovery_intent_anchored", [event["state"] for event in events])
+        self.assertIn(
+            "recovery_intent_anchored",
+            [event["state"] for event in events],
+        )
         self.assertEqual(
             events[-1]["failure_code"],
             "gatekeeper_verification_failed",
@@ -1781,9 +1994,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
         reduced = transaction_module._reduce_attempt_events(
             transaction_module.EventJournal.load_existing(
                 fixture.context.attempt_root / "events",
-                hashlib.sha256(
-                    (fixture.context.attempt_root / "intent.json").read_bytes()
-                ).hexdigest(),
+                intent_sha256,
                 lambda: "2026-07-28T04:02:00Z",
             )
         )
@@ -1794,10 +2005,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
         self.assertTrue(reduced.reconciled)
         self.assertEqual(reduced.finalization_attempt_count, 1)
         self.assertEqual(
-            {
-                path.name
-                for path in fixture.context.attempt_root.iterdir()
-            },
+            {path.name for path in fixture.context.attempt_root.iterdir()},
             {
                 "events",
                 "finalization-runs",
@@ -1812,19 +2020,14 @@ class NotarizationRecoveryTests(unittest.TestCase):
                 fixture.context.attempt_root / "recovery-intent.json"
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(
-            recovery_intent["intent_sha256"],
-            self.FROZEN_40001_INTENT_SHA256,
-        )
+        intent = json.loads(intent_path.read_text(encoding="utf-8"))
+        self.assertEqual(recovery_intent["intent_sha256"], intent_sha256)
         self.assertEqual(
             recovery_intent["archive_sha256"],
-            self.FROZEN_40001_ARCHIVE_SHA256,
+            intent["archive_sha256"],
         )
         run = sole_finalization_run(fixture)
-        self.assertEqual(
-            {path.name for path in run.iterdir()},
-            {"work"},
-        )
+        self.assertEqual({path.name for path in run.iterdir()}, {"work"})
         self.assertEqual(
             {path.name for path in (run / "work").iterdir()},
             {
@@ -1846,12 +2049,12 @@ class NotarizationRecoveryTests(unittest.TestCase):
             if path.is_file() and not path.is_symlink()
         }
 
-    def test_current_40001_fixture_continues_once_then_recovers_locally(self) -> None:
-        fixture = self._current_40001_compatibility_fixture()
-        self.assertEqual(fixture.context.build_number, "40001")
+    def test_current_ga_fixture_continues_once_then_recovers_locally(self) -> None:
+        fixture = self._current_ga_failed_finalization_fixture()
+        self.assertEqual(fixture.context.build_number, "40031")
         self.assertEqual(
             fixture.context.archive_name,
-            "Clash.for.Mac_0.4.0_40001_notary.zip",
+            "Clash.for.Mac_0.4.0_40031_notary.zip",
         )
         attempt_root = fixture.context.attempt_root
         original_event_paths = sorted(
@@ -1878,7 +2081,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
 
         self.assertEqual(
             first,
-            fixture.candidate / "validation/40001/signed/Clash for Mac.app",
+            fixture.candidate / "ga/40031/signed/Clash for Mac.app",
         )
         self.assertTrue(first.is_dir())
         self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
@@ -1944,7 +2147,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
             [event["state"] for event in final_events],
             [
                 "prepared",
-                "pre_submission_policy_compatibility_applied",
+                "notary_ready",
                 "submitting",
                 "outcome_unknown",
                 "recovery_intent_anchored",
@@ -1979,22 +2182,29 @@ class NotarizationRecoveryTests(unittest.TestCase):
         )
         receipt_path = sole_finalization_receipt(fixture)
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        intent_sha256 = hashlib.sha256(
+            (attempt_root / "intent.json").read_bytes()
+        ).hexdigest()
+        intent = json.loads(
+            (attempt_root / "intent.json").read_text(encoding="utf-8")
+        )
         self.assertEqual(
             receipt["intent_sha256"],
-            self.FROZEN_40001_INTENT_SHA256,
+            intent_sha256,
         )
         self.assertEqual(
             receipt["archive_sha256"],
-            self.FROZEN_40001_ARCHIVE_SHA256,
+            intent["archive_sha256"],
         )
         self.assertEqual(
             receipt["pre_staple_app_tree_sha256"],
-            self.FROZEN_40001_APP_SHA256,
+            intent["pre_staple_app_tree_sha256"],
         )
         self.assertEqual(
             receipt["post_staple_app_tree_sha256"],
-            self.FROZEN_40001_APP_SHA256,
+            intent["pre_staple_app_tree_sha256"],
         )
+        self.assertEqual(receipt["candidate_freeze_intent_sha256"], "f" * 64)
         self.assertEqual(
             receipt["recovery_intent_sha256"],
             hashlib.sha256(recovery_intent_path.read_bytes()).hexdigest(),
@@ -2013,14 +2223,14 @@ class NotarizationRecoveryTests(unittest.TestCase):
                 / "Clash for Mac.app.manifest.json"
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(final_manifest["metadata"]["buildNumber"], "40001")
+        self.assertEqual(final_manifest["metadata"]["buildNumber"], "40031")
         self.assertEqual(
             final_manifest["metadata"]["repositoryCommit"],
-            "9d3ab6615a667040182eb874d7d20f167a13e3a4",
+            "a" * 40,
         )
         self.assertEqual(
             final_manifest["metadata"]["releaseSourceSha256"],
-            "2cc0a657434d45b4fd7e1bc61b366393c84637c6f200e2b40f2585d20f852696",
+            "b" * 64,
         )
         self._clear_runner_observations(fixture)
         publisher_called = False
@@ -2031,7 +2241,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
 
         second = fixture.recover(
             command_runner=lambda role, _command, _timeout: self.fail(
-                f"second 40001 recovery invoked runner: {role.value}"
+                f"second GA recovery invoked runner: {role.value}"
             ),
             publisher=forbidden_publisher,
             recovery_tool_identity_reader=(
@@ -2042,8 +2252,8 @@ class NotarizationRecoveryTests(unittest.TestCase):
         self.assertEqual(fixture.runner.calls, [])
         self.assertFalse(publisher_called)
 
-    def test_current_40001_fixture_capacity_fails_closed(self) -> None:
-        fixture = self._current_40001_compatibility_fixture()
+    def test_current_ga_fixture_capacity_fails_closed(self) -> None:
+        fixture = self._current_ga_failed_finalization_fixture()
         attempt_root = fixture.context.attempt_root
         original_event_paths = sorted(
             (attempt_root / "events").glob("*.json")
@@ -2074,8 +2284,8 @@ class NotarizationRecoveryTests(unittest.TestCase):
         self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
         self.assertNotIn(CommandRole.WAIT, fixture.runner.calls)
 
-    def test_current_40001_fixture_finalization_fsync_fails_closed(self) -> None:
-        fixture = self._current_40001_compatibility_fixture()
+    def test_current_ga_fixture_finalization_fsync_fails_closed(self) -> None:
+        fixture = self._current_ga_failed_finalization_fixture()
         attempt_root = fixture.context.attempt_root
         original_event_paths = sorted(
             (attempt_root / "events").glob("*.json")
@@ -3810,64 +4020,27 @@ class NotarizationRecoveryTests(unittest.TestCase):
         finally:
             fixture.close()
 
-    def test_frozen_legacy_40001_event_prefix_is_recoverable(self) -> None:
-        snapshot_path = (
-            Path(__file__).parent
-            / "fixtures/notarization_40001_orphan.json"
+    def test_frozen_legacy_lane_intent_is_not_a_ga_recovery_authority(self) -> None:
+        intent_path = self.fixture.context.attempt_root / "intent.json"
+        legacy_intent = json.loads(intent_path.read_text(encoding="utf-8"))
+        legacy_intent["schema_version"] = 1
+        legacy_intent["document"] = "cfw-notarization-attempt-v1"
+        legacy_intent["lane"] = "validation"
+        del legacy_intent["candidate_freeze_intent_sha256"]
+        intent_path.write_bytes(
+            transaction_module._canonical_json(legacy_intent).encode("utf-8")
         )
-        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-        intent_bytes = transaction_module._canonical_json(
-            snapshot["intent"]
-        ).encode("utf-8")
-        self.assertEqual(
-            hashlib.sha256(intent_bytes).hexdigest(),
-            snapshot["intentSha256"],
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            event_directory = Path(temporary) / "events"
-            event_directory.mkdir(mode=0o700)
-            for event in snapshot["events"]:
-                event_path = event_directory / f"{event['sequence']:08d}.json"
-                event_path.write_bytes(
-                    transaction_module._canonical_json(event).encode("utf-8")
-                )
-                event_path.chmod(0o600)
-            journal = transaction_module.EventJournal.load_existing(
-                event_directory,
-                snapshot["intentSha256"],
-                lambda: "2026-07-28T17:41:00Z",
+        intent_path.chmod(0o600)
+        self._reset_runner_observations()
+        with self.assertRaises(TransactionError) as raised:
+            transaction_module._load_recovery_intent_document(
+                replace(self.fixture.context, staged_app=None)
             )
-            boundary = transaction_module._reduce_attempt_events(journal)
-
         self.assertEqual(
-            boundary.submit_window_start.isoformat(),
-            "2026-07-28T17:40:01+00:00",
+            raised.exception.code,
+            "notarization_intent_identity_drift",
         )
-        self.assertEqual(
-            boundary.submit_window_end.isoformat(),
-            "2026-07-28T17:40:13+00:00",
-        )
-        self.assertEqual(boundary.recovery_event_start, 4)
-        self.assertIsNone(boundary.submission_id)
-        self.assertFalse(boundary.submitted_receipt_expected)
-        self.assertFalse(boundary.direct_evidence_required)
-        self.assertFalse(boundary.direct_finalization_ready)
-        self.assertFalse(boundary.direct_source_preparation_incomplete)
-        self.assertEqual(snapshot["archiveSize"], 30062052)
-        self.assertEqual(
-            snapshot["archiveSha256"],
-            "34976cb5eaeef4fd5547304405a305f794d8ddff95676733996971173273839a",
-        )
-
-        for invalid_exit_code in (None, 0):
-            with self.subTest(invalid_exit_code=invalid_exit_code):
-                tampered = dict(journal.documents[-1])
-                tampered["failure_code"] = "submit_failed"
-                tampered["exit_code"] = invalid_exit_code
-                journal.documents[-1] = tampered
-                with self.assertRaises(TransactionError):
-                    transaction_module._reduce_attempt_events(journal)
-        journal.documents[-1] = snapshot["events"][-1]
+        self.assertEqual(self.fixture.runner.calls, [])
 
     def test_reconciles_exact_orphan_without_resubmission(self) -> None:
         original_events = self._original_event_bytes()
@@ -3924,13 +4097,27 @@ class NotarizationRecoveryTests(unittest.TestCase):
                 self.fixture.context.attempt_root / "submission-receipt.json"
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(receipt["schema_version"], 2)
+        self.assertEqual(receipt["schema_version"], 5)
+        self.assertEqual(
+            receipt["notary_profile"],
+            transaction_module.NOTARY_PROFILE,
+        )
+        self.assertEqual(receipt["candidate_freeze_intent_sha256"], "f" * 64)
         self.assertEqual(receipt["acquisition"], "explicit-recovery")
         self.assertEqual(
             receipt["causal_binding"], "unique-history-window-and-log"
         )
         self.assertIsNone(receipt["submission_observation_sha256"])
         self.assertRegex(receipt["recovery_intent_sha256"], r"^[0-9a-f]{64}$")
+        recovery_intent = json.loads(
+            (self.fixture.context.attempt_root / "recovery-intent.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        expected_transformation = self.fixture.signing_transformation_binding()
+        for field, expected in expected_transformation.items():
+            self.assertEqual(recovery_intent[field], expected)
+            self.assertEqual(receipt[field], expected)
 
     def test_first_recovery_intent_is_anchored_before_apple_reads(self) -> None:
         observed_states: list[list[str]] = []
@@ -4963,7 +5150,11 @@ class NotarizationRecoveryTests(unittest.TestCase):
         final_receipt = json.loads(
             final_receipts[0].read_text(encoding="utf-8")
         )
-        self.assertEqual(final_receipt["schema_version"], 3)
+        self.assertEqual(final_receipt["schema_version"], 5)
+        self.assertEqual(
+            final_receipt["candidate_freeze_intent_sha256"],
+            "f" * 64,
+        )
         self.assertEqual(
             final_receipt["recovery_continuation_sha256"],
             hashlib.sha256(continuation_path.read_bytes()).hexdigest(),
@@ -5325,6 +5516,24 @@ class NotarizationRecoveryTests(unittest.TestCase):
         )
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         receipt["state"] = "tampered"
+        receipt_path.write_bytes(
+            transaction_module._canonical_json(receipt).encode("utf-8")
+        )
+        self._reset_runner_observations()
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover()
+
+        self.assertEqual(raised.exception.code, "published_candidate_unrecognized")
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_tampered_published_freeze_binding_is_rejected_without_remote_reads(
+        self,
+    ) -> None:
+        self.fixture.recover()
+        receipt_path = sole_finalization_receipt(self.fixture)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["candidate_freeze_intent_sha256"] = "e" * 64
         receipt_path.write_bytes(
             transaction_module._canonical_json(receipt).encode("utf-8")
         )
@@ -6691,6 +6900,7 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
             ("app-manifest", "manifest_verification_failed"),
             ("archive-manifest", "manifest_verification_failed"),
             ("submission-receipt", "submission_receipt_identity_drift"),
+            ("freeze-submission-binding", "submission_receipt_identity_drift"),
             ("intent", "notarization_intent_identity_drift"),
             ("prior-event", "event_journal_identity_drift"),
         )
@@ -6743,6 +6953,12 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                             fixture.context.attempt_root / "submission-receipt.json",
                             "observed_at",
                             "2026-07-28T04:03:00Z",
+                        )
+                    elif kind == "freeze-submission-binding":
+                        rewrite(
+                            fixture.context.attempt_root / "submission-receipt.json",
+                            "candidate_freeze_intent_sha256",
+                            "e" * 64,
                         )
                     elif kind == "intent":
                         rewrite(
@@ -6821,6 +7037,7 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
             ("archive-manifest", "manifest_verification_failed"),
             ("submission-receipt", "submission_receipt_identity_drift"),
             ("intent", "notarization_intent_identity_drift"),
+            ("freeze-intent-binding", "notarization_intent_identity_drift"),
             ("prior-event", "event_journal_identity_drift"),
             ("gatekeeper", "gatekeeper_evidence_identity_drift"),
             ("inventory", "final_publish_inventory_mismatch"),
@@ -6880,6 +7097,12 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
                             fixture.context.attempt_root / "intent.json",
                             "prepared_at",
                             "2026-07-28T04:04:00Z",
+                        )
+                    elif kind == "freeze-intent-binding":
+                        rewrite(
+                            fixture.context.attempt_root / "intent.json",
+                            "candidate_freeze_intent_sha256",
+                            "e" * 64,
                         )
                     elif kind == "prior-event":
                         rewrite(
@@ -7534,8 +7757,8 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         self.addCleanup(fixture.close)
         outside = fixture.repository / "outside"
         outside.mkdir()
-        attempts = fixture.candidate / "notary-attempts"
-        attempts.symlink_to(outside, target_is_directory=True)
+        transactions = fixture.build / "transactions"
+        transactions.symlink_to(outside, target_is_directory=True)
         with self.assertRaisesRegex(TransactionError, "real directory"):
             fixture.execute()
         self.assertEqual(fixture.runner.calls, [])
@@ -7735,44 +7958,32 @@ class ShellCleanupContractTests(unittest.TestCase):
     def _run_cleanup(
         self,
         *,
-        attempt_exists: bool,
-        claim_exists: bool = False,
-    ) -> tuple[bool, bool, bool]:
+        freeze_intent_exists: bool = False,
+        frozen_exists: bool = False,
+    ) -> tuple[bool, bool]:
         with tempfile.TemporaryDirectory() as temporary:
             candidate = Path(temporary) / "target/candidates/0.4.0"
-            staging = candidate / ".signed-stage.fixture"
-            build = candidate / "validation/40000"
-            attempt = candidate / "notary-attempts/validation/40000"
-            claim = candidate / "notary-build-claims/40000"
-            (staging / "Clash for Mac.app").mkdir(parents=True)
-            build.mkdir(parents=True)
-            if attempt_exists:
-                attempt.mkdir(parents=True)
-            if claim_exists:
-                claim.mkdir(parents=True)
+            preflight = candidate / "ga-preflight/40031"
+            frozen = candidate / "ga/40031"
+            preflight.mkdir(parents=True)
+            if freeze_intent_exists:
+                intent = preflight / "candidate-freeze/intent.json"
+                intent.parent.mkdir(mode=0o700)
+                intent.write_text("{}\n", encoding="utf-8")
+            if frozen_exists:
+                frozen.mkdir(parents=True)
             script = (
                 "set -euo pipefail\n"
-                'candidate_base="$CANDIDATE_BASE"\n'
-                'staging="$STAGING"\n'
-                'build_root="$BUILD_ROOT"\n'
-                'attempt_root="$ATTEMPT_ROOT"\n'
-                'claim_root="$CLAIM_ROOT"\n'
+                'preflight_root="$PREFLIGHT_ROOT"\n'
+                'frozen_root="$FROZEN_ROOT"\n'
+                'candidate_cargo_home=""\n'
                 "completed=0\n"
                 f"{self._cleanup_source()}\n"
                 "cleanup\n"
-                '[[ -d "$staging" ]] && staging_state=present || staging_state=absent\n'
-                '[[ -d "$build_root" ]] && build_state=present || build_state=absent\n'
-                '[[ -d "$claim_root" ]] && claim_state=present || claim_state=absent\n'
-                'printf "%s %s %s\\n" "$staging_state" "$build_state" "$claim_state"\n'
+                '[[ -d "$preflight_root" ]] && preflight_state=present || preflight_state=absent\n'
+                '[[ -d "$frozen_root" ]] && frozen_state=present || frozen_state=absent\n'
+                'printf "%s %s\n" "$preflight_state" "$frozen_state"\n'
             )
-            environment = {
-                **os.environ,
-                "CANDIDATE_BASE": str(candidate),
-                "STAGING": str(staging),
-                "BUILD_ROOT": str(build),
-                "ATTEMPT_ROOT": str(attempt),
-                "CLAIM_ROOT": str(claim),
-            }
             completed = subprocess.run(
                 ["/bin/bash", "-c", script],
                 check=True,
@@ -7780,35 +7991,69 @@ class ShellCleanupContractTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="strict",
-                env=environment,
+                env={
+                    **os.environ,
+                    "PREFLIGHT_ROOT": str(preflight),
+                    "FROZEN_ROOT": str(frozen),
+                },
             )
             states = completed.stdout.split()
-            self.assertEqual(len(states), 3)
+            self.assertEqual(len(states), 2)
             return tuple(state == "present" for state in states)
 
-    def test_claimed_attempt_preserves_staging_and_build_root(self) -> None:
+    def test_unconsumed_preflight_failure_cleans_rebuildable_tree(self) -> None:
+        self.assertEqual(self._run_cleanup(), (False, False))
+
+    def test_freeze_intent_preserves_consumed_preflight_tree(self) -> None:
         self.assertEqual(
-            self._run_cleanup(attempt_exists=True),
-            (True, True, False),
+            self._run_cleanup(freeze_intent_exists=True),
+            (True, False),
         )
 
-    def test_pre_attempt_failure_cleans_only_rebuildable_outputs(self) -> None:
+    def test_existing_frozen_root_is_never_cleaned(self) -> None:
         self.assertEqual(
-            self._run_cleanup(attempt_exists=False),
-            (False, False, False),
-        )
-
-    def test_claim_only_failure_cleans_outputs_but_preserves_build_tombstone(
-        self,
-    ) -> None:
-        self.assertEqual(
-            self._run_cleanup(attempt_exists=False, claim_exists=True),
-            (False, False, True),
+            self._run_cleanup(frozen_exists=True),
+            (True, True),
         )
 
 
 class AttemptConcurrencyTests(unittest.TestCase):
-    def test_same_lane_and_build_can_only_be_claimed_once(self) -> None:
+    def test_initial_claim_holds_recovery_lock_before_attempt_creation(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        entered_claim = threading.Event()
+        release_claim = threading.Event()
+        real_claim = transaction_module._claim_attempt
+
+        def blocking_claim(context: TransactionContext) -> tuple[Path, Path]:
+            self.assertFalse(context.attempt_root.exists())
+            entered_claim.set()
+            if not release_claim.wait(5):
+                raise AssertionError("test did not release the initial claim")
+            return real_claim(context)
+
+        with patch.object(
+            transaction_module,
+            "_claim_attempt",
+            side_effect=blocking_claim,
+        ), ThreadPoolExecutor(max_workers=2) as executor:
+            executing = executor.submit(fixture.execute)
+            try:
+                self.assertTrue(entered_claim.wait(2))
+                self.assertTrue((fixture.build / "transactions").is_dir())
+                self.assertFalse(fixture.context.attempt_root.exists())
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.recover()
+                self.assertEqual(
+                    raised.exception.code,
+                    "recovery_in_progress",
+                )
+                self.assertEqual(fixture.runner.calls, [])
+            finally:
+                release_claim.set()
+            self.assertTrue(executing.result(timeout=5).is_dir())
+
+    def test_fixed_ga_attempt_can_only_be_claimed_once(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
 
@@ -7821,86 +8066,43 @@ class AttemptConcurrencyTests(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(lambda _index: claim(), range(2)))
-        self.assertEqual(sorted(results), ["build_number_claimed", "claimed"])
+        self.assertEqual(sorted(results), ["attempt_exists", "claimed"])
+        self.assertTrue(fixture.context.attempt_root.is_dir())
 
-    def test_claim_in_one_lane_serially_blocks_the_other_lane(self) -> None:
-        for claimed_kind, rejected_kind in (
-            ("validation", "release"),
-            ("release", "validation"),
-        ):
-            with self.subTest(
-                claimed_kind=claimed_kind,
-                rejected_kind=rejected_kind,
-            ):
-                fixture = Fixture()
-                try:
-                    claimed = replace(
-                        fixture.context,
-                        build_kind=claimed_kind,
-                    )
-                    rejected = replace(
-                        fixture.context,
-                        build_kind=rejected_kind,
-                    )
-                    _claim_attempt(claimed)
-                    with self.assertRaises(TransactionError) as raised:
-                        _claim_attempt(rejected)
-                    self.assertEqual(
-                        raised.exception.code,
-                        "build_number_claimed",
-                    )
-                finally:
-                    fixture.close()
-
-    def test_historical_lane_attempt_without_claim_blocks_the_other_lane(
-        self,
-    ) -> None:
-        for historical_kind, requested_kind in (
-            ("validation", "release"),
-            ("release", "validation"),
-        ):
-            with self.subTest(
-                historical_kind=historical_kind,
-                requested_kind=requested_kind,
-            ):
-                fixture = Fixture()
-                try:
-                    attempts = fixture.candidate / "notary-attempts"
-                    historical_lane = attempts / historical_kind
-                    attempts.mkdir(mode=0o700)
-                    historical_lane.mkdir(mode=0o700)
-                    historical_attempt = historical_lane / fixture.context.build_number
-                    historical_attempt.mkdir(mode=0o700)
-                    requested = replace(
-                        fixture.context,
-                        build_kind=requested_kind,
-                    )
-                    with self.assertRaises(TransactionError) as raised:
-                        _claim_attempt(requested)
-                    self.assertEqual(raised.exception.code, "attempt_exists")
-                    self.assertTrue(requested.build_number_claim.is_dir())
-                    self.assertFalse(requested.attempt_root.exists())
-                finally:
-                    fixture.close()
-
-    def test_validation_and_release_lanes_share_one_atomic_build_claim(self) -> None:
+    def test_legacy_build_kinds_are_rejected_before_attempt_creation(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
-        contexts = [
-            fixture.context,
-            replace(fixture.context, build_kind="release"),
-        ]
-        claim_barrier = threading.Barrier(len(contexts))
+        for legacy_kind in ("validation", "release"):
+            with self.subTest(legacy_kind=legacy_kind):
+                context = replace(fixture.context, build_kind=legacy_kind)
+                with self.assertRaises(TransactionError) as raised:
+                    transaction_module._validate_context(context)
+                self.assertEqual(raised.exception.code, "invalid_build_kind")
+                self.assertFalse(fixture.context.attempt_root.exists())
+
+    def test_non_active_build_number_is_rejected_before_attempt_creation(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        context = replace(fixture.context, build_number="40032")
+        with self.assertRaises(TransactionError) as raised:
+            transaction_module._validate_context(context)
+        self.assertEqual(raised.exception.code, "invalid_build_number")
+        self.assertFalse(fixture.context.attempt_root.exists())
+
+    def test_concurrent_ga_claims_meet_at_one_exclusive_attempt_root(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        claim_barrier = threading.Barrier(2)
         real_mkdir_private = transaction_module._mkdir_private
 
         def synchronized_mkdir(path: Path, *, exclusive: bool) -> None:
-            if path == fixture.context.build_number_claim:
+            if path == fixture.context.attempt_root:
                 claim_barrier.wait(timeout=5)
             real_mkdir_private(path, exclusive=exclusive)
 
-        def claim(context: TransactionContext) -> str:
+        def claim() -> str:
             try:
-                _claim_attempt(context)
+                _claim_attempt(fixture.context)
                 return "claimed"
             except TransactionError as error:
                 return error.code
@@ -7910,35 +8112,10 @@ class AttemptConcurrencyTests(unittest.TestCase):
             "_mkdir_private",
             side_effect=synchronized_mkdir,
         ), ThreadPoolExecutor(max_workers=2) as executor:
-            results = list(executor.map(claim, contexts))
-        self.assertEqual(sorted(results), ["build_number_claimed", "claimed"])
-        attempt_roots = [context.attempt_root for context in contexts]
-        self.assertEqual(sum(path.is_dir() for path in attempt_roots), 1)
+            results = list(executor.map(lambda _index: claim(), range(2)))
+        self.assertEqual(sorted(results), ["attempt_exists", "claimed"])
 
-    def test_different_build_numbers_can_be_claimed_independently(self) -> None:
-        fixture = Fixture()
-        self.addCleanup(fixture.close)
-        contexts = [
-            fixture.context,
-            replace(
-                fixture.context,
-                build_kind="release",
-                build_number="40001",
-            ),
-        ]
-
-        def claim(context: TransactionContext) -> str:
-            try:
-                _claim_attempt(context)
-                return "claimed"
-            except TransactionError as error:
-                return error.code
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            results = list(executor.map(claim, contexts))
-        self.assertEqual(results, ["claimed", "claimed"])
-
-    def test_claim_survives_a_crash_before_lane_attempt_creation(self) -> None:
+    def test_crash_before_attempt_creation_is_safely_retryable(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
         real_mkdir = transaction_module._mkdir_private
@@ -7955,30 +8132,26 @@ class AttemptConcurrencyTests(unittest.TestCase):
         ):
             with self.assertRaises(SimulatedCrash):
                 _claim_attempt(fixture.context)
-        self.assertTrue(fixture.context.build_number_claim.is_dir())
+        self.assertTrue((fixture.build / "transactions").is_dir())
         self.assertFalse(fixture.context.attempt_root.exists())
-        for build_kind in ("validation", "release"):
-            with self.subTest(build_kind=build_kind):
-                with self.assertRaises(TransactionError) as raised:
-                    _claim_attempt(
-                        replace(fixture.context, build_kind=build_kind)
-                    )
-                self.assertEqual(raised.exception.code, "build_number_claimed")
+        events, work = _claim_attempt(fixture.context)
+        self.assertTrue(events.is_dir())
+        self.assertTrue(work.is_dir())
 
-    def test_unsafe_claim_roots_fail_closed(self) -> None:
+    def test_unsafe_transactions_roots_fail_closed(self) -> None:
         for kind in ("file", "symlink", "wrong-mode"):
             with self.subTest(kind=kind):
                 fixture = Fixture()
                 try:
-                    claims = fixture.candidate / "notary-build-claims"
+                    transactions = fixture.build / "transactions"
                     if kind == "file":
-                        claims.write_bytes(b"not a directory")
+                        transactions.write_bytes(b"not a directory")
                     elif kind == "symlink":
-                        target = fixture.candidate / "claim-target"
+                        target = fixture.candidate / "transactions-target"
                         target.mkdir(mode=0o700)
-                        claims.symlink_to(target, target_is_directory=True)
+                        transactions.symlink_to(target, target_is_directory=True)
                     else:
-                        claims.mkdir(mode=0o755)
+                        transactions.mkdir(mode=0o755)
                     with self.assertRaises(TransactionError):
                         _claim_attempt(fixture.context)
                     self.assertFalse(fixture.context.attempt_root.exists())
@@ -7988,49 +8161,25 @@ class AttemptConcurrencyTests(unittest.TestCase):
     def test_two_complete_transactions_can_submit_the_build_only_once(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
-        second_staging = fixture.candidate / ".signed-stage.second"
-        second_app = second_staging / "Clash for Mac.app"
-        executable = second_app / "Contents/MacOS/clash-for-mac"
-        executable.parent.mkdir(parents=True)
-        executable.write_bytes(b"signed-app")
-        executable.chmod(0o755)
-        contexts = [
-            fixture.context,
-            replace(fixture.context, staged_app=second_app),
-        ]
 
-        def run(context: TransactionContext) -> str:
+        def run() -> str:
             try:
-                fixture.execute_context(context)
+                fixture.execute()
                 return "published"
             except TransactionError as error:
                 return error.code
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            results = list(executor.map(run, contexts))
-        self.assertEqual(sorted(results), ["build_number_claimed", "published"])
+            results = list(executor.map(lambda _index: run(), range(2)))
+        self.assertEqual(sorted(results), ["published", "recovery_in_progress"])
         self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
 
-    def test_cross_lane_transactions_can_submit_the_build_only_once(self) -> None:
+    def test_legacy_transaction_cannot_race_the_ga_submission(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
-        release_build = fixture.candidate / "release-build/40000"
-        release_native = release_build / "native-products"
-        release_native.mkdir(parents=True)
-        release_staging = fixture.candidate / ".signed-stage.release"
-        release_app = release_staging / "Clash for Mac.app"
-        release_executable = release_app / "Contents/MacOS/clash-for-mac"
-        release_executable.parent.mkdir(parents=True)
-        release_executable.write_bytes(b"signed-app")
-        release_executable.chmod(0o755)
         contexts = [
             fixture.context,
-            replace(
-                fixture.context,
-                build_kind="release",
-                staged_app=release_app,
-                native_products=release_native,
-            ),
+            replace(fixture.context, build_kind="release"),
         ]
 
         def run(context: TransactionContext) -> str:
@@ -8042,26 +8191,26 @@ class AttemptConcurrencyTests(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(run, contexts))
-        self.assertEqual(sorted(results), ["build_number_claimed", "published"])
+        self.assertEqual(sorted(results), ["invalid_build_kind", "published"])
         self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
-        loser = contexts[results.index("build_number_claimed")]
-        self.assertIsNotNone(loser.staged_app)
-        if loser.staged_app is None:
-            self.fail("losing context unexpectedly lacks a staged app")
-        self.assertTrue(loser.staged_app.is_dir())
 
 
 class NotarizationCliTests(unittest.TestCase):
-    def _common_arguments(self) -> list[str]:
+    def _common_arguments(
+        self,
+        *,
+        build_kind: str = "ga",
+        build_number: str = "40031",
+    ) -> list[str]:
         return [
             "--build-kind",
-            "validation",
+            build_kind,
             "--build-number",
-            "40001",
+            build_number,
             "--native-products",
             "/tmp/cfw-native-products",
             "--notary-profile",
-            "fixture-profile",
+            transaction_module.NOTARY_PROFILE,
             "--repository-commit",
             "a" * 40,
             "--release-source-sha256",
@@ -8088,13 +8237,22 @@ class NotarizationCliTests(unittest.TestCase):
             "8" * 64,
         ]
 
-    def _run(self, mode_arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self,
+        mode_arguments: list[str],
+        *,
+        build_kind: str = "ga",
+        build_number: str = "40031",
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
                 "-B",
                 str(Path(transaction_module.__file__).resolve()),
-                *self._common_arguments(),
+                *self._common_arguments(
+                    build_kind=build_kind,
+                    build_number=build_number,
+                ),
                 *mode_arguments,
             ],
             text=True,
@@ -8133,6 +8291,26 @@ class NotarizationCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("recovery requires --toolchain-root", result.stderr)
 
+    def test_legacy_build_kinds_are_explicitly_rejected(self) -> None:
+        for legacy_kind in ("validation", "release"):
+            with self.subTest(legacy_kind=legacy_kind):
+                result = self._run(
+                    ["--staged-app", "/tmp/Clash for Mac.app"],
+                    build_kind=legacy_kind,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("invalid choice", result.stderr)
+                self.assertIn("choose from 'ga'", result.stderr)
+
+    def test_non_active_build_number_is_explicitly_rejected(self) -> None:
+        result = self._run(
+            ["--staged-app", "/tmp/Clash for Mac.app"],
+            build_number="40032",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid choice", result.stderr)
+        self.assertIn("choose from '40031'", result.stderr)
+
     def test_recovery_dispatch_separates_artifact_tool_and_toolchain_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -8142,7 +8320,7 @@ class NotarizationCliTests(unittest.TestCase):
             toolchain_root.mkdir()
             final_app = (
                 artifact_repository
-                / "target/candidates/0.4.0/validation/40001/signed/Clash for Mac.app"
+                / "target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app"
             )
             argv = [
                 str(Path(transaction_module.__file__).resolve()),

@@ -19,7 +19,7 @@ workspace updater key is referenced by path and name only and is never opened.
 Usage:
     sealed_evidence_manifest.py collect-source-gates --output p0-source-gates.json [--journal DIR]
     sealed_evidence_manifest.py ci-toolchain-binding
-    sealed_evidence_manifest.py collect-ci-lanes --output unsigned-ci-lanes.json
+    sealed_evidence_manifest.py collect-ci-lanes --output local-ci-lanes.json
     sealed_evidence_manifest.py seal --request request.json --output manifest.json [--fixture]
     sealed_evidence_manifest.py verify --manifest manifest.json [--fixture] [--require-sealed]
     sealed_evidence_manifest.py publication-gate [--manifest manifest.json]
@@ -1131,7 +1131,7 @@ def command_ci_toolchain_binding(_arguments: argparse.Namespace) -> None:
 
 
 def command_collect_ci_lanes(arguments: argparse.Namespace) -> None:
-    """Run the required unsigned-CI lanes and record their exact results.
+    """Run the required deterministic local lanes and record their exact results.
 
     Each lane's combined output is content-addressed and its real exit status is
     recorded, bound to one commit and one toolchain digest. A nonzero exit is
@@ -1159,13 +1159,14 @@ def command_collect_ci_lanes(arguments: argparse.Namespace) -> None:
     for lane in result["document"]["lanes"]:
         print(f"  lane {lane['id']}: {lane['status']} (exit {lane['exit_code']})")
     print(
-        f"unsigned CI lane record: {Path(result['output']).resolve(strict=True)} "
+        f"local deterministic CI lane record: {Path(result['output']).resolve(strict=True)} "
         f"toolchain_sha256={result['toolchain_sha256']} failed={result['failures']}"
     )
     if result["failures"]:
         # The record is written exactly as observed; the gate refuses it.
         raise SystemExit(
-            f"error: sealed evidence manifest: unsigned CI lanes did not pass: {result['failures']}"
+            "error: sealed evidence manifest: local deterministic CI lanes did not "
+            f"pass: {result['failures']}"
         )
 
 

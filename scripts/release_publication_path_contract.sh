@@ -14,11 +14,16 @@ cfw_require_fixed_publication_app_path() {
     echo "error: publication gate requires one available absolute signed app" >&2
     return 1
   fi
-  local canonical_app expected_app
+  local canonical_repository canonical_app expected_app
+  canonical_repository="$(cd "$repository" && /bin/pwd -P)" || return 1
+  if [[ "$canonical_repository" != "$repository" ]]; then
+    echo "error: publication repository is not canonical: $repository" >&2
+    return 1
+  fi
   canonical_app="$(cd "$app_path" && /bin/pwd -P)" || return 1
-  expected_app="$repository/target/candidates/0.4.0/signed/Clash for Mac.app"
+  expected_app="$repository/target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app"
   if [[ "$canonical_app" != "$expected_app" ]]; then
-    echo "error: publication gate accepts only the fixed 0.4.0 signed app: $expected_app" >&2
+    echo "error: publication gate accepts only the fixed 0.4.0/40031 GA app: $expected_app" >&2
     return 1
   fi
 }

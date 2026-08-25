@@ -115,6 +115,11 @@ readonly toolchain_root="$repo_root/target/toolchains"
 readonly official_release_origin="https://github.com/billlza/cfw-rs/releases/download"
 readonly maximum_updater_archive_bytes=$((192 * 1024 * 1024))
 
+[[ $# -eq 0 ]] || die "usage: make_updater_manifest.sh"
+if [[ -n "${VERSION+x}" || -n "${OUT_DIR+x}" ]]; then
+  die "VERSION and OUT_DIR overrides are forbidden for the fixed GA package"
+fi
+
 require_xtrace_disabled() {
   case "$-" in
     *x*)
@@ -143,10 +148,9 @@ assert_semver() {
   die "updater release creation requires Apple Silicon macOS"
 cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
 
-app_path="${1:-$repo_root/target/candidates/0.4.0/signed/Clash for Mac.app}"
-[[ "$app_path" == /* ]] || die "application path must be absolute"
+readonly ga_root="$repo_root/target/candidates/0.4.0/ga/40031"
+readonly app_path="$ga_root/signed/Clash for Mac.app"
 [[ -d "$app_path" && ! -L "$app_path" ]] || die "app bundle not found or is a symlink: $app_path"
-app_path="$(cd "$(dirname "$app_path")" && pwd -P)/$(basename "$app_path")"
 app_directory="$(dirname "$app_path")"
 app_name="$(basename "$app_path")"
 [[ "$app_name" == "Clash for Mac.app" ]] || die "unexpected release application name: $app_name"
@@ -155,24 +159,26 @@ info_plist="$app_path/Contents/Info.plist"
 require_regular_file "$info_plist"
 bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$info_plist" 2>/dev/null)" ||
   die "cannot read CFBundleShortVersionString"
-version="${VERSION:-$bundle_version}"
+version="$bundle_version"
 assert_semver "$version"
-[[ "$version" == "$bundle_version" ]] ||
-  die "VERSION ($version) does not match the signed app version ($bundle_version)"
+build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info_plist" 2>/dev/null)" ||
+  die "cannot read CFBundleVersion"
+[[ "$version" == "0.4.0" && "$build_number" == "40031" ]] ||
+  die "signed app is not the active GA 0.4.0/40031 identity"
 
 native_products_root="$(release_native_products_root_for_app "$app_path")" ||
   die "cannot resolve candidate-specific native products"
 "$repo_root/scripts/verify_release_app.sh" "$app_path" "$native_products_root"
 
-verify_release_publication_evidence "$app_path"
+verify_release_prepackage_evidence "$app_path"
 
-output_directory="${OUT_DIR:-$repo_root/target/candidates/0.4.0/release}"
-[[ ! -L "$output_directory" ]] || die "updater output directory must not be a symlink"
-mkdir -p "$output_directory"
-output_directory="$(cd "$output_directory" && pwd -P)"
+package_root="$ga_root/packages"
+[[ ! -L "$package_root" ]] || die "GA package directory must not be a symlink"
+mkdir -p "$package_root"
+package_root="$(cd "$package_root" && pwd -P)"
 
 archive_name="Clash.for.Mac_${version}_aarch64.app.tar.gz"
-updater_root="$output_directory/updater"
+updater_root="$package_root/updater"
 [[ ! -L "$updater_root" ]] || die "updater release-set directory must not be a symlink"
 mkdir -p "$updater_root"
 updater_root="$(cd "$updater_root" && pwd -P)"
@@ -180,9 +186,9 @@ final_set="$updater_root/v$version"
 [[ ! -e "$final_set" && ! -L "$final_set" ]] ||
   die "refusing to replace existing updater release set: $final_set"
 for legacy_output in \
-  "$output_directory/$archive_name" \
-  "$output_directory/$archive_name.sig" \
-  "$output_directory/latest.json"; do
+  "$package_root/$archive_name" \
+  "$package_root/$archive_name.sig" \
+  "$package_root/latest.json"; do
   [[ ! -e "$legacy_output" && ! -L "$legacy_output" ]] ||
     die "legacy partial updater output must be removed after review: $legacy_output"
 done
@@ -274,7 +280,7 @@ require_regular_file "$staged_latest"
 
 cfw_run_release_python_script \
   "$repo_root" \
-  "$repo_root/scripts/release_artifact_set.py" \
+  "$repo_root/scripts/release_artifact_set_cli.py" \
   seal-updater \
   --staging "$staging" \
   --destination "$final_set" \

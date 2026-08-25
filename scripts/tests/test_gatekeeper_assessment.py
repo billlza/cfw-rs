@@ -915,6 +915,52 @@ class GatekeeperReleaseScriptWiringTests(unittest.TestCase):
         self.assertIn("dmg-set.seal.json", artifact_set)
         self.assertIn("verify_dmg_set", artifact_set)
 
+    def test_dmg_uses_the_supported_diskutil_image_creator(self) -> None:
+        shell = (REPOSITORY / "scripts/make_dmg.sh").read_text(encoding="utf-8")
+        self.assertIn("/usr/sbin/diskutil image create from", shell)
+        self.assertIn("--format UDZO", shell)
+        self.assertIn('--volumeName "Clash for Mac"', shell)
+        self.assertNotIn("/usr/bin/hdiutil create", shell)
+
+    def test_dmg_signing_uses_only_the_frozen_certificate_fingerprints(
+        self,
+    ) -> None:
+        shell = (REPOSITORY / "scripts/make_dmg.sh").read_text(encoding="utf-8")
+        self.assertNotIn("MACOS_SIGN_IDENTITY", shell)
+        self.assertIn(
+            '--print-certificate-sha1 "$signing_preflight_manifest"',
+            shell,
+        )
+        self.assertIn(
+            '--print-certificate-sha256 "$signing_preflight_manifest"',
+            shell,
+        )
+        self.assertIn('--sign "$signing_certificate_sha1"', shell)
+        self.assertIn(
+            '--extract-certificates="$certificate_prefix"',
+            shell,
+        )
+
+    def test_dmg_leaf_certificate_mismatch_guard_is_mandatory(self) -> None:
+        shell = (REPOSITORY / "scripts/make_dmg.sh").read_text(encoding="utf-8")
+        exact_guard = (
+            '[[ "$observed_certificate_sha256" == '
+            '"$expected_certificate_sha256" ]] ||'
+        )
+
+        def require_guard(source: str) -> None:
+            if exact_guard not in source:
+                raise AssertionError(
+                    "DMG leaf certificate mismatch is not release-blocking"
+                )
+
+        require_guard(shell)
+        with self.assertRaisesRegex(
+            AssertionError,
+            "certificate mismatch is not release-blocking",
+        ):
+            require_guard(shell.replace(exact_guard, ": # guard removed", 1))
+
 
 if __name__ == "__main__":
     unittest.main()

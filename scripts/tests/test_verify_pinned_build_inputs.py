@@ -2190,10 +2190,13 @@ class PinnedBuildInputsTests(unittest.TestCase):
 
     def test_production_orchestrator_binding_drift_fails(self) -> None:
         fixture = Fixture()
-        path = "scripts/publication/orchestrator.py"
+        path = "scripts/publication/ga_release_contract.py"
         self._verify_fixture(fixture)
-        fixture.extra_artifact_files[path] = fixture.extra_artifact_files[path].replace(
-            "require_verified=True", "require_verified=False"
+        source = fixture.extra_artifact_files[path]
+        guarded = 'prepackage = verify_stage(repository, "prepackage")'
+        self.assertIn(guarded, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded, 'prepackage = {"bindings": {}}', 1
         )
         self._assert_fails(fixture, "artifact source digest")
 
@@ -2224,7 +2227,25 @@ class PinnedBuildInputsTests(unittest.TestCase):
             "/usr/bin/xcodebuild analyze",
             1,
         ) + f"\n# {binding}\n"
+        surface = pinned_verifier._artifact_binding_surface(
+            fixture.build_native,
+            "scripts/build_native_products.sh",
+        )
+        self.assertNotIn(binding, surface)
+        inline_comment = pinned_verifier._artifact_binding_surface(
+            f"true;# {binding}\n",
+            "scripts/build_native_products.sh",
+        )
+        self.assertNotIn(binding, inline_comment)
         self._assert_fails(fixture, "artifact source digest")
+
+    def test_shell_binding_surface_preserves_only_the_entrypoint_shebang(self) -> None:
+        surface = pinned_verifier._artifact_binding_surface(
+            "#!/bin/bash -p\n# !/bin/zsh -p\ntrue\n",
+            "scripts/example.sh",
+        )
+        self.assertTrue(surface.startswith("#!/bin/bash -p\n"))
+        self.assertNotIn("#!/bin/zsh -p", surface)
 
     def test_artifact_source_digest_rejects_python_dead_string_binding(self) -> None:
         fixture = Fixture()
@@ -2238,26 +2259,390 @@ class PinnedBuildInputsTests(unittest.TestCase):
         ) + f"\nDEAD_POLICY_TEXT = {binding!r}\n"
         self._assert_fails(fixture, "artifact source digest")
 
-    def test_final_input_guard_cannot_be_removed_and_retained_as_a_comment(self) -> None:
+    def test_stage_predecessor_guard_cannot_be_retained_only_as_a_comment(self) -> None:
         fixture = Fixture()
-        path = "scripts/publication/orchestrator.py"
+        path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded_publish = (
-            "    _require_final_inputs_unchanged(context, physical_candidate_manifest)\n"
-            "    final_guard = _observe_signed_app_tree(context)"
-        )
-        self.assertIn(guarded_publish, source)
+        guarded_predecessor = 'prepackage = verify_stage(repository, "prepackage")'
+        self.assertIn(guarded_predecessor, source)
         fixture.extra_artifact_files[path] = source.replace(
-            guarded_publish,
-            "    pass\n    final_guard = _observe_signed_app_tree(context)",
+            guarded_predecessor,
+            'prepackage = {"bindings": {}}',
             1,
-        ) + "\n# _require_final_inputs_unchanged(context, physical_candidate_manifest)\n"
-        with self.assertRaisesRegex(PinnedInputError, "release guard calls"):
+        ) + f"\n# {guarded_predecessor}\n"
+        with self.assertRaisesRegex(PinnedInputError, "predecessor order"):
             pinned_verifier._artifact_binding_surface(
                 fixture.extra_artifact_files[path],
                 path,
             )
         self._assert_fails(fixture, "artifact source digest")
+
+    def test_prepackage_transformation_guard_cannot_be_bypassed(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "transformation = verify_signing_transformation_receipt(repository)"
+        self.assertIn(guarded, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            'transformation = {"signed_app_tree_sha256": "0" * 64}',
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "critical guards"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_runtime_acceptance_guard_cannot_be_bypassed(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "result = validate_ga_runtime_acceptance("
+        self.assertIn(guarded, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            "result = dict(",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "critical guards"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_hosted_ci_offline_binding_cannot_be_bypassed(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "hosted_ci = validate_hosted_ci_receipt_offline(repository)"
+        self.assertIn(guarded, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            'hosted_ci = {"source": {}}',
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "critical guards"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_hosted_ci_live_prepackage_guard_cannot_be_bypassed(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "live_verify_hosted_ci_receipt(repository)"
+        self.assertEqual(source.count(guarded), 1)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            "validate_hosted_ci_receipt_offline(repository)",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "guarded function AST"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_hosted_ci_live_publication_guard_cannot_be_bypassed(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/orchestrator.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = (
+            '        "publication",\n'
+            "        require_live_hosted_ci=True,\n"
+        )
+        self.assertEqual(source.count(guarded), 1)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            '        "publication",\n'
+            "        require_live_hosted_ci=False,\n",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "guarded function AST"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_prepackage_critical_guard_cannot_be_made_conditional(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "transformation = verify_signing_transformation_receipt(repository)"
+        self.assertIn(guarded, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            "if repository.name:\n"
+            "            transformation = verify_signing_transformation_receipt(repository)\n"
+            "        else:\n"
+            '            transformation = {"signed_app_tree_sha256": "0" * 64}',
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "critical guard is conditional"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_prepackage_critical_guard_cannot_be_hidden_in_nested_callable(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "transformation = verify_signing_transformation_receipt(repository)"
+        self.assertIn(guarded, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            "def delayed_transformation():\n"
+            "            return verify_signing_transformation_receipt(repository)\n"
+            "        transformation = delayed_transformation()",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "nested callable"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_prepackage_critical_guard_cannot_be_replaced_by_method_leaf_name(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "frozen = verify_frozen_candidate(repository)"
+        self.assertIn(guarded, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            "frozen = unrelated.verify_frozen_candidate(repository)",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "critical guards differ"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_prepackage_critical_guard_cannot_be_skipped_by_early_return(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        marker = "    repository = _canonical_repository(repository)\n    _reject_legacy_paths(repository)"
+        self.assertIn(marker, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            marker,
+            "    repository = _canonical_repository(repository)\n"
+            "    return ({}, {}, {}, {})\n"
+            "    _reject_legacy_paths(repository)",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "returns before"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_live_hosted_ci_guard_cannot_be_made_conditional(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "        if require_live_hosted_ci\n"
+        self.assertIn(guarded, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            "        if repository.name\n",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "guarded function AST"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_prepackage_guard_exception_cannot_fall_back(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        failure = (
+            "    except (OSError, SigningTransformationError, ValueError) as error:\n"
+            "        raise PublicationError(\n"
+            '            "GA signing transformation cannot be independently reopened"\n'
+            "        ) from error"
+        )
+        self.assertIn(failure, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            failure,
+            "    except (OSError, SigningTransformationError, ValueError):\n"
+            '        transformation = {"signed_app_tree_sha256": "0" * 64}',
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "exception path"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_prepackage_validator_cannot_be_locally_rebound(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        marker = "    repository = _canonical_repository(repository)\n    _reject_legacy_paths(repository)"
+        self.assertIn(marker, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            marker,
+            "    verify_frozen_candidate = lambda _repository: object()\n"
+            "    repository = _canonical_repository(repository)\n"
+            "    _reject_legacy_paths(repository)",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "rebinds a policy validator"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_prepackage_validator_cannot_be_rebound_at_module_scope(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        fixture.extra_artifact_files[path] += (
+            "\nverify_frozen_candidate = lambda _repository: object()\n"
+        )
+        with self.assertRaisesRegex(PinnedInputError, "protected binding"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_orchestrator_entrypoints_and_stages_cannot_be_rebound(self) -> None:
+        fixture = Fixture()
+        orchestrator_path = "scripts/publication/orchestrator.py"
+        contract_path = "scripts/publication/ga_release_contract.py"
+        orchestrator_source = fixture.extra_artifact_files[orchestrator_path]
+        contract_source = fixture.extra_artifact_files[contract_path]
+        mutations = {
+            "entrypoint": (
+                orchestrator_path,
+                orchestrator_source
+                + '\nseal_prepackage = lambda repository: {"stage": "prepackage"}\n',
+            ),
+            "stages": (
+                contract_path,
+                contract_source + '\nSTAGES += ("bypass",)\n',
+            ),
+            "dynamic-global": (
+                contract_path,
+                contract_source
+                + '\nglobals()["verify_frozen_candidate"] = lambda repository: None\n',
+            ),
+        }
+        for label, (path, mutated) in mutations.items():
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(
+                    PinnedInputError,
+                    "protected binding|dynamic binding",
+                ),
+            ):
+                pinned_verifier._artifact_binding_surface(mutated, path)
+
+    def test_orchestrator_guard_ast_rejects_hidden_control_flow(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "    hosted_ci = validate_hosted_ci_receipt_offline(repository)\n"
+        self.assertEqual(source.count(guarded), 1)
+        replacements = {
+            "assert": (
+                "    assert validate_hosted_ci_receipt_offline(repository)\n"
+                '    hosted_ci = {"schema": 1}\n'
+            ),
+            "try-star": (
+                "    try:\n"
+                "        hosted_ci = validate_hosted_ci_receipt_offline(repository)\n"
+                "    except* Exception:\n"
+                '        hosted_ci = {"schema": 1}\n'
+            ),
+            "nested-class": (
+                "    class ForgedHostedCI:\n"
+                "        hosted_ci = validate_hosted_ci_receipt_offline(repository)\n"
+                "    hosted_ci = ForgedHostedCI.hosted_ci\n"
+            ),
+        }
+        for label, replacement in replacements.items():
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(
+                    PinnedInputError,
+                    "forbidden .* control flow|guarded function AST",
+                ),
+            ):
+                pinned_verifier._artifact_binding_surface(
+                    source.replace(guarded, replacement, 1),
+                    path,
+                )
+
+    def test_orchestrator_guard_ast_binds_arguments_results_and_validators(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        hosted = "    hosted_ci = validate_hosted_ci_receipt_offline(repository)\n"
+        dmg = "        dmg = artifact_set.verify_dmg_set(\n"
+        self.assertEqual(source.count(hosted), 1)
+        self.assertEqual(source.count(dmg), 1)
+        mutations = {
+            "wrong-argument": source.replace(
+                hosted,
+                "    hosted_ci = validate_hosted_ci_receipt_offline(repository.parent)\n",
+                1,
+            ),
+            "forged-result": source.replace(
+                hosted,
+                "    validate_hosted_ci_receipt_offline(repository)\n"
+                '    hosted_ci = {"schema": 1}\n',
+                1,
+            ),
+            "dotted-validator": source.replace(
+                dmg,
+                "        artifact_set.verify_dmg_set = lambda *args: {}\n" + dmg,
+                1,
+            ),
+        }
+        for label, mutated in mutations.items():
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(
+                    PinnedInputError,
+                    "guarded function AST|dotted policy binding",
+                ),
+            ):
+                pinned_verifier._artifact_binding_surface(mutated, path)
+
+    def test_ga_release_cli_injection_ast_cannot_drift(self) -> None:
+        fixture = Fixture()
+        mutations = {
+            "scripts/release_artifact_set_cli.py": (
+                "prepackage_stage_verifier=verify_prepackage_authorization",
+                "prepackage_stage_verifier=None",
+            ),
+            "scripts/ga_runtime_acceptance_cli.py": (
+                "    runtime_main(\n"
+                "        derive_runtime_expectation,\n"
+                "        verify_prepackage_authorization,",
+                "    runtime_main(\n"
+                "        verify_prepackage_authorization,\n"
+                "        derive_runtime_expectation,",
+            ),
+        }
+        for path, (guarded, replacement) in mutations.items():
+            source = fixture.extra_artifact_files[path]
+            self.assertEqual(source.count(guarded), 1)
+            with (
+                self.subTest(path=path),
+                self.assertRaisesRegex(PinnedInputError, "CLI injection AST"),
+            ):
+                pinned_verifier._artifact_binding_surface(
+                    source.replace(guarded, replacement, 1),
+                    path,
+                )
 
     def test_self_excluded_verifier_still_requires_real_entrypoints(self) -> None:
         fixture = Fixture()
@@ -2277,6 +2662,185 @@ class PinnedBuildInputsTests(unittest.TestCase):
             )
         self._assert_fails(fixture, "entrypoint structure")
 
+    def test_self_excluded_source_entrypoint_cannot_return_before_verify(self) -> None:
+        fixture = Fixture()
+        path = "scripts/verify_pinned_build_inputs.py"
+        source = fixture.extra_artifact_files[path]
+        call = "    _verify(repository, require_packet_lan_peer_artifact=False)"
+        self.assertIn(call, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            call,
+            "    return\n" + call,
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "entrypoint"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_self_excluded_validation_chain_cannot_return_early(self) -> None:
+        fixture = Fixture()
+        path = "scripts/verify_pinned_build_inputs.py"
+        source = fixture.extra_artifact_files[path]
+        marker = "    manifest = _load_manifest(repository)"
+        self.assertIn(marker, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            marker,
+            "    return\n" + marker,
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "validation chain"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_self_excluded_validation_chain_cannot_exit_zero(self) -> None:
+        fixture = Fixture()
+        path = "scripts/verify_pinned_build_inputs.py"
+        source = fixture.extra_artifact_files[path]
+        marker = "    manifest = _load_manifest(repository)"
+        self.assertIn(marker, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            marker,
+            "    raise SystemExit(0)\n" + marker,
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "non-policy exit"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_self_excluded_artifact_source_verifier_cannot_return_early(self) -> None:
+        fixture = Fixture()
+        path = "scripts/verify_pinned_build_inputs.py"
+        source = fixture.extra_artifact_files[path]
+        marker = '    build_scripts = manifest.get("buildScripts")'
+        self.assertIn(marker, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            marker,
+            "    return\n" + marker,
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "artifact-source verifier"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_self_excluded_binding_surface_cannot_short_circuit_validation(self) -> None:
+        fixture = Fixture()
+        path = "scripts/verify_pinned_build_inputs.py"
+        source = fixture.extra_artifact_files[path]
+        definition = "def _artifact_binding_surface(source: str, relative: str) -> str:\n"
+        self.assertEqual(source.count(definition), 1)
+        fixture.extra_artifact_files[path] = source.replace(
+            definition,
+            definition
+            + "    if relative == ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION:\n"
+            + "        return source\n",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "guarded function AST"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_self_excluded_module_bindings_cannot_be_rebound(self) -> None:
+        fixture = Fixture()
+        path = "scripts/verify_pinned_build_inputs.py"
+        source = fixture.extra_artifact_files[path]
+        dispatch = (
+            'if __name__ == "__main__":\n'
+            "    raise SystemExit(main())\n"
+        )
+        self.assertEqual(source.count(dispatch), 1)
+        mutations = {
+            "verification-entrypoint": source.replace(
+                dispatch,
+                "verify = lambda repository: None\n\n" + dispatch,
+                1,
+            ),
+            "binding-surface": source.replace(
+                dispatch,
+                "_artifact_binding_surface = lambda source, relative: source\n\n"
+                + dispatch,
+                1,
+            ),
+            "structure-identity": source.replace(
+                dispatch,
+                "PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {}\n\n" + dispatch,
+                1,
+            ),
+        }
+        for label, mutated in mutations.items():
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(PinnedInputError, "module AST"),
+            ):
+                pinned_verifier._artifact_binding_surface(mutated, path)
+
+    def test_self_excluded_module_dispatch_is_unique_and_last(self) -> None:
+        fixture = Fixture()
+        path = "scripts/verify_pinned_build_inputs.py"
+        source = fixture.extra_artifact_files[path]
+        dispatch = (
+            'if __name__ == "__main__":\n'
+            "    raise SystemExit(main())\n"
+        )
+        self.assertEqual(source.count(dispatch), 1)
+        mutations = {
+            "pre-dispatch-success": source.replace(
+                dispatch,
+                'if __name__ == "__main__":\n'
+                "    raise SystemExit(0)\n\n"
+                + dispatch,
+                1,
+            ),
+            "missing-dispatch": source.replace(dispatch, "", 1),
+        }
+        for label, mutated in mutations.items():
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(PinnedInputError, "module dispatch"),
+            ):
+                pinned_verifier._artifact_binding_surface(mutated, path)
+
+    def test_self_excluded_main_cannot_return_before_verification(self) -> None:
+        fixture = Fixture()
+        path = "scripts/verify_pinned_build_inputs.py"
+        source = fixture.extra_artifact_files[path]
+        marker = "    repository = Path(__file__).resolve().parent.parent"
+        self.assertIn(marker, source)
+        fixture.extra_artifact_files[path] = source.replace(
+            marker,
+            "    return 0\n" + marker,
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "main failure propagation"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_self_exclusion_path_is_fixed(self) -> None:
+        fixture = Fixture()
+        path = "scripts/verify_pinned_build_inputs.py"
+        source = fixture.extra_artifact_files[path]
+        fixture.extra_artifact_files[path] = source.replace(
+            'ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"',
+            'ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/other.py"',
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "self-exclusion"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
     def test_real_manifest_pins_complete_production_orchestrator_surface(self) -> None:
         manifest = json.loads((REPO_ROOT / MANIFEST_RELATIVE_PATH).read_text(encoding="utf-8"))
         bindings = manifest["artifactBindings"]
@@ -2287,6 +2851,54 @@ class PinnedBuildInputsTests(unittest.TestCase):
         for path in (
             "scripts/release_capability_inventory.json",
             "scripts/release_capability_inventory.py",
+            "scripts/candidate_freeze.py",
+            "scripts/release_signing_plan.py",
+            "scripts/release_signing_preflight.py",
+            "scripts/release_profile_entitlements.py",
+            "scripts/release_component_entitlements.py",
+            "scripts/release_entitlement_contract.py",
+            "scripts/host_release_entitlements.py",
+            "scripts/hash_native_build_inputs.py",
+            "scripts/updater_key_possession_proof.py",
+            "scripts/github_hosted_ci_receipt.py",
+            "scripts/signing_attempt_transaction.py",
+            "scripts/run_ga_signing_attempt.sh",
+            "scripts/promote_signed_native_manifest.py",
+            "scripts/verify_signing_transformation.py",
+            "scripts/notarization_transaction.py",
+            "scripts/verify_notary_log.py",
+            "scripts/dmg_notarization_transaction.py",
+            "scripts/ga_runtime_acceptance.py",
+            "scripts/ga_runtime_acceptance_cli.py",
+            "scripts/run_ga_runtime_acceptance.sh",
+            "scripts/physical_capture/packet_host.py",
+            "scripts/physical_capture/packet_sender.py",
+            "scripts/physical_capture/__init__.py",
+            "scripts/harness/packet_capture.py",
+            "scripts/harness/packet_evidence.py",
+            "scripts/build_legacy_tombstone.sh",
+            "scripts/verify_native_product_graph.py",
+            "scripts/verify_release_authority_gate.py",
+            "scripts/verify_production_boundary_removal.py",
+            "scripts/release_artifact_set.py",
+            "scripts/release_artifact_set_cli.py",
+            "scripts/publication/release_contract.py",
+            "scripts/publication/__init__.py",
+            "scripts/prepare_publication_evidence.py",
+            "scripts/publication/build_tool_preparation.py",
+            "scripts/publication/npm_collector.py",
+            "scripts/publication_evidence.py",
+            "scripts/publication/draft.py",
+            "scripts/publication/finalize.py",
+            "scripts/publication/common.py",
+            "scripts/publication/closure.py",
+            "scripts/publication/verify.py",
+            "scripts/publication/source_archive.py",
+            "scripts/publication/sbom.py",
+            "scripts/publication/legal_review.py",
+            "scripts/publication/license_resolution.py",
+            "scripts/publication/final_candidate.py",
+            "scripts/publication/ga_release_contract.py",
             "scripts/publication/orchestrator.py",
             "scripts/production_release_evidence.py",
             "scripts/publication/sealed_manifest.py",

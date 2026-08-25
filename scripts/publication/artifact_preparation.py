@@ -27,19 +27,21 @@ from .source_preparation import (
 if __package__.startswith("scripts."):
     from scripts.candidate_artifact_binding import (
         CandidateBindingError,
+        TOOLCHAIN_METADATA_ORDER,
         validate_candidate_app_manifest,
-        validate_ci_toolchain_evidence,
     )
+    from scripts.candidate_freeze import CandidateFreezeError, verify_frozen_candidate
+    from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
     from scripts.repository_source_identity import SourceIdentityError, current_identity
-    from scripts.validated_candidate_evidence import validate_candidate_review
 else:
     from candidate_artifact_binding import (
         CandidateBindingError,
+        TOOLCHAIN_METADATA_ORDER,
         validate_candidate_app_manifest,
-        validate_ci_toolchain_evidence,
     )
+    from candidate_freeze import CandidateFreezeError, verify_frozen_candidate
+    from release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
     from repository_source_identity import SourceIdentityError, current_identity
-    from validated_candidate_evidence import validate_candidate_review
 
 
 REPOSITORY_ARTIFACT_INPUTS = {
@@ -51,6 +53,22 @@ NATIVE_ARTIFACT_INPUTS = {
     "native-packet-tunnel-manifest": "com.bill.clashformac.packet-tunnel.systemextension.manifest.json",
     "legacy-tombstone-manifest": "CFWLegacyTombstone.manifest.json",
 }
+
+
+def _prepackage_evidence_sources(fixed_ga_root: Path) -> dict[str, Path]:
+    """Return only evidence that exists before the prepackage transition."""
+
+    return {
+        "candidate-freeze-intent": fixed_ga_root / "candidate-freeze/intent.json",
+        "ga-product-input": fixed_ga_root / "product-input.json",
+        "signing-transformation": (
+            fixed_ga_root / "signing-output/signing-transformation.json"
+        ),
+        "hosted-ci-receipt": fixed_ga_root / "stage-inputs/hosted-ci.json",
+        "local-deterministic-ci-lanes": (
+            fixed_ga_root / "stage-inputs/local-ci-lanes.json"
+        ),
+    }
 
 
 def _reject_absolute_graph_paths(value: Any, path: str = "$") -> None:
@@ -182,36 +200,56 @@ def _artifact_sources(
     notary_submission = (
         signed_root / f"Clash.for.Mac_0.4.0_{build_number}_notary.zip.manifest.json"
     )
-    review_path = repository / "target/candidates/0.4.0/review/validated-candidate.json"
+    fixed_ga_root = ga_root(repository)
+    product_input_path = fixed_ga_root / "product-input.json"
     try:
         source_identity = current_identity(
             repository, environment=release_environment
         )
-        review = validate_candidate_review(
-            repository,
-            review_path,
-            build_number,
-            expected_source_identity=source_identity,
-        )
-        candidate = review["candidate"]
-        ci_evidence = repository / candidate["ci_evidence_path"]
-        toolchain_binding = repository / candidate["toolchain_binding_path"]
-        toolchain_metadata = validate_ci_toolchain_evidence(
-            ci_evidence,
-            toolchain_binding,
-            source_identity["repositoryCommit"],
-            source_identity["releaseSourceSha256"],
-        )
+        frozen = verify_frozen_candidate(repository)
+        if (
+            build_number != ACTIVE_RELEASE_IDENTITY.ga_build
+            or frozen.root != fixed_ga_root
+            or frozen.build_number != build_number
+        ):
+            raise PublicationError(
+                "publication artifacts require the fixed frozen GA build"
+            )
+        product_input = load_json(product_input_path)
+        if (
+            not isinstance(product_input, dict)
+            or product_input.get("document") != "cfm-ga-product-input-v1"
+            or product_input.get("product")
+            != {"build_number": build_number, "version": "0.4.0"}
+            or product_input.get("source")
+            != {
+                "repository_commit": source_identity["repositoryCommit"],
+                "release_source_sha256": source_identity["releaseSourceSha256"],
+            }
+            or not isinstance(product_input.get("toolchain"), dict)
+            or set(product_input["toolchain"]) != set(TOOLCHAIN_METADATA_ORDER)
+        ):
+            raise PublicationError(
+                "frozen GA product input differs from the current source identity"
+            )
+        toolchain_metadata = product_input["toolchain"]
         validate_candidate_app_manifest(
             app_manifest,
             app,
-            artifact_kind="notarized-release-v1",
+            artifact_kind="notarized-ga-candidate-v1",
             build_number=build_number,
             source_identity=source_identity,
             toolchain_metadata=toolchain_metadata,
             team_id="YKUPL7Z869",
         )
-    except (CandidateBindingError, SourceIdentityError, KeyError, OSError, ValueError) as error:
+    except (
+        CandidateBindingError,
+        CandidateFreezeError,
+        SourceIdentityError,
+        KeyError,
+        OSError,
+        ValueError,
+    ) as error:
         raise PublicationError(f"release app source/toolchain binding failed: {error}") from error
     _require_manifest_metadata(
         notary_submission,
@@ -239,19 +277,7 @@ def _artifact_sources(
             "notarization-submission-manifest": notary_submission,
         }
     )
-    sources.update(
-        {
-            "validated-candidate-review": review_path,
-            "validated-candidate-app-manifest": repository
-            / candidate["app_manifest_path"],
-            "validated-candidate-notarization": repository
-            / candidate["notarization_result_path"],
-            "validated-candidate-runtime-recovery": repository
-            / candidate["runtime_evidence_path"],
-            "validated-candidate-unsigned-ci": ci_evidence,
-            "validated-candidate-toolchain-binding": toolchain_binding,
-        }
-    )
+    sources.update(_prepackage_evidence_sources(fixed_ga_root))
     return sources
 
 

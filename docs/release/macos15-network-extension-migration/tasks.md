@@ -93,7 +93,7 @@ candidate satisfies them.
 - [ ] Bind all outputs into the final candidate and sealed outer manifest.
 - [ ] Build and verify the atomic DMG and updater version-set seals, create the
   post-packaging distribution seal with
-  `scripts/release_publication_gate.sh --seal-assets 0.4.0`, then reopen it with
+  `scripts/release_publication_gate.sh --seal-publication`, then reopen it with
   `scripts/release_publication_gate.sh --upload-assets 0.4.0`.
 - [ ] Confirm the printed upload allowlist contains the deterministic public
     publication bundle with CCS, both SBOMs, public manifests, GPL license,

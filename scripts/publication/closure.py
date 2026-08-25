@@ -53,6 +53,8 @@ REQUIRED_GRAPH_KINDS = {
     "xcode-modules",
 }
 REQUIRED_ARTIFACT_KINDS = {
+    "candidate-freeze-intent",
+    "ga-product-input",
     "libbox-manifest",
     "legacy-tombstone-manifest",
     "native-host-bridge-manifest",
@@ -61,12 +63,9 @@ REQUIRED_ARTIFACT_KINDS = {
     "notarization-result",
     "notarization-submission-manifest",
     "signed-app-manifest",
-    "validated-candidate-app-manifest",
-    "validated-candidate-notarization",
-    "validated-candidate-review",
-    "validated-candidate-runtime-recovery",
-    "validated-candidate-toolchain-binding",
-    "validated-candidate-unsigned-ci",
+    "signing-transformation",
+    "hosted-ci-receipt",
+    "local-deterministic-ci-lanes",
 }
 ALLOWED_CODE_PATHS = {
     "Contents/MacOS/clash-for-mac",

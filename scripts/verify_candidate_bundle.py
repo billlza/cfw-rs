@@ -18,7 +18,12 @@ from typing import Any
 if __package__:
     from .hash_artifact import build_manifest
     from .hash_native_build_inputs import build_digest as native_build_digest
-    from .release_build_identity import bundle_build_identity
+    from .release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        bundle_build_identity,
+        candidate_native_products_output,
+        ga_signed_native_products_root,
+    )
     from .repository_source_identity import (
         SourceIdentityError,
         current_identity as repository_source_identity,
@@ -26,7 +31,12 @@ if __package__:
 else:
     from hash_artifact import build_manifest
     from hash_native_build_inputs import build_digest as native_build_digest
-    from release_build_identity import bundle_build_identity
+    from release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        bundle_build_identity,
+        candidate_native_products_output,
+        ga_signed_native_products_root,
+    )
     from repository_source_identity import (
         SourceIdentityError,
         current_identity as repository_source_identity,
@@ -417,13 +427,6 @@ def verify_candidate(
         raise CandidateError("native products root must be absolute")
     require_real_directory(native_products)
     native_products = native_products.resolve(strict=True)
-    candidate_root = (repository / "target/candidates/0.4.0").resolve(strict=True)
-    try:
-        relative_native = native_products.relative_to(candidate_root)
-    except ValueError as error:
-        raise CandidateError("native products root is not candidate-specific") from error
-    if native_products.name != "native-products" or len(relative_native.parts) < 2:
-        raise CandidateError("native products root has an invalid candidate layout")
     native_metadata = current_native_build_metadata(repository)
 
     tauri = json.loads(
@@ -459,8 +462,32 @@ def verify_candidate(
         extension_binary,
     ):
         require_regular_file(file_path)
+    try:
+        build_identity = bundle_build_identity(app)
+    except ValueError as error:
+        raise CandidateError(str(error)) from error
     if require_unsigned_host:
+        try:
+            expected_native_products = candidate_native_products_output(
+                repository,
+                str(native_products),
+                build_identity.build_version,
+            )
+        except ValueError as error:
+            raise CandidateError(
+                "unsigned native products root is not the fixed candidate build root"
+            ) from error
+        if native_products != expected_native_products:
+            raise CandidateError("unsigned native products root is not canonical")
         verify_unsigned_host_skeleton(app)
+    elif (
+        build_identity.product_version != ACTIVE_RELEASE_IDENTITY.product_version
+        or build_identity.build_version != ACTIVE_RELEASE_IDENTITY.ga_build
+        or native_products != ga_signed_native_products_root(repository)
+    ):
+        raise CandidateError(
+            "signed native products root is not the fixed active GA root"
+        )
 
     system_extensions_root = contents / "Library/SystemExtensions"
     require_real_directory(system_extensions_root)
@@ -485,10 +512,6 @@ def verify_candidate(
     agent_info_path = agent / "Contents/Info.plist"
     extension_info = read_plist(extension_info_path)
     agent_info = read_plist(agent_info_path)
-    try:
-        build_identity = bundle_build_identity(app)
-    except ValueError as error:
-        raise CandidateError(str(error)) from error
     for plist, path, identifier, package_type in (
         (app_info, info_path, EXPECTED_APP_ID, "APPL"),
         (extension_info, extension_info_path, EXPECTED_EXTENSION_ID, "SYSX"),

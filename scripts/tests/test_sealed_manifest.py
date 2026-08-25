@@ -39,6 +39,8 @@ from scripts.release_capability_inventory import (
 )
 from scripts.publication.sealed_manifest import (
     BLOCKED,
+    DEFAULT_EVIDENCE_DIRECTORY,
+    DEFAULT_MANIFEST_PATH,
     DOCUMENT_KIND,
     FAILED,
     GATE_ORDER,
@@ -1044,6 +1046,16 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
 
 
 class SealedManifestContractTests(unittest.TestCase):
+    def test_default_state_is_confined_to_the_active_ga_stage_root(self) -> None:
+        self.assertEqual(
+            DEFAULT_EVIDENCE_DIRECTORY,
+            "target/candidates/0.4.0/ga/40031/stage-inputs/sealed-manifest",
+        )
+        self.assertEqual(
+            DEFAULT_MANIFEST_PATH,
+            f"{DEFAULT_EVIDENCE_DIRECTORY}/sealed-evidence-manifest.json",
+        )
+
     def test_self_check_passes(self) -> None:
         self_check()
 

@@ -14,6 +14,7 @@ import fcntl
 import os
 from pathlib import Path
 import stat
+import sys
 from typing import Iterator
 import uuid
 
@@ -36,6 +37,280 @@ class DurabilityOutcomeUnknown(PublicationError):
 
 class RootedDirectoryChanged(PublicationError):
     """A descriptor-rooted directory path changed while a transaction was active."""
+
+
+def _sync_regular_file(path: Path, expected: os.stat_result) -> None:
+    flags = (
+        os.O_RDONLY
+        | _required_open_flag("O_NOFOLLOW")
+        | _required_open_flag("O_CLOEXEC")
+    )
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            _metadata_identity(opened) != _metadata_identity(expected)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+        ):
+            raise PublicationError(
+                f"durable tree file is not a single-link regular file: {path}"
+            )
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        rebound = path.stat(follow_symlinks=False)
+        if (
+            _metadata_identity(after) != _metadata_identity(expected)
+            or _metadata_identity(rebound) != _metadata_identity(expected)
+        ):
+            raise RootedDirectoryChanged(
+                f"durable tree file changed while synchronizing: {path}"
+            )
+    finally:
+        os.close(descriptor)
+
+
+def _private_tree_snapshot(root: Path) -> dict[str, tuple[os.stat_result, str | None]]:
+    snapshot: dict[str, tuple[os.stat_result, str | None]] = {}
+
+    def walk_error(error: OSError) -> None:
+        raise PublicationError(
+            f"cannot enumerate private durable tree: {root}"
+        ) from error
+
+    try:
+        root_metadata = root.lstat()
+        for current, names, files in os.walk(
+            root,
+            topdown=True,
+            onerror=walk_error,
+            followlinks=False,
+        ):
+            names.sort()
+            files.sort()
+            current_path = Path(current)
+            relative_current = current_path.relative_to(root).as_posix() or "."
+            current_metadata = current_path.lstat()
+            if (
+                not stat.S_ISDIR(current_metadata.st_mode)
+                or current_path.is_symlink()
+                or current_metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(current_metadata.st_mode) & 0o022
+            ):
+                raise PublicationError(
+                    f"private durable tree directory is unsafe: {current_path}"
+                )
+            prior = snapshot.get(relative_current)
+            if prior is not None and _metadata_identity(prior[0]) != _metadata_identity(
+                current_metadata
+            ):
+                raise RootedDirectoryChanged(
+                    f"private durable tree directory changed while walking: {current_path}"
+                )
+            snapshot[relative_current] = (current_metadata, None)
+            for name in (*names, *files):
+                path = current_path / name
+                relative = path.relative_to(root).as_posix()
+                metadata = path.lstat()
+                target: str | None = None
+                if stat.S_ISLNK(metadata.st_mode):
+                    target = os.readlink(path)
+                    target_path = Path(target)
+                    if (
+                        target_path.is_absolute()
+                        or not target
+                        or "\x00" in target
+                        or ".." in target_path.parts
+                    ):
+                        raise PublicationError(
+                            f"private durable tree symlink target is unsafe: {path}"
+                        )
+                elif stat.S_ISDIR(metadata.st_mode):
+                    pass
+                elif (
+                    stat.S_ISREG(metadata.st_mode)
+                    and metadata.st_nlink == 1
+                    and metadata.st_uid == os.geteuid()
+                    and not stat.S_IMODE(metadata.st_mode) & 0o022
+                ):
+                    pass
+                else:
+                    raise PublicationError(
+                        f"private durable tree contains an unsupported entry: {path}"
+                    )
+                snapshot[relative] = (metadata, target)
+    except PublicationError:
+        raise
+    except OSError as error:
+        raise PublicationError(
+            f"cannot capture private durable tree identity: {root}"
+        ) from error
+    observed_root = snapshot.get(".")
+    if observed_root is None or _metadata_identity(
+        observed_root[0]
+    ) != _metadata_identity(root_metadata):
+        raise RootedDirectoryChanged(
+            f"private durable tree root changed while enumerating: {root}"
+        )
+    return snapshot
+
+
+def _same_tree_snapshot(
+    first: dict[str, tuple[os.stat_result, str | None]],
+    second: dict[str, tuple[os.stat_result, str | None]],
+) -> bool:
+    if set(first) != set(second):
+        return False
+    return all(
+        _metadata_identity(first[name][0]) == _metadata_identity(second[name][0])
+        and first[name][1] == second[name][1]
+        for name in first
+    )
+
+
+def fsync_private_tree(root: Path) -> None:
+    """Synchronize one complete private tree before an atomic directory publish."""
+
+    root = Path(root).absolute()
+    try:
+        root_metadata = root.lstat()
+    except OSError as error:
+        raise PublicationError(f"cannot inspect private durable tree: {root}") from error
+    _require_private_directory_metadata(root_metadata, root)
+    snapshot = _private_tree_snapshot(root)
+    try:
+        for relative, (metadata, _target) in sorted(snapshot.items()):
+            if stat.S_ISREG(metadata.st_mode):
+                _sync_regular_file(root / relative, metadata)
+        directories = sorted(
+            (
+                (relative, metadata)
+                for relative, (metadata, _target) in snapshot.items()
+                if stat.S_ISDIR(metadata.st_mode)
+            ),
+            key=lambda item: (len(Path(item[0]).parts), item[0]),
+            reverse=True,
+        )
+        for relative, expected in directories:
+            directory = root if relative == "." else root / relative
+            descriptor = _open_owned_directory(directory)
+            try:
+                if _metadata_identity(os.fstat(descriptor)) != _metadata_identity(
+                    expected
+                ):
+                    raise RootedDirectoryChanged(
+                        f"private durable tree directory changed: {directory}"
+                    )
+                if directory == root:
+                    _full_fsync_directory_descriptor(descriptor, directory)
+                else:
+                    os.fsync(descriptor)
+                rebound = directory.stat(follow_symlinks=False)
+                if _metadata_identity(rebound) != _metadata_identity(expected):
+                    raise RootedDirectoryChanged(
+                        f"private durable tree directory changed: {directory}"
+                    )
+            finally:
+                os.close(descriptor)
+    except PublicationError:
+        raise
+    except OSError as error:
+        raise PublicationError(f"cannot synchronize private durable tree: {root}") from error
+
+    rebound = _private_tree_snapshot(root)
+    if not _same_tree_snapshot(snapshot, rebound):
+        raise RootedDirectoryChanged(
+            f"private durable tree changed after synchronization: {root}"
+        )
+
+
+def _rename_directory_exclusive(source: Path, destination: Path) -> None:
+    if sys.platform != "darwin":
+        raise PublicationError(
+            "atomic private-directory publication requires macOS renamex_np"
+        )
+    library = ctypes.CDLL(None, use_errno=True)
+    rename = library.renamex_np
+    rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    result = rename(
+        os.fsencode(source),
+        os.fsencode(destination),
+        _RENAME_FLAGS,
+    )
+    if result == 0:
+        return
+    code = ctypes.get_errno()
+    if code == errno.EEXIST:
+        message = "private-directory publication destination already exists"
+    elif code == errno.EXDEV:
+        message = "private-directory publication crossed filesystems"
+    else:
+        message = "exclusive private-directory rename failed"
+    raise PublicationError(message)
+
+
+def publish_private_directory_exclusive(source: Path, destination: Path) -> None:
+    """Durably publish one private tree with a non-overwriting atomic rename."""
+
+    source = Path(source).absolute()
+    destination = Path(destination).absolute()
+    if source == destination:
+        raise PublicationError("private-directory publication paths are invalid")
+    try:
+        source.relative_to(destination)
+    except ValueError:
+        pass
+    else:
+        raise PublicationError(
+            "private-directory publication paths have an ancestor relationship"
+        )
+    try:
+        destination.relative_to(source)
+    except ValueError:
+        pass
+    else:
+        raise PublicationError(
+            "private-directory publication paths have an ancestor relationship"
+        )
+    source_metadata = source.lstat()
+    _require_private_directory_metadata(source_metadata, source)
+    destination_parent = destination.parent
+    parent_metadata = destination_parent.lstat()
+    _require_owned_directory(parent_metadata, destination_parent)
+    if os.path.lexists(destination):
+        raise PublicationError(
+            f"private-directory publication destination already exists: {destination}"
+        )
+    if source_metadata.st_dev != parent_metadata.st_dev:
+        raise PublicationError("private-directory publication crossed filesystems")
+
+    fsync_private_tree(source)
+    source_parent = source.parent
+    _rename_directory_exclusive(source, destination)
+    try:
+        fsync_directory(destination_parent)
+        if source_parent != destination_parent:
+            fsync_directory(source_parent)
+    except (OSError, PublicationError) as error:
+        raise DurabilityOutcomeUnknown(
+            "private-directory publication completed but durability is unknown"
+        ) from error
+
+
+def confirm_private_directory_published(source: Path, destination: Path) -> None:
+    """Resolve rename reply loss only when the destination is the sole survivor."""
+
+    source = Path(source).absolute()
+    destination = Path(destination).absolute()
+    if os.path.lexists(source) or not os.path.lexists(destination):
+        raise PublicationError(
+            "private-directory publication cannot be confirmed from namespace state"
+        )
+    fsync_private_tree(destination)
+    fsync_directory(destination.parent)
+    if source.parent != destination.parent:
+        fsync_directory(source.parent)
 
 
 def _required_open_flag(name: str) -> int:

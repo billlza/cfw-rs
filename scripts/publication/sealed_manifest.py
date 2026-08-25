@@ -96,7 +96,11 @@ try:  # pragma: no cover - import shim exercised by both invocation styles
         load_release_trust_policy,
         parse_descriptor,
     )
-    from scripts.release_build_identity import BuildIdentityError, canonical_build_version
+    from scripts.release_build_identity import (
+        BuildIdentityError,
+        canonical_build_version,
+        ga_root,
+    )
     from scripts.release_secret_material_blocker import (
         SecretMaterialReleaseBlock,
         evaluate_workspace,
@@ -123,7 +127,11 @@ except ImportError:  # pragma: no cover - CLI invocation style
         load_release_trust_policy,
         parse_descriptor,
     )
-    from scripts.release_build_identity import BuildIdentityError, canonical_build_version
+    from scripts.release_build_identity import (
+        BuildIdentityError,
+        canonical_build_version,
+        ga_root,
+    )
     from scripts.release_secret_material_blocker import (
         SecretMaterialReleaseBlock,
         evaluate_workspace,
@@ -290,9 +298,12 @@ PUBLICATION_DOCUMENTS: tuple[tuple[str, str, str], ...] = (
     ("cyclonedx-sbom", "sbom", "cyclonedx_sha256"),
 )
 
-# Where the release pipeline stages the composed inputs and the one sealed
-# manifest, alongside the existing 0.4.0 candidate/publication layout.
-DEFAULT_EVIDENCE_DIRECTORY = "target/candidates/0.4.0/release/sealed-manifest"
+# The outer-manifest validator is still callable by its dedicated CLI and by
+# source/CI collectors.  Keep its default state inside the one active GA stage
+# input root; the retired parallel ``release`` namespace is never recreated.
+DEFAULT_EVIDENCE_DIRECTORY = str(
+    ga_root(Path()) / "stage-inputs/sealed-manifest"
+)
 DEFAULT_MANIFEST_NAME = "sealed-evidence-manifest.json"
 DEFAULT_MANIFEST_PATH = f"{DEFAULT_EVIDENCE_DIRECTORY}/{DEFAULT_MANIFEST_NAME}"
 

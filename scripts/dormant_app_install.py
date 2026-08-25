@@ -55,10 +55,12 @@ if __package__:
     from .hash_artifact import build_manifest
     from .macos_durability import full_fsync
     from .release_build_identity import (
-        ACTIVE_RELEASE_GENERATION,
+        ACTIVE_RELEASE_IDENTITY,
         BuildIdentityError,
         bundle_build_identity,
         canonical_build_version,
+        ga_signed_native_products_root,
+        ga_signed_root,
     )
     from .repository_source_identity import SourceIdentityError, current_identity
     from .verify_notary_log import NotaryLogError, validate_files as validate_notary_files
@@ -76,10 +78,12 @@ else:
     from hash_artifact import build_manifest
     from macos_durability import full_fsync
     from release_build_identity import (
-        ACTIVE_RELEASE_GENERATION,
+        ACTIVE_RELEASE_IDENTITY,
         BuildIdentityError,
         bundle_build_identity,
         canonical_build_version,
+        ga_signed_native_products_root,
+        ga_signed_root,
     )
     from repository_source_identity import SourceIdentityError, current_identity
     from verify_notary_log import NotaryLogError, validate_files as validate_notary_files
@@ -87,9 +91,8 @@ else:
 
 DOCUMENT: Final = "cfw-dormant-app-install-v1"
 SCHEMA_VERSION: Final = 1
-VERSION: Final = ACTIVE_RELEASE_GENERATION.product_version
-BUILD_NUMBER: Final = ACTIVE_RELEASE_GENERATION.validation_build
-FINAL_BUILD_NUMBER: Final = ACTIVE_RELEASE_GENERATION.final_build
+VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
+BUILD_NUMBER: Final = ACTIVE_RELEASE_IDENTITY.ga_build
 TEAM_ID: Final = "YKUPL7Z869"
 TARGET_NAME: Final = "Clash for Mac.app"
 PAYLOAD_NAME: Final = TARGET_NAME
@@ -99,20 +102,10 @@ JOURNAL_PENDING_NAME: Final = ".com.bill.clashformac.dormant-install.pending"
 LOCK_NAME: Final = ".com.bill.clashformac.dormant-install.lock"
 MAINTENANCE_LOCK_NAME: Final = ".com.bill.clashformac.release-maintenance-v1.lock"
 STAGING_PREFIX: Final = ".com.bill.clashformac.dormant-install."
-FINAL_JOURNAL_NAME: Final = ".com.bill.clashformac.final-install.json"
-FINAL_JOURNAL_PENDING_NAME: Final = ".com.bill.clashformac.final-install.pending"
-FINAL_LOCK_NAME: Final = ".com.bill.clashformac.final-install.lock"
-FINAL_STAGING_PREFIX: Final = ".com.bill.clashformac.final-install."
-RELEASE_WORKTREE_RELATIVE: Final = Path(f"target/release-worktrees/{BUILD_NUMBER}")
-CANDIDATE_RELATIVE: Final = Path(
-    f"target/candidates/{VERSION}/validation/{BUILD_NUMBER}/signed"
-)
-FINAL_CANDIDATE_RELATIVE: Final = Path(f"target/candidates/{VERSION}/signed")
-VALIDATION_NATIVE_PRODUCTS_RELATIVE: Final = Path(
-    f"target/candidates/{VERSION}/validation/{BUILD_NUMBER}/native-products"
-)
-FINAL_NATIVE_PRODUCTS_RELATIVE: Final = Path(
-    f"target/candidates/{VERSION}/release-build/{FINAL_BUILD_NUMBER}/native-products"
+REPOSITORY_RELATIVE: Final = Path(".")
+CANDIDATE_RELATIVE: Final = ga_signed_root(REPOSITORY_RELATIVE)
+NATIVE_PRODUCTS_RELATIVE: Final = ga_signed_native_products_root(
+    REPOSITORY_RELATIVE
 )
 MAX_JOURNAL_BYTES: Final = 1024 * 1024
 MAX_GUARD_SEGMENTS: Final = 8
@@ -307,7 +300,7 @@ class InstallProfile:
             if authority_recovery_prepared:
                 raise InstallError(
                     "service_journal_invalid",
-                    "Authority recovery intent is forbidden for this generation",
+                    "Authority recovery intent is forbidden for this install profile",
                 )
             return actions, proof_profiles
 
@@ -338,14 +331,14 @@ class InstallProfile:
         return actions, proof_profiles
 
 
-VALIDATION_INSTALL_PROFILE: Final = InstallProfile(
-    name="validation",
+GA_INSTALL_PROFILE: Final = InstallProfile(
+    name="ga",
     build_number=BUILD_NUMBER,
     previous_build_number="40019",
-    repository_relative=RELEASE_WORKTREE_RELATIVE,
+    repository_relative=REPOSITORY_RELATIVE,
     candidate_relative=CANDIDATE_RELATIVE,
-    native_products_relative=VALIDATION_NATIVE_PRODUCTS_RELATIVE,
-    artifact_kind="notarized-validation-candidate-v1",
+    native_products_relative=NATIVE_PRODUCTS_RELATIVE,
+    artifact_kind="notarized-ga-candidate-v1",
     journal_name=JOURNAL_NAME,
     journal_pending_name=JOURNAL_PENDING_NAME,
     lock_name=LOCK_NAME,
@@ -356,30 +349,6 @@ VALIDATION_INSTALL_PROFILE: Final = InstallProfile(
     unregister_proxy_action="unregister-installed-40019-proxy-agent",
     unregister_authority_action="unregister-installed-40019-global-authority",
 )
-FINAL_INSTALL_PROFILE: Final = InstallProfile(
-    name="final",
-    build_number=FINAL_BUILD_NUMBER,
-    previous_build_number=BUILD_NUMBER,
-    repository_relative=Path("."),
-    candidate_relative=FINAL_CANDIDATE_RELATIVE,
-    native_products_relative=FINAL_NATIVE_PRODUCTS_RELATIVE,
-    artifact_kind="notarized-release-v1",
-    journal_name=FINAL_JOURNAL_NAME,
-    journal_pending_name=FINAL_JOURNAL_PENDING_NAME,
-    lock_name=FINAL_LOCK_NAME,
-    staging_prefix=FINAL_STAGING_PREFIX,
-    service_transaction_directory=(
-        ".com.bill.clashformac.final-service-transaction-v2"
-    ),
-    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
-    prove_off_action="prove-off",
-    unregister_proxy_action="unregister-proxy-agent",
-    unregister_authority_action="unregister-global-authority",
-)
-INSTALL_PROFILES: Final = {
-    VALIDATION_INSTALL_PROFILE.name: VALIDATION_INSTALL_PROFILE,
-    FINAL_INSTALL_PROFILE.name: FINAL_INSTALL_PROFILE,
-}
 
 
 @dataclass(frozen=True)
@@ -390,17 +359,11 @@ class InstallPaths:
     target_parent: Path
     operator_repository: Path | None = None
     target_name: str = TARGET_NAME
-    profile: InstallProfile = VALIDATION_INSTALL_PROFILE
+    profile: InstallProfile = GA_INSTALL_PROFILE
 
     @classmethod
-    def production(cls, generation: str = "validation") -> "InstallPaths":
-        try:
-            profile = INSTALL_PROFILES[generation]
-        except KeyError as error:
-            raise InstallError(
-                "install_generation_invalid",
-                "installation generation is not one of the two fixed release generations",
-            ) from error
+    def production(cls) -> "InstallPaths":
+        profile = GA_INSTALL_PROFILE
         operator_repository = Path(__file__).resolve().parent.parent
         repository = operator_repository / profile.repository_relative
         signed = repository / profile.candidate_relative
@@ -623,25 +586,18 @@ def production_command_runner(arguments: tuple[str, ...]) -> CommandResult:
 
 def _fixed_bundle_command_path(value: str) -> bool:
     path = Path(value)
-    production_paths = tuple(
-        InstallPaths.production(generation) for generation in INSTALL_PROFILES
-    )
+    production = InstallPaths.production()
     if path in {
-        *(item.candidate_app for item in production_paths),
-        *(item.target_app for item in production_paths),
+        production.candidate_app,
+        production.target_app,
     }:
         return True
     if not path.is_absolute() or path.parent.parent != Path("/Applications"):
         return False
     container = path.parent.name
-    matching_profiles = tuple(
-        profile
-        for profile in INSTALL_PROFILES.values()
-        if container.startswith(profile.staging_prefix)
-    )
-    if len(matching_profiles) != 1:
+    if not container.startswith(GA_INSTALL_PROFILE.staging_prefix):
         return False
-    transaction_id = container.removeprefix(matching_profiles[0].staging_prefix)
+    transaction_id = container.removeprefix(GA_INSTALL_PROFILE.staging_prefix)
     try:
         canonical = str(uuid.UUID(transaction_id))
     except (ValueError, AttributeError):
@@ -722,14 +678,10 @@ def _require_fixed_command(arguments: tuple[str, ...]) -> None:
             ("/usr/bin/xcrun", "stapler", "validate"),
         }:
             return
-        production_candidates = {
-            InstallPaths.production(generation).candidate_app
-            for generation in INSTALL_PROFILES
-        }
         if (
             arguments[:2] == ("/usr/bin/ditto", "--noqtn")
             and len(arguments) == 4
-            and Path(arguments[2]) in production_candidates
+            and Path(arguments[2]) == InstallPaths.production().candidate_app
             and _fixed_bundle_command_path(path)
             and Path(path).name == PARTIAL_PAYLOAD_NAME
         ):
@@ -2254,7 +2206,7 @@ def require_decommissioned_service_transaction(
         ):
             raise InstallError(
                 "service_decommission_evidence_invalid",
-                "service intent does not bind this installation generation",
+                "service intent does not bind the fixed GA installation identity",
             )
 
         intent_sha256 = _sha256_bytes(intent_data)
@@ -2393,7 +2345,7 @@ def require_decommissioned_service_transaction(
 
 def validate_journal(
     value: object,
-    profile: InstallProfile = VALIDATION_INSTALL_PROFILE,
+    profile: InstallProfile = GA_INSTALL_PROFILE,
 ) -> dict[str, Any]:
     document = _strict_dict(
         value,
@@ -2452,7 +2404,7 @@ def validate_journal(
     ):
         raise InstallError(
             "journal_invalid",
-            "installation journal is not for the fixed release generation",
+            "installation journal is not for the fixed GA identity",
         )
     if int(candidate_app["build_number"]) <= int(previous_app["build_number"]):
         raise InstallError("journal_invalid", "candidate build is not newer than previous build")
@@ -2502,7 +2454,7 @@ def _require_journal_successor(
         ):
             raise InstallError(
                 "journal_recovery_ambiguous",
-                "orphan pending journal is not the initial prepared generation",
+                "orphan pending journal is not the initial prepared revision",
             )
         return
     immutable = {
@@ -2562,7 +2514,7 @@ def _require_journal_successor(
             return
     raise InstallError(
         "journal_recovery_ambiguous",
-        "pending journal is not a permitted next transaction generation",
+        "pending journal is not a permitted next transaction revision",
     )
 
 
@@ -2831,8 +2783,8 @@ class DormantInstallTransaction:
             or previous.build_number != self.paths.profile.previous_build_number
         ):
             raise InstallError(
-                "install_generation_mismatch",
-                "candidate and installed application do not match the fixed release generation",
+                "install_identity_mismatch",
+                "candidate and installed application do not match the fixed GA identity",
             )
         self.runtime.require_service_decommissioned(
             self.paths,
@@ -3125,13 +3077,13 @@ class DormantInstallTransaction:
             _assert_guard_unchanged(segment["before"], segment["after"])
 
 
-def _transaction(generation: str = "validation") -> DormantInstallTransaction:
+def _transaction() -> DormantInstallTransaction:
     if os.geteuid() == 0:
         raise InstallError(
             "root_execution_refused",
             "dormant install must run as the owning administrator, never through sudo",
         )
-    paths = InstallPaths.production(generation)
+    paths = InstallPaths.production()
     return DormantInstallTransaction(paths, InstallRuntime.production(paths))
 
 
@@ -3141,17 +3093,13 @@ def main() -> None:
     mode.add_argument("--preflight", action="store_true")
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--recover", action="store_true")
-    parser.add_argument(
-        "--final",
-        action="store_true",
-        help=(
-            "operate on the fixed "
-            f"{BUILD_NUMBER} to {FINAL_BUILD_NUMBER} final generation"
-        ),
-    )
+    if "--final" in sys.argv[1:]:
+        parser.error(
+            f"--final is retired; {VERSION} has exactly one GA build ({BUILD_NUMBER})"
+        )
     arguments = parser.parse_args()
     try:
-        transaction = _transaction("final" if arguments.final else "validation")
+        transaction = _transaction()
         if arguments.preflight:
             candidate, previous = transaction.preflight()
             print(

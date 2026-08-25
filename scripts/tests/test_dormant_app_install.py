@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import io
 import json
 import os
 from pathlib import Path
@@ -22,12 +23,10 @@ from scripts.dormant_app_install import (
     CandidateIdentity,
     CommandResult,
     DormantInstallTransaction,
+    GA_INSTALL_PROFILE,
     InstallError,
     InstallPaths,
     InstallRuntime,
-    FINAL_INSTALL_PROFILE,
-    FINAL_JOURNAL_NAME,
-    FINAL_STAGING_PREFIX,
     JOURNAL_NAME,
     JOURNAL_PENDING_NAME,
     LOCK_NAME,
@@ -57,7 +56,7 @@ from scripts.dormant_app_install import (
 
 
 OLD = AppIdentity("0.4.0", "40019", "a" * 64)
-NEW = AppIdentity("0.4.0", "40030", "b" * 64)
+NEW = AppIdentity("0.4.0", "40031", "b" * 64)
 CANDIDATE = CandidateIdentity(
     app=NEW,
     manifest_sha256="c" * 64,
@@ -664,7 +663,7 @@ class DormantInstallTransactionTests(unittest.TestCase):
         self.assertEqual(result["phase"], "installed")
         self.assertEqual(self.fixture.read_identity(self.fixture.target), NEW)
 
-    def test_fsynced_rollback_generation_is_rejected_without_promotion(self) -> None:
+    def test_fsynced_rollback_revision_is_rejected_without_promotion(self) -> None:
         installed = self.fixture.transaction().install()
         journal = self.fixture.parent / JOURNAL_NAME
         before_journal = journal.read_bytes()
@@ -687,7 +686,7 @@ class DormantInstallTransactionTests(unittest.TestCase):
         self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), OLD)
         self.assertEqual(self.fixture.swap_count, 1)
 
-    def test_pending_generation_with_broken_lineage_fails_without_swap(self) -> None:
+    def test_pending_revision_with_broken_lineage_fails_without_swap(self) -> None:
         installed = self.fixture.transaction().install()
         pending = json.loads(json.dumps(installed))
         pending["sequence"] += 2
@@ -698,7 +697,7 @@ class DormantInstallTransactionTests(unittest.TestCase):
         self.assertEqual(self.fixture.read_identity(self.fixture.target), NEW)
         self.assertEqual(self.fixture.swap_count, 1)
 
-    def test_malformed_pending_generation_fails_without_touching_bundles(self) -> None:
+    def test_malformed_pending_revision_fails_without_touching_bundles(self) -> None:
         self.fixture.transaction().install()
         pending = self.fixture.parent / JOURNAL_PENDING_NAME
         pending.write_text("{}\n", encoding="utf-8")
@@ -963,44 +962,80 @@ class DormantInstallValidationTests(unittest.TestCase):
                 )
         self.assertEqual(captured.exception.code, "candidate_toolchain_override")
 
-    def test_final_generation_has_distinct_fixed_paths_and_journal(self) -> None:
-        paths = InstallPaths.production("final")
+    def test_ga_profile_has_one_fixed_40019_to_40031_path_and_journal(self) -> None:
+        paths = InstallPaths.production()
 
-        self.assertEqual(paths.profile, FINAL_INSTALL_PROFILE)
+        self.assertEqual(paths.profile, GA_INSTALL_PROFILE)
         self.assertEqual(paths.profile.build_number, "40031")
-        self.assertEqual(paths.profile.previous_build_number, "40030")
+        self.assertEqual(paths.profile.previous_build_number, "40019")
+        self.assertEqual(paths.repository, paths.operator_repository)
         self.assertTrue(
             str(paths.candidate_app).endswith(
-                "/target/candidates/0.4.0/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app"
             )
         )
-        self.assertEqual(paths.journal_name, FINAL_JOURNAL_NAME)
-        self.assertEqual(paths.profile.staging_prefix, FINAL_STAGING_PREFIX)
+        self.assertEqual(
+            paths.profile.native_products_relative,
+            Path(
+                "target/candidates/0.4.0/ga/40031/signing-output/signed-native-products"
+            ),
+        )
+        self.assertEqual(paths.journal_name, JOURNAL_NAME)
+        self.assertEqual(paths.profile.staging_prefix, STAGING_PREFIX)
 
-    def test_final_journal_rejects_validation_generation_identity(self) -> None:
+    def test_ga_journal_rejects_retired_40030_predecessor(self) -> None:
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         document = {
-            "candidate": {
-                **CANDIDATE.document(),
-                "build_number": "40031",
-            },
+            "candidate": CANDIDATE.document(),
             "document": "cfw-dormant-app-install-v1",
             "guards": [
                 {"after": None, "before": guard(), "operation": "install"}
             ],
             "phase": "prepared",
-            "previous": {**OLD.document(), "build_number": "40030"},
+            "previous": OLD.document(),
             "schema_version": 1,
             "sequence": 1,
-            "staging_name": f"{FINAL_STAGING_PREFIX}{transaction_id}",
+            "staging_name": f"{STAGING_PREFIX}{transaction_id}",
             "transaction_id": transaction_id,
         }
-        validate_journal(document, FINAL_INSTALL_PROFILE)
+        validate_journal(document, GA_INSTALL_PROFILE)
 
-        document["previous"]["build_number"] = "40019"
+        document["previous"]["build_number"] = "40030"
         with self.assertRaises(InstallError) as captured:
-            validate_journal(document, FINAL_INSTALL_PROFILE)
+            validate_journal(document, GA_INSTALL_PROFILE)
         self.assertEqual(captured.exception.code, "journal_invalid")
+
+    def test_retired_final_cli_and_wrapper_are_explicitly_rejected(self) -> None:
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["dormant_app_install.py", "--preflight", "--final"],
+            ),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            patch.object(install, "_transaction") as transaction,
+            self.assertRaises(SystemExit) as captured,
+        ):
+            install.main()
+        self.assertEqual(captured.exception.code, 2)
+        self.assertIn("--final is retired", stderr.getvalue())
+        transaction.assert_not_called()
+
+        repository = Path(__file__).resolve().parents[2]
+        completed = subprocess.run(
+            (
+                "/bin/bash",
+                str(repository / "scripts/run_dormant_app_install.sh"),
+                "--preflight",
+                "--final",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("--final is retired", completed.stderr)
 
     def test_terminal_install_pending_is_a_precise_guard_closure(self) -> None:
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -1074,12 +1109,11 @@ class DormantInstallValidationTests(unittest.TestCase):
             ".com.bill.clashformac.dormant-install.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         )
 
-    def test_production_candidate_is_fixed_to_40030_validation_worktree(self) -> None:
+    def test_production_candidate_is_fixed_to_40031_ga_root(self) -> None:
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                "/target/release-worktrees/40030/target/candidates/0.4.0/"
-                "validation/40030/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app"
             )
         )
 
@@ -1606,10 +1640,7 @@ class BoundedCommandRunnerTests(unittest.TestCase):
                     _require_fixed_command(command)
 
     def test_signed_host_maintenance_commands_are_exact_and_closed(self) -> None:
-        executables = (
-            str(InstallPaths.production().candidate_executable),
-            str(InstallPaths.production("final").candidate_executable),
-        )
+        executables = (str(InstallPaths.production().candidate_executable),)
         for executable in executables:
             for action in (
                 "prove-off",

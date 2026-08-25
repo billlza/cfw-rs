@@ -56,7 +56,7 @@ if __package__:
         utf8_size,
     )
     from ..release_build_identity import (
-        ACTIVE_RELEASE_GENERATION,
+        ACTIVE_RELEASE_IDENTITY,
         BuildIdentityError,
         canonical_build_version,
     )
@@ -105,7 +105,7 @@ else:  # pragma: no cover - direct script entrypoint
         utf8_size,
     )
     from release_build_identity import (  # type: ignore
-        ACTIVE_RELEASE_GENERATION,
+        ACTIVE_RELEASE_IDENTITY,
         BuildIdentityError,
         canonical_build_version,
     )
@@ -114,8 +114,8 @@ else:  # pragma: no cover - direct script entrypoint
 CONTEXT_DOCUMENT = "cfw-physical-run-context-v1"
 CONTEXT_SCHEMA_VERSION = 1
 COLLECTOR_REQUEST_SCHEMA_VERSION = 1
-PRODUCT_VERSION = ACTIVE_RELEASE_GENERATION.product_version
-FINAL_RELEASE_BUILD = ACTIVE_RELEASE_GENERATION.final_build
+PRODUCT_VERSION = ACTIVE_RELEASE_IDENTITY.product_version
+GA_RELEASE_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 MAX_INPUT_BYTES = 8 * 1024 * 1024
 MAX_COLLECTOR_REQUEST_BYTES = 1 << 20
 PRODUCTION_NONCE_TTL = timedelta(hours=6)
@@ -351,9 +351,9 @@ def _candidate(value: Any) -> dict[str, Any]:
         )
     except BuildIdentityError as error:
         raise PhysicalCollectorRequestError(str(error)) from error
-    if build_number != FINAL_RELEASE_BUILD:
+    if build_number != GA_RELEASE_BUILD:
         raise PhysicalCollectorRequestError(
-            f"candidate.build_number must be final release build {FINAL_RELEASE_BUILD}"
+            f"candidate.build_number must be GA release build {GA_RELEASE_BUILD}"
         )
     built_at = _timestamp(candidate["built_at"], "candidate.built_at")
     if built_at > _now():
@@ -873,7 +873,7 @@ def self_check() -> None:
         or EVIDENCE_PROFILE["aggregator_version"]
         != "physical-evidence-aggregator-v5-single-machine"
         or EVIDENCE_PROFILE["soak_hours_per_run"] != 3
-        or FINAL_RELEASE_BUILD != ACTIVE_RELEASE_GENERATION.final_build
+        or GA_RELEASE_BUILD != ACTIVE_RELEASE_IDENTITY.ga_build
         or PINNED_RUNS != expected_runs
         or set(EXPECTED_REPORTS) != set(RAW_KINDS_BY_HARNESS)
         or MAX_COLLECTOR_REQUEST_BYTES != 1 << 20

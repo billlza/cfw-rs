@@ -1,4 +1,4 @@
-"""Pre-nonce final-candidate identity capture.
+"""Pre-nonce GA-candidate identity capture.
 
 One fixed verifier execution produces five distinct, context-bound observation
 artifacts before nonce issuance.  The lifecycle module later reopens those
@@ -16,7 +16,7 @@ from typing import Any, Final
 
 from scripts.harness import lifecycle_matrix
 from scripts.harness.lifecycle_matrix import (
-    IDENTITY_FINAL_BUILD,
+    IDENTITY_GA_BUILD,
     IDENTITY_FIXED_COMMAND,
     IDENTITY_FIXED_COMMAND_SHA256,
     IDENTITY_OBSERVATION_DOCUMENT,
@@ -31,7 +31,7 @@ from scripts.harness.lifecycle_matrix import (
     validate_identity_observation,
 )
 from scripts.harness.physical_collector_request import (
-    FINAL_RELEASE_BUILD,
+    GA_RELEASE_BUILD,
     PRODUCT_VERSION,
     PhysicalCollectorRequestError,
     validate_context,
@@ -65,8 +65,8 @@ from scripts.physical_capture.session import (
 )
 
 
-FINAL_VERSION: Final = PRODUCT_VERSION
-FINAL_BUILD: Final = FINAL_RELEASE_BUILD
+GA_VERSION: Final = PRODUCT_VERSION
+GA_BUILD: Final = GA_RELEASE_BUILD
 VERIFIER_RELATIVE: Final = Path(IDENTITY_FIXED_COMMAND[0])
 FINAL_APP_RELATIVE: Final = Path(IDENTITY_FIXED_COMMAND[1])
 FINAL_NATIVE_PRODUCTS_RELATIVE: Final = Path(IDENTITY_FIXED_COMMAND[2])
@@ -129,8 +129,8 @@ def _validate_source_contract() -> None:
     }
     if (
         identity_specs != set(IDENTITY_PROBE_IDS)
-        or FINAL_VERSION != lifecycle_matrix.PRODUCT_VERSION
-        or FINAL_BUILD != IDENTITY_FINAL_BUILD
+        or GA_VERSION != lifecycle_matrix.PRODUCT_VERSION
+        or GA_BUILD != IDENTITY_GA_BUILD
         or command_sha256(IDENTITY_FIXED_COMMAND) != IDENTITY_FIXED_COMMAND_SHA256
     ):
         raise IdentityProbeError(
@@ -221,12 +221,12 @@ def _capture_inputs(
         ) from error
     candidate = validated_context["candidate"]
     if (
-        candidate["version"] != FINAL_VERSION
-        or candidate["build_number"] != FINAL_BUILD
+        candidate["version"] != GA_VERSION
+        or candidate["build_number"] != GA_BUILD
     ):
         raise IdentityProbeError(
             "not_final_candidate",
-            f"identity capture requires {FINAL_VERSION} build {FINAL_BUILD}",
+            f"identity capture requires {GA_VERSION} build {GA_BUILD}",
         )
     run = validated_context["run"]
     for field in _ENVIRONMENT_CONTEXT_FIELDS:

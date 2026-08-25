@@ -2,12 +2,11 @@
 """Run the durable app-notarization and atomic publication transaction.
 
 The build shell owns compilation and inside-out signing.  This module takes the
-already signed Host app and owns the first irreversible remote side effect:
-notary submission.  A build number is claimed globally exactly once before its
-lane-specific attempt is created.  The exact submitted app and archive survive
-every failure, untrusted command output is only parsed in memory, and the public
-``signed`` directory appears in one non-overwriting rename after every
-verification and manifest is complete.
+already signed Host app from the one frozen GA candidate and owns the first
+irreversible remote side effect: notary submission.  The exact submitted app
+and archive survive every failure, untrusted command output is only parsed in
+memory, and the public ``signed`` directory appears in one non-overwriting
+rename after every verification and manifest is complete.
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ from typing import Any, Callable, Iterator
 import uuid
 
 if __package__:
+    from .candidate_freeze import FrozenCandidate, verify_frozen_candidate
     from .candidate_artifact_binding import (
         TOOLCHAIN_METADATA_ORDER,
         derive_candidate_toolchain_metadata,
@@ -47,7 +47,14 @@ if __package__:
     )
     from .hash_artifact import build_manifest, write_new_manifest
     from .macos_durability import full_fsync
-    from .release_build_identity import canonical_build_version
+    from .release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        ga_root,
+        ga_signing_input_root,
+        ga_signed_native_products_root,
+        ga_signed_root,
+    )
+    from .release_signing_preflight import NOTARY_PROFILE
     from .repository_source_identity import (
         SourceIdentityError,
         current_identity,
@@ -58,12 +65,21 @@ if __package__:
         validate_documents,
         validate_normalized_documents,
     )
+    from .verify_signing_transformation import (
+        DOCUMENT as SIGNING_TRANSFORMATION_DOCUMENT,
+        RECEIPT_FIELDS as SIGNING_TRANSFORMATION_RECEIPT_FIELDS,
+        SCHEMA_VERSION as SIGNING_TRANSFORMATION_SCHEMA_VERSION,
+        canonical_json as canonical_signing_transformation_json,
+        load_receipt as load_signing_transformation_receipt,
+        verify_receipt as verify_signing_transformation_receipt,
+    )
     from .verify_artifact_manifest import MAX_MANIFEST_BYTES
     from .validate_notary_archive import (
         NotaryArchiveError,
         validate_notarization_zip,
     )
 else:
+    from candidate_freeze import FrozenCandidate, verify_frozen_candidate
     from candidate_artifact_binding import (
         TOOLCHAIN_METADATA_ORDER,
         derive_candidate_toolchain_metadata,
@@ -74,7 +90,14 @@ else:
     )
     from hash_artifact import build_manifest, write_new_manifest
     from macos_durability import full_fsync
-    from release_build_identity import canonical_build_version
+    from release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        ga_root,
+        ga_signing_input_root,
+        ga_signed_native_products_root,
+        ga_signed_root,
+    )
+    from release_signing_preflight import NOTARY_PROFILE
     from repository_source_identity import (
         SourceIdentityError,
         current_identity,
@@ -84,6 +107,14 @@ else:
         NotaryLogError,
         validate_documents,
         validate_normalized_documents,
+    )
+    from verify_signing_transformation import (
+        DOCUMENT as SIGNING_TRANSFORMATION_DOCUMENT,
+        RECEIPT_FIELDS as SIGNING_TRANSFORMATION_RECEIPT_FIELDS,
+        SCHEMA_VERSION as SIGNING_TRANSFORMATION_SCHEMA_VERSION,
+        canonical_json as canonical_signing_transformation_json,
+        load_receipt as load_signing_transformation_receipt,
+        verify_receipt as verify_signing_transformation_receipt,
     )
     from verify_artifact_manifest import MAX_MANIFEST_BYTES
     from validate_notary_archive import (
@@ -95,13 +126,13 @@ else:
 VERSION = "0.4.0"
 EXPECTED_TEAM_ID = "YKUPL7Z869"
 EXPECTED_DEPLOYMENT_TARGET = "15.0"
-ATTEMPT_DOCUMENT = "cfw-notarization-attempt-v1"
+ATTEMPT_DOCUMENT = "cfw-notarization-attempt-v4"
 EVENT_DOCUMENT = "cfw-notarization-event-v1"
 EVENT_DOCUMENT_V2 = "cfw-notarization-event-v2"
-SUBMISSION_DOCUMENT = "cfw-notarization-submission-receipt-v2"
+SUBMISSION_DOCUMENT = "cfw-notarization-submission-receipt-v5"
 SUBMISSION_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v1"
-RECEIPT_DOCUMENT = "cfw-notarization-publish-ready-receipt-v3"
-RECOVERY_DOCUMENT = "cfw-notarization-recovery-intent-v1"
+RECEIPT_DOCUMENT = "cfw-notarization-publish-ready-receipt-v5"
+RECOVERY_DOCUMENT = "cfw-notarization-recovery-intent-v2"
 RECOVERY_CONTINUATION_DOCUMENT = (
     "cfw-notarization-recovery-tool-continuation-v1"
 )
@@ -122,6 +153,12 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 EVENT_PENDING_RE = re.compile(r"^([0-9]{8})[.]pending$")
 DEPLOYMENT_TARGET_RE = re.compile(r"^[0-9]+\.[0-9]+$")
 TOOLCHAIN_METADATA_KEYS = set(TOOLCHAIN_METADATA_ORDER)
+SIGNING_TRANSFORMATION_BINDING_FIELDS = {
+    "signing_transformation_receipt_sha256",
+    "pre_sign_app_manifest_sha256",
+    "pre_sign_app_tree_sha256",
+    "signed_app_tree_sha256",
+}
 EVENT_FIELDS = {
     "schema_version",
     "document",
@@ -155,7 +192,7 @@ RECOVERY_FIELDS = {
     "recovery_tool_repository_commit",
     "recovery_tool_release_source_sha256",
     "requested_at",
-}
+} | SIGNING_TRANSFORMATION_BINDING_FIELDS
 RECOVERY_CONTINUATION_FIELDS = {
     "schema_version",
     "document",
@@ -191,10 +228,12 @@ SUBMISSION_RECEIPT_FIELDS = {
     "submission_observation_sha256",
     "recovery_intent_sha256",
     "notary_created_at",
+    "notary_profile",
     "causal_binding",
     "archive_sha256",
+    "candidate_freeze_intent_sha256",
     "observed_at",
-}
+} | SIGNING_TRANSFORMATION_BINDING_FIELDS
 PUBLISH_READY_RECEIPT_FIELDS = {
     "schema_version",
     "document",
@@ -208,6 +247,7 @@ PUBLISH_READY_RECEIPT_FIELDS = {
     "accepted_notary_log_sha256",
     "notarization_result_sha256",
     "archive_sha256",
+    "candidate_freeze_intent_sha256",
     "pre_staple_app_tree_sha256",
     "post_staple_app_tree_sha256",
     "gatekeeper_evidence_sha256",
@@ -215,23 +255,24 @@ PUBLISH_READY_RECEIPT_FIELDS = {
     "archive_manifest_sha256",
     "state",
     "sealed_at",
-}
+} | SIGNING_TRANSFORMATION_BINDING_FIELDS
 INTENT_FIELDS = {
     "schema_version",
     "document",
     "attempt_id",
-    "lane",
     "build_number",
     "version",
     "repository_commit",
     "release_source_sha256",
     "team_id",
+    "notary_profile",
     "archive_name",
     "archive_sha256",
     "archive_size",
     "pre_staple_app_tree_sha256",
+    "candidate_freeze_intent_sha256",
     "prepared_at",
-}
+} | SIGNING_TRANSFORMATION_BINDING_FIELDS
 RECOVERABLE_SUBMIT_FAILURE_CODES = {
     "command_output_invalid_utf8",
     "invalid_command_output",
@@ -421,6 +462,24 @@ MACOS_27_COMPATIBILITY_IDENTITIES = frozenset(
 
 
 @dataclass(frozen=True)
+class SigningTransformationBinding:
+    signing_transformation_receipt_sha256: str
+    pre_sign_app_manifest_sha256: str
+    pre_sign_app_tree_sha256: str
+    signed_app_tree_sha256: str
+
+    def as_fields(self) -> dict[str, str]:
+        return {
+            "signing_transformation_receipt_sha256": (
+                self.signing_transformation_receipt_sha256
+            ),
+            "pre_sign_app_manifest_sha256": self.pre_sign_app_manifest_sha256,
+            "pre_sign_app_tree_sha256": self.pre_sign_app_tree_sha256,
+            "signed_app_tree_sha256": self.signed_app_tree_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class PersistedEvidenceSnapshot:
     gatekeeper: dict[str, Any]
     notarization_sha256: str
@@ -537,42 +596,23 @@ class TransactionContext:
 
     @property
     def candidate_base(self) -> Path:
-        return self.repository / "target/candidates/0.4.0"
+        return self.repository / f"target/candidates/{VERSION}"
 
     @property
     def build_root(self) -> Path:
-        if self.build_kind == "validation":
-            return self.candidate_base / "validation" / self.build_number
-        return self.candidate_base / "release-build" / self.build_number
+        return ga_root(self.repository)
 
     @property
     def attempt_root(self) -> Path:
-        return (
-            self.candidate_base
-            / "notary-attempts"
-            / self.build_kind
-            / self.build_number
-        )
-
-    @property
-    def build_number_claim(self) -> Path:
-        return (
-            self.candidate_base
-            / "notary-build-claims"
-            / self.build_number
-        )
+        return self.build_root / "transactions/app-notary"
 
     @property
     def final_root(self) -> Path:
-        if self.build_kind == "validation":
-            return self.build_root / "signed"
-        return self.candidate_base / "signed"
+        return ga_signed_root(self.repository)
 
     @property
     def artifact_kind(self) -> str:
-        if self.build_kind == "validation":
-            return "notarized-validation-candidate-v1"
-        return "notarized-release-v1"
+        return "notarized-ga-candidate-v1"
 
     @property
     def archive_name(self) -> str:
@@ -598,6 +638,9 @@ Publisher = Callable[[Path, Path], None]
 Clock = Callable[[], str]
 AttemptIdFactory = Callable[[], str]
 HostSystemIdentityReader = Callable[[], HostSystemIdentity]
+CandidateFreezeVerifier = Callable[[Path], FrozenCandidate]
+SigningTransformationVerifier = Callable[[Path], dict[str, Any]]
+SigningTransformationReceiptReader = Callable[[Path], dict[str, Any]]
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -773,7 +816,6 @@ def _exclusive_recovery_lock(path: Path) -> Iterator[None]:
 
 @contextmanager
 def _exclusive_attempt_recovery_lock(context: TransactionContext) -> Iterator[None]:
-    canonical_build_version(context.build_number, "build number")
     lock_parent = context.attempt_root.parent
     _require_real_directory(lock_parent, trusted=True)
     lock_path = lock_parent / f".{context.build_number}.recovery.lock"
@@ -908,7 +950,7 @@ def _mkdir_private(path: Path, *, exclusive: bool) -> None:
         if exclusive:
             raise TransactionError(
                 "attempt_exists",
-                "this lane/build already has a notarization attempt and must not be resubmitted",
+                "the GA candidate already has a notarization transaction and must not be resubmitted",
             ) from error
         _require_real_directory(path, private=True)
         return
@@ -2254,9 +2296,16 @@ def _validate_context(
     ):
         raise TransactionError("unsafe_repository", "repository must be an absolute real path")
     _require_real_directory(repository, trusted=True)
-    if context.build_kind not in ("validation", "release"):
-        raise TransactionError("invalid_build_kind", "build kind is unsupported")
-    canonical_build_version(context.build_number, "build number")
+    if context.build_kind != "ga":
+        raise TransactionError(
+            "invalid_build_kind",
+            "only the active GA notarization transaction is supported",
+        )
+    if context.build_number != ACTIVE_RELEASE_IDENTITY.ga_build:
+        raise TransactionError(
+            "invalid_build_number",
+            "build number differs from the active GA release identity",
+        )
     if not COMMIT_RE.fullmatch(context.repository_commit):
         raise TransactionError("invalid_source_identity", "repository commit is malformed")
     if not SHA256_RE.fullmatch(context.release_source_sha256):
@@ -2270,29 +2319,20 @@ def _validate_context(
         not SHA256_RE.fullmatch(value) for value in context.toolchain_metadata.values()
     ):
         raise TransactionError("invalid_toolchain_identity", "toolchain identity is incomplete")
-    if (
-        not context.notary_profile
-        or len(context.notary_profile) > 256
-        or "\0" in context.notary_profile
-    ):
-        raise TransactionError("invalid_notary_profile", "notary profile name is malformed")
+    if context.notary_profile != NOTARY_PROFILE:
+        raise TransactionError(
+            "invalid_notary_profile",
+            f"notary profile must be exactly {NOTARY_PROFILE}",
+        )
     _require_real_directory(context.repository / "target", trusted=True)
     _require_real_directory(context.repository / "target/candidates", trusted=True)
     _require_real_directory(context.candidate_base, trusted=True)
     _require_real_directory(context.build_root.parent, trusted=True)
     _require_real_directory(context.build_root, trusted=True)
     _require_real_directory(context.native_products, trusted=True)
-    expected_native = context.build_root / "native-products"
+    expected_native = ga_signed_native_products_root(context.repository)
     if context.native_products != expected_native:
         raise TransactionError("unsafe_native_products", "native products path is not canonical")
-    attempts = context.candidate_base / "notary-attempts"
-    build_attempt_roots = tuple(
-        attempts / build_kind / context.build_number
-        for build_kind in ("validation", "release")
-    )
-    opposite_attempt = next(
-        path for path in build_attempt_roots if path != context.attempt_root
-    )
     if recovery:
         if context.staged_app is not None:
             raise TransactionError(
@@ -2300,11 +2340,6 @@ def _validate_context(
                 "recovery must not accept a new staged application",
             )
         _require_real_directory(context.attempt_root, private=True)
-        if os.path.lexists(opposite_attempt):
-            raise TransactionError(
-                "cross_lane_attempt_exists",
-                "the same build has notarization attempts in both lanes",
-            )
         _require_real_directory(context.attempt_root / "events", private=True)
         direct_sealed_state = (
             (context.attempt_root / "publish-ready").is_dir()
@@ -2330,54 +2365,165 @@ def _validate_context(
                 "recovery attempt has neither work nor publish-ready state",
             )
     else:
-        if os.path.lexists(context.build_number_claim):
-            raise TransactionError(
-                "build_number_claimed",
-                "this build number is permanently allocated and must not be resubmitted",
-            )
-        if any(os.path.lexists(path) for path in build_attempt_roots):
+        if os.path.lexists(context.attempt_root):
             raise TransactionError(
                 "attempt_exists",
-                "this build already has a notarization attempt and must not be resubmitted",
+                "the GA candidate already has a notarization transaction and must not be resubmitted",
             )
-        if context.staged_app is None or context.staged_app.name != "Clash for Mac.app":
+        expected_staged_app = (
+            ga_signing_input_root(context.repository) / "Clash for Mac.app"
+        )
+        if context.staged_app != expected_staged_app:
             raise TransactionError("unsafe_staged_app", "staged app name is not canonical")
-        staging = context.staged_app.parent
-        if staging.parent != context.candidate_base or not staging.name.startswith(
-            ".signed-stage."
-        ):
-            raise TransactionError("unsafe_staged_app", "staged app parent is not canonical")
+        staging = expected_staged_app.parent
         _require_real_directory(staging, trusted=True)
-        _require_real_directory(context.staged_app)
+        _require_real_directory(expected_staged_app)
     if not recovery and os.path.lexists(context.final_root):
         raise TransactionError("publish_destination_exists", "signed output already exists")
 
 
-def _claim_attempt(context: TransactionContext) -> tuple[Path, Path]:
-    attempts = context.candidate_base / "notary-attempts"
-    lane = attempts / context.build_kind
-    claims = context.candidate_base / "notary-build-claims"
-    _mkdir_private(attempts, exclusive=False)
-    _mkdir_private(lane, exclusive=False)
-    _mkdir_private(claims, exclusive=False)
+def _verified_candidate_freeze_intent_sha256(
+    context: TransactionContext,
+    verifier: CandidateFreezeVerifier,
+) -> str:
     try:
-        _mkdir_private(context.build_number_claim, exclusive=True)
-    except TransactionError as error:
-        if error.code != "attempt_exists":
-            raise
+        frozen = verifier(context.repository)
+    except Exception as error:
         raise TransactionError(
-            "build_number_claimed",
-            "this build number is permanently allocated and must not be resubmitted",
+            "candidate_freeze_verification_failed",
+            "the fixed GA candidate freeze cannot be verified",
         ) from error
-    build_attempt_roots = tuple(
-        attempts / build_kind / context.build_number
-        for build_kind in ("validation", "release")
-    )
-    if any(os.path.lexists(path) for path in build_attempt_roots):
+    if (
+        not isinstance(frozen, FrozenCandidate)
+        or frozen.root != context.build_root
+        or frozen.product_version != VERSION
+        or frozen.build_number != context.build_number
+        or frozen.intent_path
+        != context.build_root / "candidate-freeze/intent.json"
+        or not SHA256_RE.fullmatch(frozen.intent_sha256)
+    ):
         raise TransactionError(
-            "attempt_exists",
-            "this build already has a notarization attempt and must not be resubmitted",
+            "candidate_freeze_identity_mismatch",
+            "the candidate freeze differs from the active GA transaction",
         )
+    return frozen.intent_sha256
+
+
+def _signing_transformation_binding_from_fields(
+    value: dict[str, Any],
+    *,
+    failure_code: str,
+    failure_message: str,
+) -> SigningTransformationBinding:
+    if any(
+        not isinstance(value.get(field), str)
+        or not SHA256_RE.fullmatch(value[field])
+        for field in SIGNING_TRANSFORMATION_BINDING_FIELDS
+    ):
+        raise TransactionError(failure_code, failure_message)
+    return SigningTransformationBinding(
+        signing_transformation_receipt_sha256=value[
+            "signing_transformation_receipt_sha256"
+        ],
+        pre_sign_app_manifest_sha256=value["pre_sign_app_manifest_sha256"],
+        pre_sign_app_tree_sha256=value["pre_sign_app_tree_sha256"],
+        signed_app_tree_sha256=value["signed_app_tree_sha256"],
+    )
+
+
+def _require_same_signing_transformation_binding(
+    value: dict[str, Any],
+    expected: dict[str, Any],
+    *,
+    failure_code: str,
+    failure_message: str,
+) -> None:
+    observed_binding = _signing_transformation_binding_from_fields(
+        value,
+        failure_code=failure_code,
+        failure_message=failure_message,
+    )
+    expected_binding = _signing_transformation_binding_from_fields(
+        expected,
+        failure_code=failure_code,
+        failure_message=failure_message,
+    )
+    if observed_binding != expected_binding:
+        raise TransactionError(failure_code, failure_message)
+
+
+def _verified_signing_transformation_binding(
+    context: TransactionContext,
+    provider: SigningTransformationVerifier | SigningTransformationReceiptReader,
+    *,
+    candidate_freeze_intent_sha256: str,
+    staged_app: Path | None,
+) -> SigningTransformationBinding:
+    try:
+        receipt = provider(context.repository)
+    except Exception as error:
+        raise TransactionError(
+            "signing_transformation_verification_failed",
+            "the fixed GA signing transformation receipt cannot be verified",
+        ) from error
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != set(SIGNING_TRANSFORMATION_RECEIPT_FIELDS)
+        or receipt.get("document") != SIGNING_TRANSFORMATION_DOCUMENT
+        or type(receipt.get("schema_version")) is not int
+        or receipt.get("schema_version") != SIGNING_TRANSFORMATION_SCHEMA_VERSION
+        or receipt.get("product")
+        != {"build_number": context.build_number, "version": VERSION}
+        or receipt.get("candidate_freeze_intent_sha256")
+        != candidate_freeze_intent_sha256
+    ):
+        raise TransactionError(
+            "signing_transformation_identity_mismatch",
+            "the signing transformation receipt differs from the active GA candidate",
+        )
+    for field in (
+        "candidate_freeze_intent_sha256",
+        "normalized_app_tree_sha256",
+        "pre_sign_app_manifest_sha256",
+        "pre_sign_app_tree_sha256",
+        "signed_app_tree_sha256",
+    ):
+        if (
+            not isinstance(receipt.get(field), str)
+            or not SHA256_RE.fullmatch(receipt[field])
+        ):
+            raise TransactionError(
+                "signing_transformation_identity_mismatch",
+                "the signing transformation receipt contains a malformed digest",
+            )
+    receipt_sha256 = hashlib.sha256(
+        canonical_signing_transformation_json(receipt)
+    ).hexdigest()
+    binding = SigningTransformationBinding(
+        signing_transformation_receipt_sha256=receipt_sha256,
+        pre_sign_app_manifest_sha256=receipt["pre_sign_app_manifest_sha256"],
+        pre_sign_app_tree_sha256=receipt["pre_sign_app_tree_sha256"],
+        signed_app_tree_sha256=receipt["signed_app_tree_sha256"],
+    )
+    if staged_app is not None:
+        staged_tree_sha256 = _app_tree_sha256(
+            staged_app,
+            failure_code="signing_transformation_app_identity_failed",
+            failure_message=(
+                "the staged GA app identity cannot be compared with its signing receipt"
+            ),
+        )
+        if staged_tree_sha256 != binding.signed_app_tree_sha256:
+            raise TransactionError(
+                "signing_transformation_app_identity_mismatch",
+                "the staged GA app differs from the verified signing transformation",
+            )
+    return binding
+
+
+def _claim_attempt(context: TransactionContext) -> tuple[Path, Path]:
+    transactions = context.build_root / "transactions"
+    _mkdir_private(transactions, exclusive=False)
     _mkdir_private(context.attempt_root, exclusive=True)
     events = context.attempt_root / "events"
     work = context.attempt_root / "work"
@@ -2406,14 +2552,15 @@ def _load_recovery_intent_document(
     archive_size = value["archive_size"]
     if (
         type(value["schema_version"]) is not int
-        or value["schema_version"] != 1
+        or value["schema_version"] != 4
         or value["document"] != ATTEMPT_DOCUMENT
-        or value["lane"] != context.build_kind
         or value["build_number"] != context.build_number
         or value["version"] != VERSION
         or value["repository_commit"] != context.repository_commit
         or value["release_source_sha256"] != context.release_source_sha256
         or value["team_id"] != EXPECTED_TEAM_ID
+        or value["notary_profile"] != NOTARY_PROFILE
+        or value["notary_profile"] != context.notary_profile
         or value["archive_name"] != context.archive_name
         or not isinstance(value["archive_sha256"], str)
         or not SHA256_RE.fullmatch(value["archive_sha256"])
@@ -2422,10 +2569,22 @@ def _load_recovery_intent_document(
         or archive_size <= 0
         or not isinstance(value["pre_staple_app_tree_sha256"], str)
         or not SHA256_RE.fullmatch(value["pre_staple_app_tree_sha256"])
+        or not isinstance(value["candidate_freeze_intent_sha256"], str)
+        or not SHA256_RE.fullmatch(value["candidate_freeze_intent_sha256"])
     ):
         raise TransactionError(
             "notarization_intent_identity_drift",
             "notarization intent differs from the recovery context",
+        )
+    transformation = _signing_transformation_binding_from_fields(
+        value,
+        failure_code="notarization_intent_identity_drift",
+        failure_message="notarization intent has an invalid signing transformation binding",
+    )
+    if value["pre_staple_app_tree_sha256"] != transformation.signed_app_tree_sha256:
+        raise TransactionError(
+            "notarization_intent_identity_drift",
+            "notarization intent submits an app outside its signing transformation",
         )
     _parse_utc_timestamp(value["prepared_at"], "intent prepared_at")
     value["attempt_id"] = attempt_id
@@ -3004,16 +3163,28 @@ def _load_recoverable_attempt(
             or set(receipt) != SUBMISSION_RECEIPT_FIELDS
             or receipt_data != _canonical_json(receipt).encode("utf-8")
             or type(receipt["schema_version"]) is not int
-            or receipt["schema_version"] != 2
+            or receipt["schema_version"] != 5
             or receipt["document"] != SUBMISSION_DOCUMENT
             or receipt["attempt_id"] != intent["attempt_id"]
             or receipt["archive_name"] != context.archive_name
+            or receipt["notary_profile"] != NOTARY_PROFILE
+            or receipt["notary_profile"] != intent["notary_profile"]
             or receipt["archive_sha256"] != archive_sha256
+            or receipt["candidate_freeze_intent_sha256"]
+            != intent["candidate_freeze_intent_sha256"]
         ):
             raise TransactionError(
                 "submission_receipt_identity_drift",
                 "persisted submission receipt differs from the retained attempt",
             )
+        _require_same_signing_transformation_binding(
+            receipt,
+            intent,
+            failure_code="submission_receipt_identity_drift",
+            failure_message=(
+                "persisted submission receipt differs from the signing transformation"
+            ),
+        )
         receipt_submission_id = _canonical_uuid(
             receipt["submission_id"],
             "submission receipt id",
@@ -3567,17 +3738,29 @@ def _require_submission_acquisition_evidence(
     if (
         set(receipt) != SUBMISSION_RECEIPT_FIELDS
         or type(receipt["schema_version"]) is not int
-        or receipt["schema_version"] != 2
+        or receipt["schema_version"] != 5
         or receipt["document"] != SUBMISSION_DOCUMENT
         or receipt["attempt_id"] != prepared.attempt_id
         or receipt["submission_id"] != prepared.submission_id
         or receipt["archive_name"] != prepared.context.archive_name
+        or receipt["notary_profile"] != NOTARY_PROFILE
+        or receipt["notary_profile"] != prepared.intent["notary_profile"]
         or receipt["archive_sha256"] != prepared.archive_sha256
+        or receipt["candidate_freeze_intent_sha256"]
+        != prepared.intent["candidate_freeze_intent_sha256"]
     ):
         raise TransactionError(
             "submission_receipt_identity_drift",
-            "Apple submission receipt has an invalid v2 identity",
+            "Apple submission receipt has an invalid v5 identity",
         )
+    _require_same_signing_transformation_binding(
+        receipt,
+        prepared.intent,
+        failure_code="submission_receipt_identity_drift",
+        failure_message=(
+            "Apple submission receipt differs from the signing transformation"
+        ),
+    )
     _parse_utc_timestamp(receipt["observed_at"], "submission receipt observed_at")
     observation_sha256 = receipt["submission_observation_sha256"]
     if observation_sha256 is not None:
@@ -3945,7 +4128,7 @@ def _build_publish_ready_receipt(
         prepared.archive_size,
     )
     return {
-        "schema_version": 3,
+        "schema_version": 5,
         "document": RECEIPT_DOCUMENT,
         "attempt_id": prepared.attempt_id,
         "submission_id": prepared.submission_id,
@@ -3957,6 +4140,16 @@ def _build_publish_ready_receipt(
         "accepted_notary_log_sha256": evidence.notary_log_sha256,
         "notarization_result_sha256": evidence.notarization_sha256,
         "archive_sha256": prepared.archive_sha256,
+        "candidate_freeze_intent_sha256": prepared.intent[
+            "candidate_freeze_intent_sha256"
+        ],
+        **_signing_transformation_binding_from_fields(
+            prepared.intent,
+            failure_code="sealed_receipt_identity_drift",
+            failure_message=(
+                "notarization intent has an invalid signing transformation binding"
+            ),
+        ).as_fields(),
         "pre_staple_app_tree_sha256": prepared.pre_staple_app_sha256,
         "post_staple_app_tree_sha256": post_staple_app_sha256,
         "gatekeeper_evidence_sha256": evidence.gatekeeper_sha256,
@@ -4014,7 +4207,7 @@ def _require_sealed_journal_lineage(
             if not allow_receipt_durability_unknown:
                 raise TransactionError(
                     "sealed_journal_lineage_mismatch",
-                    "receipt durability outcome is unsupported in this lane",
+                    "receipt durability outcome is unsupported in this transaction path",
                 )
             if (
                 candidate["previous_event_sha256"]
@@ -4217,12 +4410,14 @@ def _validate_sealed_publication(
         or set(receipt) != PUBLISH_READY_RECEIPT_FIELDS
         or receipt_data != _canonical_json(receipt).encode("utf-8")
         or type(receipt.get("schema_version")) is not int
-        or receipt.get("schema_version") != 3
+        or receipt.get("schema_version") != 5
         or receipt.get("document") != RECEIPT_DOCUMENT
         or receipt.get("attempt_id") != prepared.attempt_id
         or receipt.get("submission_id") != prepared.submission_id
         or receipt.get("intent_sha256") != prepared.intent_sha256
         or receipt.get("archive_sha256") != prepared.archive_sha256
+        or receipt.get("candidate_freeze_intent_sha256")
+        != prepared.intent["candidate_freeze_intent_sha256"]
         or receipt.get("pre_staple_app_tree_sha256")
         != prepared.pre_staple_app_sha256
         or receipt.get("state") != "publish-ready"
@@ -4231,6 +4426,14 @@ def _validate_sealed_publication(
             "sealed_receipt_identity_drift",
             "publish-ready receipt differs from this notarization transaction",
         )
+    _require_same_signing_transformation_binding(
+        receipt,
+        prepared.intent,
+        failure_code="sealed_receipt_identity_drift",
+        failure_message=(
+            "publish-ready receipt differs from the signing transformation"
+        ),
+    )
     for key in PUBLISH_READY_RECEIPT_FIELDS - {
         "schema_version",
         "document",
@@ -4657,18 +4860,31 @@ def _resume_direct_sealed_transaction(
         or submission_receipt_data
         != _canonical_json(submission_receipt).encode("utf-8")
         or type(submission_receipt.get("schema_version")) is not int
-        or submission_receipt.get("schema_version") != 2
+        or submission_receipt.get("schema_version") != 5
         or submission_receipt.get("document") != SUBMISSION_DOCUMENT
         or submission_receipt.get("attempt_id") != intent["attempt_id"]
         or submission_receipt.get("submission_id") != submission_id
         or submission_receipt.get("acquisition") != "submit-no-wait"
         or submission_receipt.get("archive_name") != context.archive_name
+        or submission_receipt.get("notary_profile") != NOTARY_PROFILE
+        or submission_receipt.get("notary_profile")
+        != intent["notary_profile"]
         or submission_receipt.get("archive_sha256") != intent["archive_sha256"]
+        or submission_receipt.get("candidate_freeze_intent_sha256")
+        != intent["candidate_freeze_intent_sha256"]
     ):
         raise TransactionError(
             "direct_submission_receipt_mismatch",
             "direct sealed submission receipt differs from its intent",
         )
+    _require_same_signing_transformation_binding(
+        submission_receipt,
+        intent,
+        failure_code="direct_submission_receipt_mismatch",
+        failure_message=(
+            "direct sealed submission receipt differs from the signing transformation"
+        ),
+    )
     observation_path = context.attempt_root / "submission-observation.json"
     observation_data = _read_regular_bytes(observation_path)
     observation = _decode_json_bytes(observation_data, observation_path)
@@ -5421,7 +5637,7 @@ def _recovery_intent_static_fields(
     recovery_tool_identity: dict[str, str],
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "document": RECOVERY_DOCUMENT,
         "attempt_id": attempt.attempt_id,
         "submission_id": submission_id,
@@ -5439,6 +5655,13 @@ def _recovery_intent_static_fields(
         "recovery_tool_release_source_sha256": recovery_tool_identity[
             "releaseSourceSha256"
         ],
+        **_signing_transformation_binding_from_fields(
+            attempt.intent,
+            failure_code="recovery_intent_identity_drift",
+            failure_message=(
+                "notarization intent has an invalid signing transformation binding"
+            ),
+        ).as_fields(),
     }
 
 
@@ -5464,7 +5687,7 @@ def _load_existing_recovery_intent(
         not isinstance(value, dict)
         or set(value) != RECOVERY_FIELDS
         or type(value.get("schema_version")) is not int
-        or value.get("schema_version") != 1
+        or value.get("schema_version") != 2
         or value.get("document") != RECOVERY_DOCUMENT
         or any(value.get(key) != static[key] for key in invariant_fields)
         or not isinstance(value.get("recovery_tool_repository_commit"), str)
@@ -7795,6 +8018,9 @@ def recover_transaction(
     ),
     publisher: Publisher = publish_exclusive,
     clock: Clock = _utc_now,
+    signing_transformation_receipt_reader: SigningTransformationReceiptReader = (
+        load_signing_transformation_receipt
+    ),
 ) -> Path:
     submission_id = _canonical_uuid(submission_id, "recovery submission id")
     if (
@@ -7824,6 +8050,30 @@ def recover_transaction(
         raise TransactionError(
             "recovery_tool_identity_invalid",
             "recovery tool source identity is malformed",
+        )
+    _validate_context(context, recovery=True)
+    persisted_intent, _persisted_intent_path, _persisted_intent_sha256 = (
+        _load_recovery_intent_document(context)
+    )
+    expected_signing_transformation = _signing_transformation_binding_from_fields(
+        persisted_intent,
+        failure_code="signing_transformation_receipt_drift",
+        failure_message=(
+            "the notarization intent has an invalid signing transformation binding"
+        ),
+    )
+    observed_signing_transformation = _verified_signing_transformation_binding(
+        context,
+        signing_transformation_receipt_reader,
+        candidate_freeze_intent_sha256=persisted_intent[
+            "candidate_freeze_intent_sha256"
+        ],
+        staged_app=None,
+    )
+    if observed_signing_transformation != expected_signing_transformation:
+        raise TransactionError(
+            "signing_transformation_receipt_drift",
+            "the signing transformation receipt differs from the notarization intent",
         )
     direct_receipt_path = context.attempt_root / "receipt.json"
     direct_receipt_pending_path = (
@@ -8041,7 +8291,7 @@ def recover_transaction(
                 )
             if attempt.existing_submission_receipt is None:
                 submission_receipt = {
-                    "schema_version": 2,
+                    "schema_version": 5,
                     "document": SUBMISSION_DOCUMENT,
                     "attempt_id": attempt.attempt_id,
                     "submission_id": submission_id,
@@ -8052,12 +8302,23 @@ def recover_transaction(
                     ),
                     "recovery_intent_sha256": recovery_intent_sha256,
                     "notary_created_at": info_created_at,
+                    "notary_profile": context.notary_profile,
                     "causal_binding": (
                         "direct-submit-observation-and-log"
                         if attempt.observed_submission_id is not None
                         else "unique-history-window-and-log"
                     ),
                     "archive_sha256": attempt.archive_sha256,
+                    "candidate_freeze_intent_sha256": attempt.intent[
+                        "candidate_freeze_intent_sha256"
+                    ],
+                    **_signing_transformation_binding_from_fields(
+                        attempt.intent,
+                        failure_code="submission_receipt_identity_drift",
+                        failure_message=(
+                            "notarization intent has an invalid signing transformation binding"
+                        ),
+                    ).as_fields(),
                     "observed_at": clock(),
                 }
                 submission_receipt_path = (
@@ -8133,23 +8394,49 @@ def execute_transaction(
     host_system_identity_reader: HostSystemIdentityReader = (
         production_host_system_identity_reader
     ),
+    candidate_freeze_verifier: CandidateFreezeVerifier = (
+        verify_frozen_candidate
+    ),
+    signing_transformation_verifier: SigningTransformationVerifier = (
+        verify_signing_transformation_receipt
+    ),
+    signing_transformation_receipt_reader: SigningTransformationReceiptReader = (
+        load_signing_transformation_receipt
+    ),
 ) -> Path:
     _validate_context(context)
     _require_source_identity(context, source_identity_reader)
     _require_toolchain_identity(context, toolchain_metadata_reader)
-    events, work = _claim_attempt(context)
+    candidate_freeze_intent_sha256 = (
+        _verified_candidate_freeze_intent_sha256(
+            context,
+            candidate_freeze_verifier,
+        )
+    )
+    staged_app = context.staged_app
+    if staged_app is None:
+        raise TransactionError(
+            "unsafe_staged_app", "new transaction requires a staged application"
+        )
+    signing_transformation = _verified_signing_transformation_binding(
+        context,
+        signing_transformation_verifier,
+        candidate_freeze_intent_sha256=candidate_freeze_intent_sha256,
+        staged_app=staged_app,
+    )
     journal: EventJournal | None = None
     submission_id: str | None = None
     attempt_lock_scope = ExitStack()
     attempt_lock_held = False
-    attempt_lock_required = False
+    attempt_lock_required = True
     direct_boundary_event_incomplete = False
+    _mkdir_private(context.build_root / "transactions", exclusive=False)
     try:
-        staged_app = context.staged_app
-        if staged_app is None:
-            raise TransactionError(
-                "unsafe_staged_app", "new transaction requires a staged application"
-            )
+        attempt_lock_scope.enter_context(
+            _exclusive_attempt_recovery_lock(context)
+        )
+        attempt_lock_held = True
+        events, work = _claim_attempt(context)
         work_app = work / "Clash for Mac.app"
         try:
             os.rename(staged_app, work_app)
@@ -8164,6 +8451,22 @@ def execute_transaction(
             failure_code="app_identity_failed",
             failure_message="pre-staple app digest cannot be derived",
         )
+        if pre_staple_app_sha256 != signing_transformation.signed_app_tree_sha256:
+            raise TransactionError(
+                "signing_transformation_app_identity_drift",
+                "the claimed app differs from its pre-claim signing transformation",
+            )
+        reopened_signing_transformation = _verified_signing_transformation_binding(
+            context,
+            signing_transformation_receipt_reader,
+            candidate_freeze_intent_sha256=candidate_freeze_intent_sha256,
+            staged_app=None,
+        )
+        if reopened_signing_transformation != signing_transformation:
+            raise TransactionError(
+                "signing_transformation_receipt_drift",
+                "the signing transformation receipt changed across the GA claim",
+            )
 
         archive = work / context.archive_name
         archive_builder(work_app, archive)
@@ -8199,19 +8502,23 @@ def execute_transaction(
 
         attempt_id = _canonical_uuid(attempt_id_factory(), "local attempt id")
         intent = {
-            "schema_version": 1,
+            "schema_version": 4,
             "document": ATTEMPT_DOCUMENT,
             "attempt_id": attempt_id,
-            "lane": context.build_kind,
             "build_number": context.build_number,
             "version": VERSION,
             "repository_commit": context.repository_commit,
             "release_source_sha256": context.release_source_sha256,
             "team_id": EXPECTED_TEAM_ID,
+            "notary_profile": context.notary_profile,
             "archive_name": context.archive_name,
             "archive_sha256": archive_sha256,
             "archive_size": archive_size,
             "pre_staple_app_tree_sha256": pre_staple_app_sha256,
+            "candidate_freeze_intent_sha256": (
+                candidate_freeze_intent_sha256
+            ),
+            **signing_transformation.as_fields(),
             "prepared_at": clock(),
         }
         intent_path = context.attempt_root / "intent.json"
@@ -8245,11 +8552,6 @@ def execute_transaction(
                 "submission_inventory_mismatch",
                 "pre-submission attempt inventory is incomplete",
             )
-        attempt_lock_required = True
-        attempt_lock_scope.enter_context(
-            _exclusive_attempt_recovery_lock(context)
-        )
-        attempt_lock_held = True
         if (
             journal.sequence + 2 + DIRECT_FINALIZATION_EVENT_RESERVE
             > MAX_EVENT_DOCUMENTS
@@ -8356,7 +8658,7 @@ def execute_transaction(
                 terminal_state="outcome_unknown",
             )
         submission_receipt = {
-            "schema_version": 2,
+            "schema_version": 5,
             "document": SUBMISSION_DOCUMENT,
             "attempt_id": attempt_id,
             "submission_id": submission_id,
@@ -8367,8 +8669,13 @@ def execute_transaction(
             ),
             "recovery_intent_sha256": None,
             "notary_created_at": None,
+            "notary_profile": context.notary_profile,
             "causal_binding": "direct-submit-observation",
             "archive_sha256": archive_sha256,
+            "candidate_freeze_intent_sha256": (
+                candidate_freeze_intent_sha256
+            ),
+            **signing_transformation.as_fields(),
             "observed_at": clock(),
         }
         submission_receipt_path = context.attempt_root / "submission-receipt.json"
@@ -8925,6 +9232,13 @@ def validate_published_transaction_receipt(
 
 
 def self_check() -> None:
+    if NOTARY_PROFILE != "clashformac-notary":
+        raise TransactionError("self_check_failed", "notary profile contract drifted")
+    if (
+        ATTEMPT_DOCUMENT != "cfw-notarization-attempt-v4"
+        or SUBMISSION_DOCUMENT != "cfw-notarization-submission-receipt-v5"
+    ):
+        raise TransactionError("self_check_failed", "notary evidence contract drifted")
     if TOOLCHAIN_METADATA_KEYS != set(TOOLCHAIN_METADATA_ORDER):
         raise TransactionError("self_check_failed", "toolchain metadata contract drifted")
     if MAX_FINALIZATION_RUNS != 8:
@@ -8963,8 +9277,12 @@ def main() -> None:
         self_check()
         return
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--build-kind", choices=("validation", "release"), required=True)
-    parser.add_argument("--build-number", required=True)
+    parser.add_argument("--build-kind", choices=("ga",), required=True)
+    parser.add_argument(
+        "--build-number",
+        choices=(ACTIVE_RELEASE_IDENTITY.ga_build,),
+        required=True,
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--staged-app", type=Path)
     mode.add_argument("--recover-submission-id")

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,17 +16,10 @@ from scripts import dormant_app_install as install
 
 PREVIOUS = install.AppIdentity("0.4.0", "40019", "a" * 64)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40030", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40031", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
-)
-FINAL_PREVIOUS = CANDIDATE.app
-FINAL_CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40031", "f" * 64),
-    manifest_sha256="1" * 64,
-    repository_commit="2" * 40,
-    release_source_sha256="3" * 64,
 )
 
 
@@ -112,7 +108,7 @@ class FakeRuntime:
 class ServiceFixture:
     def __init__(
         self,
-        profile: install.InstallProfile = install.VALIDATION_INSTALL_PROFILE,
+        profile: install.InstallProfile = install.GA_INSTALL_PROFILE,
     ) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
@@ -146,41 +142,79 @@ class ServiceEventStoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.fixture.cleanup()
 
-    def test_final_generation_uses_independent_fixed_service_journals(self) -> None:
-        paths = service.ServicePaths.production("final")
+    def test_ga_service_transaction_is_fixed_to_40019_to_40031(self) -> None:
+        paths = service.ServicePaths.production()
 
+        self.assertEqual(paths.install_paths.profile, install.GA_INSTALL_PROFILE)
         self.assertEqual(paths.install_paths.profile.build_number, "40031")
         self.assertEqual(
             paths.install_paths.profile.previous_build_number,
-            "40030",
+            "40019",
         )
         self.assertEqual(
             paths.transaction_directory.name,
-            ".com.bill.clashformac.final-service-transaction-v2",
+            ".com.bill.clashformac.service-transaction-v2",
         )
-        self.assertNotEqual(
+        self.assertEqual(
             paths.transaction_directory.name,
             service.TRANSACTION_DIRECTORY,
         )
         self.assertEqual(
-            install.VALIDATION_INSTALL_PROFILE.service_actions[1:3],
+            install.GA_INSTALL_PROFILE.service_actions[1:3],
             (
                 "unregister-installed-40019-proxy-agent",
                 "unregister-installed-40019-global-authority",
             ),
         )
         self.assertEqual(
-            install.FINAL_INSTALL_PROFILE.service_actions[1:3],
-            ("unregister-proxy-agent", "unregister-global-authority"),
-        )
-        self.assertEqual(
-            install.VALIDATION_INSTALL_PROFILE.off_proof_profile,
+            install.GA_INSTALL_PROFILE.off_proof_profile,
             install.INSTALLED_40019_OFF_PROOF_PROFILE,
         )
-        self.assertEqual(
-            install.FINAL_INSTALL_PROFILE.off_proof_profile,
-            install.CURRENT_OFF_PROOF_PROFILE,
+
+    def test_retired_final_cli_and_wrapper_are_explicitly_rejected(self) -> None:
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["current_service_transaction.py", "--preflight", "--final"],
+            ),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            patch.object(service, "_transaction") as transaction,
+            self.assertRaises(SystemExit) as captured,
+        ):
+            service.main()
+        self.assertEqual(captured.exception.code, 2)
+        self.assertIn("--final is retired", stderr.getvalue())
+        transaction.assert_not_called()
+
+        repository = Path(__file__).resolve().parents[2]
+        completed = subprocess.run(
+            (
+                "/bin/bash",
+                str(repository / "scripts/run_current_service_transaction.sh"),
+                "--preflight",
+                "--final",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
         )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("--final is retired", completed.stderr)
+
+    def test_no_current_profile_can_accept_retired_40030_as_previous(self) -> None:
+        retired_previous = install.AppIdentity("0.4.0", "40030", "f" * 64)
+        with service.ServiceEventStore(self.fixture.paths) as store:
+            with store.locked():
+                with self.assertRaises(install.InstallError) as captured:
+                    store.create(CANDIDATE, retired_previous, guard())
+        self.assertEqual(
+            captured.exception.code,
+            "service_journal_invalid",
+        )
+        self.assertFalse(self.fixture.paths.transaction_directory.exists())
+        self.assertTrue(self.fixture.paths.pending_directory.exists())
 
     def test_append_only_lineage_round_trips_every_phase(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
@@ -394,51 +428,6 @@ class ServiceEventStoreTests(unittest.TestCase):
                 with self.assertRaises(install.InstallError) as captured:
                     store.load()
         self.assertEqual(captured.exception.code, "service_journal_invalid")
-
-    def test_final_generation_rejects_every_recovery_marker_without_publishing(
-        self,
-    ) -> None:
-        for marker_name in (
-            install.AUTHORITY_RECOVERY_INTENT_NAME,
-            install.AUTHORITY_RECOVERY_PENDING_INTENT_NAME,
-        ):
-            with self.subTest(marker_name=marker_name):
-                fixture = ServiceFixture(install.FINAL_INSTALL_PROFILE)
-                try:
-                    with service.ServiceEventStore(fixture.paths) as store:
-                        with store.locked():
-                            _intent, events = store.create(
-                                FINAL_CANDIDATE, FINAL_PREVIOUS, guard()
-                            )
-                            events.append(
-                                store.append(
-                                    events,
-                                    phase="proxy_unregistered",
-                                    action="unregister-proxy-agent",
-                                    guard=guard(),
-                                )
-                            )
-                    marker = fixture.paths.transaction_directory / marker_name
-                    marker.write_bytes(b"{}\n")
-                    marker.chmod(0o600)
-                    with service.ServiceEventStore(fixture.paths) as store:
-                        with store.locked():
-                            with self.assertRaises(install.InstallError) as captured:
-                                store.load()
-                    self.assertEqual(
-                        captured.exception.code,
-                        "service_journal_invalid",
-                    )
-                    self.assertTrue(marker.is_file())
-                    if marker_name == install.AUTHORITY_RECOVERY_PENDING_INTENT_NAME:
-                        self.assertFalse(
-                            (
-                                fixture.paths.transaction_directory
-                                / install.AUTHORITY_RECOVERY_INTENT_NAME
-                            ).exists()
-                        )
-                finally:
-                    fixture.cleanup()
 
     def test_non_scalar_event_proof_profile_is_a_stable_journal_error(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
@@ -1028,53 +1017,6 @@ class CurrentServiceTransactionTests(unittest.TestCase):
                 install.INSTALLED_40019_RECOVERY_ACTION,
             ],
         )
-
-    def test_final_generation_lost_authority_receipt_replays_current_action(
-        self,
-    ) -> None:
-        fixture = ServiceFixture(install.FINAL_INSTALL_PROFILE)
-        try:
-            with service.ServiceEventStore(fixture.paths) as store:
-                with store.locked():
-                    _intent, events = store.create(
-                        FINAL_CANDIDATE, FINAL_PREVIOUS, guard()
-                    )
-                    events.append(
-                        store.append(
-                            events,
-                            phase="proxy_unregistered",
-                            action="unregister-proxy-agent",
-                            guard=guard(),
-                        )
-                    )
-            actions: list[str] = []
-
-            def run_action(_runtime, _executable, action):
-                actions.append(action)
-                return self.receipt(action)
-
-            with (
-                patch.object(
-                    fixture.transaction,
-                    "_identity_pair",
-                    return_value=(FINAL_CANDIDATE, FINAL_PREVIOUS),
-                ),
-                patch.object(service, "_service_receipt", side_effect=run_action),
-                patch.object(service, "_wait_for_service_absence"),
-                patch.object(install, "require_cfm_dormant"),
-            ):
-                result = fixture.transaction.decommission()
-
-            self.assertEqual(result["event"]["phase"], "decommissioned")
-            self.assertEqual(actions, ["unregister-global-authority"])
-            self.assertFalse(
-                (
-                    fixture.paths.transaction_directory
-                    / install.AUTHORITY_RECOVERY_INTENT_NAME
-                ).exists()
-            )
-        finally:
-            fixture.cleanup()
 
     def test_cfw_guard_drift_blocks_event_publication_and_next_mutation(self) -> None:
         self.fixture.runtime.guards = [guard(), guard(), guard(proxy="9" * 64)]

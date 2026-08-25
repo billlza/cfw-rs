@@ -32,7 +32,27 @@ cfw_run_release_python_script "$repo_root" \
 cfw_run_release_python_script "$repo_root" \
   "$repo_root/scripts/dmg_notarization_transaction.py" self-check
 cfw_run_release_python_script "$repo_root" \
-  "$repo_root/scripts/release_artifact_set.py" self-check
+  "$repo_root/scripts/release_artifact_set_cli.py" self-check
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/ga_runtime_acceptance_cli.py" self-check
+
+for release_helper in \
+  scripts/run_ga_signing_attempt.sh \
+  scripts/run_ga_runtime_acceptance.sh; do
+  [[ -f "$release_helper" && ! -L "$release_helper" && -x "$release_helper" ]] || {
+    echo "error: release helper is not one executable regular file: $release_helper" >&2
+    exit 1
+  }
+done
+
+for release_cli in \
+  scripts/release_artifact_set_cli.py \
+  scripts/ga_runtime_acceptance_cli.py; do
+  [[ -f "$release_cli" && ! -L "$release_cli" && -x "$release_cli" ]] || {
+    echo "error: release CLI is not one executable regular file: $release_cli" >&2
+    exit 1
+  }
+done
 
 # Reject duplicate string keys inside the release-set policy literals. Python
 # accepts them silently, which could otherwise weaken an exact-field contract.
@@ -91,22 +111,29 @@ cfw_run_release_python_script "$repo_root" \
   "$repo_root/scripts/production_release_evidence.py" self-check
 
 for fragment in \
-  'ACTIVE_RELEASE_GENERATION' \
-  'VALIDATION_BUILD = ACTIVE_RELEASE_GENERATION.validation_build' \
-  'FINAL_BUILD = ACTIVE_RELEASE_GENERATION.final_build' \
-  'prepare_physical_candidate_manifest' \
-  'seal_production_evidence' \
-  'require_clean=True' \
+  'ACTIVE_RELEASE_IDENTITY' \
+  'STAGES: Final = ("prepackage", "ga-acceptance", "publication")' \
+  'cfm-candidate-freeze-intent-v3' \
+  'verify_frozen_candidate' \
+  'verify_signing_transformation_receipt' \
   'validate_published_transaction_receipt' \
-  'validate_source_gate_document' \
+  '_validate_signing_notarization_binding' \
   'validate_ci_lane_document' \
+  'validate_hosted_ci_receipt_offline' \
+  'live_verify_hosted_ci_receipt' \
+  'validate_ga_runtime_acceptance' \
   'build_manifest' \
-  '_require_final_inputs_unchanged' \
-  'expected_report_contracts' \
-  'artifact_hash_manifest_sha256' \
-  'fixture=False' \
-  'require_verified=True' \
-  'artifacts_permitted'; do
+  'verify_stage'; do
+  grep -Fq -- "$fragment" scripts/publication/ga_release_contract.py || {
+    echo "error: GA release contract is missing $fragment" >&2
+    exit 1
+  }
+done
+
+for fragment in \
+  'seal_prepackage' \
+  'seal_ga_acceptance' \
+  'seal_publication'; do
   grep -Fq -- "$fragment" scripts/publication/orchestrator.py || {
     echo "error: production release orchestrator is missing $fragment" >&2
     exit 1
@@ -114,13 +141,10 @@ for fragment in \
 done
 
 for fragment in \
-  'ACTIVE_RELEASE_GENERATION' \
-  'BUILD_NUMBER: Final = ACTIVE_RELEASE_GENERATION.validation_build' \
-  'FINAL_BUILD_NUMBER: Final = ACTIVE_RELEASE_GENERATION.final_build' \
-  'target/release-worktrees/{BUILD_NUMBER}' \
-  'target/candidates/{VERSION}/validation/{BUILD_NUMBER}/signed' \
-  'target/candidates/{VERSION}/signed' \
-  'notarized-release-v1' \
+  'BUILD_NUMBER: Final = ACTIVE_RELEASE_IDENTITY.ga_build' \
+  'CANDIDATE_RELATIVE: Final = ga_signed_root(REPOSITORY_RELATIVE)' \
+  'NATIVE_PRODUCTS_RELATIVE: Final = ga_signed_native_products_root(' \
+  'artifact_kind="notarized-ga-candidate-v1"' \
   '_matching_clean_source_identity' \
   'parse_service_maintenance_receipt' \
   'cfw-current-service-authority-recovery-intent-v1' \
@@ -130,7 +154,7 @@ for fragment in \
   'exclusive_release_maintenance_lock' \
   'require_decommissioned_service_transaction' \
   'candidate_toolchain_override' \
-  'fixed release worktree and local toolchain must be real directories'; do
+  '--final is retired'; do
   grep -Fq -- "$fragment" scripts/dormant_app_install.py || {
     echo "error: dormant installer is missing $fragment" >&2
     exit 1
@@ -143,16 +167,63 @@ for fragment in \
   'recover-installed-40019-global-authority' \
   'AUTHORITY_RECOVERY_PENDING_INTENT_NAME' \
   'prepare_authority_recovery' \
-  'unregister-proxy-agent' \
-  'unregister-global-authority' \
+  'unregister-installed-40019-proxy-agent' \
+  'unregister-installed-40019-global-authority' \
   'register-global-authority' \
   'register-proxy-agent' \
+  'verify-dormant' \
   'capture_cfw_guard(self.runner, require_cfm_absent=False)' \
   'service_install_evidence_invalid' \
   'installation["previous"] != intent["previous"]' \
-  '--final'; do
+  '--final is retired'; do
   grep -Fq -- "$fragment" scripts/current_service_transaction.py || {
     echo "error: current-service transaction is missing $fragment" >&2
+    exit 1
+  }
+done
+
+for contract in \
+  'scripts/candidate_freeze.py:cfm-candidate-freeze-intent-v3' \
+  'scripts/candidate_freeze.py:verify_possession_proof(repository, root)' \
+  'scripts/candidate_freeze.py:signing-output' \
+  'scripts/signing_attempt_transaction.py:cfm-ga-signing-attempt-v1' \
+  'scripts/signing_attempt_transaction.py:publish_private_directory_exclusive' \
+  'scripts/signing_attempt_transaction.py:verify_attempt_receipt' \
+  'scripts/signing_attempt_transaction.py:outcome_unknown' \
+  'scripts/run_ga_signing_attempt.sh:--transaction-owned' \
+  'scripts/run_ga_signing_attempt.sh:target/candidates/0.4.0/ga/40031' \
+  'scripts/verify_signing_transformation.py:cfm-ga-signing-transformation-v1' \
+  'scripts/verify_signing_transformation.py:cfm-candidate-freeze-intent-v3' \
+  'scripts/notarization_transaction.py:signing_transformation_receipt_sha256' \
+  'scripts/notarization_transaction.py:validate_published_transaction_receipt' \
+  'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-acceptance-v1' \
+  'scripts/ga_runtime_acceptance.py:validate_ga_runtime_acceptance' \
+  'scripts/ga_runtime_acceptance.py:COLLECTION_RELATIVE: Final = ACCEPTANCE_ROOT_RELATIVE / "runtime-collection"' \
+  'scripts/ga_runtime_acceptance.py:def collect_ga_runtime_acceptance(' \
+  'scripts/ga_runtime_acceptance.py:def recover_ga_runtime_collection(' \
+  'scripts/run_ga_runtime_acceptance.sh:cfw_seal_release_tool_environment production' \
+  'scripts/run_ga_runtime_acceptance.sh:cfw_select_release_apple_toolchain' \
+  'scripts/run_ga_runtime_acceptance.sh:scripts/ga_runtime_acceptance_cli.py' \
+  'scripts/ga_runtime_acceptance_cli.py:derive_runtime_expectation' \
+  'scripts/release_artifact_set_cli.py:verify_prepackage_authorization' \
+  'scripts/release_artifact_set_cli.py:verify_publication_authorization' \
+  'scripts/publication/ga_release_contract.py:def verify_stage(' \
+  'scripts/publication/ga_release_contract.py:def derive_runtime_expectation(' \
+  'scripts/github_hosted_ci_receipt.py:cfw-github-hosted-ci-receipt-v1' \
+  'scripts/github_hosted_ci_receipt.py:REPOSITORY_ID: Final = 1_306_403_473' \
+  'scripts/github_hosted_ci_receipt.py:WORKFLOW_ID: Final = 316_580_234' \
+  'scripts/github_hosted_ci_receipt.py:EXPECTED_JOB_NAMES: Final = frozenset(' \
+  'scripts/github_hosted_ci_receipt.py:/attempts/{attempt}/jobs' \
+  'scripts/github_hosted_ci_receipt.py:def validate_receipt_offline(' \
+  'scripts/github_hosted_ci_receipt.py:def verify_receipt(' \
+  'scripts/publication/artifact_preparation.py:"hosted-ci-receipt": fixed_ga_root / "stage-inputs/hosted-ci.json"' \
+  'scripts/publication/closure.py:"hosted-ci-receipt"' \
+  'scripts/publication/final_candidate.py:ga_root(Path()) / "stage-inputs/final-candidate"' \
+  'scripts/publication/sealed_manifest.py:ga_root(Path()) / "stage-inputs/sealed-manifest"'; do
+  contract_path="${contract%%:*}"
+  contract_fragment="${contract#*:}"
+  grep -Fq -- "$contract_fragment" "$contract_path" || {
+    echo "error: $contract_path is missing $contract_fragment" >&2
     exit 1
   }
 done
@@ -203,8 +274,8 @@ for release_script in scripts/make_dmg.sh scripts/make_updater_manifest.sh; do
     echo "error: $release_script does not source the publication gate" >&2
     exit 1
   }
-  grep -Fq 'verify_release_publication_evidence' "$release_script" || {
-    echo "error: $release_script does not enforce the publication gate" >&2
+  grep -Fq 'verify_release_prepackage_evidence' "$release_script" || {
+    echo "error: $release_script does not enforce the prepackage gate" >&2
     exit 1
   }
 done
@@ -226,11 +297,17 @@ if grep -Fq '/bin/ln' scripts/make_updater_manifest.sh; then
   exit 1
 fi
 for fragment in \
-  '--seal-assets' \
-  'seal_release_upload_artifacts' \
+  '--seal-prepackage' \
+  '--capture-hosted-ci' \
+  '--verify-hosted-ci' \
+  '--seal-ga-acceptance' \
+  '--seal-publication' \
+  'verify_release_prepackage_evidence' \
+  'verify_release_ga_acceptance_evidence' \
+  'verify_release_publication_evidence' \
   'seal-release' \
   'verify_release_upload_artifacts' \
-  'scripts/release_artifact_set.py' \
+  'scripts/release_artifact_set_cli.py' \
   'verify-release'; do
   grep -Fq -- "$fragment" scripts/release_publication_gate.sh || {
     echo "error: upload publication gate is missing $fragment" >&2
@@ -239,7 +316,9 @@ for fragment in \
 done
 
 for fragment in \
-  'cfw-distribution-release-set-seal-v1' \
+  'cfw-updater-release-set-seal-v2' \
+  'cfw-dmg-release-set-seal-v2' \
+  'cfw-ga-distribution-package-set-seal-v1' \
   'signed_app_tree_sha256' \
   'read_updater_app_manifest' \
   'read_dmg_app_manifest' \
@@ -252,6 +331,8 @@ for fragment in \
   'MAX_GITHUB_RELEASE_ASSET_BYTES_EXCLUSIVE' \
   'MAX_CORRESPONDING_SOURCE_ARCHIVE_BYTES' \
   '_validate_publication_bundle' \
+  'prepackage_stage_verifier' \
+  'publication_stage_verifier' \
   'seal_distribution_set' \
   'verify_distribution_set'; do
   grep -Fq -- "$fragment" scripts/release_artifact_set.py || {

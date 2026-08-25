@@ -33,26 +33,19 @@ assert_semver() {
 
 recovery_submission_id=""
 if [[ "${1:-}" == "--recover-submission-id" ]]; then
-  [[ $# -ge 2 && $# -le 3 ]] ||
-    die "usage: make_dmg.sh --recover-submission-id UUID [absolute-app-path]"
+  [[ $# -eq 2 ]] || die "usage: make_dmg.sh --recover-submission-id UUID"
   recovery_submission_id="$2"
-  app_path="${3:-$repo_root/target/candidates/0.4.0/signed/Clash for Mac.app}"
 else
-  [[ $# -le 1 ]] || die "usage: make_dmg.sh [absolute-app-path]"
-  app_path="${1:-$repo_root/target/candidates/0.4.0/signed/Clash for Mac.app}"
+  [[ $# -eq 0 ]] || die "usage: make_dmg.sh [--recover-submission-id UUID]"
 fi
-[[ "$app_path" == /* ]] || die "application path must be absolute"
+readonly ga_root="$repo_root/target/candidates/0.4.0/ga/40031"
+readonly app_path="$ga_root/signed/Clash for Mac.app"
 [[ -d "$app_path" && ! -L "$app_path" ]] || die "app bundle not found or is a symlink: $app_path"
-app_path="$(cd "$(dirname "$app_path")" && pwd -P)/$(basename "$app_path")"
-[[ "$(basename "$app_path")" == "Clash for Mac.app" ]] ||
-  die "unexpected release application name: $(basename "$app_path")"
 
-sign_identity="${MACOS_SIGN_IDENTITY:-}"
 notary_profile="${NOTARY_PROFILE:-}"
 [[ -n "$notary_profile" ]] || die "NOTARY_PROFILE is required"
-if [[ -z "$recovery_submission_id" ]]; then
-  [[ -n "$sign_identity" ]] || die "MACOS_SIGN_IDENTITY is required for a new DMG"
-fi
+[[ "$notary_profile" == "clashformac-notary" ]] ||
+  die "NOTARY_PROFILE must be the frozen clashformac-notary profile"
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "DMG release creation requires Apple Silicon macOS"
 
@@ -67,26 +60,27 @@ build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/C
   die "cannot read the signed app build number"
 [[ "$build_number" =~ ^[1-9][0-9]*$ ]] ||
   die "signed app build number is not one canonical positive integer"
+[[ "$version" == "0.4.0" && "$build_number" == "40031" ]] ||
+  die "signed app is not the active GA 0.4.0/40031 identity"
 
-verify_release_publication_evidence "$app_path"
+verify_release_prepackage_evidence "$app_path"
 
-output_root="$repo_root/target/candidates/0.4.0/release"
-[[ ! -L "$output_root" ]] || die "DMG output directory must not be a symlink"
-mkdir -p "$output_root"
-output_root="$(cd "$output_root" && pwd -P)"
-dmg_root="$output_root/dmg"
+package_root="$ga_root/packages"
+[[ ! -L "$package_root" ]] || die "GA package directory must not be a symlink"
+mkdir -p "$package_root"
+package_root="$(cd "$package_root" && pwd -P)"
+dmg_root="$package_root/dmg"
 [[ ! -L "$dmg_root" ]] || die "DMG release-set directory must not be a symlink"
 mkdir -p "$dmg_root"
 dmg_root="$(cd "$dmg_root" && pwd -P)"
 final_set="$dmg_root/v$version"
-transaction_root="$repo_root/target/candidates/0.4.0/release-transactions/dmg"
 dmg_name="Clash.for.Mac_${version}_arm64.dmg"
 for legacy_output in \
-  "$output_root/$dmg_name" \
-  "$output_root/Clash.for.Mac_${version}_arm64.notarization.json" \
-  "$output_root/Clash.for.Mac_${version}_arm64.notarization-log.json" \
-  "$output_root/Clash.for.Mac_${version}_arm64.gatekeeper.json" \
-  "$output_root/Clash.for.Mac_${version}_arm64.dmg.manifest.json"; do
+  "$package_root/$dmg_name" \
+  "$package_root/Clash.for.Mac_${version}_arm64.notarization.json" \
+  "$package_root/Clash.for.Mac_${version}_arm64.notarization-log.json" \
+  "$package_root/Clash.for.Mac_${version}_arm64.gatekeeper.json" \
+  "$package_root/Clash.for.Mac_${version}_arm64.dmg.manifest.json"; do
   [[ ! -e "$legacy_output" && ! -L "$legacy_output" ]] ||
     die "legacy partial DMG output must be removed after review: $legacy_output"
 done
@@ -97,8 +91,6 @@ if [[ -n "$recovery_submission_id" ]]; then
     "$repo_root/scripts/dmg_notarization_transaction.py" \
     recover \
     --repository "$repo_root" \
-    --release-root "$output_root" \
-    --transaction-root "$transaction_root" \
     --version "$version" \
     --build-number "$build_number" \
     --notary-profile "$notary_profile" \
@@ -112,11 +104,27 @@ cfw_run_release_python_script \
   "$repo_root/scripts/dmg_notarization_transaction.py" \
   preflight \
   --repository "$repo_root" \
-  --release-root "$output_root" \
-  --transaction-root "$transaction_root" \
   --version "$version" \
   --build-number "$build_number" \
   --notary-profile "$notary_profile"
+
+signing_preflight_manifest="$ga_root/profiles/signing-preflight.json"
+[[ -f "$signing_preflight_manifest" && ! -L "$signing_preflight_manifest" ]] ||
+  die "frozen signing preflight is unavailable"
+[[ "$(stat -f '%l' "$signing_preflight_manifest")" == "1" ]] ||
+  die "frozen signing preflight must not have hard links"
+signing_certificate_sha1="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/release_signing_preflight.py" \
+  --print-certificate-sha1 "$signing_preflight_manifest")" ||
+  die "cannot reopen the frozen Developer ID certificate SHA-1"
+expected_certificate_sha256="$(cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/release_signing_preflight.py" \
+  --print-certificate-sha256 "$signing_preflight_manifest")" ||
+  die "cannot reopen the frozen Developer ID certificate SHA-256"
+readonly signing_certificate_sha1 expected_certificate_sha256
+[[ "$signing_certificate_sha1" =~ ^[0-9A-F]{40}$ && \
+  "$expected_certificate_sha256" =~ ^[0-9A-F]{64}$ ]] ||
+  die "frozen Developer ID certificate fingerprints are malformed"
 
 staging="$(mktemp -d "$dmg_root/dmg-stage.XXXXXX")"
 payload_directory="$staging/payload"
@@ -133,15 +141,15 @@ ln -s /Applications "$payload_directory/Applications"
   "$payload_directory/Clash for Mac.app" \
   "$native_products_root"
 
-/usr/bin/hdiutil create \
-  -volname "Clash for Mac" \
-  -srcfolder "$payload_directory" \
-  -format UDZO \
+/usr/sbin/diskutil image create from \
+  --format UDZO \
+  --volumeName "Clash for Mac" \
+  "$payload_directory" \
   "$staged_dmg"
-[[ -f "$staged_dmg" && ! -L "$staged_dmg" ]] || die "hdiutil did not create a regular DMG"
+[[ -f "$staged_dmg" && ! -L "$staged_dmg" ]] || die "diskutil did not create a regular DMG"
 [[ "$(stat -f '%l' "$staged_dmg")" == "1" ]] || die "DMG must not have hard links"
 
-/usr/bin/codesign --force --timestamp --sign "$sign_identity" "$staged_dmg"
+/usr/bin/codesign --force --timestamp --sign "$signing_certificate_sha1" "$staged_dmg"
 /usr/bin/codesign --verify --strict --verbose=4 "$staged_dmg"
 signature_details="$(/usr/bin/codesign -d --verbose=4 "$staged_dmg" 2>&1)"
 [[ "$signature_details" == *"TeamIdentifier=$expected_team_id"* ]] ||
@@ -151,14 +159,27 @@ signature_details="$(/usr/bin/codesign -d --verbose=4 "$staged_dmg" 2>&1)"
 [[ "$signature_details" == *"Timestamp="* && "$signature_details" != *"Timestamp=none"* ]] ||
   die "DMG secure signing timestamp is missing"
 [[ "$signature_details" != *"Signature=adhoc"* ]] || die "ad-hoc DMG signature is forbidden"
+certificate_prefix="$staging/dmg-leaf-certificate-"
+/usr/bin/codesign -d --extract-certificates="$certificate_prefix" \
+  "$staged_dmg" >/dev/null 2>&1 ||
+  die "cannot extract the DMG Developer ID leaf certificate"
+leaf_certificate="${certificate_prefix}0"
+[[ -f "$leaf_certificate" && ! -L "$leaf_certificate" ]] ||
+  die "DMG Developer ID leaf certificate is not a regular file"
+[[ "$(stat -f '%l' "$leaf_certificate")" == "1" ]] ||
+  die "DMG Developer ID leaf certificate must not have hard links"
+observed_certificate_sha256="$(
+  /usr/bin/shasum -a 256 "$leaf_certificate" |
+    /usr/bin/awk '{print toupper($1)}'
+)" || die "cannot hash the DMG Developer ID leaf certificate"
+[[ "$observed_certificate_sha256" == "$expected_certificate_sha256" ]] ||
+  die "DMG Developer ID leaf certificate differs from the frozen signing preflight"
 
 cfw_run_release_python_script \
   "$repo_root" \
   "$repo_root/scripts/dmg_notarization_transaction.py" \
   start \
   --repository "$repo_root" \
-  --release-root "$output_root" \
-  --transaction-root "$transaction_root" \
   --version "$version" \
   --build-number "$build_number" \
   --notary-profile "$notary_profile" \

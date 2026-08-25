@@ -206,6 +206,19 @@ security() {
 
 codesign() {
   local argument
+  if [[ "$1" == "--verify" ]]; then
+    return 0
+  fi
+  if [[ "$1" == "-d" && "$2" == "--verbose=4" ]]; then
+    cat <<EOF
+Identifier=$expected_agent_id
+Authority=Developer ID Application: Release Fixture ($expected_team_id)
+TeamIdentifier=$expected_team_id
+flags=0x10000(runtime)
+Timestamp=Aug 25, 2026 at 12:00:00
+EOF
+    return 0
+  fi
   for argument in "$@"; do
     case "$argument" in
       --extract-certificates=*)
@@ -216,6 +229,23 @@ codesign() {
   done
   return 1
 }
+
+expected_signing_certificate_sha256="$({
+  /usr/bin/shasum -a 256 "$certificate_fixture" |
+    /usr/bin/awk '{print toupper($1)}'
+})"
+certificate_capture_sequence=0
+assert_developer_id_signature "$bundle_fixture" "$expected_agent_id"
+expected_signing_certificate_sha256="$(printf 'F%.0s' {1..64})"
+if (assert_developer_id_signature \
+  "$bundle_fixture" "$expected_agent_id") >/dev/null 2>&1; then
+  echo "error: expected mismatched frozen signing certificate to be rejected" >&2
+  exit 1
+fi
+expected_signing_certificate_sha256="$({
+  /usr/bin/shasum -a 256 "$certificate_fixture" |
+    /usr/bin/awk '{print toupper($1)}'
+})"
 
 expect_profile_rejected() {
   local kind="$1"

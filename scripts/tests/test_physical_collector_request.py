@@ -400,21 +400,21 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
                 observed_at=self.observed_at,
             )
 
-    def test_initialize_requires_final_40031_build_with_signed_64_bit_bound(self) -> None:
+    def test_initialize_requires_ga_40031_build_with_signed_64_bit_bound(self) -> None:
         for build_number, message in (
-            ("40002", "must be final release build 40031"),
-            ("40003", "must be final release build 40031"),
-            ("40004", "must be final release build 40031"),
-            ("40005", "must be final release build 40031"),
-            ("40019", "must be final release build 40031"),
-            ("40020", "must be final release build 40031"),
-            ("40022", "must be final release build 40031"),
-            ("40023", "must be final release build 40031"),
-            ("40026", "must be final release build 40031"),
-            ("40027", "must be final release build 40031"),
-            ("40028", "must be final release build 40031"),
-            ("40029", "must be final release build 40031"),
-            ("40030", "must be final release build 40031"),
+            ("40002", "must be GA release build 40031"),
+            ("40003", "must be GA release build 40031"),
+            ("40004", "must be GA release build 40031"),
+            ("40005", "must be GA release build 40031"),
+            ("40019", "must be GA release build 40031"),
+            ("40020", "must be GA release build 40031"),
+            ("40022", "must be GA release build 40031"),
+            ("40023", "must be GA release build 40031"),
+            ("40026", "must be GA release build 40031"),
+            ("40027", "must be GA release build 40031"),
+            ("40028", "must be GA release build 40031"),
+            ("40029", "must be GA release build 40031"),
+            ("40030", "must be GA release build 40031"),
             (str(2**63), "signed 64-bit"),
             ("9" * 5_000, "signed 64-bit"),
         ):

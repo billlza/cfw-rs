@@ -2308,7 +2308,7 @@ class PhysicalEvidenceFixture:
         identity_finished = identity_started + timedelta(seconds=1)
         identity_app = (
             "/fixture/repository/"
-            "target/candidates/0.4.0/signed/Clash for Mac.app"
+            "target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app"
         )
         identity_stdout = (
             f"release app verified: {identity_app}\n"

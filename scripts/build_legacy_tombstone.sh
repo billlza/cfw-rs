@@ -14,7 +14,7 @@ source "$repo_root/scripts/release_cargo_inputs.sh"
 : "${CFW_NATIVE_PRODUCTS_OUTPUT:?set the candidate-specific native products output root}"
 
 usage() {
-  echo "usage: scripts/build_legacy_tombstone.sh --unsigned|--developer-id" >&2
+  echo "usage: scripts/build_legacy_tombstone.sh --unsigned|--pre-sign" >&2
   exit 2
 }
 
@@ -42,8 +42,8 @@ case "$1" in
   --unsigned)
     signing_mode="unsigned-validation"
     ;;
-  --developer-id)
-    signing_mode="developer-id"
+  --pre-sign)
+    signing_mode="pre-sign"
     ;;
   *)
     usage
@@ -140,33 +140,6 @@ PY
 
 mkdir -p "$output_root"
 /usr/bin/install -m 0755 "$built_binary" "$output_root/cfw-helper-tombstone"
-if [[ "$signing_mode" == "developer-id" ]]; then
-  : "${MACOS_SIGN_IDENTITY:?set the exact Developer ID Application identity}"
-  if [[ "$MACOS_SIGN_IDENTITY" != "Developer ID Application:"*"(YKUPL7Z869)" ]]; then
-    echo "error: tombstone signing identity must belong to Team ID YKUPL7Z869" >&2
-    exit 1
-  fi
-  if ! security find-identity -v -p codesigning | grep -Fq "\"$MACOS_SIGN_IDENTITY\""; then
-    echo "error: requested Developer ID identity is unavailable" >&2
-    exit 1
-  fi
-  codesign \
-    --force \
-    --options runtime \
-    --timestamp \
-    --sign "$MACOS_SIGN_IDENTITY" \
-    "$output_root/cfw-helper-tombstone"
-  codesign --verify --strict --verbose=4 "$output_root/cfw-helper-tombstone"
-  signature="$(codesign -d --verbose=4 "$output_root/cfw-helper-tombstone" 2>&1)"
-  if [[ "$signature" != *"TeamIdentifier=YKUPL7Z869"* ]] ||
-    [[ "$signature" != *"Authority=Developer ID Application:"*"(YKUPL7Z869)"* ]] ||
-    [[ "$signature" != *"Timestamp="* ]] ||
-    [[ "$signature" == *"Timestamp=none"* ]] ||
-    [[ "$signature" == *"Signature=adhoc"* ]]; then
-    echo "error: staged tombstone does not have the required Developer ID signature" >&2
-    exit 1
-  fi
-fi
 source_sha256="$(shasum -a 256 "$repo_root/crates/cfw-legacy-tombstone/src/main.rs" | awk '{print $1}')"
 manifest_sha256="$(shasum -a 256 "$repo_root/crates/cfw-legacy-tombstone/Cargo.toml" | awk '{print $1}')"
 lock_sha256="$(shasum -a 256 "$repo_root/Cargo.lock" | awk '{print $1}')"

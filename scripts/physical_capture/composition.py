@@ -115,10 +115,10 @@ RECEIPT_RESPONSE_FIELDS = {
 }
 
 AGGREGATE_RELATIVE_PATH = PurePosixPath(
-    "target/candidates/0.4.0/release/private-physical-evidence/aggregate.json"
+    "target/candidates/0.4.0/assurance/private-physical-evidence/aggregate.json"
 )
 DESCRIPTOR_RELATIVE_PATH = PurePosixPath(
-    "target/candidates/0.4.0/release/final-candidate/physical-evidence.json"
+    "target/candidates/0.4.0/assurance/physical-candidate/physical-evidence.json"
 )
 _PRIVATE_DIRECTORY_COMPONENTS = AGGREGATE_RELATIVE_PATH.parts[:-1]
 _DESCRIPTOR_DIRECTORY_COMPONENTS = DESCRIPTOR_RELATIVE_PATH.parts[:-1]

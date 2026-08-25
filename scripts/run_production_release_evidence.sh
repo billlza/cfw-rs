@@ -2,6 +2,13 @@
 set -euo pipefail
 unset CDPATH
 
+case "${1:-}" in
+  prepare-physical-candidate-manifest | seal | validation | final)
+    echo "error: ${1} is retired; use prepackage, ga-acceptance, or publication" >&2
+    exit 2
+    ;;
+esac
+
 repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"

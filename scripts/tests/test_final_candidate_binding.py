@@ -9,6 +9,7 @@ from pathlib import Path
 from scripts.publication.common import PublicationError, canonical_json, tree_digest
 from scripts.publication.final_candidate import (
     BLOCKED,
+    DEFAULT_EVIDENCE_DIRECTORY,
     ENVIRONMENT_INPUT_FILES,
     NOT_RUN,
     PHYSICAL_INPUTS,
@@ -713,6 +714,12 @@ class FinalCandidateFailClosedTests(_CleanWorkspaceMixin):
 
 
 class FinalCandidateEnvironmentStatusTests(_CleanWorkspaceMixin):
+    def test_default_inputs_are_confined_to_the_active_ga_stage_root(self) -> None:
+        self.assertEqual(
+            DEFAULT_EVIDENCE_DIRECTORY,
+            "target/candidates/0.4.0/ga/40031/stage-inputs/final-candidate",
+        )
+
     def test_absent_inputs_report_not_run_and_block(self) -> None:
         report = environment_status(
             REPOSITORY,

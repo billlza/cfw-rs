@@ -10,24 +10,25 @@ from pathlib import Path
 from typing import Final
 
 if __package__:
-    from .release_build_identity import ACTIVE_RELEASE_GENERATION
+    from .release_build_identity import ACTIVE_RELEASE_IDENTITY
 else:
-    from release_build_identity import ACTIVE_RELEASE_GENERATION
+    from release_build_identity import ACTIVE_RELEASE_IDENTITY
 
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parent.parent
 CONTRACT_PATH: Final = REPOSITORY_ROOT / "docs/release/build-allocations-v040.json"
-DOCUMENT: Final = "cfm-release-build-allocation-v1"
-PRODUCT_VERSION: Final = ACTIVE_RELEASE_GENERATION.product_version
+DOCUMENT: Final = "cfm-release-build-allocation-v2"
+PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 BUILD_PATTERN: Final = re.compile(r"\A[1-9][0-9]{4}\Z")
-ROLES: Final = frozenset({"validation", "final"})
+ROLES: Final = frozenset({"validation", "final", "ga"})
 STATUSES: Final = frozenset(
     {
-        "active",
+        "active_ga",
         "retired_after_notarization_before_install",
         "retired_after_notarization_before_install_preflight_protocol_incompatible",
         "retired_after_notarization_before_install_runtime_preflight_failed",
         "retired_after_notarization_before_install_runtime_preflight_toolchain_binding_mismatch",
         "retired_before_candidate_build_source_gate_contract_incomplete",
+        "retired_unbuilt_policy_superseded",
         "retired_unbuilt_reserved_final_companion",
     }
 )
@@ -57,6 +58,11 @@ IMMUTABLE_RETIRED_PREFIX: Final = (
         "retired_before_candidate_build_source_gate_contract_incomplete",
     ),
     ("40029", "final", "retired_unbuilt_reserved_final_companion"),
+)
+POLICY_SUPERSEDED_ALLOCATION: Final = (
+    "40030",
+    "validation",
+    "retired_unbuilt_policy_superseded",
 )
 
 
@@ -98,29 +104,23 @@ def _exact_fields(value: dict[str, object], expected: frozenset[str], context: s
 def validate_contract(
     value: dict[str, object],
     *,
-    expected_validation: str,
-    expected_final: str,
+    expected_ga: str,
 ) -> None:
     _exact_fields(
         value,
-        frozenset({"active_pair", "allocations", "document", "product_version"}),
+        frozenset({"active_ga", "allocations", "document", "product_version"}),
         "allocation ledger",
     )
     if value["document"] != DOCUMENT or value["product_version"] != PRODUCT_VERSION:
         raise ReleaseBuildAllocationError("allocation ledger identity is invalid")
 
-    pair = value["active_pair"]
-    if type(pair) is not dict:
-        raise ReleaseBuildAllocationError("active pair must be an object")
-    _exact_fields(pair, frozenset({"validation", "final"}), "active pair")
-    validation = pair["validation"]
-    final = pair["final"]
-    if validation != expected_validation or final != expected_final:
-        raise ReleaseBuildAllocationError("active pair differs from release source constants")
-    if not isinstance(validation, str) or not BUILD_PATTERN.fullmatch(validation):
-        raise ReleaseBuildAllocationError("active validation build is not canonical")
-    if not isinstance(final, str) or not BUILD_PATTERN.fullmatch(final):
-        raise ReleaseBuildAllocationError("active final build is not canonical")
+    active_ga = value["active_ga"]
+    if active_ga != expected_ga:
+        raise ReleaseBuildAllocationError(
+            "active GA build differs from release source constants"
+        )
+    if not isinstance(active_ga, str) or not BUILD_PATTERN.fullmatch(active_ga):
+        raise ReleaseBuildAllocationError("active GA build is not canonical")
 
     allocations = value["allocations"]
     if type(allocations) is not list or not allocations:
@@ -154,29 +154,44 @@ def validate_contract(
     )
     if observed_prefix != IMMUTABLE_RETIRED_PREFIX:
         raise ReleaseBuildAllocationError("immutable retired allocation prefix changed")
+    superseded_index = len(IMMUTABLE_RETIRED_PREFIX)
+    if superseded_index >= len(allocations):
+        raise ReleaseBuildAllocationError("policy-superseded allocation is absent")
+    superseded = allocations[superseded_index]
+    if (
+        superseded["build"],
+        superseded["role"],
+        superseded["status"],
+    ) != POLICY_SUPERSEDED_ALLOCATION:
+        raise ReleaseBuildAllocationError(
+            "policy-superseded 40030 allocation changed"
+        )
     expected_range = list(
         range(int(IMMUTABLE_RETIRED_PREFIX[0][0]), ordered_builds[-1] + 1)
     )
     if ordered_builds != expected_range:
         raise ReleaseBuildAllocationError("allocation history must be ordered and gap-free")
-    for role, build in (("validation", validation), ("final", final)):
-        record = records.get(build)
-        if record is None:
-            raise ReleaseBuildAllocationError(f"active {role} build {build} is not allocated")
-        if record["status"] != "active":
-            raise ReleaseBuildAllocationError(
-                f"active {role} build {build} is allocated as {record['status']}"
-            )
-        if record["role"] != role:
-            raise ReleaseBuildAllocationError(f"active {role} build {build} has the wrong role")
-    if int(final) != int(validation) + 1:
-        raise ReleaseBuildAllocationError("active validation/final builds must be consecutive")
+    record = records.get(active_ga)
+    if record is None:
+        raise ReleaseBuildAllocationError(
+            f"active GA build {active_ga} is not allocated"
+        )
+    if record["status"] != "active_ga":
+        raise ReleaseBuildAllocationError(
+            f"active GA build {active_ga} is allocated as {record['status']}"
+        )
+    if record["role"] != "ga":
+        raise ReleaseBuildAllocationError(
+            f"active GA build {active_ga} has the wrong role"
+        )
 
-    active = {validation, final}
+    active_records = [
+        build for build, candidate in records.items() if candidate["status"] == "active_ga"
+    ]
+    if active_records != [active_ga]:
+        raise ReleaseBuildAllocationError("allocation ledger must have exactly one active GA")
     for build, record in records.items():
         status = record["status"]
-        if build not in active and status == "active":
-            raise ReleaseBuildAllocationError(f"inactive build {build} is still marked active")
         if status == "retired_unbuilt_reserved_final_companion":
             predecessor = records.get(str(int(build) - 1))
             if record["role"] != "final" or predecessor is None:
@@ -192,26 +207,7 @@ def validate_contract(
 
 
 def verify_source_bindings(value: dict[str, object]) -> None:
-    sys.path.insert(0, str(REPOSITORY_ROOT / "scripts"))
-    import dormant_app_install
-    from publication import orchestrator
-
-    validation = ACTIVE_RELEASE_GENERATION.validation_build
-    final = ACTIVE_RELEASE_GENERATION.final_build
-    installer_identity = (
-        dormant_app_install.VERSION,
-        dormant_app_install.BUILD_NUMBER,
-        dormant_app_install.FINAL_BUILD_NUMBER,
-    )
-    orchestrator_identity = (
-        orchestrator.PRODUCT_VERSION,
-        orchestrator.VALIDATION_BUILD,
-        orchestrator.FINAL_BUILD,
-    )
-    expected_identity = (PRODUCT_VERSION, validation, final)
-    if installer_identity != expected_identity or orchestrator_identity != expected_identity:
-        raise ReleaseBuildAllocationError("release entrypoints disagree on the active build pair")
-    validate_contract(value, expected_validation=validation, expected_final=final)
+    validate_contract(value, expected_ga=ACTIVE_RELEASE_IDENTITY.ga_build)
 
 
 def main() -> int:

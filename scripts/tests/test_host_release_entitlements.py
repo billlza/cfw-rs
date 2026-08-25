@@ -304,17 +304,26 @@ class SignedCandidateWiringTests(unittest.TestCase):
         self.assertIn("entrypoint is unavailable or unsafe", completed.stderr)
 
     def test_final_host_signature_uses_generated_release_xcent(self) -> None:
-        source = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
+        builder = (REPOSITORY / "scripts/build_signed_candidate.sh").read_text(
             encoding="utf-8"
         )
-        generation = source.index("scripts/host_release_entitlements.py")
-        final_signing = source.index("\n/usr/bin/codesign \\\n  --force", generation)
+        helper = (REPOSITORY / "scripts/run_ga_signing_attempt.sh").read_text(
+            encoding="utf-8"
+        )
+        generation = builder.index("scripts/host_release_entitlements.py")
+        freeze = builder.index("scripts/candidate_freeze.py\" freeze", generation)
+        transaction = builder.index("scripts/signing_attempt_transaction.py", freeze)
+        final_signing = helper.index(
+            "/usr/bin/codesign --force --options runtime --timestamp \\\n"
+            '  --entitlements "$host_release_xcent"',
+        )
 
-        self.assertLess(generation, final_signing)
-        self.assertIn('--entitlements "$host_release_xcent"', source[final_signing:])
+        self.assertLess(generation, freeze)
+        self.assertLess(freeze, transaction)
+        self.assertIn('--entitlements "$host_release_xcent"', helper[final_signing:])
         self.assertNotIn(
             '--entitlements "$repo_root/apps/cfw-tauri-shell/macos/entitlements.plist"',
-            source[final_signing:],
+            helper[final_signing:],
         )
 
     def test_repository_host_sources_are_semantically_equivalent(self) -> None:

@@ -1,25 +1,23 @@
 # v0.4.0 GA and assurance policy calibration
 
-Status: **accepted policy; implementation pending**.
+Status: **accepted executable policy; GA evidence pending**.
 
-This decision corrects the release-policy boundary for v0.4.0. It does not by
-itself authorize a build, package, upload, or release. Until the implementation
-migration is complete, the current executable gates remain authoritative and
-v0.4.0 remains blocked.
+This decision corrects the release-policy boundary for v0.4.0. The executable
+gates implement it, but the document by itself does not authorize a build,
+package, upload, or release. v0.4.0 remains blocked until the exact source,
+hosted CI, signing, notarization, package, installation, and GA-runtime evidence
+passes for the single candidate below.
 
 ## One releasable application identity
 
-Build 40031 will be the only application identity signed, notarized, installed,
+Build 40031 is the only application identity signed, notarized, installed,
 accepted, and published for the v0.4.0 GA. The DMG and updater archive will be
 two distribution envelopes around the exact same 40031 application tree, not
 separate application candidates.
 
-Build 40030 will not be built, signed, submitted to Apple, installed, or used as
-a substitute for 40031 evidence. After the executable policy migration, it will
-be recorded as `retired_unbuilt_policy_superseded` and 40031 will become the
-single `active_ga` build. The allocation file is intentionally unchanged until
-the code and schema migration lands, so documentation cannot get ahead of the
-enforced policy.
+Build 40030 must not be built, signed, submitted to Apple, installed, or used as
+a substitute for 40031 evidence. It is recorded as
+`retired_unbuilt_policy_superseded`; 40031 is the single `active_ga` build.
 
 No further build pair may be allocated for a source, CI, documentation, test,
 verifier, or preflight failure that occurs before an application candidate is
@@ -156,9 +154,9 @@ release. `AssuranceStatus` is `qualified` only when every fixed
 No optional field, exception handler, compatibility wrapper, or command-line
 override may turn missing evidence into success.
 
-## Required implementation migration
+## Executable migration invariants
 
-The next release-policy change must land as one reviewed migration that:
+The release-policy implementation must preserve all of these invariants:
 
 1. replaces the validation/final pair with one enforced `ga_build=40031`;
 2. removes the 40030 build, notarization, installation, and review path;
@@ -173,5 +171,8 @@ The next release-policy change must land as one reviewed migration that:
 9. updates build-allocation, publication, boundary, source-identity,
    documentation, and negative-order tests together.
 
-Until all nine items and their fail-closed tests pass, neither this decision nor
-the legacy high-assurance gate may be cited as ordinary GA authorization.
+All nine items and their fail-closed tests are required together. Even when the
+source implementation passes, ordinary GA authorization exists only after the
+immutable 40031 prepackage, GA-acceptance, and publication stages have each
+reopened and accepted their real inputs. The assurance extension cannot replace
+a missing GA stage.

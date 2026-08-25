@@ -73,7 +73,7 @@ packet_extension="$staged_app/Contents/Library/SystemExtensions/com.bill.clashfo
 bridge="$staged_app/Contents/Frameworks/CFWNativeBridge.framework"
 authority="$staged_app/Contents/Library/HelperTools/CFWGlobalAuthority"
 tombstone="$staged_app/Contents/Library/HelperTools/cfw-helper-tombstone"
-authority_designated_requirement='designated => anchor apple generic and identifier "com.bill.clashformac.global-authority" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "YKUPL7Z869"'
+readonly authority_designated_requirement='designated => anchor apple generic and identifier "com.bill.clashformac.global-authority" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "YKUPL7Z869"'
 /usr/bin/codesign --force --options runtime --timestamp \
   --identifier com.bill.clashformac.native-bridge \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$bridge"
@@ -82,6 +82,29 @@ authority_designated_requirement='designated => anchor apple generic and identif
   -r="$authority_designated_requirement" \
   --entitlements "$authority_entitlements" \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$authority"
+readonly authority_requirement_root="$attempt_work/authority-requirement"
+readonly authority_requirement_text="$authority_requirement_root/signed.txt"
+readonly authority_requirement_expected="$authority_requirement_root/expected.csreq"
+readonly authority_requirement_actual="$authority_requirement_root/actual.csreq"
+/bin/mkdir -m 0700 "$authority_requirement_root" ||
+  die "cannot create the private Global Authority requirement verification root"
+/usr/bin/codesign -d -r "$authority_requirement_text" "$authority" \
+  >/dev/null 2>&1 || die "cannot extract the Global Authority designated requirement"
+/usr/bin/csreq -r="$authority_designated_requirement" \
+  -b "$authority_requirement_expected" >/dev/null 2>&1 ||
+  die "cannot compile the expected Global Authority designated requirement"
+/usr/bin/csreq -r "$authority_requirement_text" \
+  -b "$authority_requirement_actual" >/dev/null 2>&1 ||
+  die "cannot compile the signed Global Authority designated requirement"
+/usr/bin/cmp -s -- "$authority_requirement_expected" "$authority_requirement_actual" ||
+  die "Global Authority designated requirement mismatch"
+/bin/rm -- \
+  "$authority_requirement_text" \
+  "$authority_requirement_expected" \
+  "$authority_requirement_actual" >/dev/null 2>&1 ||
+  die "cannot remove the Global Authority requirement verification files"
+/bin/rmdir "$authority_requirement_root" >/dev/null 2>&1 ||
+  die "cannot remove the private Global Authority requirement verification root"
 /usr/bin/codesign --force --options runtime --timestamp \
   --entitlements "$proxy_release_xcent" \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$proxy_app"

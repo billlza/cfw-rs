@@ -32,6 +32,7 @@ stage, or Release gate raises rather than silently passing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import plistlib
 import sys
@@ -58,6 +59,63 @@ EXTENSION_ID = "com.bill.clashformac.packet-tunnel"
 EXTENSION_EXECUTABLE = "CFWPacketTunnel"
 EXTENSION_WRAPPER = f"{EXTENSION_ID}.systemextension"
 AUTHORITY_ID = "com.bill.clashformac.global-authority"
+AUTHORITY_DESIGNATED_REQUIREMENT = (
+    'designated => anchor apple generic and identifier '
+    '"com.bill.clashformac.global-authority" and certificate '
+    '1[field.1.2.840.113635.100.6.2.6] exists and certificate '
+    'leaf[field.1.2.840.113635.100.6.1.13] exists and certificate '
+    'leaf[subject.OU] = "YKUPL7Z869"'
+)
+AUTHORITY_SIGNING_CRITICAL_BLOCK = "\n".join(
+    (
+        "/usr/bin/codesign --force --options runtime --timestamp \\",
+        "  --identifier com.bill.clashformac.native-bridge \\",
+        '  --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$bridge"',
+        "/usr/bin/codesign --force --options runtime --timestamp \\",
+        "  --identifier com.bill.clashformac.global-authority \\",
+        '  -r="$authority_designated_requirement" \\',
+        '  --entitlements "$authority_entitlements" \\',
+        '  --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$authority"',
+        'readonly authority_requirement_root="$attempt_work/authority-requirement"',
+        'readonly authority_requirement_text="$authority_requirement_root/signed.txt"',
+        'readonly authority_requirement_expected="$authority_requirement_root/expected.csreq"',
+        'readonly authority_requirement_actual="$authority_requirement_root/actual.csreq"',
+        '/bin/mkdir -m 0700 "$authority_requirement_root" ||',
+        '  die "cannot create the private Global Authority requirement verification root"',
+        '/usr/bin/codesign -d -r "$authority_requirement_text" "$authority" \\',
+        '  >/dev/null 2>&1 || die "cannot extract the Global Authority designated requirement"',
+        '/usr/bin/csreq -r="$authority_designated_requirement" \\',
+        '  -b "$authority_requirement_expected" >/dev/null 2>&1 ||',
+        '  die "cannot compile the expected Global Authority designated requirement"',
+        '/usr/bin/csreq -r "$authority_requirement_text" \\',
+        '  -b "$authority_requirement_actual" >/dev/null 2>&1 ||',
+        '  die "cannot compile the signed Global Authority designated requirement"',
+        '/usr/bin/cmp -s -- "$authority_requirement_expected" '
+        '"$authority_requirement_actual" ||',
+        '  die "Global Authority designated requirement mismatch"',
+        "/bin/rm -- \\",
+        '  "$authority_requirement_text" \\',
+        '  "$authority_requirement_expected" \\',
+        '  "$authority_requirement_actual" >/dev/null 2>&1 ||',
+        '  die "cannot remove the Global Authority requirement verification files"',
+        '/bin/rmdir "$authority_requirement_root" >/dev/null 2>&1 ||',
+        '  die "cannot remove the private Global Authority requirement verification root"',
+        "/usr/bin/codesign --force --options runtime --timestamp \\",
+        '  --entitlements "$proxy_release_xcent" \\',
+        '  --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$proxy_app"',
+    )
+)
+# Level 1 structural identities of the decoded UTF-8 source text around the
+# critical signing block. Together with the unique exact block, they detect
+# accidental or unreviewed reachability and post-verification drift; they are
+# not an authentication mechanism and do not defend against the repository
+# owner. The release-freeze source digest independently binds the raw file.
+AUTHORITY_SIGNING_PREFIX_SHA256 = (
+    "e4f52083c47243694915b75ae3a58f8102f4843f6a3c6b6097b553a451f05e32"
+)
+AUTHORITY_SIGNING_SUFFIX_SHA256 = (
+    "5e6659029128e23608e4eecc317f1c5eaa14b4b50bbf559522be2f077076991b"
+)
 DEPLOYMENT_TARGET = "15.0"
 
 DAEMON_EMBED = "Library/HelperTools/CFWGlobalAuthority"
@@ -67,9 +125,56 @@ AGENT_EMBED = "Library/LoginItems/CFWProxyAgent.app"
 EXTENSION_EMBED = f"Library/SystemExtensions/{EXTENSION_WRAPPER}"
 
 
+def _verify_top_level_straight_line_shell_block(
+    source: str,
+    expected_block: str,
+    *,
+    required_prefix_sha256: str,
+    required_suffix_sha256: str,
+) -> None:
+    """Bind the exact block and decoded source text before and after it."""
+
+    for position, required_sha256 in (
+        ("prefix", required_prefix_sha256),
+        ("suffix", required_suffix_sha256),
+    ):
+        if (
+            not isinstance(required_sha256, str)
+            or len(required_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in required_sha256
+            )
+        ):
+            raise NativeProductGraphError(
+                f"GA signing helper critical-{position} identity is malformed"
+            )
+    if source.count(expected_block) != 1:
+        raise NativeProductGraphError(
+            "GA signing helper does not contain one exact straight-line "
+            "Global Authority signing block"
+        )
+    block_index = source.find(expected_block)
+    prefix_sha256 = hashlib.sha256(source[:block_index].encode("utf-8")).hexdigest()
+    if prefix_sha256 != required_prefix_sha256:
+        raise NativeProductGraphError(
+            "GA signing helper critical-prefix identity differs from the "
+            "reviewed straight-line release policy"
+        )
+    block_end = block_index + len(expected_block)
+    suffix_sha256 = hashlib.sha256(source[block_end:].encode("utf-8")).hexdigest()
+    if suffix_sha256 != required_suffix_sha256:
+        raise NativeProductGraphError(
+            "GA signing helper critical-suffix identity differs from the "
+            "reviewed straight-line release policy"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Low-level readers (fail closed on missing / malformed inputs).
 # ---------------------------------------------------------------------------
+
+
 def read_text(root: Path, relative: str) -> str:
     path = root / relative
     try:
@@ -698,7 +803,12 @@ def verify_entitlements(root: Path) -> None:
 # Inside-out signing-order manifest.
 # ---------------------------------------------------------------------------
 def verify_signing_order(
-    manifest: Any, files: dict[str, str], signing_script: str
+    manifest: Any,
+    files: dict[str, str],
+    signing_script: str,
+    *,
+    critical_prefix_sha256: str,
+    critical_suffix_sha256: str,
 ) -> None:
     if not isinstance(manifest, dict):
         raise NativeProductGraphError("signing-order manifest root is not an object")
@@ -823,6 +933,108 @@ def verify_signing_order(
                 f"{destination}"
             )
 
+    authority_sign = f'{signing_selector} "$authority"'
+    authority_index = signing_script.find(authority_sign)
+    authority_requirement_signing_fragment = (
+        '--identifier com.bill.clashformac.global-authority \\\n'
+        '  -r="$authority_designated_requirement" \\\n'
+        '  --entitlements "$authority_entitlements" \\\n'
+        f'  {authority_sign}'
+    )
+    if signing_script.count(authority_requirement_signing_fragment) != 1:
+        raise NativeProductGraphError(
+            "GA signing helper does not apply the exact Global Authority "
+            "designated requirement while signing"
+        )
+    proxy_sign = f'{signing_selector} "$proxy_app"'
+    proxy_index = signing_script.find(proxy_sign)
+    requirement_assignment = (
+        "readonly authority_designated_requirement="
+        + repr(AUTHORITY_DESIGNATED_REQUIREMENT)
+    )
+    requirement_assignment_index = signing_script.find(requirement_assignment)
+    if (
+        signing_script.count(requirement_assignment) != 1
+        or requirement_assignment_index >= authority_index
+    ):
+        raise NativeProductGraphError(
+            "GA signing helper does not bind the exact Global Authority "
+            "designated requirement"
+        )
+    verification_fragments = (
+        'readonly authority_requirement_root="$attempt_work/authority-requirement"',
+        'readonly authority_requirement_text="$authority_requirement_root/signed.txt"',
+        'readonly authority_requirement_expected="$authority_requirement_root/expected.csreq"',
+        'readonly authority_requirement_actual="$authority_requirement_root/actual.csreq"',
+        '/bin/mkdir -m 0700 "$authority_requirement_root" ||\n'
+        '  die "cannot create the private Global Authority requirement verification root"',
+        '/usr/bin/codesign -d -r "$authority_requirement_text" "$authority" \\\n'
+        '  >/dev/null 2>&1 || die "cannot extract the Global Authority designated requirement"',
+        '/usr/bin/csreq -r="$authority_designated_requirement" \\\n'
+        '  -b "$authority_requirement_expected" >/dev/null 2>&1 ||\n'
+        '  die "cannot compile the expected Global Authority designated requirement"',
+        '/usr/bin/csreq -r "$authority_requirement_text" \\\n'
+        '  -b "$authority_requirement_actual" >/dev/null 2>&1 ||\n'
+        '  die "cannot compile the signed Global Authority designated requirement"',
+        '/usr/bin/cmp -s -- "$authority_requirement_expected" '
+        '"$authority_requirement_actual" ||\n'
+        '  die "Global Authority designated requirement mismatch"',
+        '/bin/rm -- \\\n'
+        '  "$authority_requirement_text" \\\n'
+        '  "$authority_requirement_expected" \\\n'
+        '  "$authority_requirement_actual" >/dev/null 2>&1 ||\n'
+        '  die "cannot remove the Global Authority requirement verification files"',
+        '/bin/rmdir "$authority_requirement_root" >/dev/null 2>&1 ||\n'
+        '  die "cannot remove the private Global Authority requirement verification root"',
+    )
+    verification_indices: list[int] = []
+    for fragment in verification_fragments:
+        if signing_script.count(fragment) != 1:
+            raise NativeProductGraphError(
+                "GA signing helper does not verify the exact Global Authority "
+                f"designated requirement: missing {fragment!r}"
+            )
+        verification_indices.append(signing_script.find(fragment))
+    policy_variables = (
+        "authority_designated_requirement",
+        "authority_requirement_root",
+        "authority_requirement_text",
+        "authority_requirement_expected",
+        "authority_requirement_actual",
+    )
+    for variable in policy_variables:
+        if signing_script.count(f"{variable}=") != 1:
+            raise NativeProductGraphError(
+                "GA signing helper reassigns a readonly Global Authority "
+                f"requirement policy variable: {variable}"
+            )
+    if not (
+        authority_index
+        < verification_indices[0]
+        < verification_indices[1]
+        < verification_indices[2]
+        < verification_indices[3]
+        < verification_indices[4]
+        < verification_indices[5]
+        < verification_indices[6]
+        < verification_indices[7]
+        < verification_indices[8]
+        < verification_indices[9]
+        < verification_indices[10]
+        < proxy_index
+        < outer_index
+    ):
+        raise NativeProductGraphError(
+            "GA signing helper verifies the Global Authority designated "
+            "requirement outside the signed nested-code boundary"
+        )
+    _verify_top_level_straight_line_shell_block(
+        signing_script,
+        AUTHORITY_SIGNING_CRITICAL_BLOCK,
+        required_prefix_sha256=critical_prefix_sha256,
+        required_suffix_sha256=critical_suffix_sha256,
+    )
+
 
 def verify_signing_transaction_boundary(
     candidate_builder: str, transaction_script: str, signing_helper: str
@@ -933,7 +1145,13 @@ def verify_repository(root: Path) -> None:
     verify_entitlements(root)
 
     manifest = read_json(root, "native/macos/Config/signing-order.json")
-    verify_signing_order(manifest, files, signing_helper)
+    verify_signing_order(
+        manifest,
+        files,
+        signing_helper,
+        critical_prefix_sha256=AUTHORITY_SIGNING_PREFIX_SHA256,
+        critical_suffix_sha256=AUTHORITY_SIGNING_SUFFIX_SHA256,
+    )
     verify_signing_transaction_boundary(
         candidate_builder, signing_transaction, signing_helper
     )

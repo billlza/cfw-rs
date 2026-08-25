@@ -136,7 +136,54 @@ private func plist(_ name: String) throws -> [String: Any] {
       repository.appending(path: "scripts/build_native_products.sh"), encoding: .utf8)
   #expect(buildScript.contains("build_scheme CFWGlobalAuthorityDaemon"))
   #expect(buildScript.contains("native-global-authority-v1"))
-  #expect(buildScript.contains("Global Authority designated requirement mismatch"))
+  #expect(!buildScript.contains("authority_designated_requirement"))
+  #expect(!buildScript.contains("/usr/bin/codesign"))
+  #expect(!buildScript.contains("/usr/bin/csreq"))
+
+  let signingScript = try String(
+    contentsOf:
+      repository.appending(path: "scripts/run_ga_signing_attempt.sh"), encoding: .utf8)
+  #expect(
+    signingScript.contains(
+      "readonly authority_designated_requirement='designated => anchor apple generic and identifier "
+        + "\"com.bill.clashformac.global-authority\" and certificate "
+        + "1[field.1.2.840.113635.100.6.2.6] exists and certificate "
+        + "leaf[field.1.2.840.113635.100.6.1.13] exists and certificate "
+        + "leaf[subject.OU] = \"YKUPL7Z869\"'"))
+  #expect(
+    signingScript.contains(
+      "/usr/bin/codesign -d -r \"$authority_requirement_text\" \"$authority\""))
+  #expect(
+    signingScript.contains(
+      "readonly authority_requirement_root=\"$attempt_work/authority-requirement\""))
+  #expect(
+    signingScript.contains(
+      "readonly authority_requirement_text=\"$authority_requirement_root/signed.txt\""))
+  #expect(
+    signingScript.contains(
+      "readonly authority_requirement_expected=\"$authority_requirement_root/expected.csreq\""))
+  #expect(
+    signingScript.contains(
+      "readonly authority_requirement_actual=\"$authority_requirement_root/actual.csreq\""))
+  #expect(
+    signingScript.contains(
+      "--identifier com.bill.clashformac.global-authority \\\n"
+        + "  -r=\"$authority_designated_requirement\" \\\n"
+        + "  --entitlements \"$authority_entitlements\""))
+  #expect(signingScript.contains("cannot extract the Global Authority designated requirement"))
+  #expect(
+    signingScript.contains(
+      "/usr/bin/csreq -r=\"$authority_designated_requirement\" \\\n"
+        + "  -b \"$authority_requirement_expected\""))
+  #expect(
+    signingScript.contains(
+      "/usr/bin/csreq -r \"$authority_requirement_text\" \\\n"
+        + "  -b \"$authority_requirement_actual\""))
+  #expect(signingScript.contains("/usr/bin/cmp -s --"))
+  #expect(signingScript.contains("Global Authority designated requirement mismatch"))
+  #expect(
+    signingScript.contains(
+      "cannot remove the Global Authority requirement verification files"))
 }
 
 @Test func tauriBundleEmbedsTheCompleteNativeProductGraph() throws {

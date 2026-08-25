@@ -784,8 +784,25 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         authority_sign = helper.index(
             "--identifier com.bill.clashformac.global-authority", bridge_sign
         )
+        authority_requirement_extract = helper.index(
+            '/usr/bin/codesign -d -r "$authority_requirement_text" "$authority"',
+            authority_sign,
+        )
+        authority_requirement_expected = helper.index(
+            '/usr/bin/csreq -r="$authority_designated_requirement"',
+            authority_requirement_extract,
+        )
+        authority_requirement_actual = helper.index(
+            '/usr/bin/csreq -r "$authority_requirement_text"',
+            authority_requirement_expected,
+        )
+        authority_requirement_compare = helper.index(
+            '/usr/bin/cmp -s -- "$authority_requirement_expected" '
+            '"$authority_requirement_actual"',
+            authority_requirement_actual,
+        )
         proxy_sign = helper.index(
-            '--entitlements "$proxy_release_xcent"', authority_sign
+            '--entitlements "$proxy_release_xcent"', authority_requirement_compare
         )
         packet_sign = helper.index(
             '--entitlements "$packet_release_xcent"', proxy_sign
@@ -803,7 +820,11 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertLess(signing_input_copy, host_profile_install)
         self.assertLess(host_profile_install, bridge_sign)
         self.assertLess(bridge_sign, authority_sign)
-        self.assertLess(authority_sign, proxy_sign)
+        self.assertLess(authority_sign, authority_requirement_extract)
+        self.assertLess(authority_requirement_extract, authority_requirement_expected)
+        self.assertLess(authority_requirement_expected, authority_requirement_actual)
+        self.assertLess(authority_requirement_actual, authority_requirement_compare)
+        self.assertLess(authority_requirement_compare, proxy_sign)
         self.assertLess(proxy_sign, packet_sign)
         self.assertLess(packet_sign, tombstone_sign)
         self.assertLess(tombstone_sign, host_sign)

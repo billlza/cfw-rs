@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import unittest
 from pathlib import Path
 
 from scripts.verify_native_product_graph import (
     AGENT_EMBED,
+    AUTHORITY_DESIGNATED_REQUIREMENT,
+    AUTHORITY_SIGNING_CRITICAL_BLOCK,
     BRIDGE_EMBED,
     DAEMON_EMBED,
     DAEMON_PLIST_EMBED,
@@ -16,7 +19,7 @@ from scripts.verify_native_product_graph import (
     verify_daemon_plist,
     verify_generated_project,
     verify_repository,
-    verify_signing_order,
+    verify_signing_order as _verify_signing_order,
     verify_signing_transaction_boundary,
     verify_tauri_embedding,
     verify_xcodegen_spec,
@@ -85,14 +88,38 @@ _SIGNING_SCRIPT = "\n".join(
         f'proxy_app="$staged_app/Contents/{AGENT_EMBED}"',
         f'packet_extension="$staged_app/Contents/{EXTENSION_EMBED}"',
         'tombstone="$staged_app/Contents/Library/HelperTools/cfw-helper-tombstone"',
-        '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$bridge"',
-        '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$authority"',
-        '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$proxy_app"',
+        "readonly authority_designated_requirement="
+        + repr(AUTHORITY_DESIGNATED_REQUIREMENT),
+        AUTHORITY_SIGNING_CRITICAL_BLOCK,
         '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$packet_extension"',
         '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$tombstone"',
         '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$staged_app"',
     ]
 )
+_SIGNING_CRITICAL_PREFIX_SHA256 = hashlib.sha256(
+    _SIGNING_SCRIPT[: _SIGNING_SCRIPT.index(AUTHORITY_SIGNING_CRITICAL_BLOCK)].encode(
+        "utf-8"
+    )
+).hexdigest()
+_SIGNING_CRITICAL_BLOCK_END = (
+    _SIGNING_SCRIPT.index(AUTHORITY_SIGNING_CRITICAL_BLOCK)
+    + len(AUTHORITY_SIGNING_CRITICAL_BLOCK)
+)
+_SIGNING_CRITICAL_SUFFIX_SHA256 = hashlib.sha256(
+    _SIGNING_SCRIPT[_SIGNING_CRITICAL_BLOCK_END:].encode("utf-8")
+).hexdigest()
+
+
+def verify_signing_order(
+    manifest: object, files: dict[str, str], signing_script: str
+) -> None:
+    _verify_signing_order(
+        manifest,
+        files,
+        signing_script,
+        critical_prefix_sha256=_SIGNING_CRITICAL_PREFIX_SHA256,
+        critical_suffix_sha256=_SIGNING_CRITICAL_SUFFIX_SHA256,
+    )
 
 
 class RepositoryContractTests(unittest.TestCase):
@@ -271,6 +298,25 @@ class SigningOrderTests(unittest.TestCase):
     def test_valid_manifest_passes(self) -> None:
         verify_signing_order(_valid_manifest(), _valid_embedding(), _SIGNING_SCRIPT)
 
+    def test_critical_hash_identities_require_strings(self) -> None:
+        cases = (
+            ("prefix", None, _SIGNING_CRITICAL_SUFFIX_SHA256),
+            ("suffix", _SIGNING_CRITICAL_PREFIX_SHA256, None),
+        )
+        for position, prefix, suffix in cases:
+            with self.subTest(position=position):
+                with self.assertRaisesRegex(
+                    NativeProductGraphError,
+                    f"critical-{position} identity is malformed",
+                ):
+                    _verify_signing_order(
+                        _valid_manifest(),
+                        _valid_embedding(),
+                        _SIGNING_SCRIPT,
+                        critical_prefix_sha256=prefix,
+                        critical_suffix_sha256=suffix,
+                    )
+
     def test_outer_not_signed_last_fails_closed(self) -> None:
         manifest = copy.deepcopy(_valid_manifest())
         manifest["outer"]["signedLast"] = False
@@ -326,6 +372,286 @@ class SigningOrderTests(unittest.TestCase):
             '"$CFW_SIGNING_CERTIFICATE_SHA1"', '"$MACOS_SIGN_IDENTITY"'
         )
         with self.assertRaisesRegex(NativeProductGraphError, "mutable signing identity"):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_drift_fails_closed(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_DESIGNATED_REQUIREMENT,
+            AUTHORITY_DESIGNATED_REQUIREMENT.replace(
+                "com.bill.clashformac.global-authority", "com.example.other"
+            ),
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "exact Global Authority designated requirement"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_must_be_applied_while_signing(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            '  -r="$authority_designated_requirement" \\\n',
+            "",
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "does not apply the exact Global Authority"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_comparison_cannot_be_removed(self) -> None:
+        comparison = (
+            '/usr/bin/cmp -s -- "$authority_requirement_expected" '
+            '"$authority_requirement_actual" ||\n'
+            '  die "Global Authority designated requirement mismatch"'
+        )
+        script = _SIGNING_SCRIPT.replace(
+            comparison,
+            "/usr/bin/true",
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "verify the exact Global Authority"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_verification_must_precede_other_signing(self) -> None:
+        proxy_sign = '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$proxy_app"'
+        authority_sign = '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$authority"'
+        script = _SIGNING_SCRIPT.replace(proxy_sign + "\n", "", 1).replace(
+            authority_sign,
+            authority_sign + "\n" + proxy_sign,
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "outside the signed nested-code boundary"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_root_cannot_escape_attempt_work(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            'readonly authority_requirement_root="$attempt_work/authority-requirement"',
+            'readonly authority_requirement_root="/tmp/authority-requirement"',
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "verify the exact Global Authority"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_outputs_must_remain_distinct(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            '-b "$authority_requirement_expected"',
+            '-b "$authority_requirement_actual"',
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "verify the exact Global Authority"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_path_binding_cannot_be_removed(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            'readonly authority_requirement_text="$authority_requirement_root/signed.txt"\n',
+            "",
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "verify the exact Global Authority"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_root_cannot_be_rebound_after_decoy(self) -> None:
+        assignment = (
+            'readonly authority_requirement_root='
+            '"$attempt_work/authority-requirement"'
+        )
+        script = _SIGNING_SCRIPT.replace(
+            assignment,
+            assignment + '\nauthority_requirement_root="/tmp/authority-requirement"',
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "reassigns a readonly Global Authority"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_expected_cannot_be_rebound_to_actual(self) -> None:
+        assignment = (
+            'readonly authority_requirement_expected='
+            '"$authority_requirement_root/expected.csreq"'
+        )
+        script = _SIGNING_SCRIPT.replace(
+            assignment,
+            assignment
+            + '\nauthority_requirement_expected="$authority_requirement_actual"',
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "reassigns a readonly Global Authority"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_file_cleanup_cannot_be_removed(self) -> None:
+        cleanup = (
+            '/bin/rm -- \\\n'
+            '  "$authority_requirement_text" \\\n'
+            '  "$authority_requirement_expected" \\\n'
+            '  "$authority_requirement_actual" >/dev/null 2>&1 ||\n'
+            '  die "cannot remove the Global Authority requirement verification files"'
+        )
+        script = _SIGNING_SCRIPT.replace(
+            cleanup,
+            "/usr/bin/true",
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "verify the exact Global Authority"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_designated_requirement_root_cleanup_cannot_be_removed(self) -> None:
+        cleanup = (
+            '/bin/rmdir "$authority_requirement_root" >/dev/null 2>&1 ||\n'
+            '  die "cannot remove the private Global Authority requirement verification root"'
+        )
+        script = _SIGNING_SCRIPT.replace(cleanup, "/usr/bin/true", 1)
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "verify the exact Global Authority"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_hide_in_uncalled_function(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            "unreachable_signing_block() {\n"
+            + AUTHORITY_SIGNING_CRITICAL_BLOCK
+            + "\n}",
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-prefix identity differs"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_hide_after_inline_function_body(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            "unreachable_signing_block() { :\n"
+            + AUTHORITY_SIGNING_CRITICAL_BLOCK
+            + "\n}",
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-prefix identity differs"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_hide_in_false_branch(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            "if false; then\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK + "\nfi",
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-prefix identity differs"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_hide_in_short_circuit_group(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            "false && {\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK + "\n}",
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-prefix identity differs"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_hide_after_inline_group_body(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            "false && { :\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK + "\n}",
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-prefix identity differs"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_hide_in_process_substitution(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            ": <(\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK + "\n)",
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-prefix identity differs"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_hide_in_coprocess(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            "coproc hidden_signing {\n"
+            + AUTHORITY_SIGNING_CRITICAL_BLOCK
+            + "\n}",
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-prefix identity differs"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_follow_early_exit(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            "exit 0\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-prefix identity differs"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_follow_exec_replacement(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            "exec /usr/bin/true\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-prefix identity differs"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_follow_die_redefinition(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            "die() {\n  return 0\n}\n" + AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-prefix identity differs"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_critical_signing_block_cannot_be_followed_by_authority_resigning(
+        self,
+    ) -> None:
+        resign = "\n".join(
+            (
+                "/usr/bin/codesign --force --options runtime --timestamp \\",
+                "  -r='designated => true' \\",
+                '  -s "$CFW_SIGNING_CERTIFICATE_SHA1" "$authority"',
+            )
+        )
+        script = _SIGNING_SCRIPT.replace(
+            AUTHORITY_SIGNING_CRITICAL_BLOCK,
+            AUTHORITY_SIGNING_CRITICAL_BLOCK + "\n" + resign,
+            1,
+        )
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "critical-suffix identity differs"
+        ):
             verify_signing_order(_valid_manifest(), _valid_embedding(), script)
 
 

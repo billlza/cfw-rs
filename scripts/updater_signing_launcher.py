@@ -428,10 +428,56 @@ def verify_pinned_tauri_signer(
 
     if not repository.is_absolute():
         raise UpdaterSigningLaunchError("release repository path must be absolute")
+    return _verify_pinned_tauri_signer_with_runtime(
+        repository,
+        _canonical_python_runtime(),
+        runner=runner,
+    )
+
+
+def _verify_pinned_tauri_signer_with_runtime(
+    repository: Path,
+    python: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+) -> HeldSigner:
+    """Verify the signer with a caller-admitted canonical Python runtime."""
+
+    if not repository.is_absolute():
+        raise UpdaterSigningLaunchError("release repository path must be absolute")
+    if not python.is_absolute():
+        raise UpdaterSigningLaunchError(
+            "prevalidated Python runtime path must be absolute"
+        )
+    try:
+        canonical_python = python.resolve(strict=True)
+    except OSError as error:
+        raise UpdaterSigningLaunchError(
+            "prevalidated Python runtime cannot be resolved"
+        ) from error
+    if canonical_python != python:
+        raise UpdaterSigningLaunchError(
+            "prevalidated Python runtime path is not canonical"
+        )
+    python_identity = _lstat_identity(python)
+    python_mode = stat.S_IMODE(python_identity.mode)
+    if (
+        not stat.S_ISREG(python_identity.mode)
+        or python_identity.owner not in {0, os.getuid()}
+        or python_identity.size < 1
+        or python_identity.size > 512 * 1024 * 1024
+        or not python_mode & 0o111
+        or python_mode & stat.S_IWOTH
+        or not os.access(python, os.X_OK, effective_ids=True)
+    ):
+        raise UpdaterSigningLaunchError(
+            "prevalidated Python runtime is not a safe executable: "
+            f"{python} (mode={python_mode:04o}, uid={python_identity.owner}, "
+            f"gid={python_identity.group}, links={python_identity.links})"
+        )
     toolchain = repository / "target/toolchains" / f"tauri-cli-{TAURI_CLI_VERSION}"
     manifest = toolchain.with_name(f"{toolchain.name}.manifest.json")
     verifier = repository / "scripts/verify_artifact_manifest.py"
-    python = _canonical_python_runtime()
     _validate_input_file(
         verifier,
         "artifact-manifest verifier",
@@ -502,6 +548,7 @@ def verify_pinned_tauri_signer(
             raise UpdaterSigningLaunchError(
                 "held Tauri signer differs from its verified manifest entry"
             )
+        _require_unchanged(python_identity)
         _require_unchanged(verifier_identity)
         _require_unchanged(manifest_identity)
         _require_unchanged(signer_identity, signer_fd)
@@ -643,13 +690,14 @@ def _canonical_python_runtime() -> Path:
         raise UpdaterSigningLaunchError(
             f"canonical Python interpreter is writable by other users: {python}"
         )
-    # The official macOS python.org package used by setup-python installs its
-    # interpreter as root:wheel 0775. Wheel-group write adds no writer outside
-    # the already-trusted root boundary; every other group-write class fails.
+    # Production may use a root:wheel 0775 interpreter because wheel adds no
+    # writer outside the already-trusted root boundary. A non-wheel,
+    # group-writable hosted-validation runtime remains outside this policy.
     if file_mode & stat.S_IWGRP and (identity.owner, identity.group) != (0, 0):
         raise UpdaterSigningLaunchError(
             "canonical Python interpreter group-write permission is not confined "
-            f"to root:wheel: {python}"
+            f"to root:wheel: {python} (mode={file_mode:04o}, "
+            f"uid={identity.owner}, gid={identity.group}, links={identity.links})"
         )
     if identity.owner == 0 and os.access(python, os.W_OK, effective_ids=True):
         raise UpdaterSigningLaunchError(
@@ -859,9 +907,10 @@ def read_fixed_keychain_password(
         _close_descriptors(fds)
 
 
-def launch_updater_signer(
+def _launch_updater_signer(
     archive: Path,
     *,
+    signer_verifier: Callable[[Path], HeldSigner],
     home: Path | None = None,
     password_reader: Callable[[], bytearray] | None = None,
     acl_checker: Callable[[Path], None] = require_no_macos_acl_grants,
@@ -881,7 +930,7 @@ def launch_updater_signer(
     signer_environment: dict[str, str] = {}
     try:
         repository = _repository_from_source()
-        held_signer = verify_pinned_tauri_signer(repository)
+        held_signer = signer_verifier(repository)
         held_archive = _open_held_release_file(archive, "updater archive")
         acl_checker(held_archive.path)
         fixed_home = _home_directory(home)
@@ -988,6 +1037,26 @@ def launch_updater_signer(
             _close_descriptors((held_signer.descriptor,))
         if held_archive is not None:
             _close_descriptors((held_archive.descriptor,))
+
+
+def launch_updater_signer(
+    archive: Path,
+    *,
+    home: Path | None = None,
+    password_reader: Callable[[], bytearray] | None = None,
+    acl_checker: Callable[[Path], None] = require_no_macos_acl_grants,
+    execve: Callable[[str, Sequence[str], dict[str, str]], NoReturn] = os.execve,
+) -> NoReturn:
+    """Run the production signer path with its fixed runtime policy."""
+
+    return _launch_updater_signer(
+        archive,
+        signer_verifier=verify_pinned_tauri_signer,
+        home=home,
+        password_reader=password_reader,
+        acl_checker=acl_checker,
+        execve=execve,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

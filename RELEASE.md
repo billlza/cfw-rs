@@ -12,6 +12,25 @@ releasable Network Extension product.
 > authorize a build or release. Builds 40030 and 40031 remain reserved and have
 > not been consumed by the current source or CI corrections.
 
+The project-wide build-number design rule is
+[`docs/release/candidate-identity-lifecycle.md`](docs/release/candidate-identity-lifecycle.md#build-number-allocation-and-consumption).
+`CFBundleVersion` identifies one application-candidate lineage; it is not a
+source-gate, CI, preflight, packaging, or evidence retry counter. Before any
+allocation change or retirement proposal, the author and reviewer must use the
+decision table in that document and record whether candidate freeze, signing,
+installation, notarization, or another externally observable action may have
+started. Pre-candidate failures use append-only attempt or CI-run identities
+and must not consume another application build.
+
+After consumption, the build remains bound to one immutable candidate. An
+evidence-only retry keeps the same `CFBundleVersion` and records a new evidence
+identity; a product-input, application, entitlement, profile, or
+application/nested-code signature-byte change retires the lineage and requires
+a successor. DMG/updater envelope signatures use package-attempt identities,
+not new application builds. An ambiguous external outcome is quarantined and
+recovered from its original transaction identity; allocating another build is
+not a recovery mechanism.
+
 Android and iOS are not release targets. Physical interoperability may use an
 iOS device as a test peer, but its harness, device identity, transport capture,
 and receipts must be independently source-bound; an Android peer record cannot

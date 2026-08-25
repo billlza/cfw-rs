@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -16,10 +17,27 @@ from typing import Callable, NoReturn, Sequence
 from unittest import mock
 
 from scripts import updater_signing_launcher as launcher
+from scripts.tests import updater_signing_integration_child as integration_child
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INTEGRATION_CHILD = REPO_ROOT / "scripts/tests/updater_signing_integration_child.py"
+UNSIGNED_VALIDATION_ENVIRONMENT_NAMES = (
+    "HOME",
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "PYTHONDONTWRITEBYTECODE",
+    "CFW_UNSIGNED_VALIDATION_PYTHON",
+    "CFW_RELEASE_PYTHON_EXECUTABLE",
+    "CFW_RELEASE_PYTHON_RUNTIME",
+    "CFW_RELEASE_PYTHON_STDLIB",
+    "CFW_RELEASE_POLICY_TOOL_ROOT",
+    "CFW_RELEASE_CARGO_INPUT_ROOT",
+    "CFW_RELEASE_CARGO_VENDOR_ROOT",
+    "CFW_RELEASE_CARGO_LOCK_SHA256",
+    "CFW_RELEASE_CARGO_VENDOR_SHA256",
+)
 
 
 class _ExecveCaptured(RuntimeError):
@@ -152,7 +170,7 @@ class CanonicalPythonRuntimeTests(unittest.TestCase):
         ):
             return launcher._canonical_python_runtime()
 
-    def test_official_root_wheel_group_writable_runtime_is_accepted(self) -> None:
+    def test_root_wheel_group_writable_production_runtime_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime = (
@@ -246,11 +264,11 @@ class CanonicalPythonRuntimeTests(unittest.TestCase):
                     "writable by other users",
                 ),
                 (
-                    "root-staff-group-writable",
+                    "root-admin-group-writable",
                     self._identity(
                         runtime,
                         mode=stat.S_IFREG | 0o775,
-                        group=20,
+                        group=80,
                     ),
                     True,
                     False,
@@ -288,6 +306,189 @@ class CanonicalPythonRuntimeTests(unittest.TestCase):
                             executable_by_user=executable,
                             writable_by_user=writable,
                         )
+
+
+class UnsignedValidationRuntimeTests(unittest.TestCase):
+    def test_closed_selectors_admit_only_the_running_canonical_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "python3.14"
+            runtime.write_bytes(b"fixture runtime")
+            runtime.chmod(0o755)
+            selector = root / "python"
+            selector.symlink_to(runtime.name)
+            environment = {
+                "CFW_UNSIGNED_VALIDATION_PYTHON": str(selector),
+                "CFW_RELEASE_PYTHON_EXECUTABLE": str(runtime),
+            }
+            with (
+                mock.patch.dict(
+                    integration_child.os.environ,
+                    environment,
+                    clear=True,
+                ),
+                mock.patch.object(
+                    integration_child.sys,
+                    "executable",
+                    str(runtime),
+                ),
+                mock.patch.object(
+                    integration_child.runtime_admission,
+                    "require_closed_release_runtime",
+                ) as admission,
+            ):
+                self.assertEqual(
+                    integration_child._closed_unsigned_validation_runtime(),
+                    runtime.resolve(strict=True),
+                )
+            admission.assert_called_once_with(allow_unsigned_validation=True)
+
+    def test_missing_relative_broken_and_mismatched_selectors_fail_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "python3.14"
+            second = root / "python3.14-other"
+            first.write_bytes(b"first runtime")
+            second.write_bytes(b"second runtime")
+            first.chmod(0o755)
+            second.chmod(0o755)
+            cases = {
+                "missing-validation": {
+                    "CFW_RELEASE_PYTHON_EXECUTABLE": str(first),
+                },
+                "missing-selected": {
+                    "CFW_UNSIGNED_VALIDATION_PYTHON": str(first),
+                },
+                "relative-validation": {
+                    "CFW_UNSIGNED_VALIDATION_PYTHON": "python3.14",
+                    "CFW_RELEASE_PYTHON_EXECUTABLE": str(first),
+                },
+                "broken-validation": {
+                    "CFW_UNSIGNED_VALIDATION_PYTHON": str(root / "missing"),
+                    "CFW_RELEASE_PYTHON_EXECUTABLE": str(first),
+                },
+                "selector-mismatch": {
+                    "CFW_UNSIGNED_VALIDATION_PYTHON": str(first),
+                    "CFW_RELEASE_PYTHON_EXECUTABLE": str(second),
+                },
+                "running-mismatch": {
+                    "CFW_UNSIGNED_VALIDATION_PYTHON": str(first),
+                    "CFW_RELEASE_PYTHON_EXECUTABLE": str(first),
+                },
+            }
+            for name, environment in cases.items():
+                with self.subTest(name=name), mock.patch.dict(
+                    integration_child.os.environ,
+                    environment,
+                    clear=True,
+                ), mock.patch.object(
+                    integration_child.sys,
+                    "executable",
+                    str(second) if name == "running-mismatch" else str(first),
+                ), mock.patch.object(
+                    integration_child.runtime_admission,
+                    "require_closed_release_runtime",
+                ) as admission:
+                    with self.assertRaises(launcher.UpdaterSigningLaunchError):
+                        integration_child._closed_unsigned_validation_runtime()
+                    admission.assert_not_called()
+
+    def test_closed_runtime_admission_failure_is_not_downgraded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "python3.14"
+            runtime.write_bytes(b"fixture runtime")
+            runtime.chmod(0o755)
+            environment = {
+                "CFW_UNSIGNED_VALIDATION_PYTHON": str(runtime),
+                "CFW_RELEASE_PYTHON_EXECUTABLE": str(runtime),
+            }
+            with (
+                mock.patch.dict(
+                    integration_child.os.environ,
+                    environment,
+                    clear=True,
+                ),
+                mock.patch.object(
+                    integration_child.sys,
+                    "executable",
+                    str(runtime),
+                ),
+                mock.patch.object(
+                    integration_child.runtime_admission,
+                    "require_closed_release_runtime",
+                    side_effect=integration_child.runtime_admission.ReleasePythonRuntimeError(
+                        "fixture rejection"
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    launcher.UpdaterSigningLaunchError,
+                    "did not pass closed runtime admission",
+                ),
+            ):
+                integration_child._closed_unsigned_validation_runtime()
+
+    def test_role_admission_fails_before_reading_the_password(self) -> None:
+        stdin = mock.Mock()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(integration_child.sys, "stdin", stdin),
+            mock.patch.object(
+                integration_child,
+                "_closed_unsigned_validation_runtime",
+                side_effect=launcher.UpdaterSigningLaunchError(
+                    "fixture admission failure"
+                ),
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = integration_child.main(
+                ["/tmp/home", "/tmp/archive", "unsigned-validation"]
+            )
+        self.assertEqual(result, 1)
+        stdin.buffer.read.assert_not_called()
+        self.assertIn("fixture admission failure", stderr.getvalue())
+
+    def test_password_read_is_deferred_until_the_launcher_requests_it(self) -> None:
+        stdin = mock.Mock()
+        stdin.buffer.read.return_value = b"fixture-password"
+        captured = bytearray()
+
+        def launch_core(
+            _archive: Path,
+            **kwargs: object,
+        ) -> NoReturn:
+            stdin.buffer.read.assert_not_called()
+            password_reader = kwargs["password_reader"]
+            self.assertTrue(callable(password_reader))
+            password = password_reader()
+            self.assertIsInstance(password, bytearray)
+            captured.extend(password)
+            integration_child._wipe(password)
+            raise _ExecveCaptured
+
+        with (
+            mock.patch.object(integration_child.sys, "stdin", stdin),
+            mock.patch.object(
+                integration_child,
+                "_closed_unsigned_validation_runtime",
+                return_value=Path("/fixture/python3.14"),
+            ),
+            mock.patch.object(
+                integration_child.launcher,
+                "_launch_updater_signer",
+                side_effect=launch_core,
+            ),
+            self.assertRaises(_ExecveCaptured),
+        ):
+            integration_child.main(
+                ["/tmp/home", "/tmp/archive", "unsigned-validation"]
+            )
+        stdin.buffer.read.assert_called_once_with(
+            launcher.MAX_PASSWORD_BYTES + 1
+        )
+        self.assertEqual(captured, b"fixture-password")
 
 
 class PinnedSignerVerificationTests(unittest.TestCase):
@@ -379,6 +580,57 @@ class PinnedSignerVerificationTests(unittest.TestCase):
                         kwargs["timeout"], launcher.TOOLCHAIN_VERIFY_TIMEOUT_SECONDS
                     )
 
+    def test_nonwheel_group_writable_prevalidated_runtime_is_accepted(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, signer, _manifest = self._repository(
+                root,
+                b"fixture-signer",
+            )
+            runtime = root / "python3.14"
+            runtime.write_bytes(b"fixture runtime")
+            runtime.chmod(0o755)
+            runtime = runtime.resolve(strict=True)
+            actual_runtime_identity = launcher._lstat_identity(runtime)
+            hosted_runtime_identity = replace(
+                actual_runtime_identity,
+                mode=stat.S_IFREG | 0o775,
+                owner=0,
+                group=80,
+            )
+            real_lstat_identity = launcher._lstat_identity
+            captured_arguments: list[str] = []
+
+            def lstat_identity(path: Path) -> launcher.PathIdentity:
+                if path == runtime:
+                    return hosted_runtime_identity
+                return real_lstat_identity(path)
+
+            def runner(arguments: list[str], **_kwargs: object):
+                captured_arguments.extend(arguments)
+                return _completed(
+                    arguments,
+                    stdout=_verified_signer_entry(signer),
+                )
+
+            with mock.patch.object(
+                launcher,
+                "_lstat_identity",
+                side_effect=lstat_identity,
+            ):
+                held = launcher._verify_pinned_tauri_signer_with_runtime(
+                    repository,
+                    runtime,
+                    runner=runner,
+                )
+            try:
+                self.assertEqual(held.path, signer)
+                self.assertEqual(captured_arguments[0], str(runtime))
+            finally:
+                os.close(held.descriptor)
+
     def test_manifest_entry_mismatch_and_noncanonical_output_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository, signer, _manifest = self._repository(
@@ -462,6 +714,35 @@ class PinnedSignerVerificationTests(unittest.TestCase):
                             stdout=output,
                             mutation=mutate,
                         )
+
+    def test_prevalidated_runtime_drift_is_rejected_after_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, signer, _manifest = self._repository(
+                root,
+                b"fixture-signer",
+            )
+            runtime = root / "python3.14"
+            runtime.write_bytes(b"fixture runtime")
+            runtime.chmod(0o755)
+
+            def runner(arguments: list[str], **_kwargs: object):
+                runtime.write_bytes(b"changed runtime")
+                runtime.chmod(0o755)
+                return _completed(
+                    arguments,
+                    stdout=_verified_signer_entry(signer),
+                )
+
+            with self.assertRaisesRegex(
+                launcher.UpdaterSigningLaunchError,
+                "changed during signing preflight",
+            ):
+                launcher._verify_pinned_tauri_signer_with_runtime(
+                    repository,
+                    runtime.resolve(strict=True),
+                    runner=runner,
+                )
 
 
 class AclPolicyTests(unittest.TestCase):
@@ -620,6 +901,22 @@ class LauncherBoundaryTests(unittest.TestCase):
                     launcher.main(["/tmp/malicious-signer", "/tmp/archive"])
         self.assertEqual(raised.exception.code, 2)
         launch.assert_not_called()
+
+    def test_production_wrapper_keeps_the_fixed_signer_verifier(self) -> None:
+        with mock.patch.dict(
+            launcher.os.environ,
+            {"CFW_UNSIGNED_VALIDATION_PYTHON": "/tmp/untrusted-python"},
+            clear=True,
+        ), mock.patch.object(
+            launcher,
+            "_launch_updater_signer",
+            side_effect=_ExecveCaptured,
+        ) as launch_core, self.assertRaises(_ExecveCaptured):
+            launcher.launch_updater_signer(Path("/tmp/archive"))
+        self.assertIs(
+            launch_core.call_args.kwargs["signer_verifier"],
+            launcher.verify_pinned_tauri_signer,
+        )
 
     def test_all_caller_secret_environment_names_fail_before_key_read(self) -> None:
         for name in sorted(launcher.SECRET_ENVIRONMENT_NAMES):
@@ -897,6 +1194,32 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
             fixture.key.chmod(0o600)
             before = hashlib.sha256(fixture.key.read_bytes()).hexdigest()
             password = password_text.encode("utf-8")
+            role = (
+                "unsigned-validation"
+                if "CFW_UNSIGNED_VALIDATION_PYTHON" in os.environ
+                else "production"
+            )
+            child_environment = {
+                "PATH": launcher.SYSTEM_PATH,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "LC_ALL": "C",
+                "LANG": "C",
+            }
+            if role == "unsigned-validation":
+                missing = [
+                    name
+                    for name in UNSIGNED_VALIDATION_ENVIRONMENT_NAMES
+                    if not os.environ.get(name)
+                ]
+                self.assertEqual(
+                    missing,
+                    [],
+                    "closed unsigned-validation environment is incomplete",
+                )
+                child_environment = {
+                    name: os.environ[name]
+                    for name in UNSIGNED_VALIDATION_ENVIRONMENT_NAMES
+                }
             completed = subprocess.run(
                 [
                     sys.executable,
@@ -908,18 +1231,14 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
                     str(INTEGRATION_CHILD),
                     str(fixture.home),
                     str(fixture.archive),
+                    role,
                 ],
                 input=password,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
                 timeout=launcher.TOOLCHAIN_VERIFY_TIMEOUT_SECONDS + 60,
-                env={
-                    "PATH": launcher.SYSTEM_PATH,
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                    "LC_ALL": "C",
-                    "LANG": "C",
-                },
+                env=child_environment,
             )
             self.assertNotIn(password, completed.stdout)
             self.assertNotIn(password, completed.stderr)

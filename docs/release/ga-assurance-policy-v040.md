@@ -33,6 +33,40 @@ candidate action occurs. Evidence-only changes that do not alter the frozen
 application bytes require the affected evidence to be rerun, not a new
 `CFBundleVersion`.
 
+## Build-number allocation and consumption
+
+The cross-version lifecycle and design-review rules are normative in
+[`candidate-identity-lifecycle.md`](candidate-identity-lifecycle.md#build-number-allocation-and-consumption). In
+particular, `CFBundleVersion` is an application-candidate identity, not a retry
+counter. Source gates, hosted CI, documentation, tests, verifier changes, tool
+bootstrap, and read-only preflights before candidate freeze use attempt or run
+identities and do not consume the selected GA build.
+
+The migrated implementation must durably commit an exclusive
+`candidate-freeze` consumption intent before the first Developer ID signing
+mutation or other externally observable candidate action. If it cannot prove
+whether freeze, signing, installation, submission, or publication began, it
+must record lifecycle state `quarantined_outcome_unknown` and treat the build
+as consumed and quarantined. Existing versioned attempt schemas retain their
+explicit `outcome-unknown` wire value; the migration must map it deliberately.
+It must not assume the number is unused or allocate another number to hide an
+ambiguous side effect.
+
+Consumption binds the number permanently to one candidate lineage; it does not
+mean that every later evidence failure needs a new build. The same exact frozen
+and signed application may be queried, packaged, or re-evidenced under new
+append-only attempt identities. A successor build is required only when
+product inputs, application bytes, entitlements, profiles, or application or
+nested-code signature bytes must change, or when the unique signed lineage
+cannot be safely recovered. DMG/updater envelope signatures and seals use their
+own package-attempt identity and do not by themselves change `CFBundleVersion`.
+
+Candidate provenance and evidence provenance must remain distinct. An
+evidence-only policy/tooling commit may advance only after it reopens the
+candidate source commit and proves the same product-input digest. It records a
+new evidence-policy identity and must never rewrite or relabel the candidate's
+original source identity.
+
 ## GA-required gates
 
 Every GA-required gate is explicit and fail closed. The GA manifest must bind:

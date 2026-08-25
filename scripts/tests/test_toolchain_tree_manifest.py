@@ -781,6 +781,9 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         launcher = (SCRIPTS / "updater_signing_launcher.py").read_text(
             encoding="utf-8"
         )
+        integration_child = (
+            SCRIPTS / "tests/updater_signing_integration_child.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("cargo tauri", updater)
         self.assertNotIn("cargo-tauri", updater)
         self.assertIn("cfw_verify_tauri_toolchain_tree", updater)
@@ -813,7 +816,18 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             launcher,
         )
         self.assertIn('signer_path = toolchain / "bin/cargo-tauri"', launcher)
-        self.assertIn("held_signer = verify_pinned_tauri_signer(repository)", launcher)
+        self.assertIn("_verify_pinned_tauri_signer_with_runtime", launcher)
+        self.assertIn("signer_verifier=verify_pinned_tauri_signer", launcher)
+        self.assertNotIn("CFW_UNSIGNED_VALIDATION_PYTHON", launcher)
+        self.assertIn(
+            "require_closed_release_runtime(",
+            integration_child,
+        )
+        self.assertIn("allow_unsigned_validation=True", integration_child)
+        self.assertIn(
+            "launcher._verify_pinned_tauri_signer_with_runtime(",
+            integration_child,
+        )
 
     def test_managed_tool_consumers_reference_tree_verification(self) -> None:
         expectations = {
@@ -1092,6 +1106,67 @@ LIBBOX_VET_PACKAGES=(".")
         )
         self.assertLess(cargo_workspace_inputs, policy_bootstrap)
         self.assertLess(policy_bootstrap, release_toolchain)
+
+    def test_release_runbook_documents_candidate_identity_lifecycle(self) -> None:
+        runbook = (REPOSITORY / "RELEASE.md").read_text(encoding="utf-8")
+        ga_policy = (
+            REPOSITORY / "docs/release/ga-assurance-policy-v040.md"
+        ).read_text(encoding="utf-8")
+        lifecycle = (
+            REPOSITORY / "docs/release/candidate-identity-lifecycle.md"
+        ).read_text(encoding="utf-8")
+
+        link = (
+            "docs/release/candidate-identity-lifecycle.md"
+            "#build-number-allocation-and-consumption"
+        )
+        self.assertIn(link, runbook)
+        self.assertIn(
+            "(candidate-identity-lifecycle.md"
+            "#build-number-allocation-and-consumption)",
+            ga_policy,
+        )
+        self.assertIn("## Build-number allocation and consumption", ga_policy)
+        for heading in (
+            "## Authority and scope",
+            "## Build-number allocation and consumption",
+            "## Identity vocabulary",
+            "## Lifecycle state machine",
+            "## Consumption boundary",
+            "## Consumption decision table",
+            "## Design and review workflow",
+            "## Required failure examples",
+        ):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, lifecycle)
+        for contract in (
+            "not a credential, authenticator, nonce, signature",
+            "or retry counter",
+            "reserved_unconsumed",
+            "active_ga_unconsumed",
+            "candidate_frozen_consumed",
+            "retired_unbuilt",
+            "retired_consumed",
+            "package_seal_sha256",
+            "product_input_sha256",
+            "candidate_source_identity",
+            "evidence_policy_identity",
+            "candidate-freeze",
+            "quarantined_outcome_unknown",
+            "source-owned, complete, and versioned",
+            "new or unclassified release path fails",
+            "complete unsigned pre-sign application tree",
+            "No nested product or Host Developer ID signing command may run",
+        ):
+            with self.subTest(contract=contract):
+                self.assertIn(contract, lifecycle)
+        self.assertIn(
+            "Pre-candidate failures use append-only attempt or CI-run identities",
+            runbook,
+        )
+        self.assertIn("(ga-assurance-policy-v040.md)", lifecycle)
+        self.assertIn("(build-allocations-v040.json)", lifecycle)
+        self.assertNotRegex(lifecycle, r"\b400[0-9]{2}\b")
 
     def test_ui_gates_do_not_expand_an_empty_array_under_nounset(self) -> None:
         wrapper = (SCRIPTS / "run_release_ci_gate.sh").read_text(encoding="utf-8")

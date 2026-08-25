@@ -21,12 +21,18 @@ if [[ $# -eq 1 && "$1" == "--test" ]]; then
   mode='test'
 elif [[ $# -eq 1 && "$1" == "--audit" ]]; then
   mode='audit'
+elif [[ $# -eq 1 && "$1" == "--verify-dependencies" ]]; then
+  mode='verify-dependencies'
 elif [[ $# -ne 0 ]]; then
-  echo "error: usage: scripts/build_ui_with_pinned_node.sh [--test|--audit]" >&2
+  echo "error: usage: scripts/build_ui_with_pinned_node.sh [--test|--audit|--verify-dependencies]" >&2
   exit 1
 fi
 readonly mode
 
+[[ "$node_root" == /* && "$node_root" != *:* ]] || {
+  echo "error: pinned Node root cannot be represented safely in PATH" >&2
+  exit 1
+}
 cfw_verify_node_toolchain_tree "$repo_root" "$toolchain_root"
 cfw_verify_ui_dependencies_tree "$repo_root" "$toolchain_root" >/dev/null
 if [[ "$("$node_bin" --version)" != "v$NODE_VERSION" ]]; then
@@ -57,6 +63,9 @@ case "$mode" in
     npm_arguments=(audit --audit-level=high)
     npm_offline=false
     npm_audit=true
+    ;;
+  verify-dependencies)
+    npm_arguments=(ls --all --offline)
     ;;
 esac
 readonly npm_offline npm_audit

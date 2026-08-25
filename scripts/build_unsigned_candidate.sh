@@ -34,8 +34,8 @@ source "$repo_root/scripts/ui_dependency_contract.sh"
 source "$repo_root/scripts/tauri_host_skeleton.sh"
 cfw_select_release_apple_toolchain
 toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
-node_bin="$toolchain_root/node-$NODE_VERSION/bin/node"
-npm_bin="$toolchain_root/node-$NODE_VERSION/bin/npm"
+node_root="$toolchain_root/node-$NODE_VERSION"
+node_bin="$node_root/bin/node"
 tauri_bin="$toolchain_root/tauri-cli-$TAURI_CLI_VERSION/bin/cargo-tauri"
 candidate_root="$repo_root/target/candidates/0.4.0/unsigned"
 cargo_target="$candidate_root/cargo"
@@ -65,12 +65,12 @@ cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
   die "tauri-cli $TAURI_CLI_VERSION is required"
 [[ "$("$node_bin" --version)" == "v$NODE_VERSION" ]] ||
   die "pinned Node.js $NODE_VERSION is unavailable"
-[[ -x "$npm_bin" ]] || die "pinned npm is unavailable"
 cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/verify_version_contract.py"
 [[ -d "$repo_root/apps/cfw-tauri-shell/node_modules" ]] ||
   die "UI dependencies are not prepared; run pinned npm ci explicitly"
-"$npm_bin" --prefix "$repo_root/apps/cfw-tauri-shell" ls --all --offline >/dev/null
+/bin/bash -p "$repo_root/scripts/build_ui_with_pinned_node.sh" \
+  --verify-dependencies >/dev/null
 source_identity_start="$(cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/repository_source_identity.py")" ||
   die "cannot capture the release source identity"

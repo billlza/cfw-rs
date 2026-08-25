@@ -552,6 +552,37 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertIn("--validation-python-executable", unsigned)
         self.assertIn("cfw_seal_release_tool_environment unsigned-validation", unsigned)
         self.assertIn("--unsigned-validation-toolchain", unsigned)
+        node_root = unsigned.index('node_root="$toolchain_root/node-$NODE_VERSION"')
+        node_verification = unsigned.index(
+            'cfw_verify_node_toolchain_tree "$repo_root" "$toolchain_root"',
+            node_root,
+        )
+        dependency_verification = unsigned.index(
+            '/bin/bash -p "$repo_root/scripts/build_ui_with_pinned_node.sh"',
+            node_verification,
+        )
+        dependency_verification_mode = unsigned.index(
+            "--verify-dependencies",
+            dependency_verification,
+        )
+        source_identity = unsigned.index(
+            'source_identity_start="$(cfw_run_release_python_script',
+            dependency_verification_mode,
+        )
+        self.assertLess(node_root, node_verification)
+        self.assertLess(node_verification, dependency_verification)
+        self.assertLess(dependency_verification, dependency_verification_mode)
+        self.assertLess(dependency_verification_mode, source_identity)
+        self.assertEqual(
+            unsigned.count(
+                '/bin/bash -p "$repo_root/scripts/build_ui_with_pinned_node.sh"'
+            ),
+            1,
+        )
+        self.assertNotIn("NPM_CONFIG_", unsigned)
+        self.assertNotIn("export PATH=", unsigned)
+        self.assertNotIn('PATH="$PATH:', unsigned)
+        self.assertNotIn('PATH="${PATH}:', unsigned)
         self.assertIn('"${1:-}" == "--unsigned"', native)
         self.assertIn("cfw_seal_release_tool_environment production", publication)
 

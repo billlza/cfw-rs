@@ -23,7 +23,7 @@
   every step to an unchanged Clash for Windows process and network projection.
   One inode-bound outer lock serializes service and bundle mutations, and
   independent fixed journals cover historical validation migrations and the
-  40019→40033 GA installation without overwriting earlier evidence. The
+  40019→40034 GA installation without overwriting earlier evidence. The
   canonical allocation ledger prevents a retired validation build or its
   reserved final companion from being reused by a later source closure. The
   validation-only compatibility island can prove the already-installed 40019
@@ -54,7 +54,15 @@
   output. Build 40032 then completed candidate freeze and signed five nested
   products in one private attempt, but a split verifier path contract rejected
   the transaction root before Host signing and canonical output. Build 40032
-  is also retired; build 40033 is the only active GA successor.
+  is also retired. Build 40033 then completed candidate freeze and signed the
+  same five nested product roles, but the private helper's process-wide umask
+  made `codesign` create non-distributable `0600` resource envelopes. The
+  verifier rejected those bytes before Host signing or canonical output, so
+  build 40033 is retired as well. Bundle-writing codesign now uses one scoped
+  distribution-mode subprocess while the attempt remains private, and a
+  signing failure or ambiguous signing output can no longer allocate a fresh
+  timestamped signature attempt under the same frozen build. Build 40034 is
+  the only active GA successor.
 - Authenticate nested release-worktree managed caches through bounded,
   descriptor-relative Git administrative control files plus an explicit
   empty-target lifecycle receipt before excluding them from the path/name-only

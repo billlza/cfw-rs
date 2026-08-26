@@ -262,6 +262,23 @@ class SignedCandidateWiringTests(unittest.TestCase):
         self.assertIn("\numask 022\n", source)
         self.assertNotIn("\numask 077\n", source)
 
+    def test_signing_helper_scopes_distribution_umask_to_codesign(self) -> None:
+        helper = (REPOSITORY / "scripts/run_ga_signing_attempt.sh").read_text(
+            encoding="utf-8"
+        )
+        boundary = (REPOSITORY / "scripts/release_bundle_codesign.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(helper.count("\numask 077\n"), 1)
+        self.assertNotIn("\numask 022\n", helper)
+        self.assertEqual(
+            helper.count("cfw_codesign_distribution_bundle --force"), 6
+        )
+        self.assertNotIn("/usr/bin/codesign --force", helper)
+        self.assertEqual(boundary.count("\n  umask 022\n"), 1)
+        self.assertEqual(boundary.count('exec /usr/bin/codesign "$@"'), 1)
+
     def isolated_runner_command(self, script: Path, *arguments: str) -> list[str]:
         return [
             "/bin/bash",
@@ -314,7 +331,7 @@ class SignedCandidateWiringTests(unittest.TestCase):
         freeze = builder.index("scripts/candidate_freeze.py\" freeze", generation)
         transaction = builder.index("scripts/signing_attempt_transaction.py", freeze)
         final_signing = helper.index(
-            "/usr/bin/codesign --force --options runtime --timestamp \\\n"
+            "cfw_codesign_distribution_bundle --force --options runtime --timestamp \\\n"
             '  --entitlements "$host_release_xcent"',
         )
 

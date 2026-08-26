@@ -18,7 +18,7 @@ class SigningAttemptFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
-        self.root = self.repository / "target/candidates/0.4.0/ga/40033"
+        self.root = self.repository / "target/candidates/0.4.0/ga/40034"
         self.root.mkdir(parents=True, mode=0o700)
         self.root.chmod(0o700)
         intent = self.root / "candidate-freeze/intent.json"
@@ -30,7 +30,7 @@ class SigningAttemptFixture:
             intent_path=intent,
             intent_sha256="a" * 64,
             product_version="0.4.0",
-            build_number="40033",
+            build_number="40034",
             recovered=False,
         )
         self.bindings = transaction.FrozenSigningBindings(
@@ -358,7 +358,7 @@ class SigningAttemptTransactionTests(unittest.TestCase):
                 )
         blocked_runner.assert_not_called()
 
-    def test_helper_failure_is_append_only_and_resume_uses_next_attempt(self) -> None:
+    def test_helper_failure_is_append_only_and_requires_candidate_retirement(self) -> None:
         def fail_after_partial_output(work: Path, _sha1: str, _sha256: str) -> int:
             marker = work / "partial-signed-product"
             marker.write_bytes(b"private partial signature output")
@@ -396,9 +396,12 @@ class SigningAttemptTransactionTests(unittest.TestCase):
         self.assertEqual(marker.read_bytes(), marker_bytes)
         self.assertEqual(marker.stat().st_mode & 0o777, marker_mode)
 
-        self.fixture.run(resume=True)
-        second = self.fixture.load("00000002")
-        self.assertEqual(second.state, "published")
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "allocate a successor build"
+        ) as retirement:
+            self.fixture.run(resume=True)
+        self.assertEqual(retirement.exception.code, "candidate_retirement_required")
+        self.assertEqual(os.listdir(self.fixture.attempts()), ["00000001"])
         self.assertEqual((first.root / transaction.INTENT_NAME).read_bytes(), first_intent)
         self.assertEqual(
             tuple(
@@ -410,7 +413,7 @@ class SigningAttemptTransactionTests(unittest.TestCase):
         self.assertEqual(marker.read_bytes(), marker_bytes)
         self.assertEqual(marker.stat().st_mode & 0o777, marker_mode)
 
-    def test_process_crash_is_recorded_outcome_unknown_before_retry(self) -> None:
+    def test_process_crash_requires_candidate_retirement_without_retry(self) -> None:
         def crash(_work: Path, _sha1: str, _sha256: str) -> int:
             raise KeyboardInterrupt
 
@@ -418,15 +421,301 @@ class SigningAttemptTransactionTests(unittest.TestCase):
             self.fixture.run(resume=False, helper=crash)
         self.assertEqual(self.fixture.load("00000001").state, "signing")
 
-        self.fixture.run(resume=True)
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "allocate a successor build"
+        ) as retirement:
+            self.fixture.run(resume=True)
         first = self.fixture.load("00000001")
-        second = self.fixture.load("00000002")
+        self.assertEqual(retirement.exception.code, "candidate_retirement_required")
         self.assertEqual(first.state, "outcome_unknown")
         self.assertEqual(
             first.events[-1]["failure_code"],
-            "interrupted_before_verified_output",
+            transaction.INTERRUPTED_DURING_SIGNING,
+        )
+        self.assertEqual(os.listdir(self.fixture.attempts()), ["00000001"])
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "allocate a successor build"
+        ):
+            self.fixture.run(resume=True)
+        self.assertEqual(os.listdir(self.fixture.attempts()), ["00000001"])
+
+    def test_publish_ready_before_verified_is_permanently_retired(self) -> None:
+        original_append = transaction._append_event
+
+        def crash_before_verified_event(
+            repository: Path,
+            attempt: transaction.Attempt,
+            state: str,
+            **keywords: object,
+        ) -> transaction.Attempt:
+            if state == "verified":
+                raise KeyboardInterrupt
+            return original_append(repository, attempt, state, **keywords)
+
+        with patch.object(
+            transaction,
+            "_append_event",
+            side_effect=crash_before_verified_event,
+        ), self.assertRaises(KeyboardInterrupt):
+            self.fixture.run(resume=False)
+
+        first = self.fixture.load("00000001")
+        self.assertEqual(first.state, "signing")
+        self.assertFalse(first.work.exists())
+        self.assertTrue(first.publish_ready.is_dir())
+        signed_app = (
+            first.publish_ready
+            / transaction.SIGNED_APP_WITHIN_OUTPUT
+            / "fixture.bin"
+        )
+        signed_native = first.publish_ready / "signed-native-products/fixture.bin"
+        receipt = first.publish_ready / transaction.TRANSFORMATION_RECEIPT_NAME
+        ready_bytes = (
+            signed_app.read_bytes(),
+            signed_native.read_bytes(),
+            receipt.read_bytes(),
+        )
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "allocate a successor build"
+        ) as retirement:
+            self.fixture.run(resume=True)
+        self.assertEqual(retirement.exception.code, "candidate_retirement_required")
+        first = self.fixture.load("00000001")
+        self.assertEqual(first.state, "outcome_unknown")
+        self.assertEqual(
+            first.events[-1]["failure_code"],
+            transaction.INTERRUPTED_DURING_SIGNING,
+        )
+        event_bytes = tuple(
+            (first.root / f"event-{number:08d}.json").read_bytes()
+            for number in range(1, len(first.events) + 1)
+        )
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError,
+            "only a publication-bound outcome may continue",
+        ):
+            transaction._append_event(
+                self.fixture.repository,
+                first,
+                "publishing",
+                clock=self.fixture.clock,
+            )
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "allocate a successor build"
+        ):
+            self.fixture.run(resume=True)
+        self.assertEqual(os.listdir(self.fixture.attempts()), ["00000001"])
+        self.assertFalse((self.fixture.root / "signing-output").exists())
+        self.assertEqual(
+            (
+                signed_app.read_bytes(),
+                signed_native.read_bytes(),
+                receipt.read_bytes(),
+            ),
+            ready_bytes,
+        )
+        reloaded = self.fixture.load("00000001")
+        self.assertEqual(
+            tuple(
+                (reloaded.root / f"event-{number:08d}.json").read_bytes()
+                for number in range(1, len(reloaded.events) + 1)
+            ),
+            event_bytes,
+        )
+
+        canonical = self.fixture.root / "signing-output"
+        reloaded.publish_ready.rename(canonical)
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "allocate a successor build"
+        ):
+            self.fixture.run(resume=True)
+        self.assertTrue(canonical.is_dir())
+        self.assertEqual(self.fixture.load("00000001").state, "outcome_unknown")
+        self.assertEqual(
+            tuple(
+                (reloaded.root / f"event-{number:08d}.json").read_bytes()
+                for number in range(1, len(reloaded.events) + 1)
+            ),
+            event_bytes,
+        )
+
+    def test_interruption_before_signing_closes_attempt_and_retries_safely(self) -> None:
+        original_append = transaction._append_event
+
+        def interrupt_before_signing(
+            repository: Path,
+            attempt: transaction.Attempt,
+            state: str,
+            **keywords: object,
+        ) -> transaction.Attempt:
+            if state == "signing":
+                raise KeyboardInterrupt
+            return original_append(repository, attempt, state, **keywords)
+
+        with patch.object(
+            transaction, "_append_event", side_effect=interrupt_before_signing
+        ), self.assertRaises(KeyboardInterrupt):
+            self.fixture.run(resume=False)
+
+        first = self.fixture.load("00000001")
+        self.assertEqual(first.state, "prepared")
+        self.assertEqual(os.listdir(first.work), [])
+
+        self.fixture.run(resume=True)
+        first = self.fixture.load("00000001")
+        second = self.fixture.load("00000002")
+        self.assertEqual(first.state, "failed")
+        self.assertEqual(
+            first.events[-1]["failure_code"],
+            transaction.ABANDONED_BEFORE_SIGNING,
         )
         self.assertEqual(second.state, "published")
+
+    def test_pre_sign_retry_accepts_durable_prepared_attempt_without_work(self) -> None:
+        original_append = transaction._append_event
+
+        def interrupt_before_signing(
+            repository: Path,
+            attempt: transaction.Attempt,
+            state: str,
+            **keywords: object,
+        ) -> transaction.Attempt:
+            if state == "signing":
+                raise KeyboardInterrupt
+            return original_append(repository, attempt, state, **keywords)
+
+        with patch.object(
+            transaction, "_append_event", side_effect=interrupt_before_signing
+        ), self.assertRaises(KeyboardInterrupt):
+            self.fixture.run(resume=False)
+
+        first = self.fixture.load("00000001")
+        first.work.rmdir()
+        self.assertFalse(os.path.lexists(first.work))
+
+        self.fixture.run(resume=True)
+        self.assertEqual(self.fixture.load("00000001").state, "failed")
+        self.assertEqual(self.fixture.load("00000002").state, "published")
+
+    def test_pre_sign_retry_rejects_unsafe_work_namespace(self) -> None:
+        original_append = transaction._append_event
+
+        for mutation in ("symlink", "wrong-mode", "regular-file"):
+            with self.subTest(mutation=mutation):
+                fixture = SigningAttemptFixture()
+                try:
+                    def interrupt_before_signing(
+                        repository: Path,
+                        attempt: transaction.Attempt,
+                        state: str,
+                        **keywords: object,
+                    ) -> transaction.Attempt:
+                        if state == "signing":
+                            raise KeyboardInterrupt
+                        return original_append(
+                            repository, attempt, state, **keywords
+                        )
+
+                    with patch.object(
+                        transaction,
+                        "_append_event",
+                        side_effect=interrupt_before_signing,
+                    ), self.assertRaises(KeyboardInterrupt):
+                        fixture.run(resume=False)
+
+                    first = fixture.load("00000001")
+                    if mutation == "symlink":
+                        outside = fixture.repository / "outside-empty"
+                        outside.mkdir(mode=0o755)
+                        first.work.rmdir()
+                        first.work.symlink_to(outside, target_is_directory=True)
+                    elif mutation == "wrong-mode":
+                        first.work.chmod(0o755)
+                    else:
+                        first.work.rmdir()
+                        first.work.write_bytes(b"not a directory")
+
+                    event_bytes = (
+                        first.root / "event-00000001.json"
+                    ).read_bytes()
+
+                    def unexpected_helper(
+                        _work: Path, _sha1: str, _sha256: str
+                    ) -> int:
+                        raise AssertionError("unsafe pre-sign retry reached codesign")
+
+                    with self.assertRaisesRegex(
+                        transaction.SigningAttemptError,
+                        "exact private work stage",
+                    ):
+                        fixture.run(resume=True, helper=unexpected_helper)
+                    self.assertEqual(
+                        os.listdir(fixture.attempts()), ["00000001"]
+                    )
+                    self.assertEqual(
+                        (first.root / "event-00000001.json").read_bytes(),
+                        event_bytes,
+                    )
+                    self.assertFalse(
+                        (fixture.root / "signing-output").exists()
+                    )
+                finally:
+                    fixture.cleanup()
+
+    def test_abandoned_pre_sign_retry_revalidates_work_namespace(self) -> None:
+        original_append = transaction._append_event
+
+        def interrupt_before_signing(
+            repository: Path,
+            attempt: transaction.Attempt,
+            state: str,
+            **keywords: object,
+        ) -> transaction.Attempt:
+            if state == "signing":
+                raise KeyboardInterrupt
+            return original_append(repository, attempt, state, **keywords)
+
+        with patch.object(
+            transaction, "_append_event", side_effect=interrupt_before_signing
+        ), self.assertRaises(KeyboardInterrupt):
+            self.fixture.run(resume=False)
+
+        with patch.object(
+            transaction, "_create_attempt", side_effect=KeyboardInterrupt
+        ), self.assertRaises(KeyboardInterrupt):
+            self.fixture.run(resume=True)
+        first = self.fixture.load("00000001")
+        self.assertEqual(first.state, "failed")
+        self.assertEqual(
+            first.events[-1]["failure_code"],
+            transaction.ABANDONED_BEFORE_SIGNING,
+        )
+        outside = self.fixture.repository / "outside-empty"
+        outside.mkdir(mode=0o755)
+        first.work.rmdir()
+        first.work.symlink_to(outside, target_is_directory=True)
+        event_bytes = tuple(
+            (first.root / f"event-{number:08d}.json").read_bytes()
+            for number in range(1, len(first.events) + 1)
+        )
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "exact private work stage"
+        ):
+            self.fixture.run(resume=True)
+        self.assertEqual(os.listdir(self.fixture.attempts()), ["00000001"])
+        reloaded = self.fixture.load("00000001")
+        self.assertEqual(
+            tuple(
+                (reloaded.root / f"event-{number:08d}.json").read_bytes()
+                for number in range(1, len(reloaded.events) + 1)
+            ),
+            event_bytes,
+        )
 
     def test_rename_reply_loss_reconciles_existing_canonical_output(self) -> None:
         def rename_then_lose_reply(source: Path, destination: Path) -> None:

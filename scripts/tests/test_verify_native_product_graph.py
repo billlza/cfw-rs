@@ -13,10 +13,13 @@ from scripts.verify_native_product_graph import (
     BRIDGE_EMBED,
     DAEMON_EMBED,
     DAEMON_PLIST_EMBED,
+    DISTRIBUTION_CODESIGN_COMMAND,
+    DISTRIBUTION_CODESIGN_FUNCTION,
     EXTENSION_EMBED,
     MACH_SERVICES,
     NativeProductGraphError,
     verify_daemon_plist,
+    verify_distribution_codesign_boundary,
     verify_generated_project,
     verify_repository,
     verify_signing_order as _verify_signing_order,
@@ -91,9 +94,12 @@ _SIGNING_SCRIPT = "\n".join(
         "readonly authority_designated_requirement="
         + repr(AUTHORITY_DESIGNATED_REQUIREMENT),
         AUTHORITY_SIGNING_CRITICAL_BLOCK,
-        '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$packet_extension"',
-        '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$tombstone"',
-        '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$staged_app"',
+        f'{DISTRIBUTION_CODESIGN_COMMAND} --force --sign '
+        '"$CFW_SIGNING_CERTIFICATE_SHA1" "$packet_extension"',
+        f'{DISTRIBUTION_CODESIGN_COMMAND} --force --sign '
+        '"$CFW_SIGNING_CERTIFICATE_SHA1" "$tombstone"',
+        f'{DISTRIBUTION_CODESIGN_COMMAND} --force --sign '
+        '"$CFW_SIGNING_CERTIFICATE_SHA1" "$staged_app"',
     ]
 )
 _SIGNING_CRITICAL_PREFIX_SHA256 = hashlib.sha256(
@@ -322,6 +328,22 @@ class SigningOrderTests(unittest.TestCase):
         manifest["outer"]["signedLast"] = False
         with self.assertRaisesRegex(NativeProductGraphError, "signed last"):
             verify_signing_order(manifest, _valid_embedding(), _SIGNING_SCRIPT)
+
+    def test_direct_writing_codesign_bypasses_distribution_boundary(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            f"{DISTRIBUTION_CODESIGN_COMMAND} --force",
+            "/usr/bin/codesign --force",
+            1,
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "bypasses"):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+    def test_every_signing_mutation_must_use_distribution_boundary(self) -> None:
+        script = _SIGNING_SCRIPT.replace(
+            f"{DISTRIBUTION_CODESIGN_COMMAND} --force", "/usr/bin/false", 1
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "every signing mutation"):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), script)
 
     def test_missing_nested_component_fails_closed(self) -> None:
         manifest = copy.deepcopy(_valid_manifest())
@@ -639,7 +661,7 @@ class SigningOrderTests(unittest.TestCase):
     ) -> None:
         resign = "\n".join(
             (
-                "/usr/bin/codesign --force --options runtime --timestamp \\",
+                f"{DISTRIBUTION_CODESIGN_COMMAND} --force --options runtime --timestamp \\",
                 "  -r='designated => true' \\",
                 '  -s "$CFW_SIGNING_CERTIFICATE_SHA1" "$authority"',
             )
@@ -650,9 +672,43 @@ class SigningOrderTests(unittest.TestCase):
             1,
         )
         with self.assertRaisesRegex(
-            NativeProductGraphError, "critical-suffix identity differs"
+            NativeProductGraphError, "every signing mutation"
         ):
             verify_signing_order(_valid_manifest(), _valid_embedding(), script)
+
+
+class DistributionCodesignBoundaryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.boundary = "\n".join(
+            (
+                "#!/bin/bash",
+                DISTRIBUTION_CODESIGN_FUNCTION,
+            )
+        )
+        self.helper = "\n".join(
+            (
+                "# shellcheck source=scripts/release_bundle_codesign.sh",
+                'source "$repo_root/scripts/release_bundle_codesign.sh"',
+                _SIGNING_SCRIPT,
+            )
+        )
+
+    def test_scoped_distribution_codesign_boundary_passes(self) -> None:
+        verify_distribution_codesign_boundary(self.boundary, self.helper)
+
+    def test_distribution_umask_cannot_be_made_private(self) -> None:
+        with self.assertRaisesRegex(NativeProductGraphError, "scoped function"):
+            verify_distribution_codesign_boundary(
+                self.boundary.replace("umask 022", "umask 077", 1),
+                self.helper,
+            )
+
+    def test_signing_helper_cannot_skip_boundary_source(self) -> None:
+        with self.assertRaisesRegex(NativeProductGraphError, "does not source"):
+            verify_distribution_codesign_boundary(
+                self.boundary,
+                self.helper.replace("source ", ": # removed ", 1),
+            )
 
 
 class SigningTransactionBoundaryTests(unittest.TestCase):

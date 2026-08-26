@@ -169,7 +169,7 @@ class PhysicalCaptureCollectorTests(unittest.TestCase):
         )
 
     @staticmethod
-    def release_context(run_id: str = "run-40033-macos15") -> dict[str, object]:
+    def release_context(run_id: str = "run-40034-macos15") -> dict[str, object]:
         def digest(value: str) -> str:
             return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -181,7 +181,7 @@ class PhysicalCaptureCollectorTests(unittest.TestCase):
             ).hexdigest(),
             "candidate": {
                 "version": "0.4.0",
-                "build_number": "40033",
+                "build_number": "40034",
                 "app_manifest_sha256": digest("app-manifest"),
                 "signed_app_tree_sha256": digest("signed-app-tree"),
                 "artifact_hash_manifest_sha256": digest("artifact-manifest"),

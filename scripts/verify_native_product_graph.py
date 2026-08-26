@@ -66,12 +66,21 @@ AUTHORITY_DESIGNATED_REQUIREMENT = (
     'leaf[field.1.2.840.113635.100.6.1.13] exists and certificate '
     'leaf[subject.OU] = "YKUPL7Z869"'
 )
+DISTRIBUTION_CODESIGN_COMMAND = "cfw_codesign_distribution_bundle"
+DISTRIBUTION_CODESIGN_FUNCTION = "\n".join(
+    (
+        "cfw_codesign_distribution_bundle() (",
+        "  umask 022",
+        '  exec /usr/bin/codesign "$@"',
+        ")",
+    )
+)
 AUTHORITY_SIGNING_CRITICAL_BLOCK = "\n".join(
     (
-        "/usr/bin/codesign --force --options runtime --timestamp \\",
+        f"{DISTRIBUTION_CODESIGN_COMMAND} --force --options runtime --timestamp \\",
         "  --identifier com.bill.clashformac.native-bridge \\",
         '  --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$bridge"',
-        "/usr/bin/codesign --force --options runtime --timestamp \\",
+        f"{DISTRIBUTION_CODESIGN_COMMAND} --force --options runtime --timestamp \\",
         "  --identifier com.bill.clashformac.global-authority \\",
         '  -r="$authority_designated_requirement" \\',
         '  --entitlements "$authority_entitlements" \\',
@@ -100,7 +109,7 @@ AUTHORITY_SIGNING_CRITICAL_BLOCK = "\n".join(
         '  die "cannot remove the Global Authority requirement verification files"',
         '/bin/rmdir "$authority_requirement_root" >/dev/null 2>&1 ||',
         '  die "cannot remove the private Global Authority requirement verification root"',
-        "/usr/bin/codesign --force --options runtime --timestamp \\",
+        f"{DISTRIBUTION_CODESIGN_COMMAND} --force --options runtime --timestamp \\",
         '  --entitlements "$proxy_release_xcent" \\',
         '  --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$proxy_app"',
     )
@@ -111,10 +120,10 @@ AUTHORITY_SIGNING_CRITICAL_BLOCK = "\n".join(
 # not an authentication mechanism and do not defend against the repository
 # owner. The release-freeze source digest independently binds the raw file.
 AUTHORITY_SIGNING_PREFIX_SHA256 = (
-    "b39b2c4b8783ea73d8731be11e5ca559f11966a44f60d3cac8ae780414e92198"
+    "41b77b94dda863c9f71da5312519fc14aee94f607d1ec2bc4fefce4f3ec3bc6c"
 )
 AUTHORITY_SIGNING_SUFFIX_SHA256 = (
-    "f276ca60b23f5560576ec7fae9d624b07a79c440e339b5eab64fe2ebb4968d7c"
+    "c053d706c210107f1f8266d569b4d1b25622da0d67573af225796cb5ae5ac017"
 )
 DEPLOYMENT_TARGET = "15.0"
 
@@ -167,6 +176,31 @@ def _verify_top_level_straight_line_shell_block(
         raise NativeProductGraphError(
             "GA signing helper critical-suffix identity differs from the "
             "reviewed straight-line release policy"
+        )
+
+
+def verify_distribution_codesign_boundary(
+    boundary_source: str, signing_helper: str
+) -> None:
+    source_fragment = (
+        "# shellcheck source=scripts/release_bundle_codesign.sh\n"
+        'source "$repo_root/scripts/release_bundle_codesign.sh"'
+    )
+    if signing_helper.count(source_fragment) != 1:
+        raise NativeProductGraphError(
+            "GA signing helper does not source the fixed distribution codesign boundary"
+        )
+    if boundary_source.count(DISTRIBUTION_CODESIGN_FUNCTION) != 1:
+        raise NativeProductGraphError(
+            "distribution codesign boundary does not contain one exact scoped function"
+        )
+    if boundary_source.count("/usr/bin/codesign") != 1:
+        raise NativeProductGraphError(
+            "distribution codesign boundary does not use one fixed Apple codesign path"
+        )
+    if boundary_source.count("umask 022") != 1 or "eval" in boundary_source:
+        raise NativeProductGraphError(
+            "distribution codesign boundary does not have one closed distribution umask"
         )
 
 
@@ -886,6 +920,16 @@ def verify_signing_order(
     # legacy tombstone before applying the sole outer-app signature.  Bind the
     # frozen certificate fingerprint rather than a mutable identity name.
     signing_selector = '--sign "$CFW_SIGNING_CERTIFICATE_SHA1"'
+    writing_codesign = f"{DISTRIBUTION_CODESIGN_COMMAND} --force"
+    if "/usr/bin/codesign --force" in signing_script:
+        raise NativeProductGraphError(
+            "GA signing helper bypasses the scoped distribution codesign boundary"
+        )
+    if signing_script.count(writing_codesign) != len(nested) + 1:
+        raise NativeProductGraphError(
+            "GA signing helper must route every signing mutation through the "
+            "distribution codesign boundary"
+        )
     if '"$MACOS_SIGN_IDENTITY"' in signing_script:
         raise NativeProductGraphError(
             "GA signing helper must not use a mutable signing identity name"
@@ -1088,6 +1132,7 @@ def verify_repository(root: Path) -> None:
     candidate_builder = read_text(root, "scripts/build_signed_candidate.sh")
     signing_transaction = read_text(root, "scripts/signing_attempt_transaction.py")
     signing_helper = read_text(root, "scripts/run_ga_signing_attempt.sh")
+    codesign_boundary = read_text(root, "scripts/release_bundle_codesign.sh")
     authority_contract = read_text(
         root,
         "native/macos/Sources/CFWSharedProtocol/GlobalAuthorityConnectionContract.swift",
@@ -1145,6 +1190,7 @@ def verify_repository(root: Path) -> None:
     verify_entitlements(root)
 
     manifest = read_json(root, "native/macos/Config/signing-order.json")
+    verify_distribution_codesign_boundary(codesign_boundary, signing_helper)
     verify_signing_order(
         manifest,
         files,

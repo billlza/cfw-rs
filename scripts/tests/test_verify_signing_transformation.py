@@ -25,7 +25,7 @@ class SigningTransformationFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.root = (
-            self.repository / "target/candidates/0.4.0/ga/40033"
+            self.repository / "target/candidates/0.4.0/ga/40034"
         )
         self.pre_sign_app = self.root / transformation.PRE_SIGN_APP_RELATIVE
         self.signing_output = (
@@ -90,7 +90,7 @@ class SigningTransformationFixture:
     def _write_pre_sign_manifest(self) -> None:
         metadata = {
             "artifactKind": "pre-sign-application-v1",
-            "buildNumber": "40033",
+            "buildNumber": "40034",
             "version": "0.4.0",
         }
         value = build_manifest(
@@ -138,7 +138,7 @@ class SigningTransformationFixture:
 
     def _write_intent(self) -> None:
         value = {
-            "build_number": "40033",
+            "build_number": "40034",
             "consumption_state": "candidate_frozen_consumed",
             "document": "cfm-candidate-freeze-intent-v3",
             "pre_sign_app_tree_sha256": "a" * 64,
@@ -157,7 +157,7 @@ class SigningTransformationFixture:
             intent_path=self.intent_path,
             intent_sha256=hashlib.sha256(self.intent_path.read_bytes()).hexdigest(),
             product_version="0.4.0",
-            build_number="40033",
+            build_number="40034",
             recovered=False,
         )
 
@@ -324,7 +324,7 @@ class SigningTransformationTests(unittest.TestCase):
     def test_pre_sign_manifest_drift_is_rejected(self) -> None:
         manifest_path = self.fixture.root / transformation.PRE_SIGN_MANIFEST_RELATIVE
         original_manifest = manifest_path.read_bytes()
-        for build_number in ("40030", "40031", "40032"):
+        for build_number in ("40030", "40031", "40032", "40033"):
             manifest = json.loads(original_manifest)
             manifest["metadata"]["buildNumber"] = build_number
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")

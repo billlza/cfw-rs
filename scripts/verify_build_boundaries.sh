@@ -45,6 +45,14 @@ for release_helper in \
   }
 done
 
+release_library="scripts/release_bundle_codesign.sh"
+readonly release_library
+[[ -f "$release_library" && ! -L "$release_library" && \
+  -r "$release_library" && ! -x "$release_library" ]] || {
+  echo "error: release library is not one source-only regular file: $release_library" >&2
+  exit 1
+}
+
 for release_cli in \
   scripts/release_artifact_set_cli.py \
   scripts/ga_runtime_acceptance_cli.py; do
@@ -191,7 +199,7 @@ for contract in \
   'scripts/signing_attempt_transaction.py:verify_attempt_receipt' \
   'scripts/signing_attempt_transaction.py:outcome_unknown' \
   'scripts/run_ga_signing_attempt.sh:--transaction-owned' \
-  'scripts/run_ga_signing_attempt.sh:target/candidates/0.4.0/ga/40033' \
+  'scripts/run_ga_signing_attempt.sh:target/candidates/0.4.0/ga/40034' \
   'scripts/verify_signing_transformation.py:cfm-ga-signing-transformation-v1' \
   'scripts/verify_signing_transformation.py:cfm-candidate-freeze-intent-v3' \
   'scripts/notarization_transaction.py:signing_transformation_receipt_sha256' \

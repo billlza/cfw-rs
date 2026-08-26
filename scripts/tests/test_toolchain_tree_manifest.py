@@ -780,6 +780,9 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         helper = (SCRIPTS / "run_ga_signing_attempt.sh").read_text(
             encoding="utf-8"
         )
+        codesign_boundary = (SCRIPTS / "release_bundle_codesign.sh").read_text(
+            encoding="utf-8"
+        )
         signing_input_copy = helper.index(
             '/usr/bin/ditto --noqtn "$pre_sign_app" "$staged_app"',
         )
@@ -874,6 +877,16 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             helper[release_app_verification:],
         )
         self.assertNotIn("/usr/bin/codesign --force", signed)
+        self.assertNotIn("/usr/bin/codesign --force", helper)
+        self.assertEqual(
+            helper.count("cfw_codesign_distribution_bundle --force"), 6
+        )
+        self.assertEqual(helper.count("\numask 077\n"), 1)
+        self.assertNotIn("\numask 022\n", helper)
+        self.assertEqual(codesign_boundary.count("\n  umask 022\n"), 1)
+        self.assertEqual(
+            codesign_boundary.count('exec /usr/bin/codesign "$@"'), 1
+        )
         self.assertNotIn('--sign "$MACOS_SIGN_IDENTITY"', helper)
         self.assertEqual(
             helper.count('--sign "$CFW_SIGNING_CERTIFICATE_SHA1"'),

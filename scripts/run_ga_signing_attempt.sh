@@ -10,6 +10,8 @@ repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/release_tool_environment.sh
 source "$repo_root/scripts/release_tool_environment.sh"
+# shellcheck source=scripts/release_bundle_codesign.sh
+source "$repo_root/scripts/release_bundle_codesign.sh"
 cfw_seal_release_tool_environment production
 
 die() {
@@ -27,7 +29,7 @@ die() {
 [[ "$CFW_SIGNING_CERTIFICATE_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
   die "frozen signing certificate SHA-256 is malformed"
 
-readonly frozen_root="$repo_root/target/candidates/0.4.0/ga/40033"
+readonly frozen_root="$repo_root/target/candidates/0.4.0/ga/40034"
 readonly attempt_work="$CFW_SIGNING_ATTEMPT_WORK"
 [[ -d "$attempt_work" && ! -L "$attempt_work" ]] ||
   die "transaction work root is not a real directory"
@@ -67,10 +69,10 @@ bridge="$staged_app/Contents/Frameworks/CFWNativeBridge.framework"
 authority="$staged_app/Contents/Library/HelperTools/CFWGlobalAuthority"
 tombstone="$staged_app/Contents/Library/HelperTools/cfw-helper-tombstone"
 readonly authority_designated_requirement='designated => anchor apple generic and identifier "com.bill.clashformac.global-authority" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "YKUPL7Z869"'
-/usr/bin/codesign --force --options runtime --timestamp \
+cfw_codesign_distribution_bundle --force --options runtime --timestamp \
   --identifier com.bill.clashformac.native-bridge \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$bridge"
-/usr/bin/codesign --force --options runtime --timestamp \
+cfw_codesign_distribution_bundle --force --options runtime --timestamp \
   --identifier com.bill.clashformac.global-authority \
   -r="$authority_designated_requirement" \
   --entitlements "$authority_entitlements" \
@@ -98,13 +100,13 @@ readonly authority_requirement_actual="$authority_requirement_root/actual.csreq"
   die "cannot remove the Global Authority requirement verification files"
 /bin/rmdir "$authority_requirement_root" >/dev/null 2>&1 ||
   die "cannot remove the private Global Authority requirement verification root"
-/usr/bin/codesign --force --options runtime --timestamp \
+cfw_codesign_distribution_bundle --force --options runtime --timestamp \
   --entitlements "$proxy_release_xcent" \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$proxy_app"
-/usr/bin/codesign --force --options runtime --timestamp \
+cfw_codesign_distribution_bundle --force --options runtime --timestamp \
   --entitlements "$packet_release_xcent" \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$packet_extension"
-/usr/bin/codesign --force --options runtime --timestamp \
+cfw_codesign_distribution_bundle --force --options runtime --timestamp \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$tombstone"
 for nested in "$bridge" "$authority" "$proxy_app" "$packet_extension" "$tombstone"; do
   /usr/bin/codesign --verify --strict --verbose=4 "$nested"
@@ -138,14 +140,14 @@ for product in \
     "$repo_root/scripts/verify_artifact_manifest.py" \
     "$signed_native_products/$product" \
     "$signed_native_products/$product.manifest.json" \
-    --metadata "buildNumber=40033" \
+    --metadata "buildNumber=40034" \
     --metadata "signingMode=developer-id"
 done
 
 "$repo_root/scripts/verify_candidate_bundle.sh" \
   "$staged_app" "$signed_native_products" \
   --context signing-attempt-work
-/usr/bin/codesign --force --options runtime --timestamp \
+cfw_codesign_distribution_bundle --force --options runtime --timestamp \
   --entitlements "$host_release_xcent" \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$staged_app"
 /usr/bin/codesign --verify --deep --strict --verbose=4 "$staged_app"

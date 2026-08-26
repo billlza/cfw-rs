@@ -53,9 +53,11 @@ nested products are failure evidence only and cannot be promoted or reused.
 
 ## Successor generation
 
-Unifying the verifier path contract changes tracked release source after build
-40032 was consumed. Build 40033 is therefore the only active GA successor. It
-must start from one new clean source identity and repeat the complete source,
+Unifying the verifier path contract changed tracked release source after build
+40032 was consumed, so build 40033 became its successor. Build 40033 was later
+consumed and retired independently; its history is recorded in
+`ga-build-40033-retirement.md`. Build 40034 is therefore the only active GA
+successor. It must start from one new clean source identity and repeat the complete source,
 hosted-CI, build, freeze, signing, notarization, package, installation, runtime,
 and publication evidence sequence. No application tree, profile, possession
 proof, signature, manifest, attempt file, or receipt from build 40032 may be

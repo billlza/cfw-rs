@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run and recover append-only Developer ID signing attempts for GA build 40033.
+"""Run and recover append-only Developer ID signing attempts for GA build 40034.
 
 The frozen candidate is never copied into a canonical signing path until one
 private attempt has passed signing, full app verification, and transformation
@@ -157,6 +157,11 @@ COMMIT_RE: Final = re.compile(r"\A[0-9a-f]{40}\Z")
 CERT_SHA1_RE: Final = re.compile(r"\A[0-9A-F]{40}\Z")
 CERT_SHA256_RE: Final = re.compile(r"\A[0-9A-F]{64}\Z")
 FAILURE_CODE_RE: Final = re.compile(r"\A[a-z][a-z0-9_]{0,127}\Z")
+ABANDONED_BEFORE_SIGNING: Final = "attempt_abandoned_before_signing"
+INTERRUPTED_DURING_SIGNING: Final = "interrupted_during_signing"
+SIGNING_OUTPUT_PUBLISH_REPLY_UNKNOWN: Final = (
+    "signing_output_publish_reply_unknown"
+)
 
 INTENT_FIELDS: Final = frozenset(
     {
@@ -194,7 +199,7 @@ STATES: Final = frozenset(
     {"prepared", "signing", "verified", "publishing", "published", "failed", "outcome_unknown"}
 )
 TRANSITIONS: Final = {
-    "prepared": frozenset({"signing", "outcome_unknown"}),
+    "prepared": frozenset({"signing", "failed"}),
     "signing": frozenset({"verified", "failed", "outcome_unknown"}),
     "verified": frozenset({"publishing", "failed"}),
     "publishing": frozenset({"published", "outcome_unknown"}),
@@ -763,10 +768,24 @@ def _load_attempt(attempts_root: Path, identifier: str) -> Attempt:
             previous=previous,
             intent_sha256=intent_sha256,
         )
-        if events and event["state"] not in TRANSITIONS[str(events[-1]["state"])]:
-            raise SigningAttemptError(
-                "invalid_attempt_transition", "signing-attempt state transition is invalid"
-            )
+        if events:
+            previous_event = events[-1]
+            if event["state"] not in TRANSITIONS[str(previous_event["state"])]:
+                raise SigningAttemptError(
+                    "invalid_attempt_transition",
+                    "signing-attempt state transition is invalid",
+                )
+            if previous_event["state"] == "outcome_unknown" and not (
+                len(events) >= 2
+                and events[-2]["state"] == "publishing"
+                and previous_event["failure_code"]
+                == SIGNING_OUTPUT_PUBLISH_REPLY_UNKNOWN
+                and previous_event["exit_code"] is None
+            ):
+                raise SigningAttemptError(
+                    "invalid_attempt_transition",
+                    "only a publication-bound outcome may continue",
+                )
         events.append(event)
         previous = str(event["event_sha256"])
     if events[0]["state"] != "prepared":
@@ -785,6 +804,13 @@ def _append_event(
     failure_code: str | None = None,
     exit_code: int | None = None,
 ) -> Attempt:
+    if attempt.state == "outcome_unknown" and not _is_publication_outcome_unknown(
+        attempt
+    ):
+        raise SigningAttemptError(
+            "invalid_attempt_transition",
+            "only a publication-bound outcome may continue",
+        )
     if state not in TRANSITIONS[attempt.state]:
         raise SigningAttemptError(
             "invalid_attempt_transition",
@@ -1106,6 +1132,12 @@ def _publish_attempt(
     verification_runner: VerificationRunner,
     transformation_verifier: TransformationVerifier,
 ) -> Attempt:
+    if attempt.state == "outcome_unknown" and not _is_publication_outcome_unknown(
+        attempt
+    ):
+        _candidate_retirement_required(
+            attempt, "has no publication-bound recoverable output"
+        )
     reopened = _verify_frozen_inputs(repository, freeze_verifier=freeze_verifier)
     if reopened != bindings:
         raise SigningAttemptError(
@@ -1132,7 +1164,7 @@ def _publish_attempt(
                 attempt,
                 "outcome_unknown",
                 clock=clock,
-                failure_code="signing_output_publish_reply_unknown",
+                failure_code=SIGNING_OUTPUT_PUBLISH_REPLY_UNKNOWN,
             )
         except SigningAttemptError as journal_error:
             raise SigningAttemptOutcomeUnknown(
@@ -1154,6 +1186,85 @@ def _publish_attempt(
 def _bindings_match_intent(bindings: FrozenSigningBindings, attempt: Attempt) -> bool:
     expected = _intent(bindings, attempt.identifier, str(attempt.intent["created_at"]))
     return attempt.intent == expected
+
+
+def _pre_sign_output_is_pristine(repository: Path, attempt: Attempt) -> bool:
+    if os.path.lexists(attempt.publish_ready):
+        return False
+    try:
+        attempt.work.lstat()
+    except FileNotFoundError:
+        return not os.path.lexists(attempt.work) and not os.path.lexists(
+            attempt.publish_ready
+        )
+    except OSError as error:
+        raise SigningAttemptError(
+            "attempt_work_unavailable",
+            "signing-attempt work cannot be inspected before recovery",
+        ) from error
+    try:
+        classified = candidate_signing_output(repository, attempt.work)
+    except BuildIdentityError as error:
+        raise SigningAttemptError(
+            "attempt_work_unsafe",
+            f"signing-attempt work is not the exact private work stage: {error}",
+        ) from error
+    if classified.context is not CandidateBundleContext.SIGNING_ATTEMPT_WORK:
+        raise SigningAttemptError(
+            "attempt_work_unsafe",
+            "signing-attempt work has the wrong private output stage",
+        )
+    try:
+        with exclusive_rooted_directory_lock(
+            repository, attempt.work, require_private=True
+        ) as descriptor:
+            return os.listdir(descriptor) == [] and not os.path.lexists(
+                attempt.publish_ready
+            )
+    except (OSError, PublicationError) as error:
+        raise SigningAttemptError(
+            "attempt_work_unavailable",
+            "signing-attempt work cannot be inspected before recovery",
+        ) from error
+
+
+def _is_abandoned_before_signing(repository: Path, attempt: Attempt) -> bool:
+    if len(attempt.events) < 2:
+        return False
+    previous = attempt.events[-2]
+    terminal = attempt.events[-1]
+    return (
+        previous["state"] == "prepared"
+        and terminal["state"] == "failed"
+        and terminal["failure_code"] == ABANDONED_BEFORE_SIGNING
+        and terminal["exit_code"] is None
+        and _pre_sign_output_is_pristine(repository, attempt)
+    )
+
+
+def _is_publication_outcome_unknown(attempt: Attempt) -> bool:
+    if len(attempt.events) < 2:
+        return False
+    previous = attempt.events[-2]
+    terminal = attempt.events[-1]
+    return (
+        previous["state"] == "publishing"
+        and terminal["state"] == "outcome_unknown"
+        and terminal["failure_code"] == SIGNING_OUTPUT_PUBLISH_REPLY_UNKNOWN
+        and terminal["exit_code"] is None
+        and all(
+            event["failure_code"] != INTERRUPTED_DURING_SIGNING
+            for event in attempt.events
+        )
+    )
+
+
+def _candidate_retirement_required(attempt: Attempt, reason: str) -> None:
+    raise SigningAttemptError(
+        "candidate_retirement_required",
+        f"signing attempt {attempt.identifier} {reason}; preserve the frozen "
+        "lineage and allocate a successor build",
+    )
 
 
 def _reconcile_existing(
@@ -1185,6 +1296,12 @@ def _reconcile_existing(
         )
     latest = attempts[-1]
 
+    publication_outcome_unknown = _is_publication_outcome_unknown(latest)
+    if latest.state == "outcome_unknown" and not publication_outcome_unknown:
+        _candidate_retirement_required(
+            latest, "has no uniquely recoverable signed output"
+        )
+
     canonical_exists = os.path.lexists(canonical)
     ready_exists = os.path.lexists(latest.publish_ready)
     if canonical_exists:
@@ -1193,7 +1310,9 @@ def _reconcile_existing(
                 "ambiguous_signing_output",
                 "both private publish-ready and canonical signing-output exist",
             )
-        if latest.state not in {"publishing", "outcome_unknown", "published"}:
+        if latest.state not in {"publishing", "published"} and not (
+            publication_outcome_unknown
+        ):
             raise SigningAttemptError(
                 "unexpected_canonical_output",
                 "canonical signing-output appeared before the publish boundary",
@@ -1217,7 +1336,9 @@ def _reconcile_existing(
         raise SigningAttemptError(
             "published_output_missing", "published signing-output is missing"
         )
-    if latest.state in {"publishing", "outcome_unknown"} and ready_exists:
+    if (
+        latest.state == "publishing" or publication_outcome_unknown
+    ) and ready_exists:
         _publish_attempt(
             repository,
             latest,
@@ -1243,17 +1364,38 @@ def _reconcile_existing(
             transformation_verifier=transformation_verifier,
         )
         return canonical
-    if latest.state in {"prepared", "signing"}:
+    if latest.state == "prepared":
+        if not _pre_sign_output_is_pristine(repository, latest):
+            _candidate_retirement_required(
+                latest, "has private output before its signing event"
+            )
+        _append_event(
+            repository,
+            latest,
+            "failed",
+            clock=clock,
+            failure_code=ABANDONED_BEFORE_SIGNING,
+        )
+        return None
+    if latest.state == "signing":
         _append_event(
             repository,
             latest,
             "outcome_unknown",
             clock=clock,
-            failure_code="interrupted_before_verified_output",
+            failure_code=INTERRUPTED_DURING_SIGNING,
         )
-        return None
-    if latest.state in {"failed", "outcome_unknown"}:
-        return None
+        _candidate_retirement_required(
+            latest, "was interrupted after signing may have started"
+        )
+    if latest.state == "failed":
+        if _is_abandoned_before_signing(repository, latest):
+            return None
+        _candidate_retirement_required(latest, "failed after signing started")
+    if latest.state in {"verified", "publishing"}:
+        _candidate_retirement_required(
+            latest, "lost its exact private publish-ready output"
+        )
     raise SigningAttemptError(
         "attempt_recovery_unsupported", "latest signing attempt cannot be recovered"
     )

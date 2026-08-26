@@ -4,7 +4,7 @@
 This module deliberately does not accept a caller-selected evidence path and it
 does not accept a list of boolean outcomes. Collection starts only after the
 existing dormant-install and current-service owners have closed their
-40019 -> 40033 journals. ``collect`` creates a durable CSPRNG challenge intent,
+40019 -> 40034 journals. ``collect`` creates a durable CSPRNG challenge intent,
 owns every runtime command and packet byte, atomically publishes the exact
 raw tree, and seals the adapter. ``recover`` owns only runtime shutdown/restore;
 it never duplicates either installation state machine. ``verify`` reopens
@@ -373,9 +373,9 @@ def _require_fixed_paths(
 ) -> None:
     expected_acceptance, expected_raw = _fixed_paths(repository)
     if Path(acceptance_path).absolute() != expected_acceptance:
-        raise _error("GA runtime adapter path is not the fixed 40033 path")
+        raise _error("GA runtime adapter path is not the fixed 40034 path")
     if Path(raw_evidence_root).absolute() != expected_raw:
-        raise _error("GA runtime raw-evidence path is not the fixed 40033 path")
+        raise _error("GA runtime raw-evidence path is not the fixed 40034 path")
 
 
 def _strict_json(data: bytes, label: str) -> dict[str, Any]:
@@ -528,7 +528,7 @@ def _validate_expected(value: object) -> dict[str, Any]:
         or expected["from_build"] != FROM_BUILD
         or expected["to_build"] != TO_BUILD
     ):
-        raise _error("GA runtime expected identity or check set differs from 0.4.0/40033")
+        raise _error("GA runtime expected identity or check set differs from 0.4.0/40034")
     for field in (
         "dmg_gatekeeper_sha256",
         "dmg_set_seal_sha256",
@@ -835,11 +835,11 @@ def _installed_candidate_tree(repository: Path, expected: dict[str, Any]) -> str
         or normalized["candidate"]["build_number"] != TO_BUILD
         or normalized["previous"]["build_number"] != FROM_BUILD
     ):
-        raise _error("GA install journal is not the completed 40019 to 40033 install")
+        raise _error("GA install journal is not the completed 40019 to 40034 install")
     try:
         installed = dormant_app_install.read_app_identity(INSTALLED_APP)
     except dormant_app_install.InstallError as error:
-        raise _error("installed 40033 application tree cannot be identified") from error
+        raise _error("installed 40034 application tree cannot be identified") from error
     if installed.document() != normalized["candidate"]:
         raise _error("installed application bytes differ from the closed install journal")
     return installed.tree_sha256
@@ -963,7 +963,7 @@ def _validate_exact_dmg_install(
         or document["installed_app_tree_sha256"] != installed_tree
         or dmg_tree != installed_tree
     ):
-        raise _error("DMG-contained app and installed 40033 app are not the same tree")
+        raise _error("DMG-contained app and installed 40034 app are not the same tree")
     commands = require_exact_keys(
         document["commands"],
         {"dmg_gatekeeper", "dmg_set_verify"},
@@ -1026,7 +1026,7 @@ def _running_host_observation(value: object) -> list[dict[str, Any]]:
         item for item in processes if item["path"] == INSTALLED_EXECUTABLE.as_posix()
     ]
     if len(app_processes) != 1:
-        raise _error("raw process table does not contain exactly one installed 40033 Host")
+        raise _error("raw process table does not contain exactly one installed 40034 Host")
     return processes
 
 
@@ -1044,7 +1044,7 @@ def _host_absence_observation(value: object) -> list[dict[str, Any]]:
     if any(
         process["path"] == INSTALLED_EXECUTABLE.as_posix() for process in processes
     ):
-        raise _error("normal shutdown evidence still contains the installed 40033 Host")
+        raise _error("normal shutdown evidence still contains the installed 40034 Host")
     return processes
 
 
@@ -1056,10 +1056,10 @@ def _validate_launch(value: dict[str, Any]) -> None:
         document["launch_command"],
         expected_argv=["/usr/bin/open", "-a", INSTALLED_APP.as_posix()],
         expected_exit=0,
-        label="installed 40033 launch command",
+        label="installed 40034 launch command",
     )
     if launch["stderr"]:
-        raise _error("installed 40033 launch command emitted an error")
+        raise _error("installed 40034 launch command emitted an error")
     _running_host_observation(document["process_observation"])
 
 
@@ -1106,7 +1106,7 @@ def _validate_system_extension(value: dict[str, Any]) -> None:
     except dormant_app_install.InstallError as error:
         raise _error("raw systemextensionsctl output is malformed") from error
     if (TEAM_ID, PACKET_EXTENSION_BUNDLE_ID) not in identities:
-        raise _error("raw system extension output lacks the fixed 40033 extension")
+        raise _error("raw system extension output lacks the fixed 40034 extension")
     matching = [
         line
         for line in receipt["stdout"].splitlines()
@@ -2110,7 +2110,7 @@ class ProductionCollectorRuntime:
                 if waiting_for_operator and not announced_operator_boundary:
                     print(
                         "GA runtime collection is waiting for macOS approval and "
-                        "Tunnel mode in the installed 40033 dashboard",
+                        "Tunnel mode in the installed 40034 dashboard",
                         file=sys.stderr,
                         flush=True,
                     )
@@ -3284,18 +3284,18 @@ def self_check() -> None:
     except OSError as error:
         raise _error("GA runtime collector source/build registry is unavailable") from error
     if (
-        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40019", "40033")
+        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40019", "40034")
         or len(CHECKS) != 12
         or tuple(sorted(CHECKS)) != CHECKS
         or len(RAW_FILE_NAMES) != 15
         or ACCEPTANCE_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40033/stage-inputs/ga-acceptance/"
+            "target/candidates/0.4.0/ga/40034/stage-inputs/ga-acceptance/"
             "runtime-acceptance.json"
         )
         or RAW_ROOT_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40033/stage-inputs/ga-acceptance/"
+            "target/candidates/0.4.0/ga/40034/stage-inputs/ga-acceptance/"
             "runtime-evidence"
         )
         or not stat.S_ISREG(runner_metadata.st_mode)

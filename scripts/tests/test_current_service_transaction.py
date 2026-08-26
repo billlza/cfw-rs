@@ -16,7 +16,7 @@ from scripts import dormant_app_install as install
 
 PREVIOUS = install.AppIdentity("0.4.0", "40019", "a" * 64)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40033", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40034", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
@@ -142,11 +142,11 @@ class ServiceEventStoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.fixture.cleanup()
 
-    def test_ga_service_transaction_is_fixed_to_40019_to_40033(self) -> None:
+    def test_ga_service_transaction_is_fixed_to_40019_to_40034(self) -> None:
         paths = service.ServicePaths.production()
 
         self.assertEqual(paths.install_paths.profile, install.GA_INSTALL_PROFILE)
-        self.assertEqual(paths.install_paths.profile.build_number, "40033")
+        self.assertEqual(paths.install_paths.profile.build_number, "40034")
         self.assertEqual(
             paths.install_paths.profile.previous_build_number,
             "40019",

@@ -125,7 +125,7 @@ def seal_prepackage(repository: Path) -> dict[str, Any]:
 
 
 def seal_ga_acceptance(repository: Path) -> dict[str, Any]:
-    """Atomically bind exact packages and the completed 40019 -> 40033 run."""
+    """Atomically bind exact packages and the completed 40019 -> 40034 run."""
 
     expected = contract.build_expected_stage_files(repository, "ga-acceptance")
     return _publish_and_confirm_stage(repository, "ga-acceptance", expected)

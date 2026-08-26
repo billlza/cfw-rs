@@ -53,8 +53,9 @@ if __package__:
     from .release_signing_plan import SigningPlanError, validate_plan
     from .release_signing_preflight import (
         SigningPreflightError,
+        load_preflight_manifest,
         signing_certificate_digests,
-        verify_custody_metadata,
+        verify_live_profile_validity,
         verify_materialized_profiles,
     )
     from .repository_source_identity import (
@@ -103,8 +104,9 @@ else:
     from release_signing_plan import SigningPlanError, validate_plan
     from release_signing_preflight import (
         SigningPreflightError,
+        load_preflight_manifest,
         signing_certificate_digests,
-        verify_custody_metadata,
+        verify_live_profile_validity,
         verify_materialized_profiles,
     )
     from repository_source_identity import SourceIdentityError, current_identity
@@ -248,6 +250,7 @@ Clock = Callable[[], str]
 HelperRunner = Callable[[Path, str, str], int]
 VerificationRunner = Callable[[Path], None]
 FreezeVerifier = Callable[[Path], FrozenCandidate]
+LiveReadinessVerifier = Callable[[Path], None]
 Publisher = Callable[[Path, Path], None]
 Confirmer = Callable[[Path, Path], None]
 TransformationCreator = Callable[[Path, Path], Mapping[str, Any]]
@@ -458,6 +461,14 @@ def _verify_frozen_inputs(
 
     preflight = root / "profiles/signing-preflight.json"
     try:
+        load_preflight_manifest(preflight)
+        certificate_sha1, certificate_sha256 = signing_certificate_digests(preflight)
+    except SigningPreflightError as error:
+        raise SigningAttemptError(
+            "signing_preflight_receipt_invalid",
+            f"frozen signing-preflight receipt is invalid: {error}",
+        ) from error
+    try:
         verify_materialized_profiles(
             preflight,
             {
@@ -466,20 +477,24 @@ def _verify_frozen_inputs(
                 "packet-tunnel": root / "profiles/packet-tunnel.provisionprofile",
             },
         )
-        verify_custody_metadata(preflight)
-        certificate_sha1, certificate_sha256 = signing_certificate_digests(preflight)
-        validate_plan(repository, root)
-        updater = verify_possession_proof(repository, root)
-    except (
-        OSError,
-        SigningPlanError,
-        SigningPreflightError,
-        UpdaterKeyPossessionError,
-        ValueError,
-    ) as error:
+    except SigningPreflightError as error:
         raise SigningAttemptError(
-            "frozen_signing_inputs_invalid",
-            "frozen signing plan, preflight, profiles, or updater proof is invalid",
+            "materialized_profile_mismatch",
+            f"frozen provisioning profiles differ from the preflight receipt: {error}",
+        ) from error
+    try:
+        validate_plan(repository, root)
+    except (OSError, SigningPlanError, ValueError) as error:
+        raise SigningAttemptError(
+            "frozen_signing_plan_invalid",
+            "frozen signing plan is invalid",
+        ) from error
+    try:
+        updater = verify_possession_proof(repository, root)
+    except (OSError, UpdaterKeyPossessionError, ValueError) as error:
+        raise SigningAttemptError(
+            "updater_possession_receipt_invalid",
+            "frozen updater possession receipt is invalid",
         ) from error
 
     preflight_sha256 = _sha256_file(preflight)
@@ -864,6 +879,18 @@ def _ensure_attempts_root(repository: Path) -> Path:
     return attempts
 
 
+def production_live_readiness_verifier(root: Path) -> None:
+    """Recheck time-sensitive profile authorization immediately before codesign."""
+
+    try:
+        verify_live_profile_validity(root / "profiles/signing-preflight.json")
+    except SigningPreflightError as error:
+        raise SigningAttemptError(
+            "signing_profile_readiness_invalid",
+            f"provisioning profiles are not currently signable: {error}",
+        ) from error
+
+
 def production_helper_runner(work: Path, certificate_sha1: str, certificate_sha256: str) -> int:
     repository = Path(__file__).resolve().parent.parent
     command = (
@@ -1190,6 +1217,9 @@ def run_signing_transaction(
     helper_runner: HelperRunner = production_helper_runner,
     verification_runner: VerificationRunner = production_verification_runner,
     freeze_verifier: FreezeVerifier = verify_frozen_candidate,
+    live_readiness_verifier: LiveReadinessVerifier = (
+        production_live_readiness_verifier
+    ),
     publisher: Publisher = publish_private_directory_exclusive,
     confirmer: Confirmer = confirm_private_directory_published,
     transformation_creator: TransformationCreator = _create_transformation,
@@ -1235,6 +1265,7 @@ def run_signing_transaction(
                 if recovered is not None:
                     return recovered
 
+            live_readiness_verifier(ga_root(repository))
             attempt = _create_attempt(
                 repository,
                 attempts_root,

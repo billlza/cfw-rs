@@ -37,7 +37,9 @@ if __package__:
     from .repository_source_identity import SourceIdentityError, current_identity
     from .release_signing_preflight import (
         SigningPreflightError,
-        verify_custody_metadata,
+        load_preflight_manifest,
+        verify_live_custody_metadata,
+        verify_live_profile_validity,
         verify_materialized_profiles,
     )
     from .release_signing_plan import SigningPlanError, validate_plan
@@ -55,7 +57,9 @@ else:
     from repository_source_identity import SourceIdentityError, current_identity
     from release_signing_preflight import (
         SigningPreflightError,
-        verify_custody_metadata,
+        load_preflight_manifest,
+        verify_live_custody_metadata,
+        verify_live_profile_validity,
         verify_materialized_profiles,
     )
     from release_signing_plan import SigningPlanError, validate_plan
@@ -1008,6 +1012,13 @@ def _expected_intent(repository: Path, root: Path, *, require_intent: bool) -> d
         ) from error
     signing_preflight_path = root / "profiles/signing-preflight.json"
     try:
+        load_preflight_manifest(signing_preflight_path)
+    except SigningPreflightError as error:
+        raise CandidateFreezeError(
+            "signing_preflight_receipt_invalid",
+            f"candidate signing-preflight receipt is invalid: {error}",
+        ) from error
+    try:
         verify_materialized_profiles(
             signing_preflight_path,
             {
@@ -1016,11 +1027,10 @@ def _expected_intent(repository: Path, root: Path, *, require_intent: bool) -> d
                 "proxy-agent": root / "profiles/proxy-agent.provisionprofile",
             },
         )
-        verify_custody_metadata(signing_preflight_path)
     except SigningPreflightError as error:
         raise CandidateFreezeError(
-            "signing_preflight_invalid",
-            "candidate freeze requires the exact live signing preflight and copied profiles",
+            "materialized_profile_mismatch",
+            f"candidate provisioning profiles differ from the preflight receipt: {error}",
         ) from error
     try:
         updater_possession = verify_possession_proof(repository, root)
@@ -1452,6 +1462,24 @@ def freeze_candidate(repository: Path) -> FrozenCandidate:
             "the frozen GA candidate already exists; fresh freeze is forbidden"
         )
     expected = _expected_intent(repository, preflight_root, require_intent=False)
+    signing_preflight_path = preflight_root / "profiles/signing-preflight.json"
+    try:
+        verify_live_profile_validity(signing_preflight_path)
+    except SigningPreflightError as error:
+        raise CandidateFreezeError(
+            "signing_profile_readiness_invalid",
+            f"candidate provisioning profiles are not currently signable: {error}",
+        ) from error
+    try:
+        verify_live_custody_metadata(
+            signing_preflight_path,
+            repository=repository,
+        )
+    except SigningPreflightError as error:
+        raise CandidateFreezeError(
+            "signing_custody_readiness_invalid",
+            f"candidate updater custody is not currently ready: {error}",
+        ) from error
     _ensure_destination_parent(final_root)
     try:
         intent_raw = _create_intent(preflight_root, expected)

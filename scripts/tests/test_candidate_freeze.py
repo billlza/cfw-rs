@@ -121,10 +121,16 @@ class CandidateFreezeTests(unittest.TestCase):
         login_keychain = custody_home / release_signing_preflight.LOGIN_KEYCHAIN_RELATIVE
         login_keychain.write_bytes(b"login-keychain")
         login_keychain.chmod(0o644)
+        self.login_keychain = login_keychain
 
         def metadata(path: Path) -> dict[str, object]:
             return release_signing_preflight.FileMetadata.from_stat(
                 path, path.lstat()
+            ).as_manifest()
+
+        def directory_identity(path: Path) -> dict[str, object]:
+            return release_signing_preflight.DirectoryIdentity.from_metadata(
+                release_signing_preflight.FileMetadata.from_stat(path, path.lstat())
             ).as_manifest()
 
         certificate_sha256 = "A" * 64
@@ -180,27 +186,48 @@ class CandidateFreezeTests(unittest.TestCase):
                 "profile": release_signing_preflight.NOTARY_PROFILE,
             },
             "profiles": profile_manifest,
+            "schemaVersion": release_signing_preflight.SCHEMA_VERSION,
             "teamId": release_signing_preflight.TEAM_ID,
             "updater": {
-                "ancestors": [
-                    metadata(path)
+                "credentialAncestors": [
+                    directory_identity(path)
                     for path in (
                         custody_home,
                         library,
                         application_support,
                         release,
                         updater,
-                        keychains,
                     )
                 ],
-                "key": metadata(updater_key),
+                "custodyPolicy": release_signing_preflight.UPDATER_CUSTODY_POLICY,
+                "key": {
+                    "aclPolicy": "deny-only",
+                    "file": metadata(updater_key),
+                },
                 "passwordKeychain": {
                     "account": release_signing_preflight.KEYCHAIN_ACCOUNT,
-                    "file": metadata(login_keychain),
+                    "directoryPolicy": {
+                        "aclPolicy": "deny-only",
+                        "allowedModes": ["0700", "0755"],
+                        "ownerUid": os.geteuid(),
+                        "path": str(keychains),
+                        "type": "directory",
+                    },
+                    "filePolicy": {
+                        "aclPolicy": "deny-only",
+                        "allowedModes": ["0600", "0644"],
+                        "hardLinks": 1,
+                        "maximumSize": 512 * 1024 * 1024,
+                        "minimumSize": 1,
+                        "ownerUid": os.geteuid(),
+                        "path": str(login_keychain),
+                        "type": "regular",
+                    },
                     "service": release_signing_preflight.KEYCHAIN_SERVICE,
                     "synchronizable": False,
                 },
             },
+            "validatedAt": now.isoformat().replace("+00:00", "Z"),
         }
         signing_preflight_path = profiles / "signing-preflight.json"
         signing_preflight_path.write_bytes(
@@ -262,8 +289,15 @@ class CandidateFreezeTests(unittest.TestCase):
             ),
         )
         self.updater_possession_patch.start()
+        self.live_custody_patch = patch.object(
+            candidate_freeze,
+            "verify_live_custody_metadata",
+            return_value=signing_preflight_manifest,
+        )
+        self.live_custody_patch.start()
 
     def tearDown(self) -> None:
+        self.live_custody_patch.stop()
         self.updater_possession_patch.stop()
         self.source_patch.stop()
         self.temporary.cleanup()
@@ -593,7 +627,7 @@ class CandidateFreezeTests(unittest.TestCase):
             self.freeze()
         self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
 
-    def test_copied_profile_or_updater_custody_drift_does_not_consume_ga(self) -> None:
+    def test_copied_profile_or_updater_custody_failure_does_not_consume_ga(self) -> None:
         host_profile = self.preflight / "profiles/host.provisionprofile"
         host_profile.write_bytes(b"different-host-profile")
         with self.assertRaises(candidate_freeze.CandidateFreezeError):
@@ -601,11 +635,60 @@ class CandidateFreezeTests(unittest.TestCase):
         self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
 
         host_profile.write_bytes(b"host-profile")
-        self.updater_key.chmod(0o400)
-        with self.assertRaisesRegex(
-            candidate_freeze.CandidateFreezeError, "signing preflight"
+        with patch.object(
+            candidate_freeze,
+            "verify_live_custody_metadata",
+            side_effect=release_signing_preflight.SigningPreflightError(
+                "updater private key changed after preflight"
+            ),
         ):
-            self.freeze()
+            with self.assertRaisesRegex(
+                candidate_freeze.CandidateFreezeError, "updater custody"
+            ) as raised:
+                self.freeze()
+        self.assertEqual(raised.exception.code, "signing_custody_readiness_invalid")
+        self.assertFalse(raised.exception.consumed)
+        self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
+
+    def test_frozen_reopen_is_independent_of_live_external_readiness(self) -> None:
+        frozen = self.freeze()
+
+        with (
+            patch.object(
+                candidate_freeze,
+                "verify_live_custody_metadata",
+                side_effect=AssertionError(
+                    "frozen verification touched the live Keychain"
+                ),
+            ),
+            patch.object(
+                candidate_freeze,
+                "verify_live_profile_validity",
+                side_effect=AssertionError(
+                    "frozen verification touched live profile readiness"
+                ),
+            ),
+        ):
+            reopened = candidate_freeze.verify_frozen_candidate(self.repository)
+
+        self.assertEqual(reopened.intent_sha256, frozen.intent_sha256)
+
+    def test_live_profile_failure_does_not_consume_ga(self) -> None:
+        with patch.object(
+            candidate_freeze,
+            "verify_live_profile_validity",
+            side_effect=release_signing_preflight.SigningPreflightError(
+                "host provisioning profile is outside its live signing window"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                candidate_freeze.CandidateFreezeError,
+                "not currently signable",
+            ) as raised:
+                self.freeze()
+
+        self.assertEqual(raised.exception.code, "signing_profile_readiness_invalid")
+        self.assertFalse(raised.exception.consumed)
         self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
 
     def test_updater_possession_failure_does_not_consume_ga(self) -> None:

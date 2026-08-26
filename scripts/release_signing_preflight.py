@@ -4,7 +4,10 @@
 The preflight resolves the exact Developer ID identity and provisioning
 profiles needed by the macOS release before a candidate-freeze intent may be
 committed.  It also proves that the fixed notary profile is usable and that the
-updater key/password custody paths satisfy their metadata-only policy.
+updater key/password custody paths satisfy their metadata-only policy.  The
+result separates immutable candidate inputs from the live policy for the
+macOS-managed login Keychain, whose database may be atomically replaced by the
+operating system after a successful password lookup.
 
 Private-key and password bytes are never opened, read, hashed, printed, or
 placed in the result.  The only updater-key observations are filesystem
@@ -61,7 +64,9 @@ else:
 
 TEAM_ID = "YKUPL7Z869"
 NOTARY_PROFILE = "clashformac-notary"
-DOCUMENT = "cfm-release-signing-preflight-v1"
+DOCUMENT = "cfm-release-signing-preflight-v2"
+SCHEMA_VERSION = 2
+UPDATER_CUSTODY_POLICY = "cfm-updater-custody-policy-v2"
 
 SECURITY = "/usr/bin/security"
 XCRUN = "/usr/bin/xcrun"
@@ -81,6 +86,7 @@ MAX_IDENTITY_BYTES = 64 * 1024
 MAX_NOTARY_BYTES = 2 * 1024 * 1024
 MAX_KEYCHAIN_METADATA_BYTES = 64 * 1024
 MAX_PREFLIGHT_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_PATH_BYTES = 4096
 PROCESS_TIMEOUT_SECONDS = 120
 
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
@@ -114,6 +120,25 @@ FILE_METADATA_FIELDS = frozenset(
         "path",
         "size",
         "uid",
+    }
+)
+DIRECTORY_IDENTITY_FIELDS = frozenset(
+    {"device", "gid", "inode", "mode", "path", "uid"}
+)
+KEY_RECORD_FIELDS = frozenset({"aclPolicy", "file"})
+KEYCHAIN_DIRECTORY_POLICY_FIELDS = frozenset(
+    {"aclPolicy", "allowedModes", "ownerUid", "path", "type"}
+)
+KEYCHAIN_FILE_POLICY_FIELDS = frozenset(
+    {
+        "aclPolicy",
+        "allowedModes",
+        "hardLinks",
+        "maximumSize",
+        "minimumSize",
+        "ownerUid",
+        "path",
+        "type",
     }
 )
 
@@ -209,6 +234,39 @@ class FileMetadata:
 
 
 @dataclass(frozen=True)
+class DirectoryIdentity:
+    """Stable cross-stage identity for one private-key custody directory."""
+
+    path: str
+    device: int
+    inode: int
+    mode: str
+    uid: int
+    gid: int
+
+    @classmethod
+    def from_metadata(cls, value: FileMetadata) -> "DirectoryIdentity":
+        return cls(
+            path=value.path,
+            device=value.device,
+            inode=value.inode,
+            mode=value.mode,
+            uid=value.uid,
+            gid=value.gid,
+        )
+
+    def as_manifest(self) -> dict[str, object]:
+        return {
+            "device": self.device,
+            "gid": self.gid,
+            "inode": self.inode,
+            "mode": self.mode,
+            "path": self.path,
+            "uid": self.uid,
+        }
+
+
+@dataclass(frozen=True)
 class ProfilePreflight:
     role: str
     path: str
@@ -242,6 +300,7 @@ class ProfilePreflight:
 
 @dataclass(frozen=True)
 class SigningPreflightResult:
+    validated_at: str
     signing_identity: str
     certificate_sha1: str
     certificate_sha256: str
@@ -252,6 +311,12 @@ class SigningPreflightResult:
     login_keychain: FileMetadata
 
     def as_manifest(self) -> dict[str, object]:
+        if len(self.updater_ancestors) != 6:
+            raise SigningPreflightError(
+                "signing preflight updater observations are incomplete"
+            )
+        credential_ancestors = self.updater_ancestors[:5]
+        keychains_directory = self.updater_ancestors[5]
         return {
             "document": DOCUMENT,
             "identity": {
@@ -266,17 +331,42 @@ class SigningPreflightResult:
             "profiles": {
                 profile.role: profile.as_manifest() for profile in self.profiles
             },
+            "schemaVersion": SCHEMA_VERSION,
             "teamId": TEAM_ID,
             "updater": {
-                "ancestors": [item.as_manifest() for item in self.updater_ancestors],
-                "key": self.updater_key.as_manifest(),
+                "credentialAncestors": [
+                    DirectoryIdentity.from_metadata(item).as_manifest()
+                    for item in credential_ancestors
+                ],
+                "custodyPolicy": UPDATER_CUSTODY_POLICY,
+                "key": {
+                    "aclPolicy": "deny-only",
+                    "file": self.updater_key.as_manifest(),
+                },
                 "passwordKeychain": {
                     "account": KEYCHAIN_ACCOUNT,
-                    "file": self.login_keychain.as_manifest(),
+                    "directoryPolicy": {
+                        "aclPolicy": "deny-only",
+                        "allowedModes": ["0700", "0755"],
+                        "ownerUid": keychains_directory.uid,
+                        "path": keychains_directory.path,
+                        "type": "directory",
+                    },
+                    "filePolicy": {
+                        "aclPolicy": "deny-only",
+                        "allowedModes": ["0600", "0644"],
+                        "hardLinks": 1,
+                        "maximumSize": 512 * 1024 * 1024,
+                        "minimumSize": 1,
+                        "ownerUid": self.login_keychain.uid,
+                        "path": self.login_keychain.path,
+                        "type": "regular",
+                    },
                     "service": KEYCHAIN_SERVICE,
                     "synchronizable": False,
                 },
             },
+            "validatedAt": self.validated_at,
         }
 
     def canonical_manifest(self) -> bytes:
@@ -404,7 +494,7 @@ def _read_stable_regular_file(
         return b"".join(chunks)
     except SigningPreflightError:
         raise
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise SigningPreflightError(f"cannot securely read {label}") from error
     finally:
         if descriptor >= 0:
@@ -440,6 +530,25 @@ def verify_materialized_profiles(
     return verified
 
 
+def _render_utc(value: datetime, label: str) -> str:
+    if value.tzinfo is None:
+        raise SigningPreflightError(f"{label} is not timezone-aware")
+    normalized = value.astimezone(timezone.utc)
+    return normalized.isoformat().replace("+00:00", "Z")
+
+
+def _parse_manifest_time(value: object, label: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise SigningPreflightError(f"{label} is not canonical UTC time")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise SigningPreflightError(f"{label} is not canonical UTC time") from error
+    if _render_utc(parsed, label) != value:
+        raise SigningPreflightError(f"{label} is not canonical UTC time")
+    return parsed
+
+
 def load_preflight_manifest(manifest_path: Path) -> dict[str, object]:
     data = _read_stable_regular_file(
         manifest_path,
@@ -453,16 +562,26 @@ def load_preflight_manifest(manifest_path: Path) -> dict[str, object]:
         "identity",
         "notary",
         "profiles",
+        "schemaVersion",
         "teamId",
         "updater",
+        "validatedAt",
     }:
         raise SigningPreflightError(
             "signing preflight manifest has an unexpected field set"
         )
     if data != canonical_manifest(value):
         raise SigningPreflightError("signing preflight manifest is not canonical JSON")
-    if value["document"] != DOCUMENT or value["teamId"] != TEAM_ID:
+    if (
+        value["document"] != DOCUMENT
+        or type(value["schemaVersion"]) is not int
+        or value["schemaVersion"] != SCHEMA_VERSION
+        or value["teamId"] != TEAM_ID
+    ):
         raise SigningPreflightError("signing preflight manifest identity is invalid")
+    validated_at = _parse_manifest_time(
+        value["validatedAt"], "signing preflight validation time"
+    )
     identity = value["identity"]
     if (
         type(identity) is not dict
@@ -483,7 +602,6 @@ def load_preflight_manifest(manifest_path: Path) -> dict[str, object]:
             "signing preflight manifest profile roles are invalid"
         )
 
-    verified: dict[str, dict[str, object]] = {}
     for role in sorted(PROFILE_ROLES):
         expected = manifest_profiles[role]
         if type(expected) is not dict or set(expected) != PROFILE_MANIFEST_FIELDS:
@@ -512,6 +630,9 @@ def load_preflight_manifest(manifest_path: Path) -> dict[str, object]:
         selected = expected["selectedCertificateSha256"]
         profile_path = expected["path"]
         profile_uuid = expected["uuid"]
+        _canonical_absolute_path(
+            profile_path, f"{role} signing preflight profile path"
+        )
         if (
             expected["bundleId"] != expected_bundle_id
             or selected != identity["certificateSha256"]
@@ -524,8 +645,6 @@ def load_preflight_manifest(manifest_path: Path) -> dict[str, object]:
             )
             or len(set(authorized)) != len(authorized)
             or authorized.count(selected) != 1
-            or not isinstance(profile_path, str)
-            or not Path(profile_path).is_absolute()
             or not isinstance(profile_uuid, str)
         ):
             raise SigningPreflightError(
@@ -534,28 +653,46 @@ def load_preflight_manifest(manifest_path: Path) -> dict[str, object]:
         try:
             if str(uuid.UUID(profile_uuid)) != profile_uuid.lower():
                 raise ValueError("noncanonical profile UUID")
-            creation = datetime.fromisoformat(expected["creation"].replace("Z", "+00:00"))
-            expiration = datetime.fromisoformat(
-                expected["expiration"].replace("Z", "+00:00")
+            creation = _parse_manifest_time(
+                expected["creation"], f"{role} provisioning profile creation"
+            )
+            expiration = _parse_manifest_time(
+                expected["expiration"], f"{role} provisioning profile expiration"
             )
         except (AttributeError, TypeError, ValueError) as error:
             raise SigningPreflightError(
                 f"{role} signing preflight profile dates or UUID are invalid"
             ) from error
         if (
-            creation.tzinfo is None
-            or expiration.tzinfo is None
+            creation > validated_at
             or creation >= expiration
-            or expiration <= datetime.now(timezone.utc)
+            or expiration <= validated_at
         ):
             raise SigningPreflightError(
-                f"{role} signing preflight profile is expired or temporally invalid"
+                f"{role} signing preflight profile was invalid at validation time"
             )
     notary = value["notary"]
     if notary != {"historyProbe": "passed", "profile": NOTARY_PROFILE}:
         raise SigningPreflightError("signing preflight notary proof is invalid")
     _validate_updater_manifest_schema(value["updater"])
     return value
+
+
+def _canonical_absolute_path(value: object, label: str) -> Path:
+    if not isinstance(value, str) or not value or not value.startswith("/"):
+        raise SigningPreflightError(f"{label} is not an absolute path")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise SigningPreflightError(f"{label} is not canonical UTF-8 text") from error
+    if (
+        len(encoded) > MAX_PATH_BYTES
+        or any(not character.isprintable() for character in value)
+        or value.startswith("//")
+        or os.path.normpath(value) != value
+    ):
+        raise SigningPreflightError(f"{label} is not a bounded canonical path")
+    return Path(value)
 
 
 def _metadata_record(value: object, label: str) -> FileMetadata:
@@ -573,15 +710,13 @@ def _metadata_record(value: object, label: str) -> FileMetadata:
     )
     if any(type(value[field]) is not int or value[field] < 0 for field in integer_fields):
         raise SigningPreflightError(f"{label} metadata integers are invalid")
-    if (
-        not isinstance(value["path"], str)
-        or not Path(value["path"]).is_absolute()
-        or not isinstance(value["mode"], str)
-        or not re.fullmatch(r"[0-7]{4}", value["mode"])
+    path = _canonical_absolute_path(value["path"], f"{label} path")
+    if not isinstance(value["mode"], str) or not re.fullmatch(
+        r"[0-7]{4}", value["mode"]
     ):
         raise SigningPreflightError(f"{label} metadata path or mode is invalid")
     return FileMetadata(
-        path=value["path"],
+        path=str(path),
         device=value["device"],
         inode=value["inode"],
         mode=value["mode"],
@@ -594,19 +729,44 @@ def _metadata_record(value: object, label: str) -> FileMetadata:
     )
 
 
+def _directory_identity_record(value: object, label: str) -> DirectoryIdentity:
+    if type(value) is not dict or set(value) != DIRECTORY_IDENTITY_FIELDS:
+        raise SigningPreflightError(f"{label} identity field set is invalid")
+    integer_fields = ("device", "gid", "inode", "uid")
+    if any(type(value[field]) is not int or value[field] < 0 for field in integer_fields):
+        raise SigningPreflightError(f"{label} identity integers are invalid")
+    path = _canonical_absolute_path(value["path"], f"{label} path")
+    if not isinstance(value["mode"], str) or not re.fullmatch(
+        r"[0-7]{4}", value["mode"]
+    ):
+        raise SigningPreflightError(f"{label} identity path or mode is invalid")
+    return DirectoryIdentity(
+        path=str(path),
+        device=value["device"],
+        inode=value["inode"],
+        mode=value["mode"],
+        uid=value["uid"],
+        gid=value["gid"],
+    )
+
+
 def _validate_updater_manifest_schema(value: object) -> None:
     if type(value) is not dict or set(value) != {
-        "ancestors",
+        "credentialAncestors",
+        "custodyPolicy",
         "key",
         "passwordKeychain",
     }:
         raise SigningPreflightError("signing preflight updater field set is invalid")
-    ancestors = value["ancestors"]
+    if value["custodyPolicy"] != UPDATER_CUSTODY_POLICY:
+        raise SigningPreflightError("signing preflight updater custody policy is invalid")
+    ancestors = value["credentialAncestors"]
     password = value["passwordKeychain"]
-    if type(ancestors) is not list or len(ancestors) != 6:
+    if type(ancestors) is not list or len(ancestors) != 5:
         raise SigningPreflightError("signing preflight updater ancestors are invalid")
     parsed_ancestors = [
-        _metadata_record(item, "updater custody ancestor") for item in ancestors
+        _directory_identity_record(item, "updater custody ancestor")
+        for item in ancestors
     ]
     home = Path(parsed_ancestors[0].path)
     expected_paths = [
@@ -615,25 +775,30 @@ def _validate_updater_manifest_schema(value: object) -> None:
         home / "Library/Application Support",
         home / "Library/Application Support/Clash for Mac Release",
         home / PRIVATE_KEY_RELATIVE.parent,
-        home / LOGIN_KEYCHAIN_RELATIVE.parent,
     ]
     if [Path(item.path) for item in parsed_ancestors] != expected_paths:
         raise SigningPreflightError(
             "signing preflight updater ancestor paths are invalid"
         )
     if (
-        any(item.uid != os.geteuid() for item in parsed_ancestors)
+        any(item.uid != parsed_ancestors[0].uid for item in parsed_ancestors)
         or int(parsed_ancestors[0].mode, 8) & 0o022
-        or any(item.mode != "0700" for item in parsed_ancestors[1:5])
-        or parsed_ancestors[5].mode not in {"0700", "0755"}
+        or any(item.mode != "0700" for item in parsed_ancestors[1:])
     ):
         raise SigningPreflightError(
             "signing preflight updater ancestor ownership or modes are invalid"
         )
-    key = _metadata_record(value["key"], "updater private key")
+    key_record = value["key"]
+    if (
+        type(key_record) is not dict
+        or set(key_record) != KEY_RECORD_FIELDS
+        or key_record["aclPolicy"] != "deny-only"
+    ):
+        raise SigningPreflightError("signing preflight updater key policy is invalid")
+    key = _metadata_record(key_record["file"], "updater private key")
     if (
         Path(key.path) != home / PRIVATE_KEY_RELATIVE
-        or key.uid != os.geteuid()
+        or key.uid != parsed_ancestors[0].uid
         or key.mode != "0600"
         or key.links != 1
         or key.size < 1
@@ -642,58 +807,178 @@ def _validate_updater_manifest_schema(value: object) -> None:
         raise SigningPreflightError("signing preflight updater key identity is invalid")
     if type(password) is not dict or set(password) != {
         "account",
-        "file",
+        "directoryPolicy",
+        "filePolicy",
         "service",
         "synchronizable",
     }:
         raise SigningPreflightError(
             "signing preflight updater password metadata is invalid"
         )
-    keychain = _metadata_record(password["file"], "login Keychain")
+    directory_policy = password["directoryPolicy"]
+    file_policy = password["filePolicy"]
     if (
         password["account"] != KEYCHAIN_ACCOUNT
         or password["service"] != KEYCHAIN_SERVICE
         or password["synchronizable"] is not False
-        or Path(keychain.path) != home / LOGIN_KEYCHAIN_RELATIVE
-        or keychain.uid != os.geteuid()
-        or keychain.mode not in {"0600", "0644"}
-        or keychain.links != 1
-        or keychain.size < 1
-        or keychain.size > 512 * 1024 * 1024
     ):
         raise SigningPreflightError(
             "signing preflight updater password custody is invalid"
         )
+    if (
+        type(directory_policy) is not dict
+        or set(directory_policy) != KEYCHAIN_DIRECTORY_POLICY_FIELDS
+    ):
+        raise SigningPreflightError(
+            "signing preflight Keychains directory policy is invalid"
+        )
+    if (
+        type(file_policy) is not dict
+        or set(file_policy) != KEYCHAIN_FILE_POLICY_FIELDS
+    ):
+        raise SigningPreflightError(
+            "signing preflight login Keychain policy is invalid"
+        )
+    owner = parsed_ancestors[0].uid
+    policy_integer_fields = (
+        (directory_policy, "ownerUid"),
+        (file_policy, "hardLinks"),
+        (file_policy, "maximumSize"),
+        (file_policy, "minimumSize"),
+        (file_policy, "ownerUid"),
+    )
+    if any(
+        type(policy[field]) is not int or policy[field] < 0
+        for policy, field in policy_integer_fields
+    ):
+        raise SigningPreflightError(
+            "signing preflight Keychain policy integers are invalid"
+        )
+    if (
+        directory_policy
+        != {
+            "aclPolicy": "deny-only",
+            "allowedModes": ["0700", "0755"],
+            "ownerUid": owner,
+            "path": str(home / LOGIN_KEYCHAIN_RELATIVE.parent),
+            "type": "directory",
+        }
+    ):
+        raise SigningPreflightError(
+            "signing preflight Keychains directory policy is invalid"
+        )
+    if (
+        file_policy
+        != {
+            "aclPolicy": "deny-only",
+            "allowedModes": ["0600", "0644"],
+            "hardLinks": 1,
+            "maximumSize": 512 * 1024 * 1024,
+            "minimumSize": 1,
+            "ownerUid": owner,
+            "path": str(home / LOGIN_KEYCHAIN_RELATIVE),
+            "type": "regular",
+        }
+    ):
+        raise SigningPreflightError(
+            "signing preflight login Keychain policy is invalid"
+        )
 
 
-def verify_custody_metadata(manifest_path: Path) -> dict[str, object]:
+def verify_live_profile_validity(
+    manifest_path: Path,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Require copied profile authorization to remain valid at a use boundary."""
+
+    value = load_preflight_manifest(manifest_path)
+    current = _utc(now or datetime.now(timezone.utc), "profile readiness time")
+    validated_at = _parse_manifest_time(
+        value["validatedAt"], "signing preflight validation time"
+    )
+    if validated_at > current:
+        raise SigningPreflightError(
+            "signing preflight validation time is in the future at the live boundary"
+        )
+    for role in sorted(PROFILE_ROLES):
+        creation = _parse_manifest_time(
+            value["profiles"][role]["creation"],
+            f"{role} provisioning profile creation",
+        )
+        expiration = _parse_manifest_time(
+            value["profiles"][role]["expiration"],
+            f"{role} provisioning profile expiration",
+        )
+        if creation > current or expiration <= current:
+            raise SigningPreflightError(
+                f"{role} provisioning profile is outside its live signing window"
+            )
+    return value
+
+
+def verify_live_custody_metadata(
+    manifest_path: Path,
+    *,
+    runner: ProcessRunner = run_bounded_process,
+    repository: Path | None = None,
+) -> dict[str, object]:
+    """Revalidate updater custody without pinning the managed Keychain database."""
+
     value = load_preflight_manifest(manifest_path)
     updater = value["updater"]
-    records = [
-        *updater["ancestors"],
-        updater["key"],
-        updater["passwordKeychain"]["file"],
-    ]
-    for index, record in enumerate(records):
-        expected = _metadata_record(record, "updater custody path")
-        path = Path(expected.path)
-        try:
-            metadata = path.lstat()
-        except OSError as error:
-            raise SigningPreflightError(
-                "updater custody path is unavailable after preflight"
-            ) from error
-        if path.is_symlink() or FileMetadata.from_stat(path, metadata) != expected:
-            raise SigningPreflightError(
-                "updater custody metadata differs from the signing preflight"
-            )
-        if index < len(updater["ancestors"]):
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise SigningPreflightError(
-                    "updater custody ancestor is not a directory"
-                )
-        elif not stat.S_ISREG(metadata.st_mode):
-            raise SigningPreflightError("updater custody file is not regular")
+    expected_ancestors = tuple(
+        _directory_identity_record(item, "updater custody ancestor")
+        for item in updater["credentialAncestors"]
+    )
+    home = _home_directory(Path(expected_ancestors[0].path))
+    fixed_repository = (
+        Path(__file__).resolve().parent.parent if repository is None else repository
+    )
+    if not fixed_repository.is_absolute() or not fixed_repository.is_dir():
+        raise SigningPreflightError("release repository is not an absolute directory")
+    observed_ancestors, observed_key, observed_keychain = _inspect_updater_custody(
+        home,
+        runner=runner,
+        repository=fixed_repository,
+        environment=_command_environment(home),
+    )
+    stable_observed = tuple(
+        DirectoryIdentity.from_metadata(item) for item in observed_ancestors[:5]
+    )
+    if stable_observed != expected_ancestors:
+        raise SigningPreflightError(
+            "updater private-key ancestor identity changed after preflight"
+        )
+    expected_key = _metadata_record(
+        updater["key"]["file"], "updater private key"
+    )
+    if observed_key != expected_key:
+        raise SigningPreflightError("updater private key changed after preflight")
+
+    password = updater["passwordKeychain"]
+    directory_policy = password["directoryPolicy"]
+    file_policy = password["filePolicy"]
+    observed_keychains = observed_ancestors[5]
+    if (
+        observed_keychains.path != directory_policy["path"]
+        or observed_keychains.uid != directory_policy["ownerUid"]
+        or observed_keychains.mode not in directory_policy["allowedModes"]
+    ):
+        raise SigningPreflightError(
+            "Keychains directory differs from the live custody policy"
+        )
+    if (
+        observed_keychain.path != file_policy["path"]
+        or observed_keychain.uid != file_policy["ownerUid"]
+        or observed_keychain.mode not in file_policy["allowedModes"]
+        or observed_keychain.links != file_policy["hardLinks"]
+        or observed_keychain.size < file_policy["minimumSize"]
+        or observed_keychain.size > file_policy["maximumSize"]
+    ):
+        raise SigningPreflightError(
+            "login Keychain differs from the live custody policy"
+        )
     return value
 
 
@@ -756,7 +1041,7 @@ def _home_directory(home: Path | None) -> Path:
             raise SigningPreflightError(
                 "release user home directory is not canonical"
             )
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise SigningPreflightError(
             "release user home directory is unavailable"
         ) from error
@@ -766,7 +1051,7 @@ def _home_directory(home: Path | None) -> Path:
 def _lstat(path: Path, label: str) -> os.stat_result:
     try:
         return path.lstat()
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise SigningPreflightError(f"{label} is unavailable: {path}") from error
 
 
@@ -853,7 +1138,7 @@ def _profile_file_identity(path: Path, role: str, owner: int) -> FileMetadata:
             raise SigningPreflightError(
                 f"{role} provisioning profile path is not canonical"
             )
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise SigningPreflightError(
             f"{role} provisioning profile path is unavailable"
         ) from error
@@ -1565,6 +1850,7 @@ def _run_preflight_with_runtime(
         environment=command_environment,
     )
     return SigningPreflightResult(
+        validated_at=_render_utc(validation_time, "signing preflight validation time"),
         signing_identity=signing_identity,
         certificate_sha1=certificate_sha1,
         certificate_sha256=certificate_sha256,
@@ -1677,13 +1963,15 @@ if __name__ == "__main__":
 __all__ = [
     "DOCUMENT",
     "NOTARY_PROFILE",
+    "SCHEMA_VERSION",
     "SigningPreflightError",
     "SigningPreflightResult",
     "canonical_manifest",
     "load_preflight_manifest",
     "run_preflight",
     "signing_certificate_digests",
-    "verify_custody_metadata",
+    "verify_live_custody_metadata",
+    "verify_live_profile_validity",
     "verify_materialized_profiles",
     "write_preflight_manifest",
 ]

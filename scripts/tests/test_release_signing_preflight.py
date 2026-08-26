@@ -222,9 +222,20 @@ class ReleaseSigningPreflightTests(unittest.TestCase):
 
         self.assertEqual(
             set(value),
-            {"document", "identity", "notary", "profiles", "teamId", "updater"},
+            {
+                "document",
+                "identity",
+                "notary",
+                "profiles",
+                "schemaVersion",
+                "teamId",
+                "updater",
+                "validatedAt",
+            },
         )
         self.assertEqual(value["document"], preflight.DOCUMENT)
+        self.assertEqual(value["schemaVersion"], preflight.SCHEMA_VERSION)
+        self.assertEqual(value["validatedAt"], "2026-08-25T12:00:00Z")
         self.assertEqual(value["teamId"], preflight.TEAM_ID)
         self.assertEqual(
             value["identity"],
@@ -240,6 +251,18 @@ class ReleaseSigningPreflightTests(unittest.TestCase):
         self.assertEqual(
             value["notary"],
             {"historyProbe": "passed", "profile": preflight.NOTARY_PROFILE},
+        )
+        self.assertEqual(
+            set(value["updater"]),
+            {"credentialAncestors", "custodyPolicy", "key", "passwordKeychain"},
+        )
+        self.assertEqual(
+            len(value["updater"]["credentialAncestors"]),
+            5,
+        )
+        self.assertNotIn("inode", value["updater"]["passwordKeychain"]["filePolicy"])
+        self.assertNotIn(
+            "modifiedNs", value["updater"]["passwordKeychain"]["filePolicy"]
         )
         self.assertNotIn(b"must-not-enter-the-manifest", data)
         self.assertNotIn(b"fixture private key", data)
@@ -282,7 +305,11 @@ class ReleaseSigningPreflightTests(unittest.TestCase):
         manifest, materialized = self._materialized_profiles(result)
 
         verified = preflight.verify_materialized_profiles(manifest, materialized)
-        custody = preflight.verify_custody_metadata(manifest)
+        custody = preflight.verify_live_custody_metadata(
+            manifest,
+            runner=self.runner,
+            repository=self.fixture.repository,
+        )
 
         self.assertEqual(set(verified), set(materialized))
         self.assertEqual(custody["notary"]["historyProbe"], "passed")
@@ -333,14 +360,18 @@ class ReleaseSigningPreflightTests(unittest.TestCase):
         ):
             preflight.verify_materialized_profiles(manifest, materialized)
 
-    def test_custody_metadata_drift_and_forged_notary_proof_are_rejected(self) -> None:
+    def test_private_key_drift_and_forged_notary_proof_are_rejected(self) -> None:
         result = self.run_preflight()
         manifest, _materialized = self._materialized_profiles(result)
         self.fixture.updater_key.chmod(0o400)
         with self.assertRaisesRegex(
-            preflight.SigningPreflightError, "custody metadata differs"
+            preflight.SigningPreflightError, "mode|private key"
         ):
-            preflight.verify_custody_metadata(manifest)
+            preflight.verify_live_custody_metadata(
+                manifest,
+                runner=self.runner,
+                repository=self.fixture.repository,
+            )
 
         self.fixture.updater_key.chmod(0o600)
         value = json.loads(manifest.read_bytes())
@@ -350,6 +381,187 @@ class ReleaseSigningPreflightTests(unittest.TestCase):
             preflight.SigningPreflightError, "notary proof"
         ):
             preflight.load_preflight_manifest(manifest)
+
+    def test_same_size_private_key_atomic_replacement_is_rejected(self) -> None:
+        result = self.run_preflight()
+        manifest, _materialized = self._materialized_profiles(result)
+        before = self.fixture.updater_key.stat()
+        replacement = self.fixture.updater_directory / "cfw-rs-v2.replacement"
+        replacement.write_bytes(b"X" * before.st_size)
+        replacement.chmod(0o600)
+
+        os.replace(replacement, self.fixture.updater_key)
+
+        after = self.fixture.updater_key.stat()
+        self.assertNotEqual(after.st_ino, before.st_ino)
+        self.assertEqual(after.st_size, before.st_size)
+        self.assertEqual(stat.S_IMODE(after.st_mode), stat.S_IMODE(before.st_mode))
+        with self.assertRaisesRegex(
+            preflight.SigningPreflightError, "private key changed after preflight"
+        ):
+            preflight.verify_live_custody_metadata(
+                manifest,
+                runner=self.runner,
+                repository=self.fixture.repository,
+            )
+
+    def test_managed_keychain_atomic_replacement_preserves_live_readiness(self) -> None:
+        result = self.run_preflight()
+        manifest, _materialized = self._materialized_profiles(result)
+        before_directory = self.fixture.keychains.stat()
+        before_keychain = self.fixture.login_keychain.stat()
+        replacement = self.fixture.keychains / "login.keychain-db.replacement"
+        replacement.write_bytes(b"replacement keychain database with new state")
+        replacement.chmod(0o644)
+
+        os.replace(replacement, self.fixture.login_keychain)
+
+        after_directory = self.fixture.keychains.stat()
+        after_keychain = self.fixture.login_keychain.stat()
+        self.assertNotEqual(after_keychain.st_ino, before_keychain.st_ino)
+        self.assertNotEqual(after_keychain.st_size, before_keychain.st_size)
+        self.assertTrue(
+            after_directory.st_mtime_ns != before_directory.st_mtime_ns
+            or after_directory.st_ctime_ns != before_directory.st_ctime_ns
+        )
+        verified = preflight.verify_live_custody_metadata(
+            manifest,
+            runner=self.runner,
+            repository=self.fixture.repository,
+        )
+        self.assertEqual(verified["document"], preflight.DOCUMENT)
+
+    def test_live_custody_rechecks_acl_and_keychain_file_type(self) -> None:
+        result = self.run_preflight()
+        manifest, _materialized = self._materialized_profiles(result)
+        self.runner.acl_grant = True
+        with self.assertRaisesRegex(
+            preflight.SigningPreflightError, "ACL grants access"
+        ):
+            preflight.verify_live_custody_metadata(
+                manifest,
+                runner=self.runner,
+                repository=self.fixture.repository,
+            )
+
+        self.runner.acl_grant = False
+        real_keychain = self.fixture.keychains / "login.keychain-db.real"
+        self.fixture.login_keychain.rename(real_keychain)
+        self.fixture.login_keychain.symlink_to(real_keychain)
+        with self.assertRaisesRegex(
+            preflight.SigningPreflightError, "owner-bound regular file"
+        ):
+            preflight.verify_live_custody_metadata(
+                manifest,
+                runner=self.runner,
+                repository=self.fixture.repository,
+            )
+
+    def test_receipt_time_is_historical_and_live_profile_expiry_is_explicit(self) -> None:
+        result = self.run_preflight()
+        manifest, _materialized = self._materialized_profiles(result)
+        value = json.loads(manifest.read_bytes())
+        shortly_after_validation = NOW + timedelta(hours=1)
+        for profile in value["profiles"].values():
+            profile["expiration"] = shortly_after_validation.isoformat().replace(
+                "+00:00", "Z"
+            )
+        manifest.write_bytes(preflight.canonical_manifest(value))
+
+        self.assertEqual(
+            preflight.load_preflight_manifest(manifest)["validatedAt"],
+            "2026-08-25T12:00:00Z",
+        )
+        with self.assertRaisesRegex(
+            preflight.SigningPreflightError, "outside its live signing window"
+        ):
+            preflight.verify_live_profile_validity(
+                manifest,
+                now=NOW + timedelta(hours=2),
+            )
+
+        with self.assertRaisesRegex(
+            preflight.SigningPreflightError, "validation time is in the future"
+        ):
+            preflight.verify_live_profile_validity(
+                manifest,
+                now=NOW - timedelta(seconds=1),
+            )
+
+    def test_v1_or_unknown_preflight_schema_is_rejected_fail_closed(self) -> None:
+        result = self.run_preflight()
+        manifest, _materialized = self._materialized_profiles(result)
+        value = json.loads(manifest.read_bytes())
+        value["document"] = "cfm-release-signing-preflight-v1"
+        value["schemaVersion"] = 1
+        manifest.write_bytes(preflight.canonical_manifest(value))
+
+        with self.assertRaisesRegex(
+            preflight.SigningPreflightError, "identity is invalid"
+        ):
+            preflight.load_preflight_manifest(manifest)
+
+        value["document"] = preflight.DOCUMENT
+        value["schemaVersion"] = 2.0
+        manifest.write_bytes(preflight.canonical_manifest(value))
+        with self.assertRaisesRegex(
+            preflight.SigningPreflightError, "identity is invalid"
+        ):
+            preflight.load_preflight_manifest(manifest)
+
+    def test_keychain_policy_requires_exact_integer_types(self) -> None:
+        result = self.run_preflight()
+        manifest, _materialized = self._materialized_profiles(result)
+        original = json.loads(manifest.read_bytes())
+        mutations = {
+            "directory-owner-float": lambda value: value["updater"][
+                "passwordKeychain"
+            ]["directoryPolicy"].__setitem__("ownerUid", float(os.geteuid())),
+            "file-owner-float": lambda value: value["updater"][
+                "passwordKeychain"
+            ]["filePolicy"].__setitem__("ownerUid", float(os.geteuid())),
+            "hard-links-bool": lambda value: value["updater"][
+                "passwordKeychain"
+            ]["filePolicy"].__setitem__("hardLinks", True),
+            "minimum-size-bool": lambda value: value["updater"][
+                "passwordKeychain"
+            ]["filePolicy"].__setitem__("minimumSize", True),
+            "maximum-size-float": lambda value: value["updater"][
+                "passwordKeychain"
+            ]["filePolicy"].__setitem__("maximumSize", float(512 * 1024 * 1024)),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                value = json.loads(json.dumps(original))
+                mutate(value)
+                manifest.write_bytes(preflight.canonical_manifest(value))
+                with self.assertRaisesRegex(
+                    preflight.SigningPreflightError,
+                    "policy integers are invalid",
+                ):
+                    preflight.load_preflight_manifest(manifest)
+
+    def test_updater_receipt_paths_require_bounded_canonical_text(self) -> None:
+        result = self.run_preflight()
+        manifest, _materialized = self._materialized_profiles(result)
+        original = json.loads(manifest.read_bytes())
+        home = original["updater"]["credentialAncestors"][0]["path"]
+        mutations = {
+            "nul": f"{home}\0suffix",
+            "parent-component": f"{home}/Library/..",
+            "repeated-separator": f"{home}//Library",
+            "control": f"{home}\nLibrary",
+        }
+        for label, path in mutations.items():
+            with self.subTest(label=label):
+                value = json.loads(json.dumps(original))
+                value["updater"]["credentialAncestors"][0]["path"] = path
+                manifest.write_bytes(preflight.canonical_manifest(value))
+                with self.assertRaisesRegex(
+                    preflight.SigningPreflightError,
+                    "canonical path",
+                ):
+                    preflight.load_preflight_manifest(manifest)
 
     def test_commands_are_fixed_bounded_and_never_request_secrets(self) -> None:
         real_open = preflight.os.open

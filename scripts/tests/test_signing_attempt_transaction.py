@@ -122,9 +122,19 @@ class SigningAttemptFixture:
         if os.path.lexists(source) or not destination.is_dir():
             raise PublicationError("fixture publication is ambiguous")
 
-    def run(self, *, resume: bool, helper=None, publisher=None) -> Path:
+    def run(
+        self,
+        *,
+        resume: bool,
+        helper=None,
+        publisher=None,
+        live_readiness=None,
+    ) -> Path:
         helper_runner = self.helper_success if helper is None else helper
         selected_publisher = self.publisher if publisher is None else publisher
+        readiness = (
+            (lambda _root: None) if live_readiness is None else live_readiness
+        )
         with patch.object(
             transaction,
             "_verify_frozen_inputs",
@@ -136,6 +146,7 @@ class SigningAttemptFixture:
                 clock=self.clock,
                 helper_runner=helper_runner,
                 verification_runner=self.verification,
+                live_readiness_verifier=readiness,
                 publisher=selected_publisher,
                 confirmer=self.confirmer,
                 transformation_creator=self.transformation_create,
@@ -176,6 +187,32 @@ class SigningAttemptTransactionTests(unittest.TestCase):
         )
         self.assertFalse(attempt.work.exists())
         self.assertFalse(attempt.publish_ready.exists())
+
+    def test_live_profile_readiness_fails_before_attempt_allocation(self) -> None:
+        def reject(_root: Path) -> None:
+            raise transaction.SigningAttemptError(
+                "signing_profile_readiness_invalid",
+                "fixture profile expired",
+            )
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "fixture profile expired"
+        ) as raised:
+            self.fixture.run(resume=False, live_readiness=reject)
+
+        self.assertEqual(raised.exception.code, "signing_profile_readiness_invalid")
+        self.assertEqual(os.listdir(self.fixture.attempts()), [])
+
+    def test_published_output_reopen_does_not_require_live_profile_validity(self) -> None:
+        canonical = self.fixture.run(resume=False)
+
+        def reject(_root: Path) -> None:
+            raise AssertionError("published output touched live profile readiness")
+
+        self.assertEqual(
+            self.fixture.run(resume=True, live_readiness=reject),
+            canonical,
+        )
 
     def test_helper_failure_is_append_only_and_resume_uses_next_attempt(self) -> None:
         with self.assertRaisesRegex(
@@ -378,6 +415,7 @@ class SigningAttemptTransactionTests(unittest.TestCase):
                 clock=self.fixture.clock,
                 helper_runner=self.fixture.helper_success,
                 verification_runner=self.fixture.verification,
+                live_readiness_verifier=lambda _root: None,
                 publisher=self.fixture.publisher,
                 confirmer=self.fixture.confirmer,
                 transformation_creator=reject,
@@ -419,6 +457,7 @@ class SigningAttemptTransactionTests(unittest.TestCase):
                         clock=self.fixture.clock,
                         helper_runner=self.fixture.helper_success,
                         verification_runner=self.fixture.verification,
+                        live_readiness_verifier=lambda _root: None,
                         publisher=self.fixture.publisher,
                         confirmer=self.fixture.confirmer,
                         transformation_creator=self.fixture.transformation_create,
@@ -447,6 +486,7 @@ class SigningAttemptTransactionTests(unittest.TestCase):
                 clock=self.fixture.clock,
                 helper_runner=self.fixture.helper_success,
                 verification_runner=self.fixture.verification,
+                live_readiness_verifier=lambda _root: None,
                 publisher=self.fixture.publisher,
                 confirmer=self.fixture.confirmer,
                 transformation_creator=self.fixture.transformation_create,

@@ -15,7 +15,7 @@ cleanup() {
 trap cleanup EXIT
 fixture_root="$(cd "$fixture_root" && /bin/pwd -P)"
 
-ga_app="$fixture_root/target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app"
+ga_app="$fixture_root/target/candidates/0.4.0/ga/40032/signed/Clash for Mac.app"
 mkdir -p "$ga_app"
 cfw_require_fixed_publication_app_path "$fixture_root" "$ga_app"
 
@@ -25,15 +25,17 @@ if cfw_require_fixed_publication_app_path "$fixture_root" "$old_signed" 2>"$fixt
   echo "error: path contract accepted retired candidate-level signed path" >&2
   exit 1
 fi
-grep -Fq "only the fixed 0.4.0/40031 GA app" "$fixture_root/old-path.stderr"
+grep -Fq "only the fixed 0.4.0/40032 GA app" "$fixture_root/old-path.stderr"
 
-retired_build="$fixture_root/target/candidates/0.4.0/ga/40030/signed/Clash for Mac.app"
-mkdir -p "$retired_build"
-if cfw_require_fixed_publication_app_path "$fixture_root" "$retired_build" 2>"$fixture_root/retired-build.stderr"; then
-  echo "error: path contract accepted retired build 40030" >&2
-  exit 1
-fi
-grep -Fq "only the fixed 0.4.0/40031 GA app" "$fixture_root/retired-build.stderr"
+for retired_build_number in 40030 40031; do
+  retired_build="$fixture_root/target/candidates/0.4.0/ga/$retired_build_number/signed/Clash for Mac.app"
+  mkdir -p "$retired_build"
+  if cfw_require_fixed_publication_app_path "$fixture_root" "$retired_build" 2>"$fixture_root/retired-build-$retired_build_number.stderr"; then
+    echo "error: path contract accepted retired build $retired_build_number" >&2
+    exit 1
+  fi
+  grep -Fq "only the fixed 0.4.0/40032 GA app" "$fixture_root/retired-build-$retired_build_number.stderr"
+done
 
 linked_app="$fixture_root/linked.app"
 ln -s "$ga_app" "$linked_app"

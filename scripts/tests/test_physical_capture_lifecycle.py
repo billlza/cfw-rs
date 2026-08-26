@@ -82,7 +82,7 @@ class LifecycleCaptureBoundaryTests(unittest.TestCase):
         }
         candidate = {
             "version": "0.4.0",
-            "build_number": "40031",
+            "build_number": "40032",
             "app_manifest_sha256": _sha256("app"),
             "signed_app_tree_sha256": _sha256("tree"),
             "artifact_hash_manifest_sha256": _sha256("artifacts"),
@@ -91,7 +91,7 @@ class LifecycleCaptureBoundaryTests(unittest.TestCase):
         self.state.context = {
             "candidate": candidate,
             "run": {
-                "run_id": "run-40031-macos15",
+                "run_id": "run-40032-macos15",
                 **{
                     field: environment[field]
                     for field in lifecycle._CONTEXT_ENVIRONMENT_FIELDS
@@ -102,7 +102,7 @@ class LifecycleCaptureBoundaryTests(unittest.TestCase):
             "schema_version": 1,
             "document": "cfw-lifecycle-observation-v1",
             "candidate": candidate,
-            "run_id": "run-40031-macos15",
+            "run_id": "run-40032-macos15",
             "environment": environment,
             "probe_id": "login",
             "category": "session",

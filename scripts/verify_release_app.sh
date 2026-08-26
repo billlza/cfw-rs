@@ -469,9 +469,9 @@ from release_build_identity import bundle_build_identity
 print(bundle_build_identity(__import__("pathlib").Path(sys.argv[2])).build_version)
 PY
 )" || die "bundle build identity is invalid"
-[[ "$build_number" == "40031" ]] ||
-  die "release application is not the fixed GA build 40031"
-ga_root="$repo_root/target/candidates/0.4.0/ga/40031"
+[[ "$build_number" == "40032" ]] ||
+  die "release application is not the fixed GA build 40032"
+ga_root="$repo_root/target/candidates/0.4.0/ga/40032"
 canonical_signing_output="$ga_root/signing-output"
 signing_output="${native_products_root%/signed-native-products}"
 if [[ "$signing_output" != "$canonical_signing_output" ]]; then
@@ -483,7 +483,7 @@ fi
   die "native products root is not the fixed signed-native-products directory"
 [[ "$app_path" == "$signing_output/signing-input/Clash for Mac.app" ]] ||
   die "release application and native products do not share one signing-output"
-signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40031/profiles/signing-preflight.json"
+signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40032/profiles/signing-preflight.json"
 require_regular_file "$signing_preflight_manifest"
 expected_signing_certificate_sha256="$(cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/release_signing_preflight.py" \

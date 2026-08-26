@@ -141,9 +141,6 @@ CARGO_HOME="$candidate_cargo_home" CARGO_NET_OFFLINE=true \
 "$repo_root/scripts/build_ui_with_pinned_node.sh"
 
 unset CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTFLAGS
-export CARGO_NET_OFFLINE=true
-export CARGO_TARGET_DIR="$cargo_target"
-export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
 tauri_override="$("$python_bin" -I -S -B -W error - "$build_version" "$native_products" <<'PY'
 import json
 import sys
@@ -169,7 +166,10 @@ print(json.dumps({
 }, separators=(",", ":")))
 PY
 )"
-CARGO_HOME="$candidate_cargo_home" CARGO_NET_OFFLINE=true \
+CARGO_HOME="$candidate_cargo_home" \
+  CARGO_NET_OFFLINE=true \
+  CARGO_TARGET_DIR="$cargo_target" \
+  MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
   cfw_build_tauri_host_skeleton \
   "$repo_root/apps/cfw-tauri-shell" \
   "$tauri_bin" \

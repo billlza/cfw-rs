@@ -17,7 +17,7 @@ class SigningAttemptFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
-        self.root = self.repository / "target/candidates/0.4.0/ga/40031"
+        self.root = self.repository / "target/candidates/0.4.0/ga/40032"
         self.root.mkdir(parents=True, mode=0o700)
         self.root.chmod(0o700)
         intent = self.root / "candidate-freeze/intent.json"
@@ -29,7 +29,7 @@ class SigningAttemptFixture:
             intent_path=intent,
             intent_sha256="a" * 64,
             product_version="0.4.0",
-            build_number="40031",
+            build_number="40032",
             recovered=False,
         )
         self.bindings = transaction.FrozenSigningBindings(
@@ -215,22 +215,42 @@ class SigningAttemptTransactionTests(unittest.TestCase):
         )
 
     def test_helper_failure_is_append_only_and_resume_uses_next_attempt(self) -> None:
+        def fail_after_partial_output(work: Path, _sha1: str, _sha256: str) -> int:
+            marker = work / "partial-signed-product"
+            marker.write_bytes(b"private partial signature output")
+            marker.chmod(0o600)
+            return 23
+
         with self.assertRaisesRegex(
             transaction.SigningAttemptError, "fixed signing helper failed"
         ):
             self.fixture.run(
                 resume=False,
-                helper=lambda _work, _sha1, _sha256: 23,
+                helper=fail_after_partial_output,
             )
         first = self.fixture.load("00000001")
         self.assertEqual(first.state, "failed")
+        self.assertEqual(first.events[-1]["failure_code"], "signing_helper_failed")
         self.assertEqual(first.events[-1]["exit_code"], 23)
         self.assertTrue(first.work.is_dir())
+        marker = first.work / "partial-signed-product"
+        marker_bytes = marker.read_bytes()
+        marker_mode = marker.stat().st_mode & 0o777
         first_intent = (first.root / transaction.INTENT_NAME).read_bytes()
         first_events = tuple(
             (first.root / f"event-{number:08d}.json").read_bytes()
             for number in range(1, len(first.events) + 1)
         )
+        self.assertEqual(os.listdir(self.fixture.attempts()), ["00000001"])
+        self.assertFalse((self.fixture.root / "signing-output").exists())
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "use the fixed resume entry"
+        ):
+            self.fixture.run(resume=False)
+        self.assertEqual(os.listdir(self.fixture.attempts()), ["00000001"])
+        self.assertEqual(marker.read_bytes(), marker_bytes)
+        self.assertEqual(marker.stat().st_mode & 0o777, marker_mode)
 
         self.fixture.run(resume=True)
         second = self.fixture.load("00000002")
@@ -243,6 +263,8 @@ class SigningAttemptTransactionTests(unittest.TestCase):
             ),
             first_events,
         )
+        self.assertEqual(marker.read_bytes(), marker_bytes)
+        self.assertEqual(marker.stat().st_mode & 0o777, marker_mode)
 
     def test_process_crash_is_recorded_outcome_unknown_before_retry(self) -> None:
         def crash(_work: Path, _sha1: str, _sha256: str) -> int:

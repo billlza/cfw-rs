@@ -27,6 +27,7 @@ STATUSES: Final = frozenset(
         "retired_after_notarization_before_install_preflight_protocol_incompatible",
         "retired_after_notarization_before_install_runtime_preflight_failed",
         "retired_after_notarization_before_install_runtime_preflight_toolchain_binding_mismatch",
+        "retired_after_candidate_freeze_before_canonical_signing_output",
         "retired_before_candidate_build_source_gate_contract_incomplete",
         "retired_unbuilt_policy_superseded",
         "retired_unbuilt_reserved_final_companion",
@@ -63,6 +64,11 @@ POLICY_SUPERSEDED_ALLOCATION: Final = (
     "40030",
     "validation",
     "retired_unbuilt_policy_superseded",
+)
+RETIRED_GA_ALLOCATION: Final = (
+    "40031",
+    "ga",
+    "retired_after_candidate_freeze_before_canonical_signing_output",
 )
 
 
@@ -166,6 +172,16 @@ def validate_contract(
         raise ReleaseBuildAllocationError(
             "policy-superseded 40030 allocation changed"
         )
+    retired_ga_index = superseded_index + 1
+    if retired_ga_index >= len(allocations):
+        raise ReleaseBuildAllocationError("retired 40031 GA allocation is absent")
+    retired_ga = allocations[retired_ga_index]
+    if (
+        retired_ga["build"],
+        retired_ga["role"],
+        retired_ga["status"],
+    ) != RETIRED_GA_ALLOCATION:
+        raise ReleaseBuildAllocationError("retired 40031 GA allocation changed")
     expected_range = list(
         range(int(IMMUTABLE_RETIRED_PREFIX[0][0]), ordered_builds[-1] + 1)
     )

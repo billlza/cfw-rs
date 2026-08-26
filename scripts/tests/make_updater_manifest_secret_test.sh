@@ -173,7 +173,7 @@ fi
 }
 
 fixture_repo="$temporary_root/repository"
-ga_root="$fixture_repo/target/candidates/0.4.0/ga/40031"
+ga_root="$fixture_repo/target/candidates/0.4.0/ga/40032"
 app_path="$ga_root/signed/Clash for Mac.app"
 native_products="$ga_root/signing-output/signed-native-products"
 mkdir -p "$fixture_repo/scripts" "$native_products" \
@@ -207,12 +207,12 @@ cfw_run_release_python_script() {
 }
 
 release_native_products_root_for_app() {
-  [[ "\$1" == "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app" ]]
-  printf '%s\n' "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40031/signing-output/signed-native-products"
+  [[ "\$1" == "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40032/signed/Clash for Mac.app" ]]
+  printf '%s\n' "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40032/signing-output/signed-native-products"
 }
 
 verify_release_prepackage_evidence() {
-  [[ "\$#" -eq 1 && "\$1" == "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app" ]]
+  [[ "\$#" -eq 1 && "\$1" == "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40032/signed/Clash for Mac.app" ]]
 }
 SH
 
@@ -303,7 +303,7 @@ cat >"$app_path/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key>
   <string>0.4.0</string>
   <key>CFBundleVersion</key>
-  <string>40031</string>
+  <string>40032</string>
 </dict>
 </plist>
 PLIST

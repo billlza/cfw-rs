@@ -58,3 +58,8 @@ one new clean source identity. Build 40030 must repeat the complete source,
 test, signing, notarization, artifact, Gatekeeper, read-only runtime preflight,
 installation, and physical-evidence sequence. No evidence from build 40028 may
 be copied forward as successful evidence.
+
+That successor plan was later superseded: policy retired build 40030 unbuilt,
+and build 40031 was retired after candidate freeze but before canonical signing
+output. Build 40032 is the only active GA allocation; see
+`ga-build-40031-retirement.md`.

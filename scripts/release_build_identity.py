@@ -52,7 +52,7 @@ class ReleaseIdentity:
         canonical_build_version(self.ga_build, "active GA build")
 
 
-ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40031")
+ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40032")
 UNSIGNED_VALIDATION_BUILD = "40000"
 
 

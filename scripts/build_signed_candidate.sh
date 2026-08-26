@@ -308,7 +308,7 @@ import sys
 ) = sys.argv[1:]
 value = {
     "document": "cfm-ga-product-input-v1",
-    "product": {"build_number": "40031", "version": "0.4.0"},
+    "product": {"build_number": "40032", "version": "0.4.0"},
     "schema_version": 1,
     "source": {
         "release_source_sha256": release_source_sha256,
@@ -364,9 +364,6 @@ done
 
 "$repo_root/scripts/build_ui_with_pinned_node.sh"
 unset CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTFLAGS
-export CARGO_NET_OFFLINE=true
-export CARGO_TARGET_DIR="$cargo_target"
-export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
 tauri_override="$("$python_bin" -I -S -B -W error - \
   "$CFW_BUILD_NUMBER" "$native_products" <<'PY'
 import json
@@ -394,7 +391,10 @@ print(json.dumps({
 PY
 )"
 cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
-CARGO_HOME="$candidate_cargo_home" CARGO_NET_OFFLINE=true \
+CARGO_HOME="$candidate_cargo_home" \
+  CARGO_NET_OFFLINE=true \
+  CARGO_TARGET_DIR="$cargo_target" \
+  MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
   cfw_build_tauri_host_skeleton \
   "$repo_root/apps/cfw-tauri-shell" \
   "$tauri_bin" \
@@ -482,7 +482,7 @@ if set(value) != {"document", "product", "schema_version", "source", "toolchain"
     raise SystemExit("error: frozen product input field set is invalid")
 if value["document"] != "cfm-ga-product-input-v1" or value["schema_version"] != 1:
     raise SystemExit("error: frozen product input identity is invalid")
-if value["product"] != {"build_number": "40031", "version": "0.4.0"}:
+if value["product"] != {"build_number": "40032", "version": "0.4.0"}:
     raise SystemExit("error: frozen product identity is invalid")
 source = value["source"]
 toolchain = value["toolchain"]

@@ -21,9 +21,9 @@ cfw_require_fixed_publication_app_path() {
     return 1
   fi
   canonical_app="$(cd "$app_path" && /bin/pwd -P)" || return 1
-  expected_app="$repository/target/candidates/0.4.0/ga/40031/signed/Clash for Mac.app"
+  expected_app="$repository/target/candidates/0.4.0/ga/40032/signed/Clash for Mac.app"
   if [[ "$canonical_app" != "$expected_app" ]]; then
-    echo "error: publication gate accepts only the fixed 0.4.0/40031 GA app: $expected_app" >&2
+    echo "error: publication gate accepts only the fixed 0.4.0/40032 GA app: $expected_app" >&2
     return 1
   fi
 }

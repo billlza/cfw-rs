@@ -11,8 +11,6 @@ source "$repo_root/scripts/dependency_pins.env"
 # shellcheck source=scripts/release_tool_environment.sh
 source "$repo_root/scripts/release_tool_environment.sh"
 cfw_seal_release_tool_environment production
-python_bin="$CFW_RELEASE_PYTHON_EXECUTABLE"
-readonly python_bin
 
 die() {
   echo "error: $*" >&2
@@ -29,7 +27,7 @@ die() {
 [[ "$CFW_SIGNING_CERTIFICATE_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
   die "frozen signing certificate SHA-256 is malformed"
 
-readonly frozen_root="$repo_root/target/candidates/0.4.0/ga/40031"
+readonly frozen_root="$repo_root/target/candidates/0.4.0/ga/40032"
 readonly attempts_root="$frozen_root/transactions/signing-attempts"
 readonly attempt_work="$CFW_SIGNING_ATTEMPT_WORK"
 case "$attempt_work" in
@@ -133,17 +131,19 @@ for product in \
   CFWProxyAgent.app \
   com.bill.clashformac.packet-tunnel.systemextension \
   CFWLegacyTombstone; do
-  "$python_bin" -I -S -B -W error \
+  cfw_run_release_python_script \
+    "$repo_root" \
     "$repo_root/scripts/promote_signed_native_manifest.py" \
     "$native_products/$product" \
     "$native_products/$product.manifest.json" \
     "$signed_native_products/$product" \
     "$signed_native_products/$product.manifest.json"
-  "$python_bin" -I -S -B -W error \
+  cfw_run_release_python_script \
+    "$repo_root" \
     "$repo_root/scripts/verify_artifact_manifest.py" \
     "$signed_native_products/$product" \
     "$signed_native_products/$product.manifest.json" \
-    --metadata "buildNumber=40031" \
+    --metadata "buildNumber=40032" \
     --metadata "signingMode=developer-id"
 done
 

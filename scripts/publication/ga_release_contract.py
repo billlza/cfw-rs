@@ -5,7 +5,7 @@ The only production state transition is::
     prepackage -> ga-acceptance -> publication
 
 Each stage is derived by reopening every required input and validating the
-exact 40031 identity.  State mutation is owned by ``orchestrator``; this module
+exact 40032 identity.  State mutation is owned by ``orchestrator``; this module
 only composes expected bytes and reopens immutable evidence.
 Assurance-only physical, performance, and capability-report evidence is kept
 outside this graph and can never satisfy a missing GA-required input.
@@ -361,7 +361,7 @@ def _verify_publication_adapter(repository: Path) -> None:
         or release_contract.evidence_root(repository) != expected_evidence
     ):
         raise PublicationError(
-            "GA publication verifier adapter is not migrated to ga/40031; "
+            "GA publication verifier adapter is not migrated to ga/40032; "
             "legacy path fallback is forbidden"
         )
 
@@ -441,8 +441,8 @@ def _verified_prepackage_inputs(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, bytes]]:
     repository = _canonical_repository(repository)
     _reject_legacy_paths(repository)
-    if (PRODUCT_VERSION, GA_BUILD) != ("0.4.0", "40031"):
-        raise PublicationError("prepackage requires the fixed v0.4.0/40031 identity")
+    if (PRODUCT_VERSION, GA_BUILD) != ("0.4.0", "40032"):
+        raise PublicationError("prepackage requires the fixed v0.4.0/40032 identity")
     try:
         frozen = verify_frozen_candidate(repository)
     except CandidateFreezeError as error:
@@ -571,7 +571,7 @@ def _verified_prepackage_inputs(
         bundle_identity.product_version != PRODUCT_VERSION
         or bundle_identity.build_version != GA_BUILD
     ):
-        raise PublicationError("signed application is not exactly v0.4.0/40031")
+        raise PublicationError("signed application is not exactly v0.4.0/40032")
     environment = _release_environment(repository)
     _validate_release_application(repository, environment)
 
@@ -790,7 +790,7 @@ def _require_artifact_set_adapter(repository: Path):
     expected = _repo_relative(repository, _path(repository, SIGNED_APP))
     if release_artifact_set.CANDIDATE_APP_RELATIVE != expected:
         raise PublicationError(
-            "GA package verifier adapter is not migrated to ga/40031; "
+            "GA package verifier adapter is not migrated to ga/40032; "
             "legacy package fallback is forbidden"
         )
     return release_artifact_set
@@ -881,7 +881,7 @@ def _verified_service_journal(repository: Path) -> tuple[dict[str, Any], dict[st
         or intent["candidate"]["build_number"] != GA_BUILD
         or intent["previous"]["build_number"] != "40019"
     ):
-        raise PublicationError("service transaction is not a completed 40019 to 40031 migration")
+        raise PublicationError("service transaction is not a completed 40019 to 40032 migration")
     return intent, _tree_record(repository, expected)
 
 
@@ -905,7 +905,7 @@ def _verified_acceptance_inputs(
         or install_journal["previous"]["build_number"] != "40019"
         or any(segment["after"] is None for segment in install_journal["guards"])
     ):
-        raise PublicationError("install journal is not a closed 40019 to 40031 migration")
+        raise PublicationError("install journal is not a closed 40019 to 40032 migration")
     prepackage_bindings = prepackage["bindings"]
     expected_candidate = {
         "build_number": GA_BUILD,
@@ -1206,9 +1206,9 @@ def self_check(repository: Path) -> None:
     repository = _canonical_source_repository(repository)
     if (
         ACTIVE_RELEASE_IDENTITY.product_version != "0.4.0"
-        or ACTIVE_RELEASE_IDENTITY.ga_build != "40031"
+        or ACTIVE_RELEASE_IDENTITY.ga_build != "40032"
         or _path(repository, GA_ROOT)
-        != repository / "target/candidates/0.4.0/ga/40031"
+        != repository / "target/candidates/0.4.0/ga/40032"
         or STAGES != ("prepackage", "ga-acceptance", "publication")
         or any(
             _path(repository, output).is_relative_to(_path(repository, ASSURANCE_ROOT))

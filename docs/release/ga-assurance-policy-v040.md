@@ -10,14 +10,22 @@ passes for the single candidate below.
 
 ## One releasable application identity
 
-Build 40031 is the only application identity signed, notarized, installed,
+Build 40032 is the only application identity signed, notarized, installed,
 accepted, and published for the v0.4.0 GA. The DMG and updater archive will be
-two distribution envelopes around the exact same 40031 application tree, not
+two distribution envelopes around the exact same 40032 application tree, not
 separate application candidates.
 
 Build 40030 must not be built, signed, submitted to Apple, installed, or used as
-a substitute for 40031 evidence. It is recorded as
-`retired_unbuilt_policy_superseded`; 40031 is the single `active_ga` build.
+a substitute for 40032 evidence. It is recorded as
+`retired_unbuilt_policy_superseded`; 40032 is the single `active_ga` build.
+
+Build 40031 completed candidate freeze and began one private signing attempt,
+but no canonical signed output or notarization submission was produced. It is
+permanently recorded as
+`retired_after_candidate_freeze_before_canonical_signing_output`; its frozen
+root and failed attempt remain immutable under
+[`ga-build-40031-retirement.md`](ga-build-40031-retirement.md). Build 40031
+must not be rebuilt, resumed, promoted, installed, or substituted for 40032.
 
 No further build pair may be allocated for a source, CI, documentation, test,
 verifier, or preflight failure that occurs before an application candidate is
@@ -82,7 +90,7 @@ Every GA-required gate is explicit and fail closed. The GA manifest must bind:
 - the signed and notarized DMG seal, plus an updater archive, updater signature,
   manifest, official URL, and exact application-tree binding when updater
   publication is enabled;
-- an exact-DMG install and 40019-to-40031 migration on a fixed Apple Silicon
+- an exact-DMG install and 40019-to-40032 migration on a fixed Apple Silicon
   GA environment, including launch, service registration, System Extension and
   Network Extension approval, and real TCP, UDP, and DNS traffic;
 - shutdown and restoration of Network Extension, proxy, DNS, and route state;
@@ -125,7 +133,7 @@ a GA product failure.
 The implementation must expose three closed stages without skip flags or
 fallback success:
 
-1. `prepackage` verifies the exact 40031 application, source and CI identity,
+1. `prepackage` verifies the exact 40032 application, source and CI identity,
    signing, notarization, Gatekeeper result, and license/source closure. Only a
    passing prepackage manifest may create the candidate DMG and updater sets.
 2. `ga-acceptance` freezes and binds the DMG and updater set seals, then installs
@@ -158,9 +166,10 @@ override may turn missing evidence into success.
 
 The release-policy implementation must preserve all of these invariants:
 
-1. replaces the validation/final pair with one enforced `ga_build=40031`;
-2. removes the 40030 build, notarization, installation, and review path;
-3. performs the existing guarded 40019-to-40031 migration directly;
+1. replaces the validation/final pair with one enforced `ga_build=40032`;
+2. keeps build 40030 unbuilt and build 40031 consumed, failed, and permanently
+   outside every active notarization, installation, and review path;
+3. performs the existing guarded 40019-to-40032 migration directly;
 4. splits prepackage authorization from final publication authorization;
 5. binds exact-DMG acceptance and updater-set identity before upload;
 6. extracts the shared GA artifact core from the current final-candidate graph;
@@ -173,6 +182,6 @@ The release-policy implementation must preserve all of these invariants:
 
 All nine items and their fail-closed tests are required together. Even when the
 source implementation passes, ordinary GA authorization exists only after the
-immutable 40031 prepackage, GA-acceptance, and publication stages have each
+immutable 40032 prepackage, GA-acceptance, and publication stages have each
 reopened and accepted their real inputs. The assurance extension cannot replace
 a missing GA stage.

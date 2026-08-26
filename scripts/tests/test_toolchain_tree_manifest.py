@@ -724,10 +724,14 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                     ),
                     cleanup_runtime_removal,
                 )
-                cargo_use = source.index(
-                    'CARGO_HOME="$candidate_cargo_home" CARGO_NET_OFFLINE=true',
-                    runtime_create,
+                scoped_host_environment = (
+                    'CARGO_HOME="$candidate_cargo_home" \\\n'
+                    '  CARGO_NET_OFFLINE=true \\\n'
+                    '  CARGO_TARGET_DIR="$cargo_target" \\\n'
+                    '  MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \\\n'
+                    "  cfw_build_tauri_host_skeleton"
                 )
+                cargo_use = source.index(scoped_host_environment, runtime_create)
                 build = source.index("cfw_build_tauri_host_skeleton", cargo_use)
                 runtime_verification = source.index(
                     'cfw_verify_release_cargo_runtime "$repo_root" '
@@ -757,6 +761,9 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                 self.assertLess(build, verification)
                 self.assertLess(verification, manifest)
                 self.assertIn("--require-unsigned-host", source[verification:manifest])
+                self.assertNotIn("export CARGO_NET_OFFLINE", source)
+                self.assertNotIn("export CARGO_TARGET_DIR", source)
+                self.assertNotIn("export MACOSX_DEPLOYMENT_TARGET", source)
 
         signed = (SCRIPTS / "build_signed_candidate.sh").read_text(encoding="utf-8")
         pre_sign_copy = signed.index(
@@ -810,8 +817,16 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         tombstone_sign = helper.index(
             '--sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$tombstone"', packet_sign
         )
+        manifest_promotion = helper.index(
+            '"$repo_root/scripts/promote_signed_native_manifest.py"',
+            tombstone_sign,
+        )
+        manifest_verification = helper.index(
+            '"$repo_root/scripts/verify_artifact_manifest.py"',
+            manifest_promotion,
+        )
         host_sign = helper.index(
-            '--entitlements "$host_release_xcent"', tombstone_sign
+            '--entitlements "$host_release_xcent"', manifest_verification
         )
         self.assertLess(pre_sign_copy, pre_sign_verify)
         self.assertLess(pre_sign_verify, freeze)
@@ -827,7 +842,9 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertLess(authority_requirement_compare, proxy_sign)
         self.assertLess(proxy_sign, packet_sign)
         self.assertLess(packet_sign, tombstone_sign)
-        self.assertLess(tombstone_sign, host_sign)
+        self.assertLess(tombstone_sign, manifest_promotion)
+        self.assertLess(manifest_promotion, manifest_verification)
+        self.assertLess(manifest_verification, host_sign)
         self.assertIn(
             "--require-unsigned-host", signed[pre_sign_verify:freeze]
         )
@@ -837,6 +854,8 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             helper.count('--sign "$CFW_SIGNING_CERTIFICATE_SHA1"'),
             6,
         )
+        self.assertEqual(helper.count("cfw_run_release_python_script"), 2)
+        self.assertNotIn('"$python_bin" -I', helper)
         self.assertIn('"$repo_root/scripts/build_native_products.sh" --pre-sign', signed)
         self.assertIn(
             '"$repo_root/scripts/build_legacy_tombstone.sh" --pre-sign', signed

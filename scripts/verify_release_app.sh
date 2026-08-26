@@ -449,41 +449,52 @@ if [[ "${1:-}" == "--pre-notary" ]]; then
 fi
 app_path="${1:-}"
 native_products_root="${2:-}"
-[[ $# == 2 ]] ||
-  die "usage: scripts/verify_release_app.sh [--pre-notary] /absolute/path/to/Clash for Mac.app /absolute/path/to/native-products"
+[[ $# == 4 && "$3" == "--context" ]] ||
+  die "usage: scripts/verify_release_app.sh [--pre-notary] APP NATIVE_PRODUCTS --context CONTEXT"
+verification_context="$4"
 [[ "$app_path" == /* ]] || die "application path must be absolute"
 [[ "$native_products_root" == /* ]] || die "native products root must be absolute"
 [[ -d "$app_path" && ! -L "$app_path" ]] || die "application must be a non-symlink directory: $app_path"
 [[ -d "$native_products_root" && ! -L "$native_products_root" ]] ||
   die "native products root must be a non-symlink directory"
-app_path="$(cd "$(dirname "$app_path")" && pwd -P)/$(basename "$app_path")"
-native_products_root="$(cd "$native_products_root" && pwd -P)"
 
 build_number="$(PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
-  "$repo_root" "$app_path" <<'PY'
+  "$repo_root" "$app_path" "$native_products_root" "$verification_context" <<'PY'
 import sys
+from pathlib import Path
 
 sys.path.insert(0, sys.argv[1] + "/scripts")
-from release_build_identity import bundle_build_identity
+from release_build_identity import (
+    CandidateBundleContext,
+    candidate_bundle_verification_paths,
+)
 
-print(bundle_build_identity(__import__("pathlib").Path(sys.argv[2])).build_version)
+try:
+    context = CandidateBundleContext(sys.argv[4])
+except ValueError:
+    raise SystemExit("error: release application verification context is invalid")
+paths = candidate_bundle_verification_paths(
+    Path(sys.argv[1]), sys.argv[2], sys.argv[3], context
+)
+if context is CandidateBundleContext.UNSIGNED_HOST:
+    raise SystemExit("error: release application verification rejects unsigned-host context")
+print(paths.build_identity.build_version)
 PY
 )" || die "bundle build identity is invalid"
-[[ "$build_number" == "40032" ]] ||
-  die "release application is not the fixed GA build 40032"
-ga_root="$repo_root/target/candidates/0.4.0/ga/40032"
-canonical_signing_output="$ga_root/signing-output"
-signing_output="${native_products_root%/signed-native-products}"
-if [[ "$signing_output" != "$canonical_signing_output" ]]; then
-  signing_attempt_pattern="$ga_root/transactions/signing-attempts/"'[0-9]{8}/(work|publish-ready)'
-  [[ "$signing_output" =~ ^${signing_attempt_pattern}$ ]] ||
-    die "native products root is outside the fixed GA signing transaction"
-fi
-[[ "$native_products_root" == "$signing_output/signed-native-products" ]] ||
-  die "native products root is not the fixed signed-native-products directory"
-[[ "$app_path" == "$signing_output/signing-input/Clash for Mac.app" ]] ||
-  die "release application and native products do not share one signing-output"
-signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40032/profiles/signing-preflight.json"
+[[ "$build_number" == "40033" ]] ||
+  die "release application is not the fixed GA build 40033"
+case "$verification_context" in
+  signing-attempt-work|signing-attempt-publish-ready)
+    ((pre_notary == 1)) ||
+      die "private signing-attempt verification is allowed only before notarization"
+    ;;
+  canonical-native-content)
+    ;;
+  *)
+    die "release application verification context is invalid"
+    ;;
+esac
+signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40033/profiles/signing-preflight.json"
 require_regular_file "$signing_preflight_manifest"
 expected_signing_certificate_sha256="$(cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/release_signing_preflight.py" \
@@ -543,7 +554,8 @@ done
 cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/verify_candidate_bundle.py" \
   "$app_path" \
-  --native-products-root "$native_products_root"
+  --native-products-root "$native_products_root" \
+  --context "$verification_context"
 
 "$python_bin" -I -S -B -W error - "$app_path" <<'PY'
 import os

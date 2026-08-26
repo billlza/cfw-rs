@@ -38,7 +38,7 @@ if [[ "${1:-}" == "--recover-submission-id" ]]; then
 else
   [[ $# -eq 0 ]] || die "usage: make_dmg.sh [--recover-submission-id UUID]"
 fi
-readonly ga_root="$repo_root/target/candidates/0.4.0/ga/40032"
+readonly ga_root="$repo_root/target/candidates/0.4.0/ga/40033"
 readonly app_path="$ga_root/signed/Clash for Mac.app"
 [[ -d "$app_path" && ! -L "$app_path" ]] || die "app bundle not found or is a symlink: $app_path"
 
@@ -51,7 +51,9 @@ notary_profile="${NOTARY_PROFILE:-}"
 
 native_products_root="$(release_native_products_root_for_app "$app_path")" ||
   die "cannot resolve candidate-specific native products"
-"$repo_root/scripts/verify_release_app.sh" "$app_path" "$native_products_root"
+"$repo_root/scripts/verify_release_app.sh" \
+  "$app_path" "$native_products_root" \
+  --context canonical-native-content
 
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Contents/Info.plist" 2>/dev/null)" ||
   die "cannot read the signed app version"
@@ -60,8 +62,8 @@ build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/C
   die "cannot read the signed app build number"
 [[ "$build_number" =~ ^[1-9][0-9]*$ ]] ||
   die "signed app build number is not one canonical positive integer"
-[[ "$version" == "0.4.0" && "$build_number" == "40032" ]] ||
-  die "signed app is not the active GA 0.4.0/40032 identity"
+[[ "$version" == "0.4.0" && "$build_number" == "40033" ]] ||
+  die "signed app is not the active GA 0.4.0/40033 identity"
 
 verify_release_prepackage_evidence "$app_path"
 
@@ -139,7 +141,8 @@ trap cleanup EXIT
 ln -s /Applications "$payload_directory/Applications"
 "$repo_root/scripts/verify_release_app.sh" \
   "$payload_directory/Clash for Mac.app" \
-  "$native_products_root"
+  "$native_products_root" \
+  --context canonical-native-content
 
 /usr/sbin/diskutil image create from \
   --format UDZO \

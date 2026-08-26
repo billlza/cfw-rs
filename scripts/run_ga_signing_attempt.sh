@@ -27,13 +27,8 @@ die() {
 [[ "$CFW_SIGNING_CERTIFICATE_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
   die "frozen signing certificate SHA-256 is malformed"
 
-readonly frozen_root="$repo_root/target/candidates/0.4.0/ga/40032"
-readonly attempts_root="$frozen_root/transactions/signing-attempts"
+readonly frozen_root="$repo_root/target/candidates/0.4.0/ga/40033"
 readonly attempt_work="$CFW_SIGNING_ATTEMPT_WORK"
-case "$attempt_work" in
-  "$attempts_root"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]/work) ;;
-  *) die "transaction work root is outside the fixed GA signing attempts" ;;
-esac
 [[ -d "$attempt_work" && ! -L "$attempt_work" ]] ||
   die "transaction work root is not a real directory"
 [[ "$(stat -f '%Lp' "$attempt_work")" == "700" ]] ||
@@ -143,15 +138,17 @@ for product in \
     "$repo_root/scripts/verify_artifact_manifest.py" \
     "$signed_native_products/$product" \
     "$signed_native_products/$product.manifest.json" \
-    --metadata "buildNumber=40032" \
+    --metadata "buildNumber=40033" \
     --metadata "signingMode=developer-id"
 done
 
 "$repo_root/scripts/verify_candidate_bundle.sh" \
-  "$staged_app" "$signed_native_products"
+  "$staged_app" "$signed_native_products" \
+  --context signing-attempt-work
 /usr/bin/codesign --force --options runtime --timestamp \
   --entitlements "$host_release_xcent" \
   --sign "$CFW_SIGNING_CERTIFICATE_SHA1" "$staged_app"
 /usr/bin/codesign --verify --deep --strict --verbose=4 "$staged_app"
 "$repo_root/scripts/verify_release_app.sh" \
-  --pre-notary "$staged_app" "$signed_native_products"
+  --pre-notary "$staged_app" "$signed_native_products" \
+  --context signing-attempt-work

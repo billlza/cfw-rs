@@ -49,10 +49,11 @@ known and terminal; it is not an outcome-unknown external transaction.
 
 ## Successor generation
 
-Correcting the release-helper invocation changes the tracked release source
-after build 40031 was consumed. Build 40032 is therefore the only active GA
-successor. It must be built from one new clean source identity and repeat the
-complete source, hosted-CI, build, signing, notarization, package, installation,
-runtime, and publication evidence sequence. No application tree, profile,
-possession proof, signature, manifest, attempt file, or receipt from build
-40031 may be copied forward as successful evidence.
+Correcting the release-helper invocation changed the tracked release source
+after build 40031 was consumed, so build 40032 became its successor. Build
+40032 was later consumed and retired independently; its history is recorded in
+`ga-build-40032-retirement.md`. Build 40033 is now the only active GA identity
+and must repeat the complete source, hosted-CI, build, signing, notarization,
+package, installation, runtime, and publication evidence sequence. No
+application tree, profile, possession proof, signature, manifest, attempt
+file, or receipt from build 40031 may be copied forward as successful evidence.

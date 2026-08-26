@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import os
 import plistlib
 import re
 import stat
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -52,8 +54,46 @@ class ReleaseIdentity:
         canonical_build_version(self.ga_build, "active GA build")
 
 
-ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40032")
+ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40033")
 UNSIGNED_VALIDATION_BUILD = "40000"
+SIGNING_OUTPUT_RELATIVE = Path("signing-output")
+SIGNING_INPUT_NAME = "signing-input"
+SIGNED_APP_NAME = "Clash for Mac.app"
+SIGNED_APP_WITHIN_OUTPUT = Path(SIGNING_INPUT_NAME) / SIGNED_APP_NAME
+SIGNED_NATIVE_PRODUCTS_NAME = "signed-native-products"
+SIGNING_ATTEMPT_ID_RE = re.compile(r"\A[0-9]{8}\Z")
+
+
+class CandidateBundleContext(str, Enum):
+    """One explicit path provenance accepted by the bundle verifiers."""
+
+    UNSIGNED_HOST = "unsigned-host"
+    SIGNING_ATTEMPT_WORK = "signing-attempt-work"
+    SIGNING_ATTEMPT_PUBLISH_READY = "signing-attempt-publish-ready"
+    CANONICAL_NATIVE_CONTENT = "canonical-native-content"
+
+
+_SIGNING_ATTEMPT_STAGE_BY_CONTEXT = {
+    CandidateBundleContext.SIGNING_ATTEMPT_WORK: "work",
+    CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY: "publish-ready",
+}
+_SIGNING_ATTEMPT_CONTEXT_BY_STAGE = {
+    stage: context for context, stage in _SIGNING_ATTEMPT_STAGE_BY_CONTEXT.items()
+}
+
+
+@dataclass(frozen=True)
+class CandidateBundleVerificationPaths:
+    app: Path
+    native_products: Path
+    build_identity: BundleBuildIdentity
+    context: CandidateBundleContext
+
+
+@dataclass(frozen=True)
+class CandidateSigningOutput:
+    root: Path
+    context: CandidateBundleContext
 
 
 def _read_plist(path: Path) -> dict[str, Any]:
@@ -128,15 +168,227 @@ def ga_signed_root(repository: Path) -> Path:
 
 
 def ga_signing_output_root(repository: Path) -> Path:
-    return ga_root(repository) / "signing-output"
+    return ga_root(repository) / SIGNING_OUTPUT_RELATIVE
 
 
 def ga_signing_input_root(repository: Path) -> Path:
-    return ga_signing_output_root(repository) / "signing-input"
+    return ga_signing_output_root(repository) / SIGNING_INPUT_NAME
 
 
 def ga_signed_native_products_root(repository: Path) -> Path:
-    return ga_signing_output_root(repository) / "signed-native-products"
+    return ga_signing_output_root(repository) / SIGNED_NATIVE_PRODUCTS_NAME
+
+
+def ga_signing_attempts_root(repository: Path) -> Path:
+    return ga_root(repository) / "transactions/signing-attempts"
+
+
+def ga_signing_attempt_output_root(
+    repository: Path,
+    attempt_id: str,
+    context: CandidateBundleContext,
+) -> Path:
+    if (
+        not isinstance(attempt_id, str)
+        or not SIGNING_ATTEMPT_ID_RE.fullmatch(attempt_id)
+        or attempt_id == "00000000"
+    ):
+        raise BuildIdentityError(
+            "signing attempt identifier must be one positive eight-digit ASCII decimal"
+        )
+    try:
+        stage = _SIGNING_ATTEMPT_STAGE_BY_CONTEXT[context]
+    except KeyError as error:
+        raise BuildIdentityError(
+            "candidate bundle context is not a private signing-attempt stage"
+        ) from error
+    return ga_signing_attempts_root(repository) / attempt_id / stage
+
+
+def _canonical_real_directory(value: str | Path, label: str) -> Path:
+    raw = os.fspath(value)
+    if (
+        not isinstance(raw, str)
+        or not raw.startswith("/")
+        or "\x00" in raw
+        or any(part in ("", ".", "..") for part in raw.split("/")[1:])
+    ):
+        raise BuildIdentityError(f"{label} must be a canonical absolute path")
+    path = Path(raw)
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise BuildIdentityError(f"{label} is unavailable") from error
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or resolved != path
+    ):
+        raise BuildIdentityError(f"{label} must be a canonical real directory")
+    return path
+
+
+def _require_private_directory(path: Path, label: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise BuildIdentityError(f"{label} is unavailable") from error
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise BuildIdentityError(
+            f"{label} must be a current-user 0700 real directory"
+        )
+
+
+def candidate_signing_output(
+    repository: Path,
+    signing_output: str | Path,
+) -> CandidateSigningOutput:
+    """Classify one exact active-GA canonical or private signing output."""
+
+    canonical_repository = _canonical_real_directory(repository, "release repository")
+    output_root = _canonical_real_directory(signing_output, "signing output")
+    canonical_root = ga_signing_output_root(canonical_repository)
+    if output_root == canonical_root:
+        _require_private_directory(output_root, "canonical signing-output root")
+        return CandidateSigningOutput(
+            root=output_root,
+            context=CandidateBundleContext.CANONICAL_NATIVE_CONTENT,
+        )
+
+    attempts_root = ga_signing_attempts_root(canonical_repository)
+    try:
+        relative = output_root.relative_to(attempts_root)
+    except ValueError as error:
+        raise BuildIdentityError(
+            "signing output is outside the fixed active GA transaction root"
+        ) from error
+    if len(relative.parts) != 2:
+        raise BuildIdentityError("private signing output layout is invalid")
+    attempt_id, stage = relative.parts
+    context = _SIGNING_ATTEMPT_CONTEXT_BY_STAGE.get(stage)
+    if context is None:
+        raise BuildIdentityError("private signing output stage is invalid")
+    expected_root = ga_signing_attempt_output_root(
+        canonical_repository, attempt_id, context
+    )
+    if output_root != expected_root:
+        raise BuildIdentityError("private signing output root is not exact")
+    _require_private_directory(attempts_root.parent, "signing transactions root")
+    _require_private_directory(attempts_root, "signing attempts root")
+    _require_private_directory(output_root.parent, "signing attempt root")
+    _require_private_directory(output_root, "signing attempt output")
+    return CandidateSigningOutput(root=output_root, context=context)
+
+
+def candidate_bundle_verification_paths(
+    repository: Path,
+    app: str | Path,
+    native_products: str | Path,
+    context: CandidateBundleContext,
+) -> CandidateBundleVerificationPaths:
+    """Bind one app/native pair to an explicit release verification context."""
+
+    if not isinstance(context, CandidateBundleContext):
+        raise BuildIdentityError("candidate bundle context is invalid")
+    canonical_repository = _canonical_real_directory(repository, "release repository")
+    app_path = _canonical_real_directory(app, "candidate application")
+    native_path = _canonical_real_directory(
+        native_products, "candidate native-products root"
+    )
+    if app_path.name != SIGNED_APP_NAME:
+        raise BuildIdentityError("candidate application name is invalid")
+    identity = bundle_build_identity(app_path)
+
+    if context is CandidateBundleContext.UNSIGNED_HOST:
+        expected_native = candidate_native_products_output(
+            canonical_repository,
+            str(native_path),
+            identity.build_version,
+        )
+        if native_path != expected_native:
+            raise BuildIdentityError(
+                "unsigned native-products root is not the fixed candidate build root"
+            )
+    else:
+        if (
+            identity.product_version != ACTIVE_RELEASE_IDENTITY.product_version
+            or identity.build_version != ACTIVE_RELEASE_IDENTITY.ga_build
+        ):
+            raise BuildIdentityError(
+                "candidate application is not the fixed active GA identity"
+            )
+        if context is CandidateBundleContext.CANONICAL_NATIVE_CONTENT:
+            if native_path != ga_signed_native_products_root(canonical_repository):
+                raise BuildIdentityError(
+                    "signed native-products root is not the fixed active GA root"
+                )
+            classified_output = candidate_signing_output(
+                canonical_repository, native_path.parent
+            )
+            if classified_output.context is not context:
+                raise BuildIdentityError(
+                    "canonical native content has the wrong signing-output context"
+                )
+            _require_private_directory(
+                native_path, "canonical signed native-products root"
+            )
+            try:
+                app_path.relative_to(ga_signing_attempts_root(canonical_repository))
+            except ValueError:
+                pass
+            else:
+                raise BuildIdentityError(
+                    "canonical native content cannot be mixed with a private signing-attempt app"
+                )
+        else:
+            attempts_root = ga_signing_attempts_root(canonical_repository)
+            try:
+                app_relative = app_path.relative_to(attempts_root)
+                native_relative = native_path.relative_to(attempts_root)
+            except ValueError as error:
+                raise BuildIdentityError(
+                    "private signing-attempt paths are outside the fixed active GA root"
+                ) from error
+            if len(app_relative.parts) != 4 or len(native_relative.parts) != 3:
+                raise BuildIdentityError(
+                    "private signing-attempt app or native-products layout is invalid"
+                )
+            attempt_id = app_relative.parts[0]
+            output_root = ga_signing_attempt_output_root(
+                canonical_repository, attempt_id, context
+            )
+            if (
+                native_relative.parts[0] != attempt_id
+                or app_path != output_root / SIGNED_APP_WITHIN_OUTPUT
+                or native_path != output_root / SIGNED_NATIVE_PRODUCTS_NAME
+            ):
+                raise BuildIdentityError(
+                    "private signing-attempt app and native-products do not share one exact output"
+                )
+            classified_output = candidate_signing_output(
+                canonical_repository, output_root
+            )
+            if classified_output.context is not context:
+                raise BuildIdentityError(
+                    "private signing-attempt stage differs from its verification context"
+                )
+            _require_private_directory(
+                output_root / SIGNING_INPUT_NAME, "signing input root"
+            )
+            _require_private_directory(native_path, "signed native-products root")
+
+    return CandidateBundleVerificationPaths(
+        app=app_path,
+        native_products=native_path,
+        build_identity=identity,
+        context=context,
+    )
 
 
 def _candidate_directory_output(

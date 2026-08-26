@@ -4,6 +4,7 @@ from dataclasses import replace
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -17,7 +18,7 @@ class SigningAttemptFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
-        self.root = self.repository / "target/candidates/0.4.0/ga/40032"
+        self.root = self.repository / "target/candidates/0.4.0/ga/40033"
         self.root.mkdir(parents=True, mode=0o700)
         self.root.chmod(0o700)
         intent = self.root / "candidate-freeze/intent.json"
@@ -29,7 +30,7 @@ class SigningAttemptFixture:
             intent_path=intent,
             intent_sha256="a" * 64,
             product_version="0.4.0",
-            build_number="40032",
+            build_number="40033",
             recovered=False,
         )
         self.bindings = transaction.FrozenSigningBindings(
@@ -45,6 +46,9 @@ class SigningAttemptFixture:
             updater_tauri_config_sha256="2" * 64,
         )
         self.clock_count = 0
+        self.verification_contexts: list[
+            tuple[Path, transaction.CandidateBundleContext]
+        ] = []
 
     def cleanup(self) -> None:
         self.temporary.cleanup()
@@ -65,8 +69,12 @@ class SigningAttemptFixture:
         (native / "fixture.bin").write_bytes(b"signed-native")
         return 0
 
-    @staticmethod
-    def verification(output: Path) -> None:
+    def verification(
+        self,
+        output: Path,
+        context: transaction.CandidateBundleContext,
+    ) -> None:
+        self.verification_contexts.append((output, context))
         if not (output / transaction.SIGNED_APP_WITHIN_OUTPUT).is_dir():
             raise transaction.SigningAttemptError(
                 "fixture_app_missing", "fixture app is missing"
@@ -180,6 +188,13 @@ class SigningAttemptTransactionTests(unittest.TestCase):
                 "signing-transformation.json",
             },
         )
+        self.assertEqual(
+            tuple(context for _, context in self.fixture.verification_contexts),
+            (
+                transaction.CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                transaction.CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY,
+            ),
+        )
         attempt = self.fixture.load("00000001")
         self.assertEqual(
             tuple(event["state"] for event in attempt.events),
@@ -205,6 +220,7 @@ class SigningAttemptTransactionTests(unittest.TestCase):
 
     def test_published_output_reopen_does_not_require_live_profile_validity(self) -> None:
         canonical = self.fixture.run(resume=False)
+        self.fixture.verification_contexts.clear()
 
         def reject(_root: Path) -> None:
             raise AssertionError("published output touched live profile readiness")
@@ -213,6 +229,134 @@ class SigningAttemptTransactionTests(unittest.TestCase):
             self.fixture.run(resume=True, live_readiness=reject),
             canonical,
         )
+        self.assertEqual(
+            self.fixture.verification_contexts,
+            [
+                (
+                    canonical,
+                    transaction.CandidateBundleContext.CANONICAL_NATIVE_CONTENT,
+                )
+            ],
+        )
+
+    def test_production_verifier_propagates_the_explicit_context(self) -> None:
+        output = Path("/private/tmp/cfm-signing-output")
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "unsigned-host"
+        ):
+            transaction.production_verification_runner(
+                output, transaction.CandidateBundleContext.UNSIGNED_HOST
+            )
+        for context in transaction.CandidateBundleContext:
+            if context is transaction.CandidateBundleContext.UNSIGNED_HOST:
+                continue
+            with self.subTest(context=context), patch.object(
+                transaction,
+                "run_bounded_process",
+                return_value=SimpleNamespace(returncode=0),
+            ) as runner:
+                transaction.production_verification_runner(output, context)
+                commands = tuple(call.args[0] for call in runner.call_args_list)
+                app = output / transaction.SIGNED_APP_WITHIN_OUTPUT
+                native = output / transaction.SIGNED_NATIVE_PRODUCTS_NAME
+                repository = Path(transaction.__file__).resolve().parent.parent
+                self.assertEqual(
+                    commands,
+                    (
+                        (
+                            "/usr/bin/codesign",
+                            "--verify",
+                            "--deep",
+                            "--strict",
+                            "--verbose=4",
+                            str(app),
+                        ),
+                        (
+                            str(repository / "scripts/verify_release_app.sh"),
+                            "--pre-notary",
+                            str(app),
+                            str(native),
+                            "--context",
+                            context.value,
+                        ),
+                    ),
+                )
+
+    def test_helper_work_root_uses_shared_attempt_classifier(self) -> None:
+        transactions = self.fixture.root / "transactions"
+        attempts = self.fixture.attempts()
+        attempt = attempts / "00000001"
+        work = attempt / "work"
+        work.mkdir(parents=True)
+        for path in (transactions, attempts, attempt, work):
+            path.chmod(0o700)
+
+        transaction._require_helper_work_root(self.fixture.repository, work)
+
+        invalid_attempt = attempts / "00000000"
+        invalid_work = invalid_attempt / "work"
+        invalid_work.mkdir(parents=True)
+        invalid_attempt.chmod(0o700)
+        invalid_work.chmod(0o700)
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "transaction-owned"
+        ):
+            transaction._require_helper_work_root(
+                self.fixture.repository, invalid_work
+            )
+
+        publish_ready = attempt / "publish-ready"
+        publish_ready.mkdir(mode=0o700)
+        canonical = self.fixture.root / transaction.SIGNING_OUTPUT_RELATIVE
+        canonical.mkdir(mode=0o700)
+        for rejected in (publish_ready, canonical):
+            with self.subTest(rejected=rejected), self.assertRaisesRegex(
+                transaction.SigningAttemptError, "exact private work"
+            ):
+                transaction._require_helper_work_root(
+                    self.fixture.repository, rejected
+                )
+
+    def test_production_helper_validates_work_before_process_launch(self) -> None:
+        work = Path("/private/tmp/cfm-signing-attempt-work")
+        completed = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        events: list[str] = []
+
+        def validate(_repository: Path, _work: Path) -> None:
+            events.append("validate")
+
+        def launch(*_args, **_kwargs):
+            events.append("launch")
+            return completed
+
+        with patch.object(
+            transaction, "_require_helper_work_root", side_effect=validate
+        ) as validator, patch.object(
+            transaction, "run_bounded_process", side_effect=launch
+        ) as runner:
+            self.assertEqual(
+                transaction.production_helper_runner(work, "A" * 40, "B" * 64),
+                0,
+            )
+        self.assertEqual(events, ["validate", "launch"])
+        repository = Path(transaction.__file__).resolve().parent.parent
+        validator.assert_called_once_with(repository, work)
+        environment = runner.call_args.kwargs["environment"]
+        self.assertEqual(environment["CFW_SIGNING_ATTEMPT_WORK"], str(work))
+
+        rejected = transaction.SigningAttemptError(
+            "signing_helper_work_root_invalid", "injected invalid work root"
+        )
+        with patch.object(
+            transaction, "_require_helper_work_root", side_effect=rejected
+        ), patch.object(transaction, "run_bounded_process") as blocked_runner:
+            with self.assertRaisesRegex(
+                transaction.SigningAttemptError, "injected invalid work root"
+            ):
+                transaction.production_helper_runner(
+                    work, "A" * 40, "B" * 64
+                )
+        blocked_runner.assert_not_called()
 
     def test_helper_failure_is_append_only_and_resume_uses_next_attempt(self) -> None:
         def fail_after_partial_output(work: Path, _sha1: str, _sha256: str) -> int:

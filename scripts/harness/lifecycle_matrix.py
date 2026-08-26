@@ -180,6 +180,8 @@ IDENTITY_FIXED_COMMAND = (
         f"target/candidates/{ACTIVE_RELEASE_IDENTITY.product_version}/ga/"
         f"{IDENTITY_GA_BUILD}/signing-output/signed-native-products"
     ),
+    "--context",
+    "canonical-native-content",
 )
 IDENTITY_FIXED_COMMAND_SHA256 = hashlib.sha256(
     canonical_json(list(IDENTITY_FIXED_COMMAND))

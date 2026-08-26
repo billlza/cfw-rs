@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run and recover append-only Developer ID signing attempts for GA build 40032.
+"""Run and recover append-only Developer ID signing attempts for GA build 40033.
 
 The frozen candidate is never copied into a canonical signing path until one
 private attempt has passed signing, full app verification, and transformation
@@ -45,7 +45,16 @@ if __package__:
         read_private_pending,
         write_private_pending_locked,
     )
-    from .release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
+    from .release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        BuildIdentityError,
+        CandidateBundleContext,
+        SIGNED_APP_WITHIN_OUTPUT,
+        SIGNED_NATIVE_PRODUCTS_NAME,
+        SIGNING_OUTPUT_RELATIVE,
+        candidate_signing_output,
+        ga_root,
+    )
     from .release_python_runtime import (
         ReleasePythonRuntimeError,
         require_closed_release_runtime,
@@ -68,8 +77,6 @@ if __package__:
     )
     from .verify_signing_transformation import (
         RECEIPT_NAME as TRANSFORMATION_RECEIPT_NAME,
-        SIGNED_APP_WITHIN_OUTPUT,
-        SIGNING_OUTPUT_RELATIVE,
         SigningTransformationError,
         SigningTransformationOutcomeUnknown,
         create_attempt_receipt,
@@ -96,7 +103,16 @@ else:
         read_private_pending,
         write_private_pending_locked,
     )
-    from release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
+    from release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        BuildIdentityError,
+        CandidateBundleContext,
+        SIGNED_APP_WITHIN_OUTPUT,
+        SIGNED_NATIVE_PRODUCTS_NAME,
+        SIGNING_OUTPUT_RELATIVE,
+        candidate_signing_output,
+        ga_root,
+    )
     from release_python_runtime import (
         ReleasePythonRuntimeError,
         require_closed_release_runtime,
@@ -116,8 +132,6 @@ else:
     )
     from verify_signing_transformation import (
         RECEIPT_NAME as TRANSFORMATION_RECEIPT_NAME,
-        SIGNED_APP_WITHIN_OUTPUT,
-        SIGNING_OUTPUT_RELATIVE,
         SigningTransformationError,
         SigningTransformationOutcomeUnknown,
         create_attempt_receipt,
@@ -190,8 +204,8 @@ TRANSITIONS: Final = {
 }
 LEGACY_OUTPUTS: Final = (
     Path("signing-input"),
-    Path("signed-native-products"),
-    Path("signed-native-products.pending"),
+    Path(SIGNED_NATIVE_PRODUCTS_NAME),
+    Path(f"{SIGNED_NATIVE_PRODUCTS_NAME}.pending"),
     Path("transactions/signing-transformation.json"),
 )
 
@@ -248,7 +262,7 @@ class Attempt:
 
 Clock = Callable[[], str]
 HelperRunner = Callable[[Path, str, str], int]
-VerificationRunner = Callable[[Path], None]
+VerificationRunner = Callable[[Path, CandidateBundleContext], None]
 FreezeVerifier = Callable[[Path], FrozenCandidate]
 LiveReadinessVerifier = Callable[[Path], None]
 Publisher = Callable[[Path, Path], None]
@@ -891,8 +905,27 @@ def production_live_readiness_verifier(root: Path) -> None:
         ) from error
 
 
+def _require_helper_work_root(repository: Path, work: Path) -> None:
+    try:
+        classified = candidate_signing_output(repository, work)
+    except BuildIdentityError as error:
+        raise SigningAttemptError(
+            "signing_helper_work_root_invalid",
+            f"signing helper work root is not transaction-owned: {error}",
+        ) from error
+    if (
+        classified.root != work
+        or classified.context is not CandidateBundleContext.SIGNING_ATTEMPT_WORK
+    ):
+        raise SigningAttemptError(
+            "signing_helper_work_root_invalid",
+            "signing helper work root is not the exact private work stage",
+        )
+
+
 def production_helper_runner(work: Path, certificate_sha1: str, certificate_sha256: str) -> int:
     repository = Path(__file__).resolve().parent.parent
+    _require_helper_work_root(repository, work)
     command = (
         str(repository / "scripts/run_ga_signing_attempt.sh"),
         "--transaction-owned",
@@ -928,10 +961,18 @@ def production_helper_runner(work: Path, certificate_sha1: str, certificate_sha2
     return completed.returncode
 
 
-def production_verification_runner(signing_output: Path) -> None:
+def production_verification_runner(
+    signing_output: Path,
+    context: CandidateBundleContext,
+) -> None:
+    if context is CandidateBundleContext.UNSIGNED_HOST:
+        raise SigningAttemptError(
+            "signing_verification_context_invalid",
+            "signed GA verification cannot use unsigned-host context",
+        )
     repository = Path(__file__).resolve().parent.parent
     app = signing_output / SIGNED_APP_WITHIN_OUTPUT
-    native = signing_output / "signed-native-products"
+    native = signing_output / SIGNED_NATIVE_PRODUCTS_NAME
     commands = (
         ("/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", str(app)),
         (
@@ -939,6 +980,8 @@ def production_verification_runner(signing_output: Path) -> None:
             "--pre-notary",
             str(app),
             str(native),
+            "--context",
+            context.value,
         ),
     )
     environment = dict(os.environ)
@@ -988,13 +1031,13 @@ def _validate_output_inventory(output: Path) -> None:
         or metadata.st_uid != os.geteuid()
         or stat.S_IMODE(metadata.st_mode) != 0o700
         or names
-        != {"signing-input", "signed-native-products", TRANSFORMATION_RECEIPT_NAME}
+        != {"signing-input", SIGNED_NATIVE_PRODUCTS_NAME, TRANSFORMATION_RECEIPT_NAME}
     ):
         raise SigningAttemptError(
             "signing_output_inventory_invalid", "signing-output inventory is invalid"
         )
     app = output / SIGNED_APP_WITHIN_OUTPUT
-    native = output / "signed-native-products"
+    native = output / SIGNED_NATIVE_PRODUCTS_NAME
     for path in (app, native):
         child = path.lstat()
         if path.is_symlink() or not stat.S_ISDIR(child.st_mode):
@@ -1015,7 +1058,9 @@ def _prepare_output(
         raise SigningAttemptError(
             "attempt_work_unavailable", "signing-attempt work root is unavailable"
         )
-    verification_runner(attempt.work)
+    verification_runner(
+        attempt.work, CandidateBundleContext.SIGNING_ATTEMPT_WORK
+    )
     try:
         transformation_creator(repository, attempt.work)
     except SigningTransformationOutcomeUnknown:
@@ -1042,7 +1087,10 @@ def _reverify_publish_ready(
     transformation_verifier: TransformationVerifier,
 ) -> None:
     _validate_output_inventory(attempt.publish_ready)
-    verification_runner(attempt.publish_ready)
+    verification_runner(
+        attempt.publish_ready,
+        CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY,
+    )
     transformation_verifier(repository, attempt.publish_ready)
 
 
@@ -1151,7 +1199,9 @@ def _reconcile_existing(
                 "canonical signing-output appeared before the publish boundary",
             )
         _validate_output_inventory(canonical)
-        verification_runner(canonical)
+        verification_runner(
+            canonical, CandidateBundleContext.CANONICAL_NATIVE_CONTENT
+        )
         canonical_transformation_verifier(repository)
         try:
             confirmer(latest.publish_ready, canonical)

@@ -62,7 +62,7 @@ REQUEST_SCRIPT = (
 def _candidate() -> dict:
     return {
         "version": "0.4.0",
-        "build_number": "40032",
+        "build_number": "40033",
         "app_manifest_sha256": "a" * 64,
         "signed_app_tree_sha256": "b" * 64,
         "artifact_hash_manifest_sha256": "c" * 64,
@@ -264,7 +264,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         self.runner = _runner()
         self.context = initialize_context(
             _candidate(),
-            run_id="run-40032-macos15",
+            run_id="run-40033-macos15",
             clean_install_confirmed=True,
             runner=self.runner,
             observed_at=self.observed_at,
@@ -332,7 +332,7 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
                 "--candidate",
                 "/missing/candidate.json",
                 "--run-id",
-                "run-40032-macos15",
+                "run-40033-macos15",
                 "--confirm-clean-install",
                 "--output",
                 "/missing/context.json",
@@ -394,28 +394,29 @@ class PhysicalCollectorRequestTests(unittest.TestCase):
         ):
             initialize_context(
                 _candidate(),
-                run_id="run-40032-macos15",
+                run_id="run-40033-macos15",
                 clean_install_confirmed=False,
                 runner=self.runner,
                 observed_at=self.observed_at,
             )
 
-    def test_initialize_requires_ga_40032_build_with_signed_64_bit_bound(self) -> None:
+    def test_initialize_requires_ga_40033_build_with_signed_64_bit_bound(self) -> None:
         for build_number, message in (
-            ("40002", "must be GA release build 40032"),
-            ("40003", "must be GA release build 40032"),
-            ("40004", "must be GA release build 40032"),
-            ("40005", "must be GA release build 40032"),
-            ("40019", "must be GA release build 40032"),
-            ("40020", "must be GA release build 40032"),
-            ("40022", "must be GA release build 40032"),
-            ("40023", "must be GA release build 40032"),
-            ("40026", "must be GA release build 40032"),
-            ("40027", "must be GA release build 40032"),
-            ("40028", "must be GA release build 40032"),
-            ("40029", "must be GA release build 40032"),
-            ("40030", "must be GA release build 40032"),
-            ("40031", "must be GA release build 40032"),
+            ("40002", "must be GA release build 40033"),
+            ("40003", "must be GA release build 40033"),
+            ("40004", "must be GA release build 40033"),
+            ("40005", "must be GA release build 40033"),
+            ("40019", "must be GA release build 40033"),
+            ("40020", "must be GA release build 40033"),
+            ("40022", "must be GA release build 40033"),
+            ("40023", "must be GA release build 40033"),
+            ("40026", "must be GA release build 40033"),
+            ("40027", "must be GA release build 40033"),
+            ("40028", "must be GA release build 40033"),
+            ("40029", "must be GA release build 40033"),
+            ("40030", "must be GA release build 40033"),
+            ("40031", "must be GA release build 40033"),
+            ("40032", "must be GA release build 40033"),
             (str(2**63), "signed 64-bit"),
             ("9" * 5_000, "signed 64-bit"),
         ):

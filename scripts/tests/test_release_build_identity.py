@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import os
 import plistlib
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts import verify_candidate_bundle
 from scripts.release_build_identity import (
     ACTIVE_RELEASE_IDENTITY,
     BuildIdentityError,
+    CandidateBundleContext,
     ReleaseIdentity,
     UNSIGNED_VALIDATION_BUILD,
     bundle_build_identity,
+    candidate_bundle_verification_paths,
     candidate_native_derived_data_output,
     candidate_native_products_output,
     canonical_build_version,
@@ -19,6 +25,7 @@ from scripts.release_build_identity import (
     ga_root,
     ga_signed_root,
     ga_signed_native_products_root,
+    ga_signing_attempt_output_root,
 )
 
 
@@ -26,13 +33,13 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
     def test_active_identity_is_one_fixed_ga_build(self) -> None:
         self.assertEqual(
             ACTIVE_RELEASE_IDENTITY,
-            ReleaseIdentity("0.4.0", "40032"),
+            ReleaseIdentity("0.4.0", "40033"),
         )
 
     def test_release_identity_rejects_version_or_build_drift(self) -> None:
         for identity in (
-            ("0.4.1", "40032"),
-            ("0.4.0", "040032"),
+            ("0.4.1", "40033"),
+            ("0.4.0", "040033"),
             ("0.4.0", "0"),
         ):
             with self.subTest(identity=identity), self.assertRaises(
@@ -60,6 +67,51 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 )
             )
         return app
+
+    def make_private_pair(
+        self,
+        repository: Path,
+        context: CandidateBundleContext,
+        attempt_id: str = "00000001",
+    ) -> tuple[Path, Path, Path]:
+        stage = {
+            CandidateBundleContext.SIGNING_ATTEMPT_WORK: "work",
+            CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY: "publish-ready",
+        }[context]
+        attempt = (
+            ga_root(repository)
+            / "transactions/signing-attempts"
+            / attempt_id
+        )
+        output = attempt / stage
+        signing_input = output / "signing-input"
+        native_products = output / "signed-native-products"
+        native_products.mkdir(parents=True)
+        signing_input.mkdir(exist_ok=True)
+        attempts = attempt.parent
+        transactions = attempts.parent
+        for private in (
+            transactions,
+            attempts,
+            attempt,
+            output,
+            signing_input,
+            native_products,
+        ):
+            os.chmod(private, 0o700)
+        app = self.make_app(
+            signing_input,
+            ("40033", "40033", "40033", "40033"),
+        )
+        return app, native_products, output
+
+    @staticmethod
+    def make_canonical_native_products(repository: Path) -> Path:
+        native_products = ga_signed_native_products_root(repository)
+        native_products.mkdir(parents=True)
+        os.chmod(native_products.parent, 0o700)
+        os.chmod(native_products, 0o700)
+        return native_products
 
     def test_one_integer_build_is_shared_by_all_bundles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -99,26 +151,26 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
         repository = Path("/repo")
         self.assertEqual(
             ga_preflight_root(repository),
-            Path("/repo/target/candidates/0.4.0/ga-preflight/40032"),
+            Path("/repo/target/candidates/0.4.0/ga-preflight/40033"),
         )
         self.assertEqual(
             ga_root(repository),
-            Path("/repo/target/candidates/0.4.0/ga/40032"),
+            Path("/repo/target/candidates/0.4.0/ga/40033"),
         )
         self.assertEqual(
             ga_pre_sign_native_products_root(repository),
             Path(
-                "/repo/target/candidates/0.4.0/ga-preflight/40032/native-products"
+                "/repo/target/candidates/0.4.0/ga-preflight/40033/native-products"
             ),
         )
         self.assertEqual(
             ga_signed_root(repository),
-            Path("/repo/target/candidates/0.4.0/ga/40032/signed"),
+            Path("/repo/target/candidates/0.4.0/ga/40033/signed"),
         )
         self.assertEqual(
             ga_signed_native_products_root(repository),
             Path(
-                "/repo/target/candidates/0.4.0/ga/40032/signing-output/signed-native-products"
+                "/repo/target/candidates/0.4.0/ga/40033/signing-output/signed-native-products"
             ),
         )
 
@@ -149,14 +201,14 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             repository = Path(directory).resolve()
             rejected = (
                 (
-                    "40032",
+                    "40033",
                     repository
-                    / "target/candidates/0.4.0/validation/40032/native-products",
+                    / "target/candidates/0.4.0/validation/40033/native-products",
                 ),
                 (
-                    "40032",
+                    "40033",
                     repository
-                    / "target/candidates/0.4.0/release-build/40032/native-products",
+                    / "target/candidates/0.4.0/release-build/40033/native-products",
                 ),
                 (
                     "40030",
@@ -170,6 +222,11 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 ),
                 (
                     "40032",
+                    repository
+                    / "target/candidates/0.4.0/ga-preflight/40032/native-products",
+                ),
+                (
+                    "40033",
                     repository
                     / "target/candidates/0.4.0/ga-preflight/../../../../tmp/escape/native-products",
                 ),
@@ -185,8 +242,8 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 candidate_native_products_output(
                     repository,
                     str(repository)
-                    + "/target/candidates/0.4.0/ga-preflight//40032/native-products",
-                    "40032",
+                    + "/target/candidates/0.4.0/ga-preflight//40033/native-products",
+                    "40033",
                 )
 
     def test_candidate_native_output_rejects_a_symlink_ancestor(self) -> None:
@@ -200,7 +257,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             output = ga_pre_sign_native_products_root(repository)
             with self.assertRaisesRegex(BuildIdentityError, "real directory"):
                 candidate_native_products_output(
-                    repository, str(output), "40032"
+                    repository, str(output), "40033"
                 )
 
     def test_candidate_derived_data_is_the_exact_native_output_sibling(self) -> None:
@@ -213,7 +270,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                     repository,
                     str(native_products),
                     str(expected),
-                    "40032",
+                    "40033",
                 ),
                 expected,
             )
@@ -228,7 +285,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                         repository,
                         str(native_products),
                         str(rejected),
-                        "40032",
+                        "40033",
                     )
 
     def test_candidate_derived_data_rejects_a_symlink_ancestor(self) -> None:
@@ -247,8 +304,284 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                     repository,
                     str(native_products),
                     str(preflight_root / "xcode-derived-data"),
-                    "40032",
+                    "40033",
                 )
+
+    def test_bundle_context_accepts_exact_private_work_and_publish_ready(self) -> None:
+        for context in (
+            CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+            CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY,
+        ):
+            with self.subTest(context=context), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory).resolve()
+                app, native_products, _ = self.make_private_pair(
+                    repository, context
+                )
+                paths = candidate_bundle_verification_paths(
+                    repository, app, native_products, context
+                )
+                self.assertEqual(paths.app, app)
+                self.assertEqual(paths.native_products, native_products)
+                self.assertEqual(paths.context, context)
+                self.assertEqual(paths.build_identity.build_version, "40033")
+
+    def test_bundle_context_accepts_canonical_native_with_safe_app_copies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            native_products = self.make_canonical_native_products(repository)
+            for app_root in (
+                ga_signed_root(repository),
+                repository / "target/notarization/attempts/00000001/work",
+                repository / "target/dmg/private-payload",
+            ):
+                with self.subTest(app_root=app_root):
+                    app = self.make_app(
+                        app_root,
+                        ("40033", "40033", "40033", "40033"),
+                    )
+                    paths = candidate_bundle_verification_paths(
+                        repository,
+                        app,
+                        native_products,
+                        CandidateBundleContext.CANONICAL_NATIVE_CONTENT,
+                    )
+                    self.assertEqual(paths.app, app)
+                    self.assertEqual(paths.native_products, native_products)
+
+    def test_bundle_context_rejects_same_attempt_cross_stage_mixing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            work_app, work_native, _ = self.make_private_pair(
+                repository, CandidateBundleContext.SIGNING_ATTEMPT_WORK
+            )
+            ready_app, ready_native, _ = self.make_private_pair(
+                repository,
+                CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY,
+            )
+            for app, native_products, context in (
+                (
+                    work_app,
+                    ready_native,
+                    CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                ),
+                (
+                    ready_app,
+                    work_native,
+                    CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY,
+                ),
+            ):
+                with self.subTest(context=context), self.assertRaises(
+                    BuildIdentityError
+                ):
+                    candidate_bundle_verification_paths(
+                        repository, app, native_products, context
+                    )
+
+    def test_bundle_context_rejects_same_stage_cross_attempt_mixing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            first_app, first_native, _ = self.make_private_pair(
+                repository,
+                CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                "00000001",
+            )
+            second_app, second_native, _ = self.make_private_pair(
+                repository,
+                CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                "00000002",
+            )
+            for app, native_products in (
+                (first_app, second_native),
+                (second_app, first_native),
+            ):
+                with self.subTest(app=app), self.assertRaises(BuildIdentityError):
+                    candidate_bundle_verification_paths(
+                        repository,
+                        app,
+                        native_products,
+                        CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                    )
+
+    def test_bundle_context_rejects_private_and_canonical_provenance_mixing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            work_app, _, _ = self.make_private_pair(
+                repository, CandidateBundleContext.SIGNING_ATTEMPT_WORK
+            )
+            canonical_native = self.make_canonical_native_products(repository)
+            for app, native_products, context in (
+                (
+                    work_app,
+                    canonical_native,
+                    CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                ),
+                (
+                    work_app,
+                    canonical_native,
+                    CandidateBundleContext.CANONICAL_NATIVE_CONTENT,
+                ),
+            ):
+                with self.subTest(context=context), self.assertRaises(
+                    BuildIdentityError
+                ):
+                    candidate_bundle_verification_paths(
+                        repository, app, native_products, context
+                    )
+
+    def test_bundle_context_rejects_invalid_attempt_ids(self) -> None:
+        for attempt_id in (
+            "0000000",
+            "000000000",
+            "00000000",
+            "0000000x",
+            "0000000１",
+        ):
+            with self.subTest(attempt_id=attempt_id), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory).resolve()
+                app, native_products, _ = self.make_private_pair(
+                    repository,
+                    CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                    attempt_id,
+                )
+                with self.assertRaises(BuildIdentityError):
+                    candidate_bundle_verification_paths(
+                        repository,
+                        app,
+                        native_products,
+                        CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                    )
+
+    def test_bundle_context_rejects_each_non_private_attempt_directory(self) -> None:
+        targets = {
+            "transactions": lambda app, native, output: output.parent.parent.parent,
+            "signing-attempts": lambda app, native, output: output.parent.parent,
+            "attempt": lambda app, native, output: output.parent,
+            "stage-output": lambda app, native, output: output,
+            "signing-input": lambda app, native, output: app.parent,
+            "native-products": lambda app, native, output: native,
+        }
+        for label, select_target in targets.items():
+            with self.subTest(target=label), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory).resolve()
+                app, native_products, output = self.make_private_pair(
+                    repository, CandidateBundleContext.SIGNING_ATTEMPT_WORK
+                )
+                os.chmod(select_target(app, native_products, output), 0o755)
+                with self.assertRaisesRegex(BuildIdentityError, "0700"):
+                    candidate_bundle_verification_paths(
+                        repository,
+                        app,
+                        native_products,
+                        CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                    )
+
+    def test_bundle_context_rejects_each_non_private_canonical_directory(self) -> None:
+        for label in ("signing-output", "native-products"):
+            with self.subTest(target=label), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory).resolve()
+                native_products = self.make_canonical_native_products(repository)
+                app = self.make_app(
+                    ga_signed_root(repository),
+                    ("40033", "40033", "40033", "40033"),
+                )
+                target = (
+                    native_products.parent
+                    if label == "signing-output"
+                    else native_products
+                )
+                os.chmod(target, 0o755)
+                with self.assertRaisesRegex(BuildIdentityError, "0700"):
+                    candidate_bundle_verification_paths(
+                        repository,
+                        app,
+                        native_products,
+                        CandidateBundleContext.CANONICAL_NATIVE_CONTENT,
+                    )
+
+    def test_bundle_context_rejects_a_non_current_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            app, native_products, _ = self.make_private_pair(
+                repository, CandidateBundleContext.SIGNING_ATTEMPT_WORK
+            )
+            with patch(
+                "scripts.release_build_identity.os.geteuid",
+                return_value=os.geteuid() + 1,
+            ), self.assertRaisesRegex(BuildIdentityError, "current-user"):
+                candidate_bundle_verification_paths(
+                    repository,
+                    app,
+                    native_products,
+                    CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                )
+
+    def test_bundle_context_rejects_alias_and_symlink_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            native_products = self.make_canonical_native_products(repository)
+            app = self.make_app(
+                ga_signed_root(repository),
+                ("40033", "40033", "40033", "40033"),
+            )
+            alias = str(app.parent / "nested/.." / app.name)
+            with self.assertRaisesRegex(BuildIdentityError, "canonical absolute"):
+                candidate_bundle_verification_paths(
+                    repository,
+                    alias,
+                    native_products,
+                    CandidateBundleContext.CANONICAL_NATIVE_CONTENT,
+                )
+            native_alias = repository / "native-alias"
+            native_alias.symlink_to(native_products, target_is_directory=True)
+            with self.assertRaisesRegex(BuildIdentityError, "canonical real"):
+                candidate_bundle_verification_paths(
+                    repository,
+                    app,
+                    native_alias,
+                    CandidateBundleContext.CANONICAL_NATIVE_CONTENT,
+                )
+
+    def test_signing_attempt_output_root_rejects_non_positive_ascii_ids(self) -> None:
+        repository = Path("/repo")
+        for attempt_id in (
+            "0000000",
+            "000000000",
+            "00000000",
+            "0000000x",
+            "0000000１",
+        ):
+            with self.subTest(attempt_id=attempt_id), self.assertRaises(
+                BuildIdentityError
+            ):
+                ga_signing_attempt_output_root(
+                    repository,
+                    attempt_id,
+                    CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                )
+
+    def test_candidate_cli_preserves_raw_paths_for_shared_admission(self) -> None:
+        raw_app = "/private/tmp/candidate//Clash for Mac.app"
+        raw_native = "/private/tmp/candidate/./signed-native-products"
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "verify_candidate_bundle.py",
+                raw_app,
+                "--native-products-root",
+                raw_native,
+                "--context",
+                "canonical-native-content",
+            ],
+        ), patch.object(
+            verify_candidate_bundle, "verify_candidate"
+        ) as verifier:
+            verify_candidate_bundle.main()
+        self.assertEqual(verifier.call_args.args[1:3], (raw_app, raw_native))
+        self.assertEqual(
+            verifier.call_args.kwargs["context"],
+            CandidateBundleContext.CANONICAL_NATIVE_CONTENT,
+        )
 
     def test_native_builders_use_the_shared_candidate_output_contract(self) -> None:
         repository = Path(__file__).resolve().parents[2]

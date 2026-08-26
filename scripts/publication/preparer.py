@@ -249,6 +249,8 @@ def prepare(
             str(repository / "scripts/verify_release_app.sh"),
             str(app),
             str(native_products),
+            "--context",
+            "canonical-native-content",
         ],
         repository,
         release_environment,

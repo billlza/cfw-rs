@@ -154,6 +154,7 @@ def _fixed_command(repository: Path) -> tuple[CommandSpec, Path]:
                 str(repository / VERIFIER_RELATIVE),
                 str(app),
                 str(repository / FINAL_NATIVE_PRODUCTS_RELATIVE),
+                *IDENTITY_FIXED_COMMAND[3:],
             ),
             cwd=repository,
             timeout_seconds=VERIFIER_TIMEOUT_SECONDS,

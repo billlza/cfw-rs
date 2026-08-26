@@ -18,7 +18,7 @@ class RetiredValidatedCandidateEvidenceTests(unittest.TestCase):
         )
 
     def test_in_process_entrypoint_fails_explicitly(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "single frozen GA 40032"):
+        with self.assertRaisesRegex(SystemExit, "single frozen GA 40033"):
             validated_candidate_evidence.main([])
 
     def test_cli_rejects_old_review_arguments(self) -> None:
@@ -28,7 +28,7 @@ class RetiredValidatedCandidateEvidenceTests(unittest.TestCase):
                 str(REPOSITORY / "scripts/validated_candidate_evidence.py"),
                 "target/candidates/0.4.0/review/validated-candidate.json",
                 "--final-build-number",
-                "40032",
+                "40033",
             ],
             cwd=REPOSITORY,
             check=False,

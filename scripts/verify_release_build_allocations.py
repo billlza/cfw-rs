@@ -65,10 +65,17 @@ POLICY_SUPERSEDED_ALLOCATION: Final = (
     "validation",
     "retired_unbuilt_policy_superseded",
 )
-RETIRED_GA_ALLOCATION: Final = (
-    "40031",
-    "ga",
-    "retired_after_candidate_freeze_before_canonical_signing_output",
+RETIRED_GA_ALLOCATIONS: Final = (
+    (
+        "40031",
+        "ga",
+        "retired_after_candidate_freeze_before_canonical_signing_output",
+    ),
+    (
+        "40032",
+        "ga",
+        "retired_after_candidate_freeze_before_canonical_signing_output",
+    ),
 )
 
 
@@ -172,16 +179,16 @@ def validate_contract(
         raise ReleaseBuildAllocationError(
             "policy-superseded 40030 allocation changed"
         )
-    retired_ga_index = superseded_index + 1
-    if retired_ga_index >= len(allocations):
-        raise ReleaseBuildAllocationError("retired 40031 GA allocation is absent")
-    retired_ga = allocations[retired_ga_index]
-    if (
-        retired_ga["build"],
-        retired_ga["role"],
-        retired_ga["status"],
-    ) != RETIRED_GA_ALLOCATION:
-        raise ReleaseBuildAllocationError("retired 40031 GA allocation changed")
+    retired_ga_start = superseded_index + 1
+    retired_ga_end = retired_ga_start + len(RETIRED_GA_ALLOCATIONS)
+    if retired_ga_end > len(allocations):
+        raise ReleaseBuildAllocationError("retired GA allocations are incomplete")
+    observed_retired_ga = tuple(
+        (record["build"], record["role"], record["status"])
+        for record in allocations[retired_ga_start:retired_ga_end]
+    )
+    if observed_retired_ga != RETIRED_GA_ALLOCATIONS:
+        raise ReleaseBuildAllocationError("retired GA allocations changed")
     expected_range = list(
         range(int(IMMUTABLE_RETIRED_PREFIX[0][0]), ordered_builds[-1] + 1)
     )

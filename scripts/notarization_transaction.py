@@ -5319,6 +5319,8 @@ def _finalize_accepted_submission(
             str(context.repository / "scripts/verify_release_app.sh"),
             str(work_app),
             str(context.native_products),
+            "--context",
+            "canonical-native-content",
         ],
         600,
     )
@@ -5387,6 +5389,8 @@ def _finalize_accepted_submission(
             str(context.repository / "scripts/verify_release_app.sh"),
             str(final_app),
             str(context.native_products),
+            "--context",
+            "canonical-native-content",
         ],
         600,
     )
@@ -5422,6 +5426,8 @@ def _finalize_accepted_submission(
             str(context.repository / "scripts/verify_release_app.sh"),
             str(final_app),
             str(context.native_products),
+            "--context",
+            "canonical-native-content",
         ],
         600,
     )
@@ -8186,6 +8192,8 @@ def recover_transaction(
             "--pre-notary",
             str(attempt.work_app),
             str(context.native_products),
+            "--context",
+            "canonical-native-content",
         ],
         600,
     )

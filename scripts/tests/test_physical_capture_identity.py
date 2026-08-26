@@ -174,6 +174,8 @@ class IdentityProbeTests(unittest.TestCase):
                 str(self.repository / identity.VERIFIER_RELATIVE),
                 str(self.app),
                 str(self.repository / identity.FINAL_NATIVE_PRODUCTS_RELATIVE),
+                "--context",
+                "canonical-native-content",
             ),
         )
         self.captured = captured

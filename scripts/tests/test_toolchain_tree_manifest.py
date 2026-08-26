@@ -760,7 +760,9 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                 self.assertLess(runtime_clear, verification)
                 self.assertLess(build, verification)
                 self.assertLess(verification, manifest)
-                self.assertIn("--require-unsigned-host", source[verification:manifest])
+                self.assertIn(
+                    "--context unsigned-host", source[verification:manifest]
+                )
                 self.assertNotIn("export CARGO_NET_OFFLINE", source)
                 self.assertNotIn("export CARGO_TARGET_DIR", source)
                 self.assertNotIn("export MACOSX_DEPLOYMENT_TARGET", source)
@@ -825,8 +827,20 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             '"$repo_root/scripts/verify_artifact_manifest.py"',
             manifest_promotion,
         )
+        pre_host_verification = helper.index(
+            '"$repo_root/scripts/verify_candidate_bundle.sh"',
+            manifest_verification,
+        )
         host_sign = helper.index(
-            '--entitlements "$host_release_xcent"', manifest_verification
+            '--entitlements "$host_release_xcent"', pre_host_verification
+        )
+        deep_host_verification = helper.index(
+            "/usr/bin/codesign --verify --deep --strict --verbose=4",
+            host_sign,
+        )
+        release_app_verification = helper.index(
+            '"$repo_root/scripts/verify_release_app.sh"',
+            deep_host_verification,
         )
         self.assertLess(pre_sign_copy, pre_sign_verify)
         self.assertLess(pre_sign_verify, freeze)
@@ -844,9 +858,20 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertLess(packet_sign, tombstone_sign)
         self.assertLess(tombstone_sign, manifest_promotion)
         self.assertLess(manifest_promotion, manifest_verification)
-        self.assertLess(manifest_verification, host_sign)
+        self.assertLess(manifest_verification, pre_host_verification)
+        self.assertLess(pre_host_verification, host_sign)
+        self.assertLess(host_sign, deep_host_verification)
+        self.assertLess(deep_host_verification, release_app_verification)
         self.assertIn(
-            "--require-unsigned-host", signed[pre_sign_verify:freeze]
+            "--context unsigned-host", signed[pre_sign_verify:freeze]
+        )
+        self.assertIn(
+            "--context signing-attempt-work",
+            helper[pre_host_verification:host_sign],
+        )
+        self.assertIn(
+            "--context signing-attempt-work",
+            helper[release_app_verification:],
         )
         self.assertNotIn("/usr/bin/codesign --force", signed)
         self.assertNotIn('--sign "$MACOS_SIGN_IDENTITY"', helper)
@@ -871,9 +896,37 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertLess(manifest, final_verification)
         self.assertLess(final_verification, manifest_reverification)
         self.assertIn(
-            "--require-unsigned-host",
+            "--context unsigned-host",
             unsigned[final_verification:manifest_reverification],
         )
+
+    def test_every_release_app_verifier_caller_declares_one_fixed_context(self) -> None:
+        expected_canonical_calls = {
+            "notarization_transaction.py": (4, 4),
+            "make_dmg.sh": (2, 2),
+            "make_updater_manifest.sh": (1, 1),
+            "release_publication_gate.sh": (1, 1),
+            "publication/ga_release_contract.py": (1, 1),
+            "publication/preparer.py": (1, 1),
+            "dormant_app_install.py": (2, 1),
+        }
+        for relative, counts in expected_canonical_calls.items():
+            with self.subTest(caller=relative):
+                verifier_count, context_count = counts
+                source = (SCRIPTS / relative).read_text(encoding="utf-8")
+                self.assertEqual(
+                    source.count("verify_release_app.sh"), verifier_count
+                )
+                self.assertEqual(
+                    source.count("canonical-native-content"), context_count
+                )
+
+        release_verifier = (SCRIPTS / "verify_release_app.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("signing_attempt_pattern", release_verifier)
+        self.assertIn("candidate_bundle_verification_paths(", release_verifier)
+        self.assertIn('--context "$verification_context"', release_verifier)
 
     def test_release_consumers_do_not_use_ambient_tauri(self) -> None:
         for relative in (

@@ -256,7 +256,7 @@ def system_extension_output() -> str:
         "--- com.apple.system_extension.network_extension\n"
         "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]\n"
         "*\t*\tYKUPL7Z869\tcom.bill.clashformac.packet-tunnel "
-        "(0.4.0/40032)\tCFWPacketTunnel\t[activated enabled]\n"
+        "(0.4.0/40033)\tCFWPacketTunnel\t[activated enabled]\n"
     )
 
 
@@ -462,7 +462,7 @@ class RuntimeFixture:
                         "context:primary-signature",
                         "-vv",
                         (
-                            "target/candidates/0.4.0/ga/40032/packages/dmg/v0.4.0/"
+                            "target/candidates/0.4.0/ga/40033/packages/dmg/v0.4.0/"
                             "Clash.for.Mac_0.4.0_arm64.dmg"
                         ),
                     ],
@@ -474,14 +474,14 @@ class RuntimeFixture:
                         "scripts/release_artifact_set_cli.py",
                         "verify-dmg",
                         "--directory",
-                        "target/candidates/0.4.0/ga/40032/packages/dmg/v0.4.0",
+                        "target/candidates/0.4.0/ga/40033/packages/dmg/v0.4.0",
                         "--version",
                         "0.4.0",
                         "--repository",
                         ".",
                     ],
                     stdout=(
-                        "DMG release set verified: target/candidates/0.4.0/ga/40032/"
+                        "DMG release set verified: target/candidates/0.4.0/ga/40033/"
                         "packages/dmg/v0.4.0\n"
                     ),
                 ),
@@ -743,20 +743,20 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_contract_has_fixed_paths_and_twelve_raw_derived_checks(self) -> None:
         self_check()
-        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40019", "40032"))
+        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40019", "40033"))
         self.assertEqual(len(CHECKS), 12)
         self.assertEqual(len(RAW_FILE_NAMES), 15)
         self.assertEqual(
             ACCEPTANCE_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40032/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40033/stage-inputs/ga-acceptance/"
                 "runtime-acceptance.json"
             ),
         )
         self.assertEqual(
             RAW_ROOT_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40032/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40033/stage-inputs/ga-acceptance/"
                 "runtime-evidence"
             ),
         )

@@ -21,7 +21,7 @@ class PhysicalCaptureProofTests(unittest.TestCase):
         self.runner = _runner()
         self.context = initialize_context(
             _candidate(),
-            run_id="run-40032-macos15",
+            run_id="run-40033-macos15",
             clean_install_confirmed=True,
             runner=self.runner,
             observed_at=self.initialized_at,
@@ -42,7 +42,7 @@ class PhysicalCaptureProofTests(unittest.TestCase):
         self.assertEqual(material.proof, parse_proof_binding(material.proof))
         self.assertEqual(material.proof["schema_version"], 3)
         self.assertEqual(material.proof["run_nonce"], "d" * 64)
-        self.assertEqual(material.proof["candidate"]["build_number"], "40032")
+        self.assertEqual(material.proof["candidate"]["build_number"], "40033")
         self.assertNotIn("built_at", material.proof["candidate"])
         self.assertEqual(
             material.nonce_issued_at,

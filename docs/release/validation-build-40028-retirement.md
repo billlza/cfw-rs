@@ -60,6 +60,6 @@ installation, and physical-evidence sequence. No evidence from build 40028 may
 be copied forward as successful evidence.
 
 That successor plan was later superseded: policy retired build 40030 unbuilt,
-and build 40031 was retired after candidate freeze but before canonical signing
-output. Build 40032 is the only active GA allocation; see
-`ga-build-40031-retirement.md`.
+and builds 40031 and 40032 were each retired after candidate freeze but before
+canonical signing output. Build 40033 is the only active GA allocation; see
+`ga-build-40031-retirement.md` and `ga-build-40032-retirement.md`.

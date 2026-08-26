@@ -1634,7 +1634,15 @@ def _run_fixed_release_verifier(
             "release_verifier_invalid",
             "release verifier ownership or mode is unsafe",
         )
-    return _run_bounded_process((str(verifier), str(app), str(native_products)))
+    return _run_bounded_process(
+        (
+            str(verifier),
+            str(app),
+            str(native_products),
+            "--context",
+            "canonical-native-content",
+        )
+    )
 
 
 def verify_dormant_bundle(

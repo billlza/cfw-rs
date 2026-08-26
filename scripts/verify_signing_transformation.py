@@ -41,7 +41,13 @@ if __package__:
         read_private_pending_locked,
         write_private_pending_locked,
     )
-    from .release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
+    from .release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        SIGNED_APP_WITHIN_OUTPUT,
+        SIGNING_OUTPUT_RELATIVE,
+        candidate_signing_output,
+        ga_root,
+    )
     from .release_python_runtime import (
         ReleasePythonRuntimeError,
         require_closed_release_runtime,
@@ -61,7 +67,13 @@ else:
         read_private_pending_locked,
         write_private_pending_locked,
     )
-    from release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
+    from release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        SIGNED_APP_WITHIN_OUTPUT,
+        SIGNING_OUTPUT_RELATIVE,
+        candidate_signing_output,
+        ga_root,
+    )
     from release_python_runtime import (
         ReleasePythonRuntimeError,
         require_closed_release_runtime,
@@ -70,16 +82,13 @@ else:
 
 DOCUMENT: Final = "cfm-ga-signing-transformation-v1"
 SCHEMA_VERSION: Final = 1
-SIGNING_OUTPUT_RELATIVE: Final = Path("signing-output")
 RECEIPT_NAME: Final = "signing-transformation.json"
 RECEIPT_RELATIVE: Final = SIGNING_OUTPUT_RELATIVE / RECEIPT_NAME
 PRE_SIGN_APP_RELATIVE: Final = Path("pre-sign/Clash for Mac.app")
 PRE_SIGN_MANIFEST_RELATIVE: Final = Path(
     "pre-sign/Clash for Mac.app.manifest.json"
 )
-SIGNED_APP_WITHIN_OUTPUT: Final = Path("signing-input/Clash for Mac.app")
 SIGNED_APP_RELATIVE: Final = SIGNING_OUTPUT_RELATIVE / SIGNED_APP_WITHIN_OUTPUT
-ATTEMPT_ID_RE: Final = re.compile(r"\A[0-9]{8}\Z")
 MAX_JSON_BYTES: Final = 64 * 1024 * 1024
 MAX_PROFILE_BYTES: Final = 16 * 1024 * 1024
 MAX_CODESIGN_OUTPUT: Final = 1024 * 1024
@@ -301,43 +310,17 @@ def _signing_output_path(
 ) -> Path:
     """Accept only the canonical output or one fixed private attempt workspace."""
 
-    root = ga_root(repository)
-    selected = root / SIGNING_OUTPUT_RELATIVE if signing_output is None else Path(signing_output)
+    selected = (
+        ga_root(repository) / SIGNING_OUTPUT_RELATIVE
+        if signing_output is None
+        else signing_output
+    )
     try:
-        resolved = selected.resolve(strict=True)
-        metadata = resolved.lstat()
-    except OSError as error:
+        return candidate_signing_output(repository, selected).root
+    except (OSError, ValueError) as error:
         raise SigningTransformationError(
-            "signing-output directory is unavailable"
+            f"signing-output path is invalid: {error}"
         ) from error
-    if (
-        not selected.is_absolute()
-        or selected != resolved
-        or resolved.is_symlink()
-        or not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-    ):
-        raise SigningTransformationError(
-            "signing-output must be one canonical owned private directory"
-        )
-    if resolved == root / SIGNING_OUTPUT_RELATIVE:
-        return resolved
-    try:
-        relative = resolved.relative_to(root / "transactions/signing-attempts")
-    except ValueError as error:
-        raise SigningTransformationError(
-            "signing-output is outside the fixed GA signing transaction"
-        ) from error
-    if (
-        len(relative.parts) != 2
-        or ATTEMPT_ID_RE.fullmatch(relative.parts[0]) is None
-        or relative.parts[1] not in {"work", "publish-ready"}
-    ):
-        raise SigningTransformationError(
-            "signing-output is not a fixed GA signing-attempt workspace"
-        )
-    return resolved
 
 
 def _freeze_inputs(

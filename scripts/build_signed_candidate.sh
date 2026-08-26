@@ -308,7 +308,7 @@ import sys
 ) = sys.argv[1:]
 value = {
     "document": "cfm-ga-product-input-v1",
-    "product": {"build_number": "40032", "version": "0.4.0"},
+    "product": {"build_number": "40033", "version": "0.4.0"},
     "schema_version": 1,
     "source": {
         "release_source_sha256": release_source_sha256,
@@ -405,12 +405,12 @@ candidate_cargo_home=""
 "$repo_root/scripts/verify_candidate_bundle.sh" \
   "$built_app" \
   "$native_products" \
-  --require-unsigned-host
+  --context unsigned-host
 /usr/bin/ditto --noqtn "$built_app" "$pre_sign_app"
 "$repo_root/scripts/verify_candidate_bundle.sh" \
   "$pre_sign_app" \
   "$native_products" \
-  --require-unsigned-host
+  --context unsigned-host
 run_isolated_python_script "$repo_root/scripts/hash_artifact.py" \
   "$pre_sign_app" \
   --output "$pre_sign_manifest" \
@@ -482,7 +482,7 @@ if set(value) != {"document", "product", "schema_version", "source", "toolchain"
     raise SystemExit("error: frozen product input field set is invalid")
 if value["document"] != "cfm-ga-product-input-v1" or value["schema_version"] != 1:
     raise SystemExit("error: frozen product input identity is invalid")
-if value["product"] != {"build_number": "40032", "version": "0.4.0"}:
+if value["product"] != {"build_number": "40033", "version": "0.4.0"}:
     raise SystemExit("error: frozen product identity is invalid")
 source = value["source"]
 toolchain = value["toolchain"]

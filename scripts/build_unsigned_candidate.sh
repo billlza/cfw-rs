@@ -180,7 +180,7 @@ candidate_cargo_home=""
 "$repo_root/scripts/verify_candidate_bundle.sh" \
   "$app_path" \
   "$native_products" \
-  --require-unsigned-host
+  --context unsigned-host
 cfw_verify_node_toolchain_tree "$repo_root" "$toolchain_root"
 cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
 ui_dependencies_tree_observed_end="$(
@@ -246,7 +246,7 @@ cfw_run_release_python_script \
 "$repo_root/scripts/verify_candidate_bundle.sh" \
   "$app_path" \
   "$native_products" \
-  --require-unsigned-host
+  --context unsigned-host
 [[ "$(/usr/bin/shasum -a 256 "$app_manifest" | /usr/bin/awk '{print $1}')" == "$app_manifest_sha256" ]] ||
   die "unsigned application manifest changed during final verification"
 cfw_run_release_python_script \

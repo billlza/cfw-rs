@@ -19,10 +19,8 @@ if __package__:
     from .hash_artifact import build_manifest
     from .hash_native_build_inputs import build_digest as native_build_digest
     from .release_build_identity import (
-        ACTIVE_RELEASE_IDENTITY,
-        bundle_build_identity,
-        candidate_native_products_output,
-        ga_signed_native_products_root,
+        CandidateBundleContext,
+        candidate_bundle_verification_paths,
     )
     from .repository_source_identity import (
         SourceIdentityError,
@@ -32,10 +30,8 @@ else:
     from hash_artifact import build_manifest
     from hash_native_build_inputs import build_digest as native_build_digest
     from release_build_identity import (
-        ACTIVE_RELEASE_IDENTITY,
-        bundle_build_identity,
-        candidate_native_products_output,
-        ga_signed_native_products_root,
+        CandidateBundleContext,
+        candidate_bundle_verification_paths,
     )
     from repository_source_identity import (
         SourceIdentityError,
@@ -43,7 +39,6 @@ else:
     )
 
 
-EXPECTED_APP_NAME = "Clash for Mac.app"
 EXPECTED_VERSION = "0.4.0"
 EXPECTED_APP_ID = "com.bill.clashformac"
 EXPECTED_AGENT_ID = "com.bill.clashformac.proxy-agent"
@@ -412,21 +407,23 @@ def classify_binary(path: Path) -> bool:
 
 def verify_candidate(
     repository: Path,
-    app: Path,
-    native_products: Path,
+    app: str | Path,
+    native_products: str | Path,
     *,
-    require_unsigned_host: bool = False,
+    context: CandidateBundleContext,
 ) -> None:
-    if not app.is_absolute():
-        raise CandidateError("application path must be absolute")
-    require_real_directory(app)
-    if app.name != EXPECTED_APP_NAME:
-        raise CandidateError(f"unexpected application name: {app.name}")
-    app = app.resolve(strict=True)
-    if not native_products.is_absolute():
-        raise CandidateError("native products root must be absolute")
-    require_real_directory(native_products)
-    native_products = native_products.resolve(strict=True)
+    try:
+        verification_paths = candidate_bundle_verification_paths(
+            repository,
+            str(app),
+            str(native_products),
+            context,
+        )
+    except ValueError as error:
+        raise CandidateError(str(error)) from error
+    app = verification_paths.app
+    native_products = verification_paths.native_products
+    build_identity = verification_paths.build_identity
     native_metadata = current_native_build_metadata(repository)
 
     tauri = json.loads(
@@ -462,32 +459,8 @@ def verify_candidate(
         extension_binary,
     ):
         require_regular_file(file_path)
-    try:
-        build_identity = bundle_build_identity(app)
-    except ValueError as error:
-        raise CandidateError(str(error)) from error
-    if require_unsigned_host:
-        try:
-            expected_native_products = candidate_native_products_output(
-                repository,
-                str(native_products),
-                build_identity.build_version,
-            )
-        except ValueError as error:
-            raise CandidateError(
-                "unsigned native products root is not the fixed candidate build root"
-            ) from error
-        if native_products != expected_native_products:
-            raise CandidateError("unsigned native products root is not canonical")
+    if context is CandidateBundleContext.UNSIGNED_HOST:
         verify_unsigned_host_skeleton(app)
-    elif (
-        build_identity.product_version != ACTIVE_RELEASE_IDENTITY.product_version
-        or build_identity.build_version != ACTIVE_RELEASE_IDENTITY.ga_build
-        or native_products != ga_signed_native_products_root(repository)
-    ):
-        raise CandidateError(
-            "signed native products root is not the fixed active GA root"
-        )
 
     system_extensions_root = contents / "Library/SystemExtensions"
     require_real_directory(system_extensions_root)
@@ -672,9 +645,13 @@ def verify_candidate(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("app", type=Path)
-    parser.add_argument("--native-products-root", required=True, type=Path)
-    parser.add_argument("--require-unsigned-host", action="store_true")
+    parser.add_argument("app")
+    parser.add_argument("--native-products-root", required=True)
+    parser.add_argument(
+        "--context",
+        required=True,
+        choices=tuple(context.value for context in CandidateBundleContext),
+    )
     arguments = parser.parse_args()
     repository = Path(__file__).resolve().parent.parent
     try:
@@ -682,7 +659,7 @@ def main() -> None:
             repository,
             arguments.app,
             arguments.native_products_root,
-            require_unsigned_host=arguments.require_unsigned_host,
+            context=CandidateBundleContext(arguments.context),
         )
     except (CandidateError, FileNotFoundError, json.JSONDecodeError, OSError) as error:
         raise SystemExit(f"error: candidate bundle verification failed: {error}") from error

@@ -8,16 +8,24 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import stat
 from typing import Any, Sequence
 
 if __package__:
     from .hash_artifact import build_manifest, write_new_manifest
+    from .release_regular_file import (
+        ReleaseRegularFileError,
+        read_bounded_regular_file,
+    )
 else:
     from hash_artifact import build_manifest, write_new_manifest
+    from release_regular_file import (
+        ReleaseRegularFileError,
+        read_bounded_regular_file,
+    )
 
 
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+MAX_ERROR_DETAIL_CHARACTERS = 512
 
 
 class SignedNativeManifestError(ValueError):
@@ -33,31 +41,48 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _read_regular(path: Path) -> bytes:
+def _read_regular(path: Path, *, label: str) -> bytes:
     try:
-        before = path.lstat()
-    except OSError as error:
-        raise SignedNativeManifestError(f"native manifest is unavailable: {path}") from error
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or path.is_symlink()
-        or before.st_nlink != 1
-        or before.st_size < 1
-        or before.st_size > MAX_MANIFEST_BYTES
-    ):
-        raise SignedNativeManifestError("pre-sign native manifest is not a bounded regular file")
-    try:
-        data = path.read_bytes()
-        after = path.lstat()
-    except OSError as error:
-        raise SignedNativeManifestError("cannot read pre-sign native manifest") from error
-    if before != after or len(data) != before.st_size:
-        raise SignedNativeManifestError("pre-sign native manifest changed while reading")
-    return data
+        return read_bounded_regular_file(
+            path,
+            label=label,
+            maximum_bytes=MAX_MANIFEST_BYTES,
+            allowed_owner_uids=frozenset({os.geteuid()}),
+        )
+    except ReleaseRegularFileError as error:
+        raise SignedNativeManifestError(str(error)) from error
 
 
-def _load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
-    data = _read_regular(path)
+def _bounded_error_detail(error: BaseException) -> str:
+    detail = " ".join(str(error).split())
+    if not detail:
+        detail = type(error).__name__
+    if len(detail) > MAX_ERROR_DETAIL_CHARACTERS:
+        return detail[: MAX_ERROR_DETAIL_CHARACTERS - 3] + "..."
+    return detail
+
+
+def _build_artifact_manifest(
+    artifact: Path,
+    *,
+    metadata: dict[str, str],
+    algorithm: str,
+    label: str,
+) -> dict[str, object]:
+    try:
+        return build_manifest(
+            artifact,
+            metadata=metadata,
+            algorithm=algorithm,
+        )
+    except ValueError as error:
+        raise SignedNativeManifestError(
+            f"{label} is invalid: {_bounded_error_detail(error)}"
+        ) from error
+
+
+def _load_manifest(path: Path, *, label: str) -> tuple[dict[str, Any], bytes]:
+    data = _read_regular(path, label=label)
     try:
         value = json.loads(
             data.decode("utf-8", errors="strict"),
@@ -67,9 +92,9 @@ def _load_manifest(path: Path) -> tuple[dict[str, Any], bytes]:
     except SignedNativeManifestError:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
-        raise SignedNativeManifestError("pre-sign native manifest is not strict JSON") from error
+        raise SignedNativeManifestError(f"{label} is not strict JSON") from error
     if type(value) is not dict:
-        raise SignedNativeManifestError("pre-sign native manifest is not an object")
+        raise SignedNativeManifestError(f"{label} is not an object")
     return value, data
 
 
@@ -82,7 +107,9 @@ def promote_manifest(
     unsigned_manifest: Path,
     signed_artifact: Path,
 ) -> dict[str, object]:
-    value, manifest_bytes = _load_manifest(unsigned_manifest)
+    value, manifest_bytes = _load_manifest(
+        unsigned_manifest, label="pre-sign native manifest"
+    )
     expected_fields = {"algorithm", "entries", "metadata", "root", "sha256"}
     if value.get("algorithm") == "sha256-tree-v2":
         expected_fields.add("rootMode")
@@ -97,12 +124,15 @@ def promote_manifest(
         or not metadata
         or any(not isinstance(key, str) or not isinstance(item, str) for key, item in metadata.items())
         or metadata.get("signingMode") != "pre-sign"
+        or "preSignArtifactSha256" in metadata
+        or "preSignManifestSha256" in metadata
     ):
         raise SignedNativeManifestError("pre-sign native metadata is invalid")
-    observed_unsigned = build_manifest(
+    observed_unsigned = _build_artifact_manifest(
         unsigned_artifact,
         metadata=dict(metadata),
         algorithm=algorithm,
+        label="pre-sign native artifact",
     )
     if observed_unsigned != value:
         raise SignedNativeManifestError("unsigned native artifact differs from its manifest")
@@ -116,11 +146,35 @@ def promote_manifest(
             "signingMode": "developer-id",
         }
     )
-    return build_manifest(
+    return _build_artifact_manifest(
         signed_artifact,
         metadata=signed_metadata,
         algorithm=algorithm,
+        label="signed native artifact",
     )
+
+
+def verify_promoted_manifest(
+    unsigned_artifact: Path,
+    unsigned_manifest: Path,
+    signed_artifact: Path,
+    signed_manifest: Path,
+) -> dict[str, object]:
+    """Re-derive and verify one exact pre-sign to Developer ID promotion."""
+
+    expected = promote_manifest(
+        unsigned_artifact,
+        unsigned_manifest,
+        signed_artifact,
+    )
+    observed, _manifest_bytes = _load_manifest(
+        signed_manifest, label="signed native manifest"
+    )
+    if observed != expected:
+        raise SignedNativeManifestError(
+            "signed native manifest differs from the exact pre-sign promotion"
+        )
+    return observed
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -136,11 +190,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.unsigned_manifest,
             arguments.signed_artifact,
         )
-        write_new_manifest(
-            arguments.output,
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        )
-    except (OSError, SignedNativeManifestError, ValueError) as error:
+        try:
+            write_new_manifest(
+                arguments.output,
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            )
+        except ValueError as error:
+            raise SignedNativeManifestError(
+                "signed native manifest output is invalid: "
+                f"{_bounded_error_detail(error)}"
+            ) from error
+    except (OSError, SignedNativeManifestError) as error:
         raise SystemExit(f"error: signed native manifest: {error}") from error
     return 0
 

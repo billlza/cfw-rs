@@ -362,81 +362,38 @@ verify_macho() {
 }
 
 verify_tombstone_provenance() {
-  local embedded_binary="$1"
+  local embedded_app="$1"
+  local pre_sign_native_products="$2"
+  local context="$3"
+  local pre_sign_root="$pre_sign_native_products/CFWLegacyTombstone"
+  local pre_sign_manifest="$pre_sign_native_products/CFWLegacyTombstone.manifest.json"
   local staged_root="$native_products_root/CFWLegacyTombstone"
   local staged_binary="$staged_root/cfw-helper-tombstone"
   local manifest="$native_products_root/CFWLegacyTombstone.manifest.json"
+  require_regular_file "$pre_sign_root/cfw-helper-tombstone"
+  require_regular_file "$pre_sign_manifest"
   require_regular_file "$staged_binary"
   require_regular_file "$manifest"
-  "$python_bin" -I -S -B -W error - \
-    "$repo_root" "$manifest" "$staged_binary" "$build_number" <<'PY'
-import hashlib
-import json
-from pathlib import Path
-import sys
-
-root = Path(sys.argv[1])
-manifest_path = Path(sys.argv[2])
-staged_binary = Path(sys.argv[3])
-build_number = sys.argv[4]
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-metadata = manifest.get("metadata", {})
-
-def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
-expected_metadata = {
-    "artifactKind": "legacy-service-tombstone-v1",
-    "architecture": "arm64",
-    "buildNumber": build_number,
-    "deploymentTarget": "15.0",
-    "signingMode": "developer-id",
-    "rustVersion": "1.97.1",
-    "sourceSha256": digest(root / "crates/cfw-legacy-tombstone/src/main.rs"),
-    "cargoManifestSha256": digest(root / "crates/cfw-legacy-tombstone/Cargo.toml"),
-    "cargoLockSha256": digest(root / "Cargo.lock"),
-}
-if metadata != expected_metadata:
-    raise SystemExit("error: legacy tombstone manifest is not bound to current source and lockfile")
-entries = manifest.get("entries")
-expected_entry = {
-    "path": "cfw-helper-tombstone",
-    "sha256": digest(staged_binary),
-    "size": staged_binary.stat().st_size,
-    "type": "file",
-}
-if entries != [expected_entry]:
-    raise SystemExit("error: legacy tombstone manifest contains an unexpected artifact set")
-encoded_entry = json.dumps(
-    expected_entry, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-) + "\n"
-tree_digest = hashlib.sha256(encoded_entry.encode("utf-8")).hexdigest()
-if (
-    manifest.get("algorithm") != "sha256-tree-v1"
-    or manifest.get("root") != "CFWLegacyTombstone"
-    or manifest.get("sha256") != tree_digest
-):
-    raise SystemExit("error: legacy tombstone tree identity is invalid")
-
-markers = (b"mihomo", b"clash-rs", b"clash-darwin", b"CFW_CORE_KIND", b"core install", b"want_core")
-payload = staged_binary.read_bytes()
-found = [marker.decode("ascii") for marker in markers if marker in payload]
-if found:
-    raise SystemExit(f"error: staged tombstone contains retired supervisor markers: {found}")
-PY
-
-  local staged_uuid embedded_uuid
-  staged_uuid="$(dwarfdump --uuid "$staged_binary" | awk '$1 == "UUID:" && $3 == "(arm64)" { print $2 }')"
-  embedded_uuid="$(dwarfdump --uuid "$embedded_binary" | awk '$1 == "UUID:" && $3 == "(arm64)" { print $2 }')"
-  [[ -n "$staged_uuid" && "$embedded_uuid" == "$staged_uuid" ]] ||
-    die "embedded tombstone does not match the source-bound staged build"
+  cfw_run_release_python_script \
+    "$repo_root" "$repo_root/scripts/verify_legacy_tombstone_provenance.py" \
+    --repository "$repo_root" \
+    --build-number "$build_number" \
+    --deployment-target "$MACOS_DEPLOYMENT_TARGET" \
+    --rust-version "$RUST_VERSION" \
+    --pre-sign-artifact "$pre_sign_root" \
+    --pre-sign-manifest "$pre_sign_manifest" \
+    --signed-artifact "$staged_root" \
+    --signed-manifest "$manifest" \
+    --embedded-app "$embedded_app" \
+    --context "$context" ||
+    die "legacy tombstone provenance verification failed"
 }
 
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
 
-for command in codesign dwarfdump file find lipo plutil security shasum spctl stat vtool xcrun; do
+for command in codesign file find lipo plutil security shasum spctl stat vtool xcrun; do
   require_command "$command"
 done
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
@@ -481,8 +438,8 @@ if context is CandidateBundleContext.UNSIGNED_HOST:
 print(paths.build_identity.build_version)
 PY
 )" || die "bundle build identity is invalid"
-[[ "$build_number" == "40034" ]] ||
-  die "release application is not the fixed GA build 40034"
+[[ "$build_number" == "40035" ]] ||
+  die "release application is not the fixed GA build 40035"
 case "$verification_context" in
   signing-attempt-work|signing-attempt-publish-ready)
     ((pre_notary == 1)) ||
@@ -494,7 +451,7 @@ case "$verification_context" in
     die "release application verification context is invalid"
     ;;
 esac
-signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40034/profiles/signing-preflight.json"
+signing_preflight_manifest="$repo_root/target/candidates/0.4.0/ga/40035/profiles/signing-preflight.json"
 require_regular_file "$signing_preflight_manifest"
 expected_signing_certificate_sha256="$(cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/release_signing_preflight.py" \
@@ -713,7 +670,10 @@ cmp -s "$proxy_agent_plist" "$repo_root/native/macos/Config/com.bill.clashformac
   die "ProxyAgent launchd BundleProgram mismatch"
 [[ "$(plist_value "$proxy_agent_plist" MachServices:$expected_agent_id)" == "true" ]] ||
   die "ProxyAgent launchd MachServices contract mismatch"
-verify_tombstone_provenance "$tombstone_path"
+verify_tombstone_provenance \
+  "$app_path" \
+  "$repo_root/target/candidates/0.4.0/ga/$build_number/native-products" \
+  "$verification_context"
 assert_developer_id_signature "$authority_path" "$expected_authority_id"
 
 for retired_path in \

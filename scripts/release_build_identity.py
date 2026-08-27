@@ -12,11 +12,24 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+if __package__:
+    from .release_regular_file import (
+        ReleaseRegularFileError,
+        read_bounded_regular_file,
+    )
+else:
+    from release_regular_file import (
+        ReleaseRegularFileError,
+        read_bounded_regular_file,
+    )
+
 
 PRODUCT_VERSION = "0.4.0"
 POSITIVE_INTEGER_RE = re.compile(r"^[1-9][0-9]*$")
 MAX_BUILD_VERSION = 9_223_372_036_854_775_807
 MAX_BUILD_VERSION_TEXT = str(MAX_BUILD_VERSION)
+MAX_BUNDLE_IDENTITY_PLIST_BYTES = 1024 * 1024
+BUNDLE_IDENTITY_PLIST_MODE = 0o644
 
 
 class BuildIdentityError(ValueError):
@@ -54,7 +67,7 @@ class ReleaseIdentity:
         canonical_build_version(self.ga_build, "active GA build")
 
 
-ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40034")
+ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40035")
 UNSIGNED_VALIDATION_BUILD = "40000"
 SIGNING_OUTPUT_RELATIVE = Path("signing-output")
 SIGNING_INPUT_NAME = "signing-input"
@@ -96,16 +109,25 @@ class CandidateSigningOutput:
     context: CandidateBundleContext
 
 
-def _read_plist(path: Path) -> dict[str, Any]:
-    metadata = path.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink() or metadata.st_nlink != 1:
-        raise BuildIdentityError(f"bundle identity plist is not a single-link regular file: {path}")
+def _read_plist(path: Path, *, label: str) -> dict[str, Any]:
     try:
-        value = plistlib.loads(path.read_bytes())
-    except (OSError, plistlib.InvalidFileException) as error:
-        raise BuildIdentityError(f"cannot parse bundle identity plist: {path}") from error
+        data = read_bounded_regular_file(
+            path,
+            label=f"{label} bundle identity plist",
+            maximum_bytes=MAX_BUNDLE_IDENTITY_PLIST_BYTES,
+            allowed_owner_uids=frozenset({0, os.geteuid()}),
+            exact_mode=BUNDLE_IDENTITY_PLIST_MODE,
+        )
+    except ReleaseRegularFileError as error:
+        raise BuildIdentityError(str(error)) from error
+    try:
+        value = plistlib.loads(data)
+    except plistlib.InvalidFileException as error:
+        raise BuildIdentityError(
+            f"{label} bundle identity plist cannot be parsed"
+        ) from error
     if not isinstance(value, dict):
-        raise BuildIdentityError(f"bundle identity plist is not a dictionary: {path}")
+        raise BuildIdentityError(f"{label} bundle identity plist is not a dictionary")
     return value
 
 
@@ -128,11 +150,11 @@ def bundle_build_identity(app: Path) -> BundleBuildIdentity:
     }
     identities = {}
     for name, path in plists.items():
-        value = _read_plist(path)
+        value = _read_plist(path, label=name)
         product_version = value.get("CFBundleShortVersionString")
         if product_version != PRODUCT_VERSION:
             raise BuildIdentityError(
-                f"{name} CFBundleShortVersionString is {product_version!r}, expected {PRODUCT_VERSION}"
+                f"{name} CFBundleShortVersionString is not the fixed product version"
             )
         identities[name] = canonical_build_version(
             value.get("CFBundleVersion"), f"{name} CFBundleVersion"

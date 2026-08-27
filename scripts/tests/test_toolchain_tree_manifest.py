@@ -830,9 +830,13 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             '"$repo_root/scripts/verify_artifact_manifest.py"',
             manifest_promotion,
         )
+        tombstone_provenance_verification = helper.index(
+            '"$repo_root/scripts/verify_legacy_tombstone_provenance.py"',
+            manifest_verification,
+        )
         pre_host_verification = helper.index(
             '"$repo_root/scripts/verify_candidate_bundle.sh"',
-            manifest_verification,
+            tombstone_provenance_verification,
         )
         host_sign = helper.index(
             '--entitlements "$host_release_xcent"', pre_host_verification
@@ -861,6 +865,17 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertLess(packet_sign, tombstone_sign)
         self.assertLess(tombstone_sign, manifest_promotion)
         self.assertLess(manifest_promotion, manifest_verification)
+        self.assertLess(
+            manifest_verification, tombstone_provenance_verification
+        )
+        tombstone_provenance = helper[
+            tombstone_provenance_verification:pre_host_verification
+        ]
+        self.assertIn('--embedded-app "$staged_app"', tombstone_provenance)
+        self.assertIn("--context signing-attempt-work", tombstone_provenance)
+        self.assertLess(
+            tombstone_provenance_verification, pre_host_verification
+        )
         self.assertLess(manifest_verification, pre_host_verification)
         self.assertLess(pre_host_verification, host_sign)
         self.assertLess(host_sign, deep_host_verification)
@@ -892,7 +907,7 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             helper.count('--sign "$CFW_SIGNING_CERTIFICATE_SHA1"'),
             6,
         )
-        self.assertEqual(helper.count("cfw_run_release_python_script"), 2)
+        self.assertEqual(helper.count("cfw_run_release_python_script"), 3)
         self.assertNotIn('"$python_bin" -I', helper)
         self.assertIn('"$repo_root/scripts/build_native_products.sh" --pre-sign', signed)
         self.assertIn(

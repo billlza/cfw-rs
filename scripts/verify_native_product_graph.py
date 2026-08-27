@@ -120,12 +120,28 @@ AUTHORITY_SIGNING_CRITICAL_BLOCK = "\n".join(
 # not an authentication mechanism and do not defend against the repository
 # owner. The release-freeze source digest independently binds the raw file.
 AUTHORITY_SIGNING_PREFIX_SHA256 = (
-    "41b77b94dda863c9f71da5312519fc14aee94f607d1ec2bc4fefce4f3ec3bc6c"
+    "4050a071edfeee9e9e067af1fe9f54b52eb355f56eb2ae9034fbbfd0b1012b5d"
 )
 AUTHORITY_SIGNING_SUFFIX_SHA256 = (
-    "c053d706c210107f1f8266d569b4d1b25622da0d67573af225796cb5ae5ac017"
+    "2279c5667dbb2f5dc9aa2302c2c10338ddcb0c0810a9f486aa7042c91dbf18a3"
 )
 DEPLOYMENT_TARGET = "15.0"
+TOMBSTONE_PROVENANCE_COMMAND = "\n".join(
+    (
+        "cfw_run_release_python_script \\",
+        '  "$repo_root" "$repo_root/scripts/verify_legacy_tombstone_provenance.py" \\',
+        '  --repository "$repo_root" \\',
+        '  --build-number "$CFW_BUILD_NUMBER" \\',
+        '  --deployment-target "$MACOS_DEPLOYMENT_TARGET" \\',
+        '  --rust-version "$RUST_VERSION" \\',
+        '  --pre-sign-artifact "$native_products/CFWLegacyTombstone" \\',
+        '  --pre-sign-manifest "$native_products/CFWLegacyTombstone.manifest.json" \\',
+        '  --signed-artifact "$signed_native_products/CFWLegacyTombstone" \\',
+        '  --signed-manifest "$signed_native_products/CFWLegacyTombstone.manifest.json" \\',
+        '  --embedded-app "$staged_app" \\',
+        "  --context signing-attempt-work",
+    )
+)
 
 DAEMON_EMBED = "Library/HelperTools/CFWGlobalAuthority"
 DAEMON_PLIST_EMBED = "Library/LaunchDaemons/com.bill.clashformac.global-authority.plist"
@@ -945,7 +961,6 @@ def verify_signing_order(
             "GA signing helper must apply exactly one signature per nested "
             "component and one outer host signature"
         )
-
     nested_variables = {
         f"Contents/{BRIDGE_EMBED}": "bridge",
         f"Contents/{DAEMON_EMBED}": "authority",
@@ -976,6 +991,21 @@ def verify_signing_order(
                 "GA signing helper signs the outer app before nested component: "
                 f"{destination}"
             )
+
+    promotion_index = signing_script.find("promote_signed_native_manifest.py")
+    tombstone_provenance_fragment = "verify_legacy_tombstone_provenance.py"
+    tombstone_provenance_block = TOMBSTONE_PROVENANCE_COMMAND + "\n"
+    tombstone_provenance_index = signing_script.find(tombstone_provenance_block)
+    if (
+        promotion_index < 0
+        or signing_script.count(tombstone_provenance_fragment) != 1
+        or signing_script.count(tombstone_provenance_block) != 1
+        or not promotion_index < tombstone_provenance_index < outer_index
+    ):
+        raise NativeProductGraphError(
+            "GA signing helper must use the exact promoted tombstone lineage "
+            "command after manifest promotion and before outer Host signing"
+        )
 
     authority_sign = f'{signing_selector} "$authority"'
     authority_index = signing_script.find(authority_sign)

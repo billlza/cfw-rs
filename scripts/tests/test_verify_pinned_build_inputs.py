@@ -2864,6 +2864,8 @@ class PinnedBuildInputsTests(unittest.TestCase):
             "scripts/signing_attempt_transaction.py",
             "scripts/run_ga_signing_attempt.sh",
             "scripts/promote_signed_native_manifest.py",
+            "scripts/release_regular_file.py",
+            "scripts/verify_legacy_tombstone_provenance.py",
             "scripts/verify_signing_transformation.py",
             "scripts/notarization_transaction.py",
             "scripts/verify_notary_log.py",

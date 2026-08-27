@@ -147,6 +147,7 @@ cfw_run_release_python_script \
   "$repo_root" "$repo_root/scripts/hash_artifact.py" \
   "$output_root" \
   --output "$manifest_path" \
+  --algorithm sha256-tree-v1 \
   --metadata "artifactKind=legacy-service-tombstone-v1" \
   --metadata "architecture=arm64" \
   --metadata "buildNumber=$CFW_BUILD_NUMBER" \

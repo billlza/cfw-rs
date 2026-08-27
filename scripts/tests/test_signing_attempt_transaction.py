@@ -18,7 +18,7 @@ class SigningAttemptFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
-        self.root = self.repository / "target/candidates/0.4.0/ga/40034"
+        self.root = self.repository / "target/candidates/0.4.0/ga/40035"
         self.root.mkdir(parents=True, mode=0o700)
         self.root.chmod(0o700)
         intent = self.root / "candidate-freeze/intent.json"
@@ -30,7 +30,7 @@ class SigningAttemptFixture:
             intent_path=intent,
             intent_sha256="a" * 64,
             product_version="0.4.0",
-            build_number="40034",
+            build_number="40035",
             recovered=False,
         )
         self.bindings = transaction.FrozenSigningBindings(

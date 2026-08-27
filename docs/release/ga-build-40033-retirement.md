@@ -57,9 +57,11 @@ only and cannot be modified, promoted, or reused.
 
 Scoping distribution mode creation around the fixed `codesign` boundary and
 closing unsafe fresh-signing recovery change tracked release source after
-build 40033 was consumed. Build 40034 is therefore the only active GA
+build 40033 was consumed. Build 40034 became its successor and was later
+consumed and retired independently; its history is recorded in
+`ga-build-40034-retirement.md`. Build 40035 is therefore the only active GA
 successor. It must start from one new clean source identity and repeat the
 complete source, hosted-CI, build, freeze, signing, notarization, package,
-installation, runtime, and publication evidence sequence. No application
-tree, profile, possession proof, signature, manifest, attempt file, or receipt
-from build 40033 may be copied forward as successful evidence.
+installation, runtime, and publication evidence sequence. No application tree,
+profile, possession proof, signature, manifest, attempt file, or receipt from
+build 40033 may be copied forward as successful evidence.

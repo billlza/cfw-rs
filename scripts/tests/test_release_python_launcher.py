@@ -51,6 +51,7 @@ class ReleasePythonLauncherTests(unittest.TestCase):
             ("scripts/candidate_artifact_binding.py", "--help"),
             ("scripts/verify_artifact_manifest.py", "--help"),
             ("scripts/promote_signed_native_manifest.py", "--help"),
+            ("scripts/verify_legacy_tombstone_provenance.py", "--help"),
             ("scripts/verify_candidate_bundle.py", "--help"),
             ("scripts/gatekeeper_assessment.py", "--help"),
             ("scripts/hash_artifact.py", "--help"),

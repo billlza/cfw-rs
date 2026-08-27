@@ -54,9 +54,9 @@ class CandidateFreezeTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.preflight = (
-            self.repository / "target/candidates/0.4.0/ga-preflight/40034"
+            self.repository / "target/candidates/0.4.0/ga-preflight/40035"
         )
-        self.final = self.repository / "target/candidates/0.4.0/ga/40034"
+        self.final = self.repository / "target/candidates/0.4.0/ga/40035"
         (self.repository / "docs/release").mkdir(parents=True)
         allocations = [
             {"build": build, "role": role, "status": status}
@@ -64,13 +64,13 @@ class CandidateFreezeTests(unittest.TestCase):
                 *IMMUTABLE_RETIRED_PREFIX,
                 POLICY_SUPERSEDED_ALLOCATION,
                 *RETIRED_GA_ALLOCATIONS,
-                ("40034", "ga", "active_ga"),
+                ("40035", "ga", "active_ga"),
             )
         ]
         (self.repository / "docs/release/build-allocations-v040.json").write_bytes(
             _canonical_json(
                 {
-                    "active_ga": "40034",
+                    "active_ga": "40035",
                     "allocations": allocations,
                     "document": "cfm-release-build-allocation-v2",
                     "product_version": "0.4.0",
@@ -262,7 +262,7 @@ class CandidateFreezeTests(unittest.TestCase):
             _canonical_json(
                 {
                     "document": "cfm-ga-product-input-v1",
-                    "product": {"build_number": "40034", "version": "0.4.0"},
+                    "product": {"build_number": "40035", "version": "0.4.0"},
                     "schema_version": 1,
                     "source": {
                         "release_source_sha256": "b" * 64,
@@ -311,7 +311,7 @@ class CandidateFreezeTests(unittest.TestCase):
         receipt = self.freeze()
 
         self.assertEqual(receipt.root, self.final)
-        self.assertEqual(receipt.build_number, "40034")
+        self.assertEqual(receipt.build_number, "40035")
         self.assertFalse(receipt.recovered)
         self.assertFalse(self.preflight.exists())
         self.assertTrue((self.final / "candidate-freeze/intent.json").is_file())
@@ -483,7 +483,7 @@ class CandidateFreezeTests(unittest.TestCase):
             _canonical_json(
                 {
                     "document": "cfm-ga-product-input-v1",
-                    "product": {"build_number": "40034", "version": "0.4.0"},
+                    "product": {"build_number": "40035", "version": "0.4.0"},
                     "schema_version": 1,
                     "source": {
                         "release_source_sha256": "b" * 64,
@@ -591,7 +591,7 @@ class CandidateFreezeTests(unittest.TestCase):
     def test_nonfinite_json_constant_is_rejected_before_consumption(self) -> None:
         (self.preflight / "signing-plan.json").write_bytes(
             b'{"components":{"host":NaN},"document":"cfm-ga-signing-plan-v1",'
-            b'"order":["host"],"product":{"build_number":"40034",'
+            b'"order":["host"],"product":{"build_number":"40035",'
             b'"version":"0.4.0"},"schema_version":1}\n'
         )
 

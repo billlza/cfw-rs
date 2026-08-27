@@ -4,13 +4,15 @@ import os
 import plistlib
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts import verify_candidate_bundle
+from scripts import release_build_identity, verify_candidate_bundle
 from scripts.release_build_identity import (
     ACTIVE_RELEASE_IDENTITY,
+    BundleBuildIdentity,
     BuildIdentityError,
     CandidateBundleContext,
     ReleaseIdentity,
@@ -33,13 +35,13 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
     def test_active_identity_is_one_fixed_ga_build(self) -> None:
         self.assertEqual(
             ACTIVE_RELEASE_IDENTITY,
-            ReleaseIdentity("0.4.0", "40034"),
+            ReleaseIdentity("0.4.0", "40035"),
         )
 
     def test_release_identity_rejects_version_or_build_drift(self) -> None:
         for identity in (
-            ("0.4.1", "40034"),
-            ("0.4.0", "040034"),
+            ("0.4.1", "40035"),
+            ("0.4.0", "040035"),
             ("0.4.0", "0"),
         ):
             with self.subTest(identity=identity), self.assertRaises(
@@ -47,15 +49,19 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             ):
                 ReleaseIdentity(*identity)
 
-    def make_app(self, root: Path, builds: tuple[str, str, str, str]) -> Path:
-        app = root / "Clash for Mac.app"
-        paths = (
+    @staticmethod
+    def identity_plists(app: Path) -> tuple[Path, Path, Path, Path]:
+        return (
             app / "Contents/Info.plist",
             app / "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/Resources/Info.plist",
             app / "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/Info.plist",
             app
             / "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/Info.plist",
         )
+
+    def make_app(self, root: Path, builds: tuple[str, str, str, str]) -> Path:
+        app = root / "Clash for Mac.app"
+        paths = self.identity_plists(app)
         for path, build in zip(paths, builds, strict=True):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(
@@ -66,6 +72,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                     }
                 )
             )
+            path.chmod(0o644)
         return app
 
     def make_private_pair(
@@ -101,7 +108,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             os.chmod(private, 0o700)
         app = self.make_app(
             signing_input,
-            ("40034", "40034", "40034", "40034"),
+            ("40035", "40035", "40035", "40035"),
         )
         return app, native_products, output
 
@@ -121,6 +128,237 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 )
             )
             self.assertEqual(identity.build_version, "40001")
+
+    def test_each_bundle_identity_plist_rejects_links(self) -> None:
+        for index in range(4):
+            for mutation in ("symlink", "hardlink"):
+                with (
+                    self.subTest(index=index, mutation=mutation),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    app = self.make_app(
+                        Path(directory),
+                        ("40001", "40001", "40001", "40001"),
+                    )
+                    path = self.identity_plists(app)[index]
+                    sibling = path.with_name(path.name + ".linked")
+                    if mutation == "symlink":
+                        sibling.write_bytes(path.read_bytes())
+                        sibling.chmod(0o644)
+                        path.unlink()
+                        path.symlink_to(sibling)
+                    else:
+                        os.link(path, sibling)
+
+                    with self.assertRaisesRegex(
+                        BuildIdentityError,
+                        "bounded owned single-link regular file",
+                    ):
+                        bundle_build_identity(app)
+
+    def test_each_bundle_identity_plist_requires_mode_0644(self) -> None:
+        for index in range(4):
+            for mode in (0o600, 0o664, 0o755):
+                with (
+                    self.subTest(index=index, mode=f"{mode:04o}"),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    app = self.make_app(
+                        Path(directory),
+                        ("40001", "40001", "40001", "40001"),
+                    )
+                    self.identity_plists(app)[index].chmod(mode)
+
+                    with self.assertRaisesRegex(
+                        BuildIdentityError,
+                        f"mode is {mode:04o}, expected 0644",
+                    ):
+                        bundle_build_identity(app)
+
+    def test_bundle_identity_plist_size_parse_and_owner_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(
+                Path(directory),
+                ("40001", "40001", "40001", "40001"),
+            )
+            path = self.identity_plists(app)[0]
+            original = path.read_bytes()
+
+            path.write_bytes(
+                original
+                + b" "
+                * (release_build_identity.MAX_BUNDLE_IDENTITY_PLIST_BYTES - len(original))
+            )
+            path.chmod(0o644)
+            self.assertEqual(
+                release_build_identity._read_plist(path, label="host")[
+                    "CFBundleVersion"
+                ],
+                "40001",
+            )
+
+            path.write_bytes(b"")
+            path.chmod(0o644)
+            with self.assertRaisesRegex(
+                BuildIdentityError,
+                "bounded owned single-link regular file",
+            ):
+                release_build_identity._read_plist(path, label="host")
+
+            path.write_bytes(
+                b"x" * (release_build_identity.MAX_BUNDLE_IDENTITY_PLIST_BYTES + 1)
+            )
+            path.chmod(0o644)
+            with self.assertRaisesRegex(
+                BuildIdentityError,
+                "bounded owned single-link regular file",
+            ):
+                release_build_identity._read_plist(path, label="host")
+
+            path.write_bytes(b"not a plist")
+            path.chmod(0o644)
+            with self.assertRaisesRegex(BuildIdentityError, "cannot be parsed"):
+                release_build_identity._read_plist(path, label="host")
+
+            path.write_bytes(plistlib.dumps(["not", "a", "dictionary"]))
+            path.chmod(0o644)
+            with self.assertRaisesRegex(BuildIdentityError, "is not a dictionary"):
+                release_build_identity._read_plist(path, label="host")
+
+            path.write_bytes(original)
+            path.chmod(0o644)
+            with patch(
+                "scripts.release_build_identity.os.geteuid",
+                return_value=os.geteuid() + 1,
+            ), self.assertRaisesRegex(
+                BuildIdentityError,
+                "bounded owned single-link regular file",
+            ):
+                release_build_identity._read_plist(path, label="host")
+
+    def test_bundle_identity_plist_accepts_root_owned_0644_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(
+                Path(directory),
+                ("40001", "40001", "40001", "40001"),
+            )
+            path = self.identity_plists(app)[0]
+            actual = path.stat()
+            root_owned = SimpleNamespace(
+                st_dev=actual.st_dev,
+                st_ino=actual.st_ino,
+                st_mode=actual.st_mode,
+                st_nlink=actual.st_nlink,
+                st_uid=0,
+                st_gid=actual.st_gid,
+                st_size=actual.st_size,
+                st_mtime_ns=actual.st_mtime_ns,
+                st_ctime_ns=actual.st_ctime_ns,
+            )
+            with (
+                patch.object(Path, "lstat", return_value=root_owned),
+                patch.object(Path, "stat", return_value=root_owned),
+                patch(
+                    "scripts.release_regular_file.os.fstat",
+                    return_value=root_owned,
+                ),
+            ):
+                value = release_build_identity._read_plist(path, label="host")
+
+            self.assertEqual(value["CFBundleVersion"], "40001")
+
+    def test_bundle_identity_version_error_does_not_echo_untrusted_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(
+                Path(directory),
+                ("40001", "40001", "40001", "40001"),
+            )
+            path = self.identity_plists(app)[0]
+            value = plistlib.loads(path.read_bytes())
+            marker = "untrusted-version-marker"
+            value["CFBundleShortVersionString"] = marker
+            path.write_bytes(plistlib.dumps(value))
+            path.chmod(0o644)
+
+            with self.assertRaisesRegex(
+                BuildIdentityError,
+                "CFBundleShortVersionString is not the fixed product version",
+            ) as raised:
+                bundle_build_identity(app)
+
+            self.assertNotIn(marker, str(raised.exception))
+
+    def test_bundle_identity_plist_detects_open_and_read_rebinding(self) -> None:
+        for operation in ("open", "read"):
+            with (
+                self.subTest(operation=operation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                app = self.make_app(
+                    Path(directory),
+                    ("40001", "40001", "40001", "40001"),
+                )
+                path = self.identity_plists(app)[0]
+                parked = path.with_name(path.name + ".parked")
+                replacement = path.with_name(path.name + ".replacement")
+                replacement.write_bytes(
+                    plistlib.dumps(
+                        {
+                            "CFBundleShortVersionString": "0.4.0",
+                            "CFBundleVersion": "40002",
+                        }
+                    )
+                )
+                replacement.chmod(0o644)
+                rebound = False
+                closed: list[int] = []
+                original_open = os.open
+                original_read = os.read
+                original_close = os.close
+
+                def rebinding_open(target: Path, flags: int) -> int:
+                    nonlocal rebound
+                    if not rebound and Path(target) == path:
+                        rebound = True
+                        path.rename(parked)
+                        replacement.rename(path)
+                    return original_open(target, flags)
+
+                def rebinding_read(descriptor: int, count: int) -> bytes:
+                    nonlocal rebound
+                    chunk = original_read(descriptor, count)
+                    if chunk and not rebound:
+                        rebound = True
+                        path.rename(parked)
+                        replacement.rename(path)
+                    return chunk
+
+                def closing(descriptor: int) -> None:
+                    closed.append(descriptor)
+                    original_close(descriptor)
+
+                patch_target = (
+                    "scripts.release_regular_file.os.open"
+                    if operation == "open"
+                    else "scripts.release_regular_file.os.read"
+                )
+                patch_value = rebinding_open if operation == "open" else rebinding_read
+                with (
+                    patch(patch_target, side_effect=patch_value),
+                    patch(
+                        "scripts.release_regular_file.os.close",
+                        side_effect=closing,
+                    ),
+                    self.assertRaisesRegex(
+                        BuildIdentityError,
+                        f"changed while {operation}ing"
+                        if operation == "open"
+                        else "changed while reading",
+                    ),
+                ):
+                    release_build_identity._read_plist(path, label="host")
+                self.assertTrue(rebound)
+                self.assertEqual(len(closed), 1)
 
     def test_mismatched_nested_build_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -151,26 +389,26 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
         repository = Path("/repo")
         self.assertEqual(
             ga_preflight_root(repository),
-            Path("/repo/target/candidates/0.4.0/ga-preflight/40034"),
+            Path("/repo/target/candidates/0.4.0/ga-preflight/40035"),
         )
         self.assertEqual(
             ga_root(repository),
-            Path("/repo/target/candidates/0.4.0/ga/40034"),
+            Path("/repo/target/candidates/0.4.0/ga/40035"),
         )
         self.assertEqual(
             ga_pre_sign_native_products_root(repository),
             Path(
-                "/repo/target/candidates/0.4.0/ga-preflight/40034/native-products"
+                "/repo/target/candidates/0.4.0/ga-preflight/40035/native-products"
             ),
         )
         self.assertEqual(
             ga_signed_root(repository),
-            Path("/repo/target/candidates/0.4.0/ga/40034/signed"),
+            Path("/repo/target/candidates/0.4.0/ga/40035/signed"),
         )
         self.assertEqual(
             ga_signed_native_products_root(repository),
             Path(
-                "/repo/target/candidates/0.4.0/ga/40034/signing-output/signed-native-products"
+                "/repo/target/candidates/0.4.0/ga/40035/signing-output/signed-native-products"
             ),
         )
 
@@ -201,14 +439,14 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             repository = Path(directory).resolve()
             rejected = (
                 (
-                    "40034",
+                    "40035",
                     repository
-                    / "target/candidates/0.4.0/validation/40034/native-products",
+                    / "target/candidates/0.4.0/validation/40035/native-products",
                 ),
                 (
-                    "40034",
+                    "40035",
                     repository
-                    / "target/candidates/0.4.0/release-build/40034/native-products",
+                    / "target/candidates/0.4.0/release-build/40035/native-products",
                 ),
                 (
                     "40030",
@@ -231,7 +469,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                     / "target/candidates/0.4.0/ga-preflight/40033/native-products",
                 ),
                 (
-                    "40034",
+                    "40035",
                     repository
                     / "target/candidates/0.4.0/ga-preflight/../../../../tmp/escape/native-products",
                 ),
@@ -247,8 +485,8 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 candidate_native_products_output(
                     repository,
                     str(repository)
-                    + "/target/candidates/0.4.0/ga-preflight//40034/native-products",
-                    "40034",
+                    + "/target/candidates/0.4.0/ga-preflight//40035/native-products",
+                    "40035",
                 )
 
     def test_candidate_native_output_rejects_a_symlink_ancestor(self) -> None:
@@ -262,7 +500,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             output = ga_pre_sign_native_products_root(repository)
             with self.assertRaisesRegex(BuildIdentityError, "real directory"):
                 candidate_native_products_output(
-                    repository, str(output), "40034"
+                    repository, str(output), "40035"
                 )
 
     def test_candidate_derived_data_is_the_exact_native_output_sibling(self) -> None:
@@ -275,7 +513,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                     repository,
                     str(native_products),
                     str(expected),
-                    "40034",
+                    "40035",
                 ),
                 expected,
             )
@@ -290,7 +528,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                         repository,
                         str(native_products),
                         str(rejected),
-                        "40034",
+                        "40035",
                     )
 
     def test_candidate_derived_data_rejects_a_symlink_ancestor(self) -> None:
@@ -309,7 +547,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                     repository,
                     str(native_products),
                     str(preflight_root / "xcode-derived-data"),
-                    "40034",
+                    "40035",
                 )
 
     def test_bundle_context_accepts_exact_private_work_and_publish_ready(self) -> None:
@@ -328,7 +566,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 self.assertEqual(paths.app, app)
                 self.assertEqual(paths.native_products, native_products)
                 self.assertEqual(paths.context, context)
-                self.assertEqual(paths.build_identity.build_version, "40034")
+                self.assertEqual(paths.build_identity.build_version, "40035")
 
     def test_bundle_context_accepts_canonical_native_with_safe_app_copies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -342,7 +580,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 with self.subTest(app_root=app_root):
                     app = self.make_app(
                         app_root,
-                        ("40034", "40034", "40034", "40034"),
+                        ("40035", "40035", "40035", "40035"),
                     )
                     paths = candidate_bundle_verification_paths(
                         repository,
@@ -487,7 +725,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 native_products = self.make_canonical_native_products(repository)
                 app = self.make_app(
                     ga_signed_root(repository),
-                    ("40034", "40034", "40034", "40034"),
+                    ("40035", "40035", "40035", "40035"),
                 )
                 target = (
                     native_products.parent
@@ -509,10 +747,17 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             app, native_products, _ = self.make_private_pair(
                 repository, CandidateBundleContext.SIGNING_ATTEMPT_WORK
             )
-            with patch(
-                "scripts.release_build_identity.os.geteuid",
-                return_value=os.geteuid() + 1,
-            ), self.assertRaisesRegex(BuildIdentityError, "current-user"):
+            with (
+                patch(
+                    "scripts.release_build_identity.bundle_build_identity",
+                    return_value=BundleBuildIdentity("0.4.0", "40035"),
+                ),
+                patch(
+                    "scripts.release_build_identity.os.geteuid",
+                    return_value=os.geteuid() + 1,
+                ),
+                self.assertRaisesRegex(BuildIdentityError, "current-user"),
+            ):
                 candidate_bundle_verification_paths(
                     repository,
                     app,
@@ -526,7 +771,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             native_products = self.make_canonical_native_products(repository)
             app = self.make_app(
                 ga_signed_root(repository),
-                ("40034", "40034", "40034", "40034"),
+                ("40035", "40035", "40035", "40035"),
             )
             alias = str(app.parent / "nested/.." / app.name)
             with self.assertRaisesRegex(BuildIdentityError, "canonical absolute"):
@@ -603,6 +848,10 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("candidate_native_derived_data_output", native_source)
         self.assertIn("validate_candidate_derived_data", native_source)
+        legacy_source = (
+            repository / "scripts/build_legacy_tombstone.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--algorithm sha256-tree-v1", legacy_source)
 
 
 if __name__ == "__main__":

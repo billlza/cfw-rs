@@ -18,6 +18,7 @@ from scripts.verify_native_product_graph import (
     EXTENSION_EMBED,
     MACH_SERVICES,
     NativeProductGraphError,
+    TOMBSTONE_PROVENANCE_COMMAND,
     verify_daemon_plist,
     verify_distribution_codesign_boundary,
     verify_generated_project,
@@ -98,6 +99,9 @@ _SIGNING_SCRIPT = "\n".join(
         '"$CFW_SIGNING_CERTIFICATE_SHA1" "$packet_extension"',
         f'{DISTRIBUTION_CODESIGN_COMMAND} --force --sign '
         '"$CFW_SIGNING_CERTIFICATE_SHA1" "$tombstone"',
+        'cfw_run_release_python_script "$repo_root" '
+        '"$repo_root/scripts/promote_signed_native_manifest.py"',
+        TOMBSTONE_PROVENANCE_COMMAND,
         f'{DISTRIBUTION_CODESIGN_COMMAND} --force --sign '
         '"$CFW_SIGNING_CERTIFICATE_SHA1" "$staged_app"',
     ]
@@ -303,6 +307,43 @@ class DaemonPlistTests(unittest.TestCase):
 class SigningOrderTests(unittest.TestCase):
     def test_valid_manifest_passes(self) -> None:
         verify_signing_order(_valid_manifest(), _valid_embedding(), _SIGNING_SCRIPT)
+
+    def test_tombstone_promotion_must_be_verified_before_outer_signing(self) -> None:
+        provenance = TOMBSTONE_PROVENANCE_COMMAND
+        missing = _SIGNING_SCRIPT.replace(provenance, "", 1)
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "exact promoted tombstone lineage"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), missing)
+
+        after_outer = _SIGNING_SCRIPT.replace(provenance, "", 1) + "\n" + provenance
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "exact promoted tombstone lineage"
+        ):
+            verify_signing_order(_valid_manifest(), _valid_embedding(), after_outer)
+
+    def test_tombstone_provenance_command_shape_is_exact(self) -> None:
+        bound_arguments = (
+            '--repository "$repo_root"',
+            '--build-number "$CFW_BUILD_NUMBER"',
+            '--deployment-target "$MACOS_DEPLOYMENT_TARGET"',
+            '--rust-version "$RUST_VERSION"',
+            '--pre-sign-artifact "$native_products/CFWLegacyTombstone"',
+            '--pre-sign-manifest "$native_products/CFWLegacyTombstone.manifest.json"',
+            '--signed-artifact "$signed_native_products/CFWLegacyTombstone"',
+            '--signed-manifest "$signed_native_products/CFWLegacyTombstone.manifest.json"',
+            '--embedded-app "$staged_app"',
+            "--context signing-attempt-work",
+        )
+        for argument in bound_arguments:
+            with self.subTest(argument=argument):
+                drifted = _SIGNING_SCRIPT.replace(argument, argument + "-drift", 1)
+                with self.assertRaisesRegex(
+                    NativeProductGraphError, "exact promoted tombstone lineage"
+                ):
+                    verify_signing_order(
+                        _valid_manifest(), _valid_embedding(), drifted
+                    )
 
     def test_critical_hash_identities_require_strings(self) -> None:
         cases = (

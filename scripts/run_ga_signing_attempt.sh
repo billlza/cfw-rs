@@ -29,7 +29,7 @@ die() {
 [[ "$CFW_SIGNING_CERTIFICATE_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
   die "frozen signing certificate SHA-256 is malformed"
 
-readonly frozen_root="$repo_root/target/candidates/0.4.0/ga/40034"
+readonly frozen_root="$repo_root/target/candidates/0.4.0/ga/40035"
 readonly attempt_work="$CFW_SIGNING_ATTEMPT_WORK"
 [[ -d "$attempt_work" && ! -L "$attempt_work" ]] ||
   die "transaction work root is not a real directory"
@@ -140,9 +140,22 @@ for product in \
     "$repo_root/scripts/verify_artifact_manifest.py" \
     "$signed_native_products/$product" \
     "$signed_native_products/$product.manifest.json" \
-    --metadata "buildNumber=40034" \
+    --metadata "buildNumber=40035" \
     --metadata "signingMode=developer-id"
 done
+
+cfw_run_release_python_script \
+  "$repo_root" "$repo_root/scripts/verify_legacy_tombstone_provenance.py" \
+  --repository "$repo_root" \
+  --build-number "$CFW_BUILD_NUMBER" \
+  --deployment-target "$MACOS_DEPLOYMENT_TARGET" \
+  --rust-version "$RUST_VERSION" \
+  --pre-sign-artifact "$native_products/CFWLegacyTombstone" \
+  --pre-sign-manifest "$native_products/CFWLegacyTombstone.manifest.json" \
+  --signed-artifact "$signed_native_products/CFWLegacyTombstone" \
+  --signed-manifest "$signed_native_products/CFWLegacyTombstone.manifest.json" \
+  --embedded-app "$staged_app" \
+  --context signing-attempt-work
 
 "$repo_root/scripts/verify_candidate_bundle.sh" \
   "$staged_app" "$signed_native_products" \

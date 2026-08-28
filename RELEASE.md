@@ -621,13 +621,17 @@ wire proof.
    ```
 
    Hosted capture and live verification fix the public repository ID, workflow
-   ID/path/name, `pull_request` event, exact head SHA, run ID/number/attempt,
-   three exact job names, and every successful job step. They read the run both
-   before and after its attempt-specific jobs. `prepackage`, final publication,
-   and upload live-revalidate this receipt; ordinary sealed-stage verification
-   reopens it offline to avoid treating GitHub availability or API rate limits
-   as an immutable-stage failure. The local 27-lane record remains corroborating
-   toolchain evidence and can never replace `hosted-ci.json`;
+   ID/path/name, `pull_request` event, exact tested head SHA, run
+   ID/number/attempt, three exact job names, and every successful job step. Each
+   job also retains GitHub's `workflow_sha`; it may differ from the tested head,
+   but all jobs must agree and the fixed public Contents API must return a
+   `ci.yml` at that commit whose decoded bytes equal the clean tested source.
+   They read the run both before and after its attempt-specific jobs.
+   `prepackage`, final publication, and upload live-revalidate the v3 receipt;
+   ordinary sealed-stage verification performs no network access and instead
+   reopens the retained workflow projection against the local clean source.
+   The local 27-lane record remains corroborating toolchain evidence and can
+   never replace `hosted-ci.json`;
 4. after a signing interruption, inspect the retained attempt through the
    fixed recovery entry:
 

@@ -13,7 +13,9 @@ from scripts.verify_ci_no_masking import (
     DEFAULT_PINS,
     DEFAULT_WORKFLOW,
     REQUIRED_RUN_SHELL,
+    REQUIRED_SOURCE_ASSERTION_STEP,
     REQUIRED_SWIFT_TARGET_INFO_PROBE,
+    REQUIRED_XCODE_OWNERSHIP_STEP,
     audit_shell_test_python_isolation,
     audit_workflow,
 )
@@ -48,8 +50,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Assert exact CI source identity
-        run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+""" + REQUIRED_SOURCE_ASSERTION_STEP + "\n" + REQUIRED_XCODE_OWNERSHIP_STEP + "\n" + """
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -141,11 +142,8 @@ CHECKOUT_STEP = (
     f"          ref: {EXACT_SOURCE_EXPRESSION}\n"
     "          persist-credentials: false\n"
 )
-HEAD_ASSERTION_STEP = (
-    "      - name: Assert exact CI source identity\n"
-    "        run: /bin/test \"$(/usr/bin/git rev-parse HEAD)\" = "
-    f'\"{EXACT_SOURCE_EXPRESSION}\"\n'
-)
+SOURCE_ASSERTION_STEP = REQUIRED_SOURCE_ASSERTION_STEP + "\n"
+XCODE_OWNERSHIP_STEP = REQUIRED_XCODE_OWNERSHIP_STEP + "\n"
 
 
 class VerifyCiNoMaskingTests(unittest.TestCase):
@@ -465,10 +463,10 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             "        run: /usr/bin/true\n"
         )
         variants = (
-            GOOD_WORKFLOW.replace(HEAD_ASSERTION_STEP, "", 1),
+            GOOD_WORKFLOW.replace(SOURCE_ASSERTION_STEP, "", 1),
             GOOD_WORKFLOW.replace(
-                HEAD_ASSERTION_STEP,
-                intervening_step + HEAD_ASSERTION_STEP,
+                SOURCE_ASSERTION_STEP,
+                intervening_step + SOURCE_ASSERTION_STEP,
                 1,
             ),
         )
@@ -480,9 +478,10 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
 
     def test_exact_head_assertion_requires_absolute_system_git(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            bad_assertion = HEAD_ASSERTION_STEP.replace("/usr/bin/git", "git")
+            bad_assertion = SOURCE_ASSERTION_STEP.replace("/usr/bin/git", "git")
             workflow_path, pins_path = self._write(
-                Path(tmp), GOOD_WORKFLOW.replace(HEAD_ASSERTION_STEP, bad_assertion, 1)
+                Path(tmp),
+                GOOD_WORKFLOW.replace(SOURCE_ASSERTION_STEP, bad_assertion, 1),
             )
             with self.assertRaisesRegex(
                 CiPolicyError, "absolute /bin/test and /usr/bin/git"
@@ -491,26 +490,152 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
 
     def test_exact_head_assertion_requires_macos_system_test(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            bad_assertion = HEAD_ASSERTION_STEP.replace(
+            bad_assertion = SOURCE_ASSERTION_STEP.replace(
                 "/bin/test", "/usr/bin/test"
             )
             workflow_path, pins_path = self._write(
-                Path(tmp), GOOD_WORKFLOW.replace(HEAD_ASSERTION_STEP, bad_assertion, 1)
+                Path(tmp),
+                GOOD_WORKFLOW.replace(SOURCE_ASSERTION_STEP, bad_assertion, 1),
             )
             with self.assertRaisesRegex(CiPolicyError, "absolute /bin/test"):
                 audit_workflow(workflow_path, pins_path)
 
+    def test_pinned_xcode_ownership_normalization_is_the_third_step(self) -> None:
+        self.assertIn(XCODE_OWNERSHIP_STEP, GOOD_WORKFLOW)
+        rust_setup = (
+            "      - uses: dtolnay/rust-toolchain@stable\n"
+            "        with:\n"
+            '          toolchain: "1.97.1"\n'
+        )
+        without_normalization = GOOD_WORKFLOW.replace(
+            XCODE_OWNERSHIP_STEP,
+            "",
+            1,
+        )
+        variants = (
+            without_normalization,
+            without_normalization.replace(
+                rust_setup,
+                rust_setup + XCODE_OWNERSHIP_STEP,
+                1,
+            ),
+            GOOD_WORKFLOW.replace(
+                XCODE_OWNERSHIP_STEP,
+                XCODE_OWNERSHIP_STEP * 2,
+                1,
+            ),
+        )
+        for workflow in variants:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as tmp:
+                workflow_path, pins_path = self._write(Path(tmp), workflow)
+                with self.assertRaisesRegex(CiPolicyError, "pinned Xcode ownership"):
+                    audit_workflow(workflow_path, pins_path)
+
+    def test_pinned_xcode_ownership_policy_cannot_be_weakened(self) -> None:
+        mutations = (
+            ("/Applications/Xcode_26.6.app", "/Applications/Xcode.app"),
+            ("/usr/bin/find -P -x", "/usr/bin/find -L -x"),
+            ("/usr/bin/sudo -n", "/usr/bin/sudo"),
+            (
+                "\\( ! -uid 0 -o ! -gid 0 -o -perm -0002 \\)",
+                "\\( ! -uid 0 -a ! -gid 0 -o -perm -0002 \\)",
+            ),
+            ('[[ "$runner_groups" != *" 0 "* ]]', ""),
+            ('/usr/sbin/spctl --assess --type execute "$xcode_application"', ""),
+        )
+        for original, replacement in mutations:
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as tmp:
+                self.assertIn(original, XCODE_OWNERSHIP_STEP)
+                mutated_step = XCODE_OWNERSHIP_STEP.replace(
+                    original,
+                    replacement,
+                    1,
+                )
+                workflow = GOOD_WORKFLOW.replace(
+                    XCODE_OWNERSHIP_STEP,
+                    mutated_step,
+                    1,
+                )
+                workflow_path, pins_path = self._write(Path(tmp), workflow)
+                with self.assertRaisesRegex(CiPolicyError, "pinned Xcode ownership"):
+                    audit_workflow(workflow_path, pins_path)
+
+    def test_xcode_normalization_preserves_unselected_bundle_modes(self) -> None:
+        self.assertNotIn("/usr/sbin/chmod", XCODE_OWNERSHIP_STEP)
+        self.assertNotIn("-perm -0020", XCODE_OWNERSHIP_STEP)
+        self.assertEqual(XCODE_OWNERSHIP_STEP.count("-perm -0002"), 2)
+
+    def test_xcode_bundle_is_assessed_before_each_identity_execution(self) -> None:
+        assessment = (
+            '/usr/sbin/spctl --assess --type execute "$xcode_application"'
+        )
+        execution = "/usr/bin/xcodebuild -version"
+        assessment_offsets = tuple(
+            index
+            for index in range(len(XCODE_OWNERSHIP_STEP))
+            if XCODE_OWNERSHIP_STEP.startswith(assessment, index)
+        )
+        execution_offsets = tuple(
+            index
+            for index in range(len(XCODE_OWNERSHIP_STEP))
+            if XCODE_OWNERSHIP_STEP.startswith(execution, index)
+        )
+        self.assertEqual(len(assessment_offsets), 2)
+        self.assertEqual(len(execution_offsets), 2)
+        self.assertLess(assessment_offsets[0], execution_offsets[0])
+        self.assertLess(execution_offsets[0], assessment_offsets[1])
+        self.assertLess(assessment_offsets[1], execution_offsets[1])
+
+    def test_privileged_xcode_commands_are_confined_to_normalization(self) -> None:
+        injected = (
+            "      - name: Unreviewed privileged step\n"
+            "        run: /usr/bin/sudo -n /usr/bin/true\n"
+        )
+        workflow = GOOD_WORKFLOW.replace(
+            XCODE_OWNERSHIP_STEP,
+            XCODE_OWNERSHIP_STEP + injected,
+            1,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path, pins_path = self._write(Path(tmp), workflow)
+            with self.assertRaisesRegex(CiPolicyError, "privileged Xcode ownership"):
+                audit_workflow(workflow_path, pins_path)
+
     def test_runtime_assertion_must_use_the_checkout_event_sha(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            bad_assertion = HEAD_ASSERTION_STEP.replace(
+            bad_assertion = SOURCE_ASSERTION_STEP.replace(
                 EXACT_SOURCE_EXPRESSION,
                 "${{ github.sha }}",
             )
             workflow_path, pins_path = self._write(
-                Path(tmp), GOOD_WORKFLOW.replace(HEAD_ASSERTION_STEP, bad_assertion, 1)
+                Path(tmp),
+                GOOD_WORKFLOW.replace(SOURCE_ASSERTION_STEP, bad_assertion, 1),
             )
             with self.assertRaisesRegex(CiPolicyError, "exact event SHA"):
                 audit_workflow(workflow_path, pins_path)
+
+    def test_runtime_assertion_must_use_workflow_file_sha(self) -> None:
+        replacements = (
+            "${{ github.sha }}",
+            "${{ github.workflow_ref }}",
+            "a" * 40,
+        )
+        for replacement in replacements:
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as tmp:
+                bad_assertion = SOURCE_ASSERTION_STEP.replace(
+                    "${{ github.workflow_sha }}",
+                    replacement,
+                )
+                workflow_path, pins_path = self._write(
+                    Path(tmp),
+                    GOOD_WORKFLOW.replace(
+                        SOURCE_ASSERTION_STEP,
+                        bad_assertion,
+                        1,
+                    ),
+                )
+                with self.assertRaisesRegex(CiPolicyError, "workflow-file"):
+                    audit_workflow(workflow_path, pins_path)
 
     def test_fixed_privileged_shell_boundary_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

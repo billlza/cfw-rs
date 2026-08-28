@@ -110,7 +110,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "fa476b2114b40f2999603a38326f77afdb01c3bdc6854cb367e25ccde55041b5"
+    "f5d082e28b4eb560a82f013f0047cbf96da6c304a0585759450cdd44cf1dafdc"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -118,7 +118,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "9a63eaa2409198806b647838f6ed879d6cd35010e43e6d5adbb4b6202f76fbbe"
+    "5a87eb60901af12f9bbecfb46b0c2cf3a6d7745274f9af203d99ef2f6e4d3f9e"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -128,8 +128,11 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
     "_publish_and_confirm_stage": (
         "ff488d2364ad4d0d2b37bb6d297e9f9ff2df60a4dec9cb83386af2c08302aa75"
     ),
+    "_require_hosted_ci_source_binding": (
+        "63a05e630f3622bbcd4d5b418ebe8174487d8690ea60b383147bd24e87696f0a"
+    ),
     "_verified_prepackage_inputs": (
-        "632a200998a0a936afa0a2e2d46718a0ccf8d1a0394b2c98ff55cbb3cd539cb1"
+        "ccbadf8a87fe00bc411ccd3e024be750657ec668b0725a585625676c525e84a3"
     ),
     "_verified_package_sets": "6d530c9583863c1b56baa56554f2c8e576d90f0797c113e3d15dada9f8805b56",
     "_verified_migration_journals": (
@@ -170,7 +173,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     ),
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "f201de9492e4cfbf83de0ce23230af7263e21acd26eaad6801e49ce26251bddd"
+    "fd14a2e2ae606e1bd739930a81b088dc17bf902955fd71998142cfbe2f963ef2"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -1182,6 +1185,7 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
         "seal_publication",
     )
     contract_functions = (
+        "_require_hosted_ci_source_binding",
         "_verified_prepackage_inputs",
         "_verified_package_sets",
         "_verified_migration_journals",
@@ -1426,6 +1430,7 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
                 "verify_frozen_candidate",
                 "validate_ci_lane_document",
                 "validate_hosted_ci_receipt_offline",
+                "_require_hosted_ci_source_binding",
                 "validate_candidate_app_manifest",
                 "_validate_release_application",
                 "verify_signing_transformation_receipt",

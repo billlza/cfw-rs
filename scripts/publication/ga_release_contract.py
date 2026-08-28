@@ -446,6 +446,34 @@ def _validate_signing_notarization_binding(
         )
 
 
+def _require_hosted_ci_source_binding(
+    hosted_ci: object,
+    *,
+    candidate_freeze_intent_sha256: str,
+    release_source_sha256: str,
+    repository_commit: str,
+) -> None:
+    if not isinstance(hosted_ci, dict):
+        raise PublicationError("hosted CI receipt is not an object")
+    workflow = hosted_ci.get("workflow")
+    workflow_source = workflow.get("source") if isinstance(workflow, dict) else None
+    workflow_sha256 = (
+        require_sha256(
+            workflow_source.get("sha256"),
+            "hosted CI workflow-file source",
+        )
+        if isinstance(workflow_source, dict)
+        else None
+    )
+    if workflow_sha256 is None or hosted_ci.get("source") != {
+        "candidate_freeze_intent_sha256": candidate_freeze_intent_sha256,
+        "release_source_sha256": release_source_sha256,
+        "repository_commit": repository_commit,
+        "workflow_sha256": workflow_sha256,
+    }:
+        raise PublicationError("hosted CI receipt differs from the frozen candidate")
+
+
 def _verified_prepackage_inputs(
     repository: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, bytes]]:
@@ -552,12 +580,12 @@ def _verified_prepackage_inputs(
             "local deterministic CI lanes and frozen candidate use different toolchains"
         )
     hosted_ci = validate_hosted_ci_receipt_offline(repository)
-    if hosted_ci["source"] != {
-        "candidate_freeze_intent_sha256": frozen.intent_sha256,
-        "release_source_sha256": intent["release_source_sha256"],
-        "repository_commit": intent["repository_commit"],
-    }:
-        raise PublicationError("hosted CI receipt differs from the frozen candidate")
+    _require_hosted_ci_source_binding(
+        hosted_ci,
+        candidate_freeze_intent_sha256=frozen.intent_sha256,
+        release_source_sha256=intent["release_source_sha256"],
+        repository_commit=intent["repository_commit"],
+    )
 
     source_identity = {
         "repositoryCommit": intent["repository_commit"],

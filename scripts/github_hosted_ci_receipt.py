@@ -6,14 +6,17 @@ collector.  A local command result can corroborate a hosted run, but it can
 never satisfy this receipt.  Production access is read-only, unauthenticated,
 fixed to one public repository/workflow, and revalidates one run and its fixed
 Check Suite around the attempt-specific jobs and zero-annotation responses so
-a rerun or successful job carrying diagnostics cannot be mistaken for the
-retained attempt.
+a rerun, workflow-file source drift, or successful job carrying diagnostics
+cannot be mistaken for the retained attempt.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -31,7 +34,12 @@ from urllib.request import (
 
 if __package__:
     from .candidate_freeze import CandidateFreezeError, verify_frozen_candidate
-    from .publication.common import PublicationError, read_regular, sha256_file
+    from .publication.common import (
+        PublicationError,
+        read_regular,
+        sha256_bytes,
+        sha256_file,
+    )
     from .publication.durable_file import (
         ensure_private_directory_locked,
         exclusive_rooted_directory_lock,
@@ -41,7 +49,12 @@ if __package__:
     from .repository_source_identity import SourceIdentityError, current_identity
 else:
     from candidate_freeze import CandidateFreezeError, verify_frozen_candidate
-    from publication.common import PublicationError, read_regular, sha256_file
+    from publication.common import (
+        PublicationError,
+        read_regular,
+        sha256_bytes,
+        sha256_file,
+    )
     from publication.durable_file import (
         ensure_private_directory_locked,
         exclusive_rooted_directory_lock,
@@ -55,8 +68,8 @@ class HostedCIReceiptError(PublicationError):
     """The hosted-CI receipt is unavailable, ambiguous, or not successful."""
 
 
-SCHEMA_VERSION: Final = 2
-DOCUMENT: Final = "cfw-github-hosted-ci-receipt-v2"
+SCHEMA_VERSION: Final = 3
+DOCUMENT: Final = "cfw-github-hosted-ci-receipt-v3"
 PRODUCT_VERSION: Final = "0.4.0"
 GA_BUILD: Final = "40035"
 
@@ -67,6 +80,7 @@ API_USER_AGENT: Final = "cfw-rs-release-evidence/0.4.0"
 API_TIMEOUT_SECONDS: Final = 30
 MAX_API_RESPONSE_BYTES: Final = 8 * 1024 * 1024
 MAX_RECEIPT_BYTES: Final = 4 * 1024 * 1024
+MAX_WORKFLOW_BYTES: Final = 512 * 1024
 
 REPOSITORY_FULL_NAME: Final = "billlza/cfw-rs"
 REPOSITORY_ID: Final = 1_306_403_473
@@ -74,6 +88,10 @@ WORKFLOW_ID: Final = 316_580_234
 WORKFLOW_NAME: Final = "CI"
 WORKFLOW_PATH: Final = ".github/workflows/ci.yml"
 EVENT: Final = "pull_request"
+WORKFLOW_SOURCE_STEP_PREFIX: Final = "Assert exact CI source and workflow identity "
+WORKFLOW_SOURCE_STEP_RE: Final = re.compile(
+    rf"^{re.escape(WORKFLOW_SOURCE_STEP_PREFIX)}(?P<sha>[0-9a-f]{{40}})$"
+)
 EXPECTED_JOB_NAMES: Final = frozenset(
     {
         "Rust, UI, and script quality gates",
@@ -84,7 +102,7 @@ EXPECTED_JOB_NAMES: Final = frozenset(
 REQUIRED_JOB_STEP_NAMES: Final = {
     "Rust, UI, and script quality gates": frozenset(
         {
-            "Assert exact CI source identity",
+            "Normalize pinned Xcode ownership",
             "Verify build-script boundary",
             "Test release tooling",
             "Validate shell scripts",
@@ -93,14 +111,12 @@ REQUIRED_JOB_STEP_NAMES: Final = {
     ),
     "macOS Rust supply-chain policy": frozenset(
         {
-            "Assert exact CI source identity",
             "Audit exact shipped Rust target graph",
             "Enforce dependency, source, and license policy",
         }
     ),
     "libbox, Network Extension, and app skeleton gates": frozenset(
         {
-            "Assert exact CI source identity",
             "Build and verify pinned packet LAN peer",
             "Build source-bound libbox",
             "Build and verify unsigned application skeleton",
@@ -123,6 +139,7 @@ API_PATH_RE: Final = re.compile(
     r"\?filter=latest&per_page=100&page=1"
     r"|check-runs/[1-9][0-9]{0,19}/annotations"
     r"\?per_page=100&page=1"
+    r"|contents/\.github/workflows/ci\.yml\?ref=[0-9a-f]{40}"
     r")$"
 )
 
@@ -316,6 +333,119 @@ def _annotations_api_path(check_run_id: int) -> str:
     )
 
 
+def _workflow_contents_api_path(workflow_sha: str) -> str:
+    if not COMMIT_RE.fullmatch(workflow_sha):
+        raise _error("workflow-file source SHA is malformed")
+    return (
+        f"/repos/{REPOSITORY_FULL_NAME}/contents/{WORKFLOW_PATH}"
+        f"?ref={workflow_sha}"
+    )
+
+
+def _workflow_source_identity(workflow_sha: str, data: bytes) -> dict[str, object]:
+    if (
+        not COMMIT_RE.fullmatch(workflow_sha)
+        or not 0 < len(data) <= MAX_WORKFLOW_BYTES
+    ):
+        raise _error("workflow-file source identity is malformed")
+    git_object = b"blob " + str(len(data)).encode("ascii") + b"\0" + data
+    return {
+        "git_blob_sha": hashlib.sha1(
+            git_object,
+            usedforsecurity=False,
+        ).hexdigest(),
+        "sha256": sha256_bytes(data),
+        "size": len(data),
+        "workflow_sha": workflow_sha,
+    }
+
+
+def _project_workflow_source(
+    value: object,
+    workflow_sha: str,
+    expected_bytes: bytes,
+) -> dict[str, object]:
+    payload = _exact_object(
+        value,
+        {
+            "_links",
+            "content",
+            "download_url",
+            "encoding",
+            "git_url",
+            "html_url",
+            "name",
+            "path",
+            "sha",
+            "size",
+            "type",
+            "url",
+        },
+        "GitHub workflow-file contents response",
+    )
+    if (
+        payload["type"] != "file"
+        or payload["name"] != Path(WORKFLOW_PATH).name
+        or payload["path"] != WORKFLOW_PATH
+        or payload["encoding"] != "base64"
+    ):
+        raise _error("GitHub workflow-file contents response is not the fixed file")
+    size = _positive_int(payload["size"], "GitHub workflow-file size")
+    if size > MAX_WORKFLOW_BYTES:
+        raise _error("GitHub workflow-file size exceeds the fixed bound")
+    encoded = payload["content"]
+    if (
+        not isinstance(encoded, str)
+        or not encoded
+        or "\r" in encoded
+    ):
+        raise _error("GitHub workflow-file content is not bounded canonical base64")
+    try:
+        encoded_ascii = encoded.encode("ascii", errors="strict")
+    except UnicodeEncodeError as error:
+        raise _error(
+            "GitHub workflow-file content is not bounded canonical base64"
+        ) from error
+    if len(encoded_ascii) > ((MAX_WORKFLOW_BYTES + 2) // 3) * 4 + 16_384:
+        raise _error("GitHub workflow-file content is not bounded canonical base64")
+    compact = encoded.replace("\n", "")
+    try:
+        decoded = base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise _error("GitHub workflow-file content is malformed base64") from error
+    if (
+        not compact
+        or base64.b64encode(decoded).decode("ascii") != compact
+        or len(decoded) != size
+        or decoded != expected_bytes
+    ):
+        raise _error("GitHub workflow-file bytes differ from the exact clean source")
+    projected = _workflow_source_identity(workflow_sha, decoded)
+    blob_sha = payload["sha"]
+    if not isinstance(blob_sha, str) or blob_sha != projected["git_blob_sha"]:
+        raise _error("GitHub workflow-file Git blob identity is invalid")
+    api_url = API_ORIGIN + _workflow_contents_api_path(workflow_sha)
+    git_url = f"{API_ORIGIN}/repos/{REPOSITORY_FULL_NAME}/git/blobs/{blob_sha}"
+    html_url = (
+        f"https://github.com/{REPOSITORY_FULL_NAME}/blob/"
+        f"{workflow_sha}/{WORKFLOW_PATH}"
+    )
+    download_url = (
+        f"https://raw.githubusercontent.com/{REPOSITORY_FULL_NAME}/"
+        f"{workflow_sha}/{WORKFLOW_PATH}"
+    )
+    if (
+        payload["url"] != api_url
+        or payload["git_url"] != git_url
+        or payload["html_url"] != html_url
+        or payload["download_url"] != download_url
+        or payload["_links"]
+        != {"git": git_url, "html": html_url, "self": api_url}
+    ):
+        raise _error("GitHub workflow-file URLs escaped the fixed source")
+    return projected
+
+
 def _project_run(value: object, expected_sha: str, run_id: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise _error("GitHub workflow run response is not an object")
@@ -475,6 +605,20 @@ def _project_job(value: object, run: dict[str, Any]) -> dict[str, Any]:
     step_names = {step["name"] for step in steps}
     if not REQUIRED_JOB_STEP_NAMES[name].issubset(step_names):
         raise _error(f"GitHub job {name!r} is missing required workflow steps")
+    workflow_source_steps = [
+        step
+        for step in steps
+        if step["name"].startswith(WORKFLOW_SOURCE_STEP_PREFIX)
+    ]
+    workflow_source_match = (
+        WORKFLOW_SOURCE_STEP_RE.fullmatch(workflow_source_steps[0]["name"])
+        if len(workflow_source_steps) == 1
+        else None
+    )
+    if workflow_source_match is None:
+        raise _error(
+            f"GitHub job {name!r} is not bound to the exact workflow-file source"
+        )
     if any(
         _timestamp_value(step["started_at"]) < _timestamp_value(started_at)
         or _timestamp_value(step["completed_at"]) > _timestamp_value(completed_at)
@@ -493,6 +637,7 @@ def _project_job(value: object, run: dict[str, Any]) -> dict[str, Any]:
         "started_at": started_at,
         "status": status,
         "steps": steps,
+        "workflow_source_sha": workflow_source_match.group("sha"),
     }
 
 
@@ -508,6 +653,8 @@ def _project_jobs(value: object, run: dict[str, Any]) -> list[dict[str, Any]]:
     names = [job["name"] for job in jobs]
     if len(set(names)) != len(names) or set(names) != EXPECTED_JOB_NAMES:
         raise _error("GitHub workflow has missing, repeated, or extra required jobs")
+    if len({job["workflow_source_sha"] for job in jobs}) != 1:
+        raise _error("GitHub jobs disagree about the exact workflow-file source")
     return sorted(jobs, key=lambda job: job["name"])
 
 
@@ -655,6 +802,13 @@ def _require_empty_annotations(value: object, check_run: dict[str, Any]) -> None
         )
 
 
+def _workflow_source_bytes(repository: Path) -> bytes:
+    try:
+        return read_regular(repository.absolute() / WORKFLOW_PATH, MAX_WORKFLOW_BYTES)
+    except (OSError, PublicationError) as error:
+        raise _error("exact local workflow-file source is unavailable") from error
+
+
 def _source_binding(repository: Path) -> dict[str, str]:
     repository = repository.absolute()
     try:
@@ -662,6 +816,7 @@ def _source_binding(repository: Path) -> dict[str, str]:
             raise OSError("repository path is not canonical")
         frozen = verify_frozen_candidate(repository)
         current = current_identity(repository, require_clean=True)
+        workflow_bytes = _workflow_source_bytes(repository)
         intent_bytes = read_regular(frozen.intent_path, MAX_RECEIPT_BYTES)
         intent = _strict_json(intent_bytes, "candidate-freeze intent")
     except (CandidateFreezeError, SourceIdentityError, OSError, PublicationError) as error:
@@ -686,16 +841,29 @@ def _source_binding(repository: Path) -> dict[str, str]:
         "candidate_freeze_intent_sha256": frozen.intent_sha256,
         "release_source_sha256": source_sha256,
         "repository_commit": commit,
+        "workflow_sha256": sha256_bytes(workflow_bytes),
     }
 
 
-def _live_receipt(source: dict[str, str], run_id: int) -> dict[str, Any]:
+def _live_receipt(
+    source: dict[str, str],
+    run_id: int,
+    workflow_bytes: bytes,
+) -> dict[str, Any]:
+    if source.get("workflow_sha256") != sha256_bytes(workflow_bytes):
+        raise _error("local workflow-file bytes differ from the source binding")
     run_before = _project_run(
         _fetch_api_json(_run_api_path(run_id)), source["repository_commit"], run_id
     )
     jobs = _project_jobs(
         _fetch_api_json(_jobs_api_path(run_id, run_before["run_attempt"])),
         run_before,
+    )
+    workflow_sha = jobs[0]["workflow_source_sha"]
+    workflow_source = _project_workflow_source(
+        _fetch_api_json(_workflow_contents_api_path(workflow_sha)),
+        workflow_sha,
+        workflow_bytes,
     )
     check_runs_before = _project_check_runs(
         _fetch_api_json(_check_runs_api_path(run_before["check_suite_id"])),
@@ -735,12 +903,15 @@ def _live_receipt(source: dict[str, str], run_id: int) -> dict[str, Any]:
             "id": WORKFLOW_ID,
             "name": WORKFLOW_NAME,
             "path": WORKFLOW_PATH,
+            "source": workflow_source,
         },
     }
 
 
 def _validated_stored_receipt(
-    value: object, expected_source: dict[str, str]
+    value: object,
+    expected_source: dict[str, str],
+    workflow_bytes: bytes,
 ) -> tuple[dict[str, Any], int]:
     receipt = _exact_object(
         value,
@@ -757,6 +928,32 @@ def _validated_stored_receipt(
         },
         "hosted CI receipt",
     )
+    workflow = _exact_object(
+        receipt["workflow"],
+        {"event", "id", "name", "path", "source"},
+        "hosted CI workflow identity",
+    )
+    workflow_source = _exact_object(
+        workflow["source"],
+        {"git_blob_sha", "sha256", "size", "workflow_sha"},
+        "hosted CI workflow-file source identity",
+    )
+    retained_workflow_sha = workflow_source["workflow_sha"]
+    expected_workflow_source = (
+        _workflow_source_identity(retained_workflow_sha, workflow_bytes)
+        if isinstance(retained_workflow_sha, str)
+        else None
+    )
+    workflow_metadata = {
+        key: workflow[key]
+        for key in ("event", "id", "name", "path")
+    }
+    expected_workflow_metadata = {
+        "event": EVENT,
+        "id": WORKFLOW_ID,
+        "name": WORKFLOW_NAME,
+        "path": WORKFLOW_PATH,
+    }
     if (
         receipt["document"] != DOCUMENT
         or type(receipt["schema_version"]) is not int
@@ -765,8 +962,9 @@ def _validated_stored_receipt(
         != {"accept": API_ACCEPT, "origin": API_ORIGIN, "version": API_VERSION}
         or receipt["repository"]
         != {"full_name": REPOSITORY_FULL_NAME, "id": REPOSITORY_ID}
-        or receipt["workflow"]
-        != {"event": EVENT, "id": WORKFLOW_ID, "name": WORKFLOW_NAME, "path": WORKFLOW_PATH}
+        or workflow_metadata != expected_workflow_metadata
+        or expected_source.get("workflow_sha256") != sha256_bytes(workflow_bytes)
+        or workflow_source != expected_workflow_source
         or receipt["source"] != expected_source
         or not isinstance(receipt["run"], dict)
     ):
@@ -827,7 +1025,13 @@ def _validated_stored_receipt(
     normalized_jobs = _project_jobs(
         {"jobs": raw_jobs, "total_count": len(raw_jobs)}, normalized_run
     )
-    if normalized_jobs != retained_jobs:
+    if (
+        normalized_jobs != retained_jobs
+        or any(
+            job["workflow_source_sha"] != retained_workflow_sha
+            for job in normalized_jobs
+        )
+    ):
         raise _error("hosted CI receipt job or step schema is invalid")
     retained_check_runs = receipt["check_runs"]
     if not isinstance(retained_check_runs, list):
@@ -883,13 +1087,15 @@ def _read_receipt_bytes(repository: Path) -> bytes:
 
 
 def _load_receipt(
-    repository: Path, source: dict[str, str]
+    repository: Path,
+    source: dict[str, str],
+    workflow_bytes: bytes,
 ) -> tuple[dict[str, Any], bytes, int]:
     raw = _read_receipt_bytes(repository)
     value = _strict_json(raw, "hosted CI receipt")
     if _canonical_json(value) != raw:
         raise _error("hosted CI receipt is not canonical JSON")
-    validated, run_id = _validated_stored_receipt(value, source)
+    validated, run_id = _validated_stored_receipt(value, source, workflow_bytes)
     return validated, raw, run_id
 
 
@@ -913,9 +1119,13 @@ def capture_receipt(repository: Path, run_id: int) -> dict[str, Any]:
 
     run_id = _positive_int(run_id, "workflow run id")
     source_before = _source_binding(repository)
-    receipt = _live_receipt(source_before, run_id)
+    workflow_before = _workflow_source_bytes(repository)
+    if source_before.get("workflow_sha256") != sha256_bytes(workflow_before):
+        raise _error("release workflow changed before hosted CI capture")
+    receipt = _live_receipt(source_before, run_id, workflow_before)
     source_after = _source_binding(repository)
-    if source_after != source_before:
+    workflow_after = _workflow_source_bytes(repository)
+    if source_after != source_before or workflow_after != workflow_before:
         raise _error("release source changed while hosted CI was being captured")
     _publish_receipt(repository, _canonical_json(receipt))
     verified = validate_receipt_offline(repository)
@@ -928,11 +1138,21 @@ def validate_receipt_offline(repository: Path) -> dict[str, Any]:
     """Reopen the canonical receipt against the frozen source without networking."""
 
     source_before = _source_binding(repository)
-    retained, raw_before, _run_id = _load_receipt(repository, source_before)
+    workflow_before = _workflow_source_bytes(repository)
+    retained, raw_before, _run_id = _load_receipt(
+        repository,
+        source_before,
+        workflow_before,
+    )
     source_after = _source_binding(repository)
-    if source_after != source_before:
+    workflow_after = _workflow_source_bytes(repository)
+    if source_after != source_before or workflow_after != workflow_before:
         raise _error("release source changed while hosted CI receipt was being reopened")
-    reopened, raw_after, _reopened_run_id = _load_receipt(repository, source_after)
+    reopened, raw_after, _reopened_run_id = _load_receipt(
+        repository,
+        source_after,
+        workflow_after,
+    )
     if raw_after != raw_before or reopened != retained:
         raise _error("hosted CI receipt changed while it was being reopened")
     return retained
@@ -944,7 +1164,8 @@ def verify_receipt(repository: Path) -> dict[str, Any]:
     retained = validate_receipt_offline(repository)
     source = retained["source"]
     run_id = _positive_int(retained["run"].get("id"), "retained workflow run id")
-    live = _live_receipt(source, run_id)
+    workflow_bytes = _workflow_source_bytes(repository)
+    live = _live_receipt(source, run_id, workflow_bytes)
     reopened = validate_receipt_offline(repository)
     if reopened != retained:
         raise _error("hosted CI receipt changed during live verification")
@@ -993,7 +1214,9 @@ def main() -> None:
     print(
         "hosted CI receipt verified: "
         f"run={receipt['run']['id']} attempt={receipt['run']['run_attempt']} "
-        f"head={receipt['run']['head_sha']} jobs={len(receipt['jobs'])}"
+        f"head={receipt['run']['head_sha']} "
+        f"workflow={receipt['workflow']['source']['workflow_sha']} "
+        f"jobs={len(receipt['jobs'])}"
     )
 
 

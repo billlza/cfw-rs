@@ -43,6 +43,7 @@ from scripts.publication.ga_release_contract import (
     UPDATER_SET,
     _parse_strict_json,
     _record,
+    _require_hosted_ci_source_binding,
     _require_artifact_set_adapter,
     _stage_manifest,
     _tree_record,
@@ -92,9 +93,9 @@ class StageFixture:
         return {
             "hosted-ci.json": canonical_json(
                 {
-                    "document": "cfw-github-hosted-ci-receipt-v2",
+                    "document": "cfw-github-hosted-ci-receipt-v3",
                     "run": {"id": 1, "run_attempt": 1},
-                    "schema_version": 2,
+                    "schema_version": 3,
                 }
             ),
             "local-ci-lanes.json": canonical_json(
@@ -590,6 +591,47 @@ class AdapterContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = StageFixture()
         self.addCleanup(self.fixture.cleanup)
+
+    def test_hosted_ci_source_binding_requires_v3_workflow_identity(self) -> None:
+        expected_source = {
+            "candidate_freeze_intent_sha256": "a" * 64,
+            "release_source_sha256": "b" * 64,
+            "repository_commit": "c" * 40,
+            "workflow_sha256": "d" * 64,
+        }
+        valid = {
+            "source": dict(expected_source),
+            "workflow": {"source": {"sha256": "d" * 64}},
+        }
+        arguments = {
+            "candidate_freeze_intent_sha256": "a" * 64,
+            "release_source_sha256": "b" * 64,
+            "repository_commit": "c" * 40,
+        }
+        _require_hosted_ci_source_binding(valid, **arguments)
+
+        old_source = dict(expected_source)
+        old_source.pop("workflow_sha256")
+        variants = (
+            {"source": old_source, "workflow": valid["workflow"]},
+            {
+                "source": dict(expected_source),
+                "workflow": {"source": {"sha256": "e" * 64}},
+            },
+            {
+                "source": {**expected_source, "workflow_sha256": "e" * 64},
+                "workflow": valid["workflow"],
+            },
+            {
+                "source": dict(expected_source),
+                "workflow": {"source": {"sha256": "invalid"}},
+            },
+        )
+        for hosted_ci in variants:
+            with self.subTest(hosted_ci=hosted_ci), self.assertRaises(
+                PublicationError
+            ):
+                _require_hosted_ci_source_binding(hosted_ci, **arguments)
 
     def test_package_adapter_uses_the_fixed_ga_candidate_contract(self) -> None:
         adapter = _require_artifact_set_adapter(self.fixture.repository)

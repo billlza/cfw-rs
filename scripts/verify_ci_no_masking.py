@@ -18,7 +18,11 @@ This checker enforces the *structural* half of that guarantee against
   fails instead of blocking forever;
 * every job starts from the same explicit pull-request-head-or-event SHA,
   disables persisted checkout credentials, and immediately verifies the
-  materialized ``HEAD`` through the absolute system Git executable;
+  materialized ``HEAD`` through the absolute system Git executable while its
+  step identity carries the GitHub workflow-file SHA for receipt validation;
+* the hosted release-tooling job then normalizes only the exact pinned Xcode
+  application through a physical, no-follow ownership pass before executing
+  any setup action or repository command, and revalidates its identity;
 * the Rust, Node, and Xcode toolchains referenced by the workflow each resolve
   to exactly one version, and that version equals the pinned value in
   ``scripts/dependency_pins.env`` (single-toolchain binding); the Node lane must
@@ -60,9 +64,56 @@ REQUIRED_SOURCE_REF = (
     "${{ github.event_name == 'pull_request' && "
     "github.event.pull_request.head.sha || github.sha }}"
 )
+REQUIRED_WORKFLOW_SOURCE_SHA = "${{ github.workflow_sha }}"
 REQUIRED_HEAD_ASSERTION = (
     f'/bin/test "$(/usr/bin/git rev-parse HEAD)" = "{REQUIRED_SOURCE_REF}"'
 )
+REQUIRED_SOURCE_ASSERTION_STEP = (
+    "      - name: Assert exact CI source and workflow identity "
+    f"{REQUIRED_WORKFLOW_SOURCE_SHA}\n"
+    f"        run: {REQUIRED_HEAD_ASSERTION}"
+)
+REQUIRED_XCODE_OWNERSHIP_STEP = """      - name: Normalize pinned Xcode ownership
+        run: |
+          readonly xcode_application=/Applications/Xcode_26.6.app
+          /bin/test "$DEVELOPER_DIR" = "$xcode_application/Contents/Developer"
+          /bin/test -d "$xcode_application"
+          /bin/test ! -L "$xcode_application"
+          /bin/test -d "$xcode_application/Contents"
+          /bin/test ! -L "$xcode_application/Contents"
+          /bin/test -d "$xcode_application/Contents/Developer"
+          /bin/test ! -L "$xcode_application/Contents/Developer"
+          /usr/sbin/spctl --assess --type execute "$xcode_application"
+          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 26.6\\nBuild version 17F113'
+
+          runner_uid="$(/usr/bin/id -u)"
+          readonly runner_uid
+          /bin/test "$runner_uid" -ne 0
+          runner_groups=" $(/usr/bin/id -G) "
+          readonly runner_groups
+          [[ "$runner_groups" != *" 0 "* ]]
+          xcode_device_inode="$(/usr/bin/stat -f '%d:%i' "$xcode_application")"
+          readonly xcode_device_inode
+          unexpected_entry="$(
+            /usr/bin/find -P -x "$xcode_application" \\
+              \\( \\( ! -uid 0 -a ! -uid "$runner_uid" \\) -o -perm -0002 \\) \\
+              -print -quit
+          )"
+          readonly unexpected_entry
+          /bin/test -z "$unexpected_entry"
+
+          /usr/bin/sudo -n /usr/bin/find -P -x "$xcode_application" \\
+            -exec /usr/sbin/chown -h 0:0 {} +
+
+          /bin/test "$(/usr/bin/stat -f '%d:%i' "$xcode_application")" = "$xcode_device_inode"
+          remaining_unsafe_entry="$(
+            /usr/bin/find -P -x "$xcode_application" \\
+              \\( ! -uid 0 -o ! -gid 0 -o -perm -0002 \\) -print -quit
+          )"
+          readonly remaining_unsafe_entry
+          /bin/test -z "$remaining_unsafe_entry"
+          /usr/sbin/spctl --assess --type execute "$xcode_application"
+          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 26.6\\nBuild version 17F113'"""
 REQUIRED_TAURI_TMPDIR = "${{ runner.temp }}"
 REQUIRED_SWIFT_TARGET_INFO_PROBE = (
     'swift_identity_stderr="$(/usr/bin/mktemp '
@@ -96,7 +147,7 @@ REQUIRED_RELEASE_CI_GATE_SHA256 = (
     "5932cb47a358bca72d49c0d96ce1c51da58dfc35957bc97111627ba9427ca38f"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "06443d9a15ec2aa9f2a7650610a1bb5d9f6114f780d384402e0c5703a0136a79"
+    "a2809cfbb6618a83b5c369254cdd1970775af7d2f58619da20024fff5f755f81"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -246,11 +297,6 @@ def _check_source_checkout(jobs: dict[str, str]) -> list[str]:
         rf"          ref: {re.escape(REQUIRED_SOURCE_REF)}\n"
         r"          persist-credentials: false$"
     )
-    required_assertion_step = (
-        "      - name: Assert exact CI source identity\n"
-        f"        run: {REQUIRED_HEAD_ASSERTION}"
-    )
-
     for name, body in jobs.items():
         checkout_matches = tuple(checkout_use.finditer(body))
         if len(checkout_matches) != 1:
@@ -280,20 +326,88 @@ def _check_source_checkout(jobs: dict[str, str]) -> list[str]:
         assertion_steps = tuple(
             index
             for index, step in enumerate(steps)
-            if REQUIRED_HEAD_ASSERTION in step
+            if step == REQUIRED_SOURCE_ASSERTION_STEP
         )
         if len(assertion_steps) != 1:
             findings.append(
-                f"job {name!r} must contain exactly one exact-HEAD runtime assertion"
+                f"job {name!r} must contain exactly one exact source assertion "
+                "carrying the workflow-file identity"
             )
         if (
             checkout_index + 1 >= len(steps)
-            or steps[checkout_index + 1] != required_assertion_step
+            or steps[checkout_index + 1] != REQUIRED_SOURCE_ASSERTION_STEP
         ):
             findings.append(
-                f"job {name!r} must immediately assert the exact event SHA with "
-                "absolute /bin/test and /usr/bin/git after checkout"
+                f"job {name!r} must immediately assert the exact event SHA and carry "
+                "the workflow-file SHA with absolute /bin/test and /usr/bin/git "
+                "after checkout"
             )
+    return findings
+
+
+def _check_hosted_xcode_ownership(
+    jobs: dict[str, str],
+    pins: dict[str, str],
+) -> list[str]:
+    """Require the one privileged hosted-Xcode adapter before repository code."""
+
+    findings: list[str] = []
+    release_tooling_jobs = tuple(
+        (name, body)
+        for name, body in jobs.items()
+        if "release-tool-tests" in _release_gate_commands(body)
+    )
+    if len(release_tooling_jobs) != 1:
+        return [
+            "workflow must contain exactly one release-tooling job for pinned "
+            "Xcode ownership normalization"
+        ]
+
+    job_name, job_body = release_tooling_jobs[0]
+    steps = _split_job_steps(job_body)
+    normalization_steps = tuple(
+        index
+        for index, step in enumerate(steps)
+        if step == REQUIRED_XCODE_OWNERSHIP_STEP
+    )
+    if normalization_steps != (2,):
+        findings.append(
+            f"job {job_name!r} must normalize the exact pinned Xcode ownership "
+            "once, immediately after checkout and exact-HEAD verification"
+        )
+
+    expected_application = f"/Applications/Xcode_{pins['XCODE_VERSION']}.app"
+    expected_identity = (
+        f"Xcode {pins['XCODE_VERSION']}\\n"
+        f"Build version {pins['XCODE_BUILD_VERSION']}"
+    )
+    if (
+        f"readonly xcode_application={expected_application}"
+        not in REQUIRED_XCODE_OWNERSHIP_STEP
+        or REQUIRED_XCODE_OWNERSHIP_STEP.count(expected_identity) != 2
+    ):
+        findings.append(
+            "pinned Xcode ownership policy differs from the Xcode version pins"
+        )
+
+    privileged_commands = (
+        "/usr/bin/sudo",
+        "/usr/sbin/chown",
+        "/usr/sbin/spctl",
+    )
+    for name, body in jobs.items():
+        for index, step in enumerate(_split_job_steps(body)):
+            if (
+                name == job_name
+                and index == 2
+                and step == REQUIRED_XCODE_OWNERSHIP_STEP
+            ):
+                continue
+            if any(command in step for command in privileged_commands):
+                findings.append(
+                    f"job {name!r} step {index + 1} contains an unreviewed "
+                    "privileged Xcode ownership command"
+                )
     return findings
 
 
@@ -1133,6 +1247,7 @@ def audit_workflow(workflow_path: Path, pins_path: Path) -> None:
     findings += _check_release_ci_boundary(active_text, pins)
     jobs = _split_jobs(active_text)
     findings += _check_source_checkout(jobs)
+    findings += _check_hosted_xcode_ownership(jobs, pins)
     findings += _check_job_bounds(jobs)
     findings += _check_release_tool_test_dependencies(jobs)
     findings += _check_tauri_frontend_dependencies(jobs)

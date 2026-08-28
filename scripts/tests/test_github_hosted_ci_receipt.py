@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import copy
 from contextlib import redirect_stderr
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -16,11 +18,50 @@ from scripts.publication.common import PublicationError
 RUN_ID = 90_012_345_678
 CHECK_SUITE_ID = 80_012_345_678
 HEAD_SHA = "a" * 40
+WORKFLOW_SHA = "e" * 40
+WORKFLOW_BYTES = b"name: CI\non: pull_request\n"
 SOURCE = {
     "candidate_freeze_intent_sha256": "b" * 64,
     "release_source_sha256": "c" * 64,
     "repository_commit": HEAD_SHA,
+    "workflow_sha256": hashlib.sha256(WORKFLOW_BYTES).hexdigest(),
 }
+
+
+def workflow_response(
+    *,
+    workflow_sha: str = WORKFLOW_SHA,
+    content: bytes = WORKFLOW_BYTES,
+) -> dict[str, object]:
+    git_object = b"blob " + str(len(content)).encode("ascii") + b"\0" + content
+    blob_sha = hashlib.sha1(git_object, usedforsecurity=False).hexdigest()
+    api_url = hosted.API_ORIGIN + hosted._workflow_contents_api_path(workflow_sha)
+    git_url = (
+        f"{hosted.API_ORIGIN}/repos/{hosted.REPOSITORY_FULL_NAME}/git/blobs/"
+        f"{blob_sha}"
+    )
+    html_url = (
+        f"https://github.com/{hosted.REPOSITORY_FULL_NAME}/blob/"
+        f"{workflow_sha}/{hosted.WORKFLOW_PATH}"
+    )
+    download_url = (
+        f"https://raw.githubusercontent.com/{hosted.REPOSITORY_FULL_NAME}/"
+        f"{workflow_sha}/{hosted.WORKFLOW_PATH}"
+    )
+    return {
+        "_links": {"git": git_url, "html": html_url, "self": api_url},
+        "content": base64.encodebytes(content).decode("ascii"),
+        "download_url": download_url,
+        "encoding": "base64",
+        "git_url": git_url,
+        "html_url": html_url,
+        "name": "ci.yml",
+        "path": hosted.WORKFLOW_PATH,
+        "sha": blob_sha,
+        "size": len(content),
+        "type": "file",
+        "url": api_url,
+    }
 
 
 def run_response(*, attempt: int = 2, head_sha: str = HEAD_SHA) -> dict[str, object]:
@@ -62,6 +103,7 @@ def run_response(*, attempt: int = 2, head_sha: str = HEAD_SHA) -> dict[str, obj
 def job_response(name: str, identifier: int, *, attempt: int = 2) -> dict[str, object]:
     step_names = [
         "Set up job",
+        hosted.WORKFLOW_SOURCE_STEP_PREFIX + WORKFLOW_SHA,
         *sorted(hosted.REQUIRED_JOB_STEP_NAMES.get(name, frozenset())),
         "Complete job",
     ]
@@ -140,11 +182,13 @@ class StableAPI:
         *,
         run: dict[str, object] | None = None,
         jobs: dict[str, object] | None = None,
+        workflow: dict[str, object] | None = None,
         check_runs: dict[str, object] | None = None,
         annotations: dict[int, list[dict[str, object]]] | None = None,
     ) -> None:
         self.run = run or run_response()
         self.jobs = jobs or jobs_response()
+        self.workflow = workflow or workflow_response()
         self.check_runs = check_runs or check_runs_response(self.jobs)
         self.annotations = annotations or {}
         self.paths: list[str] = []
@@ -155,6 +199,8 @@ class StableAPI:
             return copy.deepcopy(self.run)
         if path == hosted._jobs_api_path(RUN_ID, int(self.run["run_attempt"])):
             return copy.deepcopy(self.jobs)
+        if path == hosted._workflow_contents_api_path(WORKFLOW_SHA):
+            return copy.deepcopy(self.workflow)
         if path == hosted._check_runs_api_path(int(self.run["check_suite_id"])):
             return copy.deepcopy(self.check_runs)
         for check_run in self.check_runs["check_runs"]:
@@ -208,6 +254,9 @@ class HostedCIReceiptTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.repository = Path(self.temporary.name).resolve()
+        workflow_path = self.repository / hosted.WORKFLOW_PATH
+        workflow_path.parent.mkdir(parents=True)
+        workflow_path.write_bytes(WORKFLOW_BYTES)
         self.output = self.repository.joinpath(*hosted.RECEIPT_RELATIVE.parts)
         self.output.parent.mkdir(parents=True, mode=0o700)
         self.output.parent.chmod(0o700)
@@ -224,7 +273,7 @@ class HostedCIReceiptTests(unittest.TestCase):
     def _write_receipt(self, api: StableAPI | None = None) -> dict[str, object]:
         selected = api or StableAPI()
         with patch.object(hosted, "_fetch_api_json", side_effect=selected):
-            receipt = hosted._live_receipt(dict(SOURCE), RUN_ID)
+            receipt = hosted._live_receipt(dict(SOURCE), RUN_ID, WORKFLOW_BYTES)
         self.output.write_bytes(hosted._canonical_json(receipt))
         self.output.chmod(0o600)
         return receipt
@@ -237,6 +286,7 @@ class HostedCIReceiptTests(unittest.TestCase):
         expected_calls = [
             hosted._run_api_path(RUN_ID),
             hosted._jobs_api_path(RUN_ID, 2),
+            hosted._workflow_contents_api_path(WORKFLOW_SHA),
             hosted._check_runs_api_path(CHECK_SUITE_ID),
             *[
                 hosted._annotations_api_path(check_run["id"])
@@ -273,6 +323,15 @@ class HostedCIReceiptTests(unittest.TestCase):
         ):
             self.assertEqual(hosted.validate_receipt_offline(self.repository), retained)
 
+    def test_offline_validation_rejects_local_workflow_drift(self) -> None:
+        self._write_receipt()
+        (self.repository / hosted.WORKFLOW_PATH).write_bytes(b"name: Drifted CI\n")
+        with (
+            patch.object(hosted, "_source_binding", return_value=dict(SOURCE)),
+            self.assertRaises(hosted.HostedCIReceiptError),
+        ):
+            hosted.validate_receipt_offline(self.repository)
+
     def test_existing_receipt_is_never_replaced(self) -> None:
         self.output.write_bytes(b"retained\n")
         self.output.chmod(0o600)
@@ -288,6 +347,7 @@ class HostedCIReceiptTests(unittest.TestCase):
         responses = [
             before,
             jobs,
+            workflow_response(),
             checks,
             [],
             [],
@@ -307,6 +367,20 @@ class HostedCIReceiptTests(unittest.TestCase):
         drifted = {**SOURCE, "release_source_sha256": "d" * 64}
         with (
             patch.object(hosted, "_source_binding", side_effect=[SOURCE, drifted]),
+            patch.object(hosted, "_fetch_api_json", side_effect=StableAPI()),
+            self.assertRaisesRegex(hosted.HostedCIReceiptError, "source changed"),
+        ):
+            hosted.capture_receipt(self.repository, RUN_ID)
+        self.assertFalse(self.output.exists())
+
+    def test_workflow_drift_during_capture_fails_before_publication(self) -> None:
+        with (
+            patch.object(hosted, "_source_binding", return_value=dict(SOURCE)),
+            patch.object(
+                hosted,
+                "_workflow_source_bytes",
+                side_effect=[WORKFLOW_BYTES, b"name: Drifted CI\n"],
+            ),
             patch.object(hosted, "_fetch_api_json", side_effect=StableAPI()),
             self.assertRaisesRegex(hosted.HostedCIReceiptError, "source changed"),
         ):
@@ -350,6 +424,108 @@ class HostedCIReceiptTests(unittest.TestCase):
             with self.subTest(label=label), self.assertRaises(hosted.HostedCIReceiptError):
                 hosted._project_jobs(value, hosted._project_run(run_response(), HEAD_SHA, RUN_ID))
 
+    def test_xcode_ownership_step_must_be_present_and_successful(self) -> None:
+        rust_job_name = "Rust, UI, and script quality gates"
+        step_name = "Normalize pinned Xcode ownership"
+        for conclusion in (None, "failure", "skipped"):
+            with self.subTest(conclusion=conclusion):
+                value = jobs_response()
+                rust_job = next(
+                    job for job in value["jobs"] if job["name"] == rust_job_name
+                )
+                step = next(
+                    item for item in rust_job["steps"] if item["name"] == step_name
+                )
+                if conclusion is None:
+                    rust_job["steps"].remove(step)
+                else:
+                    step["conclusion"] = conclusion
+                with self.assertRaises(hosted.HostedCIReceiptError):
+                    hosted._project_jobs(
+                        value,
+                        hosted._project_run(run_response(), HEAD_SHA, RUN_ID),
+                    )
+
+    def test_workflow_source_marker_may_differ_from_tested_head(self) -> None:
+        projected = hosted._project_jobs(
+            jobs_response(),
+            hosted._project_run(run_response(), HEAD_SHA, RUN_ID),
+        )
+        self.assertNotEqual(WORKFLOW_SHA, HEAD_SHA)
+        self.assertEqual(
+            {job["workflow_source_sha"] for job in projected},
+            {WORKFLOW_SHA},
+        )
+
+    def test_workflow_source_marker_is_exact_and_consistent(self) -> None:
+        def marker(job: dict[str, object]) -> dict[str, object]:
+            return next(
+                step
+                for step in job["steps"]
+                if step["name"].startswith(hosted.WORKFLOW_SOURCE_STEP_PREFIX)
+            )
+
+        cases: list[tuple[str, dict[str, object]]] = []
+        missing = jobs_response()
+        missing["jobs"][0]["steps"].remove(marker(missing["jobs"][0]))
+        cases.append(("missing", missing))
+        repeated = jobs_response()
+        repeated["jobs"][0]["steps"].insert(
+            2,
+            copy.deepcopy(marker(repeated["jobs"][0])),
+        )
+        cases.append(("repeated", repeated))
+        malformed = jobs_response()
+        marker(malformed["jobs"][0])["name"] = (
+            hosted.WORKFLOW_SOURCE_STEP_PREFIX + "E" * 40
+        )
+        cases.append(("malformed", malformed))
+        inconsistent = jobs_response()
+        marker(inconsistent["jobs"][0])["name"] = (
+            hosted.WORKFLOW_SOURCE_STEP_PREFIX + "d" * 40
+        )
+        cases.append(("inconsistent", inconsistent))
+        failed = jobs_response()
+        marker(failed["jobs"][0])["conclusion"] = "failure"
+        cases.append(("failed", failed))
+        skipped = jobs_response()
+        marker(skipped["jobs"][0])["conclusion"] = "skipped"
+        cases.append(("skipped", skipped))
+        for label, value in cases:
+            with self.subTest(label=label), self.assertRaises(
+                hosted.HostedCIReceiptError
+            ):
+                hosted._project_jobs(
+                    value,
+                    hosted._project_run(run_response(), HEAD_SHA, RUN_ID),
+                )
+
+    def test_workflow_source_marker_rejects_noncanonical_sha_text(self) -> None:
+        invalid_values = (
+            "e" * 39,
+            "e" * 41,
+            "E" * 40,
+            "g" * 40,
+            "e" * 40 + " ",
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid):
+                value = jobs_response()
+                for job in value["jobs"]:
+                    marker = next(
+                        step
+                        for step in job["steps"]
+                        if step["name"].startswith(
+                            hosted.WORKFLOW_SOURCE_STEP_PREFIX
+                        )
+                    )
+                    marker["name"] = hosted.WORKFLOW_SOURCE_STEP_PREFIX + invalid
+                with self.assertRaises(hosted.HostedCIReceiptError):
+                    hosted._project_jobs(
+                        value,
+                        hosted._project_run(run_response(), HEAD_SHA, RUN_ID),
+                    )
+
     def test_check_run_diagnostics_are_rejected_before_publication(self) -> None:
         checks_with_count = check_runs_response()
         checks_with_count["check_runs"][0]["output"]["annotations_count"] = 1
@@ -379,6 +555,68 @@ class HostedCIReceiptTests(unittest.TestCase):
             ):
                 hosted.capture_receipt(self.repository, RUN_ID)
             self.assertFalse(self.output.exists())
+
+    def test_workflow_contents_are_exactly_bound_to_clean_source(self) -> None:
+        projected = hosted._project_workflow_source(
+            workflow_response(),
+            WORKFLOW_SHA,
+            WORKFLOW_BYTES,
+        )
+        self.assertEqual(projected["workflow_sha"], WORKFLOW_SHA)
+        self.assertEqual(projected["sha256"], SOURCE["workflow_sha256"])
+        self.assertEqual(projected["size"], len(WORKFLOW_BYTES))
+
+    def test_workflow_contents_malformed_or_foreign_state_is_rejected(self) -> None:
+        mutations = (
+            lambda value: value.update(type="dir"),
+            lambda value: value.update(type="symlink"),
+            lambda value: value.update(type="submodule"),
+            lambda value: value.update(encoding="utf-8"),
+            lambda value: value.update(path=".github/workflows/other.yml"),
+            lambda value: value.update(size=len(WORKFLOW_BYTES) + 1),
+            lambda value: value.update(size=hosted.MAX_WORKFLOW_BYTES + 1),
+            lambda value: value.update(content="not base64!"),
+            lambda value: value.update(content=value["content"] + " "),
+            lambda value: value.update(content=value["content"].rstrip("=\n")),
+            lambda value: value.update(content=value["content"] + "\r"),
+            lambda value: value.update(sha="f" * 40),
+            lambda value: value.update(url="https://example.invalid/workflow"),
+            lambda value: value.update(git_url="https://example.invalid/blob"),
+            lambda value: value.update(html_url="https://example.invalid/file"),
+            lambda value: value.update(
+                download_url="https://example.invalid/download"
+            ),
+            lambda value: value["_links"].update(self="https://example.invalid"),
+            lambda value: value.update(unknown="field"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                value = workflow_response()
+                mutate(value)
+                with self.assertRaises(hosted.HostedCIReceiptError):
+                    hosted._project_workflow_source(
+                        value,
+                        WORKFLOW_SHA,
+                        WORKFLOW_BYTES,
+                    )
+        with self.assertRaisesRegex(
+            hosted.HostedCIReceiptError,
+            "differ from the exact clean source",
+        ):
+            hosted._project_workflow_source(
+                workflow_response(content=b"name: Foreign\n"),
+                WORKFLOW_SHA,
+                WORKFLOW_BYTES,
+            )
+
+    def test_capture_rejects_remote_workflow_byte_drift(self) -> None:
+        api = StableAPI(workflow=workflow_response(content=b"name: Foreign\n"))
+        with self.assertRaisesRegex(
+            hosted.HostedCIReceiptError,
+            "differ from the exact clean source",
+        ):
+            self._capture(api)
+        self.assertFalse(self.output.exists())
 
     def test_check_runs_must_match_the_exact_jobs_and_suite(self) -> None:
         mutations = (
@@ -412,7 +650,17 @@ class HostedCIReceiptTests(unittest.TestCase):
         before = check_runs_response(jobs)
         after = copy.deepcopy(before)
         after["check_runs"][0]["output"]["annotations_count"] = 1
-        responses = [run, jobs, before, [], [], [], run, after]
+        responses = [
+            run,
+            jobs,
+            workflow_response(),
+            before,
+            [],
+            [],
+            [],
+            run,
+            after,
+        ]
         with (
             patch.object(hosted, "_source_binding", return_value=dict(SOURCE)),
             patch.object(hosted, "_fetch_api_json", side_effect=responses),
@@ -477,9 +725,17 @@ class HostedCIReceiptTests(unittest.TestCase):
     def test_offline_validation_rejects_run_job_and_step_schema_drift(self) -> None:
         mutations = (
             lambda receipt: receipt.update(
-                document="cfw-github-hosted-ci-receipt-v1"
+                document="cfw-github-hosted-ci-receipt-v2"
             ),
-            lambda receipt: receipt.update(schema_version=1),
+            lambda receipt: receipt.update(schema_version=2),
+            lambda receipt: receipt["workflow"]["source"].update(
+                workflow_sha="d" * 40
+            ),
+            lambda receipt: receipt["workflow"]["source"].update(
+                git_blob_sha="d" * 40
+            ),
+            lambda receipt: receipt["workflow"].update(unknown="field"),
+            lambda receipt: receipt["workflow"]["source"].update(size="1"),
             lambda receipt: receipt["run"].update(status="queued"),
             lambda receipt: receipt["jobs"][0].update(run_attempt=99),
             lambda receipt: receipt["jobs"][0]["steps"][0].update(conclusion="skipped"),
@@ -541,6 +797,7 @@ class HostedCIReceiptTests(unittest.TestCase):
         for fixed_path in (
             hosted._check_runs_api_path(CHECK_SUITE_ID),
             hosted._annotations_api_path(7_001),
+            hosted._workflow_contents_api_path(WORKFLOW_SHA),
         ):
             with self.subTest(fixed_path=fixed_path):
                 self.assertEqual(
@@ -553,6 +810,18 @@ class HostedCIReceiptTests(unittest.TestCase):
             (
                 f"/repos/{hosted.REPOSITORY_FULL_NAME}/check-suites/"
                 f"{CHECK_SUITE_ID}/check-runs?filter=latest&per_page=100&page=2"
+            ),
+            (
+                f"/repos/{hosted.REPOSITORY_FULL_NAME}/contents/"
+                f"{hosted.WORKFLOW_PATH}?ref=main"
+            ),
+            (
+                f"/repos/{hosted.REPOSITORY_FULL_NAME}/contents/"
+                f".github/workflows/other.yml?ref={WORKFLOW_SHA}"
+            ),
+            (
+                f"/repos/{hosted.REPOSITORY_FULL_NAME}/contents/"
+                f"{hosted.WORKFLOW_PATH}?ref={WORKFLOW_SHA}&page=1"
             ),
             (
                 f"/repos/{hosted.REPOSITORY_FULL_NAME}/check-suites/"

@@ -31,8 +31,49 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Assert exact CI source identity
+      - name: Assert exact CI source and workflow identity ${{ github.workflow_sha }}
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+      - name: Normalize pinned Xcode ownership
+        run: |
+          readonly xcode_application=/Applications/Xcode_26.6.app
+          /bin/test "$DEVELOPER_DIR" = "$xcode_application/Contents/Developer"
+          /bin/test -d "$xcode_application"
+          /bin/test ! -L "$xcode_application"
+          /bin/test -d "$xcode_application/Contents"
+          /bin/test ! -L "$xcode_application/Contents"
+          /bin/test -d "$xcode_application/Contents/Developer"
+          /bin/test ! -L "$xcode_application/Contents/Developer"
+          /usr/sbin/spctl --assess --type execute "$xcode_application"
+          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 26.6\nBuild version 17F113'
+
+          runner_uid="$(/usr/bin/id -u)"
+          readonly runner_uid
+          /bin/test "$runner_uid" -ne 0
+          runner_groups=" $(/usr/bin/id -G) "
+          readonly runner_groups
+          [[ "$runner_groups" != *" 0 "* ]]
+          xcode_device_inode="$(/usr/bin/stat -f '%d:%i' "$xcode_application")"
+          readonly xcode_device_inode
+          unexpected_entry="$(
+            /usr/bin/find -P -x "$xcode_application" \
+              \( \( ! -uid 0 -a ! -uid "$runner_uid" \) -o -perm -0002 \) \
+              -print -quit
+          )"
+          readonly unexpected_entry
+          /bin/test -z "$unexpected_entry"
+
+          /usr/bin/sudo -n /usr/bin/find -P -x "$xcode_application" \
+            -exec /usr/sbin/chown -h 0:0 {} +
+
+          /bin/test "$(/usr/bin/stat -f '%d:%i' "$xcode_application")" = "$xcode_device_inode"
+          remaining_unsafe_entry="$(
+            /usr/bin/find -P -x "$xcode_application" \
+              \( ! -uid 0 -o ! -gid 0 -o -perm -0002 \) -print -quit
+          )"
+          readonly remaining_unsafe_entry
+          /bin/test -z "$remaining_unsafe_entry"
+          /usr/sbin/spctl --assess --type execute "$xcode_application"
+          /bin/test "$(DEVELOPER_DIR="$DEVELOPER_DIR" /usr/bin/xcodebuild -version)" = $'Xcode 26.6\nBuild version 17F113'
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: "1.97.1"
@@ -105,7 +146,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Assert exact CI source identity
+      - name: Assert exact CI source and workflow identity ${{ github.workflow_sha }}
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
@@ -135,7 +176,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Assert exact CI source identity
+      - name: Assert exact CI source and workflow identity ${{ github.workflow_sha }}
         run: /bin/test "$(/usr/bin/git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:

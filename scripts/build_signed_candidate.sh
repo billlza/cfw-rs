@@ -81,18 +81,30 @@ readonly notarization_recovery_id
   die "signed candidates require Apple Silicon macOS"
 : "${CFW_BUILD_NUMBER:?set the explicit positive integer candidate build number}"
 PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
-  "$repo_root" "$CFW_BUILD_NUMBER" <<'PY'
+  "$repo_root" "$CFW_BUILD_NUMBER" "$signing_transaction_command" <<'PY'
 import sys
+from pathlib import Path
 
 sys.path.insert(0, sys.argv[1] + "/scripts")
-from release_build_identity import ACTIVE_RELEASE_IDENTITY, canonical_build_version
+from release_build_identity import (
+    ACTIVE_RELEASE_IDENTITY,
+    BuildIdentityError,
+    ReleaseWorkspaceError,
+    canonical_build_version,
+    verify_ga_workspace_path_preconditions,
+)
 
-canonical_build_version(sys.argv[2], "CFW_BUILD_NUMBER")
-if sys.argv[2] != ACTIVE_RELEASE_IDENTITY.ga_build:
-    raise SystemExit(
-        "error: CFW_BUILD_NUMBER must be the single active GA build "
-        + ACTIVE_RELEASE_IDENTITY.ga_build
-    )
+try:
+    canonical_build_version(sys.argv[2], "CFW_BUILD_NUMBER")
+    if sys.argv[2] != ACTIVE_RELEASE_IDENTITY.ga_build:
+        raise BuildIdentityError(
+            "CFW_BUILD_NUMBER must be the single active GA build "
+            + ACTIVE_RELEASE_IDENTITY.ga_build
+        )
+    if sys.argv[3] == "run":
+        verify_ga_workspace_path_preconditions(Path(sys.argv[1]))
+except (BuildIdentityError, ReleaseWorkspaceError) as error:
+    raise SystemExit(f"error: {error}") from None
 PY
 preflight_root="$candidate_base/ga-preflight/$CFW_BUILD_NUMBER"
 frozen_root="$candidate_base/ga/$CFW_BUILD_NUMBER"

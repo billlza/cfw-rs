@@ -12,6 +12,7 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+from scripts import ga_runtime_acceptance as ga_runtime
 from scripts.ga_runtime_acceptance import (
     ACCEPTANCE_RELATIVE,
     CHECKS,
@@ -22,10 +23,12 @@ from scripts.ga_runtime_acceptance import (
     COLLECTION_SUCCESS_STEPS,
     COMMAND_DOCUMENT,
     DOCUMENT,
+    ENVIRONMENT_RELATIVE,
     FROM_BUILD,
     GARuntimeAcceptanceError,
     GACollectionRecoveryRequired,
     HIGH_RISK_PROBES,
+    INSTALL_JOURNAL_RELATIVE,
     OFF_PROOF_COMMAND,
     PCAP_FILES,
     PROCESS_OBSERVATION_COMMAND,
@@ -49,6 +52,11 @@ from scripts.ga_runtime_acceptance import (
     self_check,
     validate_ga_runtime_acceptance,
 )
+from scripts.ga_acceptance_environment import (
+    DOCUMENT as GA_ENVIRONMENT_DOCUMENT,
+    SCHEMA_VERSION as GA_ENVIRONMENT_SCHEMA_VERSION,
+    environment_sha256,
+)
 from scripts.harness.packet_evidence import packet_capture_filter_argv
 from scripts.physical_capture.packet_host import (
     PacketCaptureDisposition,
@@ -68,6 +76,20 @@ DIGESTS = {
     "install_journal_sha256": "4" * 64,
     "service_journal_tree_sha256": "5" * 64,
 }
+RAW_MACHINE_UUID = "01234567-89AB-CDEF-0123-456789ABCDEF"
+RAW_BOOT_UUID = "89ABCDEF-0123-4567-89AB-CDEF01234567"
+GA_ENVIRONMENT = {
+    "architecture": "arm64",
+    "boot_environment_sha256": hashlib.sha256(RAW_BOOT_UUID.encode("ascii")).hexdigest(),
+    "document": GA_ENVIRONMENT_DOCUMENT,
+    "hardware_model": "Mac16,1",
+    "machine_sha256": hashlib.sha256(RAW_MACHINE_UUID.encode("ascii")).hexdigest(),
+    "macos_build_version": "26A5388g",
+    "macos_product_version": "27.0",
+    "physical_nonvirtualized": True,
+    "schema_version": GA_ENVIRONMENT_SCHEMA_VERSION,
+}
+GA_ENVIRONMENT_SHA256 = environment_sha256(GA_ENVIRONMENT)
 APP_TREE = "6" * 64
 SESSION_ID = "12345678-1234-4234-8234-123456789abc"
 CHALLENGE = base64.urlsafe_b64encode(b"C" * 32).decode("ascii").rstrip("=")
@@ -102,7 +124,11 @@ def command(
 def check(check_id: str, **fields: object) -> dict[str, object]:
     return {
         "check_id": check_id,
-        "collection": {"challenge": CHALLENGE, "session_id": SESSION_ID},
+        "collection": {
+            "challenge": CHALLENGE,
+            "ga_environment_sha256": GA_ENVIRONMENT_SHA256,
+            "session_id": SESSION_ID,
+        },
         "document": CHECK_DOCUMENT,
         "schema_version": SCHEMA_VERSION,
         **fields,
@@ -268,11 +294,17 @@ class RuntimeFixture:
         self.acceptance.parent.mkdir(parents=True)
         self.acceptance.parent.chmod(0o700)
         self.raw_root.mkdir(mode=0o700)
+        self.environment_path = self.repository.joinpath(*ENVIRONMENT_RELATIVE.parts)
+        self.environment_path.parent.parent.mkdir(mode=0o700)
+        self.environment_path.parent.mkdir(mode=0o700)
+        self.environment_path.write_bytes(canonical_json(GA_ENVIRONMENT))
+        self.environment_path.chmod(0o600)
         self.expected = {
             "checks": CHECKS,
             "document": DOCUMENT,
             **DIGESTS,
             "from_build": FROM_BUILD,
+            "ga_environment_sha256": GA_ENVIRONMENT_SHA256,
             "product_version": PRODUCT_VERSION,
             "to_build": TO_BUILD,
         }
@@ -645,7 +677,11 @@ class RuntimeFixture:
         root = self.repository.joinpath(*COLLECTION_RELATIVE.parts)
         root.mkdir(mode=0o700)
         intent = {
-            "collection": {"challenge": CHALLENGE, "session_id": SESSION_ID},
+            "collection": {
+                "challenge": CHALLENGE,
+                "ga_environment_sha256": GA_ENVIRONMENT_SHA256,
+                "session_id": SESSION_ID,
+            },
             "document": COLLECTION_DOCUMENT,
             "package_bindings": {
                 key: DIGESTS[key]
@@ -673,7 +709,11 @@ class RuntimeFixture:
         pairs.append(("raw_published", "collection"))
         for index, (phase, step) in enumerate(pairs):
             event = {
-                "collection": {"challenge": CHALLENGE, "session_id": SESSION_ID},
+                "collection": {
+                    "challenge": CHALLENGE,
+                    "ga_environment_sha256": GA_ENVIRONMENT_SHA256,
+                    "session_id": SESSION_ID,
+                },
                 "command_sha256": None,
                 "document": COLLECTION_EVENT_DOCUMENT,
                 "phase": phase,
@@ -744,6 +784,24 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
     def test_contract_has_fixed_paths_and_twelve_raw_derived_checks(self) -> None:
         self_check()
         self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40019", "40035"))
+        self.assertEqual(
+            (
+                DOCUMENT,
+                SCHEMA_VERSION,
+                CHECK_DOCUMENT,
+                COMMAND_DOCUMENT,
+                COLLECTION_DOCUMENT,
+                COLLECTION_EVENT_DOCUMENT,
+            ),
+            (
+                "cfm-ga-runtime-acceptance-v2",
+                2,
+                "cfm-ga-runtime-check-v2",
+                "cfm-ga-command-observation-v2",
+                "cfm-ga-runtime-collection-intent-v2",
+                "cfm-ga-runtime-collection-event-v2",
+            ),
+        )
         self.assertEqual(len(CHECKS), 12)
         self.assertEqual(len(RAW_FILE_NAMES), 15)
         self.assertEqual(
@@ -760,6 +818,63 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
                 "runtime-evidence"
             ),
         )
+        self.assertEqual(
+            ENVIRONMENT_RELATIVE,
+            Path(
+                "target/candidates/0.4.0/ga/40035/stage-inputs/ga-acceptance/"
+                "migration-journals/service-transaction/environment.json"
+            ),
+        )
+        self.assertEqual(
+            INSTALL_JOURNAL_RELATIVE,
+            Path(
+                "target/candidates/0.4.0/ga/40035/stage-inputs/ga-acceptance/"
+                "migration-journals/dormant-install.json"
+            ),
+        )
+
+    def test_runtime_json_recursion_is_a_stable_domain_error(self) -> None:
+        deeply_nested = (
+            "{\"nested\":" * 10_000 + "0" + "}" * 10_000
+        ).encode("ascii")
+        with self.assertRaises(GARuntimeAcceptanceError):
+            ga_runtime._strict_json(deeply_nested, "deep runtime fixture")
+
+        with patch.object(
+            ga_runtime.json,
+            "loads",
+            side_effect=RecursionError("fixture decoder recursion"),
+        ), self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "not strict UTF-8 JSON",
+        ):
+            ga_runtime._strict_json(b"{}\n", "deep runtime fixture")
+
+        excessive_integer = b'{"value":' + b"9" * 5_000 + b"}\n"
+        with self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "not strict UTF-8 JSON",
+        ):
+            ga_runtime._strict_json(excessive_integer, "large integer fixture")
+
+        with patch.object(
+            ga_runtime,
+            "canonical_json",
+            side_effect=RecursionError("fixture canonical recursion"),
+        ), self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "not one canonical JSON object",
+        ):
+            ga_runtime._strict_json(b"{}\n", "deep runtime fixture")
+
+        with self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "not one canonical JSON object",
+        ):
+            ga_runtime._strict_json(
+                b'{"value":"\\ud800"}\n',
+                "surrogate runtime fixture",
+            )
 
     def test_complete_raw_evidence_seals_and_reopens_exact_records(self) -> None:
         result = self.fixture.seal()
@@ -809,6 +924,27 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "fixed command registry"):
             self.fixture.validate()
 
+    def test_boolean_collection_sequence_invalidates_the_adapter(self) -> None:
+        for index, boolean_value in ((0, False), (1, True)):
+            with self.subTest(index=index):
+                fixture = RuntimeFixture()
+                try:
+                    collection = fixture.repository.joinpath(
+                        *COLLECTION_RELATIVE.parts
+                    )
+                    event = collection / f"event-{index:03d}.json"
+                    document = json.loads(event.read_text(encoding="utf-8"))
+                    document["sequence"] = boolean_value
+                    event.write_bytes(canonical_json(document))
+                    event.chmod(0o600)
+                    with self.assertRaisesRegex(
+                        GARuntimeAcceptanceError,
+                        "collection event identity is invalid",
+                    ):
+                        fixture.seal()
+                finally:
+                    fixture.cleanup()
+
     def test_duplicate_json_key_is_rejected(self) -> None:
         path = self.fixture.raw_root / "launch.json"
         path.write_bytes(
@@ -843,6 +979,14 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         }
         self.fixture.write_all()
         with self.assertRaisesRegex(Exception, "unexpected field set"):
+            self.fixture.seal()
+
+    def test_v1_runtime_evidence_is_not_accepted_by_the_v2_contract(self) -> None:
+        launch = self.fixture.documents["launch.json"]
+        launch["document"] = "cfm-ga-runtime-check-v1"
+        launch["schema_version"] = 1
+        self.fixture.write_all()
+        with self.assertRaisesRegex(Exception, "evidence identity is invalid"):
             self.fixture.seal()
 
     def test_partial_traffic_without_target_token_is_rejected(self) -> None:
@@ -983,7 +1127,13 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
 
 class FakeCollectorRuntime:
-    def __init__(self, fixture: RuntimeFixture, *, fail_launch: bool = False) -> None:
+    def __init__(
+        self,
+        fixture: RuntimeFixture,
+        *,
+        environments: list[dict[str, object]] | None = None,
+        fail_launch: bool = False,
+    ) -> None:
         self.fixture = fixture
         self.fail_launch = fail_launch
         self.calls: list[tuple[list[str], int]] = []
@@ -1011,6 +1161,16 @@ class FakeCollectorRuntime:
         add(documents["shutdown-restore.json"]["off_proof_command"])
         add(documents["shutdown-restore.json"]["process_observation"])
         self.guards = [guard(), guard()]
+        self.environments = (
+            [copy.deepcopy(GA_ENVIRONMENT) for _ in range(3)]
+            if environments is None
+            else copy.deepcopy(environments)
+        )
+
+    def capture_environment(self) -> dict[str, object]:
+        if not self.environments:
+            raise AssertionError("unexpected extra GA environment capture")
+        return copy.deepcopy(self.environments.pop(0))
 
     def run(self, argv: list[str], *, timeout: int = 900) -> dict[str, object]:
         self.calls.append((list(argv), timeout))
@@ -1059,6 +1219,31 @@ class FakeCollectorRuntime:
 
 
 class GARuntimeCollectorTests(unittest.TestCase):
+    class _CapturePipe:
+        def __init__(self, descriptor: int, *, close_error: bool = False) -> None:
+            self.descriptor = descriptor
+            self.close_error = close_error
+            self.closed = False
+
+        def fileno(self) -> int:
+            return self.descriptor
+
+        def close(self) -> None:
+            self.closed = True
+            if self.close_error:
+                raise OSError("fixture capture pipe close failure")
+
+    class _CaptureProcess:
+        def __init__(
+            self,
+            stdout: "GARuntimeCollectorTests._CapturePipe",
+            stderr: "GARuntimeCollectorTests._CapturePipe",
+        ) -> None:
+            self.pid = 525_252
+            self.stdout = stdout
+            self.stderr = stderr
+            self.returncode = None
+
     def setUp(self) -> None:
         self.fixture = RuntimeFixture()
         self.fixture.remove_unsealed_raw_tree()
@@ -1079,6 +1264,132 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 return_value=guard(),
             ),
         )
+
+    def _capture_runtime(self) -> ProductionCollectorRuntime:
+        runtime = object.__new__(ProductionCollectorRuntime)
+        runtime.repository = self.fixture.repository
+        runtime.environment = {}
+        return runtime
+
+    def test_capture_selector_initialization_failure_cleans_all_resources(
+        self,
+    ) -> None:
+        for stdout_close_error in (False, True):
+            with self.subTest(stdout_close_error=stdout_close_error):
+                runtime = self._capture_runtime()
+                stdout = self._CapturePipe(21, close_error=stdout_close_error)
+                stderr = self._CapturePipe(22)
+                process = self._CaptureProcess(stdout, stderr)
+                with patch.object(
+                    runtime,
+                    "_tunnel_interface",
+                    return_value="utun6",
+                ), patch(
+                    "scripts.ga_runtime_acceptance.packet_capture_filter_argv",
+                    return_value=(),
+                ), patch(
+                    "scripts.ga_runtime_acceptance.subprocess.Popen",
+                    return_value=process,
+                ), patch(
+                    "scripts.ga_runtime_acceptance.selectors.DefaultSelector",
+                    side_effect=OSError("fixture selector exhaustion"),
+                ), patch.object(
+                    runtime,
+                    "_terminate_capture",
+                ) as terminate, self.assertRaises(
+                    GARuntimeAcceptanceError
+                ) as captured:
+                    runtime._capture_traffic_bytes(
+                        "tcp_traffic",
+                        RuntimeFixture._traffic_tokens("tcp_traffic"),
+                    )
+                self.assertIn(
+                    (
+                        "pipes could not be closed"
+                        if stdout_close_error
+                        else "selector is unavailable"
+                    ),
+                    str(captured.exception),
+                )
+                terminate.assert_called_once_with(process)
+                self.assertTrue(stdout.closed)
+                self.assertTrue(stderr.closed)
+
+    def test_capture_post_selector_io_failure_is_typed_and_interrupt_cleans(
+        self,
+    ) -> None:
+        for failure in (
+            OSError("fixture descriptor exhaustion"),
+            KeyboardInterrupt(),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                runtime = self._capture_runtime()
+                stdout = self._CapturePipe(21)
+                stderr = self._CapturePipe(22)
+                process = self._CaptureProcess(stdout, stderr)
+                expected = (
+                    GARuntimeAcceptanceError
+                    if isinstance(failure, OSError)
+                    else KeyboardInterrupt
+                )
+                with patch.object(
+                    runtime,
+                    "_tunnel_interface",
+                    return_value="utun6",
+                ), patch(
+                    "scripts.ga_runtime_acceptance.packet_capture_filter_argv",
+                    return_value=(),
+                ), patch(
+                    "scripts.ga_runtime_acceptance.subprocess.Popen",
+                    return_value=process,
+                ), patch(
+                    "scripts.ga_runtime_acceptance.os.set_blocking",
+                    side_effect=failure,
+                ), patch.object(
+                    runtime,
+                    "_terminate_capture",
+                ) as terminate, self.assertRaises(expected) as captured:
+                    runtime._capture_traffic_bytes(
+                        "tcp_traffic",
+                        RuntimeFixture._traffic_tokens("tcp_traffic"),
+                    )
+                if isinstance(failure, OSError):
+                    self.assertIn("process I/O failed", str(captured.exception))
+                terminate.assert_called_once_with(process)
+                self.assertTrue(stdout.closed)
+                self.assertTrue(stderr.closed)
+
+    def _create_recoverable_collection(self) -> None:
+        failing = FakeCollectorRuntime(self.fixture, fail_launch=True)
+        source_patches = self._patch_evidence_sources()
+        with source_patches[0], source_patches[1], source_patches[2], self.assertRaises(
+            GACollectionRecoveryRequired
+        ):
+            collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=failing,
+                challenge_bytes=b"C" * 32,
+                session_id=SESSION_ID,
+            )
+
+    def _absent_host_recovery_runtime(
+        self,
+        environments: list[dict[str, object]],
+    ) -> FakeCollectorRuntime:
+        runtime = FakeCollectorRuntime(self.fixture, environments=environments)
+        shutdown = self.fixture.documents["shutdown-restore.json"]
+        runtime.receipts = {
+            tuple(PROCESS_OBSERVATION_COMMAND): [
+                copy.deepcopy(shutdown["process_observation"]),
+                copy.deepcopy(shutdown["host_process_observation"]),
+                copy.deepcopy(shutdown["process_observation"]),
+            ],
+            tuple(OFF_PROOF_COMMAND): [copy.deepcopy(shutdown["off_proof_command"])],
+        }
+        runtime.guards = [guard()]
+        return runtime
 
     def test_production_capture_is_inside_authenticated_host_test_stage(self) -> None:
         runtime = object.__new__(ProductionCollectorRuntime)
@@ -1165,6 +1476,169 @@ class GARuntimeCollectorTests(unittest.TestCase):
         self.assertTrue(all("run_current_service_transaction.sh" not in argv for argv in commands))
         self.assertTrue(all("run_dormant_app_install.sh" not in argv for argv in commands))
         self.assertEqual(runtime.guards, [])
+        self.assertEqual(runtime.environments, [])
+
+    def test_environment_digest_propagates_without_private_identity_material(self) -> None:
+        runtime = FakeCollectorRuntime(self.fixture)
+        source_patches = self._patch_evidence_sources()
+        with source_patches[0], source_patches[1], source_patches[2]:
+            collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=runtime,
+                challenge_bytes=b"C" * 32,
+                session_id=SESSION_ID,
+            )
+
+        expected_collection = {
+            "challenge": CHALLENGE,
+            "ga_environment_sha256": GA_ENVIRONMENT_SHA256,
+            "session_id": SESSION_ID,
+        }
+        collection_root = self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts)
+        collection_documents = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(collection_root.glob("*.json"))
+        ]
+        raw_documents = [
+            json.loads((self.fixture.raw_root / name).read_text(encoding="utf-8"))
+            for name in sorted(RAW_FILE_NAMES - PCAP_FILES)
+        ]
+        adapter = json.loads(self.fixture.acceptance.read_text(encoding="utf-8"))
+        self.assertTrue(collection_documents)
+        self.assertTrue(raw_documents)
+        self.assertTrue(
+            all(document["collection"] == expected_collection for document in collection_documents)
+        )
+        self.assertTrue(
+            all(document["collection"] == expected_collection for document in raw_documents)
+        )
+        self.assertEqual(adapter["collection"], expected_collection)
+        self.assertEqual(
+            adapter["bindings"]["ga_environment_sha256"],
+            GA_ENVIRONMENT_SHA256,
+        )
+
+        persisted = b"".join(
+            path.read_bytes()
+            for path in (
+                *sorted(collection_root.glob("*.json")),
+                *sorted(self.fixture.raw_root.iterdir()),
+                self.fixture.acceptance,
+            )
+        )
+        for forbidden in (
+            b"boot_session",
+            b"machine_sha256",
+            b"boot_environment_sha256",
+            RAW_MACHINE_UUID.encode("ascii"),
+            RAW_BOOT_UUID.encode("ascii"),
+            GA_ENVIRONMENT["machine_sha256"].encode("ascii"),
+            GA_ENVIRONMENT["boot_environment_sha256"].encode("ascii"),
+        ):
+            self.assertNotIn(forbidden, persisted)
+
+    def test_environment_drift_before_intent_is_rejected_without_side_effects(self) -> None:
+        drifted = {**GA_ENVIRONMENT, "machine_sha256": "9" * 64}
+        runtime = FakeCollectorRuntime(self.fixture, environments=[drifted])
+        with self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "collection admission environment",
+        ):
+            collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=runtime,
+                challenge_bytes=b"C" * 32,
+                session_id=SESSION_ID,
+            )
+        self.assertFalse(
+            self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts).exists()
+        )
+        self.assertFalse(self.fixture.raw_root.exists())
+        self.assertEqual(runtime.calls, [])
+
+    def test_environment_symlink_is_rejected_before_collection_intent(self) -> None:
+        original = self.fixture.environment_path.parent / "environment-original.json"
+        self.fixture.environment_path.rename(original)
+        self.fixture.environment_path.symlink_to(original.name)
+        runtime = FakeCollectorRuntime(self.fixture)
+        with self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "cannot be reopened safely",
+        ):
+            collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=runtime,
+                challenge_bytes=b"C" * 32,
+                session_id=SESSION_ID,
+            )
+        self.assertFalse(
+            self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts).exists()
+        )
+        self.assertEqual(runtime.calls, [])
+
+    def test_environment_drift_before_first_mutation_aborts_collection(self) -> None:
+        drifted = {**GA_ENVIRONMENT, "boot_environment_sha256": "9" * 64}
+        runtime = FakeCollectorRuntime(
+            self.fixture,
+            environments=[GA_ENVIRONMENT, drifted],
+        )
+        source_patches = self._patch_evidence_sources()
+        with source_patches[0], source_patches[1], source_patches[2], self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "pre-mutation environment",
+        ):
+            collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=runtime,
+                challenge_bytes=b"C" * 32,
+                session_id=SESSION_ID,
+            )
+        commands = [argv for argv, _timeout in runtime.calls]
+        self.assertNotIn(
+            ["/usr/bin/open", "-a", "/Applications/Clash for Mac.app"],
+            commands,
+        )
+        collection_root = self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts)
+        final_event = json.loads(
+            sorted(collection_root.glob("event-*.json"))[-1].read_text(encoding="utf-8")
+        )
+        self.assertEqual(final_event["phase"], "aborted_before_mutation")
+        self.assertFalse(self.fixture.raw_root.exists())
+
+    def test_environment_drift_after_restore_requires_recovery(self) -> None:
+        drifted = {**GA_ENVIRONMENT, "macos_build_version": "26A5389a"}
+        runtime = FakeCollectorRuntime(
+            self.fixture,
+            environments=[GA_ENVIRONMENT, GA_ENVIRONMENT, drifted],
+        )
+        source_patches = self._patch_evidence_sources()
+        with source_patches[0], source_patches[1], source_patches[2], self.assertRaises(
+            GACollectionRecoveryRequired
+        ) as captured:
+            collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=runtime,
+                challenge_bytes=b"C" * 32,
+                session_id=SESSION_ID,
+            )
+        self.assertIsInstance(captured.exception.__cause__, GARuntimeAcceptanceError)
+        self.assertIn("post-restore environment", str(captured.exception.__cause__))
+        collection_root = self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts)
+        final_event = json.loads(
+            sorted(collection_root.glob("event-*.json"))[-1].read_text(encoding="utf-8")
+        )
+        self.assertEqual(final_event["phase"], "recovery_required")
+        self.assertFalse(self.fixture.raw_root.exists())
 
     def test_cli_exposes_fixed_collect_and_recover_without_input_paths(self) -> None:
         self.assertEqual(_arguments(["collect"]).command, "collect")
@@ -1248,6 +1722,52 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 list(OFF_PROOF_COMMAND),
                 list(PROCESS_OBSERVATION_COMMAND),
             ],
+        )
+
+    def test_recovery_rejects_environment_drift_before_runtime_mutation(self) -> None:
+        self._create_recoverable_collection()
+        drifted = {**GA_ENVIRONMENT, "machine_sha256": "9" * 64}
+        recovery = FakeCollectorRuntime(self.fixture, environments=[drifted])
+        with self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "recovery admission environment",
+        ):
+            recover_ga_runtime_collection(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                runtime=recovery,
+            )
+        self.assertEqual(recovery.calls, [])
+        self.assertTrue(
+            self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts).is_dir()
+        )
+
+    def test_recovery_rejects_environment_drift_after_restore(self) -> None:
+        self._create_recoverable_collection()
+        drifted = {**GA_ENVIRONMENT, "macos_build_version": "26A5389a"}
+        recovery = self._absent_host_recovery_runtime(
+            [GA_ENVIRONMENT, drifted]
+        )
+        with patch(
+            "scripts.ga_runtime_acceptance._installed_guard_baseline",
+            return_value=guard(),
+        ), self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "recovery post-restore environment",
+        ):
+            recover_ga_runtime_collection(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                runtime=recovery,
+            )
+        self.assertTrue(
+            self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts).is_dir()
+        )
+        self.assertFalse(
+            any(
+                path.name.startswith("runtime-collection-aborted-")
+                for path in self.fixture.acceptance.parent.iterdir()
+            )
         )
 
     def test_recovery_uses_normal_quit_when_the_installed_host_is_running(self) -> None:

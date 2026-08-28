@@ -10,7 +10,7 @@ import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 if __package__:
     from .release_regular_file import (
@@ -31,9 +31,23 @@ MAX_BUILD_VERSION_TEXT = str(MAX_BUILD_VERSION)
 MAX_BUNDLE_IDENTITY_PLIST_BYTES = 1024 * 1024
 BUNDLE_IDENTITY_PLIST_MODE = 0o644
 
+RETIRED_GA_WORKSPACE_PATHS: Final = (
+    Path(f"target/candidates/{PRODUCT_VERSION}/validation"),
+    Path(f"target/candidates/{PRODUCT_VERSION}/signed"),
+    Path(f"target/candidates/{PRODUCT_VERSION}/release-build"),
+    Path(f"target/candidates/{PRODUCT_VERSION}/review/validated-candidate.json"),
+    Path(f"target/candidates/{PRODUCT_VERSION}/notary-attempts/release"),
+    Path(f"target/candidates/{PRODUCT_VERSION}/release"),
+    Path(f"target/candidates/{PRODUCT_VERSION}/release-transactions"),
+)
+
 
 class BuildIdentityError(ValueError):
     """A candidate bundle does not have one canonical product identity."""
+
+
+class ReleaseWorkspaceError(ValueError):
+    """The GA workspace cannot prove that retired release paths are absent."""
 
 
 @dataclass(frozen=True)
@@ -249,6 +263,42 @@ def _canonical_real_directory(value: str | Path, label: str) -> Path:
     ):
         raise BuildIdentityError(f"{label} must be a canonical real directory")
     return path
+
+
+def verify_ga_workspace_path_preconditions(repository: Path) -> None:
+    """Verify one canonical active-GA workspace excludes retired namespaces."""
+
+    try:
+        repository = _canonical_real_directory(repository, "GA workspace repository")
+    except BuildIdentityError as error:
+        raise ReleaseWorkspaceError(
+            "cannot verify one canonical GA workspace repository"
+        ) from error
+    for relative in RETIRED_GA_WORKSPACE_PATHS:
+        retired_path = repository.joinpath(*relative.parts)
+        current = repository
+        for index, component in enumerate(relative.parts):
+            current /= component
+            try:
+                metadata = current.lstat()
+            except FileNotFoundError:
+                break
+            except OSError as error:
+                raise ReleaseWorkspaceError(
+                    f"cannot verify that retired release path is absent: {retired_path}"
+                ) from error
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ReleaseWorkspaceError(
+                    f"retired release path must not contain a symlink: {current}"
+                )
+            if index == len(relative.parts) - 1:
+                raise ReleaseWorkspaceError(
+                    f"retired validation/final release path is forbidden: {retired_path}"
+                )
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ReleaseWorkspaceError(
+                    f"cannot verify that retired release path is absent: {retired_path}"
+                )
 
 
 def _require_private_directory(path: Path, label: str) -> None:

@@ -15,7 +15,9 @@ from scripts.release_build_identity import (
     BundleBuildIdentity,
     BuildIdentityError,
     CandidateBundleContext,
+    RETIRED_GA_WORKSPACE_PATHS,
     ReleaseIdentity,
+    ReleaseWorkspaceError,
     UNSIGNED_VALIDATION_BUILD,
     bundle_build_identity,
     candidate_bundle_verification_paths,
@@ -28,6 +30,7 @@ from scripts.release_build_identity import (
     ga_signed_root,
     ga_signed_native_products_root,
     ga_signing_attempt_output_root,
+    verify_ga_workspace_path_preconditions,
 )
 
 
@@ -411,6 +414,136 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 "/repo/target/candidates/0.4.0/ga/40035/signing-output/signed-native-products"
             ),
         )
+
+    def test_ga_workspace_path_preconditions_reject_every_retired_path(self) -> None:
+        for relative in RETIRED_GA_WORKSPACE_PATHS:
+            with (
+                self.subTest(relative=relative),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                repository = Path(directory).resolve()
+                path = repository.joinpath(*relative.parts)
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b"retired\n")
+
+                with self.assertRaisesRegex(ReleaseWorkspaceError, "retired"):
+                    verify_ga_workspace_path_preconditions(repository)
+
+    def test_retired_ga_workspace_path_set_is_exact(self) -> None:
+        self.assertEqual(
+            RETIRED_GA_WORKSPACE_PATHS,
+            (
+                Path("target/candidates/0.4.0/validation"),
+                Path("target/candidates/0.4.0/signed"),
+                Path("target/candidates/0.4.0/release-build"),
+                Path(
+                    "target/candidates/0.4.0/review/validated-candidate.json"
+                ),
+                Path("target/candidates/0.4.0/notary-attempts/release"),
+                Path("target/candidates/0.4.0/release"),
+                Path("target/candidates/0.4.0/release-transactions"),
+            ),
+        )
+
+    def test_ga_workspace_path_preconditions_reject_broken_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            path = repository.joinpath(*RETIRED_GA_WORKSPACE_PATHS[0].parts)
+            path.parent.mkdir(parents=True)
+            path.symlink_to("missing-retired-path")
+            self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(ReleaseWorkspaceError, "retired"):
+                verify_ga_workspace_path_preconditions(repository)
+
+    def test_ga_workspace_path_preconditions_reject_symlink_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            (repository / "target").mkdir()
+            (repository / "target/candidates").symlink_to(
+                repository / "missing-candidate-root",
+                target_is_directory=True,
+            )
+
+            with self.assertRaisesRegex(ReleaseWorkspaceError, "symlink"):
+                verify_ga_workspace_path_preconditions(repository)
+
+    def test_ga_workspace_path_preconditions_reject_nested_symlink_ancestor(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            candidate_root = repository / "target/candidates/0.4.0"
+            candidate_root.mkdir(parents=True)
+            (candidate_root / "review").symlink_to(
+                repository / "missing-review-root",
+                target_is_directory=True,
+            )
+
+            with self.assertRaisesRegex(ReleaseWorkspaceError, "symlink"):
+                verify_ga_workspace_path_preconditions(repository)
+
+    def test_ga_workspace_path_preconditions_are_read_only_when_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            before = tuple(repository.iterdir())
+
+            verify_ga_workspace_path_preconditions(repository)
+
+            self.assertEqual(tuple(repository.iterdir()), before)
+
+    def test_ga_workspace_path_preconditions_require_canonical_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory).resolve()
+            repository = parent / "repository"
+            repository.mkdir()
+            alias = parent / "repository-alias"
+            alias.symlink_to(repository, target_is_directory=True)
+
+            for rejected in (Path("relative-repository"), alias):
+                with self.subTest(repository=rejected), self.assertRaisesRegex(
+                    ReleaseWorkspaceError,
+                    "canonical",
+                ):
+                    verify_ga_workspace_path_preconditions(rejected)
+
+    def test_ga_workspace_path_preconditions_fail_when_absence_is_unverifiable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            denied = repository / "target/candidates"
+            denied.mkdir(parents=True)
+            real_lstat = Path.lstat
+
+            def deny_nested_path(path: Path) -> os.stat_result:
+                if path == denied:
+                    raise PermissionError("injected nested lstat denial")
+                return real_lstat(path)
+
+            with patch.object(Path, "lstat", new=deny_nested_path):
+                with self.assertRaisesRegex(ReleaseWorkspaceError, "cannot verify"):
+                    verify_ga_workspace_path_preconditions(repository)
+
+    def test_signed_builder_checks_workspace_before_preflight_creation(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        source = (repository / "scripts/build_signed_candidate.sh").read_text(
+            encoding="utf-8"
+        )
+        admission = source.index(
+            "verify_ga_workspace_path_preconditions(Path(sys.argv[1]))"
+        )
+        run_only = source.index('if sys.argv[3] == "run":')
+        preflight_assignment = source.index(
+            'preflight_root="$candidate_base/ga-preflight/$CFW_BUILD_NUMBER"'
+        )
+        candidate_parent_creation = source.index('mkdir -p "$parent"')
+        preflight_creation = source.index('mkdir -m 0700 "$preflight_root"')
+
+        self.assertLess(run_only, admission)
+        self.assertLess(admission, preflight_assignment)
+        self.assertLess(admission, candidate_parent_creation)
+        self.assertLess(admission, preflight_creation)
 
     def test_candidate_native_output_accepts_only_exact_build_roots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

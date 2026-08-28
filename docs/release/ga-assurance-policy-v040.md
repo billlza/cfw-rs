@@ -136,6 +136,56 @@ The preferred baseline is the lowest supported macOS 15 environment. A light
 install, launch, traffic, and shutdown smoke on the newest supported macOS
 remains recommended, but does not inherit the full assurance matrix.
 
+The ordinary-GA environment binding is private release evidence. Before the
+first service mutation, the transaction records one canonical document that
+contains only the domain-separated machine and APFS boot-environment digests,
+the physical Apple hardware model, `arm64`, and the exact macOS product/build
+versions. Raw IOPlatformUUID, APFS volume UUID, and volume-group UUID values
+must never enter a journal, log, adapter, stage seal, or upload asset. The
+service intent, dormant-install journal, runtime collection, every raw-derived
+check, and the runtime adapter bind the same environment-document digest.
+Machine, system-volume, or macOS-build drift fails closed before the next
+mutation and again after restoration.
+
+This contract fixes the machine and system environment, not one boot session.
+A reboot needed for System Extension or Network Extension approval is allowed
+only when the machine digest, APFS boot-environment digest, and exact macOS
+version/build remain unchanged. The completed service and install journals are
+then copied without modifying their source into one private, atomically
+published `migration-journals` container before runtime collection. A partial,
+pending, foreign-environment, or mixed-candidate export cannot authorize GA
+acceptance.
+
+The fixed container path is
+`target/candidates/0.4.0/ga/40035/stage-inputs/ga-acceptance/migration-journals`.
+It contains exactly the private `dormant-install.json`, the complete
+`service-transaction` directory, `export-intent.json`, and
+`export-receipt.json`. The sole environment document is
+`service-transaction/environment.json`; a second root-level environment file
+is forbidden. The producer schemas are `cfw-current-service-transaction-v3`,
+`cfw-dormant-app-install-v2`, and `cfm-ga-environment-identity-v1`. The export
+transaction uses `cfm-ga-journal-export-intent-v1` and
+`cfm-ga-journal-export-receipt-v1`. GA runtime evidence uses
+`cfm-ga-runtime-acceptance-v2`, `cfm-ga-runtime-check-v2`,
+`cfm-ga-command-observation-v2`, `cfm-ga-runtime-collection-intent-v2`, and
+`cfm-ga-runtime-collection-event-v2`. The prepackage stage remains
+`cfm-ga-prepackage-seal-v1`; the acceptance and publication stages use
+`cfm-ga-acceptance-seal-v2` and `cfm-ga-publication-seal-v2`.
+Older service/runtime/stage markers cannot be accepted as compatible evidence.
+
+The mandatory order is service recommission, journal `--export`, journal
+`--verify`, runtime `collect`, runtime `verify`, and GA-acceptance sealing.
+Journal `--recover` is admitted only after a recovery-required or
+outcome-unknown export and must be followed by `--verify`; it is never a normal
+step. Export and recovery must reopen byte-identical source journals under the
+same environment binding and must never modify producer journals or replace an
+already published container. The producer maintenance, service, and install
+lock files must already exist as owned `0600` files; the read-only exporter
+never creates a missing coordination lock. Verification holds the fixed
+`stage-inputs` directory identity continuously while it opens and validates
+the descendant acceptance container, so a directory rebind cannot combine two
+different snapshots.
+
 ## Assurance-only qualification
 
 The following evidence remains valuable but will not block an ordinary GA:

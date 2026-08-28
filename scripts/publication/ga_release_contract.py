@@ -40,8 +40,6 @@ from .durable_file import (
 from .graph_model import load_pins
 from .release_environment import release_tool_environment
 from .sealed_manifest import validate_ci_lane_document
-from scripts import current_service_transaction as service_transaction
-from scripts import dormant_app_install as dormant_install
 from scripts.candidate_artifact_binding import (
     CandidateBindingError,
     validate_candidate_app_manifest,
@@ -58,6 +56,15 @@ from scripts.github_hosted_ci_receipt import (
     validate_receipt_offline as validate_hosted_ci_receipt_offline,
     verify_receipt as live_verify_hosted_ci_receipt,
 )
+from scripts.ga_acceptance_journal_export import (
+    ACCEPTANCE_ROOT_RELATIVE,
+    ENVIRONMENT_RELATIVE,
+    GAAcceptanceJournalExportError,
+    INSTALL_RELATIVE,
+    MIGRATION_RELATIVE,
+    SERVICE_RELATIVE,
+    verify_ga_acceptance_journal_export,
+)
 from scripts.hash_artifact import build_manifest
 from scripts.notarization_transaction import (
     TransactionContext,
@@ -66,8 +73,10 @@ from scripts.notarization_transaction import (
 )
 from scripts.release_build_identity import (
     ACTIVE_RELEASE_IDENTITY,
+    ReleaseWorkspaceError,
     bundle_build_identity,
     ga_root,
+    verify_ga_workspace_path_preconditions,
 )
 from scripts.verify_notary_log import (
     NotaryLogError,
@@ -105,12 +114,11 @@ STAGE_INPUT_ROOT: Final = GA_ROOT / "stage-inputs"
 LOCAL_CI_INPUT: Final = STAGE_INPUT_ROOT / "local-ci-lanes.json"
 HOSTED_CI_INPUT: Final = STAGE_INPUT_ROOT / "hosted-ci.json"
 PUBLICATION_INPUT_ROOT: Final = STAGE_INPUT_ROOT / "publication"
-ACCEPTANCE_INPUT_ROOT: Final = STAGE_INPUT_ROOT / "ga-acceptance"
-INSTALL_JOURNAL_INPUT: Final = ACCEPTANCE_INPUT_ROOT / "dormant-install.json"
-SERVICE_JOURNAL_INPUT: Final = (
-    ACCEPTANCE_INPUT_ROOT
-    / dormant_install.GA_INSTALL_PROFILE.service_transaction_directory
-)
+ACCEPTANCE_INPUT_ROOT: Final = ACCEPTANCE_ROOT_RELATIVE
+MIGRATION_JOURNAL_INPUT: Final = MIGRATION_RELATIVE
+INSTALL_JOURNAL_INPUT: Final = INSTALL_RELATIVE
+SERVICE_JOURNAL_INPUT: Final = SERVICE_RELATIVE
+SERVICE_ENVIRONMENT_INPUT: Final = ENVIRONMENT_RELATIVE
 RUNTIME_ACCEPTANCE_INPUT: Final = ACCEPTANCE_INPUT_ROOT / "runtime-acceptance.json"
 RUNTIME_EVIDENCE_INPUT: Final = ACCEPTANCE_INPUT_ROOT / "runtime-evidence"
 
@@ -129,11 +137,15 @@ NOTARY_LOG: Final = SIGNED_ROOT / "notarization-log.json"
 GATEKEEPER_EVIDENCE: Final = SIGNED_ROOT / "gatekeeper.json"
 
 PREPACKAGE_DOCUMENT: Final = "cfm-ga-prepackage-seal-v1"
-GA_ACCEPTANCE_DOCUMENT: Final = "cfm-ga-acceptance-seal-v1"
-PUBLICATION_DOCUMENT: Final = "cfm-ga-publication-seal-v1"
-RUNTIME_ACCEPTANCE_DOCUMENT: Final = "cfm-ga-runtime-acceptance-v1"
+GA_ACCEPTANCE_DOCUMENT: Final = "cfm-ga-acceptance-seal-v2"
+PUBLICATION_DOCUMENT: Final = "cfm-ga-publication-seal-v2"
+RUNTIME_ACCEPTANCE_DOCUMENT: Final = "cfm-ga-runtime-acceptance-v2"
 GA_APP_ARTIFACT_KIND: Final = "notarized-ga-candidate-v1"
-SCHEMA_VERSION: Final = 1
+STAGE_SCHEMA_VERSIONS: Final = {
+    "prepackage": 1,
+    "ga-acceptance": 2,
+    "publication": 2,
+}
 MAX_COMMAND_OUTPUT: Final = 8 * 1024 * 1024
 
 STAGE_DOCUMENTS: Final = {
@@ -160,15 +172,6 @@ STAGE_FILE_NAMES: Final = {
         }
     ),
 }
-LEGACY_PATHS: Final = (
-    CANDIDATE_ROOT / "validation",
-    CANDIDATE_ROOT / "signed",
-    CANDIDATE_ROOT / "release-build",
-    CANDIDATE_ROOT / "review/validated-candidate.json",
-    CANDIDATE_ROOT / "notary-attempts/release",
-    CANDIDATE_ROOT / "release",
-    CANDIDATE_ROOT / "release-transactions",
-)
 GA_RUNTIME_CHECKS: Final = frozenset(
     {
         "credential_leak_scan",
@@ -247,10 +250,22 @@ def _parse_strict_json(data: bytes, path: Path, *, canonical: bool = True) -> An
             object_pairs_hook=reject_duplicates,
             parse_constant=reject_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except PublicationError:
+        raise
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        ValueError,
+    ) as error:
         raise PublicationError(f"GA JSON is invalid: {path}") from error
-    if canonical and canonical_json(value) != data:
-        raise PublicationError(f"GA JSON is not canonical: {path}")
+    if canonical:
+        try:
+            encoded = canonical_json(value)
+        except (RecursionError, UnicodeError) as error:
+            raise PublicationError(f"GA JSON is not canonical: {path}") from error
+        if encoded != data:
+            raise PublicationError(f"GA JSON is not canonical: {path}")
     return value
 
 
@@ -297,13 +312,6 @@ def _require_private_regular(path: Path) -> None:
         or stat.S_IMODE(metadata.st_mode) != 0o600
     ):
         raise PublicationError(f"GA adapter is not one owned 0600 regular file: {path}")
-
-
-def _reject_legacy_paths(repository: Path) -> None:
-    for relative in LEGACY_PATHS:
-        path = _path(repository, relative)
-        if os.path.lexists(path):
-            raise PublicationError(f"retired validation/final release path is forbidden: {path}")
 
 
 def _run_checked(
@@ -442,7 +450,10 @@ def _verified_prepackage_inputs(
     repository: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, bytes]]:
     repository = _canonical_repository(repository)
-    _reject_legacy_paths(repository)
+    try:
+        verify_ga_workspace_path_preconditions(repository)
+    except ReleaseWorkspaceError as error:
+        raise PublicationError(str(error)) from error
     if (PRODUCT_VERSION, GA_BUILD) != ("0.4.0", "40035"):
         raise PublicationError("prepackage requires the fixed v0.4.0/40035 identity")
     try:
@@ -713,7 +724,7 @@ def _stage_manifest(stage: str, bindings: dict[str, Any]) -> dict[str, Any]:
         "gate_class": GATE_CLASS,
         "gate_status": PASSED,
         "product": {"build_number": GA_BUILD, "version": PRODUCT_VERSION},
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": STAGE_SCHEMA_VERSIONS[stage],
         "stage": stage,
     }
 
@@ -746,7 +757,7 @@ def _validate_stage_manifest(value: object, stage: str) -> dict[str, Any]:
     if (
         manifest["document"] != STAGE_DOCUMENTS[stage]
         or type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != SCHEMA_VERSION
+        or manifest["schema_version"] != STAGE_SCHEMA_VERSIONS[stage]
         or manifest["stage"] != stage
         or manifest["gate_class"] != GATE_CLASS
         or manifest["gate_status"] != PASSED
@@ -854,37 +865,124 @@ def _verified_package_sets(
     }
 
 
-def _verified_service_journal(repository: Path) -> tuple[dict[str, Any], dict[str, str]]:
-    acceptance_root = _path(repository, ACCEPTANCE_INPUT_ROOT)
-    _require_real_directory(acceptance_root)
-    paths = service_transaction.ServicePaths(
-        install_paths=dormant_install.InstallPaths.production(),
-        transaction_parent=acceptance_root,
-    )
-    expected = _path(repository, SERVICE_JOURNAL_INPUT)
-    if paths.transaction_directory != expected:
-        raise PublicationError("service journal adapter path differs from the fixed GA path")
-    if os.path.lexists(paths.pending_directory):
-        raise PublicationError("pending service journal cannot authorize GA acceptance")
-    _require_real_directory(expected)
-    if any(name.startswith(".") and name.endswith(".pending") for name in os.listdir(expected)):
-        raise PublicationError("pending service event cannot authorize GA acceptance")
+def _verified_migration_journals(repository: Path) -> dict[str, Any]:
+    repository = _canonical_repository(repository)
     try:
-        with service_transaction.ServiceEventStore(paths) as store:
-            loaded = store.load()
-    except (OSError, dormant_install.InstallError) as error:
-        raise PublicationError("GA service transaction journal is invalid") from error
-    if loaded is None:
-        raise PublicationError("GA service transaction journal is absent")
-    intent, events = loaded
+        verified = verify_ga_acceptance_journal_export(repository)
+    except (OSError, GAAcceptanceJournalExportError) as error:
+        raise PublicationError("atomic GA migration journal export is invalid") from error
+    verified = require_exact_keys(
+        verified,
+        {
+            "candidate",
+            "environment",
+            "export",
+            "install_journal",
+            "previous",
+            "service_journal",
+        },
+        "verified GA migration journals",
+    )
+    environment = require_exact_keys(
+        verified["environment"],
+        {"document", "record", "sha256"},
+        "verified GA migration environment",
+    )
+    export = require_exact_keys(
+        verified["export"],
+        {"intent", "receipt", "record"},
+        "verified GA migration export",
+    )
+    install_journal = require_exact_keys(
+        verified["install_journal"],
+        {"document", "record"},
+        "verified GA install journal",
+    )
+    service_journal = require_exact_keys(
+        verified["service_journal"],
+        {"events", "intent", "record"},
+        "verified GA service journal",
+    )
+    require_sha256(environment["sha256"], "verified GA environment digest")
+    expected_records = {
+        "environment": _record(repository, _path(repository, SERVICE_ENVIRONMENT_INPUT)),
+        "export": _tree_record(repository, _path(repository, MIGRATION_JOURNAL_INPUT)),
+        "install": _record(repository, _path(repository, INSTALL_JOURNAL_INPUT)),
+        "service": _tree_record(repository, _path(repository, SERVICE_JOURNAL_INPUT)),
+    }
     if (
-        not events
-        or events[-1]["phase"] != "recommissioned"
-        or intent["candidate"]["build_number"] != GA_BUILD
-        or intent["previous"]["build_number"] != "40019"
+        environment["record"] != expected_records["environment"]
+        or export["record"] != expected_records["export"]
+        or install_journal["record"] != expected_records["install"]
+        or service_journal["record"] != expected_records["service"]
+        or verified["candidate"] != install_journal["document"]["candidate"]
+        or verified["previous"] != install_journal["document"]["previous"]
+        or service_journal["intent"]["candidate"] != verified["candidate"]
+        or service_journal["intent"]["previous"] != verified["previous"]
+        or service_journal["intent"]["ga_environment_sha256"]
+        != environment["sha256"]
+        or install_journal["document"]["ga_environment_sha256"]
+        != environment["sha256"]
     ):
-        raise PublicationError("service transaction is not a completed 40019 to 40035 migration")
-    return intent, _tree_record(repository, expected)
+        raise PublicationError(
+            "atomic GA migration journal export differs from its reopened fixed records"
+        )
+    return verified
+
+
+def _expected_candidate_from_prepackage(
+    prepackage: dict[str, Any],
+) -> dict[str, str]:
+    try:
+        bindings = prepackage["bindings"]
+        return {
+            "build_number": GA_BUILD,
+            "manifest_sha256": bindings["candidate"]["app_manifest"]["sha256"],
+            "release_source_sha256": bindings["source"][
+                "release_source_sha256"
+            ],
+            "repository_commit": bindings["source"]["repository_commit"],
+            "tree_sha256": bindings["candidate"]["signed_app"]["tree_sha256"],
+            "version": PRODUCT_VERSION,
+        }
+    except (KeyError, TypeError) as error:
+        raise PublicationError(
+            "prepackage omits the candidate identity required for GA migration"
+        ) from error
+
+
+def _require_migration_matches_prepackage(
+    prepackage: dict[str, Any],
+    migration: dict[str, Any],
+) -> None:
+    expected_candidate = _expected_candidate_from_prepackage(prepackage)
+    try:
+        install_journal = migration["install_journal"]["document"]
+        closed_migration = (
+            install_journal["phase"] == "installed"
+            and install_journal["candidate"]["build_number"] == GA_BUILD
+            and install_journal["previous"]["build_number"] == "40019"
+            and all(
+                segment["after"] is not None
+                for segment in install_journal["guards"]
+            )
+        )
+        candidate_matches = (
+            migration["candidate"] == expected_candidate
+            and install_journal["candidate"] == expected_candidate
+        )
+    except (KeyError, TypeError) as error:
+        raise PublicationError(
+            "GA migration export omits its pre-runtime candidate identity"
+        ) from error
+    if not closed_migration:
+        raise PublicationError(
+            "install journal is not a closed 40019 to 40035 migration"
+        )
+    if not candidate_matches:
+        raise PublicationError(
+            "GA migration export targets different bytes than prepackage"
+        )
 
 
 def _verified_acceptance_inputs(
@@ -892,54 +990,25 @@ def _verified_acceptance_inputs(
     prepackage: dict[str, Any],
     packages: dict[str, Any],
 ) -> dict[str, Any]:
-    install_path = _path(repository, INSTALL_JOURNAL_INPUT)
-    _require_private_regular(install_path)
-    try:
-        install_journal = dormant_install.validate_journal(
-            _load_strict_json(install_path),
-            dormant_install.GA_INSTALL_PROFILE,
-        )
-    except (OSError, dormant_install.InstallError) as error:
-        raise PublicationError("GA dormant-install journal is invalid") from error
-    if (
-        install_journal["phase"] != "installed"
-        or install_journal["candidate"]["build_number"] != GA_BUILD
-        or install_journal["previous"]["build_number"] != "40019"
-        or any(segment["after"] is None for segment in install_journal["guards"])
-    ):
-        raise PublicationError("install journal is not a closed 40019 to 40035 migration")
-    prepackage_bindings = prepackage["bindings"]
-    expected_candidate = {
-        "build_number": GA_BUILD,
-        "manifest_sha256": prepackage_bindings["candidate"]["app_manifest"]["sha256"],
-        "release_source_sha256": prepackage_bindings["source"][
-            "release_source_sha256"
-        ],
-        "repository_commit": prepackage_bindings["source"]["repository_commit"],
-        "tree_sha256": prepackage_bindings["candidate"]["signed_app"][
-            "tree_sha256"
-        ],
-        "version": PRODUCT_VERSION,
-    }
-    if install_journal["candidate"] != expected_candidate:
-        raise PublicationError("install journal targets different bytes than prepackage")
-    service_intent, service_tree = _verified_service_journal(repository)
-    if (
-        service_intent["candidate"] != install_journal["candidate"]
-        or service_intent["previous"] != install_journal["previous"]
-    ):
-        raise PublicationError("installer and service journals bind different migrations")
+    migration = _verified_migration_journals(repository)
+    _require_migration_matches_prepackage(prepackage, migration)
     runtime = _verified_runtime_acceptance_adapter(
         repository,
         packages=packages,
-        install_journal_sha256=sha256_file(install_path),
-        service_journal_tree_sha256=service_tree["sha256"],
+        ga_environment_sha256=migration["environment"]["sha256"],
+        install_journal_sha256=migration["install_journal"]["record"]["sha256"],
+        service_journal_tree_sha256=migration["service_journal"]["record"]["sha256"],
     )
     return {
         "adapter": runtime["adapter"],
-        "install_journal": _record(repository, install_path),
+        "ga_environment_sha256": migration["environment"]["sha256"],
+        "migration_journals": {
+            "environment": migration["environment"]["record"],
+            "export": migration["export"]["record"],
+            "install": migration["install_journal"]["record"],
+            "service": migration["service_journal"]["record"],
+        },
         "runtime_evidence": runtime["runtime_evidence"],
-        "service_journal": service_tree,
     }
 
 
@@ -947,6 +1016,7 @@ def _verified_runtime_acceptance_adapter(
     repository: Path,
     *,
     packages: dict[str, Any],
+    ga_environment_sha256: str,
     install_journal_sha256: str,
     service_journal_tree_sha256: str,
 ) -> dict[str, Any]:
@@ -970,6 +1040,7 @@ def _verified_runtime_acceptance_adapter(
         "dmg_gatekeeper_sha256": packages["dmg"]["gatekeeper_sha256"],
         "dmg_set_seal_sha256": packages["dmg"]["seal"]["sha256"],
         "from_build": "40019",
+        "ga_environment_sha256": ga_environment_sha256,
         "install_journal_sha256": install_journal_sha256,
         "product_version": PRODUCT_VERSION,
         "service_journal_tree_sha256": service_journal_tree_sha256,
@@ -1175,21 +1246,8 @@ def derive_runtime_expectation(repository: Path) -> dict[str, Any]:
     repository = _canonical_repository(repository)
     prepackage = verify_stage(repository, "prepackage")
     packages = _verified_package_sets(repository, prepackage)
-    install_path = _path(repository, INSTALL_JOURNAL_INPUT)
-    _require_private_regular(install_path)
-    service_intent, service_tree = _verified_service_journal(repository)
-    try:
-        install = dormant_install.validate_journal(
-            _load_strict_json(install_path),
-            dormant_install.GA_INSTALL_PROFILE,
-        )
-    except (OSError, dormant_install.InstallError) as error:
-        raise PublicationError("GA dormant-install journal is invalid") from error
-    if (
-        service_intent["candidate"] != install["candidate"]
-        or service_intent["previous"] != install["previous"]
-    ):
-        raise PublicationError("fixed installer and service journals bind different migrations")
+    migration = _verified_migration_journals(repository)
+    _require_migration_matches_prepackage(prepackage, migration)
     return {
         "checks": tuple(sorted(GA_RUNTIME_CHECKS)),
         "document": RUNTIME_ACCEPTANCE_DOCUMENT,
@@ -1197,9 +1255,10 @@ def derive_runtime_expectation(repository: Path) -> dict[str, Any]:
         "dmg_set_seal_sha256": packages["dmg"]["seal"]["sha256"],
         "dmg_sha256": packages["dmg"]["dmg_sha256"],
         "from_build": "40019",
-        "install_journal_sha256": sha256_file(install_path),
+        "ga_environment_sha256": migration["environment"]["sha256"],
+        "install_journal_sha256": migration["install_journal"]["record"]["sha256"],
         "product_version": PRODUCT_VERSION,
-        "service_journal_tree_sha256": service_tree["sha256"],
+        "service_journal_tree_sha256": migration["service_journal"]["record"]["sha256"],
         "to_build": GA_BUILD,
     }
 
@@ -1212,6 +1271,13 @@ def self_check(repository: Path) -> None:
         or _path(repository, GA_ROOT)
         != repository / "target/candidates/0.4.0/ga/40035"
         or STAGES != ("prepackage", "ga-acceptance", "publication")
+        or STAGE_SCHEMA_VERSIONS
+        != {"prepackage": 1, "ga-acceptance": 2, "publication": 2}
+        or ACCEPTANCE_INPUT_ROOT.parent != STAGE_INPUT_ROOT
+        or MIGRATION_JOURNAL_INPUT.parent != ACCEPTANCE_INPUT_ROOT
+        or INSTALL_JOURNAL_INPUT.parent != MIGRATION_JOURNAL_INPUT
+        or SERVICE_JOURNAL_INPUT.parent != MIGRATION_JOURNAL_INPUT
+        or SERVICE_ENVIRONMENT_INPUT.parent != SERVICE_JOURNAL_INPUT
         or any(
             _path(repository, output).is_relative_to(_path(repository, ASSURANCE_ROOT))
             for output in STAGE_OUTPUTS.values()

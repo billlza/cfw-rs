@@ -17,6 +17,7 @@ from unittest.mock import call, patch
 
 from scripts.candidate_artifact_binding import CandidateBindingError
 from scripts import dormant_app_install as install
+from scripts import ga_acceptance_environment as ga_environment
 
 from scripts.dormant_app_install import (
     AppIdentity,
@@ -63,6 +64,17 @@ CANDIDATE = CandidateIdentity(
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
 )
+GA_ENVIRONMENT = {
+    "architecture": "arm64",
+    "boot_environment_sha256": "9" * 64,
+    "document": ga_environment.DOCUMENT,
+    "hardware_model": "Mac16,1",
+    "machine_sha256": "8" * 64,
+    "macos_build_version": "26A5388g",
+    "macos_product_version": "27.0",
+    "physical_nonvirtualized": True,
+    "schema_version": ga_environment.SCHEMA_VERSION,
+}
 
 
 def service_status_fixture(
@@ -269,12 +281,21 @@ class DormantInstallFixture:
         *,
         captures: list[dict[str, object]] | None = None,
         dormant=None,
+        environment: dict[str, object] | None = None,
         quick=None,
         swap=None,
     ) -> InstallRuntime:
         guard_values = captures or [guard()]
+
+        def require_service_decommissioned(
+            _paths, _candidate, _previous, expected_guard
+        ):
+            _assert_guard_unchanged(self.service_baseline, expected_guard)
+            return dict(GA_ENVIRONMENT)
+
         return InstallRuntime(
             capture_guard=GuardSequence(guard_values),
+            observe_environment=lambda: dict(environment or GA_ENVIRONMENT),
             require_cfm_dormant=dormant or (lambda _guard: None),
             require_cfm_process_absent=quick or (lambda: []),
             admit_candidate=self.admit,
@@ -283,10 +304,7 @@ class DormantInstallFixture:
             sync_tree=lambda _path: None,
             swap=swap or self.swap,
             verify_bundle=lambda _path, _identity: None,
-            require_service_decommissioned=(
-                lambda _paths, _candidate, _previous, expected_guard:
-                _assert_guard_unchanged(self.service_baseline, expected_guard)
-            ),
+            require_service_decommissioned=require_service_decommissioned,
         )
 
     def transaction(self, **runtime_arguments) -> DormantInstallTransaction:
@@ -327,10 +345,25 @@ class DormantInstallTransactionTests(unittest.TestCase):
         self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), OLD)
         self.assertEqual(self.fixture.swap_count, 1)
         self.assertEqual(result["guards"][0]["before"], result["guards"][0]["after"])
+        self.assertEqual(
+            result["ga_environment_sha256"],
+            ga_environment.environment_sha256(GA_ENVIRONMENT),
+        )
         journal = self.fixture.parent / JOURNAL_NAME
         self.assertEqual(stat.S_IMODE(journal.stat().st_mode), 0o600)
         self.assertEqual(journal.parent, self.fixture.parent)
         self.assertNotIn(self.fixture.target, journal.parents)
+
+    def test_environment_drift_blocks_before_journal_copy_or_swap(self) -> None:
+        changed = dict(GA_ENVIRONMENT)
+        changed["machine_sha256"] = "7" * 64
+        with self.assertRaises(InstallError) as captured:
+            self.fixture.transaction(environment=changed).install()
+        self.assertEqual(captured.exception.code, "install_environment_drift")
+        self.assertFalse((self.fixture.parent / JOURNAL_NAME).exists())
+        self.assertFalse((self.fixture.parent / JOURNAL_PENDING_NAME).exists())
+        self.assertEqual(self.fixture.copy_count, 0)
+        self.assertEqual(self.fixture.swap_count, 0)
 
     def test_registered_or_running_cfm_blocks_before_any_journal_or_copy(self) -> None:
         def blocked(_guard) -> None:
@@ -762,6 +795,167 @@ class DormantInstallTransactionTests(unittest.TestCase):
 
 
 class DormantInstallValidationTests(unittest.TestCase):
+    def test_install_journal_json_recursion_is_a_stable_domain_error(self) -> None:
+        deeply_nested = (
+            "{\"nested\":" * 10_000 + "0" + "}" * 10_000
+        ).encode("ascii")
+        with self.assertRaises(InstallError) as captured:
+            install.validate_journal_bytes(deeply_nested)
+        self.assertEqual(captured.exception.code, "journal_invalid")
+
+        with patch.object(
+            install,
+            "_canonical_json",
+            side_effect=RecursionError("fixture canonical recursion"),
+        ), self.assertRaises(InstallError) as captured:
+            install.validate_journal_bytes(b"{}\n")
+        self.assertEqual(captured.exception.code, "journal_invalid")
+
+        for token in (b"NaN", b"Infinity", b"-Infinity"):
+            with self.subTest(token=token), self.assertRaises(
+                InstallError
+            ) as captured:
+                install.validate_journal_bytes(
+                    b'{"value":' + token + b"}\n"
+                )
+            self.assertEqual(captured.exception.code, "journal_invalid")
+
+    def test_service_evidence_json_recursion_is_a_stable_domain_error(self) -> None:
+        deeply_nested = (
+            "{\"nested\":" * 10_000 + "0" + "}" * 10_000
+        ).encode("ascii")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "service.json"
+            path.write_bytes(deeply_nested)
+            path.chmod(0o600)
+            descriptor = os.open(root, os.O_RDONLY)
+            try:
+                with self.assertRaises(InstallError) as captured:
+                    install._read_private_service_document(
+                        descriptor,
+                        path.name,
+                        "deep service fixture",
+                    )
+                self.assertEqual(
+                    captured.exception.code,
+                    "service_decommission_evidence_invalid",
+                )
+
+                path.write_bytes(b'{"value":NaN}\n')
+                path.chmod(0o600)
+                with self.assertRaises(InstallError) as captured:
+                    install._read_private_service_document(
+                        descriptor,
+                        path.name,
+                        "non-finite service fixture",
+                    )
+                self.assertEqual(
+                    captured.exception.code,
+                    "service_decommission_evidence_invalid",
+                )
+
+                path.write_bytes(b"{}\n")
+                path.chmod(0o600)
+                with patch.object(
+                    install.os,
+                    "stat",
+                    side_effect=FileNotFoundError("fixture path rebind"),
+                ), self.assertRaises(InstallError) as captured:
+                    install._read_private_service_document(
+                        descriptor,
+                        path.name,
+                        "rebound service fixture",
+                    )
+                self.assertEqual(
+                    captured.exception.code,
+                    "service_decommission_evidence_invalid",
+                )
+
+                path.write_bytes(b"{}\n")
+                path.chmod(0o600)
+                with patch.object(
+                    install,
+                    "_canonical_json",
+                    side_effect=RecursionError("fixture canonical recursion"),
+                ), self.assertRaises(InstallError) as captured:
+                    install._read_private_service_document(
+                        descriptor,
+                        path.name,
+                        "deep service fixture",
+                    )
+                self.assertEqual(
+                    captured.exception.code,
+                    "service_decommission_evidence_invalid",
+                )
+            finally:
+                os.close(descriptor)
+
+    def test_service_receipt_deep_json_is_a_stable_domain_error(self) -> None:
+        deeply_nested = "{\"nested\":" * 10_000 + "0" + "}" * 10_000
+        with self.assertRaises(InstallError) as captured:
+            parse_service_maintenance_receipt(
+                CommandResult(0, deeply_nested + "\n", ""),
+                "status",
+            )
+        self.assertEqual(captured.exception.code, "cfm_service_status_invalid")
+
+        with self.assertRaises(InstallError) as captured:
+            parse_service_maintenance_receipt(
+                CommandResult(0, '{"value":NaN}\n', ""),
+                "status",
+            )
+        self.assertEqual(captured.exception.code, "cfm_service_status_invalid")
+
+        receipt = {
+            "action": "status",
+            "document": install.SERVICE_MAINTENANCE_DOCUMENT,
+            "engine_status": None,
+            "global_authority": "not_registered",
+            "off_proof_profile": None,
+            "proxy_agent": "not_registered",
+        }
+        stdout = json.dumps(
+            receipt,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ) + "\n"
+        with patch.object(
+            install,
+            "_canonical_json",
+            side_effect=RecursionError("fixture canonical recursion"),
+        ), self.assertRaises(InstallError) as captured:
+            parse_service_maintenance_receipt(
+                CommandResult(0, stdout, ""),
+                "status",
+            )
+        self.assertEqual(captured.exception.code, "cfm_service_status_invalid")
+
+    def test_existing_install_lock_path_failure_is_typed_without_recreation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = InstallPaths(
+                repository=root,
+                candidate_app=root / TARGET_NAME,
+                candidate_manifest=root / f"{TARGET_NAME}.manifest.json",
+                target_parent=root,
+            )
+            lock_path = root / LOCK_NAME
+            lock_path.write_bytes(b"")
+            lock_path.chmod(0o600)
+            with JournalStore(paths) as store, patch.object(
+                install.os,
+                "stat",
+                side_effect=FileNotFoundError("fixture lock rebind"),
+            ), self.assertRaises(InstallError) as captured:
+                with store.locked(require_existing=True):
+                    self.fail("rebound installation lock was accepted")
+            self.assertEqual(captured.exception.code, "install_lock_unsafe")
+            self.assertTrue(lock_path.is_file())
+
     def test_service_maintenance_receipt_engine_status_contract(self) -> None:
         actions = (
             "status",
@@ -987,6 +1181,31 @@ class DormantInstallValidationTests(unittest.TestCase):
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         document = {
             "candidate": CANDIDATE.document(),
+            "document": install.DOCUMENT,
+            "ga_environment_sha256": ga_environment.environment_sha256(
+                GA_ENVIRONMENT
+            ),
+            "guards": [
+                {"after": None, "before": guard(), "operation": "install"}
+            ],
+            "phase": "prepared",
+            "previous": OLD.document(),
+            "schema_version": install.SCHEMA_VERSION,
+            "sequence": 1,
+            "staging_name": f"{STAGING_PREFIX}{transaction_id}",
+            "transaction_id": transaction_id,
+        }
+        validate_journal(document, GA_INSTALL_PROFILE)
+
+        document["previous"]["build_number"] = "40030"
+        with self.assertRaises(InstallError) as captured:
+            validate_journal(document, GA_INSTALL_PROFILE)
+        self.assertEqual(captured.exception.code, "journal_invalid")
+
+    def test_pre_environment_install_schema_is_rejected(self) -> None:
+        transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        legacy = {
+            "candidate": CANDIDATE.document(),
             "document": "cfw-dormant-app-install-v1",
             "guards": [
                 {"after": None, "before": guard(), "operation": "install"}
@@ -998,11 +1217,28 @@ class DormantInstallValidationTests(unittest.TestCase):
             "staging_name": f"{STAGING_PREFIX}{transaction_id}",
             "transaction_id": transaction_id,
         }
-        validate_journal(document, GA_INSTALL_PROFILE)
-
-        document["previous"]["build_number"] = "40030"
         with self.assertRaises(InstallError) as captured:
-            validate_journal(document, GA_INSTALL_PROFILE)
+            validate_journal(legacy, GA_INSTALL_PROFILE)
+        self.assertEqual(captured.exception.code, "journal_invalid")
+
+        current = {
+            "candidate": CANDIDATE.document(),
+            "document": install.DOCUMENT,
+            "ga_environment_sha256": ga_environment.environment_sha256(
+                GA_ENVIRONMENT
+            ),
+            "guards": [
+                {"after": None, "before": guard(), "operation": "install"}
+            ],
+            "phase": "prepared",
+            "previous": OLD.document(),
+            "schema_version": True,
+            "sequence": 1,
+            "staging_name": f"{STAGING_PREFIX}{transaction_id}",
+            "transaction_id": transaction_id,
+        }
+        with self.assertRaises(InstallError) as captured:
+            validate_journal(current, GA_INSTALL_PROFILE)
         self.assertEqual(captured.exception.code, "journal_invalid")
 
     def test_retired_final_cli_and_wrapper_are_explicitly_rejected(self) -> None:
@@ -1041,11 +1277,14 @@ class DormantInstallValidationTests(unittest.TestCase):
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         installed = {
             "candidate": CANDIDATE.document(),
-            "document": "cfw-dormant-app-install-v1",
+            "document": install.DOCUMENT,
+            "ga_environment_sha256": ga_environment.environment_sha256(
+                GA_ENVIRONMENT
+            ),
             "guards": [{"after": guard(), "before": guard(), "operation": "install"}],
             "phase": "installed",
             "previous": OLD.document(),
-            "schema_version": 1,
+            "schema_version": install.SCHEMA_VERSION,
             "sequence": 4,
             "staging_name": f"{STAGING_PREFIX}{transaction_id}",
             "transaction_id": transaction_id,
@@ -1062,14 +1301,17 @@ class DormantInstallValidationTests(unittest.TestCase):
         transaction_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         document = {
             "candidate": CANDIDATE.document(),
-            "document": "cfw-dormant-app-install-v1",
+            "document": install.DOCUMENT,
+            "ga_environment_sha256": ga_environment.environment_sha256(
+                GA_ENVIRONMENT
+            ),
             "guards": [
                 {"after": guard(), "before": guard(), "operation": "install"},
                 {"after": guard(), "before": guard(), "operation": "rollback"},
             ],
             "phase": "installed",
             "previous": OLD.document(),
-            "schema_version": 1,
+            "schema_version": install.SCHEMA_VERSION,
             "sequence": 5,
             "staging_name": f"{STAGING_PREFIX}{transaction_id}",
             "transaction_id": transaction_id,
@@ -1090,11 +1332,14 @@ class DormantInstallValidationTests(unittest.TestCase):
     def test_journal_rejects_caller_chosen_staging_name(self) -> None:
         document = {
             "candidate": CANDIDATE.document(),
-            "document": "cfw-dormant-app-install-v1",
+            "document": install.DOCUMENT,
+            "ga_environment_sha256": ga_environment.environment_sha256(
+                GA_ENVIRONMENT
+            ),
             "guards": [{"after": guard(), "before": guard(), "operation": "install"}],
             "phase": "installed",
             "previous": OLD.document(),
-            "schema_version": 1,
+            "schema_version": install.SCHEMA_VERSION,
             "sequence": 4,
             "staging_name": "../../arbitrary",
             "transaction_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
@@ -1530,6 +1775,89 @@ en0: flags=8863<UP> mtu 1500
 
 
 class BoundedCommandRunnerTests(unittest.TestCase):
+    class _FakePipe:
+        def __init__(
+            self,
+            *,
+            descriptor: int = 11,
+            close_error: bool = False,
+        ) -> None:
+            self.descriptor = descriptor
+            self.close_error = close_error
+            self.closed = False
+
+        def fileno(self) -> int:
+            return self.descriptor
+
+        def close(self) -> None:
+            self.closed = True
+            if self.close_error:
+                raise OSError("fixture pipe close failure")
+
+    class _FakeProcess:
+        def __init__(
+            self,
+            stdout: "BoundedCommandRunnerTests._FakePipe",
+            stderr: "BoundedCommandRunnerTests._FakePipe",
+        ) -> None:
+            self.pid = 424_242
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def test_selector_initialization_failure_cleans_process_and_both_pipes(
+        self,
+    ) -> None:
+        for stdout_close_error in (False, True):
+            with self.subTest(stdout_close_error=stdout_close_error):
+                stdout = self._FakePipe(close_error=stdout_close_error)
+                stderr = self._FakePipe()
+                process = self._FakeProcess(stdout, stderr)
+                with patch(
+                    "scripts.dormant_app_install.subprocess.Popen",
+                    return_value=process,
+                ), patch(
+                    "scripts.dormant_app_install.selectors.DefaultSelector",
+                    side_effect=OSError("fixture selector exhaustion"),
+                ), patch(
+                    "scripts.dormant_app_install._terminate_process_group",
+                    return_value=None,
+                ) as terminate, self.assertRaises(InstallError) as captured:
+                    _run_bounded_process(("/usr/bin/true",), timeout=1)
+                self.assertEqual(
+                    captured.exception.code,
+                    (
+                        "command_cleanup_failed"
+                        if stdout_close_error
+                        else "command_io_unavailable"
+                    ),
+                )
+                terminate.assert_called_once_with(process, process.pid)
+                self.assertTrue(stdout.closed)
+                self.assertTrue(stderr.closed)
+
+    def test_post_selector_io_failure_is_typed_and_cleans_every_resource(
+        self,
+    ) -> None:
+        stdout = self._FakePipe(descriptor=11)
+        stderr = self._FakePipe(descriptor=12)
+        process = self._FakeProcess(stdout, stderr)
+        with patch(
+            "scripts.dormant_app_install.subprocess.Popen",
+            return_value=process,
+        ), patch(
+            "scripts.dormant_app_install.os.set_blocking",
+            side_effect=OSError("fixture descriptor exhaustion"),
+        ), patch(
+            "scripts.dormant_app_install._terminate_process_group",
+            return_value=None,
+        ) as terminate, self.assertRaises(InstallError) as captured:
+            _run_bounded_process(("/usr/bin/true",), timeout=1)
+        self.assertEqual(captured.exception.code, "command_io_unavailable")
+        self.assertIsInstance(captured.exception.__cause__, OSError)
+        terminate.assert_called_once_with(process, process.pid)
+        self.assertTrue(stdout.closed)
+        self.assertTrue(stderr.closed)
+
     def test_immediate_exit_has_a_result_and_only_uses_its_spawned_group(self) -> None:
         observed_groups: list[int] = []
         spawned_pids: list[int] = []

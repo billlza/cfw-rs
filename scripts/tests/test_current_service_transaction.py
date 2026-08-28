@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import io
 import json
 import os
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 from scripts import current_service_transaction as service
 from scripts import dormant_app_install as install
+from scripts import ga_acceptance_environment as ga_environment
 
 
 PREVIOUS = install.AppIdentity("0.4.0", "40019", "a" * 64)
@@ -21,6 +23,17 @@ CANDIDATE = install.CandidateIdentity(
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
 )
+GA_ENVIRONMENT = {
+    "architecture": "arm64",
+    "boot_environment_sha256": "9" * 64,
+    "document": ga_environment.DOCUMENT,
+    "hardware_model": "Mac16,1",
+    "machine_sha256": "8" * 64,
+    "macos_build_version": "26A5388g",
+    "macos_product_version": "27.0",
+    "physical_nonvirtualized": True,
+    "schema_version": ga_environment.SCHEMA_VERSION,
+}
 
 
 def guard(*, proxy: str = "1" * 64) -> dict[str, object]:
@@ -98,6 +111,7 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.runner = lambda arguments: (_ for _ in ()).throw(AssertionError(arguments))
         self.guards = [guard()]
+        self.observe_environment = lambda: dict(GA_ENVIRONMENT)
 
     def capture_guard(self) -> dict[str, object]:
         if len(self.guards) > 1:
@@ -153,7 +167,7 @@ class ServiceEventStoreTests(unittest.TestCase):
         )
         self.assertEqual(
             paths.transaction_directory.name,
-            ".com.bill.clashformac.service-transaction-v2",
+            ".com.bill.clashformac.service-transaction-v3",
         )
         self.assertEqual(
             paths.transaction_directory.name,
@@ -169,6 +183,256 @@ class ServiceEventStoreTests(unittest.TestCase):
         self.assertEqual(
             install.GA_INSTALL_PROFILE.off_proof_profile,
             install.INSTALLED_40019_OFF_PROOF_PROFILE,
+        )
+
+    def test_service_intent_binds_one_private_ga_environment(self) -> None:
+        with service.ServiceEventStore(self.fixture.paths) as store:
+            with store.locked():
+                intent, _events = store.create(
+                    CANDIDATE,
+                    PREVIOUS,
+                    guard(),
+                    GA_ENVIRONMENT,
+                )
+        self.assertEqual(
+            intent["ga_environment_sha256"],
+            ga_environment.environment_sha256(GA_ENVIRONMENT),
+        )
+        environment_path = (
+            self.fixture.paths.transaction_directory / service.ENVIRONMENT_NAME
+        )
+        self.assertEqual(
+            environment_path.read_bytes(),
+            ga_environment.canonical_json(GA_ENVIRONMENT),
+        )
+        self.assertNotIn("io_platform_uuid", environment_path.read_text())
+        self.assertNotIn("volume_uuid", environment_path.read_text())
+
+    def test_service_journal_rejects_environment_document_drift(self) -> None:
+        with service.ServiceEventStore(self.fixture.paths) as store:
+            with store.locked():
+                store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
+        changed = dict(GA_ENVIRONMENT)
+        changed["macos_build_version"] = "26A5389a"
+        environment_path = (
+            self.fixture.paths.transaction_directory / service.ENVIRONMENT_NAME
+        )
+        environment_path.write_bytes(ga_environment.canonical_json(changed))
+        with service.ServiceEventStore(self.fixture.paths) as store:
+            with store.locked(), self.assertRaises(install.InstallError) as captured:
+                store.load()
+        self.assertEqual(captured.exception.code, "service_journal_invalid")
+
+    def test_service_mutation_boundary_rejects_current_environment_drift(self) -> None:
+        with service.ServiceEventStore(self.fixture.paths) as store:
+            with store.locked():
+                intent, _events = store.create(
+                    CANDIDATE,
+                    PREVIOUS,
+                    guard(),
+                    GA_ENVIRONMENT,
+                )
+        changed = dict(GA_ENVIRONMENT)
+        changed["boot_environment_sha256"] = "7" * 64
+        self.fixture.runtime.observe_environment = lambda: changed
+        with self.assertRaises(install.InstallError) as captured:
+            self.fixture.transaction._require_environment(intent)
+        self.assertEqual(captured.exception.code, "service_environment_drift")
+
+    def test_pre_environment_service_schema_is_rejected(self) -> None:
+        legacy = {
+            "candidate": CANDIDATE.document(),
+            "document": "cfw-current-service-transaction-v2",
+            "off_proof_profile": install.INSTALLED_40019_OFF_PROOF_PROFILE,
+            "previous": PREVIOUS.document(),
+            "schema_version": 2,
+            "transaction_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        }
+        with self.assertRaises(install.InstallError) as captured:
+            service.validate_intent(legacy)
+        self.assertEqual(captured.exception.code, "service_journal_invalid")
+
+        boolean_schema = {
+            "candidate": CANDIDATE.document(),
+            "document": service.DOCUMENT,
+            "ga_environment_sha256": ga_environment.environment_sha256(
+                GA_ENVIRONMENT
+            ),
+            "off_proof_profile": install.INSTALLED_40019_OFF_PROOF_PROFILE,
+            "previous": PREVIOUS.document(),
+            "schema_version": True,
+            "transaction_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        }
+        with self.assertRaises(install.InstallError) as captured:
+            service.validate_intent(boolean_schema)
+        self.assertEqual(captured.exception.code, "service_journal_invalid")
+
+    def test_service_event_rejects_boolean_schema_and_sequence(self) -> None:
+        with service.ServiceEventStore(self.fixture.paths) as store:
+            with store.locked():
+                _intent, events = store.create(
+                    CANDIDATE,
+                    PREVIOUS,
+                    guard(),
+                    GA_ENVIRONMENT,
+                )
+                event = store.append(
+                    events,
+                    phase=service.PHASES[1],
+                    action=install.GA_INSTALL_PROFILE.service_actions[1],
+                    guard=guard(),
+                )
+        for field in ("schema_version", "sequence"):
+            malformed = dict(event)
+            malformed[field] = True
+            with self.subTest(field=field), self.assertRaises(install.InstallError):
+                service.validate_event(
+                    malformed,
+                    expected_sequence=1,
+                    previous_event_sha256=event["previous_event_sha256"],
+                    expected_guard=event["guard_before"],
+                    intent_sha256=event["intent_sha256"],
+                    expected_actions=frozenset({event["action"]}),
+                    expected_off_proof_profiles=frozenset(
+                        {event["off_proof_profile"]}
+                    ),
+                )
+
+    def test_service_json_recursion_is_a_stable_journal_error(self) -> None:
+        deeply_nested = (
+            "{\"nested\":" * 10_000 + "0" + "}" * 10_000
+        ).encode("ascii")
+        with self.assertRaises(install.InstallError) as captured:
+            service._strict_json_bytes(deeply_nested, "deep service fixture")
+        self.assertEqual(captured.exception.code, "service_journal_invalid")
+
+        with patch.object(
+            service,
+            "_canonical_json",
+            side_effect=RecursionError("fixture canonical recursion"),
+        ), self.assertRaises(install.InstallError) as captured:
+            service._strict_json_bytes(b"{}\n", "deep service fixture")
+        self.assertEqual(captured.exception.code, "service_journal_invalid")
+
+        for token in (b"NaN", b"Infinity", b"-Infinity"):
+            with self.subTest(token=token), self.assertRaises(
+                install.InstallError
+            ) as captured:
+                service._strict_json_bytes(
+                    b'{"value":' + token + b"}\n",
+                    "non-finite service fixture",
+                )
+            self.assertEqual(captured.exception.code, "service_journal_invalid")
+
+    def test_retired_v2_service_namespace_is_never_reused_or_removed(self) -> None:
+        for name in service.RETIRED_TRANSACTION_NAMES:
+            with self.subTest(name=name):
+                fixture = ServiceFixture()
+                self.addCleanup(fixture.cleanup)
+                legacy = fixture.paths.transaction_parent / name
+                if name.endswith(".lock"):
+                    legacy.write_text("historical\n", encoding="utf-8")
+                else:
+                    legacy.mkdir()
+                with service.ServiceEventStore(fixture.paths) as store:
+                    with self.assertRaises(install.InstallError) as captured:
+                        with store.locked():
+                            store.create(
+                                CANDIDATE,
+                                PREVIOUS,
+                                guard(),
+                                GA_ENVIRONMENT,
+                            )
+                self.assertEqual(
+                    captured.exception.code,
+                    "service_retired_journal_present",
+                )
+                self.assertTrue(os.path.lexists(legacy))
+                self.assertFalse(fixture.paths.pending_directory.exists())
+                self.assertFalse(fixture.paths.transaction_directory.exists())
+                self.assertFalse(
+                    (fixture.paths.transaction_parent / fixture.paths.lock_name).exists()
+                )
+
+    def test_retired_namespace_race_is_rejected_inside_maintenance_lock(
+        self,
+    ) -> None:
+        retired = (
+            self.fixture.paths.transaction_parent
+            / service.RETIRED_TRANSACTION_NAMES[0]
+        )
+        real_maintenance_lock = install.exclusive_release_maintenance_lock
+
+        @contextmanager
+        def create_retired_name_after_lock(
+            target_parent: Path,
+            *,
+            require_existing: bool = False,
+        ):
+            with real_maintenance_lock(
+                target_parent,
+                require_existing=require_existing,
+            ):
+                retired.write_bytes(b"historical\n")
+                yield
+
+        with patch.object(
+            install,
+            "exclusive_release_maintenance_lock",
+            new=create_retired_name_after_lock,
+        ):
+            with service.ServiceEventStore(self.fixture.paths) as store:
+                with self.assertRaises(install.InstallError) as captured:
+                    with store.locked():
+                        self.fail("retired namespace race was accepted")
+        self.assertEqual(
+            captured.exception.code,
+            "service_retired_journal_present",
+        )
+        self.assertTrue(retired.is_file())
+        self.assertFalse(self.fixture.paths.pending_directory.exists())
+        self.assertFalse(self.fixture.paths.transaction_directory.exists())
+        self.assertFalse(
+            (
+                self.fixture.paths.transaction_parent
+                / self.fixture.paths.lock_name
+            ).exists()
+        )
+
+    def test_unobservable_retired_namespace_is_typed_not_absent(self) -> None:
+        retired_name = service.RETIRED_TRANSACTION_NAMES[0]
+        real_stat = os.stat
+        with service.ServiceEventStore(self.fixture.paths) as store:
+
+            def deny_retired_name(
+                name: object,
+                *args: object,
+                **kwargs: object,
+            ) -> os.stat_result:
+                if (
+                    name == retired_name
+                    and kwargs.get("dir_fd") == store.parent_fd
+                    and kwargs.get("follow_symlinks") is False
+                ):
+                    raise PermissionError("fixture retired namespace denial")
+                return real_stat(name, *args, **kwargs)
+
+            with patch.object(
+                service.os,
+                "stat",
+                side_effect=deny_retired_name,
+            ), self.assertRaises(install.InstallError) as captured:
+                with store.locked():
+                    self.fail("unobservable retired namespace was accepted")
+        self.assertEqual(
+            captured.exception.code,
+            "service_retired_journal_unavailable",
+        )
+        self.assertFalse(
+            (
+                self.fixture.paths.transaction_parent
+                / self.fixture.paths.lock_name
+            ).exists()
         )
 
     def test_retired_final_cli_and_wrapper_are_explicitly_rejected(self) -> None:
@@ -208,7 +472,7 @@ class ServiceEventStoreTests(unittest.TestCase):
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
                 with self.assertRaises(install.InstallError) as captured:
-                    store.create(CANDIDATE, retired_previous, guard())
+                    store.create(CANDIDATE, retired_previous, guard(), GA_ENVIRONMENT)
         self.assertEqual(
             captured.exception.code,
             "service_journal_invalid",
@@ -219,7 +483,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_append_only_lineage_round_trips_every_phase(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 for phase, action in zip(
                     service.PHASES[1:], service.ACTIONS[1:], strict=True
                 ):
@@ -242,7 +506,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_initial_pending_directory_is_recovered_atomically(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 os.rename(
                     self.fixture.paths.transaction_directory,
                     self.fixture.paths.pending_directory,
@@ -255,7 +519,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     ) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 events.append(
                     store.append(
                         events,
@@ -291,7 +555,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     ) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 events.append(
                     store.append(
                         events,
@@ -337,7 +601,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                     with service.ServiceEventStore(fixture.paths) as store:
                         with store.locked():
                             intent, events = store.create(
-                                CANDIDATE, PREVIOUS, guard()
+                                CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT
                             )
                             events.append(
                                 store.append(
@@ -370,7 +634,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     ) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 events.append(
                     store.append(
                         events,
@@ -395,7 +659,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_recovery_marker_cannot_authorize_a_legacy_authority_event(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 events.append(
                     store.append(
                         events,
@@ -432,7 +696,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_non_scalar_event_proof_profile_is_a_stable_journal_error(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 with self.assertRaises(install.InstallError) as captured:
                     store.append(
                         events,
@@ -448,7 +712,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_complete_pending_event_is_published_on_recovery(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 with patch.object(
                     service.ServiceEventStore,
                     "_publish_pending_event",
@@ -475,7 +739,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_partial_pending_event_is_discarded_for_idempotent_replay(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, _events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, _events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
         pending = (
             self.fixture.paths.transaction_directory
             / ".event-00000001.json.pending"
@@ -491,7 +755,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_pending_event_must_be_resynced_before_recovery_publication(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 with patch.object(
                     service.ServiceEventStore,
                     "_publish_pending_event",
@@ -531,7 +795,7 @@ class ServiceEventStoreTests(unittest.TestCase):
             with store.locked():
                 self.assertIsNone(store.load())
                 rebuilt_intent, rebuilt_events = store.create(
-                    CANDIDATE, PREVIOUS, guard()
+                    CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT
                 )
         self.assertEqual(rebuilt_intent["candidate"], CANDIDATE.document())
         self.assertEqual(rebuilt_events[-1]["phase"], "prepared")
@@ -552,7 +816,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_intent_replacement_and_wrong_phase_action_fail_closed(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 with self.assertRaises(install.InstallError) as action_error:
                     store.append(
                         events,
@@ -573,7 +837,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_excess_event_inventory_is_a_typed_failure(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 for phase, action in zip(
                     service.PHASES[1:], service.ACTIONS[1:], strict=True
                 ):
@@ -594,7 +858,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_event_gap_tamper_and_guard_drift_fail_closed(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 events.append(
                     store.append(
                         events,
@@ -615,7 +879,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_append_rejects_guard_drift_between_individually_stable_events(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 with self.assertRaises(install.InstallError) as captured:
                     store.append(
                         events,
@@ -643,7 +907,7 @@ class ServiceEventStoreTests(unittest.TestCase):
     def test_decommissioned_journal_is_the_exact_installer_authorization(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 for phase, action in (
                     (
                         "proxy_unregistered",
@@ -686,6 +950,62 @@ class ServiceEventStoreTests(unittest.TestCase):
             path.name: path.read_bytes()
             for path in transaction_directory.iterdir()
         }
+        retired = (
+            self.fixture.paths.transaction_parent
+            / service.RETIRED_TRANSACTION_NAMES[0]
+        )
+        retired.write_bytes(b"historical\n")
+        with self.assertRaises(install.InstallError) as retired_error:
+            install.require_decommissioned_service_transaction(
+                self.fixture.paths.install_paths,
+                CANDIDATE,
+                PREVIOUS,
+                guard(),
+            )
+        self.assertEqual(
+            retired_error.exception.code,
+            "service_retired_journal_present",
+        )
+        retired.unlink()
+
+        real_stat = os.stat
+
+        def deny_retired_name(
+            name: object,
+            *args: object,
+            **kwargs: object,
+        ) -> os.stat_result:
+            if (
+                name == service.RETIRED_TRANSACTION_NAMES[0]
+                and kwargs.get("follow_symlinks") is False
+            ):
+                raise PermissionError("fixture retired namespace denial")
+            return real_stat(name, *args, **kwargs)
+
+        with patch.object(
+            install.os,
+            "stat",
+            side_effect=deny_retired_name,
+        ), self.assertRaises(install.InstallError) as unavailable_error:
+            install.require_decommissioned_service_transaction(
+                self.fixture.paths.install_paths,
+                CANDIDATE,
+                PREVIOUS,
+                guard(),
+            )
+        self.assertEqual(
+            unavailable_error.exception.code,
+            "service_retired_journal_unavailable",
+        )
+        self.assertEqual(transaction_directory.stat().st_ino, before_inode)
+        self.assertEqual(
+            {
+                path.name: path.read_bytes()
+                for path in transaction_directory.iterdir()
+            },
+            before_documents,
+        )
+
         with self.assertRaises(install.InstallError) as guard_error:
             install.require_decommissioned_service_transaction(
                 self.fixture.paths.install_paths,
@@ -754,7 +1074,10 @@ class RegisteredServiceObservationTests(unittest.TestCase):
                 )
             raise AssertionError(arguments)
 
-        return service.ServiceRuntime(runner=runner)
+        return service.ServiceRuntime(
+            runner=runner,
+            observe_environment=lambda: dict(GA_ENVIRONMENT),
+        )
 
     def test_relative_ps_comm_is_bound_through_absolute_proc_pidpath(self) -> None:
         paths = {
@@ -953,7 +1276,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
     ) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 events.append(
                     store.append(
                         events,
@@ -1044,7 +1367,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
     def test_preexisting_guard_drift_blocks_before_any_service_mutation(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                store.create(CANDIDATE, PREVIOUS, guard())
+                store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
         self.fixture.runtime.guards = [guard(proxy="9" * 64)]
         with (
             patch.object(
@@ -1065,7 +1388,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
     def test_recommission_orders_authority_before_proxy_then_reproves_off(self) -> None:
         with service.ServiceEventStore(self.fixture.paths) as store:
             with store.locked():
-                _intent, events = store.create(CANDIDATE, PREVIOUS, guard())
+                _intent, events = store.create(CANDIDATE, PREVIOUS, guard(), GA_ENVIRONMENT)
                 for phase, action in (
                     (
                         "proxy_unregistered",

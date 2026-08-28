@@ -31,8 +31,10 @@ if __package__:
     from .macos_durability import full_fsync
     from .release_build_identity import (
         ACTIVE_RELEASE_IDENTITY,
+        ReleaseWorkspaceError,
         ga_preflight_root,
         ga_root,
+        verify_ga_workspace_path_preconditions,
     )
     from .repository_source_identity import SourceIdentityError, current_identity
     from .release_signing_preflight import (
@@ -53,7 +55,13 @@ if __package__:
     )
 else:
     from macos_durability import full_fsync
-    from release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_preflight_root, ga_root
+    from release_build_identity import (
+        ACTIVE_RELEASE_IDENTITY,
+        ReleaseWorkspaceError,
+        ga_preflight_root,
+        ga_root,
+        verify_ga_workspace_path_preconditions,
+    )
     from repository_source_identity import SourceIdentityError, current_identity
     from release_signing_preflight import (
         SigningPreflightError,
@@ -1447,6 +1455,15 @@ def _verify_exact_intent(repository: Path, root: Path) -> bytes:
     return raw
 
 
+def _require_workspace_path_preconditions(repository: Path) -> None:
+    try:
+        verify_ga_workspace_path_preconditions(repository)
+    except ReleaseWorkspaceError as error:
+        raise CandidateFreezeError(
+            "workspace_path_precondition_failed", str(error)
+        ) from error
+
+
 def freeze_candidate(repository: Path) -> FrozenCandidate:
     """Consume and atomically freeze the one active GA candidate.
 
@@ -1461,6 +1478,7 @@ def freeze_candidate(repository: Path) -> FrozenCandidate:
         raise CandidateAlreadyConsumed(
             "the frozen GA candidate already exists; fresh freeze is forbidden"
         )
+    _require_workspace_path_preconditions(repository)
     expected = _expected_intent(repository, preflight_root, require_intent=False)
     signing_preflight_path = preflight_root / "profiles/signing-preflight.json"
     try:
@@ -1481,6 +1499,7 @@ def freeze_candidate(repository: Path) -> FrozenCandidate:
             f"candidate updater custody is not currently ready: {error}",
         ) from error
     _ensure_destination_parent(final_root)
+    _require_workspace_path_preconditions(repository)
     try:
         intent_raw = _create_intent(preflight_root, expected)
     except CandidateAlreadyConsumed:

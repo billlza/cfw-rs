@@ -1241,6 +1241,34 @@ class PinnedBuildInputsTests(unittest.TestCase):
             with self.assertRaisesRegex(PinnedInputError, "parent.*symlink"):
                 self._verify_written_fixture(fixture, root)
 
+    def test_rooted_reader_descriptor_dup_failure_is_typed(self) -> None:
+        fixture = Fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = fixture.write(Path(temporary))
+            with mock.patch(
+                "scripts.verify_pinned_build_inputs.os.dup",
+                side_effect=OSError("fixture descriptor exhaustion"),
+            ), self.assertRaisesRegex(
+                PinnedInputError,
+                "descriptor cannot be duplicated",
+            ):
+                self._verify_written_fixture(fixture, root)
+
+    def test_descriptor_cleanup_attempts_every_owned_descriptor(self) -> None:
+        closed: list[int] = []
+
+        def close(descriptor: int) -> None:
+            closed.append(descriptor)
+            if descriptor == 11:
+                raise OSError("fixture close failure")
+
+        with mock.patch(
+            "scripts.verify_pinned_build_inputs.os.close",
+            side_effect=close,
+        ), self.assertRaisesRegex(PinnedInputError, "descriptor cleanup failed"):
+            pinned_verifier._close_descriptors((11, 12, 13), "fixture")
+        self.assertEqual(closed, [11, 12, 13])
+
     def test_packet_lan_peer_artifact_parent_replacement_during_read_fails(self) -> None:
         fixture = Fixture()
         with tempfile.TemporaryDirectory() as temporary:
@@ -2311,6 +2339,101 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 path,
             )
 
+    def test_ga_workspace_admission_cannot_be_bypassed(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "        verify_ga_workspace_path_preconditions(repository)"
+        self.assertEqual(source.count(guarded), 1)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            "        repository.is_dir()",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "critical guards"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_atomic_journal_export_guard_cannot_be_bypassed(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "        verified = verify_ga_acceptance_journal_export(repository)"
+        self.assertEqual(source.count(guarded), 1)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            "        verified = {}",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "critical guards"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_atomic_journal_export_guard_cannot_be_made_conditional(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "        verified = verify_ga_acceptance_journal_export(repository)"
+        self.assertEqual(source.count(guarded), 1)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            "        if repository.name:\n"
+            "            verified = verify_ga_acceptance_journal_export(repository)\n"
+            "        else:\n"
+            "            verified = {}",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "critical guard is conditional"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_migration_candidate_guard_cannot_be_bypassed(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "    _require_migration_matches_prepackage(prepackage, migration)"
+        self.assertEqual(source.count(guarded), 2)
+        fixture.extra_artifact_files[path] = source.replace(
+            guarded,
+            "    bool(migration)",
+            1,
+        )
+        with self.assertRaisesRegex(PinnedInputError, "critical guards"):
+            pinned_verifier._artifact_binding_surface(
+                fixture.extra_artifact_files[path],
+                path,
+            )
+
+    def test_runtime_derivation_candidate_guard_cannot_be_reordered(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        ordered = (
+            "    packages = _verified_package_sets(repository, prepackage)\n"
+            "    migration = _verified_migration_journals(repository)\n"
+            "    _require_migration_matches_prepackage(prepackage, migration)"
+        )
+        self.assertEqual(source.count(ordered), 1)
+        reordered = (
+            "    packages = _verified_package_sets(repository, prepackage)\n"
+            "    _require_migration_matches_prepackage(prepackage, migration)\n"
+            "    migration = _verified_migration_journals(repository)"
+        )
+        with self.assertRaisesRegex(
+            PinnedInputError,
+            "derivation order|guarded function AST",
+        ):
+            pinned_verifier._artifact_binding_surface(
+                source.replace(ordered, reordered, 1),
+                path,
+            )
+
     def test_hosted_ci_offline_binding_cannot_be_bypassed(self) -> None:
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
@@ -2426,13 +2549,18 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        marker = "    repository = _canonical_repository(repository)\n    _reject_legacy_paths(repository)"
+        marker = (
+            "    repository = _canonical_repository(repository)\n"
+            "    try:\n"
+            "        verify_ga_workspace_path_preconditions(repository)"
+        )
         self.assertIn(marker, source)
         fixture.extra_artifact_files[path] = source.replace(
             marker,
             "    repository = _canonical_repository(repository)\n"
             "    return ({}, {}, {}, {})\n"
-            "    _reject_legacy_paths(repository)",
+            "    try:\n"
+            "        verify_ga_workspace_path_preconditions(repository)",
             1,
         )
         with self.assertRaisesRegex(PinnedInputError, "returns before"):
@@ -2485,13 +2613,18 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        marker = "    repository = _canonical_repository(repository)\n    _reject_legacy_paths(repository)"
+        marker = (
+            "    repository = _canonical_repository(repository)\n"
+            "    try:\n"
+            "        verify_ga_workspace_path_preconditions(repository)"
+        )
         self.assertIn(marker, source)
         fixture.extra_artifact_files[path] = source.replace(
             marker,
             "    verify_frozen_candidate = lambda _repository: object()\n"
             "    repository = _canonical_repository(repository)\n"
-            "    _reject_legacy_paths(repository)",
+            "    try:\n"
+            "        verify_ga_workspace_path_preconditions(repository)",
             1,
         )
         with self.assertRaisesRegex(PinnedInputError, "rebinds a policy validator"):
@@ -2527,6 +2660,11 @@ class PinnedBuildInputsTests(unittest.TestCase):
             "stages": (
                 contract_path,
                 contract_source + '\nSTAGES += ("bypass",)\n',
+            ),
+            "stage-schemas": (
+                contract_path,
+                contract_source
+                + '\nSTAGE_SCHEMA_VERSIONS["ga-acceptance"] = 1\n',
             ),
             "dynamic-global": (
                 contract_path,
@@ -2870,9 +3008,12 @@ class PinnedBuildInputsTests(unittest.TestCase):
             "scripts/notarization_transaction.py",
             "scripts/verify_notary_log.py",
             "scripts/dmg_notarization_transaction.py",
+            "scripts/ga_acceptance_environment.py",
+            "scripts/ga_acceptance_journal_export.py",
             "scripts/ga_runtime_acceptance.py",
             "scripts/ga_runtime_acceptance_cli.py",
             "scripts/run_ga_runtime_acceptance.sh",
+            "scripts/run_ga_acceptance_journal_export.sh",
             "scripts/physical_capture/packet_host.py",
             "scripts/physical_capture/packet_sender.py",
             "scripts/physical_capture/__init__.py",

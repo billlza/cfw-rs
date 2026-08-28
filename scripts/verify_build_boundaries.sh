@@ -36,11 +36,42 @@ cfw_run_release_python_script "$repo_root" \
 cfw_run_release_python_script "$repo_root" \
   "$repo_root/scripts/ga_runtime_acceptance_cli.py" self-check
 
+# These modules own source-only self-check functions, while the exporter's
+# direct CLI requires closed production admission and the environment module's
+# direct mode performs a live observation. Import only the pure functions inside
+# this isolated boundary; never observe or mutate the release host from CI.
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+  "$repo_root" <<'PY'
+from pathlib import Path
+import sys
+
+repository = Path(sys.argv[1]).resolve(strict=True)
+sys.path.insert(0, str(repository))
+
+from scripts.ga_acceptance_environment import self_check as environment_self_check
+from scripts.ga_acceptance_journal_export import self_check as journal_export_self_check
+
+environment_self_check()
+journal_export_self_check()
+PY
+
 for release_helper in \
   scripts/run_ga_signing_attempt.sh \
+  scripts/run_ga_acceptance_journal_export.sh \
   scripts/run_ga_runtime_acceptance.sh; do
-  [[ -f "$release_helper" && ! -L "$release_helper" && -x "$release_helper" ]] || {
+  [[ -f "$release_helper" && ! -L "$release_helper" && -O "$release_helper" && \
+    -x "$release_helper" ]] || {
     echo "error: release helper is not one executable regular file: $release_helper" >&2
+    exit 1
+  }
+done
+
+for release_module in \
+  scripts/ga_acceptance_environment.py \
+  scripts/ga_acceptance_journal_export.py; do
+  [[ -f "$release_module" && ! -L "$release_module" && -O "$release_module" && \
+    -r "$release_module" && ! -x "$release_module" ]] || {
+    echo "error: GA acceptance module is not one owned source-only file: $release_module" >&2
     exit 1
   }
 done
@@ -129,7 +160,25 @@ for fragment in \
   'validate_ci_lane_document' \
   'validate_hosted_ci_receipt_offline' \
   'live_verify_hosted_ci_receipt' \
+  'ACCEPTANCE_INPUT_ROOT: Final = ACCEPTANCE_ROOT_RELATIVE' \
+  'MIGRATION_JOURNAL_INPUT: Final = MIGRATION_RELATIVE' \
+  'INSTALL_JOURNAL_INPUT: Final = INSTALL_RELATIVE' \
+  'SERVICE_JOURNAL_INPUT: Final = SERVICE_RELATIVE' \
+  'SERVICE_ENVIRONMENT_INPUT: Final = ENVIRONMENT_RELATIVE' \
+  'STAGE_SCHEMA_VERSIONS: Final = {' \
+  '"prepackage": 1' \
+  '"ga-acceptance": 2' \
+  '"publication": 2' \
+  'verify_ga_acceptance_journal_export' \
+  'def _verified_migration_journals(repository: Path) -> dict[str, Any]:' \
+  'verified = verify_ga_acceptance_journal_export(repository)' \
+  'migration = _verified_migration_journals(repository)' \
+  '"migration_journals": {' \
   'validate_ga_runtime_acceptance' \
+  'ga_environment_sha256' \
+  'cfm-ga-acceptance-seal-v2' \
+  'cfm-ga-publication-seal-v2' \
+  'cfm-ga-runtime-acceptance-v2' \
   'build_manifest' \
   'verify_stage'; do
   grep -Fq -- "$fragment" scripts/publication/ga_release_contract.py || {
@@ -159,6 +208,9 @@ for fragment in \
   'recover-installed-40019-global-authority' \
   'AUTHORITY_RECOVERY_PENDING_INTENT_NAME' \
   'service_event_contract' \
+  'DOCUMENT: Final = "cfw-dormant-app-install-v2"' \
+  'SERVICE_TRANSACTION_DOCUMENT: Final = "cfw-current-service-transaction-v3"' \
+  'ga_environment_sha256' \
   'exclusive_release_maintenance_lock' \
   'require_decommissioned_service_transaction' \
   'candidate_toolchain_override' \
@@ -170,7 +222,9 @@ for fragment in \
 done
 
 for fragment in \
-  'cfw-current-service-transaction-v2' \
+  'cfw-current-service-transaction-v3' \
+  'ENVIRONMENT_NAME: Final = "environment.json"' \
+  'ga_environment_sha256' \
   'cfw-current-service-authority-recovery-intent-v1' \
   'recover-installed-40019-global-authority' \
   'AUTHORITY_RECOVERY_PENDING_INTENT_NAME' \
@@ -204,7 +258,27 @@ for contract in \
   'scripts/verify_signing_transformation.py:cfm-candidate-freeze-intent-v3' \
   'scripts/notarization_transaction.py:signing_transformation_receipt_sha256' \
   'scripts/notarization_transaction.py:validate_published_transaction_receipt' \
-  'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-acceptance-v1' \
+  'scripts/ga_acceptance_environment.py:DOCUMENT: Final = "cfm-ga-environment-identity-v1"' \
+  'scripts/ga_acceptance_environment.py:def environment_sha256(' \
+  'scripts/ga_acceptance_environment.py:def require_same_environment(' \
+  'scripts/ga_acceptance_journal_export.py:INTENT_DOCUMENT: Final = "cfm-ga-journal-export-intent-v1"' \
+  'scripts/ga_acceptance_journal_export.py:RECEIPT_DOCUMENT: Final = "cfm-ga-journal-export-receipt-v1"' \
+  'scripts/ga_acceptance_journal_export.py:ENVIRONMENT_RELATIVE: Final = SERVICE_RELATIVE / service.ENVIRONMENT_NAME' \
+  'scripts/ga_acceptance_journal_export.py:def export_ga_acceptance_journals(' \
+  'scripts/ga_acceptance_journal_export.py:def recover_ga_acceptance_journal_export(' \
+  'scripts/ga_acceptance_journal_export.py:def verify_ga_acceptance_journal_export(' \
+  'scripts/ga_acceptance_journal_export.py:publish_private_directory_exclusive(' \
+  'scripts/run_ga_acceptance_journal_export.sh:cfw_seal_release_tool_environment production' \
+  'scripts/run_ga_acceptance_journal_export.sh:cfw_select_release_apple_toolchain' \
+  'scripts/run_ga_acceptance_journal_export.sh:cfw_run_release_python_script' \
+  'scripts/run_ga_acceptance_journal_export.sh:scripts/ga_acceptance_journal_export.py' \
+  'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-acceptance-v2' \
+  'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-check-v2' \
+  'scripts/ga_runtime_acceptance.py:cfm-ga-command-observation-v2' \
+  'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-collection-intent-v2' \
+  'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-collection-event-v2' \
+  'scripts/ga_runtime_acceptance.py:ENVIRONMENT_RELATIVE as JOURNAL_EXPORT_ENVIRONMENT_RELATIVE' \
+  'scripts/ga_runtime_acceptance.py:ENVIRONMENT_RELATIVE: Final = JOURNAL_EXPORT_ENVIRONMENT_RELATIVE' \
   'scripts/ga_runtime_acceptance.py:validate_ga_runtime_acceptance' \
   'scripts/ga_runtime_acceptance.py:COLLECTION_RELATIVE: Final = ACCEPTANCE_ROOT_RELATIVE / "runtime-collection"' \
   'scripts/ga_runtime_acceptance.py:def collect_ga_runtime_acceptance(' \

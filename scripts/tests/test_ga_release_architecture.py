@@ -215,6 +215,63 @@ class GAReleaseCompositionRootTests(unittest.TestCase):
             boundary,
         )
 
+    def test_ci_boundary_checks_journal_export_without_running_a_mutation(self) -> None:
+        boundary = _source("scripts/verify_build_boundaries.sh")
+        for required in (
+            "environment_self_check()",
+            "journal_export_self_check()",
+            "scripts/run_ga_acceptance_journal_export.sh",
+            "scripts/run_ga_acceptance_journal_export.sh:"
+            "cfw_seal_release_tool_environment production",
+            "scripts/run_ga_acceptance_journal_export.sh:"
+            "cfw_select_release_apple_toolchain",
+            "scripts/run_ga_acceptance_journal_export.sh:cfw_run_release_python_script",
+            "scripts/run_ga_acceptance_journal_export.sh:"
+            "scripts/ga_acceptance_journal_export.py",
+            "cfm-ga-journal-export-intent-v1",
+            "cfm-ga-journal-export-receipt-v1",
+            "cfw-current-service-transaction-v3",
+            "cfw-dormant-app-install-v2",
+            "cfm-ga-acceptance-seal-v2",
+            "cfm-ga-publication-seal-v2",
+            "cfm-ga-runtime-acceptance-v2",
+            "cfm-ga-runtime-check-v2",
+            "cfm-ga-command-observation-v2",
+            "cfm-ga-runtime-collection-intent-v2",
+            "cfm-ga-runtime-collection-event-v2",
+            "ACCEPTANCE_INPUT_ROOT: Final = ACCEPTANCE_ROOT_RELATIVE",
+            "MIGRATION_JOURNAL_INPUT: Final = MIGRATION_RELATIVE",
+            "INSTALL_JOURNAL_INPUT: Final = INSTALL_RELATIVE",
+            "SERVICE_JOURNAL_INPUT: Final = SERVICE_RELATIVE",
+            "SERVICE_ENVIRONMENT_INPUT: Final = ENVIRONMENT_RELATIVE",
+            "STAGE_SCHEMA_VERSIONS: Final = {",
+            '"prepackage": 1',
+            '"ga-acceptance": 2',
+            '"publication": 2',
+            "def _verified_migration_journals(repository: Path) -> dict[str, Any]:",
+            "verified = verify_ga_acceptance_journal_export(repository)",
+            "migration = _verified_migration_journals(repository)",
+            '"migration_journals": {',
+            "ENVIRONMENT_RELATIVE as JOURNAL_EXPORT_ENVIRONMENT_RELATIVE",
+            "ENVIRONMENT_RELATIVE: Final = JOURNAL_EXPORT_ENVIRONMENT_RELATIVE",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, boundary)
+        for stale in (
+            "cfw-current-service-transaction-v2",
+            "cfm-ga-acceptance-seal-v1",
+            "cfm-ga-publication-seal-v1",
+            "cfm-ga-runtime-acceptance-v1",
+            "cfm-ga-runtime-check-v1",
+            "cfm-ga-command-observation-v1",
+            "cfm-ga-runtime-collection-intent-v1",
+            "cfm-ga-runtime-collection-event-v1",
+            "migration-journals/service-transaction/environment.json",
+        ):
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, boundary)
+        self.assertNotIn("run_ga_acceptance_journal_export.sh --export", boundary)
+
     def test_runtime_cli_self_check_runs_without_production_admission(self) -> None:
         arguments = [str(Path(ga_runtime_acceptance_cli.__file__)), "self-check"]
         with patch.object(sys, "argv", arguments), patch(

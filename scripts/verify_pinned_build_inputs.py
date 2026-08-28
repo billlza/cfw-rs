@@ -104,7 +104,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "4d7a59a8a89f03c3d91dc7e217e043a67ae49363b4aa1eb6484d752e7d7b9960"
+    "3f6d0f3e913f433a1479bd1b1dbb1717efa00470a9d859f0601a5c01a1614352"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -112,7 +112,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "6109a955bca1e03a93b5217cc3136fc65bf146001e670abbbbc7cbddc1ba6c7c"
+    "9e1ec0bf8e1ea599424c7983ec58fd3a0291a64dc7f067a16ccc216b11b0cc73"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -123,14 +123,23 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
         "ff488d2364ad4d0d2b37bb6d297e9f9ff2df60a4dec9cb83386af2c08302aa75"
     ),
     "_verified_prepackage_inputs": (
-        "a3132a95426d9ddb5beaefc2cc0248eaa724e799b6d5d565062272471f2e17fc"
+        "632a200998a0a936afa0a2e2d46718a0ccf8d1a0394b2c98ff55cbb3cd539cb1"
     ),
     "_verified_package_sets": "6d530c9583863c1b56baa56554f2c8e576d90f0797c113e3d15dada9f8805b56",
+    "_verified_migration_journals": (
+        "aae37ebedddaa00d345475f26ed45e28d69d1097bee7a9a9997b6dd63b7bcc28"
+    ),
+    "_expected_candidate_from_prepackage": (
+        "6157ac3c2f944787433c9db2ed8bdc95e80d88866729b5a2351fd7c15975e42e"
+    ),
+    "_require_migration_matches_prepackage": (
+        "757aa9a73fa3bf89e98c22bcadf07687d4607442dabcbb99daca515c22f95839"
+    ),
     "_verified_acceptance_inputs": (
-        "4e85cce6c8dafb4c69690a6dd7fb56ad5eeb535f6edf1bd8a9dd5b8baa879e5c"
+        "099413649138b7298d94930f60dc51fcfa0927a6c7af5d60bd44fc623b53db3f"
     ),
     "_verified_runtime_acceptance_adapter": (
-        "bf1828c2c331d646e47aaaaf00d0a4721c868c51b16a2ee775254994062744e4"
+        "8f9e422e175ae0da92109edfd6460192836fc34c8ebbe611e6364519e916e9c1"
     ),
     "_ga_acceptance_files": "d84444d7a3f250de492754fe285be1c40ee89a8d9f385819810b714e508aa906",
     "_prepackage_files": "83423102dc58b6f3010f3d80268b9015360036494444f8df4c0091e8a13474a2",
@@ -138,7 +147,7 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
     "verify_stage": "c3f0d92eb16c9f7c2e4984c27fd17de55fadcd3c6caf55985274b76171f2d039",
     "verify_prepackage_authorization": "945770f694ef508fa668af79ee50928f4a3b0c91f527c007bc10ff2a6af7216a",
     "verify_publication_authorization": "181dd93f19fa706c5c25b839bf63b4f0fc4caf61656e87b5f20ff72768767d20",
-    "derive_runtime_expectation": "d5c505b2bb6f81978f40f6547a4f8011dcea1620739113ebef4dc4540c8f4fce",
+    "derive_runtime_expectation": "2282c7d2e88d4b6bd044c44cc0ec5b5bfc1a6436865e1c3461436b0cb959b18f",
     "seal_prepackage": "758a9039726ae7d93a048ed4ba6989c2654dd3ae3cedb0c61d0f7a8ad77646e8",
     "seal_ga_acceptance": "9e8c5865ea08b502af72bad1829c064a8f5c14580c173a4c34a4392a3183cad7",
     "seal_publication": "edf0ba7d44672ddb7cf23856d59ddb9c4f43f9caaea7f05f62b89c794729ef9a",
@@ -155,7 +164,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     ),
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "b33b9473d438a5abc64f89694af45c81f1cb97f7458f7c4cf3f85688beca784d"
+    "b0bf69f0b45831ecbbcf9f11bb5d657e29d84079a18a0bdd8d5a25d8ab157bd8"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -473,6 +482,27 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _close_descriptors(
+    descriptors: tuple[int, ...],
+    description: str,
+) -> None:
+    """Close every owned descriptor and report the first cleanup failure."""
+
+    first_error: OSError | None = None
+    for descriptor in descriptors:
+        if descriptor < 0:
+            continue
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise PinnedInputError(
+            f"{description} descriptor cleanup failed"
+        ) from first_error
+
+
 def _open_directory_beneath(
     root_descriptor: int,
     components: tuple[str, ...],
@@ -480,10 +510,21 @@ def _open_directory_beneath(
     description: str,
 ) -> tuple[int, os.stat_result]:
     """Open one repository-relative directory chain without following links."""
-    descriptor = os.dup(root_descriptor)
     try:
-        opened = os.fstat(descriptor)
+        descriptor = os.dup(root_descriptor)
+    except OSError as error:
+        raise PinnedInputError(
+            f"{description} parent descriptor cannot be duplicated"
+        ) from error
+    try:
+        try:
+            opened = os.fstat(descriptor)
+        except OSError as error:
+            raise PinnedInputError(
+                f"{description} parent descriptor cannot be inspected"
+            ) from error
         for component in components:
+            next_descriptor = -1
             try:
                 before = os.stat(
                     component,
@@ -495,7 +536,10 @@ def _open_directory_beneath(
                     directory_flags,
                     dir_fd=descriptor,
                 )
+                next_opened = os.fstat(next_descriptor)
             except OSError as error:
+                if next_descriptor >= 0:
+                    _close_descriptors((next_descriptor,), description)
                 if error.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
                     raise PinnedInputError(
                         f"{description} parent is missing, a symlink, or not a directory"
@@ -504,7 +548,6 @@ def _open_directory_beneath(
                     f"{description} parent cannot be opened securely: {error}"
                 ) from error
             try:
-                next_opened = os.fstat(next_descriptor)
                 if (
                     not stat.S_ISDIR(before.st_mode)
                     or not stat.S_ISDIR(next_opened.st_mode)
@@ -514,16 +557,17 @@ def _open_directory_beneath(
                         f"{description} parent changed while it was opened"
                     )
             except BaseException:
-                os.close(next_descriptor)
+                _close_descriptors((next_descriptor,), description)
                 raise
-            os.close(descriptor)
+            previous_descriptor = descriptor
             descriptor = next_descriptor
+            _close_descriptors((previous_descriptor,), description)
             opened = next_opened
         if not stat.S_ISDIR(opened.st_mode):
             raise PinnedInputError(f"{description} parent is not a directory")
         return descriptor, opened
     except BaseException:
-        os.close(descriptor)
+        _close_descriptors((descriptor,), description)
         raise
 
 
@@ -557,20 +601,29 @@ def read_repository_regular_file(
     flags |= getattr(os, "O_NONBLOCK", 0)
     directory_flags = os.O_RDONLY | nofollow | directory
     directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    root_descriptor = -1
+    parent_descriptor = -1
+    descriptor = -1
+    fresh_parent_descriptor = -1
+    current_descriptor = -1
     try:
-        repository_before = os.stat(repository, follow_symlinks=False)
-        root_descriptor = os.open(repository, directory_flags)
-    except OSError as error:
-        if error.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
+        try:
+            repository_before = os.stat(repository, follow_symlinks=False)
+            root_descriptor = os.open(repository, directory_flags)
+        except OSError as error:
+            if error.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
+                raise PinnedInputError(
+                    f"{description} repository root is missing, a symlink, or not a directory"
+                ) from error
             raise PinnedInputError(
-                f"{description} repository root is missing, a symlink, or not a directory"
+                f"{description} repository root cannot be opened securely: {error}"
             ) from error
-        raise PinnedInputError(
-            f"{description} repository root cannot be opened securely: {error}"
-        ) from error
-
-    try:
-        repository_opened = os.fstat(root_descriptor)
+        try:
+            repository_opened = os.fstat(root_descriptor)
+        except OSError as error:
+            raise PinnedInputError(
+                f"{description} repository root cannot be inspected securely"
+            ) from error
         if (
             not stat.S_ISDIR(repository_before.st_mode)
             or not stat.S_ISDIR(repository_opened.st_mode)
@@ -589,7 +642,6 @@ def read_repository_regular_file(
             path_before = os.stat(filename, dir_fd=parent_descriptor, follow_symlinks=False)
             descriptor = os.open(filename, flags, dir_fd=parent_descriptor)
         except OSError as error:
-            os.close(parent_descriptor)
             if error.errno in (errno.ELOOP, errno.ENOENT, errno.ENOTDIR):
                 raise PinnedInputError(
                     f"{description} is missing, a symlink, or has an unsafe path"
@@ -597,141 +649,139 @@ def read_repository_regular_file(
             raise PinnedInputError(
                 f"{description} cannot be opened securely: {error}"
             ) from error
+        try:
+            opened = os.fstat(descriptor)
+            if _file_identity(path_before) != _file_identity(opened):
+                raise PinnedInputError(f"{description} changed while it was opened")
+            if not stat.S_ISREG(opened.st_mode):
+                raise PinnedInputError(f"{description} is not a regular file")
+            if opened.st_nlink != 1:
+                raise PinnedInputError(f"{description} must have exactly one hard link")
+            if opened.st_uid != expected_uid:
+                raise PinnedInputError(
+                    f"{description} is not owned by the effective user"
+                )
+            if expected_mode is None and opened.st_mode & 0o022:
+                raise PinnedInputError(
+                    f"{description} is writable by group or other users"
+                )
+            if (
+                expected_mode is not None
+                and stat.S_IMODE(opened.st_mode) != expected_mode
+            ):
+                raise PinnedInputError(
+                    f"{description} mode is not {expected_mode:04o}"
+                )
+            if expected_size is not None and opened.st_size != expected_size:
+                raise PinnedInputError(
+                    f"{description} size is {opened.st_size}, expected {expected_size}"
+                )
+            if opened.st_size > maximum_size:
+                raise PinnedInputError(
+                    f"{description} exceeds its {maximum_size}-byte bound"
+                )
+
+            digest = hashlib.sha256()
+            chunks: list[bytes] = []
+            remaining = opened.st_size
+            while remaining:
+                try:
+                    chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                except BlockingIOError as error:
+                    raise PinnedInputError(
+                        f"{description} could not be read as a regular file"
+                    ) from error
+                if not chunk:
+                    raise PinnedInputError(
+                        f"{description} ended before its observed size"
+                    )
+                chunks.append(chunk)
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise PinnedInputError(f"{description} exceeds its observed size")
+            after = os.fstat(descriptor)
+        except OSError as error:
+            raise PinnedInputError(
+                f"{description} cannot be read securely: {error}"
+            ) from error
 
         try:
-            try:
-                opened = os.fstat(descriptor)
-                if _file_identity(path_before) != _file_identity(opened):
-                    raise PinnedInputError(f"{description} changed while it was opened")
-                if not stat.S_ISREG(opened.st_mode):
-                    raise PinnedInputError(f"{description} is not a regular file")
-                if opened.st_nlink != 1:
-                    raise PinnedInputError(f"{description} must have exactly one hard link")
-                if opened.st_uid != expected_uid:
-                    raise PinnedInputError(
-                        f"{description} is not owned by the effective user"
-                    )
-                if expected_mode is None and opened.st_mode & 0o022:
-                    raise PinnedInputError(
-                        f"{description} is writable by group or other users"
-                    )
-                if (
-                    expected_mode is not None
-                    and stat.S_IMODE(opened.st_mode) != expected_mode
-                ):
-                    raise PinnedInputError(
-                        f"{description} mode is not {expected_mode:04o}"
-                    )
-                if expected_size is not None and opened.st_size != expected_size:
-                    raise PinnedInputError(
-                        f"{description} size is {opened.st_size}, expected {expected_size}"
-                    )
-                if opened.st_size > maximum_size:
-                    raise PinnedInputError(
-                        f"{description} exceeds its {maximum_size}-byte bound"
-                    )
-
-                digest = hashlib.sha256()
-                chunks: list[bytes] = []
-                remaining = opened.st_size
-                while remaining:
-                    try:
-                        chunk = os.read(descriptor, min(1024 * 1024, remaining))
-                    except BlockingIOError as error:
-                        raise PinnedInputError(
-                            f"{description} could not be read as a regular file"
-                        ) from error
-                    if not chunk:
-                        raise PinnedInputError(
-                            f"{description} ended before its observed size"
-                        )
-                    chunks.append(chunk)
-                    digest.update(chunk)
-                    remaining -= len(chunk)
-                if os.read(descriptor, 1):
-                    raise PinnedInputError(f"{description} exceeds its observed size")
-                after = os.fstat(descriptor)
-            except OSError as error:
-                raise PinnedInputError(
-                    f"{description} cannot be read securely: {error}"
-                ) from error
-            finally:
-                os.close(descriptor)
-
-            try:
-                path_after = os.stat(
-                    filename,
-                    dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
-                parent_after = os.fstat(parent_descriptor)
-            except OSError as error:
-                raise PinnedInputError(
-                    f"{description} path changed after it was read: {error}"
-                ) from error
-
-            fresh_parent_descriptor, fresh_parent = _open_directory_beneath(
-                root_descriptor,
-                parent_components,
-                directory_flags,
-                description,
+            path_after = os.stat(
+                filename,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
             )
-            try:
-                current_path_before = os.stat(
-                    filename,
-                    dir_fd=fresh_parent_descriptor,
-                    follow_symlinks=False,
-                )
-                current_descriptor = os.open(
-                    filename,
-                    flags,
-                    dir_fd=fresh_parent_descriptor,
-                )
-                try:
-                    current_opened = os.fstat(current_descriptor)
-                finally:
-                    os.close(current_descriptor)
-                current_path_after = os.stat(
-                    filename,
-                    dir_fd=fresh_parent_descriptor,
-                    follow_symlinks=False,
-                )
-            except OSError as error:
-                raise PinnedInputError(
-                    f"{description} current path cannot be rebound securely: {error}"
-                ) from error
-            finally:
-                os.close(fresh_parent_descriptor)
+            parent_after = os.fstat(parent_descriptor)
+        except OSError as error:
+            raise PinnedInputError(
+                f"{description} path changed after it was read: {error}"
+            ) from error
 
-            try:
-                repository_after = os.fstat(root_descriptor)
-                repository_rebound = os.stat(repository, follow_symlinks=False)
-            except OSError as error:
-                raise PinnedInputError(
-                    f"{description} repository root changed after it was read: {error}"
-                ) from error
-        finally:
-            os.close(parent_descriptor)
-    finally:
-        os.close(root_descriptor)
-    if (
-        _file_identity(repository_before) != _file_identity(repository_opened)
-        or _file_identity(repository_opened) != _file_identity(repository_after)
-        or _file_identity(repository_after) != _file_identity(repository_rebound)
-        or _file_identity(parent_opened) != _file_identity(parent_after)
-        or _file_identity(parent_after) != _file_identity(fresh_parent)
-        or _file_identity(opened) != _file_identity(after)
-        or _file_identity(after) != _file_identity(path_after)
-        or _file_identity(path_after) != _file_identity(current_path_before)
-        or _file_identity(current_path_before) != _file_identity(current_opened)
-        or _file_identity(current_opened) != _file_identity(current_path_after)
-    ):
-        raise PinnedInputError(
-            f"{description} repository, parent, path, or metadata changed while it was read"
+        fresh_parent_descriptor, fresh_parent = _open_directory_beneath(
+            root_descriptor,
+            parent_components,
+            directory_flags,
+            description,
         )
-    if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
-        raise PinnedInputError(f"{description} SHA-256 differs from its pin")
-    return b"".join(chunks)
+        try:
+            current_path_before = os.stat(
+                filename,
+                dir_fd=fresh_parent_descriptor,
+                follow_symlinks=False,
+            )
+            current_descriptor = os.open(
+                filename,
+                flags,
+                dir_fd=fresh_parent_descriptor,
+            )
+            current_opened = os.fstat(current_descriptor)
+            current_path_after = os.stat(
+                filename,
+                dir_fd=fresh_parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise PinnedInputError(
+                f"{description} current path cannot be rebound securely: {error}"
+            ) from error
+
+        try:
+            repository_after = os.fstat(root_descriptor)
+            repository_rebound = os.stat(repository, follow_symlinks=False)
+        except OSError as error:
+            raise PinnedInputError(
+                f"{description} repository root changed after it was read: {error}"
+            ) from error
+        if (
+            _file_identity(repository_before) != _file_identity(repository_opened)
+            or _file_identity(repository_opened) != _file_identity(repository_after)
+            or _file_identity(repository_after) != _file_identity(repository_rebound)
+            or _file_identity(parent_opened) != _file_identity(parent_after)
+            or _file_identity(parent_after) != _file_identity(fresh_parent)
+            or _file_identity(opened) != _file_identity(after)
+            or _file_identity(after) != _file_identity(path_after)
+            or _file_identity(path_after) != _file_identity(current_path_before)
+            or _file_identity(current_path_before) != _file_identity(current_opened)
+            or _file_identity(current_opened) != _file_identity(current_path_after)
+        ):
+            raise PinnedInputError(
+                f"{description} repository, parent, path, or metadata changed while it was read"
+            )
+        if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
+            raise PinnedInputError(f"{description} SHA-256 differs from its pin")
+        return b"".join(chunks)
+    finally:
+        _close_descriptors(
+            (
+                current_descriptor,
+                fresh_parent_descriptor,
+                descriptor,
+                parent_descriptor,
+                root_descriptor,
+            ),
+            description,
+        )
 
 
 def _read_bytes(
@@ -994,6 +1044,11 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
 
     imported_guards = frozenset(
         {
+            "ACCEPTANCE_ROOT_RELATIVE",
+            "ENVIRONMENT_RELATIVE",
+            "INSTALL_RELATIVE",
+            "MIGRATION_RELATIVE",
+            "SERVICE_RELATIVE",
             "build_manifest",
             "live_verify_hosted_ci_receipt",
             "validate_candidate_app_manifest",
@@ -1002,12 +1057,44 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
             "validate_hosted_ci_receipt_offline",
             "validate_notary_files",
             "validate_published_transaction_receipt",
+            "verify_ga_acceptance_journal_export",
+            "verify_ga_workspace_path_preconditions",
             "verify_frozen_candidate",
             "verify_signing_transformation_receipt",
             "validate_ga_runtime_acceptance",
         }
     )
     expected_imports = {
+        "ACCEPTANCE_ROOT_RELATIVE": (
+            "scripts.ga_acceptance_journal_export",
+            0,
+            "ACCEPTANCE_ROOT_RELATIVE",
+            None,
+        ),
+        "ENVIRONMENT_RELATIVE": (
+            "scripts.ga_acceptance_journal_export",
+            0,
+            "ENVIRONMENT_RELATIVE",
+            None,
+        ),
+        "INSTALL_RELATIVE": (
+            "scripts.ga_acceptance_journal_export",
+            0,
+            "INSTALL_RELATIVE",
+            None,
+        ),
+        "MIGRATION_RELATIVE": (
+            "scripts.ga_acceptance_journal_export",
+            0,
+            "MIGRATION_RELATIVE",
+            None,
+        ),
+        "SERVICE_RELATIVE": (
+            "scripts.ga_acceptance_journal_export",
+            0,
+            "SERVICE_RELATIVE",
+            None,
+        ),
         "build_manifest": ("scripts.hash_artifact", 0, "build_manifest", None),
         "live_verify_hosted_ci_receipt": (
             "scripts.github_hosted_ci_receipt",
@@ -1038,6 +1125,18 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
             0,
             "validate_evidence",
             "validate_gatekeeper_evidence",
+        ),
+        "verify_ga_acceptance_journal_export": (
+            "scripts.ga_acceptance_journal_export",
+            0,
+            "verify_ga_acceptance_journal_export",
+            None,
+        ),
+        "verify_ga_workspace_path_preconditions": (
+            "scripts.release_build_identity",
+            0,
+            "verify_ga_workspace_path_preconditions",
+            None,
         ),
         "validate_hosted_ci_receipt_offline": (
             "scripts.github_hosted_ci_receipt",
@@ -1079,6 +1178,9 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
     contract_functions = (
         "_verified_prepackage_inputs",
         "_verified_package_sets",
+        "_verified_migration_journals",
+        "_expected_candidate_from_prepackage",
+        "_require_migration_matches_prepackage",
         "_verified_acceptance_inputs",
         "_verified_runtime_acceptance_adapter",
         "_ga_acceptance_files",
@@ -1159,6 +1261,17 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
             )
         )
     ]
+    schema_assignments = [
+        node
+        for node in module.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and any(
+            isinstance(target, ast.Name) and target.id == "STAGE_SCHEMA_VERSIONS"
+            for target in (
+                node.targets if isinstance(node, ast.Assign) else (node.target,)
+            )
+        )
+    ]
     if relative == contract_relative:
         if len(stage_assignments) != 1:
             raise PinnedInputError("production GA contract stage order is not unique")
@@ -1174,15 +1287,36 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
             raise PinnedInputError(
                 "production GA contract stage order differs from policy"
             )
-    elif stage_assignments:
-        raise PinnedInputError("production orchestrator must not own the stage order")
+        try:
+            stage_schema_versions = (
+                ast.literal_eval(schema_assignments[0].value)
+                if len(schema_assignments) == 1
+                else None
+            )
+        except (ValueError, TypeError):
+            stage_schema_versions = None
+        if stage_schema_versions != {
+            "prepackage": 1,
+            "ga-acceptance": 2,
+            "publication": 2,
+        }:
+            raise PinnedInputError(
+                "production GA contract stage schemas differ from policy"
+            )
+    elif stage_assignments or schema_assignments:
+        raise PinnedInputError(
+            "production orchestrator must not own stage order or schemas"
+        )
 
     imported_bindings = imported_guards if relative == contract_relative else {"contract"}
     protected_module_names = (
-        frozenset(imported_bindings) | frozenset(functions) | {"STAGES"}
+        frozenset(imported_bindings)
+        | frozenset(functions)
+        | {"STAGES", "STAGE_SCHEMA_VERSIONS"}
     )
     allowed_statement_ids = {id(function) for function in functions.values()}
     allowed_statement_ids.update(id(statement) for statement in stage_assignments)
+    allowed_statement_ids.update(id(statement) for statement in schema_assignments)
     dynamic_mutators = {
         "delattr",
         "eval",
@@ -1199,7 +1333,9 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
                 alias.asname or alias.name.split(".", 1)[0]
                 for alias in statement.names
             }
-            if aliases.intersection(frozenset(functions) | {"STAGES"}):
+            if aliases.intersection(
+                frozenset(functions) | {"STAGES", "STAGE_SCHEMA_VERSIONS"}
+            ):
                 raise PinnedInputError(
                     "production GA release module imports over a protected binding"
                 )
@@ -1291,6 +1427,7 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
                 "_validate_signing_notarization_binding",
                 "validate_notary_files",
                 "validate_gatekeeper_evidence",
+                "verify_ga_workspace_path_preconditions",
                 "_verified_legal_source_closure",
                 "build_manifest",
             }
@@ -1298,10 +1435,16 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
         "_verified_package_sets": frozenset(
             {"artifact_set.verify_dmg_set", "artifact_set.verify_updater_set"}
         ),
+        "_verified_migration_journals": frozenset(
+            {"verify_ga_acceptance_journal_export"}
+        ),
+        "_require_migration_matches_prepackage": frozenset(
+            {"_expected_candidate_from_prepackage"}
+        ),
         "_verified_acceptance_inputs": frozenset(
             {
-                "dormant_install.validate_journal",
-                "_verified_service_journal",
+                "_verified_migration_journals",
+                "_require_migration_matches_prepackage",
                 "_verified_runtime_acceptance_adapter",
             }
         ),
@@ -1333,8 +1476,8 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
                 "_canonical_repository",
                 "verify_stage",
                 "_verified_package_sets",
-                "_verified_service_journal",
-                "dormant_install.validate_journal",
+                "_verified_migration_journals",
+                "_require_migration_matches_prepackage",
             }
         ),
     }
@@ -1362,6 +1505,46 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
         ):
             raise PinnedInputError(
                 "GA package verification must precede runtime acceptance"
+            )
+        migration_positions = _direct_call_positions(
+            functions["_verified_acceptance_inputs"],
+            frozenset(
+                {
+                    "_verified_migration_journals",
+                    "_require_migration_matches_prepackage",
+                    "_verified_runtime_acceptance_adapter",
+                }
+            ),
+            require_unconditional=True,
+        )
+        if not (
+            migration_positions["_verified_migration_journals"][0]
+            < migration_positions["_require_migration_matches_prepackage"][0]
+            < migration_positions["_verified_runtime_acceptance_adapter"][0]
+        ):
+            raise PinnedInputError(
+                "GA migration export and candidate verification must precede runtime acceptance"
+            )
+        derivation_positions = _direct_call_positions(
+            functions["derive_runtime_expectation"],
+            frozenset(
+                {
+                    "verify_stage",
+                    "_verified_package_sets",
+                    "_verified_migration_journals",
+                    "_require_migration_matches_prepackage",
+                }
+            ),
+            require_unconditional=True,
+        )
+        if not (
+            derivation_positions["verify_stage"][0]
+            < derivation_positions["_verified_package_sets"][0]
+            < derivation_positions["_verified_migration_journals"][0]
+            < derivation_positions["_require_migration_matches_prepackage"][0]
+        ):
+            raise PinnedInputError(
+                "GA runtime derivation order differs from release policy"
             )
 
     expected_stage_calls = (

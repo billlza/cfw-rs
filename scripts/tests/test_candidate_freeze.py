@@ -18,6 +18,7 @@ from unittest.mock import patch
 from scripts import candidate_freeze
 from scripts import release_signing_plan
 from scripts import release_signing_preflight
+from scripts.release_build_identity import RETIRED_GA_WORKSPACE_PATHS
 from scripts.verify_release_build_allocations import (
     IMMUTABLE_RETIRED_PREFIX,
     POLICY_SUPERSEDED_ALLOCATION,
@@ -365,6 +366,63 @@ class CandidateFreezeTests(unittest.TestCase):
         self.assertEqual(sum(kind == "error" for kind, _value in outcomes), 1)
         self.assertTrue(self.final.is_dir())
         self.assertFalse(self.preflight.exists())
+
+    def test_retired_workspace_paths_are_rejected_without_consuming_ga(self) -> None:
+        for relative in RETIRED_GA_WORKSPACE_PATHS:
+            with self.subTest(relative=relative):
+                path = self.repository.joinpath(*relative.parts)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"retired\n")
+                try:
+                    with self.assertRaisesRegex(
+                        candidate_freeze.CandidateFreezeError,
+                        "retired",
+                    ) as raised:
+                        self.freeze()
+                    self.assertEqual(
+                        raised.exception.code,
+                        "workspace_path_precondition_failed",
+                    )
+                    self.assertFalse(raised.exception.consumed)
+                    self.assertFalse(
+                        (self.preflight / "candidate-freeze/intent.json").exists()
+                    )
+                finally:
+                    path.unlink()
+
+    def test_retired_path_race_is_rejected_immediately_before_intent(self) -> None:
+        retired = self.repository.joinpath(*RETIRED_GA_WORKSPACE_PATHS[0].parts)
+        real_ensure_destination_parent = candidate_freeze._ensure_destination_parent
+
+        def ensure_then_publish_retired_path(final_root: Path) -> None:
+            real_ensure_destination_parent(final_root)
+            retired.symlink_to("missing-raced-retired-path")
+
+        with (
+            patch.object(
+                candidate_freeze,
+                "_ensure_destination_parent",
+                side_effect=ensure_then_publish_retired_path,
+            ),
+            patch.object(
+                candidate_freeze,
+                "_create_intent",
+                side_effect=AssertionError("intent creation must not be reached"),
+            ) as create_intent,
+            self.assertRaisesRegex(
+                candidate_freeze.CandidateFreezeError,
+                "retired",
+            ) as raised,
+        ):
+            self.freeze()
+
+        self.assertEqual(
+            raised.exception.code,
+            "workspace_path_precondition_failed",
+        )
+        self.assertFalse(raised.exception.consumed)
+        create_intent.assert_not_called()
+        self.assertFalse((self.preflight / "candidate-freeze/intent.json").exists())
 
     def test_fresh_retry_never_resumes_consumed_intent(self) -> None:
         with patch.object(

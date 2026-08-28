@@ -1298,6 +1298,45 @@ LIBBOX_VET_PACKAGES=(".")
         self.assertLess(cargo_workspace_inputs, policy_bootstrap)
         self.assertLess(policy_bootstrap, release_toolchain)
 
+    def test_release_runbook_exports_atomic_journals_before_runtime_acceptance(self) -> None:
+        runbook = (REPOSITORY / "RELEASE.md").read_text(encoding="utf-8")
+        policy = (
+            REPOSITORY / "docs/release/ga-assurance-policy-v040.md"
+        ).read_text(encoding="utf-8")
+        ordered_commands = (
+            "scripts/run_current_service_transaction.sh --recommission",
+            "scripts/run_ga_acceptance_journal_export.sh --export",
+            "scripts/run_ga_acceptance_journal_export.sh --verify",
+            "scripts/run_ga_runtime_acceptance.sh collect",
+            "scripts/run_ga_runtime_acceptance.sh verify",
+            "scripts/release_publication_gate.sh --seal-ga-acceptance",
+        )
+        positions = [runbook.index(command) for command in ordered_commands]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn(
+            "`--recover` is not a normal post-export step",
+            runbook,
+        )
+        for required in (
+            "service-transaction/environment.json",
+            "cfm-ga-journal-export-intent-v1",
+            "cfm-ga-journal-export-receipt-v1",
+            "cfw-current-service-transaction-v3",
+            "cfw-dormant-app-install-v2",
+            "cfm-ga-runtime-acceptance-v2",
+            "cfm-ga-runtime-check-v2",
+            "cfm-ga-command-observation-v2",
+            "cfm-ga-runtime-collection-intent-v2",
+            "cfm-ga-runtime-collection-event-v2",
+            "cfm-ga-prepackage-seal-v1",
+            "cfm-ga-acceptance-seal-v2",
+            "cfm-ga-publication-seal-v2",
+            "Older service/runtime/stage markers cannot be accepted",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, policy)
+        self.assertNotIn("migration-journals/environment.json", policy)
+
     def test_release_runbook_documents_candidate_identity_lifecycle(self) -> None:
         runbook = (REPOSITORY / "RELEASE.md").read_text(encoding="utf-8")
         ga_policy = (

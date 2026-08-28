@@ -11,9 +11,11 @@ from types import ModuleType
 import unittest
 from unittest.mock import patch
 
+from scripts import ga_acceptance_journal_export as journal_export
 from scripts import production_release_evidence
 from scripts.publication import durable_file
 from scripts.publication.common import PublicationError, canonical_json, sha256_file
+from scripts.release_build_identity import RETIRED_GA_WORKSPACE_PATHS
 from scripts.publication.ga_release_contract import (
     ACCEPTANCE_INPUT_ROOT,
     ASSURANCE_ROOT,
@@ -25,20 +27,21 @@ from scripts.publication.ga_release_contract import (
     GA_ROOT,
     GA_RUNTIME_CHECKS,
     INSTALL_JOURNAL_INPUT,
-    LEGACY_PATHS,
+    MIGRATION_JOURNAL_INPUT,
     PACKAGE_ROOT,
     PRODUCT_VERSION,
     RUNTIME_ACCEPTANCE_DOCUMENT,
     RUNTIME_ACCEPTANCE_INPUT,
     RUNTIME_EVIDENCE_INPUT,
     SERVICE_JOURNAL_INPUT,
+    SERVICE_ENVIRONMENT_INPUT,
     SIGNED_APP,
     STAGES,
     STAGE_FILE_NAMES,
     STAGE_OUTPUTS,
+    STAGE_SCHEMA_VERSIONS,
     UPDATER_SET,
     _parse_strict_json,
-    _reject_legacy_paths,
     _record,
     _require_artifact_set_adapter,
     _stage_manifest,
@@ -46,8 +49,11 @@ from scripts.publication.ga_release_contract import (
     _validate_signing_notarization_binding,
     _validate_stage_manifest,
     _verified_acceptance_inputs,
+    _verified_migration_journals,
+    _verified_prepackage_inputs,
     _verified_runtime_acceptance_adapter,
     _verify_publication_adapter,
+    derive_runtime_expectation,
     self_check,
     verify_stage,
 )
@@ -197,6 +203,28 @@ class ProductionStageIdentityTests(unittest.TestCase):
         self.assertEqual(DMG_SET, PACKAGE_ROOT / "dmg/v0.4.0")
         self.assertEqual(UPDATER_SET, PACKAGE_ROOT / "updater/v0.4.0")
 
+    def test_migration_journal_layout_is_owned_by_the_exporter(self) -> None:
+        self.assertEqual(
+            ACCEPTANCE_INPUT_ROOT,
+            journal_export.ACCEPTANCE_ROOT_RELATIVE,
+        )
+        self.assertEqual(
+            MIGRATION_JOURNAL_INPUT,
+            journal_export.MIGRATION_RELATIVE,
+        )
+        self.assertEqual(
+            INSTALL_JOURNAL_INPUT,
+            journal_export.INSTALL_RELATIVE,
+        )
+        self.assertEqual(
+            SERVICE_JOURNAL_INPUT,
+            journal_export.SERVICE_RELATIVE,
+        )
+        self.assertEqual(
+            SERVICE_ENVIRONMENT_INPUT,
+            journal_export.ENVIRONMENT_RELATIVE,
+        )
+
     def test_assurance_namespace_is_not_a_ga_stage_input(self) -> None:
         self.assertEqual(ASSURANCE_ROOT, CANDIDATE_ROOT / "assurance")
         required = " ".join(
@@ -232,6 +260,10 @@ class ProductionStageIdentityTests(unittest.TestCase):
                     "upload": stage == "publication",
                 },
             )
+            self.assertEqual(
+                validated["schema_version"],
+                STAGE_SCHEMA_VERSIONS[stage],
+            )
 
     def test_old_stage_schema_is_rejected_without_compatibility(self) -> None:
         for document in (
@@ -244,6 +276,23 @@ class ProductionStageIdentityTests(unittest.TestCase):
                 value["document"] = document
                 with self.assertRaisesRegex(PublicationError, "identity or status"):
                     _validate_stage_manifest(value, "prepackage")
+
+        for stage, old_document in (
+            ("ga-acceptance", "cfm-ga-acceptance-seal-v1"),
+            ("publication", "cfm-ga-publication-seal-v1"),
+        ):
+            for field, old_value in (
+                ("document", old_document),
+                ("schema_version", 1),
+            ):
+                with self.subTest(stage=stage, field=field):
+                    value = _stage_manifest(stage, {"fixture": True})
+                    value[field] = old_value
+                    with self.assertRaisesRegex(
+                        PublicationError,
+                        "identity or status",
+                    ):
+                        _validate_stage_manifest(value, stage)
 
     def test_boolean_schema_or_integer_authorization_is_rejected(self) -> None:
         for field, value in (
@@ -260,6 +309,27 @@ class ProductionStageIdentityTests(unittest.TestCase):
         for raw in (b'{"field":1,"field":2}\n', b'{"field":NaN}\n'):
             with self.subTest(raw=raw), self.assertRaises(PublicationError):
                 _parse_strict_json(raw, Path("manifest.json"))
+
+    def test_extreme_stage_json_failures_are_publication_errors(self) -> None:
+        deeply_nested = (
+            "{\"nested\":" * 10_000 + "0" + "}" * 10_000
+        ).encode("ascii")
+        excessive_integer = b'{"value":' + b"9" * 5_000 + b"}\n"
+        for raw in (deeply_nested, excessive_integer):
+            with self.subTest(size=len(raw)), self.assertRaises(PublicationError):
+                _parse_strict_json(raw, Path("manifest.json"))
+
+        with patch(
+            "scripts.publication.ga_release_contract.canonical_json",
+            side_effect=RecursionError("fixture canonical recursion"),
+        ), self.assertRaisesRegex(PublicationError, "not canonical"):
+            _parse_strict_json(b"{}\n", Path("manifest.json"))
+
+        with self.assertRaisesRegex(PublicationError, "not canonical"):
+            _parse_strict_json(
+                b'{"value":"\\ud800"}\n',
+                Path("manifest.json"),
+            )
 
     def test_self_check_has_no_filesystem_side_effect(self) -> None:
         fixture = StageFixture()
@@ -569,7 +639,7 @@ class AdapterContractTests(unittest.TestCase):
                     )
 
     def test_legacy_paths_are_rejected_even_when_the_ga_root_exists(self) -> None:
-        for relative in LEGACY_PATHS:
+        for relative in RETIRED_GA_WORKSPACE_PATHS:
             with self.subTest(path=relative):
                 fixture = StageFixture()
                 try:
@@ -577,7 +647,7 @@ class AdapterContractTests(unittest.TestCase):
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(b"legacy\n")
                     with self.assertRaisesRegex(PublicationError, "retired"):
-                        _reject_legacy_paths(fixture.repository)
+                        _verified_prepackage_inputs(fixture.repository)
                 finally:
                     fixture.cleanup()
 
@@ -607,6 +677,7 @@ class AdapterContractTests(unittest.TestCase):
                         "seal": {"sha256": "8" * 64},
                     }
                 },
+                ga_environment_sha256="9" * 64,
                 install_journal_sha256="a" * 64,
                 service_journal_tree_sha256="b" * 64,
             )
@@ -643,6 +714,7 @@ class AdapterContractTests(unittest.TestCase):
             result = _verified_runtime_acceptance_adapter(
                 self.fixture.repository,
                 packages=self._runtime_packages(),
+                ga_environment_sha256="9" * 64,
                 install_journal_sha256="a" * 64,
                 service_journal_tree_sha256="b" * 64,
             )
@@ -669,6 +741,7 @@ class AdapterContractTests(unittest.TestCase):
             _verified_runtime_acceptance_adapter(
                 self.fixture.repository,
                 packages=self._runtime_packages(),
+                ga_environment_sha256="9" * 64,
                 install_journal_sha256="a" * 64,
                 service_journal_tree_sha256="b" * 64,
             )
@@ -693,6 +766,7 @@ class AdapterContractTests(unittest.TestCase):
             _verified_runtime_acceptance_adapter(
                 self.fixture.repository,
                 packages=self._runtime_packages(),
+                ga_environment_sha256="9" * 64,
                 install_journal_sha256="a" * 64,
                 service_journal_tree_sha256="b" * 64,
             )
@@ -708,6 +782,7 @@ class AdapterContractTests(unittest.TestCase):
                 "version": "0.4.0",
             },
             "guards": [{"after": {"closed": True}}],
+            "ga_environment_sha256": "9" * 64,
             "phase": "installed",
             "previous": {
                 "build_number": "40019",
@@ -717,7 +792,34 @@ class AdapterContractTests(unittest.TestCase):
         }
         service_intent = {
             "candidate": install["candidate"],
+            "ga_environment_sha256": "9" * 64,
             "previous": install["previous"],
+        }
+        migration = {
+            "candidate": install["candidate"],
+            "environment": {
+                "document": {"document": "cfm-ga-environment-identity-v1"},
+                "record": {
+                    "path": "migration/service/environment.json",
+                    "sha256": "e" * 64,
+                },
+                "sha256": "9" * 64,
+            },
+            "export": {
+                "intent": {"document": "cfm-ga-journal-export-intent-v1"},
+                "receipt": {"document": "cfm-ga-journal-export-receipt-v1"},
+                "record": {"path": "migration-journals", "sha256": "f" * 64},
+            },
+            "install_journal": {
+                "document": install,
+                "record": {"path": "dormant-install.json", "sha256": "a" * 64},
+            },
+            "previous": install["previous"],
+            "service_journal": {
+                "events": [{"phase": "recommissioned"}],
+                "intent": service_intent,
+                "record": {"path": "service-transaction", "sha256": "b" * 64},
+            },
         }
         packages = {
             "dmg": {
@@ -739,47 +841,16 @@ class AdapterContractTests(unittest.TestCase):
                 },
             },
         )
-        def load(path: Path, *, canonical: bool = True):
-            del canonical
-            if path == self.fixture.repository.joinpath(*INSTALL_JOURNAL_INPUT.parts):
-                return install
-            raise AssertionError(path)
-
-        def digest(path: Path) -> str:
-            if path == self.fixture.repository.joinpath(*INSTALL_JOURNAL_INPUT.parts):
-                return "a" * 64
-            raise AssertionError(path)
-
         with (
             patch(
-                "scripts.publication.ga_release_contract._load_strict_json",
-                side_effect=load,
-            ),
-            patch("scripts.publication.ga_release_contract._require_private_regular"),
-            patch(
-                "scripts.publication.ga_release_contract.dormant_install.validate_journal",
-                return_value=install,
-            ),
-            patch(
-                "scripts.publication.ga_release_contract._verified_service_journal",
-                return_value=(service_intent, {"path": "service", "sha256": "b" * 64}),
+                "scripts.publication.ga_release_contract._verified_migration_journals",
+                return_value=migration,
             ),
             patch(
                 "scripts.publication.ga_release_contract._verified_runtime_acceptance_adapter",
                 return_value={
                     "adapter": {"path": "runtime-acceptance.json", "sha256": "c" * 64},
                     "runtime_evidence": {"path": "runtime-evidence", "sha256": "d" * 64},
-                },
-            ),
-            patch(
-                "scripts.publication.ga_release_contract.sha256_file",
-                side_effect=digest,
-            ),
-            patch(
-                "scripts.publication.ga_release_contract._record",
-                side_effect=lambda _repository, path: {
-                    "path": path.name,
-                    "sha256": "d" * 64,
                 },
             ),
         ):
@@ -789,6 +860,11 @@ class AdapterContractTests(unittest.TestCase):
                 packages,
             )
             self.assertEqual(accepted["runtime_evidence"]["sha256"], "d" * 64)
+            self.assertEqual(
+                accepted["migration_journals"]["export"]["sha256"],
+                "f" * 64,
+            )
+            self.assertEqual(accepted["ga_environment_sha256"], "9" * 64)
             install["candidate"]["tree_sha256"] = "9" * 64
             with self.assertRaises(PublicationError):
                 _verified_acceptance_inputs(
@@ -796,6 +872,212 @@ class AdapterContractTests(unittest.TestCase):
                     prepackage,
                     packages,
                 )
+
+
+class MigrationJournalContractIntegrationTests(unittest.TestCase):
+    @unittest.skipUnless(
+        os.uname().sysname == "Darwin",
+        "durable rename is macOS-only",
+    )
+    def test_contract_reopens_the_exact_atomic_export_record(self) -> None:
+        from scripts.tests.test_ga_acceptance_journal_export import (
+            JournalExportFixture,
+        )
+
+        fixture = JournalExportFixture()
+        self.addCleanup(fixture.cleanup)
+        exported = fixture.export()
+
+        with patch.object(
+            journal_export.JournalExportPaths,
+            "verification",
+            return_value=fixture.paths,
+        ):
+            verified = _verified_migration_journals(fixture.repository)
+
+        self.assertEqual(verified, exported)
+        self.assertEqual(
+            verified["export"]["record"]["path"],
+            MIGRATION_JOURNAL_INPUT.as_posix(),
+        )
+        self.assertEqual(
+            verified["environment"]["record"]["path"],
+            SERVICE_ENVIRONMENT_INPUT.as_posix(),
+        )
+
+    def test_export_verification_failure_stops_before_contract_reopen(self) -> None:
+        fixture = StageFixture()
+        self.addCleanup(fixture.cleanup)
+
+        with (
+            patch(
+                "scripts.publication.ga_release_contract."
+                "verify_ga_acceptance_journal_export",
+                side_effect=journal_export.GAAcceptanceJournalExportError(
+                    "fixture invalid export"
+                ),
+            ),
+            patch(
+                "scripts.publication.ga_release_contract._record"
+            ) as record,
+            patch(
+                "scripts.publication.ga_release_contract._tree_record"
+            ) as tree_record,
+            self.assertRaisesRegex(
+                PublicationError,
+                "atomic GA migration journal export is invalid",
+            ),
+        ):
+            _verified_migration_journals(fixture.repository)
+
+        record.assert_not_called()
+        tree_record.assert_not_called()
+
+    def test_mixed_candidate_is_rejected_before_runtime_collection(self) -> None:
+        from scripts import ga_runtime_acceptance
+
+        fixture = StageFixture()
+        self.addCleanup(fixture.cleanup)
+        expected_candidate = {
+            "build_number": "40035",
+            "manifest_sha256": "1" * 64,
+            "release_source_sha256": "2" * 64,
+            "repository_commit": "3" * 40,
+            "tree_sha256": "4" * 64,
+            "version": "0.4.0",
+        }
+        previous = {
+            "build_number": "40019",
+            "tree_sha256": "5" * 64,
+            "version": "0.4.0",
+        }
+        prepackage = _stage_manifest(
+            "prepackage",
+            {
+                "candidate": {
+                    "app_manifest": {"sha256": "1" * 64},
+                    "signed_app": {"tree_sha256": "4" * 64},
+                },
+                "source": {
+                    "release_source_sha256": "2" * 64,
+                    "repository_commit": "3" * 40,
+                },
+            },
+        )
+        packages = {
+            "dmg": {
+                "dmg_sha256": "c" * 64,
+                "gatekeeper_sha256": "d" * 64,
+                "seal": {"sha256": "e" * 64},
+            }
+        }
+        collection_path = fixture.repository.joinpath(
+            *ga_runtime_acceptance.COLLECTION_RELATIVE.parts
+        )
+
+        for field, drifted_value in (
+            ("manifest_sha256", "6" * 64),
+            ("release_source_sha256", "7" * 64),
+            ("repository_commit", "8" * 40),
+            ("tree_sha256", "9" * 64),
+        ):
+            with self.subTest(field=field):
+                mixed_candidate = {
+                    **expected_candidate,
+                    field: drifted_value,
+                }
+                migration = {
+                    "candidate": mixed_candidate,
+                    "environment": {
+                        "document": {
+                            "document": "cfm-ga-environment-identity-v1"
+                        },
+                        "record": {
+                            "path": "environment.json",
+                            "sha256": "6" * 64,
+                        },
+                        "sha256": "7" * 64,
+                    },
+                    "export": {
+                        "intent": {
+                            "document": "cfm-ga-journal-export-intent-v1"
+                        },
+                        "receipt": {
+                            "document": "cfm-ga-journal-export-receipt-v1"
+                        },
+                        "record": {
+                            "path": "migration-journals",
+                            "sha256": "8" * 64,
+                        },
+                    },
+                    "install_journal": {
+                        "document": {
+                            "candidate": mixed_candidate,
+                            "guards": [{"after": {"closed": True}}],
+                            "phase": "installed",
+                            "previous": previous,
+                        },
+                        "record": {
+                            "path": "dormant-install.json",
+                            "sha256": "a" * 64,
+                        },
+                    },
+                    "previous": previous,
+                    "service_journal": {
+                        "events": [{"phase": "recommissioned"}],
+                        "intent": {
+                            "candidate": mixed_candidate,
+                            "ga_environment_sha256": "7" * 64,
+                            "previous": previous,
+                        },
+                        "record": {
+                            "path": "service-transaction",
+                            "sha256": "b" * 64,
+                        },
+                    },
+                }
+
+                with (
+                    patch(
+                        "scripts.publication.ga_release_contract.verify_stage",
+                        return_value=prepackage,
+                    ),
+                    patch(
+                        "scripts.publication.ga_release_contract."
+                        "_verified_package_sets",
+                        return_value=packages,
+                    ),
+                    patch(
+                        "scripts.publication.ga_release_contract."
+                        "_verified_migration_journals",
+                        return_value=migration,
+                    ),
+                    patch.object(
+                        ga_runtime_acceptance,
+                        "_repository",
+                        return_value=fixture.repository,
+                    ),
+                    patch.object(
+                        ga_runtime_acceptance,
+                        "collect_ga_runtime_acceptance",
+                    ) as collector,
+                    patch.object(
+                        sys,
+                        "argv",
+                        ["ga-runtime-acceptance", "collect"],
+                    ),
+                    self.assertRaisesRegex(
+                        SystemExit,
+                        "GA migration export targets different bytes than prepackage",
+                    ),
+                ):
+                    ga_runtime_acceptance.main(
+                        derive_runtime_expectation,
+                        lambda _repository: {},
+                    )
+
+                collector.assert_not_called()
+                self.assertFalse(os.path.lexists(collection_path))
 
 
 class CommandBoundaryTests(unittest.TestCase):

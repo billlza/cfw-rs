@@ -28,14 +28,16 @@ import uuid
 
 if __package__:
     from . import dormant_app_install as install
+    from . import ga_acceptance_environment as ga_environment
     from .release_build_identity import ACTIVE_RELEASE_IDENTITY
 else:
     import dormant_app_install as install
+    import ga_acceptance_environment as ga_environment
     from release_build_identity import ACTIVE_RELEASE_IDENTITY
 
 
-DOCUMENT: Final = "cfw-current-service-transaction-v2"
-SCHEMA_VERSION: Final = 2
+DOCUMENT: Final = "cfw-current-service-transaction-v3"
+SCHEMA_VERSION: Final = 3
 if (
     DOCUMENT != install.SERVICE_TRANSACTION_DOCUMENT
     or SCHEMA_VERSION != install.SERVICE_TRANSACTION_SCHEMA_VERSION
@@ -49,6 +51,8 @@ PENDING_DIRECTORY: Final = (
 )
 LOCK_NAME: Final = install.GA_INSTALL_PROFILE.service_lock_name
 INTENT_NAME: Final = "intent.json"
+ENVIRONMENT_NAME: Final = "environment.json"
+RETIRED_TRANSACTION_NAMES: Final = install.RETIRED_SERVICE_TRANSACTION_NAMES
 EVENT_PREFIX: Final = "event-"
 PENDING_EVENT_PREFIX: Final = ".event-"
 PENDING_EVENT_SUFFIX: Final = ".pending"
@@ -160,13 +164,37 @@ class ServicePaths:
 @dataclass(frozen=True)
 class ServiceRuntime:
     runner: install.CommandRunner
+    observe_environment: ga_environment.EnvironmentObserver
 
     @classmethod
     def production(cls) -> "ServiceRuntime":
-        return cls(runner=install.production_command_runner)
+        return cls(
+            runner=install.production_command_runner,
+            observe_environment=ga_environment.observe_environment,
+        )
 
     def capture_guard(self) -> dict[str, Any]:
         return install.capture_cfw_guard(self.runner, require_cfm_absent=False)
+
+
+@dataclass(frozen=True)
+class ServiceJournalFileSnapshot:
+    """One stable private service-journal file read under the service lock."""
+
+    name: str
+    data: bytes
+    metadata: os.stat_result
+
+
+@dataclass(frozen=True)
+class TerminalServiceJournalSnapshot:
+    """The exact validated recommissioned service transaction tree."""
+
+    environment: dict[str, Any]
+    intent: dict[str, Any]
+    events: tuple[dict[str, Any], ...]
+    files: tuple[ServiceJournalFileSnapshot, ...]
+    directory_metadata: os.stat_result
 
 
 def _canonical_json(value: object) -> bytes:
@@ -177,18 +205,44 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _journal_metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def _strict_json_bytes(data: bytes, label: str) -> dict[str, Any]:
     if not data or len(data) > MAX_DOCUMENT_BYTES:
         raise install.InstallError("service_journal_invalid", f"{label} size is invalid")
     try:
         value = json.loads(
-            data.decode("utf-8"), object_pairs_hook=install._reject_duplicate_keys
+            data.decode("utf-8"),
+            object_pairs_hook=install._reject_duplicate_keys,
+            parse_constant=install._reject_nonfinite_constant,
         )
-    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+    except (UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
         raise install.InstallError(
             "service_journal_invalid", f"{label} is not strict JSON"
         ) from error
-    if not isinstance(value, dict) or data != _canonical_json(value):
+    if not isinstance(value, dict):
+        raise install.InstallError(
+            "service_journal_invalid", f"{label} is not canonical JSON"
+        )
+    try:
+        encoded = _canonical_json(value)
+    except RecursionError as error:
+        raise install.InstallError(
+            "service_journal_invalid", f"{label} is not canonical JSON"
+        ) from error
+    if data != encoded:
         raise install.InstallError(
             "service_journal_invalid", f"{label} is not canonical JSON"
         )
@@ -249,14 +303,26 @@ def validate_intent(value: object) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "candidate",
         "document",
+        "ga_environment_sha256",
         "off_proof_profile",
         "previous",
         "schema_version",
         "transaction_id",
     }:
         raise install.InstallError("service_journal_invalid", "service intent shape is invalid")
-    if value["document"] != DOCUMENT or value["schema_version"] != SCHEMA_VERSION:
+    if (
+        value["document"] != DOCUMENT
+        or type(value["schema_version"]) is not int
+        or value["schema_version"] != SCHEMA_VERSION
+    ):
         raise install.InstallError("service_journal_invalid", "service intent schema is invalid")
+    if (
+        not isinstance(value["ga_environment_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["ga_environment_sha256"]) is None
+    ):
+        raise install.InstallError(
+            "service_journal_invalid", "service intent GA environment digest is invalid"
+        )
     if not isinstance(value["off_proof_profile"], str) or value[
         "off_proof_profile"
     ] not in {
@@ -314,7 +380,9 @@ def validate_event(
         raise install.InstallError("service_journal_invalid", "service event shape is invalid")
     if (
         value["document"] != DOCUMENT
+        or type(value["schema_version"]) is not int
         or value["schema_version"] != SCHEMA_VERSION
+        or type(value["sequence"]) is not int
         or value["sequence"] != expected_sequence
         or value["phase"] != PHASES[expected_sequence]
         or value["previous_event_sha256"] != previous_event_sha256
@@ -370,10 +438,12 @@ def validate_authority_recovery_intent(
     guard = install._validate_guard(value["guard"])
     if (
         value["document"] != AUTHORITY_RECOVERY_INTENT_DOCUMENT
+        or type(value["schema_version"]) is not int
         or value["schema_version"] != AUTHORITY_RECOVERY_INTENT_SCHEMA_VERSION
         or value["action"] != install.INSTALLED_40019_RECOVERY_ACTION
         or value["off_proof_profile"]
         != install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
+        or type(value["sequence"]) is not int
         or value["sequence"] != 2
         or value["transaction_id"] != intent["transaction_id"]
         or value["intent_sha256"] != events[0]["intent_sha256"]
@@ -386,6 +456,109 @@ def validate_authority_recovery_intent(
             "Authority recovery intent lineage is invalid",
         )
     return value
+
+
+def validate_terminal_snapshot_files(
+    files: dict[str, bytes],
+    profile: install.InstallProfile = install.GA_INSTALL_PROFILE,
+) -> tuple[dict[str, Any], dict[str, Any], tuple[dict[str, Any], ...]]:
+    """Validate exact canonical bytes from one recommissioned service tree."""
+
+    if not isinstance(files, dict) or any(
+        type(name) is not str or not isinstance(data, bytes)
+        for name, data in files.items()
+    ):
+        raise install.InstallError(
+            "service_journal_invalid",
+            "service snapshot file map is invalid",
+        )
+    event_names = tuple(
+        f"{EVENT_PREFIX}{sequence:08d}.json" for sequence in range(len(PHASES))
+    )
+    authority_recovery_prepared = AUTHORITY_RECOVERY_INTENT_NAME in files
+    expected_names = {
+        ENVIRONMENT_NAME,
+        INTENT_NAME,
+        *event_names,
+        *(
+            {AUTHORITY_RECOVERY_INTENT_NAME}
+            if authority_recovery_prepared
+            else set()
+        ),
+    }
+    if set(files) != expected_names:
+        raise install.InstallError(
+            "service_journal_invalid",
+            "terminal service snapshot inventory is invalid",
+        )
+    intent = validate_intent(_strict_json_bytes(files[INTENT_NAME], "service intent"))
+    if (
+        intent["candidate"]["build_number"] != profile.build_number
+        or intent["previous"]["build_number"] != profile.previous_build_number
+        or intent["off_proof_profile"] != profile.off_proof_profile
+    ):
+        raise install.InstallError(
+            "service_journal_invalid",
+            "service snapshot is not for the fixed GA identity",
+        )
+    try:
+        environment = ga_environment.validate_environment(
+            _strict_json_bytes(
+                files[ENVIRONMENT_NAME],
+                "GA environment identity",
+            )
+        )
+    except ga_environment.GAAcceptanceEnvironmentError as error:
+        raise install.InstallError(
+            "service_journal_invalid",
+            "service GA environment identity is invalid",
+        ) from error
+    if (
+        ga_environment.environment_sha256(environment)
+        != intent["ga_environment_sha256"]
+    ):
+        raise install.InstallError(
+            "service_journal_invalid",
+            "service intent does not bind its GA environment identity",
+        )
+
+    intent_sha256 = _sha256(files[INTENT_NAME])
+    previous_event_sha256: str | None = None
+    baseline_guard: dict[str, Any] | None = None
+    events: list[dict[str, Any]] = []
+    for sequence, name in enumerate(event_names):
+        allowed_actions, allowed_profiles = profile.service_event_contract(
+            sequence,
+            authority_recovery_prepared=authority_recovery_prepared,
+        )
+        event = validate_event(
+            _strict_json_bytes(files[name], f"service event {sequence}"),
+            expected_sequence=sequence,
+            previous_event_sha256=previous_event_sha256,
+            expected_guard=baseline_guard,
+            intent_sha256=intent_sha256,
+            expected_actions=allowed_actions,
+            expected_off_proof_profiles=allowed_profiles,
+        )
+        events.append(event)
+        if baseline_guard is None:
+            baseline_guard = event["guard_after"]
+        previous_event_sha256 = _sha256(files[name])
+    if events[-1]["phase"] != "recommissioned":
+        raise install.InstallError(
+            "service_journal_not_terminal",
+            "service transaction is not at the recommissioned phase",
+        )
+    if authority_recovery_prepared:
+        validate_authority_recovery_intent(
+            _strict_json_bytes(
+                files[AUTHORITY_RECOVERY_INTENT_NAME],
+                "Authority recovery intent",
+            ),
+            intent=intent,
+            events=events,
+        )
+    return environment, intent, tuple(events)
 
 
 class ServiceEventStore:
@@ -417,14 +590,19 @@ class ServiceEventStore:
                 "service intent is not for the fixed GA identity",
             )
 
+    def _reject_retired_namespace(self) -> None:
+        install.require_retired_service_transaction_names_absent(self.parent_fd)
+
     @contextmanager
-    def locked(self) -> Iterator[None]:
+    def locked(self, *, require_existing: bool = False) -> Iterator[None]:
+        self._reject_retired_namespace()
         with install.exclusive_release_maintenance_lock(
-            self.paths.transaction_parent
+            self.paths.transaction_parent,
+            require_existing=require_existing,
         ):
+            self._reject_retired_namespace()
             flags = (
-                os.O_RDWR
-                | os.O_CREAT
+                (os.O_RDONLY if require_existing else os.O_RDWR | os.O_CREAT)
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0)
             )
@@ -683,7 +861,11 @@ class ServiceEventStore:
         )
         try:
             names = os.listdir(directory_fd)
-            allowed = {INTENT_NAME, f"{EVENT_PREFIX}00000000.json"}
+            allowed = {
+                ENVIRONMENT_NAME,
+                INTENT_NAME,
+                f"{EVENT_PREFIX}00000000.json",
+            }
             if not set(names) <= allowed:
                 raise install.InstallError(
                     "service_journal_unsafe",
@@ -884,7 +1066,9 @@ class ServiceEventStore:
         candidate: install.CandidateIdentity,
         previous: install.AppIdentity,
         guard: dict[str, Any],
+        environment: object,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        self._reject_retired_namespace()
         if self.paths.transaction_directory.exists() or self.paths.transaction_directory.is_symlink():
             raise install.InstallError(
                 "service_journal_exists", "service transaction already exists"
@@ -907,10 +1091,23 @@ class ServiceEventStore:
             self.paths.pending_directory_name
         )
         try:
+            try:
+                normalized_environment = ga_environment.validate_environment(
+                    environment
+                )
+                environment_sha256 = ga_environment.environment_sha256(
+                    normalized_environment
+                )
+            except ga_environment.GAAcceptanceEnvironmentError as error:
+                raise install.InstallError(
+                    "service_environment_invalid",
+                    "service transaction GA environment is invalid",
+                ) from error
             intent = validate_intent(
                 {
                     "candidate": candidate.document(),
                     "document": DOCUMENT,
+                    "ga_environment_sha256": environment_sha256,
                     "off_proof_profile": (
                         self.paths.install_paths.profile.service_event_proof_profiles[0]
                     ),
@@ -921,6 +1118,7 @@ class ServiceEventStore:
             )
             self._require_profile_intent(intent)
             intent_sha256 = _sha256(_canonical_json(intent))
+            self._write_new(pending_fd, ENVIRONMENT_NAME, normalized_environment)
             self._write_new(pending_fd, INTENT_NAME, intent)
             event = validate_event(
                 {
@@ -1014,6 +1212,7 @@ class ServiceEventStore:
             if (
                 set(names)
                 != {
+                    ENVIRONMENT_NAME,
                     INTENT_NAME,
                     *event_names,
                     *pending_names,
@@ -1046,6 +1245,28 @@ class ServiceEventStore:
                 )
             )
             self._require_profile_intent(intent)
+            try:
+                environment = ga_environment.validate_environment(
+                    _strict_json_bytes(
+                        self._read(
+                            directory_fd,
+                            ENVIRONMENT_NAME,
+                            "GA environment identity",
+                        ),
+                        "GA environment identity",
+                    )
+                )
+                environment_sha256 = ga_environment.environment_sha256(environment)
+            except ga_environment.GAAcceptanceEnvironmentError as error:
+                raise install.InstallError(
+                    "service_journal_invalid",
+                    "service GA environment identity is invalid",
+                ) from error
+            if environment_sha256 != intent["ga_environment_sha256"]:
+                raise install.InstallError(
+                    "service_journal_invalid",
+                    "service intent does not bind its GA environment identity",
+                )
             intent_sha256 = _sha256(_canonical_json(intent))
             events: list[dict[str, Any]] = []
             previous_digest: str | None = None
@@ -1201,6 +1422,7 @@ class ServiceEventStore:
             os.close(directory_fd)
 
     def load(self) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+        self._reject_retired_namespace()
         published = self.paths.transaction_directory.exists()
         pending = self.paths.pending_directory.exists()
         if self.paths.transaction_directory.is_symlink() or self.paths.pending_directory.is_symlink():
@@ -1253,6 +1475,109 @@ class ServiceEventStore:
             )
         install._fsync_directory_fd(self.parent_fd)
         return intent, events
+
+    def terminal_snapshot(self) -> TerminalServiceJournalSnapshot:
+        """Read the exact recommissioned tree; the caller must hold ``locked``."""
+
+        try:
+            pending_metadata = os.stat(
+                self.paths.pending_directory_name,
+                dir_fd=self.parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pending_metadata = None
+        except OSError as error:
+            raise install.InstallError(
+                "service_journal_unavailable",
+                "cannot inspect pending service transaction",
+            ) from error
+        if pending_metadata is not None:
+            raise install.InstallError(
+                "service_journal_pending",
+                "terminal service snapshot refuses a pending transaction",
+            )
+
+        directory_fd = self._open_transaction_directory()
+        try:
+            names = set(os.listdir(directory_fd))
+            if any(
+                re.fullmatch(r"\.event-[0-9]{8}\.json\.pending", name)
+                is not None
+                for name in names
+            ) or AUTHORITY_RECOVERY_PENDING_INTENT_NAME in names:
+                raise install.InstallError(
+                    "service_journal_pending",
+                    "terminal service snapshot refuses pending journal entries",
+                )
+        finally:
+            os.close(directory_fd)
+
+        intent, events = self._load_directory(self.paths.transaction_directory_name)
+        if len(events) != len(PHASES) or events[-1]["phase"] != "recommissioned":
+            raise install.InstallError(
+                "service_journal_not_terminal",
+                "service transaction is not at the recommissioned phase",
+            )
+
+        directory_fd = self._open_transaction_directory()
+        try:
+            directory_metadata = os.fstat(directory_fd)
+            names = sorted(os.listdir(directory_fd))
+            snapshots: list[ServiceJournalFileSnapshot] = []
+            for name in names:
+                before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                data = self._read(directory_fd, name, f"service journal {name}")
+                after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if _journal_metadata_identity(before) != _journal_metadata_identity(
+                    after
+                ):
+                    raise install.InstallError(
+                        "service_journal_identity_drift",
+                        f"service journal {name} changed while snapshotting",
+                    )
+                snapshots.append(
+                    ServiceJournalFileSnapshot(
+                        name=name,
+                        data=data,
+                        metadata=before,
+                    )
+                )
+            after_directory = os.fstat(directory_fd)
+            visible_directory = os.stat(
+                self.paths.transaction_directory_name,
+                dir_fd=self.parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                _journal_metadata_identity(directory_metadata)
+                != _journal_metadata_identity(after_directory)
+                or _journal_metadata_identity(directory_metadata)
+                != _journal_metadata_identity(visible_directory)
+            ):
+                raise install.InstallError(
+                    "service_journal_identity_drift",
+                    "service transaction directory changed while snapshotting",
+                )
+        finally:
+            os.close(directory_fd)
+
+        environment, observed_intent, observed_events = validate_terminal_snapshot_files(
+            {snapshot.name: snapshot.data for snapshot in snapshots},
+            self.paths.install_paths.profile,
+        )
+        if observed_intent != intent or observed_events != tuple(events):
+            raise install.InstallError(
+                "service_journal_identity_drift",
+                "service journal changed between validation and snapshot",
+            )
+        return TerminalServiceJournalSnapshot(
+            environment=environment,
+            intent=observed_intent,
+            events=observed_events,
+            files=tuple(snapshots),
+            directory_metadata=directory_metadata,
+        )
 
     def append(
         self,
@@ -1605,6 +1930,33 @@ class CurrentServiceTransaction:
     def _candidate(self) -> install.CandidateIdentity:
         return install.admit_fixed_candidate(self.paths.install_paths, self.runtime.runner)
 
+    def _observe_environment(self) -> dict[str, Any]:
+        try:
+            return ga_environment.validate_environment(
+                self.runtime.observe_environment()
+            )
+        except ga_environment.GAAcceptanceEnvironmentError as error:
+            raise install.InstallError(
+                "service_environment_invalid",
+                "current GA environment cannot be observed",
+            ) from error
+
+    def _require_environment(self, intent: dict[str, Any]) -> dict[str, Any]:
+        observed = self._observe_environment()
+        try:
+            digest = ga_environment.environment_sha256(observed)
+        except ga_environment.GAAcceptanceEnvironmentError as error:
+            raise install.InstallError(
+                "service_environment_invalid",
+                "current GA environment is invalid",
+            ) from error
+        if digest != intent["ga_environment_sha256"]:
+            raise install.InstallError(
+                "service_environment_drift",
+                "current GA environment differs from the service intent",
+            )
+        return observed
+
     def _identity_pair(
         self,
     ) -> tuple[install.CandidateIdentity, install.AppIdentity]:
@@ -1633,6 +1985,8 @@ class CurrentServiceTransaction:
     def preflight(
         self,
     ) -> tuple[install.CandidateIdentity, install.AppIdentity, dict[str, Any]]:
+        with ServiceEventStore(self.paths) as store:
+            store._reject_retired_namespace()
         if (
             self.paths.transaction_directory.exists()
             or self.paths.transaction_directory.is_symlink()
@@ -1642,6 +1996,7 @@ class CurrentServiceTransaction:
             raise install.InstallError(
                 "service_journal_exists", "service transaction already exists; use recovery"
             )
+        self._observe_environment()
         before = self.runtime.capture_guard()
         uid = _uid_from_guard(before)
         install.require_single_interactive_local_user(self.runtime.runner, uid)
@@ -1682,6 +2037,7 @@ class CurrentServiceTransaction:
         store: ServiceEventStore,
         events: list[dict[str, Any]],
         *,
+        intent: dict[str, Any],
         phase: str,
         action: str,
         executable: Path,
@@ -1689,6 +2045,7 @@ class CurrentServiceTransaction:
         expected_authority: set[str],
         after_action: Callable[[], None] | None = None,
     ) -> None:
+        self._require_environment(intent)
         baseline = events[0]["guard_after"]
         before = self.runtime.capture_guard()
         install._assert_guard_unchanged(baseline, before)
@@ -1700,6 +2057,7 @@ class CurrentServiceTransaction:
         )
         if after_action is not None:
             after_action()
+        self._require_environment(intent)
         after = self.runtime.capture_guard()
         install._assert_guard_unchanged(before, after)
         events.append(
@@ -1712,7 +2070,12 @@ class CurrentServiceTransaction:
             )
         )
 
-    def _prove_decommissioned(self, events: list[dict[str, Any]]) -> dict[str, Any]:
+    def _prove_decommissioned(
+        self,
+        intent: dict[str, Any],
+        events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        self._require_environment(intent)
         baseline = events[0]["guard_after"]
         before = self.runtime.capture_guard()
         install._assert_guard_unchanged(baseline, before)
@@ -1723,16 +2086,19 @@ class CurrentServiceTransaction:
         )
         after = self.runtime.capture_guard()
         install._assert_guard_unchanged(before, after)
+        self._require_environment(intent)
         return after
 
     def _prove_recommissioned(
         self,
+        intent: dict[str, Any],
         events: list[dict[str, Any]],
         *,
         executable: Path,
         installed: install.AppIdentity,
         uid: int,
     ) -> dict[str, Any]:
+        self._require_environment(intent)
         baseline = events[0]["guard_after"]
         before = self.runtime.capture_guard()
         install._assert_guard_unchanged(baseline, before)
@@ -1744,6 +2110,7 @@ class CurrentServiceTransaction:
         _require_tombstone_and_no_system_extension(self.runtime)
         after = self.runtime.capture_guard()
         install._assert_guard_unchanged(before, after)
+        self._require_environment(intent)
         return after
 
     def decommission(self) -> dict[str, Any]:
@@ -1752,14 +2119,21 @@ class CurrentServiceTransaction:
                 loaded = store.load()
                 if loaded is None:
                     candidate, previous, guard = self.preflight()
+                    environment = self._observe_environment()
                     # Recheck the CFW projection at the actual durable intent boundary.
                     adjacent = self.runtime.capture_guard()
                     install._assert_guard_unchanged(guard, adjacent)
-                    intent, events = store.create(candidate, previous, adjacent)
+                    intent, events = store.create(
+                        candidate,
+                        previous,
+                        adjacent,
+                        environment,
+                    )
                 else:
                     intent, events = loaded
                     candidate, previous = self._identity_pair()
                     self._require_intent_matches(intent, candidate, previous)
+                self._require_environment(intent)
                 uid = _uid_from_guard(events[-1]["guard_after"])
                 phase = events[-1]["phase"]
                 decommission_proven = False
@@ -1768,6 +2142,7 @@ class CurrentServiceTransaction:
                     self._step(
                         store,
                         events,
+                        intent=intent,
                         phase="proxy_unregistered",
                         action=(
                             self.paths.install_paths.profile.unregister_proxy_action
@@ -1812,6 +2187,7 @@ class CurrentServiceTransaction:
                             store.prepare_authority_recovery(
                                 intent, events, recovery_guard
                             )
+                            self._require_environment(intent)
                             adjacent = self.runtime.capture_guard()
                             install._assert_guard_unchanged(
                                 recovery_guard, adjacent
@@ -1830,6 +2206,7 @@ class CurrentServiceTransaction:
                     self._step(
                         store,
                         events,
+                        intent=intent,
                         phase="authority_unregistered",
                         action=authority_action,
                         executable=executable,
@@ -1843,7 +2220,7 @@ class CurrentServiceTransaction:
                     )
                     phase = events[-1]["phase"]
                 if phase == "authority_unregistered":
-                    guard = self._prove_decommissioned(events)
+                    guard = self._prove_decommissioned(intent, events)
                     decommission_proven = True
                     events.append(
                         store.append(
@@ -1860,7 +2237,7 @@ class CurrentServiceTransaction:
                         "service decommission did not reach a stable phase",
                     )
                 if not decommission_proven:
-                    self._prove_decommissioned(events)
+                    self._prove_decommissioned(intent, events)
                 return {"intent": intent, "event": events[-1]}
 
     def _require_installed_candidate(
@@ -1890,6 +2267,8 @@ class CurrentServiceTransaction:
             or installation["phase"] != "installed"
             or installation["candidate"] != intent["candidate"]
             or installation["previous"] != intent["previous"]
+            or installation["ga_environment_sha256"]
+            != intent["ga_environment_sha256"]
         ):
             raise install.InstallError(
                 "service_install_evidence_invalid",
@@ -1913,6 +2292,7 @@ class CurrentServiceTransaction:
                     intent["previous"]["tree_sha256"],
                 )
                 self._require_intent_matches(intent, candidate, previous)
+                self._require_environment(intent)
                 installed = self._require_installed_candidate(intent)
                 uid = _uid_from_guard(events[-1]["guard_after"])
                 phase = events[-1]["phase"]
@@ -1932,6 +2312,7 @@ class CurrentServiceTransaction:
                     self._step(
                         store,
                         events,
+                        intent=intent,
                         phase="authority_registered",
                         action="register-global-authority",
                         executable=executable,
@@ -1943,6 +2324,7 @@ class CurrentServiceTransaction:
                     self._step(
                         store,
                         events,
+                        intent=intent,
                         phase="proxy_registered",
                         action="register-proxy-agent",
                         executable=executable,
@@ -1952,6 +2334,7 @@ class CurrentServiceTransaction:
                     phase = events[-1]["phase"]
                 if phase == "proxy_registered":
                     after = self._prove_recommissioned(
+                        intent,
                         events,
                         executable=executable,
                         installed=installed,
@@ -1974,6 +2357,7 @@ class CurrentServiceTransaction:
                     )
                 if not recommission_proven:
                     self._prove_recommissioned(
+                        intent,
                         events,
                         executable=executable,
                         installed=installed,
@@ -1990,6 +2374,7 @@ class CurrentServiceTransaction:
                         "service_journal_missing", "service transaction is absent"
                     )
                 intent, events = loaded
+                self._require_environment(intent)
                 phase = events[-1]["phase"]
                 target = install.read_app_identity(self.paths.install_paths.target_app)
                 previous = install.AppIdentity(

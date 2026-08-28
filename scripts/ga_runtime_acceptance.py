@@ -38,6 +38,18 @@ import uuid
 
 if __package__:
     from . import dormant_app_install
+    from .ga_acceptance_environment import (
+        GAAcceptanceEnvironmentError,
+        environment_sha256,
+        observe_environment,
+        require_same_environment,
+        validate_environment,
+    )
+    from .ga_acceptance_journal_export import (
+        ACCEPTANCE_ROOT_RELATIVE as JOURNAL_EXPORT_ACCEPTANCE_ROOT_RELATIVE,
+        ENVIRONMENT_RELATIVE as JOURNAL_EXPORT_ENVIRONMENT_RELATIVE,
+        INSTALL_RELATIVE as JOURNAL_EXPORT_INSTALL_RELATIVE,
+    )
     from .harness.packet_capture import (
         ALLOWED_LINK_TYPES,
         PacketCaptureError,
@@ -88,6 +100,18 @@ if __package__:
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from scripts import dormant_app_install
+    from scripts.ga_acceptance_environment import (
+        GAAcceptanceEnvironmentError,
+        environment_sha256,
+        observe_environment,
+        require_same_environment,
+        validate_environment,
+    )
+    from scripts.ga_acceptance_journal_export import (
+        ACCEPTANCE_ROOT_RELATIVE as JOURNAL_EXPORT_ACCEPTANCE_ROOT_RELATIVE,
+        ENVIRONMENT_RELATIVE as JOURNAL_EXPORT_ENVIRONMENT_RELATIVE,
+        INSTALL_RELATIVE as JOURNAL_EXPORT_INSTALL_RELATIVE,
+    )
     from scripts.harness.packet_capture import (
         ALLOWED_LINK_TYPES,
         PacketCaptureError,
@@ -170,23 +194,22 @@ AUTHORITY_EXECUTABLE: Final = (
 )
 
 GA_ROOT_RELATIVE: Final = ga_root(Path("."))
-ACCEPTANCE_ROOT_RELATIVE: Final = (
-    GA_ROOT_RELATIVE / "stage-inputs/ga-acceptance"
-)
+ACCEPTANCE_ROOT_RELATIVE: Final = JOURNAL_EXPORT_ACCEPTANCE_ROOT_RELATIVE
 ACCEPTANCE_RELATIVE: Final = ACCEPTANCE_ROOT_RELATIVE / "runtime-acceptance.json"
 RAW_ROOT_RELATIVE: Final = ACCEPTANCE_ROOT_RELATIVE / "runtime-evidence"
 COLLECTION_RELATIVE: Final = ACCEPTANCE_ROOT_RELATIVE / "runtime-collection"
-INSTALL_JOURNAL_RELATIVE: Final = ACCEPTANCE_ROOT_RELATIVE / "dormant-install.json"
+ENVIRONMENT_RELATIVE: Final = JOURNAL_EXPORT_ENVIRONMENT_RELATIVE
+INSTALL_JOURNAL_RELATIVE: Final = JOURNAL_EXPORT_INSTALL_RELATIVE
 DMG_RELATIVE: Final = (
     GA_ROOT_RELATIVE
     / f"packages/dmg/v{PRODUCT_VERSION}/Clash.for.Mac_{PRODUCT_VERSION}_arm64.dmg"
 )
 DMG_SET_RELATIVE: Final = GA_ROOT_RELATIVE / f"packages/dmg/v{PRODUCT_VERSION}"
 
-DOCUMENT: Final = "cfm-ga-runtime-acceptance-v1"
-SCHEMA_VERSION: Final = 1
-CHECK_DOCUMENT: Final = "cfm-ga-runtime-check-v1"
-COMMAND_DOCUMENT: Final = "cfm-ga-command-observation-v1"
+DOCUMENT: Final = "cfm-ga-runtime-acceptance-v2"
+SCHEMA_VERSION: Final = 2
+CHECK_DOCUMENT: Final = "cfm-ga-runtime-check-v2"
+COMMAND_DOCUMENT: Final = "cfm-ga-command-observation-v2"
 TRAFFIC_DOCUMENT: Final = "cfm-ga-traffic-capture-v1"
 SECRET_POLICY: Final = "cfm-ga-evidence-secret-patterns-v1"
 GATE_CLASS: Final = "ga_required"
@@ -398,9 +421,20 @@ def _strict_json(data: bytes, label: str) -> dict[str, Any]:
         )
     except GARuntimeAcceptanceError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        ValueError,
+    ) as error:
         raise _error(f"{label} is not strict UTF-8 JSON") from error
-    if not isinstance(value, dict) or canonical_json(value) != data:
+    if not isinstance(value, dict):
+        raise _error(f"{label} is not one canonical JSON object")
+    try:
+        encoded = canonical_json(value)
+    except (RecursionError, UnicodeError) as error:
+        raise _error(f"{label} is not one canonical JSON object") from error
+    if encoded != data:
         raise _error(f"{label} is not one canonical JSON object")
     return value
 
@@ -446,6 +480,55 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, i
         metadata.st_mode,
         metadata.st_nlink,
     )
+
+
+def _load_bound_environment(
+    repository: Path,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    path = repository.joinpath(*ENVIRONMENT_RELATIVE.parts)
+    try:
+        with exclusive_rooted_directory_lock(
+            repository,
+            path.parent,
+            require_private=True,
+        ) as descriptor:
+            data = read_private_pending_locked(
+                descriptor,
+                path.parent,
+                path.name,
+                MAX_JSON_BYTES,
+            )
+    except (PublicationError, RootedDirectoryChanged) as error:
+        raise _error("fixed GA environment document cannot be reopened safely") from error
+    document = _strict_json(data, "fixed GA environment document")
+    try:
+        normalized = validate_environment(document)
+        observed_sha256 = environment_sha256(normalized)
+    except GAAcceptanceEnvironmentError as error:
+        raise _error("fixed GA environment document is invalid") from error
+    if observed_sha256 != expected_sha256:
+        raise _error("fixed GA environment differs from the expected binding")
+    return normalized
+
+
+def _require_current_environment(
+    repository: Path,
+    runtime: ProductionCollectorRuntime,
+    expected_sha256: str,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    expected_environment = _load_bound_environment(repository, expected_sha256)
+    try:
+        observed_environment = runtime.capture_environment()
+        return require_same_environment(
+            expected_environment,
+            observed_environment,
+            label=label,
+        )
+    except GAAcceptanceEnvironmentError as error:
+        raise _error(f"{label} does not match the fixed GA environment") from error
 
 
 def _snapshot_raw_tree(root: Path) -> dict[str, FileSnapshot]:
@@ -514,6 +597,7 @@ def _validate_expected(value: object) -> dict[str, Any]:
             "dmg_set_seal_sha256",
             "dmg_sha256",
             "from_build",
+            "ga_environment_sha256",
             "install_journal_sha256",
             "product_version",
             "service_journal_tree_sha256",
@@ -533,6 +617,7 @@ def _validate_expected(value: object) -> dict[str, Any]:
         "dmg_gatekeeper_sha256",
         "dmg_set_seal_sha256",
         "dmg_sha256",
+        "ga_environment_sha256",
         "install_journal_sha256",
         "service_journal_tree_sha256",
     ):
@@ -621,36 +706,58 @@ def _check_document(value: object, check_id: str, fields: set[str]) -> dict[str,
     return document
 
 
-def _collection_binding(value: object, label: str) -> dict[str, str]:
-    binding = require_exact_keys(value, {"challenge", "session_id"}, label)
+def _canonical_challenge(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise _error(f"{label} challenge is malformed")
     try:
-        session = str(uuid.UUID(binding["session_id"]))
-    except (AttributeError, TypeError, ValueError) as error:
-        raise _error(f"{label} session is not one canonical UUID") from error
-    if session != binding["session_id"] or not isinstance(binding["challenge"], str):
-        raise _error(f"{label} identity is malformed")
-    try:
-        challenge = base64.urlsafe_b64decode(binding["challenge"] + "==")
+        challenge = base64.urlsafe_b64decode(value + "==")
     except (ValueError, TypeError) as error:
         raise _error(f"{label} challenge is not base64url") from error
     if (
         len(challenge) != 32
         or base64.urlsafe_b64encode(challenge).decode("ascii").rstrip("=")
-        != binding["challenge"]
+        != value
     ):
         raise _error(f"{label} challenge is not one canonical 256-bit value")
-    return {"challenge": binding["challenge"], "session_id": session}
+    return value
+
+
+def _collection_binding(value: object, label: str) -> dict[str, str]:
+    binding = require_exact_keys(
+        value,
+        {"challenge", "ga_environment_sha256", "session_id"},
+        label,
+    )
+    try:
+        session = str(uuid.UUID(binding["session_id"]))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise _error(f"{label} session is not one canonical UUID") from error
+    if session != binding["session_id"]:
+        raise _error(f"{label} identity is malformed")
+    challenge = _canonical_challenge(binding["challenge"], label)
+    try:
+        ga_environment_sha256 = require_sha256(
+            binding["ga_environment_sha256"],
+            f"{label} GA environment",
+        )
+    except PublicationError as error:
+        raise _error(f"{label} GA environment digest is malformed") from error
+    return {
+        "challenge": challenge,
+        "ga_environment_sha256": ga_environment_sha256,
+        "session_id": session,
+    }
 
 
 def _derive_capture_token(challenge: str, check_id: str, stage: str) -> str:
-    binding = _collection_binding(
-        {"challenge": challenge, "session_id": "00000000-0000-4000-8000-000000000000"},
+    normalized_challenge = _canonical_challenge(
+        challenge,
         "capture token challenge",
     )
     prefix = {"start": "s000", "target": "t000", "end": "e000"}.get(stage)
     if check_id not in TRAFFIC_CHECKS or prefix is None:
         raise _error("capture token domain is not source-owned")
-    material = base64.urlsafe_b64decode(binding["challenge"] + "==")
+    material = base64.urlsafe_b64decode(normalized_challenge + "==")
     digest = hashlib.sha256(
         b"cfm-ga-runtime-capture-token-v1\0"
         + check_id.encode("ascii")
@@ -1442,6 +1549,7 @@ def _packet_send_result(
         or result["case_id"] != policy["case_id"]
         or result["stage"] != stage
         or result["token_sha256"] != expected_digest
+        or type(result["bytes_submitted"]) is not int
         or result["bytes_submitted"] != len(token)
         or result["transport"]
         != ("resolver" if policy["protocol"] == "dns" else policy["protocol"])
@@ -1710,8 +1818,12 @@ def _validate_raw_evidence(
         if isinstance(document, dict) and "collection" in document
     }
     if len(collections) != 1:
-        raise _error("GA runtime checks do not bind one collection session/challenge")
+        raise _error(
+            "GA runtime checks do not bind one collection session/challenge/environment"
+        )
     collection = dict(next(iter(collections)))
+    if collection["ga_environment_sha256"] != expected["ga_environment_sha256"]:
+        raise _error("GA runtime checks bind a different fixed GA environment")
     _validate_exact_dmg_install(
         documents["exact-dmg-install.json"],
         repository,
@@ -1780,6 +1892,7 @@ def _adapter_document(
                 "dmg_gatekeeper_sha256",
                 "dmg_set_seal_sha256",
                 "dmg_sha256",
+                "ga_environment_sha256",
                 "install_journal_sha256",
                 "service_journal_tree_sha256",
             )
@@ -1999,8 +2112,8 @@ def seal_ga_runtime_acceptance(
     )
 
 
-COLLECTION_DOCUMENT: Final = "cfm-ga-runtime-collection-intent-v1"
-COLLECTION_EVENT_DOCUMENT: Final = "cfm-ga-runtime-collection-event-v1"
+COLLECTION_DOCUMENT: Final = "cfm-ga-runtime-collection-intent-v2"
+COLLECTION_EVENT_DOCUMENT: Final = "cfm-ga-runtime-collection-event-v2"
 COLLECTION_SUCCESS_STEPS: Final = (
     "dmg-gatekeeper",
     "dmg-contained-app-byte-proof",
@@ -2070,6 +2183,9 @@ class ProductionCollectorRuntime:
             "stderr": stderr,
             "stdout": stdout,
         }
+
+    def capture_environment(self) -> dict[str, Any]:
+        return observe_environment()
 
     def capture_guard(self) -> dict[str, Any]:
         try:
@@ -2142,15 +2258,45 @@ class ProductionCollectorRuntime:
 
     @staticmethod
     def _terminate_capture(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is None:
+        try:
+            running = process.poll() is None
+        except OSError as error:
+            raise _error("tcpdump capture state could not be observed") from error
+        if running:
             try:
                 os.killpg(process.pid, 9)
-            except ProcessLookupError:
-                pass
+            except ProcessLookupError as error:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired as timeout_error:
+                    raise _error(
+                        "tcpdump capture process group could not be cleaned up"
+                    ) from timeout_error
+                except OSError as wait_error:
+                    raise _error(
+                        "tcpdump capture process exit could not be observed"
+                    ) from wait_error
+                try:
+                    still_running = process.poll() is None
+                except OSError as poll_error:
+                    raise _error(
+                        "tcpdump capture process exit could not be observed"
+                    ) from poll_error
+                if still_running:
+                    raise _error(
+                        "tcpdump capture process exit could not be observed"
+                    ) from error
+                return
+            except OSError as error:
+                raise _error(
+                    "tcpdump capture process group could not be terminated"
+                ) from error
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired as error:
             raise _error("tcpdump capture process group could not be cleaned up") from error
+        except OSError as error:
+            raise _error("tcpdump capture process exit could not be observed") from error
 
     def _capture_traffic_bytes(
         self,
@@ -2188,12 +2334,18 @@ class ProductionCollectorRuntime:
             )
         except OSError as error:
             raise _error("fixed tcpdump capture could not start") from error
-        if process.stdout is None or process.stderr is None:
-            self._terminate_capture(process)
-            raise _error("fixed tcpdump capture pipes are unavailable")
         prefix = bytearray()
-        selector = selectors.DefaultSelector()
+        selector: selectors.BaseSelector | None = None
+        primary: BaseException | None = None
+        cleanup_failure: GARuntimeAcceptanceError | None = None
+        result: tuple[dict[str, Any], bytes] | None = None
         try:
+            if process.stdout is None or process.stderr is None:
+                raise _error("fixed tcpdump capture pipes are unavailable")
+            try:
+                selector = selectors.DefaultSelector()
+            except OSError as error:
+                raise _error("tcpdump output selector is unavailable") from error
             os.set_blocking(process.stderr.fileno(), False)
             selector.register(process.stderr, selectors.EVENT_READ)
             deadline = time.monotonic() + 10
@@ -2314,7 +2466,7 @@ class ProductionCollectorRuntime:
             )
             duration = (window_end - window_start) * 1000
             observation_ms = duration.numerator // duration.denominator
-            return (
+            result = (
                 {
                     "capture_command": capture_command,
                     "endpoint": endpoint,
@@ -2323,13 +2475,46 @@ class ProductionCollectorRuntime:
                 },
                 capture_bytes,
             )
-        except BaseException:
-            self._terminate_capture(process)
-            raise
+        except OSError as error:
+            primary = _error("tcpdump capture process I/O failed")
+            primary.__cause__ = error
+        except BaseException as error:
+            primary = error
         finally:
-            selector.close()
-            process.stdout.close()
-            process.stderr.close()
+            if primary is not None:
+                try:
+                    self._terminate_capture(process)
+                except GARuntimeAcceptanceError as error:
+                    cleanup_failure = error
+            if selector is not None:
+                try:
+                    selector.close()
+                except OSError as error:
+                    if cleanup_failure is None:
+                        cleanup_failure = _error(
+                            "tcpdump output selector could not be closed"
+                        )
+                        cleanup_failure.__cause__ = error
+            for stream in (process.stdout, process.stderr):
+                if stream is None:
+                    continue
+                try:
+                    stream.close()
+                except OSError as error:
+                    if cleanup_failure is None:
+                        cleanup_failure = _error(
+                            "tcpdump capture pipes could not be closed"
+                        )
+                        cleanup_failure.__cause__ = error
+        if cleanup_failure is not None:
+            if primary is not None:
+                raise cleanup_failure from primary
+            raise cleanup_failure
+        if primary is not None:
+            raise primary
+        if result is not None:
+            return result
+        raise _error("tcpdump capture ended without a result")
 
     def capture_traffic(
         self,
@@ -2571,6 +2756,7 @@ def _validate_collection_receipt(
                 or event["document"] != COLLECTION_EVENT_DOCUMENT
                 or type(event["schema_version"]) is not int
                 or event["schema_version"] != SCHEMA_VERSION
+                or type(event["sequence"]) is not int
                 or event["sequence"] != index
             ):
                 raise _error("GA runtime collection event identity is invalid")
@@ -2739,17 +2925,27 @@ def collect_ga_runtime_acceptance(
     if os.path.lexists(acceptance_path) or os.path.lexists(raw_root):
         raise _error("GA runtime acceptance or raw evidence already exists")
     initial = _validate_expected(expected)
+    selected_runtime = runtime or ProductionCollectorRuntime(repository)
+    _require_current_environment(
+        repository,
+        selected_runtime,
+        initial["ga_environment_sha256"],
+        label="GA runtime collection admission environment",
+    )
     material = os.urandom(32) if challenge_bytes is None else challenge_bytes
     if not isinstance(material, bytes) or len(material) != 32:
         raise _error("GA runtime collection challenge must contain 32 CSPRNG bytes")
     selected_session = str(uuid.uuid4()) if session_id is None else session_id
     challenge = base64.urlsafe_b64encode(material).decode("ascii").rstrip("=")
     collection = _collection_binding(
-        {"challenge": challenge, "session_id": selected_session},
+        {
+            "challenge": challenge,
+            "ga_environment_sha256": initial["ga_environment_sha256"],
+            "session_id": selected_session,
+        },
         "GA runtime collection",
     )
     collection_path = _publish_collection_intent(repository, initial, collection)
-    selected_runtime = runtime or ProductionCollectorRuntime(repository)
     mutation_started = False
     try:
         before_guard = selected_runtime.capture_guard()
@@ -2803,6 +2999,12 @@ def collect_ga_runtime_acceptance(
         if installed_tree != dmg_contained_tree:
             raise _error("installed app differs from the byte-proven DMG-contained app")
 
+        _require_current_environment(
+            repository,
+            selected_runtime,
+            initial["ga_environment_sha256"],
+            label="GA runtime pre-mutation environment",
+        )
         mutation_started = True
         launch = _step_command(
             repository,
@@ -3047,6 +3249,14 @@ def collect_ga_runtime_acceptance(
         )
         after_guard = selected_runtime.capture_guard()
         _guard(after_guard, "collection restored")
+        if after_guard != before_guard:
+            raise _error("collection did not restore the exact pre-run CFW state")
+        _require_current_environment(
+            repository,
+            selected_runtime,
+            initial["ga_environment_sha256"],
+            label="GA runtime post-restore environment",
+        )
         documents["shutdown-restore.json"] = {
             "after_guard": after_guard,
             "before_guard": before_guard,
@@ -3202,8 +3412,19 @@ def recover_ga_runtime_collection(
     if not os.path.lexists(collection_path):
         raise _error("there is no active GA runtime collection to recover")
     _intent, collection = _load_collection_intent(repository, collection_path)
-    selected_runtime = runtime or ProductionCollectorRuntime(repository)
     normalized_expected = _validate_expected(expected)
+    if (
+        collection["ga_environment_sha256"]
+        != normalized_expected["ga_environment_sha256"]
+    ):
+        raise _error("recovery collection binds a different fixed GA environment")
+    selected_runtime = runtime or ProductionCollectorRuntime(repository)
+    _require_current_environment(
+        repository,
+        selected_runtime,
+        normalized_expected["ga_environment_sha256"],
+        label="GA runtime recovery admission environment",
+    )
     baseline = _installed_guard_baseline(repository, normalized_expected)
     initial = _run_collector_command(
         selected_runtime,
@@ -3265,6 +3486,12 @@ def recover_ga_runtime_collection(
     _guard(restored, "runtime recovery")
     if restored != baseline:
         raise _error("runtime recovery did not restore the install-journal CFW guard")
+    _require_current_environment(
+        repository,
+        selected_runtime,
+        normalized_expected["ga_environment_sha256"],
+        label="GA runtime recovery post-restore environment",
+    )
     _append_collection_event(
         repository,
         collection_path,
@@ -3288,6 +3515,22 @@ def self_check() -> None:
         or len(CHECKS) != 12
         or tuple(sorted(CHECKS)) != CHECKS
         or len(RAW_FILE_NAMES) != 15
+        or (
+            DOCUMENT,
+            SCHEMA_VERSION,
+            CHECK_DOCUMENT,
+            COMMAND_DOCUMENT,
+            COLLECTION_DOCUMENT,
+            COLLECTION_EVENT_DOCUMENT,
+        )
+        != (
+            "cfm-ga-runtime-acceptance-v2",
+            2,
+            "cfm-ga-runtime-check-v2",
+            "cfm-ga-command-observation-v2",
+            "cfm-ga-runtime-collection-intent-v2",
+            "cfm-ga-runtime-collection-event-v2",
+        )
         or ACCEPTANCE_RELATIVE
         != Path(
             "target/candidates/0.4.0/ga/40035/stage-inputs/ga-acceptance/"
@@ -3297,6 +3540,16 @@ def self_check() -> None:
         != Path(
             "target/candidates/0.4.0/ga/40035/stage-inputs/ga-acceptance/"
             "runtime-evidence"
+        )
+        or ENVIRONMENT_RELATIVE
+        != Path(
+            "target/candidates/0.4.0/ga/40035/stage-inputs/ga-acceptance/"
+            "migration-journals/service-transaction/environment.json"
+        )
+        or INSTALL_JOURNAL_RELATIVE
+        != Path(
+            "target/candidates/0.4.0/ga/40035/stage-inputs/ga-acceptance/"
+            "migration-journals/dormant-install.json"
         )
         or not stat.S_ISREG(runner_metadata.st_mode)
         or stat.S_ISLNK(runner_metadata.st_mode)

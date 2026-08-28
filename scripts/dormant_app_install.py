@@ -52,6 +52,7 @@ if __package__:
         GatekeeperEvidenceError,
         validate_evidence as validate_gatekeeper_evidence,
     )
+    from . import ga_acceptance_environment as ga_environment
     from .hash_artifact import build_manifest
     from .macos_durability import full_fsync
     from .release_build_identity import (
@@ -75,6 +76,7 @@ else:
         GatekeeperEvidenceError,
         validate_evidence as validate_gatekeeper_evidence,
     )
+    import ga_acceptance_environment as ga_environment
     from hash_artifact import build_manifest
     from macos_durability import full_fsync
     from release_build_identity import (
@@ -89,8 +91,8 @@ else:
     from verify_notary_log import NotaryLogError, validate_files as validate_notary_files
 
 
-DOCUMENT: Final = "cfw-dormant-app-install-v1"
-SCHEMA_VERSION: Final = 1
+DOCUMENT: Final = "cfw-dormant-app-install-v2"
+SCHEMA_VERSION: Final = 2
 VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 BUILD_NUMBER: Final = ACTIVE_RELEASE_IDENTITY.ga_build
 TEAM_ID: Final = "YKUPL7Z869"
@@ -142,8 +144,14 @@ LEGACY_TOMBSTONE_PROGRAM: Final = (
 )
 SERVICE_MAINTENANCE_FLAG: Final = "--service-maintenance-v2"
 SERVICE_MAINTENANCE_DOCUMENT: Final = "cfw-current-service-maintenance-v2"
-SERVICE_TRANSACTION_DOCUMENT: Final = "cfw-current-service-transaction-v2"
-SERVICE_TRANSACTION_SCHEMA_VERSION: Final = 2
+SERVICE_TRANSACTION_DOCUMENT: Final = "cfw-current-service-transaction-v3"
+SERVICE_TRANSACTION_SCHEMA_VERSION: Final = 3
+SERVICE_ENVIRONMENT_NAME: Final = "environment.json"
+RETIRED_SERVICE_TRANSACTION_NAMES: Final = (
+    ".com.bill.clashformac.service-transaction-v2",
+    ".com.bill.clashformac.service-transaction-v2.pending",
+    ".com.bill.clashformac.service-transaction-v2.lock",
+)
 INSTALLED_40019_OFF_PROOF_PROFILE: Final = (
     "installed_40019_engine_v5_authority_v1_0"
 )
@@ -343,7 +351,7 @@ GA_INSTALL_PROFILE: Final = InstallProfile(
     journal_pending_name=JOURNAL_PENDING_NAME,
     lock_name=LOCK_NAME,
     staging_prefix=STAGING_PREFIX,
-    service_transaction_directory=".com.bill.clashformac.service-transaction-v2",
+    service_transaction_directory=".com.bill.clashformac.service-transaction-v3",
     off_proof_profile=INSTALLED_40019_OFF_PROOF_PROFILE,
     prove_off_action="prove-installed-40019-off",
     unregister_proxy_action="unregister-installed-40019-proxy-agent",
@@ -436,6 +444,15 @@ class CandidateIdentity:
 
 
 @dataclass(frozen=True)
+class TerminalInstallJournalSnapshot:
+    """One stable, validated terminal install journal read under its lock."""
+
+    document: dict[str, Any]
+    data: bytes
+    metadata: os.stat_result
+
+
+@dataclass(frozen=True)
 class CommandResult:
     returncode: int
     stdout: str
@@ -453,13 +470,14 @@ TreeSyncer = Callable[[Path], None]
 Swapper = Callable[[int, str, int, str], None]
 BundleVerifier = Callable[[Path, AppIdentity], None]
 ServiceDecommissionVerifier = Callable[
-    [InstallPaths, CandidateIdentity, AppIdentity, dict[str, Any]], None
+    [InstallPaths, CandidateIdentity, AppIdentity, dict[str, Any]], dict[str, Any]
 ]
 
 
 @dataclass(frozen=True)
 class InstallRuntime:
     capture_guard: GuardCapture
+    observe_environment: ga_environment.EnvironmentObserver
     require_cfm_dormant: DormantCheck
     require_cfm_process_absent: CfmProcessCheck
     admit_candidate: CandidateAdmitter
@@ -476,6 +494,7 @@ class InstallRuntime:
         selected_paths = paths or InstallPaths.production()
         return cls(
             capture_guard=lambda: capture_cfw_guard(runner),
+            observe_environment=ga_environment.observe_environment,
             require_cfm_dormant=lambda guard: require_cfm_dormant(
                 guard,
                 runner,
@@ -703,6 +722,16 @@ def _terminate_process_group(
                 "command_termination_failed",
                 "spawned command group disappeared while its leader remained",
             )
+    except PermissionError:
+        # macOS can transiently report EPERM for an already-killed orphaned
+        # group while its descendants are being reparented and reaped.  Keep
+        # the bounded absence proof below armed; a live leader is still an
+        # unambiguous termination failure.
+        if process.poll() is None:
+            failure = InstallError(
+                "command_termination_failed",
+                "spawned command group could not be signalled",
+            )
     except OSError:
         failure = InstallError(
             "command_termination_failed", "spawned command group could not be signalled"
@@ -753,6 +782,48 @@ def _terminate_process_group(
                     process.kill()
                 except OSError:
                     continue
+    while failure is None:
+        group_visibility_restricted = False
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            group_visibility_restricted = True
+        except OSError:
+            failure = InstallError(
+                "command_termination_failed",
+                "spawned command group absence could not be observed",
+            )
+            break
+        if time.monotonic() >= deadline:
+            failure = InstallError(
+                "command_termination_failed",
+                (
+                    "spawned command group absence could not be observed"
+                    if group_visibility_restricted
+                    else "spawned command group did not disappear after SIGKILL"
+                ),
+            )
+            break
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            if not group_visibility_restricted:
+                failure = InstallError(
+                    "command_termination_failed",
+                    "spawned command group could not be re-signalled",
+                )
+                break
+        except OSError:
+            failure = InstallError(
+                "command_termination_failed",
+                "spawned command group could not be re-signalled",
+            )
+            break
+        time.sleep(0.01)
     return failure
 
 
@@ -804,15 +875,22 @@ def _run_bounded_process(
     result: CommandResult | None = None
     stdout = bytearray()
     stderr = bytearray()
-    selector = selectors.DefaultSelector()
+    selector: selectors.BaseSelector | None = None
+    leader_cleanup_attempted = False
     try:
+        try:
+            selector = selectors.DefaultSelector()
+        except OSError as error:
+            raise InstallError(
+                "command_io_unavailable",
+                "fixed command output selector is unavailable",
+            ) from error
         if process.stdout is None or process.stderr is None:
             raise InstallError("command_failed", "fixed command pipes are unavailable")
         for stream, destination in ((process.stdout, stdout), (process.stderr, stderr)):
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, destination)
         deadline = time.monotonic() + timeout
-        leader_cleanup_attempted = False
         while selector.get_map() or process.poll() is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -855,30 +933,35 @@ def _run_bounded_process(
                 "command_output_invalid", "fixed installer command output is not UTF-8"
             ) from error
         result = CommandResult(returncode, decoded_stdout, decoded_stderr)
+    except OSError as error:
+        primary = InstallError(
+            "command_io_unavailable",
+            "fixed command process I/O failed",
+        )
+        primary.__cause__ = error
     except BaseException as error:
         primary = error
     finally:
         close_failure: InstallError | None = None
-        try:
-            selector.close()
-        except OSError:
-            close_failure = InstallError(
-                "command_cleanup_failed", "command selector could not be closed"
-            )
-        finally:
+        if selector is not None:
             try:
-                if process.stdout is not None:
-                    process.stdout.close()
-                if process.stderr is not None:
-                    process.stderr.close()
+                selector.close()
             except OSError:
                 close_failure = InstallError(
-                    "command_cleanup_failed", "command pipes could not be closed"
+                    "command_cleanup_failed", "command selector could not be closed"
                 )
-            finally:
-                final_cleanup = _terminate_process_group(process, group)
-                if cleanup_failure is None:
-                    cleanup_failure = final_cleanup
+        for stream in (process.stdout, process.stderr):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except OSError:
+                if close_failure is None:
+                    close_failure = InstallError(
+                        "command_cleanup_failed", "command pipes could not be closed"
+                    )
+        if not leader_cleanup_attempted:
+            cleanup_failure = _terminate_process_group(process, group)
         if cleanup_failure is None:
             cleanup_failure = close_failure
     if cleanup_failure is not None:
@@ -1296,11 +1379,19 @@ def parse_service_maintenance_receipt(
         receipt = json.loads(
             result.stdout,
             object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
         )
-    except (json.JSONDecodeError, ValueError) as error:
+    except (json.JSONDecodeError, RecursionError, ValueError) as error:
         raise InstallError(
             "cfm_service_status_invalid",
             "signed Host returned a malformed service status receipt",
+        ) from error
+    try:
+        canonical_receipt = _canonical_json(receipt)
+    except RecursionError as error:
+        raise InstallError(
+            "cfm_service_status_invalid",
+            "signed Host returned a noncanonical service maintenance receipt",
         ) from error
     expected_keys = {
         "action",
@@ -1362,7 +1453,7 @@ def parse_service_maintenance_receipt(
             "not_found",
             "unknown",
         }
-        or result.stdout.encode("utf-8") != _canonical_json(receipt)
+        or result.stdout.encode("utf-8") != canonical_receipt
     ):
         raise InstallError(
             "cfm_service_status_invalid",
@@ -1901,15 +1992,32 @@ def _read_fd_bytes(descriptor: int, maximum: int) -> bytes:
     return bytes(output)
 
 
+def _journal_metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 @contextmanager
-def exclusive_release_maintenance_lock(target_parent: Path) -> Iterator[None]:
+def exclusive_release_maintenance_lock(
+    target_parent: Path,
+    *,
+    require_existing: bool = False,
+) -> Iterator[None]:
     """Serialize every service-registration and application-swap mutation."""
 
     parent_fd = _open_directory(target_parent)
     descriptor = -1
     flags = (
-        os.O_RDWR
-        | os.O_CREAT
+        (os.O_RDONLY if require_existing else os.O_RDWR | os.O_CREAT)
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
     )
@@ -2063,24 +2171,36 @@ def _read_private_service_document(
             f"cannot open {label}",
         ) from error
     try:
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_nlink != 1
-            or opened.st_uid != os.geteuid()
-            or stat.S_IMODE(opened.st_mode) != 0o600
-            or opened.st_size <= 0
-            or opened.st_size > MAX_JOURNAL_BYTES
-        ):
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or opened.st_uid != os.geteuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_size <= 0
+                or opened.st_size > MAX_JOURNAL_BYTES
+            ):
+                raise InstallError(
+                    "service_decommission_evidence_invalid",
+                    f"{label} metadata is unsafe",
+                )
+            data = _read_fd_bytes(descriptor, MAX_JOURNAL_BYTES)
+            after = os.fstat(descriptor)
+            visible = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError as error:
             raise InstallError(
                 "service_decommission_evidence_invalid",
-                f"{label} metadata is unsafe",
-            )
-        data = _read_fd_bytes(descriptor, MAX_JOURNAL_BYTES)
-        after = os.fstat(descriptor)
-        visible = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                f"{label} changed or became unavailable while reading",
+            ) from error
     finally:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                f"{label} descriptor could not be closed",
+            ) from error
     if (
         (
             opened.st_dev,
@@ -2104,13 +2224,26 @@ def _read_private_service_document(
         value = json.loads(
             data.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
         )
-    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+    except (UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
         raise InstallError(
             "service_decommission_evidence_invalid",
             f"{label} is not strict JSON",
         ) from error
-    if not isinstance(value, dict) or data != _canonical_json(value):
+    if not isinstance(value, dict):
+        raise InstallError(
+            "service_decommission_evidence_invalid",
+            f"{label} is not canonical JSON",
+        )
+    try:
+        encoded = _canonical_json(value)
+    except RecursionError as error:
+        raise InstallError(
+            "service_decommission_evidence_invalid",
+            f"{label} is not canonical JSON",
+        ) from error
+    if data != encoded:
         raise InstallError(
             "service_decommission_evidence_invalid",
             f"{label} is not canonical JSON",
@@ -2118,18 +2251,38 @@ def _read_private_service_document(
     return value, data
 
 
+def require_retired_service_transaction_names_absent(parent_fd: int) -> None:
+    """Prove every retired service-transaction name is absent beneath one fd."""
+
+    for name in RETIRED_SERVICE_TRANSACTION_NAMES:
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise InstallError(
+                "service_retired_journal_unavailable",
+                "cannot prove the retired service transaction namespace is absent",
+            ) from error
+        raise InstallError(
+            "service_retired_journal_present",
+            "retired service transaction evidence must be reviewed separately",
+        )
+
+
 def require_decommissioned_service_transaction(
     paths: InstallPaths,
     candidate: CandidateIdentity,
     previous: AppIdentity,
     expected_guard: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
     """Verify the exact append-only service journal before any bundle swap."""
 
     parent_fd = _open_directory(paths.target_parent)
     directory_fd = -1
     directory_name = paths.profile.service_transaction_directory
     try:
+        require_retired_service_transaction_names_absent(parent_fd)
         try:
             directory_fd = os.open(
                 directory_name,
@@ -2168,7 +2321,11 @@ def require_decommissioned_service_transaction(
         ]
         inventory = set(os.listdir(directory_fd))
         authority_recovery_prepared = AUTHORITY_RECOVERY_INTENT_NAME in inventory
-        expected_inventory = {"intent.json", *event_names}
+        expected_inventory = {
+            SERVICE_ENVIRONMENT_NAME,
+            "intent.json",
+            *event_names,
+        }
         if authority_recovery_prepared:
             expected_inventory.add(AUTHORITY_RECOVERY_INTENT_NAME)
         if (
@@ -2188,6 +2345,7 @@ def require_decommissioned_service_transaction(
         if set(intent) != {
             "candidate",
             "document",
+            "ga_environment_sha256",
             "off_proof_profile",
             "previous",
             "schema_version",
@@ -2196,6 +2354,29 @@ def require_decommissioned_service_transaction(
             raise InstallError(
                 "service_decommission_evidence_invalid",
                 "service intent shape is invalid",
+            )
+
+        environment_document, environment_data = _read_private_service_document(
+            directory_fd,
+            SERVICE_ENVIRONMENT_NAME,
+            "GA environment identity",
+        )
+        try:
+            normalized_environment = ga_environment.validate_environment(
+                environment_document
+            )
+            environment_sha256 = ga_environment.environment_sha256(
+                normalized_environment
+            )
+        except ga_environment.GAAcceptanceEnvironmentError as error:
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "service GA environment identity is invalid",
+            ) from error
+        if environment_data != ga_environment.canonical_json(normalized_environment):
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "service GA environment identity is not canonical",
             )
         try:
             transaction_id = str(uuid.UUID(intent["transaction_id"]))
@@ -2206,10 +2387,12 @@ def require_decommissioned_service_transaction(
             ) from error
         if (
             intent["document"] != SERVICE_TRANSACTION_DOCUMENT
+            or type(intent["schema_version"]) is not int
             or intent["schema_version"] != SERVICE_TRANSACTION_SCHEMA_VERSION
             or transaction_id != intent["transaction_id"]
             or intent["candidate"] != candidate.document()
             or intent["previous"] != previous.document()
+            or intent["ga_environment_sha256"] != environment_sha256
             or intent["off_proof_profile"] != paths.profile.off_proof_profile
         ):
             raise InstallError(
@@ -2257,8 +2440,10 @@ def require_decommissioned_service_transaction(
                 or event["intent_sha256"] != intent_sha256
                 or event["phase"] != SERVICE_DECOMMISSION_PHASES[sequence]
                 or event["previous_event_sha256"] != previous_event_sha256
+                or type(event["schema_version"]) is not int
                 or event["schema_version"]
                 != SERVICE_TRANSACTION_SCHEMA_VERSION
+                or type(event["sequence"]) is not int
                 or event["sequence"] != sequence
                 or not isinstance(event["off_proof_profile"], str)
                 or event["off_proof_profile"]
@@ -2307,8 +2492,10 @@ def require_decommissioned_service_transaction(
                 != INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
                 or recovery["previous_event_sha256"]
                 != _sha256_bytes(event_documents[1])
+                or type(recovery["schema_version"]) is not int
                 or recovery["schema_version"]
                 != AUTHORITY_RECOVERY_INTENT_SCHEMA_VERSION
+                or type(recovery["sequence"]) is not int
                 or recovery["sequence"] != 2
                 or recovery["transaction_id"] != intent["transaction_id"]
                 or recovery_guard != baseline_guard
@@ -2338,6 +2525,7 @@ def require_decommissioned_service_transaction(
                 "service transaction has no CFW guard baseline",
             )
         _assert_guard_unchanged(baseline_guard, expected_guard)
+        return normalized_environment
     except InstallError as error:
         if error.code == "journal_invalid":
             raise InstallError(
@@ -2345,10 +2533,28 @@ def require_decommissioned_service_transaction(
                 "service transaction contains an invalid CFW guard",
             ) from error
         raise
+    except OSError as error:
+        raise InstallError(
+            "service_decommission_evidence_invalid",
+            "service transaction evidence changed or became unavailable",
+        ) from error
     finally:
+        close_error: OSError | None = None
         if directory_fd >= 0:
-            os.close(directory_fd)
-        os.close(parent_fd)
+            try:
+                os.close(directory_fd)
+            except OSError as error:
+                close_error = error
+        try:
+            os.close(parent_fd)
+        except OSError as error:
+            if close_error is None:
+                close_error = error
+        if close_error is not None:
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                "service transaction descriptors could not be closed",
+            ) from close_error
 
 
 def validate_journal(
@@ -2360,6 +2566,7 @@ def validate_journal(
         {
             "candidate",
             "document",
+            "ga_environment_sha256",
             "guards",
             "phase",
             "previous",
@@ -2370,8 +2577,23 @@ def validate_journal(
         },
         "installation journal",
     )
-    if document["document"] != DOCUMENT or document["schema_version"] != SCHEMA_VERSION:
+    if (
+        document["document"] != DOCUMENT
+        or type(document["schema_version"]) is not int
+        or document["schema_version"] != SCHEMA_VERSION
+    ):
         raise InstallError("journal_invalid", "installation journal schema is unsupported")
+    try:
+        ga_environment_digest = document["ga_environment_sha256"]
+        if (
+            not isinstance(ga_environment_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", ga_environment_digest) is None
+        ):
+            raise ValueError
+    except (KeyError, ValueError) as error:
+        raise InstallError(
+            "journal_invalid", "installation journal GA environment digest is invalid"
+        ) from error
     if type(document["sequence"]) is not int or document["sequence"] <= 0:
         raise InstallError("journal_invalid", "installation journal sequence is invalid")
     if document["phase"] not in PHASES:
@@ -2449,6 +2671,52 @@ def validate_journal(
     return document
 
 
+def validate_journal_bytes(
+    data: bytes,
+    profile: InstallProfile = GA_INSTALL_PROFILE,
+) -> dict[str, Any]:
+    """Parse canonical producer bytes through the one install-journal validator."""
+
+    if not isinstance(data, bytes) or not data or len(data) > MAX_JOURNAL_BYTES:
+        raise InstallError("journal_invalid", "installation journal size is invalid")
+    try:
+        value = json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
+        raise InstallError(
+            "journal_invalid", "installation journal is not strict JSON"
+        ) from error
+    try:
+        encoded = _canonical_json(value)
+    except RecursionError as error:
+        raise InstallError(
+            "journal_invalid", "installation journal is not canonical JSON"
+        ) from error
+    if data != encoded:
+        raise InstallError(
+            "journal_invalid", "installation journal is not canonical JSON"
+        )
+    return validate_journal(value, profile)
+
+
+def validate_terminal_journal_bytes(
+    data: bytes,
+    profile: InstallProfile = GA_INSTALL_PROFILE,
+) -> dict[str, Any]:
+    """Validate one exact installed producer journal for downstream export."""
+
+    document = validate_journal_bytes(data, profile)
+    if document["phase"] != "installed":
+        raise InstallError(
+            "journal_not_terminal",
+            "installation journal is not at the installed phase",
+        )
+    return document
+
+
 def _require_journal_successor(
     current: dict[str, Any] | None, pending: dict[str, Any]
 ) -> None:
@@ -2468,6 +2736,7 @@ def _require_journal_successor(
     immutable = {
         "candidate",
         "document",
+        "ga_environment_sha256",
         "previous",
         "schema_version",
         "staging_name",
@@ -2543,8 +2812,12 @@ class JournalStore:
         self.close()
 
     @contextmanager
-    def locked(self) -> Iterator[None]:
-        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    def locked(self, *, require_existing: bool = False) -> Iterator[None]:
+        flags = (
+            (os.O_RDONLY if require_existing else os.O_RDWR | os.O_CREAT)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         try:
             descriptor = os.open(self.paths.lock_name, flags, 0o600, dir_fd=self.parent_fd)
         except OSError as error:
@@ -2563,11 +2836,17 @@ class JournalStore:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as error:
                 raise InstallError("install_busy", "another installation transaction is active") from error
-            rebound = os.stat(
-                self.paths.lock_name,
-                dir_fd=self.parent_fd,
-                follow_symlinks=False,
-            )
+            try:
+                rebound = os.stat(
+                    self.paths.lock_name,
+                    dir_fd=self.parent_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise InstallError(
+                    "install_lock_unsafe",
+                    "installation lock path is unavailable",
+                ) from error
             if (rebound.st_dev, rebound.st_ino) != (metadata.st_dev, metadata.st_ino):
                 raise InstallError("install_lock_unsafe", "installation lock path changed")
             try:
@@ -2595,7 +2874,10 @@ class JournalStore:
         finally:
             os.close(descriptor)
 
-    def _load_name(self, name: str) -> dict[str, Any] | None:
+    def _read_name(
+        self,
+        name: str,
+    ) -> TerminalInstallJournalSnapshot | None:
         try:
             descriptor = os.open(
                 name,
@@ -2623,18 +2905,38 @@ class JournalStore:
         finally:
             os.close(descriptor)
         if (
-            (metadata.st_size, metadata.st_mtime_ns)
-            != (after.st_size, after.st_mtime_ns)
-            or (metadata.st_dev, metadata.st_ino) != (rebound.st_dev, rebound.st_ino)
+            _journal_metadata_identity(metadata) != _journal_metadata_identity(after)
+            or _journal_metadata_identity(metadata)
+            != _journal_metadata_identity(rebound)
         ):
             raise InstallError("journal_identity_drift", "installation journal changed while reading")
-        try:
-            value = json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
-        except (UnicodeError, json.JSONDecodeError, ValueError) as error:
-            raise InstallError("journal_invalid", "installation journal is not strict JSON") from error
-        if data != _canonical_json(value):
-            raise InstallError("journal_invalid", "installation journal is not canonical JSON")
-        return validate_journal(value, self.paths.profile)
+        return TerminalInstallJournalSnapshot(
+            document=validate_journal_bytes(data, self.paths.profile),
+            data=data,
+            metadata=metadata,
+        )
+
+    def _load_name(self, name: str) -> dict[str, Any] | None:
+        snapshot = self._read_name(name)
+        return None if snapshot is None else snapshot.document
+
+    def terminal_snapshot(self) -> TerminalInstallJournalSnapshot:
+        """Read the exact installed journal; the caller must hold ``locked``."""
+
+        current = self._read_name(self.paths.journal_name)
+        pending = self._read_name(self.paths.journal_pending_name)
+        if pending is not None:
+            raise InstallError(
+                "journal_pending",
+                "terminal installation snapshot refuses a pending journal",
+            )
+        if current is None:
+            raise InstallError(
+                "journal_missing",
+                "terminal installation journal is absent",
+            )
+        validate_terminal_journal_bytes(current.data, self.paths.profile)
+        return current
 
     def peek(self) -> dict[str, Any] | None:
         current = self._load_name(self.paths.journal_name)
@@ -2722,6 +3024,10 @@ def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]
     return result
 
 
+def _reject_nonfinite_constant(token: str) -> object:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
 def _next(document: dict[str, Any], *, phase: str | None = None) -> dict[str, Any]:
     updated = json.loads(json.dumps(document))
     updated["sequence"] += 1
@@ -2777,6 +3083,53 @@ class DormantInstallTransaction:
         self.runtime.require_cfm_process_absent()
         return final
 
+    def _observe_environment(self) -> dict[str, Any]:
+        try:
+            return ga_environment.validate_environment(
+                self.runtime.observe_environment()
+            )
+        except ga_environment.GAAcceptanceEnvironmentError as error:
+            raise InstallError(
+                "install_environment_invalid",
+                "current GA environment cannot be observed",
+            ) from error
+
+    def _require_service_environment(
+        self,
+        expected: object,
+    ) -> dict[str, Any]:
+        observed = self._observe_environment()
+        try:
+            return ga_environment.require_same_environment(
+                expected,
+                observed,
+                label="dormant install GA environment",
+            )
+        except ga_environment.GAAcceptanceEnvironmentError as error:
+            raise InstallError(
+                "install_environment_drift",
+                "current GA environment differs from the service transaction",
+            ) from error
+
+    def _require_journal_environment(
+        self,
+        document: dict[str, Any],
+    ) -> dict[str, Any]:
+        observed = self._observe_environment()
+        try:
+            digest = ga_environment.environment_sha256(observed)
+        except ga_environment.GAAcceptanceEnvironmentError as error:
+            raise InstallError(
+                "install_environment_invalid",
+                "current GA environment is invalid",
+            ) from error
+        if digest != document["ga_environment_sha256"]:
+            raise InstallError(
+                "install_environment_drift",
+                "current GA environment differs from the installation journal",
+            )
+        return observed
+
     def preflight(self) -> tuple[CandidateIdentity, AppIdentity]:
         before = self._capture_stable_dormant_guard()
         candidate = self.runtime.admit_candidate(self.paths)
@@ -2794,12 +3147,13 @@ class DormantInstallTransaction:
                 "install_identity_mismatch",
                 "candidate and installed application do not match the fixed GA identity",
             )
-        self.runtime.require_service_decommissioned(
+        service_environment = self.runtime.require_service_decommissioned(
             self.paths,
             candidate,
             previous,
             before,
         )
+        self._require_service_environment(service_environment)
         after = self._capture_stable_dormant_guard(before)
         return candidate, previous
 
@@ -2812,11 +3166,14 @@ class DormantInstallTransaction:
             with JournalStore(self.paths) as store:
                 with store.locked():
                     opening_guard = self._capture_stable_dormant_guard()
-                    self.runtime.require_service_decommissioned(
+                    service_environment = self.runtime.require_service_decommissioned(
                         self.paths,
                         candidate,
                         previous,
                         opening_guard,
+                    )
+                    observed_environment = self._require_service_environment(
+                        service_environment
                     )
                     if store.peek() is not None:
                         raise InstallError(
@@ -2831,6 +3188,11 @@ class DormantInstallTransaction:
                     document: dict[str, Any] = {
                         "candidate": candidate.document(),
                         "document": DOCUMENT,
+                        "ga_environment_sha256": (
+                            ga_environment.environment_sha256(
+                                observed_environment
+                            )
+                        ),
                         "guards": [
                             {
                                 "after": None,
@@ -2854,14 +3216,26 @@ class DormantInstallTransaction:
             with JournalStore(self.paths) as store:
                 with store.locked():
                     before = self._capture_stable_dormant_guard(before_open)
-                    document = store.load(
-                        lambda selected: self.runtime.require_service_decommissioned(
+                    def authorize(selected: dict[str, Any]) -> None:
+                        service_environment = self.runtime.require_service_decommissioned(
                             self.paths,
                             _candidate_from_journal(selected),
                             _previous_from_journal(selected),
                             before,
                         )
-                    )
+                        observed = self._require_service_environment(
+                            service_environment
+                        )
+                        if (
+                            ga_environment.environment_sha256(observed)
+                            != selected["ga_environment_sha256"]
+                        ):
+                            raise InstallError(
+                                "install_environment_drift",
+                                "service and installation journals bind different GA environments",
+                            )
+
+                    document = store.load(authorize)
                     if document is None:
                         raise InstallError(
                             "journal_absent", "there is no installation transaction"
@@ -2885,6 +3259,7 @@ class DormantInstallTransaction:
                     return self._resume(store, updated)
 
     def _resume(self, store: JournalStore, document: dict[str, Any]) -> dict[str, Any]:
+        self._require_journal_environment(document)
         candidate = _candidate_from_journal(document)
         parent_fd = _open_directory(self.paths.target_parent)
         container_path = self.paths.target_parent / document["staging_name"]
@@ -2906,6 +3281,7 @@ class DormantInstallTransaction:
                 except FileNotFoundError:
                     container_exists = False
                 if not container_exists:
+                    self._require_journal_environment(document)
                     os.mkdir(document["staging_name"], 0o700, dir_fd=parent_fd)
                     _fsync_directory_fd(parent_fd)
                 container_fd = _open_directory(container_path)
@@ -2950,6 +3326,7 @@ class DormantInstallTransaction:
                             remove_partial_staged_payload(container_path, partial)
                             partial_identity = None
                         if partial_identity is None:
+                            self._require_journal_environment(document)
                             admitted = self.runtime.admit_candidate(self.paths)
                             if admitted != candidate:
                                 raise InstallError(
@@ -2965,6 +3342,7 @@ class DormantInstallTransaction:
                             )
                         self.runtime.verify_bundle(partial, candidate.app)
                         self.runtime.sync_tree(partial)
+                        self._require_journal_environment(document)
                         publish_staged_payload(container_fd)
                     staged_identity = self.runtime.read_identity(staged)
                     if not _same_app(staged_identity, candidate.app):
@@ -2976,6 +3354,7 @@ class DormantInstallTransaction:
                 finally:
                     os.close(container_fd)
                 document = _next(document, phase="staged")
+                self._require_journal_environment(document)
                 store.write(document)
 
             if document["phase"] == "staged":
@@ -2996,6 +3375,7 @@ class DormantInstallTransaction:
                         self._require_layout(
                             document, target="previous", staged="candidate"
                         )
+                        self._require_journal_environment(document)
                         self.runtime.swap(
                             swap_parent_fd,
                             self.paths.target_name,
@@ -3014,6 +3394,7 @@ class DormantInstallTransaction:
                     os.close(swap_parent_fd)
                 self._require_layout(document, target="candidate", staged="previous")
                 document = _next(document, phase="swapped")
+                self._require_journal_environment(document)
                 store.write(document)
 
             if document["phase"] == "swapped":
@@ -3032,6 +3413,7 @@ class DormantInstallTransaction:
                 )
                 document["guards"][-1]["after"] = after
                 document = _next(document, phase="installed")
+                self._require_journal_environment(document)
                 store.write(document)
                 self._verify_terminal(document)
                 return document
@@ -3066,6 +3448,7 @@ class DormantInstallTransaction:
             raise InstallError("recovery_layout_ambiguous", "bundle layout differs from journal")
 
     def _verify_terminal(self, document: dict[str, Any]) -> None:
+        self._require_journal_environment(document)
         if document["phase"] == "installed":
             self._require_layout(document, target="candidate", staged="previous")
             self.runtime.verify_bundle(

@@ -661,6 +661,8 @@ wire proof.
    scripts/run_dormant_app_install.sh --preflight
    scripts/run_dormant_app_install.sh --install
    scripts/run_current_service_transaction.sh --recommission
+   scripts/run_ga_acceptance_journal_export.sh --export
+   scripts/run_ga_acceptance_journal_export.sh --verify
    ```
 
    The first transaction unregisters only ProxyAgent and GlobalAuthority in
@@ -678,8 +680,33 @@ wire proof.
    recommission journal would leave an unproven mixed state. Never use
    `launchctl bootout`, `kill`, `sfltool resetbtm`, Finder, `ditto`, or a DMG
    drag as a substitute;
-7. after the service and install journals are durably closed, run the fixed GA
-   runtime collector. It independently reopens the DMG set, proves the DMG's
+   Only after recommission closes the service journal may the fixed exporter
+   read the two producer-owned journals. It first durably records an exact
+   source/environment-bound export intent, then atomically publishes the private
+   `stage-inputs/ga-acceptance/migration-journals` container. The container owns
+   `dormant-install.json`, the complete `service-transaction` tree (including
+   its `environment.json`), `export-intent.json`, and `export-receipt.json`.
+   Export never edits, moves, or relabels either producer journal, and raw
+   machine or APFS UUID values may not enter the container. It requires the
+   already-existing private maintenance, service, and install lock files and
+   never recreates a missing producer lock. `--verify` reopens only this fixed
+   container, holds the `stage-inputs` identity across the complete descendant
+   verification, and never consults mutable producer paths.
+
+   If export reports `recovery required` or an outcome-unknown interruption,
+   retain every source, pending path, and intent, then run only the fixed
+   recovery flow:
+
+   ```bash
+   scripts/run_ga_acceptance_journal_export.sh --recover
+   scripts/run_ga_acceptance_journal_export.sh --verify
+   ```
+
+   `--recover` is not a normal post-export step. It may complete only the exact
+   durable intent against byte-identical source journals and the same fixed GA
+   environment; it must not overwrite an already published container;
+7. after the atomic journal export verifies, run the fixed GA runtime collector.
+   It independently reopens the DMG set, proves the DMG's
    contained app equals the installed 40035 tree, derives all twelve required
    checks from bounded command output and packet captures, and proves shutdown
    restored the CFW guard:

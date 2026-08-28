@@ -1477,6 +1477,14 @@ LIBBOX_VET_PACKAGES=(".")
             lock_patch_command_prefix
             + '/usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"'
         )
+        workspace_manifest_creation = (
+            'render_tauri_workspace_manifest >"$staging_workspace_manifest"'
+        )
+        workspace_lock_creation = (
+            '/usr/bin/install -m 0600 "$cargo_lock" "$staging_workspace_lock"'
+        )
+        workspace_boundary_call = "\nverify_tauri_workspace_boundary\n"
+        cargo_configuration_call = "\nreject_tauri_cargo_configuration\n"
         for fragment in (
             'readonly temporary_parent_input="${TMPDIR:-}"',
             '"$(/usr/bin/stat -f \'%u\' "$temporary_parent")" == "$(/usr/bin/id -u)"',
@@ -1499,6 +1507,11 @@ LIBBOX_VET_PACKAGES=(".")
             lock_patch_check_command,
             lock_patch_apply_command,
             lock_patch_reverse_check_command,
+            'members = ["tauri-cli-%s"]',
+            'resolver = "2"',
+            workspace_manifest_creation,
+            workspace_lock_creation,
+            '--additional-working-directory "$source_root"',
             'readonly payload="$staging/payload/tauri-cli-$TAURI_CLI_VERSION"',
             '/bin/mv "$source_root" "$payload/source"',
             "artifactKind=pinned-tauri-cli-v2",
@@ -1529,6 +1542,10 @@ LIBBOX_VET_PACKAGES=(".")
         self.assertEqual(installer.count(lock_patch_check_command), 1)
         self.assertEqual(installer.count(lock_patch_apply_command), 1)
         self.assertEqual(installer.count(lock_patch_reverse_check_command), 1)
+        self.assertEqual(installer.count(workspace_manifest_creation), 1)
+        self.assertEqual(installer.count(workspace_lock_creation), 1)
+        self.assertEqual(installer.count(workspace_boundary_call), 4)
+        self.assertEqual(installer.count(cargo_configuration_call), 4)
         self.assertEqual(
             installer.count(
                 'offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest'
@@ -1561,9 +1578,25 @@ LIBBOX_VET_PACKAGES=(".")
             "patched Tauri CLI lock has unexpected spin records",
             reverse_check,
         )
+        workspace_manifest = installer.index(
+            workspace_manifest_creation, spin_semantic_check
+        )
+        workspace_lock = installer.index(workspace_lock_creation, workspace_manifest)
+        workspace_boundary_before_fetch = installer.index(
+            workspace_boundary_call, workspace_lock
+        )
+        cargo_configuration_before_fetch = installer.index(
+            cargo_configuration_call, workspace_boundary_before_fetch
+        )
         preparation_before = installer.index(preparation_call)
-        fetch = installer.index('"$cargo_bin" fetch', spin_semantic_check)
+        fetch = installer.index('"$cargo_bin" fetch', cargo_configuration_before_fetch)
         fetch_warning = installer.index(fetch_warning_call, fetch)
+        workspace_boundary_after_fetch = installer.index(
+            workspace_boundary_call, fetch_warning
+        )
+        cargo_configuration_after_fetch = installer.index(
+            cargo_configuration_call, workspace_boundary_after_fetch
+        )
         preparation_after = installer.index(preparation_call, fetch_warning)
         copied = installer.index(
             '/usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"',
@@ -1578,11 +1611,25 @@ LIBBOX_VET_PACKAGES=(".")
             'offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest',
             manifest,
         )
-        install = installer.index('"$cargo_bin" install', verified_before)
+        workspace_boundary_before_install = installer.index(
+            workspace_boundary_call, verified_before
+        )
+        cargo_configuration_before_install = installer.index(
+            cargo_configuration_call, workspace_boundary_before_install
+        )
+        install = installer.index(
+            '"$cargo_bin" install', cargo_configuration_before_install
+        )
         install_warning = installer.index(install_warning_call, install)
+        workspace_boundary_after_install = installer.index(
+            workspace_boundary_call, install_warning
+        )
+        cargo_configuration_after_install = installer.index(
+            cargo_configuration_call, workspace_boundary_after_install
+        )
         normalized_after = installer.index(
             normalization_call,
-            install_warning,
+            cargo_configuration_after_install,
         )
         verified_after = installer.index(
             'offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest',
@@ -1593,15 +1640,25 @@ LIBBOX_VET_PACKAGES=(".")
             sorted(
                 (
                     preparation_before,
+                    workspace_manifest,
+                    workspace_lock,
+                    workspace_boundary_before_fetch,
+                    cargo_configuration_before_fetch,
                     fetch,
                     fetch_warning,
+                    workspace_boundary_after_fetch,
+                    cargo_configuration_after_fetch,
                     preparation_after,
                     copied,
                     normalized_before,
                     manifest,
                     verified_before,
+                    workspace_boundary_before_install,
+                    cargo_configuration_before_install,
                     install,
                     install_warning,
+                    workspace_boundary_after_install,
+                    cargo_configuration_after_install,
                     normalized_after,
                     verified_after,
                     compared,
@@ -1609,15 +1666,25 @@ LIBBOX_VET_PACKAGES=(".")
             ),
             [
                 preparation_before,
+                workspace_manifest,
+                workspace_lock,
+                workspace_boundary_before_fetch,
+                cargo_configuration_before_fetch,
                 fetch,
                 fetch_warning,
+                workspace_boundary_after_fetch,
+                cargo_configuration_after_fetch,
                 preparation_after,
                 copied,
                 normalized_before,
                 manifest,
                 verified_before,
+                workspace_boundary_before_install,
+                cargo_configuration_before_install,
                 install,
                 install_warning,
+                workspace_boundary_after_install,
+                cargo_configuration_after_install,
                 normalized_after,
                 verified_after,
                 compared,

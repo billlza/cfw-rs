@@ -70,7 +70,7 @@ TAURI_CLI_INSTALLER_RELATIVE_PATH = "scripts/install_pinned_tauri_cli.sh"
 # Level 1 source identity: detect accidental or unreviewed installer drift.
 # Exact Git/hosted-CI identity remains the trust root; this is not authentication.
 REQUIRED_TAURI_CLI_INSTALLER_SHA256 = (
-    "d4c1c518db2f4dd90276895ef18ba540a19503ef9d10e03983078898c12d601f"
+    "7bc439d444cb7dc00c6c60fd7ee9003124ae635d331d71df7c528f75d6158ce7"
 )
 MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024
 MAX_PINNED_MANIFEST_BYTES = 512 * 1024
@@ -110,7 +110,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "3f6d0f3e913f433a1479bd1b1dbb1717efa00470a9d859f0601a5c01a1614352"
+    "77a9371f8d908964394d0680ba6fa429d65075f52acde724beaac3edb94ea63f"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -118,7 +118,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "4f6a46ab798a1fc21f484b36feb8c406dfa9561da1c310ba1f1688c91529c763"
+    "3a26e32db3362bda999dfcf1abe5145356586c0845e284c2afd7b7ddafe05472"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -170,7 +170,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     ),
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "3ae00548c6c9f4c0a72a745230b393ae4f436c562ed867699ef75ebfb5ea8ec7"
+    "f201de9492e4cfbf83de0ce23230af7263e21acd26eaad6801e49ce26251bddd"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -3218,6 +3218,24 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         'staging="$(/usr/bin/mktemp -d '
         '"$temporary_parent/cfw-tauri-cli.XXXXXX")"'
     )
+    workspace_manifest_renderer = (
+        "render_tauri_workspace_manifest() {\n"
+        "  printf '[workspace]\\nmembers = [\"tauri-cli-%s\"]\\n"
+        "resolver = \"2\"\\n' \\\n"
+        '    "$TAURI_CLI_VERSION"\n'
+        "}"
+    )
+    workspace_manifest_creation_command = (
+        'render_tauri_workspace_manifest >"$staging_workspace_manifest"'
+    )
+    workspace_manifest_mode_command = (
+        '/bin/chmod 0600 "$staging_workspace_manifest"'
+    )
+    workspace_lock_creation_command = (
+        '/usr/bin/install -m 0600 "$cargo_lock" "$staging_workspace_lock"'
+    )
+    workspace_boundary_call = "\nverify_tauri_workspace_boundary\n"
+    cargo_configuration_call = "\nreject_tauri_cargo_configuration\n"
     for fragment in fragments:
         if not isinstance(fragment, str) or not fragment or fragment not in installer:
             raise PinnedInputError(
@@ -3240,6 +3258,29 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         lock_patch_reverse_check_command: 1,
         colon_path_rejection_command: 1,
         staging_creation_command: 1,
+        workspace_manifest_renderer: 1,
+        'members = ["tauri-cli-%s"]': 1,
+        'resolver = "2"': 1,
+        'reject_tauri_cargo_configuration() {': 1,
+        'verify_tauri_workspace_boundary() {': 1,
+        '[[ -f "$boundary_file" && ! -L "$boundary_file" ]] ||': 1,
+        '[[ "$(stat -f \'%l\' "$boundary_file")" == "1" ]] ||': 1,
+        '[[ "$(stat -f \'%u\' "$boundary_file")" == '
+        '"$(/usr/bin/id -u)" ]] ||': 1,
+        'die "Tauri workspace input must be a regular file: $boundary_file"': 1,
+        'die "Tauri workspace input must not have hard links: $boundary_file"': 1,
+        'die "Tauri workspace input must belong to the release account: '
+        '$boundary_file"': 1,
+        'die "temporary Tauri workspace inputs must use mode 0600"': 1,
+        '--additional-working-directory "$source_root"': 1,
+        'readonly staging_workspace_manifest="$staging/Cargo.toml"': 1,
+        'readonly staging_workspace_lock="$staging/Cargo.lock"': 1,
+        workspace_manifest_creation_command: 1,
+        workspace_manifest_mode_command: 1,
+        workspace_lock_creation_command: 1,
+        workspace_boundary_call: 4,
+        cargo_configuration_call: 4,
+        '/usr/bin/cmp -s "$cargo_lock" "$staging_workspace_lock"': 1,
     }
     for fragment, expected_count in exact_counts.items():
         actual_count = installer.count(fragment)
@@ -3248,6 +3289,50 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
                 f"Tauri CLI installer requires {expected_count} exact occurrences of "
                 f"{fragment!r}, found {actual_count}"
             )
+
+    def require_exact_block(
+        start_marker: str,
+        end_marker: str,
+        expected_sha256: str,
+        description: str,
+    ) -> None:
+        if installer.count(start_marker) != 1:
+            raise PinnedInputError(
+                f"Tauri CLI installer {description} boundary is ambiguous"
+            )
+        start = installer.index(start_marker)
+        try:
+            end = installer.index(end_marker, start) + len(end_marker)
+        except ValueError as error:
+            raise PinnedInputError(
+                f"Tauri CLI installer {description} boundary is incomplete"
+            ) from error
+        actual_sha256 = hashlib.sha256(
+            installer[start:end].encode("utf-8")
+        ).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise PinnedInputError(
+                f"Tauri CLI installer {description} differs from release policy"
+            )
+
+    require_exact_block(
+        "reject_tauri_cargo_configuration() {",
+        "\n}",
+        "a131e2c379b0d05f5ba5b1676ab80aefad156feb6f3fe628eea858ece4132eb1",
+        "ambient Cargo configuration verifier",
+    )
+    require_exact_block(
+        "verify_tauri_workspace_boundary() {",
+        "\n}",
+        "79ff796bee6ec01ab2530da6112847aad1a2bf9df786103dbb6e3d2c780fd992",
+        "workspace boundary verifier",
+    )
+    require_exact_block(
+        'staging_workspace_manifest_sha256="$(',
+        "\nreadonly staging_workspace_manifest_sha256",
+        "e696a052345c9b83bd83c6a2c85a536c81171448b96f824c8cc61453be3d79a9",
+        "workspace manifest digest producer",
+    )
 
     def normalized_shell_operation(operation: str) -> str:
         return " ".join(operation.replace("\\\n", " ").split())
@@ -3268,6 +3353,81 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
     ):
         raise PinnedInputError(
             "Tauri CLI installer contains an unexpected lock patch apply operation"
+        )
+
+    expected_workspace_references = {
+        normalized_shell_operation(value)
+        for value in (
+            'for boundary_file in "$cargo_manifest" "$cargo_lock" '
+            '"$staging_workspace_manifest" "$staging_workspace_lock"; do',
+            '[[ "$(stat -f \'%Lp\' "$staging_workspace_manifest")" == "600" && '
+            '"$(stat -f \'%Lp\' "$staging_workspace_lock")" == "600" ]] ||',
+            'printf \'%s  %s\\n\' "$staging_workspace_manifest_sha256" '
+            '"$staging_workspace_manifest" |',
+            'printf \'%s  %s\\n\' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" '
+            '"$staging_workspace_lock" |',
+            '/usr/bin/cmp -s "$cargo_lock" "$staging_workspace_lock" ||',
+            'readonly staging_workspace_manifest="$staging/Cargo.toml"',
+            'readonly staging_workspace_lock="$staging/Cargo.lock"',
+            'staging_workspace_manifest_sha256="$(',
+            "readonly staging_workspace_manifest_sha256",
+            '[[ ! -e "$staging_workspace_manifest" && '
+            '! -L "$staging_workspace_manifest" && '
+            '! -e "$staging_workspace_lock" && '
+            '! -L "$staging_workspace_lock" ]] ||',
+            workspace_manifest_creation_command,
+            workspace_manifest_mode_command,
+            workspace_lock_creation_command,
+        )
+    }
+    workspace_reference_markers = (
+        "staging_workspace_",
+        '"$staging/Cargo.toml"',
+        '"$staging/Cargo.lock"',
+        '"${staging}/Cargo.toml"',
+        '"${staging}/Cargo.lock"',
+    )
+    observed_workspace_references = [
+        normalized_shell_operation(line)
+        for line in installer.replace("\\\n", " ").splitlines()
+        if any(marker in line for marker in workspace_reference_markers)
+    ]
+    if (
+        len(observed_workspace_references) != len(expected_workspace_references)
+        or set(observed_workspace_references) != expected_workspace_references
+    ):
+        raise PinnedInputError(
+            "Tauri CLI installer contains an unexpected workspace input mutation"
+        )
+
+    # Bind the ordered, exact logical-line surface for both literal Cargo
+    # control-file paths and every ordinary direct/braced reference to the two
+    # source variables.  Removing line continuations mirrors shell parsing but
+    # deliberately preserves all other bytes, so equal-count substitutions,
+    # parameter-expansion variants, and quoted whitespace drift fail closed.
+    cargo_control_file_reference_pattern = re.compile(
+        r"Cargo[.](?:toml|lock)"
+        r"|[$]cargo_(?:manifest|lock)(?![A-Za-z0-9_])"
+        r"|[$][{]cargo_(?:manifest|lock)(?:[^}]*)[}]"
+    )
+    cargo_control_file_references = [
+        line
+        for line in installer.replace("\\\n", "").splitlines()
+        if not line.lstrip().startswith("#")
+        and cargo_control_file_reference_pattern.search(line)
+    ]
+    cargo_control_file_reference_identity = hashlib.sha256(
+        json.dumps(
+            cargo_control_file_references,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if cargo_control_file_reference_identity != (
+        "c2004832a51b0ea20561ee649c58fa5d2be3c5594e47d58bfd02ee8a48bd6e2b"
+    ):
+        raise PinnedInputError(
+            "Tauri CLI installer contains an unexpected Cargo control-file reference"
         )
 
     def locate(fragment: str, after: int = 0) -> int:
@@ -3301,14 +3461,38 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         "patched Tauri CLI lock has unexpected spin records",
         lock_patch_reverse_check,
     )
-    fetch = locate('"$cargo_bin" fetch', spin_semantic_check)
+    workspace_manifest_creation = locate(
+        workspace_manifest_creation_command,
+        spin_semantic_check,
+    )
+    workspace_lock_creation = locate(
+        workspace_lock_creation_command,
+        workspace_manifest_creation,
+    )
+    workspace_boundary_before_fetch = locate(
+        workspace_boundary_call,
+        workspace_lock_creation,
+    )
+    cargo_configuration_before_fetch = locate(
+        cargo_configuration_call,
+        workspace_boundary_before_fetch,
+    )
+    fetch = locate('"$cargo_bin" fetch', cargo_configuration_before_fetch)
     fetch_warning_gate = locate(
         'reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"',
         fetch,
     )
+    workspace_boundary_after_fetch = locate(
+        workspace_boundary_call,
+        fetch_warning_gate,
+    )
+    cargo_configuration_after_fetch = locate(
+        cargo_configuration_call,
+        workspace_boundary_after_fetch,
+    )
     preparation_after = locate(
         'verify_cargo_preparation_cache "$prepared_cargo_home"',
-        fetch_warning_gate,
+        cargo_configuration_after_fetch,
     )
     copied = locate(
         '/usr/bin/ditto --noqtn "$prepared_cargo_home" "$offline_cargo_home"',
@@ -3327,14 +3511,30 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         'offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest',
         manifest_input,
     )
-    install = locate('"$cargo_bin" install', verified_before)
+    workspace_boundary_before_install = locate(
+        workspace_boundary_call,
+        verified_before,
+    )
+    cargo_configuration_before_install = locate(
+        cargo_configuration_call,
+        workspace_boundary_before_install,
+    )
+    install = locate('"$cargo_bin" install', cargo_configuration_before_install)
     install_warning_gate = locate(
         'reject_cargo_warnings "$install_log" "tauri-cli installation"',
         install,
     )
+    workspace_boundary_after_install = locate(
+        workspace_boundary_call,
+        install_warning_gate,
+    )
+    cargo_configuration_after_install = locate(
+        cargo_configuration_call,
+        workspace_boundary_after_install,
+    )
     normalized_after = locate(
         'normalize_cargo_offline_cache "$offline_cargo_home"',
-        install_warning_gate,
+        cargo_configuration_after_install,
     )
     verified_after = locate(
         'offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest',

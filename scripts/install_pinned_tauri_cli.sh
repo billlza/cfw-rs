@@ -132,6 +132,49 @@ normalize_cargo_offline_cache() {
     "$repo_root" "$cargo_cache_contract" normalize-offline "$root"
 }
 
+render_tauri_workspace_manifest() {
+  printf '[workspace]\nmembers = ["tauri-cli-%s"]\nresolver = "2"\n' \
+    "$TAURI_CLI_VERSION"
+}
+
+reject_tauri_cargo_configuration() {
+  cfw_run_release_python_script \
+    "$repo_root" "$repo_root/scripts/release_cargo_inputs.py" \
+    reject-ambient --repository "$repo_root" --release-home "$HOME" \
+    --additional-working-directory "$source_root" ||
+    die "ambient Cargo configuration is forbidden for the Tauri source"
+}
+
+verify_tauri_workspace_boundary() {
+  local boundary_file
+  for boundary_file in \
+    "$cargo_manifest" \
+    "$cargo_lock" \
+    "$staging_workspace_manifest" \
+    "$staging_workspace_lock"; do
+    [[ -f "$boundary_file" && ! -L "$boundary_file" ]] ||
+      die "Tauri workspace input must be a regular file: $boundary_file"
+    [[ "$(stat -f '%l' "$boundary_file")" == "1" ]] ||
+      die "Tauri workspace input must not have hard links: $boundary_file"
+    [[ "$(stat -f '%u' "$boundary_file")" == "$(/usr/bin/id -u)" ]] ||
+      die "Tauri workspace input must belong to the release account: $boundary_file"
+  done
+  [[ "$(stat -f '%Lp' "$staging_workspace_manifest")" == "600" && \
+    "$(stat -f '%Lp' "$staging_workspace_lock")" == "600" ]] ||
+    die "temporary Tauri workspace inputs must use mode 0600"
+  printf '%s  %s\n' \
+    "$staging_workspace_manifest_sha256" "$staging_workspace_manifest" |
+    shasum -a 256 --check >/dev/null
+  printf '%s  %s\n' \
+    "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock" |
+    shasum -a 256 --check >/dev/null
+  printf '%s  %s\n' \
+    "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$staging_workspace_lock" |
+    shasum -a 256 --check >/dev/null
+  /usr/bin/cmp -s "$cargo_lock" "$staging_workspace_lock" ||
+    die "Tauri source and workspace locks differ"
+}
+
 reject_cargo_warnings() {
   local log="$1"
   local operation="$2"
@@ -214,6 +257,12 @@ cleanup() {
 trap cleanup EXIT
 
 readonly source_root="$staging/tauri-cli-$TAURI_CLI_VERSION"
+readonly staging_workspace_manifest="$staging/Cargo.toml"
+readonly staging_workspace_lock="$staging/Cargo.lock"
+staging_workspace_manifest_sha256="$(
+  render_tauri_workspace_manifest | shasum -a 256 | /usr/bin/awk '{print $1}'
+)"
+readonly staging_workspace_manifest_sha256
 mkdir -p "$preparation_root" "$prepared_cargo_home"
 [[ -d "$preparation_root" && ! -L "$preparation_root" ]] ||
   die "Tauri CLI preparation root must be a real directory"
@@ -314,6 +363,15 @@ if records != [expected]:
     raise SystemExit(f"error: patched Tauri CLI lock has unexpected spin records: {records!r}")
 PY
 
+[[ ! -e "$staging_workspace_manifest" && ! -L "$staging_workspace_manifest" && \
+  ! -e "$staging_workspace_lock" && ! -L "$staging_workspace_lock" ]] ||
+  die "temporary Tauri workspace inputs already exist"
+render_tauri_workspace_manifest >"$staging_workspace_manifest"
+/bin/chmod 0600 "$staging_workspace_manifest"
+/usr/bin/install -m 0600 "$cargo_lock" "$staging_workspace_lock"
+verify_tauri_workspace_boundary
+reject_tauri_cargo_configuration
+
 # Network access is a resumable preparation phase. It uses only the dedicated
 # cache below; a user's Cargo home is never consulted. A failed attempt leaves
 # already checksum-verified crates available for the next explicit retry.
@@ -351,6 +409,8 @@ else
   die "checksum-bound Tauri CLI dependency preparation failed; the isolated cache was preserved"
 fi
 reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"
+verify_tauri_workspace_boundary
+reject_tauri_cargo_configuration
 verify_cargo_preparation_cache "$prepared_cargo_home"
 
 # Final compilation gets a snapshot of the prepared cache and is forced
@@ -387,6 +447,8 @@ readonly cargo_target="$staging/cargo-target"
 readonly isolated_home="$staging/home"
 readonly isolated_tmp="$staging/tmp"
 mkdir -p "$cargo_install_root" "$cargo_target" "$isolated_home" "$isolated_tmp"
+verify_tauri_workspace_boundary
+reject_tauri_cargo_configuration
 if /usr/bin/env -i \
   HOME="$isolated_home" \
   TMPDIR="$isolated_tmp" \
@@ -420,6 +482,8 @@ else
   die "checksum-bound tauri-cli installation failed"
 fi
 reject_cargo_warnings "$install_log" "tauri-cli installation"
+verify_tauri_workspace_boundary
+reject_tauri_cargo_configuration
 normalize_cargo_offline_cache "$offline_cargo_home"
 offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest \
   "$repo_root" \

@@ -382,6 +382,42 @@ class ReleaseCargoInputsTests(unittest.TestCase):
                 additional_working_directories=(external_workspace,),
             )
 
+    def test_reject_ambient_cli_checks_each_additional_working_directory(self) -> None:
+        _archive, checksum = self._archive()
+        self._write_lock(checksum)
+        root = Path(self.temporary.name)
+        safe_workspace = root / "safe-build-parent/workspace"
+        unsafe_parent = root / "unsafe-build-parent"
+        unsafe_workspace = unsafe_parent / "workspace"
+        safe_workspace.mkdir(parents=True)
+        unsafe_workspace.mkdir(parents=True)
+        configuration = unsafe_parent / ".cargo/config.toml"
+        configuration.parent.mkdir()
+        configuration.write_text(
+            "[build]\nrustc-wrapper='injector'\n", encoding="utf-8"
+        )
+        stderr = io.StringIO()
+        arguments = [
+            "release_cargo_inputs.py",
+            "reject-ambient",
+            "--repository",
+            str(self.repository),
+            "--release-home",
+            str(self.home),
+            "--additional-working-directory",
+            str(safe_workspace),
+            "--additional-working-directory",
+            str(unsafe_workspace),
+        ]
+        with (
+            mock.patch.object(os.sys, "argv", arguments),
+            mock.patch.object(os.sys, "stderr", stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            cargo_inputs_module._main()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn(str(configuration), stderr.getvalue())
+
     def test_duplicate_archive_cache_is_rejected(self) -> None:
         archive, checksum = self._archive()
         duplicate_directory = self.source_cargo_home / "registry/cache/duplicate"

@@ -1209,6 +1209,13 @@ def _main() -> None:
         command = subparsers.add_parser(name)
         command.add_argument("--repository", required=True, type=Path)
         command.add_argument("--release-home", required=True, type=Path)
+        if name == "reject-ambient":
+            command.add_argument(
+                "--additional-working-directory",
+                action="append",
+                default=[],
+                type=Path,
+            )
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("--repository", required=True, type=Path)
     prepare.add_argument("--release-home", required=True, type=Path)
@@ -1228,7 +1235,12 @@ def _main() -> None:
             print(root)
             return
         if arguments.command == "reject-ambient":
-            reject_ambient_cargo_configuration(arguments.repository)
+            reject_ambient_cargo_configuration(
+                arguments.repository,
+                additional_working_directories=(
+                    arguments.additional_working_directory
+                ),
+            )
             return
         if arguments.command == "prepare":
             inputs = prepare_workspace_cargo_inputs(

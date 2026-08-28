@@ -291,11 +291,16 @@ for contract in \
   'scripts/release_artifact_set_cli.py:verify_publication_authorization' \
   'scripts/publication/ga_release_contract.py:def verify_stage(' \
   'scripts/publication/ga_release_contract.py:def derive_runtime_expectation(' \
-  'scripts/github_hosted_ci_receipt.py:cfw-github-hosted-ci-receipt-v1' \
+  'scripts/github_hosted_ci_receipt.py:cfw-github-hosted-ci-receipt-v2' \
   'scripts/github_hosted_ci_receipt.py:REPOSITORY_ID: Final = 1_306_403_473' \
   'scripts/github_hosted_ci_receipt.py:WORKFLOW_ID: Final = 316_580_234' \
   'scripts/github_hosted_ci_receipt.py:EXPECTED_JOB_NAMES: Final = frozenset(' \
   'scripts/github_hosted_ci_receipt.py:/attempts/{attempt}/jobs' \
+  'scripts/github_hosted_ci_receipt.py:def _check_runs_api_path(' \
+  'scripts/github_hosted_ci_receipt.py:?filter=latest&per_page=100&page=1' \
+  'scripts/github_hosted_ci_receipt.py:def _annotations_api_path(' \
+  'scripts/github_hosted_ci_receipt.py:def _project_check_runs(' \
+  'scripts/github_hosted_ci_receipt.py:def _require_empty_annotations(' \
   'scripts/github_hosted_ci_receipt.py:def validate_receipt_offline(' \
   'scripts/github_hosted_ci_receipt.py:def verify_receipt(' \
   'scripts/publication/artifact_preparation.py:"hosted-ci-receipt": fixed_ga_root / "stage-inputs/hosted-ci.json"' \

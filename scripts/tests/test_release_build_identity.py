@@ -530,17 +530,51 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
         source = (repository / "scripts/build_signed_candidate.sh").read_text(
             encoding="utf-8"
         )
+        forwarded_operation = (
+            '"$repo_root" "$CFW_BUILD_NUMBER" "$candidate_operation" <<\'PY\''
+        )
+        build_admission = (
+            '    if sys.argv[3] == "build":\n'
+            "        verify_ga_workspace_path_preconditions(Path(sys.argv[1]))"
+        )
+        operation_mappings = (
+            (
+                "  --ga)\n"
+                '    [[ $# -eq 1 ]] || die "--ga accepts no additional arguments"\n'
+                '    candidate_operation="build"'
+            ),
+            (
+                "  --resume-signing)\n"
+                '    [[ $# -eq 1 ]] || die "--resume-signing accepts no additional arguments"\n'
+                '    candidate_operation="resume-signing"'
+            ),
+            (
+                "  --recover-notarization-id)\n"
+                "    [[ $# -eq 2 ]] || "
+                'die "--recover-notarization-id requires one submission UUID"\n'
+                '    [[ -n "$2" ]] ||\n'
+                '      die "--recover-notarization-id requires one non-empty submission UUID"\n'
+                '    candidate_operation="recover-notarization"'
+            ),
+        )
+
+        self.assertEqual(source.count(forwarded_operation), 1)
+        self.assertEqual(source.count(build_admission), 1)
+        for operation_mapping in operation_mappings:
+            self.assertEqual(source.count(operation_mapping), 1)
+        self.assertNotIn('if sys.argv[3] == "run":', source)
+
         admission = source.index(
             "verify_ga_workspace_path_preconditions(Path(sys.argv[1]))"
         )
-        run_only = source.index('if sys.argv[3] == "run":')
+        build_only = source.index(build_admission)
         preflight_assignment = source.index(
             'preflight_root="$candidate_base/ga-preflight/$CFW_BUILD_NUMBER"'
         )
         candidate_parent_creation = source.index('mkdir -p "$parent"')
         preflight_creation = source.index('mkdir -m 0700 "$preflight_root"')
 
-        self.assertLess(run_only, admission)
+        self.assertLess(build_only, admission)
         self.assertLess(admission, preflight_assignment)
         self.assertLess(admission, candidate_parent_creation)
         self.assertLess(admission, preflight_creation)

@@ -7998,6 +7998,179 @@ class FsyncTreeTests(unittest.TestCase):
                     transaction_module._fsync_tree(root)
 
 
+class BuildSignedCandidateRoutingTests(unittest.TestCase):
+    @staticmethod
+    def _production_routing_source() -> str:
+        source = (
+            Path(__file__).resolve().parents[2] / "scripts/build_signed_candidate.sh"
+        ).read_text(encoding="utf-8")
+        parse_start = source.index('candidate_operation=""')
+        parse_end_marker = "readonly notarization_recovery_id"
+        parse_end = source.index(parse_end_marker, parse_start) + len(parse_end_marker)
+        function_start = source.index("run_candidate_transactions() {")
+        function_end_marker = "\nrun_candidate_transactions\n"
+        function_end = (
+            source.index(function_end_marker, function_start)
+            + len(function_end_marker)
+        )
+        return source[parse_start:parse_end] + "\n" + source[function_start:function_end]
+
+    def _run_route(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        routing = self._production_routing_source()
+        harness = f"""
+set -euo pipefail
+die() {{
+  printf 'error: %s\\n' "$*" >&2
+  exit 1
+}}
+repo_root=/release
+candidate_root=/release/target/candidates/0.4.0/ga/40035
+staged_app="$candidate_root/signing-output/signing-input/Clash for Mac.app"
+toolchain_root=/release/target/toolchains
+CFW_BUILD_NUMBER=40035
+signed_native_products="$candidate_root/signing-output/signed-native-products"
+NOTARY_PROFILE=clashformac-notary
+repository_commit={'a' * 40}
+release_source_sha256={'b' * 64}
+MACOS_DEPLOYMENT_TARGET=15.0
+cargo_workspace_sources_tree_sha256={'c' * 64}
+go_module_cache_tree_sha256={'d' * 64}
+go_toolchain_tree_sha256={'e' * 64}
+go_tools_tree_sha256={'f' * 64}
+node_toolchain_tree_sha256={'1' * 64}
+tauri_toolchain_tree_sha256={'2' * 64}
+toolchain_sha256={'3' * 64}
+ui_dependencies_tree_sha256={'4' * 64}
+xcodegen_toolchain_tree_sha256={'5' * 64}
+run_isolated_python_script() {{
+  "$ROUTE_LOGGER" -c \
+    'import json,sys; print(json.dumps(sys.argv[1:], separators=(",", ":")))' \
+    "$@"
+}}
+{routing}
+"""
+        return subprocess.run(
+            ["/bin/bash", "-p", "-c", harness, "routing-fixture", *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env={"PATH": "/usr/bin:/bin", "ROUTE_LOGGER": sys.executable},
+        )
+
+    @staticmethod
+    def _calls(completed: subprocess.CompletedProcess[str]) -> list[list[str]]:
+        return [json.loads(line) for line in completed.stdout.splitlines()]
+
+    @staticmethod
+    def _fixed_verification_calls() -> list[list[str]]:
+        return [
+            ["/release/scripts/candidate_freeze.py", "verify"],
+            ["/release/scripts/release_signing_plan.py", "verify-frozen"],
+            ["/release/scripts/updater_key_possession_proof.py", "verify-frozen"],
+        ]
+
+    @staticmethod
+    def _notary_call(*mode: str) -> list[str]:
+        return [
+            "/release/scripts/notarization_transaction.py",
+            "--build-kind",
+            "ga",
+            "--build-number",
+            "40035",
+            *mode,
+            "--native-products",
+            "/release/target/candidates/0.4.0/ga/40035/signing-output/signed-native-products",
+            "--notary-profile",
+            "clashformac-notary",
+            "--repository-commit",
+            "a" * 40,
+            "--release-source-sha256",
+            "b" * 64,
+            "--deployment-target",
+            "15.0",
+            "--cargo-workspace-sources-tree-sha256",
+            "c" * 64,
+            "--go-module-cache-tree-sha256",
+            "d" * 64,
+            "--go-toolchain-tree-sha256",
+            "e" * 64,
+            "--go-tools-tree-sha256",
+            "f" * 64,
+            "--node-toolchain-tree-sha256",
+            "1" * 64,
+            "--tauri-toolchain-tree-sha256",
+            "2" * 64,
+            "--toolchain-sha256",
+            "3" * 64,
+            "--ui-dependencies-tree-sha256",
+            "4" * 64,
+            "--xcodegen-toolchain-tree-sha256",
+            "5" * 64,
+        ]
+
+    def test_build_and_signing_resume_keep_full_signing_verification(self) -> None:
+        staged = (
+            "--staged-app",
+            "/release/target/candidates/0.4.0/ga/40035/signing-output/"
+            "signing-input/Clash for Mac.app",
+        )
+        cases = (
+            ("--ga", "run"),
+            ("--resume-signing", "resume"),
+        )
+        for argument, signing_command in cases:
+            with self.subTest(argument=argument):
+                completed = self._run_route(argument)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stderr, "")
+                self.assertEqual(
+                    self._calls(completed),
+                    [
+                        *self._fixed_verification_calls(),
+                        [
+                            "/release/scripts/signing_attempt_transaction.py",
+                            signing_command,
+                        ],
+                        [
+                            "/release/scripts/verify_signing_transformation.py",
+                            "verify",
+                        ],
+                        self._notary_call(*staged),
+                    ],
+                )
+
+    def test_notarization_recovery_never_reenters_signing_or_fresh_submit(self) -> None:
+        for recovery_id in (SUBMISSION_ID, "not-a-canonical-uuid"):
+            with self.subTest(recovery_id=recovery_id):
+                completed = self._run_route(
+                    "--recover-notarization-id", recovery_id
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stderr, "")
+                self.assertEqual(
+                    self._calls(completed),
+                    [
+                        *self._fixed_verification_calls(),
+                        self._notary_call(
+                            "--recover-submission-id",
+                            recovery_id,
+                            "--artifact-repository",
+                            "/release",
+                            "--toolchain-root",
+                            "/release/target/toolchains",
+                        ),
+                    ],
+                )
+
+    def test_empty_notarization_recovery_id_fails_before_any_transaction(self) -> None:
+        completed = self._run_route("--recover-notarization-id", "")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("requires one non-empty submission UUID", completed.stderr)
+
+
 class ShellCleanupContractTests(unittest.TestCase):
     @staticmethod
     def _cleanup_source() -> str:

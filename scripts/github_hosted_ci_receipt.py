@@ -4,9 +4,10 @@
 This module is intentionally separate from the deterministic local CI-lane
 collector.  A local command result can corroborate a hosted run, but it can
 never satisfy this receipt.  Production access is read-only, unauthenticated,
-fixed to one public repository/workflow, and revalidates one run around the
-attempt-specific jobs response so a rerun cannot be mistaken for the retained
-attempt.
+fixed to one public repository/workflow, and revalidates one run and its fixed
+Check Suite around the attempt-specific jobs and zero-annotation responses so
+a rerun or successful job carrying diagnostics cannot be mistaken for the
+retained attempt.
 """
 
 from __future__ import annotations
@@ -54,8 +55,8 @@ class HostedCIReceiptError(PublicationError):
     """The hosted-CI receipt is unavailable, ambiguous, or not successful."""
 
 
-SCHEMA_VERSION: Final = 1
-DOCUMENT: Final = "cfw-github-hosted-ci-receipt-v1"
+SCHEMA_VERSION: Final = 2
+DOCUMENT: Final = "cfw-github-hosted-ci-receipt-v2"
 PRODUCT_VERSION: Final = "0.4.0"
 GA_BUILD: Final = "40035"
 
@@ -115,9 +116,14 @@ BRANCH_RE: Final = re.compile(r"^[^\x00-\x20\x7f~^:?*\\\[\]]{1,255}$")
 TIMESTAMP_RE: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 DECIMAL_RE: Final = re.compile(r"^[1-9][0-9]{0,19}$")
 API_PATH_RE: Final = re.compile(
-    rf"^/repos/{re.escape(REPOSITORY_FULL_NAME)}/actions/runs/"
-    r"[1-9][0-9]{0,19}"
-    r"(?:/attempts/[1-9][0-9]{0,19}/jobs\?per_page=100&page=1)?$"
+    rf"^/repos/{re.escape(REPOSITORY_FULL_NAME)}/(?:"
+    r"actions/runs/[1-9][0-9]{0,19}"
+    r"(?:/attempts/[1-9][0-9]{0,19}/jobs\?per_page=100&page=1)?"
+    r"|check-suites/[1-9][0-9]{0,19}/check-runs"
+    r"\?filter=latest&per_page=100&page=1"
+    r"|check-runs/[1-9][0-9]{0,19}/annotations"
+    r"\?per_page=100&page=1"
+    r")$"
 )
 
 
@@ -296,6 +302,20 @@ def _jobs_api_path(run_id: int, attempt: int) -> str:
     )
 
 
+def _check_runs_api_path(check_suite_id: int) -> str:
+    return (
+        f"/repos/{REPOSITORY_FULL_NAME}/check-suites/{check_suite_id}/check-runs"
+        "?filter=latest&per_page=100&page=1"
+    )
+
+
+def _annotations_api_path(check_run_id: int) -> str:
+    return (
+        f"/repos/{REPOSITORY_FULL_NAME}/check-runs/{check_run_id}/annotations"
+        "?per_page=100&page=1"
+    )
+
+
 def _project_run(value: object, expected_sha: str, run_id: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise _error("GitHub workflow run response is not an object")
@@ -303,6 +323,9 @@ def _project_run(value: object, expected_sha: str, run_id: int) -> dict[str, Any
     attempt = _positive_int(value.get("run_attempt"), "workflow run attempt")
     run_number = _positive_int(value.get("run_number"), "workflow run number")
     workflow_id = _positive_int(value.get("workflow_id"), "workflow id")
+    check_suite_id = _positive_int(
+        value.get("check_suite_id"), "workflow check suite id"
+    )
     name = _bounded_string(value.get("name"), "workflow name")
     path = _bounded_string(value.get("path"), "workflow path")
     event = _bounded_string(value.get("event"), "workflow event")
@@ -331,12 +354,19 @@ def _project_run(value: object, expected_sha: str, run_id: int) -> dict[str, Any
     api_url = _bounded_string(value.get("url"), "workflow API URL", 2048)
     html_url = _bounded_string(value.get("html_url"), "workflow HTML URL", 2048)
     jobs_url = _bounded_string(value.get("jobs_url"), "workflow jobs URL", 2048)
+    check_suite_url = _bounded_string(
+        value.get("check_suite_url"), "workflow check suite URL", 2048
+    )
     expected_api_url = API_ORIGIN + _run_api_path(run_id)
+    expected_check_suite_url = (
+        f"{API_ORIGIN}/repos/{REPOSITORY_FULL_NAME}/check-suites/{check_suite_id}"
+    )
     expected_html_url = f"https://github.com/{REPOSITORY_FULL_NAME}/actions/runs/{run_id}"
     if (
         api_url != expected_api_url
         or html_url != expected_html_url
         or jobs_url != expected_api_url + "/jobs"
+        or check_suite_url != expected_check_suite_url
     ):
         raise _error("GitHub workflow run URL escaped the fixed repository")
     created_at = _timestamp(value.get("created_at"), "workflow created_at")
@@ -350,6 +380,8 @@ def _project_run(value: object, expected_sha: str, run_id: int) -> dict[str, Any
         raise _error("GitHub workflow timestamps are not ordered")
     return {
         "api_url": api_url,
+        "check_suite_id": check_suite_id,
+        "check_suite_url": check_suite_url,
         "conclusion": conclusion,
         "created_at": created_at,
         "event": event,
@@ -479,6 +511,150 @@ def _project_jobs(value: object, run: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(jobs, key=lambda job: job["name"])
 
 
+def _project_check_run(value: object, run: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _error("GitHub check suite contains a malformed check run")
+    identifier = _positive_int(value.get("id"), "GitHub check run id")
+    name = _bounded_string(value.get("name"), "GitHub check run name")
+    head_sha = _bounded_string(
+        value.get("head_sha"), f"GitHub check run {name!r} head SHA", 40
+    )
+    status = _bounded_string(
+        value.get("status"), f"GitHub check run {name!r} status"
+    )
+    conclusion = _bounded_string(
+        value.get("conclusion"), f"GitHub check run {name!r} conclusion"
+    )
+    if (
+        name not in EXPECTED_JOB_NAMES
+        or head_sha != run["head_sha"]
+        or status != "completed"
+        or conclusion != "success"
+    ):
+        raise _error(
+            f"GitHub check run {name!r} is foreign, incomplete, or not successful"
+        )
+    api_url = _bounded_string(
+        value.get("url"), f"GitHub check run {name!r} API URL", 2048
+    )
+    html_url = _bounded_string(
+        value.get("html_url"), f"GitHub check run {name!r} HTML URL", 2048
+    )
+    details_url = _bounded_string(
+        value.get("details_url"), f"GitHub check run {name!r} details URL", 2048
+    )
+    expected_api_url = (
+        f"{API_ORIGIN}/repos/{REPOSITORY_FULL_NAME}/check-runs/{identifier}"
+    )
+    expected_html_url = (
+        f"https://github.com/{REPOSITORY_FULL_NAME}/actions/runs/"
+        f"{run['id']}/job/{identifier}"
+    )
+    if (
+        api_url != expected_api_url
+        or html_url != expected_html_url
+        or details_url != expected_html_url
+    ):
+        raise _error(f"GitHub check run {name!r} URL escaped the fixed repository")
+    check_suite = value.get("check_suite")
+    if not isinstance(check_suite, dict):
+        raise _error(f"GitHub check run {name!r} has no check suite identity")
+    check_suite_id = _positive_int(
+        check_suite.get("id"), f"GitHub check run {name!r} check suite id"
+    )
+    if check_suite_id != run["check_suite_id"]:
+        raise _error(f"GitHub check run {name!r} escaped the workflow check suite")
+    output = value.get("output")
+    if not isinstance(output, dict):
+        raise _error(f"GitHub check run {name!r} has no output summary")
+    annotations_count = output.get("annotations_count")
+    if type(annotations_count) is not int or annotations_count != 0:
+        raise _error(f"GitHub check run {name!r} contains release diagnostics")
+    started_at = _timestamp(
+        value.get("started_at"), f"GitHub check run {name!r} started_at"
+    )
+    completed_at = _timestamp(
+        value.get("completed_at"), f"GitHub check run {name!r} completed_at"
+    )
+    if not (
+        _timestamp_value(run["run_started_at"])
+        <= _timestamp_value(started_at)
+        <= _timestamp_value(completed_at)
+        <= _timestamp_value(run["updated_at"])
+    ):
+        raise _error(
+            f"GitHub check run {name!r} timestamps are not ordered within its run"
+        )
+    return {
+        "annotations": {"count": 0, "items": []},
+        "api_url": api_url,
+        "check_suite_id": check_suite_id,
+        "completed_at": completed_at,
+        "conclusion": conclusion,
+        "details_url": details_url,
+        "head_sha": head_sha,
+        "html_url": html_url,
+        "id": identifier,
+        "name": name,
+        "started_at": started_at,
+        "status": status,
+    }
+
+
+def _project_check_runs(
+    value: object,
+    run: dict[str, Any],
+    jobs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    payload = _exact_object(
+        value, {"check_runs", "total_count"}, "GitHub check runs response"
+    )
+    total = _positive_int(payload["total_count"], "GitHub check runs total_count")
+    raw_check_runs = payload["check_runs"]
+    if not isinstance(raw_check_runs, list) or total != len(raw_check_runs):
+        raise _error("GitHub check runs response is incomplete or paginated ambiguously")
+    if total != len(EXPECTED_JOB_NAMES):
+        raise _error("GitHub workflow has missing or extra check runs")
+    check_runs = [_project_check_run(item, run) for item in raw_check_runs]
+    names = [item["name"] for item in check_runs]
+    identifiers = [item["id"] for item in check_runs]
+    if (
+        len(set(names)) != len(names)
+        or set(names) != EXPECTED_JOB_NAMES
+        or len(set(identifiers)) != len(identifiers)
+    ):
+        raise _error("GitHub workflow has missing, repeated, or extra check runs")
+    jobs_by_id = {job["id"]: job for job in jobs}
+    for check_run in check_runs:
+        job = jobs_by_id.get(check_run["id"])
+        if job is None or (
+            check_run["name"],
+            check_run["head_sha"],
+            check_run["status"],
+            check_run["conclusion"],
+            check_run["started_at"],
+            check_run["completed_at"],
+            check_run["html_url"],
+        ) != (
+            job["name"],
+            job["head_sha"],
+            job["status"],
+            job["conclusion"],
+            job["started_at"],
+            job["completed_at"],
+            job["html_url"],
+        ):
+            raise _error("GitHub check runs do not match the exact workflow jobs")
+    return sorted(check_runs, key=lambda item: item["name"])
+
+
+def _require_empty_annotations(value: object, check_run: dict[str, Any]) -> None:
+    if value != [] or check_run["annotations"] != {"count": 0, "items": []}:
+        raise _error(
+            f"GitHub check run {check_run['name']!r} contains release diagnostics"
+        )
+
+
 def _source_binding(repository: Path) -> dict[str, str]:
     repository = repository.absolute()
     try:
@@ -521,17 +697,33 @@ def _live_receipt(source: dict[str, str], run_id: int) -> dict[str, Any]:
         _fetch_api_json(_jobs_api_path(run_id, run_before["run_attempt"])),
         run_before,
     )
+    check_runs_before = _project_check_runs(
+        _fetch_api_json(_check_runs_api_path(run_before["check_suite_id"])),
+        run_before,
+        jobs,
+    )
+    for check_run in check_runs_before:
+        _require_empty_annotations(
+            _fetch_api_json(_annotations_api_path(check_run["id"])),
+            check_run,
+        )
     run_after = _project_run(
         _fetch_api_json(_run_api_path(run_id)), source["repository_commit"], run_id
     )
-    if run_after != run_before:
-        raise _error("GitHub workflow run changed while its attempt jobs were read")
+    check_runs_after = _project_check_runs(
+        _fetch_api_json(_check_runs_api_path(run_after["check_suite_id"])),
+        run_after,
+        jobs,
+    )
+    if run_after != run_before or check_runs_after != check_runs_before:
+        raise _error("GitHub workflow run changed while its exact checks were read")
     return {
         "api": {
             "accept": API_ACCEPT,
             "origin": API_ORIGIN,
             "version": API_VERSION,
         },
+        "check_runs": check_runs_before,
         "document": DOCUMENT,
         "jobs": jobs,
         "repository": {"full_name": REPOSITORY_FULL_NAME, "id": REPOSITORY_ID},
@@ -554,6 +746,7 @@ def _validated_stored_receipt(
         value,
         {
             "api",
+            "check_runs",
             "document",
             "jobs",
             "repository",
@@ -581,6 +774,8 @@ def _validated_stored_receipt(
     run_value = receipt["run"]
     run_id = _positive_int(run_value.get("id"), "retained workflow run id")
     run_api_value = {
+        "check_suite_id": run_value.get("check_suite_id"),
+        "check_suite_url": run_value.get("check_suite_url"),
         "conclusion": run_value.get("conclusion"),
         "created_at": run_value.get("created_at"),
         "event": run_value.get("event"),
@@ -634,6 +829,43 @@ def _validated_stored_receipt(
     )
     if normalized_jobs != retained_jobs:
         raise _error("hosted CI receipt job or step schema is invalid")
+    retained_check_runs = receipt["check_runs"]
+    if not isinstance(retained_check_runs, list):
+        raise _error("hosted CI receipt check runs are malformed")
+    raw_check_runs: list[dict[str, Any]] = []
+    for check_run in retained_check_runs:
+        if not isinstance(check_run, dict):
+            raise _error("hosted CI receipt contains a malformed check run")
+        annotations = check_run.get("annotations")
+        raw_check_runs.append(
+            {
+                "check_suite": {"id": check_run.get("check_suite_id")},
+                "completed_at": check_run.get("completed_at"),
+                "conclusion": check_run.get("conclusion"),
+                "details_url": check_run.get("details_url"),
+                "head_sha": check_run.get("head_sha"),
+                "html_url": check_run.get("html_url"),
+                "id": check_run.get("id"),
+                "name": check_run.get("name"),
+                "output": {
+                    "annotations_count": (
+                        annotations.get("count")
+                        if isinstance(annotations, dict)
+                        else None
+                    )
+                },
+                "started_at": check_run.get("started_at"),
+                "status": check_run.get("status"),
+                "url": check_run.get("api_url"),
+            }
+        )
+    normalized_check_runs = _project_check_runs(
+        {"check_runs": raw_check_runs, "total_count": len(raw_check_runs)},
+        normalized_run,
+        normalized_jobs,
+    )
+    if normalized_check_runs != retained_check_runs:
+        raise _error("hosted CI receipt check run schema is invalid")
     return receipt, run_id
 
 
@@ -707,7 +939,7 @@ def validate_receipt_offline(repository: Path) -> dict[str, Any]:
 
 
 def verify_receipt(repository: Path) -> dict[str, Any]:
-    """Reopen one receipt and live-revalidate its current run attempt and jobs."""
+    """Reopen one receipt and live-revalidate its run, jobs, and zero-annotation checks."""
 
     retained = validate_receipt_offline(repository)
     source = retained["source"]

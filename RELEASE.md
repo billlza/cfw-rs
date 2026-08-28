@@ -168,7 +168,10 @@ migration before release.
 ./scripts/run_release_ci_gate.sh prepare-cargo-workspace-inputs
 ./scripts/run_release_ci_gate.sh bootstrap-policy-tools
 ./scripts/run_release_ci_gate.sh bootstrap-release-toolchain
-./scripts/run_release_ci_gate.sh install-tauri-cli
+tauri_install_tmp="$(/usr/bin/mktemp -d /private/tmp/cfw-tauri-install.XXXXXX)"
+/bin/chmod 0700 "$tauri_install_tmp"
+TMPDIR="$tauri_install_tmp" ./scripts/run_release_ci_gate.sh install-tauri-cli
+/bin/rmdir "$tauri_install_tmp"
 ./scripts/run_release_ci_gate.sh prepare-ui-dependencies
 ./scripts/run_release_ci_gate.sh fetch-libbox-upstream \
   /absolute/path/to/clean-upstream-sing-box
@@ -178,6 +181,11 @@ migration before release.
 ./scripts/run_release_ci_gate.sh prepare-libbox-modules \
   /absolute/path/to/patched-sing-box
 ```
+
+The Tauri installer requires its explicit `TMPDIR` to be a canonical,
+current-user-owned directory that is not writable by group or other users.
+Remove only the exact empty directory created by the command above; do not use
+the shared `/private/tmp` directory itself as the installer input.
 
 `prepare-cargo-workspace-inputs` is the only networked admission path for the
 Rust workspace dependency sources. It fetches every `Cargo.lock` registry

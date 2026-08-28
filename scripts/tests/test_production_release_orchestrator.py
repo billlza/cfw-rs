@@ -92,9 +92,9 @@ class StageFixture:
         return {
             "hosted-ci.json": canonical_json(
                 {
-                    "document": "cfw-github-hosted-ci-receipt-v1",
+                    "document": "cfw-github-hosted-ci-receipt-v2",
                     "run": {"id": 1, "run_attempt": 1},
-                    "schema_version": 1,
+                    "schema_version": 2,
                 }
             ),
             "local-ci-lanes.json": canonical_json(

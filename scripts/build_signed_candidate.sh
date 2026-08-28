@@ -56,32 +56,39 @@ require_regular_file() {
   [[ "$(stat -f '%l' "$path")" == "1" ]] || die "release input must not have hard links: $path"
 }
 
+candidate_operation=""
+signing_transaction_command=""
 notarization_recovery_id=""
 case "${1:-}" in
   --ga)
     [[ $# -eq 1 ]] || die "--ga accepts no additional arguments"
+    candidate_operation="build"
     signing_transaction_command="run"
     ;;
   --resume-signing)
     [[ $# -eq 1 ]] || die "--resume-signing accepts no additional arguments"
+    candidate_operation="resume-signing"
     signing_transaction_command="resume"
     ;;
   --recover-notarization-id)
     [[ $# -eq 2 ]] || die "--recover-notarization-id requires one submission UUID"
-    signing_transaction_command="resume"
+    [[ -n "$2" ]] ||
+      die "--recover-notarization-id requires one non-empty submission UUID"
+    candidate_operation="recover-notarization"
     notarization_recovery_id="$2"
     ;;
   *)
     die "usage: scripts/build_signed_candidate.sh --ga|--resume-signing|--recover-notarization-id UUID"
     ;;
 esac
+readonly candidate_operation
 readonly signing_transaction_command
 readonly notarization_recovery_id
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "signed candidates require Apple Silicon macOS"
 : "${CFW_BUILD_NUMBER:?set the explicit positive integer candidate build number}"
 PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
-  "$repo_root" "$CFW_BUILD_NUMBER" "$signing_transaction_command" <<'PY'
+  "$repo_root" "$CFW_BUILD_NUMBER" "$candidate_operation" <<'PY'
 import sys
 from pathlib import Path
 
@@ -101,7 +108,7 @@ try:
             "CFW_BUILD_NUMBER must be the single active GA build "
             + ACTIVE_RELEASE_IDENTITY.ga_build
         )
-    if sys.argv[3] == "run":
+    if sys.argv[3] == "build":
         verify_ga_workspace_path_preconditions(Path(sys.argv[1]))
 except (BuildIdentityError, ReleaseWorkspaceError) as error:
     raise SystemExit(f"error: {error}") from None
@@ -124,7 +131,7 @@ final_app="$frozen_root/signed/Clash for Mac.app"
 : "${NOTARY_PROFILE:?set the notarytool Keychain profile name}"
 [[ "$NOTARY_PROFILE" == "clashformac-notary" ]] ||
   die "NOTARY_PROFILE must be the frozen clashformac-notary profile"
-if [[ "$signing_transaction_command" == "run" ]]; then
+if [[ "$candidate_operation" == "build" ]]; then
 : "${MACOS_SIGN_IDENTITY:?set the exact Developer ID Application identity}"
 : "${HOST_PROVISIONING_PROFILE_PATH:?set the absolute host Developer ID profile path}"
 : "${PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER:?set the ProxyAgent profile specifier}"
@@ -550,40 +557,48 @@ PY
     die "current release source differs from the frozen GA product input"
 fi
 
-run_isolated_python_script "$repo_root/scripts/candidate_freeze.py" verify
-run_isolated_python_script "$repo_root/scripts/release_signing_plan.py" verify-frozen
-run_isolated_python_script "$repo_root/scripts/updater_key_possession_proof.py" verify-frozen
-run_isolated_python_script "$repo_root/scripts/signing_attempt_transaction.py" \
-  "$signing_transaction_command"
-run_isolated_python_script \
-  "$repo_root/scripts/verify_signing_transformation.py" verify
+run_candidate_transactions() {
+  local -a notarization_mode
 
-notarization_mode=(--staged-app "$staged_app")
-if [[ -n "$notarization_recovery_id" ]]; then
-  notarization_mode=(
-    --recover-submission-id "$notarization_recovery_id"
-    --artifact-repository "$repo_root"
-    --toolchain-root "$toolchain_root"
-  )
-fi
-run_isolated_python_script "$repo_root/scripts/notarization_transaction.py" \
-  --build-kind ga \
-  --build-number "$CFW_BUILD_NUMBER" \
-  "${notarization_mode[@]}" \
-  --native-products "$signed_native_products" \
-  --notary-profile "$NOTARY_PROFILE" \
-  --repository-commit "$repository_commit" \
-  --release-source-sha256 "$release_source_sha256" \
-  --deployment-target "$MACOS_DEPLOYMENT_TARGET" \
-  --cargo-workspace-sources-tree-sha256 "$cargo_workspace_sources_tree_sha256" \
-  --go-module-cache-tree-sha256 "$go_module_cache_tree_sha256" \
-  --go-toolchain-tree-sha256 "$go_toolchain_tree_sha256" \
-  --go-tools-tree-sha256 "$go_tools_tree_sha256" \
-  --node-toolchain-tree-sha256 "$node_toolchain_tree_sha256" \
-  --tauri-toolchain-tree-sha256 "$tauri_toolchain_tree_sha256" \
-  --toolchain-sha256 "$toolchain_sha256" \
-  --ui-dependencies-tree-sha256 "$ui_dependencies_tree_sha256" \
-  --xcodegen-toolchain-tree-sha256 "$xcodegen_toolchain_tree_sha256"
+  run_isolated_python_script "$repo_root/scripts/candidate_freeze.py" verify
+  run_isolated_python_script "$repo_root/scripts/release_signing_plan.py" verify-frozen
+  run_isolated_python_script "$repo_root/scripts/updater_key_possession_proof.py" verify-frozen
+  if [[ "$candidate_operation" != "recover-notarization" ]]; then
+    run_isolated_python_script "$repo_root/scripts/signing_attempt_transaction.py" \
+      "$signing_transaction_command"
+    run_isolated_python_script \
+      "$repo_root/scripts/verify_signing_transformation.py" verify
+  fi
+
+  notarization_mode=(--staged-app "$staged_app")
+  if [[ "$candidate_operation" == "recover-notarization" ]]; then
+    notarization_mode=(
+      --recover-submission-id "$notarization_recovery_id"
+      --artifact-repository "$repo_root"
+      --toolchain-root "$toolchain_root"
+    )
+  fi
+  run_isolated_python_script "$repo_root/scripts/notarization_transaction.py" \
+    --build-kind ga \
+    --build-number "$CFW_BUILD_NUMBER" \
+    "${notarization_mode[@]}" \
+    --native-products "$signed_native_products" \
+    --notary-profile "$NOTARY_PROFILE" \
+    --repository-commit "$repository_commit" \
+    --release-source-sha256 "$release_source_sha256" \
+    --deployment-target "$MACOS_DEPLOYMENT_TARGET" \
+    --cargo-workspace-sources-tree-sha256 "$cargo_workspace_sources_tree_sha256" \
+    --go-module-cache-tree-sha256 "$go_module_cache_tree_sha256" \
+    --go-toolchain-tree-sha256 "$go_toolchain_tree_sha256" \
+    --go-tools-tree-sha256 "$go_tools_tree_sha256" \
+    --node-toolchain-tree-sha256 "$node_toolchain_tree_sha256" \
+    --tauri-toolchain-tree-sha256 "$tauri_toolchain_tree_sha256" \
+    --toolchain-sha256 "$toolchain_sha256" \
+    --ui-dependencies-tree-sha256 "$ui_dependencies_tree_sha256" \
+    --xcodegen-toolchain-tree-sha256 "$xcodegen_toolchain_tree_sha256"
+}
+
+run_candidate_transactions
 completed=1
 trap - EXIT
 

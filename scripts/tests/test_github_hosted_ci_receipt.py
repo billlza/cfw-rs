@@ -14,6 +14,7 @@ from scripts.publication.common import PublicationError
 
 
 RUN_ID = 90_012_345_678
+CHECK_SUITE_ID = 80_012_345_678
 HEAD_SHA = "a" * 40
 SOURCE = {
     "candidate_freeze_intent_sha256": "b" * 64,
@@ -25,6 +26,11 @@ SOURCE = {
 def run_response(*, attempt: int = 2, head_sha: str = HEAD_SHA) -> dict[str, object]:
     api_url = f"https://api.github.com/repos/{hosted.REPOSITORY_FULL_NAME}/actions/runs/{RUN_ID}"
     return {
+        "check_suite_id": CHECK_SUITE_ID,
+        "check_suite_url": (
+            f"https://api.github.com/repos/{hosted.REPOSITORY_FULL_NAME}/"
+            f"check-suites/{CHECK_SUITE_ID}"
+        ),
         "conclusion": "success",
         "created_at": "2026-08-25T20:00:00Z",
         "event": "pull_request",
@@ -100,15 +106,47 @@ def jobs_response() -> dict[str, object]:
     return {"jobs": jobs, "total_count": len(jobs)}
 
 
+def check_run_response(job: dict[str, object]) -> dict[str, object]:
+    return {
+        "check_suite": {"id": CHECK_SUITE_ID},
+        "completed_at": job["completed_at"],
+        "conclusion": job["conclusion"],
+        "details_url": job["html_url"],
+        "head_sha": job["head_sha"],
+        "html_url": job["html_url"],
+        "id": job["id"],
+        "name": job["name"],
+        "output": {"annotations_count": 0},
+        "started_at": job["started_at"],
+        "status": job["status"],
+        "url": (
+            f"https://api.github.com/repos/{hosted.REPOSITORY_FULL_NAME}/"
+            f"check-runs/{job['id']}"
+        ),
+    }
+
+
+def check_runs_response(
+    jobs: dict[str, object] | None = None,
+) -> dict[str, object]:
+    selected = jobs or jobs_response()
+    check_runs = [check_run_response(job) for job in selected["jobs"]]
+    return {"check_runs": check_runs, "total_count": len(check_runs)}
+
+
 class StableAPI:
     def __init__(
         self,
         *,
         run: dict[str, object] | None = None,
         jobs: dict[str, object] | None = None,
+        check_runs: dict[str, object] | None = None,
+        annotations: dict[int, list[dict[str, object]]] | None = None,
     ) -> None:
         self.run = run or run_response()
         self.jobs = jobs or jobs_response()
+        self.check_runs = check_runs or check_runs_response(self.jobs)
+        self.annotations = annotations or {}
         self.paths: list[str] = []
 
     def __call__(self, path: str):
@@ -117,6 +155,11 @@ class StableAPI:
             return copy.deepcopy(self.run)
         if path == hosted._jobs_api_path(RUN_ID, int(self.run["run_attempt"])):
             return copy.deepcopy(self.jobs)
+        if path == hosted._check_runs_api_path(int(self.run["check_suite_id"])):
+            return copy.deepcopy(self.check_runs)
+        for check_run in self.check_runs["check_runs"]:
+            if path == hosted._annotations_api_path(int(check_run["id"])):
+                return copy.deepcopy(self.annotations.get(int(check_run["id"]), []))
         raise AssertionError(path)
 
 
@@ -194,9 +237,19 @@ class HostedCIReceiptTests(unittest.TestCase):
         expected_calls = [
             hosted._run_api_path(RUN_ID),
             hosted._jobs_api_path(RUN_ID, 2),
+            hosted._check_runs_api_path(CHECK_SUITE_ID),
+            *[
+                hosted._annotations_api_path(check_run["id"])
+                for check_run in receipt["check_runs"]
+            ],
             hosted._run_api_path(RUN_ID),
+            hosted._check_runs_api_path(CHECK_SUITE_ID),
         ]
         self.assertEqual(api.paths, expected_calls)
+        self.assertEqual(
+            [check_run["annotations"] for check_run in receipt["check_runs"]],
+            [{"count": 0, "items": []}] * 3,
+        )
         self.assertEqual(self.output.stat().st_mode & 0o777, 0o600)
         raw = self.output.read_bytes()
         self.assertEqual(raw, hosted._canonical_json(json.loads(raw)))
@@ -230,7 +283,18 @@ class HostedCIReceiptTests(unittest.TestCase):
     def test_attempt_drift_between_run_reads_fails_before_publication(self) -> None:
         before = run_response(attempt=2)
         after = run_response(attempt=3)
-        responses = [before, jobs_response(), after]
+        jobs = jobs_response()
+        checks = check_runs_response(jobs)
+        responses = [
+            before,
+            jobs,
+            checks,
+            [],
+            [],
+            [],
+            after,
+            checks,
+        ]
         with (
             patch.object(hosted, "_source_binding", return_value=dict(SOURCE)),
             patch.object(hosted, "_fetch_api_json", side_effect=responses),
@@ -256,6 +320,8 @@ class HostedCIReceiptTests(unittest.TestCase):
             lambda run: run.update(event="push"),
             lambda run: run.update(head_sha="d" * 40),
             lambda run: run["head_repository"].update(full_name="foreign/fork"),
+            lambda run: run.update(check_suite_id=7),
+            lambda run: run.update(check_suite_url="https://example.invalid/suite"),
         )
         for mutate in mutations:
             with self.subTest(mutate=mutate):
@@ -284,6 +350,119 @@ class HostedCIReceiptTests(unittest.TestCase):
             with self.subTest(label=label), self.assertRaises(hosted.HostedCIReceiptError):
                 hosted._project_jobs(value, hosted._project_run(run_response(), HEAD_SHA, RUN_ID))
 
+    def test_check_run_diagnostics_are_rejected_before_publication(self) -> None:
+        checks_with_count = check_runs_response()
+        checks_with_count["check_runs"][0]["output"]["annotations_count"] = 1
+        first_check_id = int(check_runs_response()["check_runs"][0]["id"])
+        cases = (
+            StableAPI(check_runs=checks_with_count),
+            StableAPI(
+                annotations={
+                    first_check_id: [
+                        {
+                            "annotation_level": "warning",
+                            "message": "release warning",
+                            "path": "src/main.rs",
+                        }
+                    ]
+                }
+            ),
+        )
+        for api in cases:
+            with (
+                self.subTest(api=api),
+                patch.object(hosted, "_source_binding", return_value=dict(SOURCE)),
+                patch.object(hosted, "_fetch_api_json", side_effect=api),
+                self.assertRaisesRegex(
+                    hosted.HostedCIReceiptError, "release diagnostics"
+                ),
+            ):
+                hosted.capture_receipt(self.repository, RUN_ID)
+            self.assertFalse(self.output.exists())
+
+    def test_check_runs_must_match_the_exact_jobs_and_suite(self) -> None:
+        mutations = (
+            lambda check: check.update(name="foreign check"),
+            lambda check: check.update(head_sha="d" * 40),
+            lambda check: check["check_suite"].update(id=7),
+            lambda check: check.update(details_url="https://example.invalid/check"),
+            lambda check: check.update(completed_at="2026-08-25T20:16:00Z"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                checks = check_runs_response()
+                mutate(checks["check_runs"][0])
+                with (
+                    patch.object(
+                        hosted, "_source_binding", return_value=dict(SOURCE)
+                    ),
+                    patch.object(
+                        hosted,
+                        "_fetch_api_json",
+                        side_effect=StableAPI(check_runs=checks),
+                    ),
+                    self.assertRaises(hosted.HostedCIReceiptError),
+                ):
+                    hosted.capture_receipt(self.repository, RUN_ID)
+                self.assertFalse(self.output.exists())
+
+    def test_check_suite_is_reopened_after_annotation_queries(self) -> None:
+        run = run_response()
+        jobs = jobs_response()
+        before = check_runs_response(jobs)
+        after = copy.deepcopy(before)
+        after["check_runs"][0]["output"]["annotations_count"] = 1
+        responses = [run, jobs, before, [], [], [], run, after]
+        with (
+            patch.object(hosted, "_source_binding", return_value=dict(SOURCE)),
+            patch.object(hosted, "_fetch_api_json", side_effect=responses),
+            self.assertRaisesRegex(
+                hosted.HostedCIReceiptError, "release diagnostics"
+            ),
+        ):
+            hosted.capture_receipt(self.repository, RUN_ID)
+        self.assertFalse(self.output.exists())
+
+    def test_rerun_receipt_uses_only_latest_attempt_check_runs(self) -> None:
+        current_run = run_response(attempt=2)
+        current_jobs = jobs_response()
+        current_checks = check_runs_response(current_jobs)
+        previous_jobs = {
+            "jobs": [
+                job_response(name, 6_000 + index, attempt=1)
+                for index, name in enumerate(
+                    sorted(hosted.EXPECTED_JOB_NAMES), start=1
+                )
+            ],
+            "total_count": len(hosted.EXPECTED_JOB_NAMES),
+        }
+        all_checks = {
+            "check_runs": [
+                *current_checks["check_runs"],
+                *check_runs_response(previous_jobs)["check_runs"],
+            ],
+            "total_count": len(hosted.EXPECTED_JOB_NAMES) * 2,
+        }
+        projected_run = hosted._project_run(current_run, HEAD_SHA, RUN_ID)
+        projected_jobs = hosted._project_jobs(current_jobs, projected_run)
+        with self.assertRaisesRegex(hosted.HostedCIReceiptError, "extra check runs"):
+            hosted._project_check_runs(all_checks, projected_run, projected_jobs)
+
+        api = StableAPI(
+            run=current_run,
+            jobs=current_jobs,
+            check_runs=current_checks,
+        )
+        receipt = self._capture(api)
+        self.assertEqual(
+            {check_run["id"] for check_run in receipt["check_runs"]},
+            {job["id"] for job in receipt["jobs"]},
+        )
+        self.assertIn(
+            hosted._check_runs_api_path(CHECK_SUITE_ID),
+            api.paths,
+        )
+
     def test_successful_post_steps_may_have_strictly_increasing_number_gaps(self) -> None:
         value = jobs_response()
         steps = value["jobs"][0]["steps"]
@@ -297,9 +476,19 @@ class HostedCIReceiptTests(unittest.TestCase):
 
     def test_offline_validation_rejects_run_job_and_step_schema_drift(self) -> None:
         mutations = (
+            lambda receipt: receipt.update(
+                document="cfw-github-hosted-ci-receipt-v1"
+            ),
+            lambda receipt: receipt.update(schema_version=1),
             lambda receipt: receipt["run"].update(status="queued"),
             lambda receipt: receipt["jobs"][0].update(run_attempt=99),
             lambda receipt: receipt["jobs"][0]["steps"][0].update(conclusion="skipped"),
+            lambda receipt: receipt["check_runs"][0]["annotations"].update(
+                count=1
+            ),
+            lambda receipt: receipt["check_runs"][0].update(
+                details_url="https://example.invalid/check"
+            ),
             lambda receipt: receipt["run"].update(unknown="field"),
         )
         for mutate in mutations:
@@ -349,10 +538,26 @@ class HostedCIReceiptTests(unittest.TestCase):
         self.assertEqual(headers["x-github-api-version"], hosted.API_VERSION)
         self.assertEqual(headers["user-agent"], hosted.API_USER_AGENT)
         self.assertNotIn("authorization", headers)
+        for fixed_path in (
+            hosted._check_runs_api_path(CHECK_SUITE_ID),
+            hosted._annotations_api_path(7_001),
+        ):
+            with self.subTest(fixed_path=fixed_path):
+                self.assertEqual(
+                    hosted._api_url(fixed_path), hosted.API_ORIGIN + fixed_path
+                )
         for escaped in (
             "https://api.github.com/repos/billlza/cfw-rs/actions/runs/1",
             "/repos/billlza/cfw-rs/actions/runs/1/../2",
             "/repos/foreign/repository/actions/runs/1",
+            (
+                f"/repos/{hosted.REPOSITORY_FULL_NAME}/check-suites/"
+                f"{CHECK_SUITE_ID}/check-runs?filter=latest&per_page=100&page=2"
+            ),
+            (
+                f"/repos/{hosted.REPOSITORY_FULL_NAME}/check-suites/"
+                f"{CHECK_SUITE_ID}/check-runs?filter=all&per_page=100&page=1"
+            ),
         ):
             with self.subTest(escaped=escaped), self.assertRaises(
                 hosted.HostedCIReceiptError

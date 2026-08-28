@@ -1000,18 +1000,24 @@ def production_verification_runner(
     app = signing_output / SIGNED_APP_WITHIN_OUTPUT
     native = signing_output / SIGNED_NATIVE_PRODUCTS_NAME
     commands = (
-        ("/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", str(app)),
         (
-            str(repository / "scripts/verify_release_app.sh"),
-            "--pre-notary",
-            str(app),
-            str(native),
-            "--context",
-            context.value,
+            "codesign",
+            ("/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", str(app)),
+        ),
+        (
+            "release_app",
+            (
+                str(repository / "scripts/verify_release_app.sh"),
+                "--pre-notary",
+                str(app),
+                str(native),
+                "--context",
+                context.value,
+            ),
         ),
     )
     environment = dict(os.environ)
-    for command in commands:
+    for phase, command in commands:
         try:
             completed = run_bounded_process(
                 command,
@@ -1022,12 +1028,13 @@ def production_verification_runner(
             )
         except BoundedProcessError as error:
             raise SigningAttemptError(
-                f"signing_verification_{error.reason}",
-                "fixed signing verification did not complete",
+                f"signing_{phase}_{error.reason}",
+                f"fixed {phase} signing verification did not complete",
             ) from error
         if completed.returncode != 0:
             raise SigningAttemptError(
-                "signing_verification_failed", "signed GA application verification failed"
+                f"signing_{phase}_failed",
+                f"signed GA {phase} verification failed",
             )
 
 
@@ -1084,14 +1091,29 @@ def _prepare_output(
         raise SigningAttemptError(
             "attempt_work_unavailable", "signing-attempt work root is unavailable"
         )
-    verification_runner(
-        attempt.work, CandidateBundleContext.SIGNING_ATTEMPT_WORK
-    )
+    verification_runner(attempt.work, CandidateBundleContext.SIGNING_ATTEMPT_WORK)
     try:
         transformation_creator(repository, attempt.work)
     except SigningTransformationOutcomeUnknown:
+        try:
+            transformation_verifier(repository, attempt.work)
+        except SigningTransformationError as error:
+            raise SigningAttemptError(
+                "signing_transformation_outcome_unknown",
+                f"private signing-transformation receipt cannot be recovered: {error}",
+            ) from error
+    except SigningTransformationError as error:
+        raise SigningAttemptError(
+            "signing_transformation_failed",
+            f"private signing transformation failed: {error}",
+        ) from error
+    try:
         transformation_verifier(repository, attempt.work)
-    transformation_verifier(repository, attempt.work)
+    except SigningTransformationError as error:
+        raise SigningAttemptError(
+            "signing_transformation_failed",
+            f"private signing transformation failed: {error}",
+        ) from error
     _validate_output_inventory(attempt.work)
     try:
         publish_private_directory_exclusive(attempt.work, attempt.publish_ready)
@@ -1117,7 +1139,26 @@ def _reverify_publish_ready(
         attempt.publish_ready,
         CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY,
     )
-    transformation_verifier(repository, attempt.publish_ready)
+    try:
+        transformation_verifier(repository, attempt.publish_ready)
+    except SigningTransformationError as error:
+        raise SigningAttemptError(
+            "signing_transformation_failed",
+            f"private signing transformation failed: {error}",
+        ) from error
+
+
+def _reverify_canonical_transformation(
+    repository: Path,
+    verifier: CanonicalTransformationVerifier,
+) -> None:
+    try:
+        verifier(repository)
+    except SigningTransformationError as error:
+        raise SigningAttemptError(
+            "canonical_signing_transformation_failed",
+            f"canonical signing transformation verification failed: {error}",
+        ) from error
 
 
 def _publish_attempt(
@@ -1143,12 +1184,27 @@ def _publish_attempt(
         raise SigningAttemptError(
             "frozen_input_drift", "frozen inputs changed during the signing attempt"
         )
-    _reverify_publish_ready(
-        repository,
-        attempt,
-        verification_runner=verification_runner,
-        transformation_verifier=transformation_verifier,
-    )
+    try:
+        _reverify_publish_ready(
+            repository,
+            attempt,
+            verification_runner=verification_runner,
+            transformation_verifier=transformation_verifier,
+        )
+    except SigningAttemptError as error:
+        if attempt.state == "verified":
+            _append_event(
+                repository,
+                attempt,
+                "failed",
+                clock=clock,
+                failure_code=error.code,
+            )
+            raise
+        _candidate_retirement_required(
+            attempt,
+            f"failed publish-ready re-verification ({error.code})",
+        )
     if attempt.state in {"verified", "outcome_unknown"}:
         attempt = _append_event(repository, attempt, "publishing", clock=clock)
     elif attempt.state != "publishing":
@@ -1321,7 +1377,9 @@ def _reconcile_existing(
         verification_runner(
             canonical, CandidateBundleContext.CANONICAL_NATIVE_CONTENT
         )
-        canonical_transformation_verifier(repository)
+        _reverify_canonical_transformation(
+            repository, canonical_transformation_verifier
+        )
         try:
             confirmer(latest.publish_ready, canonical)
         except (OSError, PublicationError) as error:
@@ -1503,7 +1561,16 @@ def run_signing_transaction(
                 )
             except SigningAttemptOutcomeUnknown:
                 raise
-            except (OSError, PublicationError, SigningAttemptError, SigningTransformationError) as error:
+            except SigningAttemptError as error:
+                _append_event(
+                    repository,
+                    attempt,
+                    "failed",
+                    clock=clock,
+                    failure_code=error.code,
+                )
+                raise
+            except (OSError, PublicationError, SigningTransformationError) as error:
                 _append_event(
                     repository,
                     attempt,
@@ -1528,7 +1595,9 @@ def run_signing_transaction(
                 verification_runner=verification_runner,
                 transformation_verifier=transformation_verifier,
             )
-            canonical_transformation_verifier(repository)
+            _reverify_canonical_transformation(
+                repository, canonical_transformation_verifier
+            )
             return canonical
     except PublicationError as error:
         raise SigningAttemptError(

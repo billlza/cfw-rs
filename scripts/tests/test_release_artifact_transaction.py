@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 import gzip
 import hashlib
@@ -55,6 +56,13 @@ from scripts.release_artifact_set import (
     verify_dmg_set,
     verify_release_sets,
     verify_updater_set,
+)
+from scripts.release_apple_toolchain import (
+    APPLE_TOOLCHAIN_DOCUMENT,
+    APPLE_TOOLCHAIN_SCHEMA_VERSION,
+    DEVELOPER_DIRECTORY_PLACEHOLDER,
+    ReleaseAppleToolchain,
+    ReleaseAppleToolchainError,
 )
 from scripts.release_cargo_inputs import (
     ReleaseCargoInputsError,
@@ -211,6 +219,9 @@ def create_release_verifier_build(repository: Path) -> ReleaseVerifierBuild:
     toolchain_surface = _release_toolchain_surface(toolchain_root)
     (repository / "scripts").mkdir(exist_ok=True)
     (repository / "scripts/dependency_pins.env").write_text(
+        "MACOS_DEPLOYMENT_TARGET=15.0\n"
+        "XCODE_VERSION=26.6\n"
+        "XCODE_BUILD_VERSION=17F113\n"
         "RUST_VERSION=1.97.1\n"
         "RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256="
         + str(toolchain_surface["sha256"])
@@ -297,8 +308,51 @@ print(json.dumps({
     cargo_vendor = cargo_input_root / "verified-vendor"
     cargo_archives.mkdir(parents=True, mode=0o700)
     cargo_vendor.mkdir(mode=0o700)
+    developer_directory = repository / "fixture-xcode/Contents/Developer"
+    clang = developer_directory / "Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
+    linker = developer_directory / "Toolchains/XcodeDefault.xctoolchain/usr/bin/ld"
+    sdk_root = (
+        developer_directory
+        / "Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk"
+    )
+    apple_toolchain = {
+        "clang": {
+            "path": "Toolchains/XcodeDefault.xctoolchain/usr/bin/clang",
+            "sha256": "5" * 64,
+            "size": 101,
+        },
+        "deployment_target": "15.0",
+        "developer_directory": DEVELOPER_DIRECTORY_PLACEHOLDER,
+        "document": APPLE_TOOLCHAIN_DOCUMENT,
+        "ld": {
+            "path": "Toolchains/XcodeDefault.xctoolchain/usr/bin/ld",
+            "sha256": "6" * 64,
+            "size": 102,
+        },
+        "schema_version": APPLE_TOOLCHAIN_SCHEMA_VERSION,
+        "sdk": {
+            "resolved_path": (
+                "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+            ),
+            "selected_path": (
+                "Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk"
+            ),
+            "settings": {
+                "path": (
+                    "Platforms/MacOSX.platform/Developer/SDKs/"
+                    "MacOSX.sdk/SDKSettings.json"
+                ),
+                "sha256": "7" * 64,
+                "size": 103,
+            },
+            "version": "26.5",
+        },
+        "xcode_build_version": "17F113",
+        "xcode_version": "26.6",
+    }
     return ReleaseVerifierBuild(
         executable=executable,
+        apple_toolchain=apple_toolchain,
         cargo=cargo,
         cargo_version="cargo 1.97.1 (fixture)",
         cargo_input_root=cargo_input_root,
@@ -312,10 +366,13 @@ print(json.dumps({
             "sha256": dependency_digest,
         },
         isolated_lock_sha256="3" * 64,
+        developer_directory=developer_directory,
+        deployment_target="15.0",
         rustc=rustc,
         rustc_version="rustc 1.97.1 (fixture)",
         toolchain="1.97.1-aarch64-apple-darwin",
         toolchain_surface=toolchain_surface,
+        sdk_root=sdk_root,
     )
 
 
@@ -341,11 +398,37 @@ def require_fixture_cargo_boundary(repository: Path) -> None:
 @contextmanager
 def verified_cargo_fixture(build: ReleaseVerifierBuild):
     inputs = cargo_inputs_for_build(build)
+    apple_toolchain = ReleaseAppleToolchain(
+        developer_directory=build.developer_directory,
+        clang=(
+            build.developer_directory
+            / str(build.apple_toolchain["clang"]["path"])
+        ),
+        linker=(
+            build.developer_directory
+            / str(build.apple_toolchain["ld"]["path"])
+        ),
+        sdk_root=build.sdk_root,
+        deployment_target=build.deployment_target,
+        binding=build.apple_toolchain,
+    )
 
     def verify_inputs(repository: Path, root: Path) -> WorkspaceCargoInputs:
         if repository != build.cargo_input_root.parent or root != inputs.root:
             raise AssertionError("release verifier used the wrong Cargo input fixture")
         return inputs
+
+    def validate_apple_toolchain(
+        value: object, repository: Path
+    ) -> dict[str, object]:
+        if (
+            repository != build.cargo_input_root.parent
+            or value != apple_toolchain.binding
+        ):
+            raise ReleaseAppleToolchainError(
+                "recorded Apple linker inputs differ from the fixture"
+            )
+        return apple_toolchain.binding
 
     with patch.dict(
         os.environ,
@@ -356,6 +439,12 @@ def verified_cargo_fixture(build: ReleaseVerifierBuild):
     ), patch(
         "scripts.release_artifact_set.release_verifier_dependency_records",
         return_value=build.dependency_sources,
+    ), patch(
+        "scripts.release_artifact_set.capture_release_apple_toolchain",
+        return_value=apple_toolchain,
+    ), patch(
+        "scripts.release_artifact_set.validate_recorded_release_apple_toolchain",
+        side_effect=validate_apple_toolchain,
     ):
         yield
 
@@ -368,6 +457,124 @@ def publisher(source: Path, destination: Path) -> None:
     if os.path.lexists(destination):
         raise AssertionError("publisher must not replace a destination")
     os.rename(source, destination)
+
+
+class ReleaseVerifierBuildPolicyTests(unittest.TestCase):
+    def test_canonical_build_invocation_uses_the_single_argv_constructor(
+        self,
+    ) -> None:
+        from scripts import release_artifact_set as artifact_sets
+
+        expected = artifact_sets._release_verifier_build_argv(
+            cargo="cargo",
+            workspace="<private-isolated-workspace>",
+            target="<private-ephemeral-target>",
+            private_root="<private-root>",
+            verified_vendor="<verified-vendor>",
+            clang="<selected-xcode-clang>",
+            linker="<selected-xcode-ld>",
+        )
+        invocation = artifact_sets.RELEASE_VERIFIER_BUILD_INVOCATION
+
+        self.assertEqual(invocation["argv"], expected)
+        rustflags = json.loads(
+            expected[-1].removeprefix("build.rustflags=")
+        )
+        self.assertEqual(
+            rustflags,
+            [
+                "--remap-path-prefix=<private-root>="
+                "/cfw-release-verifier-build",
+                "--remap-path-prefix=<verified-vendor>="
+                "/cfw-release-verifier-vendor",
+                "-C",
+                "linker=<selected-xcode-clang>",
+                "-C",
+                "link-arg=-fuse-ld=<selected-xcode-ld>",
+                "-C",
+                "link-arg=-Wl,-S",
+                "-C",
+                "link-arg=-Wl,-x",
+            ],
+        )
+        self.assertNotIn("-no_uuid", expected[-1])
+
+    def test_build_and_execution_environments_are_separate_allowlists(
+        self,
+    ) -> None:
+        from scripts import release_artifact_set as artifact_sets
+
+        environment = artifact_sets._release_verifier_build_environment(
+            tool_directory="/release/rust/bin",
+            developer_directory=(
+                "/Applications/Xcode.app/Contents/Developer"
+            ),
+            deployment_target="15.0",
+            sdk_root="/Applications/Xcode.app/SDKs/MacOSX.sdk",
+            cargo_home="/private/cargo-home",
+            home="/private/home",
+            rustc="/release/rust/bin/rustc",
+            temporary_directory="/private/tmp",
+        )
+
+        self.assertEqual(
+            set(environment),
+            {
+                "CARGO_HOME",
+                "CARGO_NET_OFFLINE",
+                "DEVELOPER_DIR",
+                "HOME",
+                "LANG",
+                "LC_ALL",
+                "MACOSX_DEPLOYMENT_TARGET",
+                "PATH",
+                "RUSTC",
+                "SDKROOT",
+                "TMPDIR",
+            },
+        )
+        self.assertEqual(
+            artifact_sets.RELEASE_VERIFIER_BUILD_INVOCATION["environment"],
+            artifact_sets._release_verifier_build_environment(
+                tool_directory="<pinned-rust-bin>",
+                developer_directory=(
+                    artifact_sets.DEVELOPER_DIRECTORY_PLACEHOLDER
+                ),
+                deployment_target="<pinned-macos-deployment-target>",
+                sdk_root="<selected-macos-sdk>",
+                cargo_home="<private-runtime-cargo-home>",
+                home="<private-home>",
+                rustc="<pinned-rustc>",
+                temporary_directory="<private-temp>",
+            ),
+        )
+        self.assertEqual(
+            artifact_sets.RELEASE_VERIFIER_VERIFY_INVOCATION["environment"],
+            {
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            },
+        )
+        self.assertEqual(
+            artifact_sets.RELEASE_VERIFIER_VERIFY_INVOCATION["argv"],
+            artifact_sets._release_verifier_verify_argv(
+                executable="cfw-release-verifier",
+                configuration=(
+                    "<repository>/apps/cfw-tauri-shell/tauri.conf.json"
+                ),
+                archive="<staging>/updater-archive",
+                signature="<staging>/updater-signature",
+            ),
+        )
+        for injectable in (
+            "CC",
+            "CFLAGS",
+            "LDFLAGS",
+            "RUSTFLAGS",
+            "RUSTC_WRAPPER",
+        ):
+            self.assertNotIn(injectable, environment)
 
 
 def dmg_gatekeeper_fixture(target: Path, digest: str) -> dict:
@@ -1235,7 +1442,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             seal["release_verifier"]["executable"]["filename"],
             "cfw-release-verifier",
         )
-        self.assertEqual(seal["release_verifier"]["schema_version"], 3)
+        self.assertEqual(seal["release_verifier"]["schema_version"], 4)
         self.assertEqual(
             seal["release_verifier"]["cargo_workspace_lock_sha256"],
             self.verifier_build.cargo_lock_sha256,
@@ -1245,6 +1452,249 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             self.verifier_build.cargo_vendor_sha256,
         )
         self.assertEqual(seal["release_verifier"]["network"], "offline")
+
+    def test_legacy_or_non_integer_verifier_binding_schema_is_rejected(self) -> None:
+        destination = self.seal()
+        seal_path = destination / "updater-set.seal.json"
+        original = json.loads(seal_path.read_text(encoding="utf-8"))
+
+        for schema_version in (3, True, "4"):
+            with self.subTest(schema_version=schema_version):
+                changed = deepcopy(original)
+                changed["release_verifier"]["schema_version"] = schema_version
+                seal_path.write_text(
+                    json.dumps(
+                        changed,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ArtifactSetError, "build policy is inconsistent"
+                ):
+                    self.verify(destination)
+
+    def test_verifier_binding_rejects_field_or_build_invocation_drift(self) -> None:
+        destination = self.seal()
+        seal_path = destination / "updater-set.seal.json"
+        original = json.loads(seal_path.read_text(encoding="utf-8"))
+        mutations = {
+            "extra-field": lambda binding: binding.update({"legacy": False}),
+            "missing-field": lambda binding: binding.pop("lock_invocation"),
+            "reordered-rustflags": lambda binding: binding[
+                "build_invocation"
+            ]["argv"][-1].replace(
+                '"-C","link-arg=-Wl,-S","-C","link-arg=-Wl,-x"',
+                '"-C","link-arg=-Wl,-x","-C","link-arg=-Wl,-S"',
+            ),
+        }
+
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                changed = deepcopy(original)
+                binding = changed["release_verifier"]
+                if name == "reordered-rustflags":
+                    binding["build_invocation"]["argv"][-1] = mutate(binding)
+                else:
+                    mutate(binding)
+                seal_path.write_text(
+                    json.dumps(
+                        changed,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ArtifactSetError,
+                    "unexpected field set|build policy is inconsistent",
+                ):
+                    self.verify(destination)
+
+    def test_apple_linker_binding_drift_is_rejected(self) -> None:
+        destination = self.seal()
+        seal_path = destination / "updater-set.seal.json"
+        seal = json.loads(seal_path.read_text(encoding="utf-8"))
+        seal["release_verifier"]["apple_toolchain"]["ld"]["sha256"] = (
+            "0" * 64
+        )
+        seal_path.write_text(
+            json.dumps(
+                seal,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactSetError, "Apple linker inputs are inconsistent"
+        ):
+            self.verify(destination)
+
+    def test_source_input_size_requires_one_strict_json_integer(self) -> None:
+        destination = self.seal()
+        seal_path = destination / "updater-set.seal.json"
+        original = json.loads(seal_path.read_text(encoding="utf-8"))
+        original_size = original["release_verifier"]["source_inputs"][
+            "crate_source"
+        ]["size"]
+
+        for changed_size in (float(original_size), True):
+            with self.subTest(changed_size=changed_size):
+                changed = deepcopy(original)
+                changed["release_verifier"]["source_inputs"]["crate_source"][
+                    "size"
+                ] = changed_size
+                seal_path.write_text(
+                    json.dumps(
+                        changed,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ArtifactSetError, "source input crate_source is malformed"
+                ):
+                    self.verify(destination)
+
+    def test_source_input_record_shape_path_and_digest_are_strict(self) -> None:
+        destination = self.seal()
+        seal_path = destination / "updater-set.seal.json"
+        original = json.loads(seal_path.read_text(encoding="utf-8"))
+
+        for source_key in original["release_verifier"]["source_inputs"]:
+            for mutation in ("missing-field", "extra-field"):
+                with self.subTest(source_key=source_key, mutation=mutation):
+                    changed = deepcopy(original)
+                    record = changed["release_verifier"]["source_inputs"][
+                        source_key
+                    ]
+                    if mutation == "missing-field":
+                        record.pop("path")
+                    else:
+                        record["legacy"] = False
+                    seal_path.write_text(
+                        json.dumps(
+                            changed,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(ArtifactSetError):
+                        self.verify(destination)
+
+        mutations = {
+            "path-type": lambda record: record.update({"path": True}),
+            "path-value": lambda record: record.update(
+                {"path": "scripts/not-the-release-verifier.rs"}
+            ),
+            "digest-type": lambda record: record.update({"sha256": False}),
+            "digest-format": lambda record: record.update({"sha256": "A" * 64}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                changed = deepcopy(original)
+                record = changed["release_verifier"]["source_inputs"][
+                    "crate_source"
+                ]
+                mutate(record)
+                seal_path.write_text(
+                    json.dumps(
+                        changed,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(ArtifactSetError):
+                    self.verify(destination)
+
+    def test_updater_verification_numeric_fields_require_strict_integers(
+        self,
+    ) -> None:
+        destination = self.seal()
+        receipt_path = destination / self.verification.name
+        seal_path = destination / "updater-set.seal.json"
+        original_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        original_seal = json.loads(seal_path.read_text(encoding="utf-8"))
+
+        for field, changed_value in (
+            ("schema_version", True),
+            ("archive_size", float(original_receipt["archive_size"])),
+            ("signature_size", float(original_receipt["signature_size"])),
+        ):
+            with self.subTest(field=field):
+                receipt = deepcopy(original_receipt)
+                receipt[field] = changed_value
+                receipt_path.write_text(
+                    json.dumps(
+                        receipt,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                receipt_data = receipt_path.read_bytes()
+                seal = deepcopy(original_seal)
+                seal["artifacts"]["embedded_public_key_verification"] = {
+                    "filename": receipt_path.name,
+                    "sha256": hashlib.sha256(receipt_data).hexdigest(),
+                    "size": len(receipt_data),
+                }
+                seal_path.write_text(
+                    json.dumps(
+                        seal,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ArtifactSetError, "malformed numeric fields"
+                ):
+                    self.verify(destination)
+
+    def test_sealed_artifact_size_requires_one_strict_json_integer(self) -> None:
+        destination = self.seal()
+        seal_path = destination / "updater-set.seal.json"
+        seal = json.loads(seal_path.read_text(encoding="utf-8"))
+        record_value = seal["artifacts"]["embedded_public_key_verification"]
+        record_value["size"] = float(record_value["size"])
+        seal_path.write_text(
+            json.dumps(
+                seal,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            ArtifactSetError,
+            "embedded public-key verification evidence is malformed",
+        ):
+            self.verify(destination)
 
     def test_hand_forged_complete_set_cannot_bypass_fresh_signature_verification(
         self,

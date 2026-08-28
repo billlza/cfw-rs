@@ -12,6 +12,7 @@ the first app-notarization submission is allowed to start.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import struct
 import sys
 import tempfile
 from typing import Any, Callable, Final, Sequence
@@ -80,8 +82,8 @@ else:
     )
 
 
-DOCUMENT: Final = "cfm-ga-signing-transformation-v1"
-SCHEMA_VERSION: Final = 1
+DOCUMENT: Final = "cfm-ga-signing-transformation-v2"
+SCHEMA_VERSION: Final = 2
 RECEIPT_NAME: Final = "signing-transformation.json"
 RECEIPT_RELATIVE: Final = SIGNING_OUTPUT_RELATIVE / RECEIPT_NAME
 PRE_SIGN_APP_RELATIVE: Final = Path("pre-sign/Clash for Mac.app")
@@ -91,31 +93,103 @@ PRE_SIGN_MANIFEST_RELATIVE: Final = Path(
 SIGNED_APP_RELATIVE: Final = SIGNING_OUTPUT_RELATIVE / SIGNED_APP_WITHIN_OUTPUT
 MAX_JSON_BYTES: Final = 64 * 1024 * 1024
 MAX_PROFILE_BYTES: Final = 16 * 1024 * 1024
+MAX_MACHO_BYTES: Final = 512 * 1024 * 1024
 MAX_CODESIGN_OUTPUT: Final = 1024 * 1024
 SHA256_RE: Final = re.compile(r"\A[0-9a-f]{64}\Z")
 
+MH_MAGIC_64: Final = 0xFEEDFACF
+CPU_TYPE_ARM64: Final = 0x0100000C
+MH_EXECUTE: Final = 0x2
+MH_DYLIB: Final = 0x6
+LC_SEGMENT_64: Final = 0x19
+LC_CODE_SIGNATURE: Final = 0x1D
+MACH_HEADER_64_SIZE: Final = 32
+SEGMENT_COMMAND_64_SIZE: Final = 72
+SECTION_64_SIZE: Final = 80
+LINKEDIT_DATA_COMMAND_SIZE: Final = 16
+ARM64_SEGMENT_ALIGNMENT: Final = 0x4000
+LINKEDIT_SEGMENT_NAME: Final = b"__LINKEDIT" + (b"\0" * 6)
+
+
+@dataclass(frozen=True)
+class _CodeObjectSpec:
+    code_object: str
+    executable: str
+    signature_directory: str | None
+
+
 # This order is the frozen signing-plan order: all nested objects, then Host.
-CODE_OBJECTS: Final = (
-    "Contents/Frameworks/CFWNativeBridge.framework",
-    "Contents/Library/HelperTools/CFWGlobalAuthority",
-    "Contents/Library/LoginItems/CFWProxyAgent.app",
-    (
-        "Contents/Library/SystemExtensions/"
-        "com.bill.clashformac.packet-tunnel.systemextension"
+CODE_OBJECT_SPECS: Final = (
+    _CodeObjectSpec(
+        code_object="Contents/Frameworks/CFWNativeBridge.framework",
+        executable=(
+            "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/"
+            "CFWNativeBridge"
+        ),
+        signature_directory=(
+            "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/"
+            "_CodeSignature"
+        ),
     ),
-    "Contents/Library/HelperTools/cfw-helper-tombstone",
-    ".",
-)
-DIRECTORY_CODE_OBJECTS: Final = frozenset(
-    {
-        ".",
-        "Contents/Frameworks/CFWNativeBridge.framework",
-        "Contents/Library/LoginItems/CFWProxyAgent.app",
-        (
+    _CodeObjectSpec(
+        code_object="Contents/Library/HelperTools/CFWGlobalAuthority",
+        executable="Contents/Library/HelperTools/CFWGlobalAuthority",
+        signature_directory=None,
+    ),
+    _CodeObjectSpec(
+        code_object="Contents/Library/LoginItems/CFWProxyAgent.app",
+        executable=(
+            "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/MacOS/"
+            "CFWProxyAgent"
+        ),
+        signature_directory=(
+            "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/"
+            "_CodeSignature"
+        ),
+    ),
+    _CodeObjectSpec(
+        code_object=(
             "Contents/Library/SystemExtensions/"
             "com.bill.clashformac.packet-tunnel.systemextension"
         ),
-    }
+        executable=(
+            "Contents/Library/SystemExtensions/"
+            "com.bill.clashformac.packet-tunnel.systemextension/Contents/MacOS/"
+            "CFWPacketTunnel"
+        ),
+        signature_directory=(
+            "Contents/Library/SystemExtensions/"
+            "com.bill.clashformac.packet-tunnel.systemextension/Contents/"
+            "_CodeSignature"
+        ),
+    ),
+    _CodeObjectSpec(
+        code_object="Contents/Library/HelperTools/cfw-helper-tombstone",
+        executable="Contents/Library/HelperTools/cfw-helper-tombstone",
+        signature_directory=None,
+    ),
+    _CodeObjectSpec(
+        code_object=".",
+        executable="Contents/MacOS/clash-for-mac",
+        signature_directory="Contents/_CodeSignature",
+    ),
+)
+CODE_OBJECTS: Final = tuple(spec.code_object for spec in CODE_OBJECT_SPECS)
+MACHO_EXECUTABLES: Final = tuple(
+    spec.executable for spec in CODE_OBJECT_SPECS
+)
+DIRECTORY_CODE_OBJECTS: Final = frozenset(
+    spec.code_object
+    for spec in CODE_OBJECT_SPECS
+    if spec.signature_directory is not None
+)
+SIGNATURE_DIRECTORY_BY_CODE_OBJECT: Final = {
+    spec.code_object: spec.signature_directory
+    for spec in CODE_OBJECT_SPECS
+    if spec.signature_directory is not None
+}
+SIGNATURE_DIRECTORIES: Final = tuple(
+    SIGNATURE_DIRECTORY_BY_CODE_OBJECT.values()
 )
 PROFILE_BINDINGS: Final = {
     "host": (
@@ -168,6 +242,24 @@ class SigningTransformationOutcomeUnknown(SigningTransformationError):
 
 CodeSignRunner = Callable[[tuple[str, ...], Path], None]
 FreezeVerifier = Callable[[Path], FrozenCandidate]
+
+
+@dataclass(frozen=True)
+class _MachOLayout:
+    cpu_subtype: int
+    file_type: int
+    file_size: int
+    ncmds: int
+    sizeofcmds: int
+    linkedit_command_offset: int
+    linkedit_vmaddr: int
+    linkedit_vmsize: int
+    linkedit_fileoff: int
+    linkedit_filesize: int
+    code_signature_command_offset: int | None
+    code_signature_dataoff: int | None
+    code_signature_datasize: int | None
+    code_signature_prefix: bytes | None
 
 
 def canonical_json(value: object) -> bytes:
@@ -235,6 +327,18 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _stable_file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+    )
+
+
 def _read_regular(path: Path, label: str, maximum: int) -> bytes:
     try:
         before = path.lstat()
@@ -282,6 +386,300 @@ def _read_regular(path: Path, label: str, maximum: int) -> bytes:
     ):
         raise SigningTransformationError(f"{label} changed while reading")
     return data
+
+
+def _align_up(value: int, alignment: int) -> int:
+    if value < 0 or alignment <= 0 or alignment & (alignment - 1):
+        raise SigningTransformationError("Mach-O alignment contract is invalid")
+    return (value + alignment - 1) & ~(alignment - 1)
+
+
+def _parse_macho(data: bytes, label: str) -> _MachOLayout:
+    if len(data) < MACH_HEADER_64_SIZE or len(data) > MAX_MACHO_BYTES:
+        raise SigningTransformationError(
+            f"{label} is not one bounded thin arm64 Mach-O"
+        )
+    try:
+        (
+            magic,
+            cpu_type,
+            cpu_subtype,
+            file_type,
+            ncmds,
+            sizeofcmds,
+            _flags,
+            _reserved,
+        ) = struct.unpack_from("<8I", data, 0)
+    except struct.error as error:
+        raise SigningTransformationError(f"{label} Mach-O header is malformed") from error
+    if (
+        magic != MH_MAGIC_64
+        or cpu_type != CPU_TYPE_ARM64
+        or file_type not in {MH_EXECUTE, MH_DYLIB}
+    ):
+        raise SigningTransformationError(
+            f"{label} is not one supported thin arm64 Mach-O"
+        )
+    commands_end = MACH_HEADER_64_SIZE + sizeofcmds
+    if (
+        ncmds < 1
+        or sizeofcmds < ncmds * 8
+        or sizeofcmds % 8 != 0
+        or commands_end > len(data)
+    ):
+        raise SigningTransformationError(f"{label} Mach-O load commands are malformed")
+
+    linkedit: tuple[int, int, int, int, int] | None = None
+    code_signature: tuple[int, int, int] | None = None
+    offset = MACH_HEADER_64_SIZE
+    for _index in range(ncmds):
+        if offset + 8 > commands_end:
+            raise SigningTransformationError(
+                f"{label} Mach-O load command header is out of bounds"
+            )
+        command, command_size = struct.unpack_from("<2I", data, offset)
+        next_offset = offset + command_size
+        if (
+            command_size < 8
+            or command_size % 8 != 0
+            or next_offset > commands_end
+        ):
+            raise SigningTransformationError(
+                f"{label} Mach-O load command is out of bounds"
+            )
+        if command == LC_SEGMENT_64:
+            if command_size < SEGMENT_COMMAND_64_SIZE:
+                raise SigningTransformationError(
+                    f"{label} Mach-O segment command is truncated"
+                )
+            section_count = struct.unpack_from("<I", data, offset + 64)[0]
+            expected_size = SEGMENT_COMMAND_64_SIZE + section_count * SECTION_64_SIZE
+            if command_size != expected_size:
+                raise SigningTransformationError(
+                    f"{label} Mach-O segment section inventory is malformed"
+                )
+            segment_name = data[offset + 8 : offset + 24]
+            vmaddr, vmsize, fileoff, filesize = struct.unpack_from(
+                "<4Q", data, offset + 24
+            )
+            if fileoff > len(data) or filesize > len(data) - fileoff:
+                raise SigningTransformationError(
+                    f"{label} Mach-O segment file range is out of bounds"
+                )
+            if segment_name == LINKEDIT_SEGMENT_NAME:
+                if linkedit is not None or section_count != 0 or vmsize < filesize:
+                    raise SigningTransformationError(
+                        f"{label} Mach-O __LINKEDIT segment is malformed"
+                    )
+                linkedit = (offset, vmaddr, vmsize, fileoff, filesize)
+        elif command == LC_CODE_SIGNATURE:
+            if command_size != LINKEDIT_DATA_COMMAND_SIZE or code_signature is not None:
+                raise SigningTransformationError(
+                    f"{label} Mach-O code-signature command is malformed"
+                )
+            dataoff, datasize = struct.unpack_from("<2I", data, offset + 8)
+            code_signature = (offset, dataoff, datasize)
+        offset = next_offset
+    if offset != commands_end:
+        raise SigningTransformationError(
+            f"{label} Mach-O load-command inventory is malformed"
+        )
+    if linkedit is None:
+        raise SigningTransformationError(
+            f"{label} Mach-O must contain exactly one __LINKEDIT segment"
+        )
+
+    (
+        linkedit_command_offset,
+        linkedit_vmaddr,
+        linkedit_vmsize,
+        linkedit_fileoff,
+        linkedit_filesize,
+    ) = linkedit
+    if code_signature is None:
+        code_signature_command_offset = None
+        code_signature_dataoff = None
+        code_signature_datasize = None
+        code_signature_prefix = None
+    else:
+        (
+            code_signature_command_offset,
+            code_signature_dataoff,
+            code_signature_datasize,
+        ) = code_signature
+        code_signature_prefix = (
+            data[max(linkedit_fileoff, code_signature_dataoff - 15) : code_signature_dataoff]
+            if code_signature_dataoff <= len(data)
+            else b""
+        )
+    return _MachOLayout(
+        cpu_subtype=cpu_subtype,
+        file_type=file_type,
+        file_size=len(data),
+        ncmds=ncmds,
+        sizeofcmds=sizeofcmds,
+        linkedit_command_offset=linkedit_command_offset,
+        linkedit_vmaddr=linkedit_vmaddr,
+        linkedit_vmsize=linkedit_vmsize,
+        linkedit_fileoff=linkedit_fileoff,
+        linkedit_filesize=linkedit_filesize,
+        code_signature_command_offset=code_signature_command_offset,
+        code_signature_dataoff=code_signature_dataoff,
+        code_signature_datasize=code_signature_datasize,
+        code_signature_prefix=code_signature_prefix,
+    )
+
+
+def _validate_signed_macho(data: bytes, label: str) -> _MachOLayout:
+    layout = _parse_macho(data, label)
+    command_offset = layout.code_signature_command_offset
+    dataoff = layout.code_signature_dataoff
+    datasize = layout.code_signature_datasize
+    if command_offset is None or dataoff is None or datasize is None:
+        raise SigningTransformationError(
+            f"{label} does not contain one fixed code-signature command"
+        )
+    if (
+        command_offset + LINKEDIT_DATA_COMMAND_SIZE
+        != MACH_HEADER_64_SIZE + layout.sizeofcmds
+        or dataoff % 16 != 0
+        or datasize < 16
+        or datasize % 16 != 0
+        or dataoff < layout.linkedit_fileoff
+        or dataoff + datasize != layout.file_size
+        or layout.linkedit_fileoff + layout.linkedit_filesize != layout.file_size
+        or layout.linkedit_fileoff % ARM64_SEGMENT_ALIGNMENT != 0
+        or layout.linkedit_vmaddr % ARM64_SEGMENT_ALIGNMENT != 0
+        or layout.linkedit_vmsize
+        != _align_up(layout.linkedit_filesize, ARM64_SEGMENT_ALIGNMENT)
+    ):
+        raise SigningTransformationError(
+            f"{label} code signature is not the fixed __LINKEDIT tail"
+        )
+    return layout
+
+
+def _inspect_signed_macho(path: Path, label: str) -> _MachOLayout:
+    return _validate_signed_macho(_read_regular(path, label, MAX_MACHO_BYTES), label)
+
+
+def _patch_regular_file(
+    path: Path,
+    *,
+    offset: int,
+    expected: bytes,
+    replacement: bytes,
+    label: str,
+) -> None:
+    if len(expected) != len(replacement) or not expected:
+        raise SigningTransformationError("Mach-O normalization patch is malformed")
+    if expected == replacement:
+        return
+    descriptor = -1
+    try:
+        before = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or path.is_symlink()
+            or before.st_nlink != 1
+            or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) & 0o022
+            or before.st_size < 1
+            or before.st_size > MAX_MACHO_BYTES
+            or offset < 0
+            or offset + len(expected) > before.st_size
+        ):
+            raise SigningTransformationError(
+                f"{label} is not one writable private Mach-O copy"
+            )
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if _stable_file_identity(opened) != _stable_file_identity(before):
+            raise SigningTransformationError(f"{label} changed while opening")
+        if os.pread(descriptor, len(expected), offset) != expected:
+            raise SigningTransformationError(
+                f"{label} normalization field changed before replacement"
+            )
+        if os.pwrite(descriptor, replacement, offset) != len(replacement):
+            raise SigningTransformationError(
+                f"{label} normalization write made incomplete progress"
+            )
+        if os.pread(descriptor, len(replacement), offset) != replacement:
+            raise SigningTransformationError(
+                f"{label} normalization bytes cannot be reopened"
+            )
+        after = os.fstat(descriptor)
+        rebound = path.stat(follow_symlinks=False)
+        if (
+            _stable_file_identity(after) != _stable_file_identity(before)
+            or _stable_file_identity(rebound) != _stable_file_identity(before)
+        ):
+            raise SigningTransformationError(
+                f"{label} changed while normalizing its signature envelope"
+            )
+    except OSError as error:
+        raise SigningTransformationError(
+            f"cannot normalize {label} in the private comparison copy"
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _normalize_removed_signature_macho(
+    path: Path,
+    label: str,
+    signed: _MachOLayout,
+) -> None:
+    data = _read_regular(path, label, MAX_MACHO_BYTES)
+    unsigned = _parse_macho(data, label)
+    dataoff = signed.code_signature_dataoff
+    signature_prefix = signed.code_signature_prefix
+    if dataoff is None or signature_prefix is None:
+        raise SigningTransformationError(
+            f"{label} signed Mach-O binding lost its signature offset"
+        )
+    signature_alignment_padding = dataoff - unsigned.file_size
+    expected_filesize = unsigned.file_size - signed.linkedit_fileoff
+    canonical_vmsize = _align_up(expected_filesize, ARM64_SEGMENT_ALIGNMENT)
+    if (
+        unsigned.code_signature_command_offset is not None
+        or unsigned.code_signature_dataoff is not None
+        or unsigned.code_signature_datasize is not None
+        or unsigned.code_signature_prefix is not None
+        or unsigned.cpu_subtype != signed.cpu_subtype
+        or unsigned.file_type != signed.file_type
+        or signature_alignment_padding < 0
+        or signature_alignment_padding >= 16
+        or not signature_prefix.endswith(b"\0" * signature_alignment_padding)
+        or unsigned.ncmds != signed.ncmds - 1
+        or unsigned.sizeofcmds != signed.sizeofcmds - LINKEDIT_DATA_COMMAND_SIZE
+        or unsigned.linkedit_command_offset != signed.linkedit_command_offset
+        or unsigned.linkedit_vmaddr != signed.linkedit_vmaddr
+        or unsigned.linkedit_fileoff != signed.linkedit_fileoff
+        or unsigned.linkedit_filesize != expected_filesize
+        or unsigned.linkedit_fileoff + unsigned.linkedit_filesize
+        != unsigned.file_size
+        or unsigned.linkedit_vmsize not in {signed.linkedit_vmsize, canonical_vmsize}
+    ):
+        raise SigningTransformationError(
+            f"{label} changed outside the removable Mach-O signature envelope"
+        )
+
+    field_offset = unsigned.linkedit_command_offset + 32
+    _patch_regular_file(
+        path,
+        offset=field_offset,
+        expected=struct.pack("<Q", unsigned.linkedit_vmsize),
+        replacement=struct.pack("<Q", canonical_vmsize),
+        label=label,
+    )
+    reopened = _parse_macho(_read_regular(path, label, MAX_MACHO_BYTES), label)
+    if reopened != replace(unsigned, linkedit_vmsize=canonical_vmsize):
+        raise SigningTransformationError(
+            f"{label} Mach-O signature-envelope normalization is not exact"
+        )
 
 
 def _canonical_repository(repository: Path) -> Path:
@@ -488,6 +886,60 @@ def _require_code_objects(app: Path) -> None:
             )
 
 
+def _signature_directory_inventory(app: Path) -> tuple[str, ...]:
+    discovered: list[str] = []
+    try:
+        for current, directories, files in os.walk(app, topdown=True, followlinks=False):
+            directories.sort()
+            files.sort()
+            if "_CodeSignature" in files:
+                raise SigningTransformationError(
+                    "a code-signature container has the wrong file type"
+                )
+            if "_CodeSignature" not in directories:
+                continue
+            path = Path(current) / "_CodeSignature"
+            metadata = path.lstat()
+            if (
+                path.is_symlink()
+                or not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                raise SigningTransformationError(
+                    "a code-signature container is unsafe"
+                )
+            discovered.append(path.relative_to(app).as_posix())
+            directories.remove("_CodeSignature")
+    except OSError as error:
+        raise SigningTransformationError(
+            "cannot enumerate fixed code-signature containers"
+        ) from error
+    return tuple(sorted(discovered))
+
+
+def _remove_signature_directories(
+    app: Path, original: tuple[str, ...]
+) -> None:
+    remaining = _signature_directory_inventory(app)
+    if not set(remaining).issubset(original):
+        raise SigningTransformationError(
+            "codesign created an unexpected signature container during normalization"
+        )
+    for relative in remaining:
+        path = app.joinpath(*Path(relative).parts)
+        try:
+            shutil.rmtree(path)
+        except OSError as error:
+            raise SigningTransformationError(
+                "cannot remove one fixed signature container from the private copy"
+            ) from error
+    if _signature_directory_inventory(app):
+        raise SigningTransformationError(
+            "a fixed signature container remained after normalization"
+        )
+
+
 def production_codesign_runner(command: tuple[str, ...], repository: Path) -> None:
     if (
         command[:2] != ("/usr/bin/codesign", "--remove-signature")
@@ -520,9 +972,24 @@ def production_codesign_runner(command: tuple[str, ...], repository: Path) -> No
 
 def _normalize_copy(app: Path, repository: Path, runner: CodeSignRunner) -> None:
     _require_code_objects(app)
-    for relative in CODE_OBJECTS:
+    signature_directories = _signature_directory_inventory(app)
+    if signature_directories not in (
+        (),
+        tuple(sorted(SIGNATURE_DIRECTORIES)),
+    ):
+        raise SigningTransformationError(
+            "application code-signature container inventory is invalid"
+        )
+    for spec in CODE_OBJECT_SPECS:
+        relative = spec.code_object
+        executable_relative = spec.executable
         code_object = app if relative == "." else app.joinpath(*Path(relative).parts)
+        executable = app.joinpath(*Path(executable_relative).parts)
+        label = f"fixed Mach-O code object {executable_relative}"
+        signed_layout = _inspect_signed_macho(executable, label)
         runner(("/usr/bin/codesign", "--remove-signature", str(code_object)), repository)
+        _normalize_removed_signature_macho(executable, label, signed_layout)
+    _remove_signature_directories(app, signature_directories)
     _require_code_objects(app)
 
 

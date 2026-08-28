@@ -172,7 +172,7 @@ class Fixture:
                 "Contents/Library/HelperTools/cfw-helper-tombstone",
                 ".",
             ],
-            "document": "cfm-ga-signing-transformation-v1",
+            "document": transaction_module.SIGNING_TRANSFORMATION_DOCUMENT,
             "normalized_app_tree_sha256": "9" * 64,
             "pre_sign_app_manifest_sha256": "a" * 64,
             "pre_sign_app_tree_sha256": "b" * 64,
@@ -194,7 +194,7 @@ class Fixture:
                     "embedded.provisionprofile"
                 ),
             ],
-            "schema_version": 1,
+            "schema_version": transaction_module.SIGNING_TRANSFORMATION_SCHEMA_VERSION,
             "signed_app_tree_sha256": self.signed_app_tree_sha256,
         }
         (self.repository / "scripts").mkdir()

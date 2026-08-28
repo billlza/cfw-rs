@@ -63,6 +63,12 @@ if __package__:
         ga_root,
         ga_signed_root,
     )
+    from .release_apple_toolchain import (
+        DEVELOPER_DIRECTORY_PLACEHOLDER,
+        ReleaseAppleToolchainError,
+        capture_release_apple_toolchain,
+        validate_recorded_release_apple_toolchain,
+    )
     from .release_cargo_inputs import (
         CRATES_IO_SOURCE,
         ReleaseCargoInputsError,
@@ -119,6 +125,12 @@ else:
         ga_root,
         ga_signed_root,
     )
+    from release_apple_toolchain import (
+        DEVELOPER_DIRECTORY_PLACEHOLDER,
+        ReleaseAppleToolchainError,
+        capture_release_apple_toolchain,
+        validate_recorded_release_apple_toolchain,
+    )
     from release_cargo_inputs import (
         CRATES_IO_SOURCE,
         ReleaseCargoInputsError,
@@ -147,7 +159,8 @@ TEAM_ID = "YKUPL7Z869"
 OFFICIAL_RELEASE_ORIGIN = "https://github.com/billlza/cfw-rs/releases/download"
 UPDATER_SEAL_DOCUMENT = "cfw-updater-release-set-seal-v2"
 UPDATER_VERIFICATION_DOCUMENT = "cfw-updater-embedded-pubkey-verification-v1"
-RELEASE_VERIFIER_BINDING_DOCUMENT = "cfw-release-verifier-build-binding-v2"
+RELEASE_VERIFIER_BINDING_DOCUMENT = "cfw-release-verifier-build-binding-v3"
+RELEASE_VERIFIER_BINDING_SCHEMA_VERSION = 4
 DMG_SEAL_DOCUMENT = "cfw-dmg-release-set-seal-v2"
 DMG_SUBMISSION_DOCUMENT = "cfw-dmg-notarization-submission-receipt-v2"
 DISTRIBUTION_SEAL_DOCUMENT = "cfw-ga-distribution-package-set-seal-v1"
@@ -211,43 +224,151 @@ RELEASE_VERIFIER_SOURCE_INPUTS = {
     "rust_toolchain": "rust-toolchain.toml",
     "workspace_manifest": "Cargo.toml",
 }
-RELEASE_VERIFIER_BUILD_COMMAND = [
-    "CARGO_HOME=<private-runtime-cargo-home>",
-    "CARGO_NET_OFFLINE=true",
-    "cargo",
-    "build",
-    "--offline",
-    "--locked",
-    "--quiet",
-    "--release",
-    "-p",
-    "cfw-release-verifier",
-    "--target",
-    RELEASE_VERIFIER_TARGET,
-    "--manifest-path",
-    "<private-isolated-workspace>/Cargo.toml",
-    "--target-dir",
-    "<private-ephemeral-target>",
-    "--config",
-    'build.rustflags=["--remap-path-prefix=<private-root>=/cfw-release-verifier-build"]',
-]
-RELEASE_VERIFIER_LOCK_COMMAND = [
-    "CARGO_HOME=<private-runtime-cargo-home>",
-    "CARGO_NET_OFFLINE=true",
-    "cargo",
-    "generate-lockfile",
-    "--offline",
-    "--quiet",
-    "--manifest-path",
-    "<private-isolated-workspace>/Cargo.toml",
-]
-RELEASE_VERIFIER_VERIFY_COMMAND = [
-    "cfw-release-verifier",
-    "<repository>/apps/cfw-tauri-shell/tauri.conf.json",
-    "<staging>/updater-archive",
-    "<staging>/updater-signature",
-    "--json",
-]
+RELEASE_VERIFIER_PRIVATE_ROOT = "/cfw-release-verifier-build"
+RELEASE_VERIFIER_VENDOR_ROOT = "/cfw-release-verifier-vendor"
+
+
+def _release_verifier_build_argv(
+    *,
+    cargo: str,
+    workspace: str,
+    target: str,
+    private_root: str,
+    verified_vendor: str,
+    clang: str,
+    linker: str,
+) -> list[str]:
+    rustflags = [
+        f"--remap-path-prefix={private_root}={RELEASE_VERIFIER_PRIVATE_ROOT}",
+        f"--remap-path-prefix={verified_vendor}={RELEASE_VERIFIER_VENDOR_ROOT}",
+        "-C",
+        f"linker={clang}",
+        "-C",
+        f"link-arg=-fuse-ld={linker}",
+        "-C",
+        "link-arg=-Wl,-S",
+        "-C",
+        "link-arg=-Wl,-x",
+    ]
+    return [
+        cargo,
+        "build",
+        "--offline",
+        "--locked",
+        "--quiet",
+        "--release",
+        "-p",
+        "cfw-release-verifier",
+        "--target",
+        RELEASE_VERIFIER_TARGET,
+        "--manifest-path",
+        f"{workspace}/Cargo.toml",
+        "--target-dir",
+        target,
+        "--config",
+        "build.rustflags="
+        + json.dumps(rustflags, ensure_ascii=True, separators=(",", ":")),
+    ]
+
+
+def _release_verifier_lock_argv(*, cargo: str, workspace: str) -> list[str]:
+    return [
+        cargo,
+        "generate-lockfile",
+        "--offline",
+        "--quiet",
+        "--manifest-path",
+        f"{workspace}/Cargo.toml",
+    ]
+
+
+def _release_verifier_verify_argv(
+    *,
+    executable: str,
+    configuration: str,
+    archive: str,
+    signature: str,
+) -> list[str]:
+    return [
+        executable,
+        configuration,
+        archive,
+        signature,
+        "--json",
+    ]
+
+
+def _release_verifier_build_environment(
+    *,
+    tool_directory: str,
+    developer_directory: str,
+    deployment_target: str,
+    sdk_root: str,
+    cargo_home: str,
+    home: str,
+    rustc: str,
+    temporary_directory: str,
+) -> dict[str, str]:
+    return {
+        "CARGO_HOME": cargo_home,
+        "CARGO_NET_OFFLINE": "true",
+        "DEVELOPER_DIR": developer_directory,
+        "HOME": home,
+        "LANG": "C",
+        "LC_ALL": "C",
+        "MACOSX_DEPLOYMENT_TARGET": deployment_target,
+        "PATH": f"{tool_directory}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "RUSTC": rustc,
+        "SDKROOT": sdk_root,
+        "TMPDIR": temporary_directory,
+    }
+
+
+RELEASE_VERIFIER_BUILD_ENVIRONMENT = _release_verifier_build_environment(
+    tool_directory="<pinned-rust-bin>",
+    developer_directory=DEVELOPER_DIRECTORY_PLACEHOLDER,
+    deployment_target="<pinned-macos-deployment-target>",
+    sdk_root="<selected-macos-sdk>",
+    cargo_home="<private-runtime-cargo-home>",
+    home="<private-home>",
+    rustc="<pinned-rustc>",
+    temporary_directory="<private-temp>",
+)
+RELEASE_VERIFIER_BUILD_INVOCATION = {
+    "argv": _release_verifier_build_argv(
+        cargo="cargo",
+        workspace="<private-isolated-workspace>",
+        target="<private-ephemeral-target>",
+        private_root="<private-root>",
+        verified_vendor="<verified-vendor>",
+        clang="<selected-xcode-clang>",
+        linker="<selected-xcode-ld>",
+    ),
+    "cwd": "<private-isolated-workspace>",
+    "environment": RELEASE_VERIFIER_BUILD_ENVIRONMENT,
+}
+RELEASE_VERIFIER_LOCK_INVOCATION = {
+    "argv": _release_verifier_lock_argv(
+        cargo="cargo",
+        workspace="<private-isolated-workspace>",
+    ),
+    "cwd": "<private-isolated-workspace>",
+    "environment": RELEASE_VERIFIER_BUILD_ENVIRONMENT,
+}
+RELEASE_VERIFIER_VERIFY_INVOCATION = {
+    "argv": _release_verifier_verify_argv(
+        executable="cfw-release-verifier",
+        configuration="<repository>/apps/cfw-tauri-shell/tauri.conf.json",
+        archive="<staging>/updater-archive",
+        signature="<staging>/updater-signature",
+    ),
+    "cwd": "<repository>",
+    "environment": {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    },
+}
 RELEASE_VERIFIER_ISOLATED_WORKSPACE = """[workspace]
 members = ["crates/cfw-release-verifier"]
 resolver = "2"
@@ -297,6 +418,7 @@ PrepackageStageVerifier = Callable[[Path], dict[str, Any]]
 @dataclass(frozen=True)
 class ReleaseVerifierBuild:
     executable: Path
+    apple_toolchain: dict[str, object]
     cargo: Path
     cargo_version: str
     cargo_input_root: Path
@@ -304,10 +426,13 @@ class ReleaseVerifierBuild:
     cargo_vendor_sha256: str
     dependency_sources: dict[str, Any]
     isolated_lock_sha256: str
+    developer_directory: Path
+    deployment_target: str
     rustc: Path
     rustc_version: str
     toolchain: str
     toolchain_surface: dict[str, Any]
+    sdk_root: Path
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -543,6 +668,44 @@ def _release_verifier_source_inputs(repository: Path) -> dict[str, dict[str, obj
     return records
 
 
+def _validate_release_verifier_source_inputs(
+    value: object,
+    repository: Path,
+) -> dict[str, dict[str, object]]:
+    value = _require_exact_keys(
+        value,
+        set(RELEASE_VERIFIER_SOURCE_INPUTS),
+        "release verifier source inputs",
+    )
+    validated: dict[str, dict[str, object]] = {}
+    for key, relative in RELEASE_VERIFIER_SOURCE_INPUTS.items():
+        record = _require_exact_keys(
+            value[key],
+            {"path", "sha256", "size"},
+            f"release verifier source input {key}",
+        )
+        size = record["size"]
+        if (
+            record["path"] != relative
+            or type(size) is not int
+            or size <= 0
+            or size > MAX_PUBLICATION_DOCUMENT_BYTES
+        ):
+            raise ArtifactSetError(
+                f"release verifier source input {key} is malformed"
+            )
+        _require_sha256(
+            record["sha256"],
+            f"release verifier source input {key} digest",
+        )
+        validated[key] = record
+    if validated != _release_verifier_source_inputs(repository):
+        raise ArtifactSetError(
+            "release verifier source inputs differ from the sealed build binding"
+        )
+    return validated
+
+
 def _write_private_file(path: Path, data: bytes, mode: int = 0o600) -> None:
     try:
         with path.open("xb") as handle:
@@ -692,7 +855,8 @@ def _validate_release_verifier_binding(
     value = _require_exact_keys(
         value,
         {
-            "build_command",
+            "apple_toolchain",
+            "build_invocation",
             "cargo",
             "cargo_workspace_lock_sha256",
             "cargo_workspace_vendor_sha256",
@@ -700,7 +864,7 @@ def _validate_release_verifier_binding(
             "document",
             "executable",
             "isolated_workspace_sha256",
-            "lock_command",
+            "lock_invocation",
             "lock_sha256",
             "network",
             "rustc",
@@ -709,19 +873,20 @@ def _validate_release_verifier_binding(
             "target",
             "toolchain",
             "toolchain_surface",
-            "verification_command",
+            "verification_invocation",
         },
         "release verifier build binding",
     )
     if (
         value["document"] != RELEASE_VERIFIER_BINDING_DOCUMENT
         or type(value["schema_version"]) is not int
-        or value["schema_version"] != 3
+        or value["schema_version"] != RELEASE_VERIFIER_BINDING_SCHEMA_VERSION
         or value["network"] != "offline"
         or value["target"] != RELEASE_VERIFIER_TARGET
-        or value["build_command"] != RELEASE_VERIFIER_BUILD_COMMAND
-        or value["lock_command"] != RELEASE_VERIFIER_LOCK_COMMAND
-        or value["verification_command"] != RELEASE_VERIFIER_VERIFY_COMMAND
+        or value["build_invocation"] != RELEASE_VERIFIER_BUILD_INVOCATION
+        or value["lock_invocation"] != RELEASE_VERIFIER_LOCK_INVOCATION
+        or value["verification_invocation"]
+        != RELEASE_VERIFIER_VERIFY_INVOCATION
         or value["isolated_workspace_sha256"]
         != hashlib.sha256(
             RELEASE_VERIFIER_ISOLATED_WORKSPACE.encode("utf-8")
@@ -737,6 +902,14 @@ def _validate_release_verifier_binding(
         value["cargo_workspace_vendor_sha256"],
         "release verifier workspace Cargo vendor digest",
     )
+    try:
+        validate_recorded_release_apple_toolchain(
+            value["apple_toolchain"], repository
+        )
+    except ReleaseAppleToolchainError as error:
+        raise ArtifactSetError(
+            "release verifier Apple linker inputs are inconsistent"
+        ) from error
 
     channel = _pinned_rust_channel(repository)
     expected_toolchain = f"{channel}-aarch64-apple-darwin"
@@ -765,11 +938,10 @@ def _validate_release_verifier_binding(
         value["dependency_sources"]
     )
     _validate_release_toolchain_surface(value["toolchain_surface"], repository)
-    if value["source_inputs"] != _release_verifier_source_inputs(repository):
-        raise ArtifactSetError(
-            "release verifier source inputs differ from the sealed build binding"
-        )
-    if cargo_workspace_lock_sha256 != value["source_inputs"]["cargo_lock"]["sha256"]:
+    source_inputs = _validate_release_verifier_source_inputs(
+        value["source_inputs"], repository
+    )
+    if cargo_workspace_lock_sha256 != source_inputs["cargo_lock"]["sha256"]:
         raise ArtifactSetError(
             "release verifier workspace Cargo.lock differs from its source binding"
         )
@@ -826,26 +998,21 @@ def _run_bounded_process(
     return subprocess.CompletedProcess(command, result.returncode, stdout, stderr)
 
 
-def _release_verifier_environment(
+def _release_verifier_identity_environment(
     tool_directory: Path,
     *,
-    cargo_home: Path | None = None,
-    home: Path | None = None,
-    temporary_directory: Path | None = None,
+    developer_directory: Path,
+    deployment_target: str,
+    sdk_root: Path,
 ) -> dict[str, str]:
-    environment = {
-        "CARGO_NET_OFFLINE": "true",
+    return {
+        "DEVELOPER_DIR": str(developer_directory),
         "LANG": "C",
         "LC_ALL": "C",
+        "MACOSX_DEPLOYMENT_TARGET": deployment_target,
         "PATH": f"{tool_directory}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "SDKROOT": str(sdk_root),
     }
-    if cargo_home is not None:
-        environment["CARGO_HOME"] = str(cargo_home)
-    if home is not None:
-        environment["HOME"] = str(home)
-    if temporary_directory is not None:
-        environment["TMPDIR"] = str(temporary_directory)
-    return environment
 
 
 def _pinned_rust_channel(repository: Path) -> str:
@@ -913,7 +1080,11 @@ def _tool_version(
 
 
 @contextmanager
-def _compiled_release_verifier(repository: Path):
+def _compiled_release_verifier(
+    repository: Path,
+    *,
+    temporary_parent: Path | None = None,
+):
     try:
         workspace_inputs = verify_workspace_cargo_inputs(
             repository,
@@ -922,6 +1093,12 @@ def _compiled_release_verifier(repository: Path):
     except (KeyError, OSError, ReleaseCargoInputsError) as error:
         raise ArtifactSetError(
             "verified Cargo workspace inputs are unavailable"
+        ) from error
+    try:
+        apple_toolchain = capture_release_apple_toolchain(repository)
+    except ReleaseAppleToolchainError as error:
+        raise ArtifactSetError(
+            "Apple release linker inputs are unavailable"
         ) from error
     channel = _pinned_rust_channel(repository)
     toolchain = f"{channel}-{RELEASE_VERIFIER_TARGET}"
@@ -937,12 +1114,40 @@ def _compiled_release_verifier(repository: Path):
     _artifact_record(rustc, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
     if cargo.parent != rustc.parent:
         raise ArtifactSetError("cargo and rustc are from different toolchains")
-    bootstrap_environment = _release_verifier_environment(cargo.parent)
+    bootstrap_environment = _release_verifier_identity_environment(
+        cargo.parent,
+        developer_directory=apple_toolchain.developer_directory,
+        deployment_target=apple_toolchain.deployment_target,
+        sdk_root=apple_toolchain.sdk_root,
+    )
     cargo_version = _tool_version(cargo, repository, bootstrap_environment, "cargo")
     rustc_version = _tool_version(rustc, repository, bootstrap_environment, "rustc")
     if channel not in cargo_version or channel not in rustc_version:
         raise ArtifactSetError("cargo or rustc differs from the pinned release channel")
-    with tempfile.TemporaryDirectory(prefix="cfw-release-verifier-build.") as temporary:
+    resolved_temporary_parent: Path | None = None
+    if temporary_parent is not None:
+        try:
+            resolved_temporary_parent = temporary_parent.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ArtifactSetError(
+                "release verifier temporary parent is unavailable"
+            ) from error
+        if (
+            not temporary_parent.is_absolute()
+            or resolved_temporary_parent != temporary_parent.absolute()
+            or "=" in str(resolved_temporary_parent)
+        ):
+            raise ArtifactSetError(
+                "release verifier temporary parent is not canonical"
+            )
+        _require_real_directory(
+            resolved_temporary_parent,
+            "release verifier temporary parent",
+        )
+    with tempfile.TemporaryDirectory(
+        prefix="cfw-release-verifier-build.",
+        dir=resolved_temporary_parent,
+    ) as temporary:
         private_root = Path(temporary).resolve()
         cargo_home = private_root / "cargo-home"
         home = private_root / "home"
@@ -991,13 +1196,16 @@ def _compiled_release_verifier(repository: Path):
             ),
         ):
             _write_private_file(destination, read_regular(source, maximum))
-        environment = _release_verifier_environment(
-            cargo.parent,
-            cargo_home=cargo_home,
-            home=home,
-            temporary_directory=temporary_directory,
+        environment = _release_verifier_build_environment(
+            tool_directory=str(cargo.parent),
+            developer_directory=str(apple_toolchain.developer_directory),
+            deployment_target=apple_toolchain.deployment_target,
+            sdk_root=str(apple_toolchain.sdk_root),
+            cargo_home=str(cargo_home),
+            home=str(home),
+            rustc=str(rustc),
+            temporary_directory=str(temporary_directory),
         )
-        environment["RUSTC"] = str(rustc)
         if any(
             name in environment
             for name in (
@@ -1012,14 +1220,10 @@ def _compiled_release_verifier(repository: Path):
             )
         ):
             raise ArtifactSetError("release verifier build environment is injectable")
-        lock_command = [
-            str(cargo),
-            "generate-lockfile",
-            "--offline",
-            "--quiet",
-            "--manifest-path",
-            str(workspace / "Cargo.toml"),
-        ]
+        lock_command = _release_verifier_lock_argv(
+            cargo=str(cargo),
+            workspace=str(workspace),
+        )
         _run_bounded_process(
             lock_command,
             cwd=workspace,
@@ -1030,27 +1234,15 @@ def _compiled_release_verifier(repository: Path):
         isolated_lock_sha256 = _validate_isolated_release_verifier_lock(
             workspace / "Cargo.lock", dependency_sources
         )
-        command = [
-            str(cargo),
-            "build",
-            "--offline",
-            "--locked",
-            "--quiet",
-            "--release",
-            "-p",
-            "cfw-release-verifier",
-            "--target",
-            RELEASE_VERIFIER_TARGET,
-            "--manifest-path",
-            str(workspace / "Cargo.toml"),
-            "--target-dir",
-            str(target),
-            "--config",
-            (
-                'build.rustflags=["--remap-path-prefix='
-                f"{private_root}=/cfw-release-verifier-build\"]"
-            ),
-        ]
+        command = _release_verifier_build_argv(
+            cargo=str(cargo),
+            workspace=str(workspace),
+            target=str(target),
+            private_root=str(private_root),
+            verified_vendor=str(workspace_inputs.vendor),
+            clang=str(apple_toolchain.clang),
+            linker=str(apple_toolchain.linker),
+        )
         _run_bounded_process(
             command,
             cwd=workspace,
@@ -1082,8 +1274,19 @@ def _compiled_release_verifier(repository: Path):
             raise ArtifactSetError(
                 "release verifier Cargo inputs changed during compilation"
             )
+        try:
+            ending_apple_toolchain = capture_release_apple_toolchain(repository)
+        except ReleaseAppleToolchainError as error:
+            raise ArtifactSetError(
+                "Apple release linker inputs changed during compilation"
+            ) from error
+        if ending_apple_toolchain != apple_toolchain:
+            raise ArtifactSetError(
+                "Apple release linker inputs changed during compilation"
+            )
         yield ReleaseVerifierBuild(
             executable=executable,
+            apple_toolchain=apple_toolchain.binding,
             cargo=cargo,
             cargo_version=cargo_version,
             cargo_input_root=workspace_inputs.root,
@@ -1091,10 +1294,13 @@ def _compiled_release_verifier(repository: Path):
             cargo_vendor_sha256=workspace_inputs.vendor_tree_sha256,
             dependency_sources=dependency_sources,
             isolated_lock_sha256=isolated_lock_sha256,
+            developer_directory=apple_toolchain.developer_directory,
+            deployment_target=apple_toolchain.deployment_target,
             rustc=rustc,
             rustc_version=rustc_version,
             toolchain=toolchain,
             toolchain_surface=toolchain_surface,
+            sdk_root=apple_toolchain.sdk_root,
         )
 
 
@@ -1106,15 +1312,14 @@ def _invoke_release_verifier(
 ) -> dict[str, Any]:
     configuration = repository / "apps/cfw-tauri-shell/tauri.conf.json"
     result = _run_bounded_process(
-        [
-            str(build.executable),
-            str(configuration),
-            str(archive),
-            str(signature),
-            "--json",
-        ],
+        _release_verifier_verify_argv(
+            executable=str(build.executable),
+            configuration=str(configuration),
+            archive=str(archive),
+            signature=str(signature),
+        ),
         cwd=repository,
-        environment=_release_verifier_environment(build.cargo.parent),
+        environment=dict(RELEASE_VERIFIER_VERIFY_INVOCATION["environment"]),
         timeout=300,
         label="release verifier execution",
     )
@@ -1200,8 +1405,24 @@ def _produce_updater_verification(
         raise ArtifactSetError(
             "pinned Rust toolchain changed during release verification"
         )
+    try:
+        apple_toolchain_after = capture_release_apple_toolchain(repository)
+    except ReleaseAppleToolchainError as error:
+        raise ArtifactSetError(
+            "Apple release linker inputs changed during release verification"
+        ) from error
+    if (
+        apple_toolchain_after.binding != build.apple_toolchain
+        or apple_toolchain_after.developer_directory != build.developer_directory
+        or apple_toolchain_after.sdk_root != build.sdk_root
+        or apple_toolchain_after.deployment_target != build.deployment_target
+    ):
+        raise ArtifactSetError(
+            "Apple release linker inputs changed during release verification"
+        )
     binding = {
-        "build_command": RELEASE_VERIFIER_BUILD_COMMAND,
+        "apple_toolchain": build.apple_toolchain,
+        "build_invocation": RELEASE_VERIFIER_BUILD_INVOCATION,
         "cargo": {**cargo_before, "version": build.cargo_version},
         "cargo_workspace_lock_sha256": build.cargo_lock_sha256,
         "cargo_workspace_vendor_sha256": build.cargo_vendor_sha256,
@@ -1211,16 +1432,16 @@ def _produce_updater_verification(
         "isolated_workspace_sha256": hashlib.sha256(
             RELEASE_VERIFIER_ISOLATED_WORKSPACE.encode("utf-8")
         ).hexdigest(),
-        "lock_command": RELEASE_VERIFIER_LOCK_COMMAND,
+        "lock_invocation": RELEASE_VERIFIER_LOCK_INVOCATION,
         "lock_sha256": build.isolated_lock_sha256,
         "network": "offline",
         "rustc": {**rustc_before, "version": build.rustc_version},
-        "schema_version": 3,
+        "schema_version": RELEASE_VERIFIER_BINDING_SCHEMA_VERSION,
         "source_inputs": inputs_after,
         "target": RELEASE_VERIFIER_TARGET,
         "toolchain": build.toolchain,
         "toolchain_surface": build.toolchain_surface,
-        "verification_command": RELEASE_VERIFIER_VERIFY_COMMAND,
+        "verification_invocation": RELEASE_VERIFIER_VERIFY_INVOCATION,
     }
     return receipt, binding
 
@@ -1381,6 +1602,14 @@ def _validate_artifact_record(
     label: str,
 ) -> dict[str, object]:
     value = _require_exact_keys(value, {"filename", "sha256", "size"}, label)
+    if (
+        value["filename"] != path.name
+        or type(value["size"]) is not int
+        or value["size"] <= 0
+        or value["size"] > maximum
+    ):
+        raise ArtifactSetError(f"{label} is malformed")
+    _require_sha256(value["sha256"], f"{label} digest")
     actual = _artifact_record(path, maximum)
     if value != actual:
         raise ArtifactSetError(f"{label} differs from the sealed release asset")
@@ -1664,6 +1893,18 @@ def _validate_updater_verification(
         "signature_sha256": signature_record["sha256"],
         "signature_size": signature_record["size"],
     }
+    if (
+        type(value["schema_version"]) is not int
+        or type(value["archive_size"]) is not int
+        or value["archive_size"] <= 0
+        or value["archive_size"] > MAX_UPDATER_ARCHIVE_BYTES
+        or type(value["signature_size"]) is not int
+        or value["signature_size"] <= 0
+        or value["signature_size"] > MAX_SIGNATURE_BYTES
+    ):
+        raise ArtifactSetError(
+            "embedded public-key verification has malformed numeric fields"
+        )
     if any(value[key] != item for key, item in expected.items()):
         raise ArtifactSetError(
             "embedded public-key verification does not bind the exact updater bytes"

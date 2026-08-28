@@ -500,6 +500,18 @@ def _validate_embedded_verification(
         "signature_sha256": signature_record["sha256"],
         "signature_size": signature_record["size"],
     }
+    if (
+        type(document["schema_version"]) is not int
+        or type(document["archive_size"]) is not int
+        or document["archive_size"] <= 0
+        or document["archive_size"] > MAX_CHALLENGE_BYTES
+        or type(document["signature_size"]) is not int
+        or document["signature_size"] <= 0
+        or document["signature_size"] > MAX_SIGNATURE_BYTES
+    ):
+        raise UpdaterKeyPossessionError(
+            "embedded updater-key verification has malformed numeric fields"
+        )
     if any(document[name] != item for name, item in expected.items()):
         raise UpdaterKeyPossessionError(
             "embedded updater-key verification binds different challenge bytes"
@@ -549,7 +561,13 @@ def _validate_artifact_record(
     value: object, *, name: str, data: bytes, label: str
 ) -> None:
     record = _require_exact_fields(value, {"filename", "sha256", "size"}, label)
-    if record != _record(name, data):
+    if (
+        record["filename"] != name
+        or type(record["size"]) is not int
+        or record["size"] <= 0
+        or record["size"] != len(data)
+        or _require_sha256(record["sha256"], f"{label} digest") != _sha256(data)
+    ):
         raise UpdaterKeyPossessionError(f"{label} binds different bytes")
 
 
@@ -624,14 +642,26 @@ def _verify_documents(
         signature_record=signature_record,
         tauri_config_sha256=tauri_config_sha256,
     )
-    if verification != fresh_verification:
+    try:
+        fresh_verification_data = canonical_json(fresh_verification)
+    except (TypeError, ValueError) as error:
+        raise UpdaterKeyPossessionError(
+            "fresh embedded updater-key verification is not canonical JSON"
+        ) from error
+    if files[VERIFICATION_NAME] != fresh_verification_data:
         raise UpdaterKeyPossessionError(
             "stored embedded updater-key verification does not replay exactly"
         )
     binding = _strict_json(
         files[VERIFIER_BINDING_NAME], "release verifier binding"
     )
-    if binding != fresh_binding:
+    try:
+        fresh_binding_data = canonical_json(fresh_binding)
+    except (TypeError, ValueError) as error:
+        raise UpdaterKeyPossessionError(
+            "fresh source-pinned release verifier binding is not canonical JSON"
+        ) from error
+    if files[VERIFIER_BINDING_NAME] != fresh_binding_data:
         raise UpdaterKeyPossessionError(
             "stored source-pinned release verifier binding does not replay exactly"
         )

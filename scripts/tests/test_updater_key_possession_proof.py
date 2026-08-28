@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -136,6 +137,11 @@ class PossessionFixture:
         }
         binding = {
             "document": "fixture-source-pinned-release-verifier-v1",
+            "executable": {
+                "filename": "cfw-release-verifier",
+                "sha256": "5" * 64,
+                "size": 451_488,
+            },
             "schema_version": 1,
             "source_sha256": "5" * 64,
         }
@@ -259,6 +265,127 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
         self.assertEqual(verified, created)
         self.assertEqual(self.fixture.signer_calls, signer_calls)
         self.assertEqual(len(self.fixture.verifier_calls), 1)
+
+    def test_fresh_verifier_executable_digest_drift_rejects_exact_replay(
+        self,
+    ) -> None:
+        self.fixture.create()
+        signer_calls = list(self.fixture.signer_calls)
+        proof_bytes = {
+            path.name: path.read_bytes()
+            for path in self.fixture.proof_root.iterdir()
+        }
+
+        def drifted_verifier(
+            repository: Path, challenge: Path, signature: Path
+        ) -> tuple[dict[str, object], dict[str, object]]:
+            verification, binding = self.fixture.embedded_verifier(
+                repository, challenge, signature
+            )
+            binding = deepcopy(binding)
+            binding["executable"]["sha256"] = "8" * 64
+            return verification, binding
+
+        with self.assertRaisesRegex(
+            possession.UpdaterKeyPossessionError,
+            "stored source-pinned release verifier binding does not replay exactly",
+        ):
+            possession.verify_possession_proof(
+                self.fixture.repository,
+                self.fixture.preflight_root,
+                source_identity_reader=self.fixture.source_reader,
+                embedded_verifier=drifted_verifier,
+            )
+
+        self.assertEqual(self.fixture.signer_calls, signer_calls)
+        self.assertEqual(
+            {
+                path.name: path.read_bytes()
+                for path in self.fixture.proof_root.iterdir()
+            },
+            proof_bytes,
+        )
+
+    def test_embedded_verification_numeric_fields_require_strict_integers(
+        self,
+    ) -> None:
+        self.fixture.create()
+
+        for field, changed_value in (
+            ("schema_version", True),
+            ("archive_size", 1.0),
+            ("signature_size", 1.0),
+        ):
+            with self.subTest(field=field):
+                def malformed_verifier(
+                    repository: Path, challenge: Path, signature: Path
+                ) -> tuple[dict[str, object], dict[str, object]]:
+                    verification, binding = self.fixture.embedded_verifier(
+                        repository, challenge, signature
+                    )
+                    verification = deepcopy(verification)
+                    if field == "archive_size":
+                        changed = float(verification[field])
+                    elif field == "signature_size":
+                        changed = float(verification[field])
+                    else:
+                        changed = changed_value
+                    verification[field] = changed
+                    return verification, binding
+
+                with self.assertRaisesRegex(
+                    possession.UpdaterKeyPossessionError,
+                    "malformed numeric fields",
+                ):
+                    possession.verify_possession_proof(
+                        self.fixture.repository,
+                        self.fixture.preflight_root,
+                        source_identity_reader=self.fixture.source_reader,
+                        embedded_verifier=malformed_verifier,
+                    )
+
+    def test_release_verifier_binding_numeric_spelling_must_replay_exactly(
+        self,
+    ) -> None:
+        self.fixture.create()
+
+        def float_sized_verifier(
+            repository: Path, challenge: Path, signature: Path
+        ) -> tuple[dict[str, object], dict[str, object]]:
+            verification, binding = self.fixture.embedded_verifier(
+                repository, challenge, signature
+            )
+            binding = deepcopy(binding)
+            binding["executable"]["size"] = float(
+                binding["executable"]["size"]
+            )
+            return verification, binding
+
+        with self.assertRaisesRegex(
+            possession.UpdaterKeyPossessionError,
+            "release verifier binding does not replay exactly",
+        ):
+            possession.verify_possession_proof(
+                self.fixture.repository,
+                self.fixture.preflight_root,
+                source_identity_reader=self.fixture.source_reader,
+                embedded_verifier=float_sized_verifier,
+            )
+
+    def test_proof_artifact_size_requires_one_strict_json_integer(self) -> None:
+        self.fixture.create()
+        proof_path = self.fixture.proof_root / possession.PROOF_NAME
+        proof = json.loads(proof_path.read_bytes())
+        record = proof["embedded_verification"]
+        record["size"] = float(record["size"])
+        proof_path.write_bytes(canonical_json(proof))
+        proof_path.chmod(0o600)
+
+        with self.assertRaisesRegex(
+            possession.UpdaterKeyPossessionError,
+            "embedded verification record binds different bytes",
+        ):
+            self.fixture.verify()
 
     def test_production_source_pinned_verifier_binding_is_rebuilt_and_validated(
         self,

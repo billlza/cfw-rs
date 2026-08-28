@@ -4,7 +4,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
+import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,8 +20,102 @@ from scripts.publication.common import PublicationError
 from scripts import verify_signing_transformation as transformation
 
 
-ADHOC_SIGNATURE_SUFFIX = b"\nTEST-LINKER-ADHOC-SIGNATURE"
-DEVELOPER_ID_SIGNATURE_SUFFIX = b"\nTEST-DEVELOPER-ID-SIGNATURE"
+ADHOC_SIGNATURE_SIZE = 0x1000
+DEVELOPER_ID_SIGNATURE_SIZE = 0x5000
+FIXTURE_LINKEDIT_FILEOFF = 0x4000
+FIXTURE_SIGNATURE_DATAOFF = 0x4400
+
+
+def fixture_signed_macho(
+    signature_size: int,
+    signature_byte: bytes,
+    *,
+    linkedit_count: int = 1,
+    code_signature_count: int = 1,
+) -> bytes:
+    if (
+        signature_size < 16
+        or signature_size % 16
+        or len(signature_byte) != 1
+        or linkedit_count not in {0, 1, 2}
+        or code_signature_count not in {0, 1, 2}
+    ):
+        raise ValueError("fixture signature contract is invalid")
+    file_size = FIXTURE_SIGNATURE_DATAOFF + signature_size
+    linkedit_filesize = file_size - FIXTURE_LINKEDIT_FILEOFF
+    linkedit_vmsize = transformation._align_up(
+        linkedit_filesize, transformation.ARM64_SEGMENT_ALIGNMENT
+    )
+    segment = struct.pack(
+        "<II16sQQQQIIII",
+        transformation.LC_SEGMENT_64,
+        transformation.SEGMENT_COMMAND_64_SIZE,
+        transformation.LINKEDIT_SEGMENT_NAME,
+        0x100004000,
+        linkedit_vmsize,
+        FIXTURE_LINKEDIT_FILEOFF,
+        linkedit_filesize,
+        7,
+        5,
+        0,
+        0,
+    )
+    signature = struct.pack(
+        "<IIII",
+        transformation.LC_CODE_SIGNATURE,
+        transformation.LINKEDIT_DATA_COMMAND_SIZE,
+        FIXTURE_SIGNATURE_DATAOFF,
+        signature_size,
+    )
+    commands = segment * linkedit_count + signature * code_signature_count
+    header = struct.pack(
+        "<8I",
+        transformation.MH_MAGIC_64,
+        transformation.CPU_TYPE_ARM64,
+        0,
+        transformation.MH_EXECUTE,
+        linkedit_count + code_signature_count,
+        len(commands),
+        0,
+        0,
+    )
+    prefix = header + commands
+    if len(prefix) > FIXTURE_LINKEDIT_FILEOFF:
+        raise AssertionError("fixture Mach-O load commands escaped __LINKEDIT")
+    return (
+        prefix
+        + (b"\0" * (FIXTURE_LINKEDIT_FILEOFF - len(prefix)))
+        + (b"L" * (FIXTURE_SIGNATURE_DATAOFF - FIXTURE_LINKEDIT_FILEOFF))
+        + (signature_byte * signature_size)
+    )
+
+
+def remove_fixture_signature(data: bytes, *, alignment_padding: int = 0) -> bytes:
+    layout = transformation._parse_macho(data, "fixture signed Mach-O")
+    command_offset = layout.code_signature_command_offset
+    dataoff = layout.code_signature_dataoff
+    if command_offset is None or dataoff is None:
+        raise AssertionError("fixture signed Mach-O has no signature command")
+    if alignment_padding < 0 or alignment_padding >= 16:
+        raise ValueError("fixture signature alignment padding is invalid")
+    result = bytearray(data[: dataoff - alignment_padding])
+    struct.pack_into("<I", result, 16, layout.ncmds - 1)
+    struct.pack_into(
+        "<I",
+        result,
+        20,
+        layout.sizeofcmds - transformation.LINKEDIT_DATA_COMMAND_SIZE,
+    )
+    result[
+        command_offset : command_offset + transformation.LINKEDIT_DATA_COMMAND_SIZE
+    ] = b"\0" * transformation.LINKEDIT_DATA_COMMAND_SIZE
+    struct.pack_into(
+        "<Q",
+        result,
+        layout.linkedit_command_offset + 48,
+        len(result) - layout.linkedit_fileoff,
+    )
+    return bytes(result)
 
 
 class SigningTransformationFixture:
@@ -46,10 +144,12 @@ class SigningTransformationFixture:
         self.calls: list[tuple[str, ...]] = []
         self._create_profiles()
         self._create_app(self.pre_sign_app)
-        self._sign_fixture_app(ADHOC_SIGNATURE_SUFFIX, "adhoc")
+        self._sign_fixture_app(ADHOC_SIGNATURE_SIZE, b"A", "adhoc")
         self._write_pre_sign_manifest()
         shutil.copytree(self.pre_sign_app, self.signed_app, symlinks=True)
-        self._sign_fixture_app(DEVELOPER_ID_SIGNATURE_SUFFIX, "developer-id")
+        self._sign_fixture_app(
+            DEVELOPER_ID_SIGNATURE_SIZE, b"D", "developer-id"
+        )
         self._embed_profiles()
         self._write_intent()
 
@@ -64,10 +164,6 @@ class SigningTransformationFixture:
             path.write_bytes(f"{role}-profile\n".encode("ascii"))
             path.chmod(0o644)
 
-    @staticmethod
-    def _code_payload(path: Path) -> Path:
-        return path / ".test-code" if path.is_dir() else path
-
     def _create_app(self, app: Path) -> None:
         (app / "Contents/Resources").mkdir(parents=True)
         (app / "Contents/Resources/config.json").write_bytes(b'{"fixed":true}\n')
@@ -75,17 +171,13 @@ class SigningTransformationFixture:
             path = app if relative == "." else app.joinpath(*Path(relative).parts)
             if relative in transformation.DIRECTORY_CODE_OBJECTS:
                 path.mkdir(parents=True, exist_ok=True)
-                if relative != "." and (
-                    relative.endswith("CFWProxyAgent.app")
-                    or relative.endswith(".systemextension")
-                ):
-                    (path / "Contents").mkdir()
-                payload = path / ".test-code"
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                payload = path
-            payload.write_bytes(f"unsigned:{relative}\n".encode("ascii"))
-            payload.chmod(0o755)
+        for relative in transformation.MACHO_EXECUTABLES:
+            executable = app.joinpath(*Path(relative).parts)
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            executable.write_bytes(fixture_signed_macho(ADHOC_SIGNATURE_SIZE, b"A"))
+            executable.chmod(0o755)
 
     def _write_pre_sign_manifest(self) -> None:
         metadata = {
@@ -105,28 +197,30 @@ class SigningTransformationFixture:
         )
         path.chmod(0o600)
 
-    def _sign_fixture_app(self, suffix: bytes, label: str) -> None:
+    def _sign_fixture_app(
+        self, signature_size: int, signature_byte: bytes, label: str
+    ) -> None:
         app = self.pre_sign_app if label == "adhoc" else self.signed_app
-        for relative in transformation.CODE_OBJECTS:
-            path = (
-                app
-                if relative == "."
-                else app.joinpath(*Path(relative).parts)
+        for code_relative, executable_relative in zip(
+            transformation.CODE_OBJECTS,
+            transformation.MACHO_EXECUTABLES,
+            strict=True,
+        ):
+            executable = app.joinpath(*Path(executable_relative).parts)
+            executable.write_bytes(
+                fixture_signed_macho(signature_size, signature_byte)
             )
-            payload = self._code_payload(path)
-            data = payload.read_bytes()
-            for existing in (
-                ADHOC_SIGNATURE_SUFFIX,
-                DEVELOPER_ID_SIGNATURE_SUFFIX,
-            ):
-                if data.endswith(existing):
-                    data = data[: -len(existing)]
-            payload.write_bytes(data + suffix)
-            if path.is_dir() and label == "developer-id":
-                signature = path / "_CodeSignature"
+            if code_relative in transformation.DIRECTORY_CODE_OBJECTS and label == "developer-id":
+                signature = app.joinpath(
+                    *Path(
+                        transformation.SIGNATURE_DIRECTORY_BY_CODE_OBJECT[
+                            code_relative
+                        ]
+                    ).parts
+                )
                 signature.mkdir(exist_ok=True)
                 (signature / "CodeResources").write_bytes(
-                    f"{label}:{relative}\n".encode("ascii")
+                    f"{label}:{code_relative}\n".encode("ascii")
                 )
 
     def _embed_profiles(self) -> None:
@@ -168,15 +262,13 @@ class SigningTransformationFixture:
             raise AssertionError(f"unexpected command: {command}")
         path = Path(command[2])
         self.calls.append(command)
-        payload = self._code_payload(path)
-        data = payload.read_bytes()
-        for suffix in (
-            ADHOC_SIGNATURE_SUFFIX,
-            DEVELOPER_ID_SIGNATURE_SUFFIX,
-        ):
-            if data.endswith(suffix):
-                payload.write_bytes(data[: -len(suffix)])
-                break
+        app = path if path.name == "Clash for Mac.app" else next(
+            parent for parent in path.parents if parent.name == "Clash for Mac.app"
+        )
+        relative = "." if path == app else path.relative_to(app).as_posix()
+        index = transformation.CODE_OBJECTS.index(relative)
+        executable = app.joinpath(*Path(transformation.MACHO_EXECUTABLES[index]).parts)
+        executable.write_bytes(remove_fixture_signature(executable.read_bytes()))
         signature = path / "_CodeSignature" if path.is_dir() else None
         if signature is not None and signature.exists():
             shutil.rmtree(signature)
@@ -196,6 +288,249 @@ class SigningTransformationFixture:
             codesign_runner=self.codesign_runner,
             freeze_verifier=self.freeze_verifier,
         )
+
+
+class MachONormalizationTests(unittest.TestCase):
+    def test_signature_capacity_is_the_only_normalized_load_command_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pre = root / "pre-sign"
+            signed = root / "developer-id"
+            pre.write_bytes(fixture_signed_macho(ADHOC_SIGNATURE_SIZE, b"A"))
+            signed.write_bytes(
+                fixture_signed_macho(DEVELOPER_ID_SIGNATURE_SIZE, b"D")
+            )
+            pre.chmod(0o755)
+            signed.chmod(0o755)
+            pre_layout = transformation._inspect_signed_macho(pre, "pre-sign fixture")
+            signed_layout = transformation._inspect_signed_macho(
+                signed, "Developer ID fixture"
+            )
+            self.assertNotEqual(
+                pre_layout.linkedit_vmsize, signed_layout.linkedit_vmsize
+            )
+
+            pre.write_bytes(remove_fixture_signature(pre.read_bytes()))
+            signed.write_bytes(remove_fixture_signature(signed.read_bytes()))
+            transformation._normalize_removed_signature_macho(
+                pre, "pre-sign fixture", pre_layout
+            )
+            transformation._normalize_removed_signature_macho(
+                signed, "Developer ID fixture", signed_layout
+            )
+            self.assertEqual(pre.read_bytes(), signed.read_bytes())
+
+    def test_malformed_signed_macho_variants_fail_closed(self) -> None:
+        valid = fixture_signed_macho(ADHOC_SIGNATURE_SIZE, b"A")
+
+        def patch_u32(data: bytes, offset: int, value: int) -> bytes:
+            mutated = bytearray(data)
+            struct.pack_into("<I", mutated, offset, value)
+            return bytes(mutated)
+
+        def patch_u64(data: bytes, offset: int, value: int) -> bytes:
+            mutated = bytearray(data)
+            struct.pack_into("<Q", mutated, offset, value)
+            return bytes(mutated)
+
+        signature_command = (
+            transformation.MACH_HEADER_64_SIZE
+            + transformation.SEGMENT_COMMAND_64_SIZE
+        )
+        cases = {
+            "truncated-header": valid[:20],
+            "fat-magic": patch_u32(valid, 0, 0xCAFEBABE),
+            "wrong-cpu": patch_u32(valid, 4, 0x01000007),
+            "load-command-out-of-bounds": patch_u32(
+                valid, transformation.MACH_HEADER_64_SIZE + 4, 0xFFFFFFF8
+            ),
+            "missing-linkedit": fixture_signed_macho(
+                ADHOC_SIGNATURE_SIZE, b"A", linkedit_count=0
+            ),
+            "duplicate-linkedit": fixture_signed_macho(
+                ADHOC_SIGNATURE_SIZE, b"A", linkedit_count=2
+            ),
+            "missing-signature": fixture_signed_macho(
+                ADHOC_SIGNATURE_SIZE, b"A", code_signature_count=0
+            ),
+            "duplicate-signature": fixture_signed_macho(
+                ADHOC_SIGNATURE_SIZE, b"A", code_signature_count=2
+            ),
+            "bad-signature-dataoff": patch_u32(
+                valid,
+                signature_command + 8,
+                FIXTURE_SIGNATURE_DATAOFF - 16,
+            ),
+            "bad-linkedit-vmsize": patch_u64(
+                valid,
+                transformation.MACH_HEADER_64_SIZE + 32,
+                0x1234,
+            ),
+            "trailing-bytes": valid + b"unexpected-tail",
+        }
+        for name, data in cases.items():
+            with self.subTest(name=name), self.assertRaises(
+                transformation.SigningTransformationError
+            ):
+                transformation._validate_signed_macho(data, name)
+
+    def test_removed_signature_cannot_hide_other_load_command_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "tampered"
+            path.write_bytes(
+                fixture_signed_macho(DEVELOPER_ID_SIGNATURE_SIZE, b"D")
+            )
+            path.chmod(0o755)
+            signed = transformation._inspect_signed_macho(path, "signed fixture")
+            removed = bytearray(remove_fixture_signature(path.read_bytes()))
+            struct.pack_into(
+                "<Q",
+                removed,
+                signed.linkedit_command_offset + 24,
+                signed.linkedit_vmaddr + transformation.ARM64_SEGMENT_ALIGNMENT,
+            )
+            path.write_bytes(removed)
+            with self.assertRaisesRegex(
+                transformation.SigningTransformationError,
+                "outside the removable Mach-O signature envelope",
+            ):
+                transformation._normalize_removed_signature_macho(
+                    path, "signed fixture", signed
+                )
+
+    def test_only_zero_signature_alignment_padding_may_be_trimmed(self) -> None:
+        for padding_byte, accepted in ((b"\0", True), (b"P", False)):
+            with self.subTest(accepted=accepted), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "padding-fixture"
+                data = bytearray(
+                    fixture_signed_macho(DEVELOPER_ID_SIGNATURE_SIZE, b"D")
+                )
+                data[
+                    FIXTURE_SIGNATURE_DATAOFF - 8 : FIXTURE_SIGNATURE_DATAOFF
+                ] = padding_byte * 8
+                path.write_bytes(data)
+                path.chmod(0o755)
+                signed = transformation._inspect_signed_macho(
+                    path, "padding fixture"
+                )
+                path.write_bytes(
+                    remove_fixture_signature(path.read_bytes(), alignment_padding=8)
+                )
+                if accepted:
+                    transformation._normalize_removed_signature_macho(
+                        path, "padding fixture", signed
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        transformation.SigningTransformationError,
+                        "outside the removable Mach-O signature envelope",
+                    ):
+                        transformation._normalize_removed_signature_macho(
+                            path, "padding fixture", signed
+                        )
+
+    def test_real_codesign_signature_capacity_normalizes_on_darwin(self) -> None:
+        self.assertEqual(sys.platform, "darwin")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "main.c"
+            base = root / "base"
+            pre = root / "pre-sign"
+            signed = root / "developer-id"
+            source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            clang = subprocess.run(
+                ("/usr/bin/xcrun", "--find", "clang"),
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            ).stdout.strip()
+            sdk = subprocess.run(
+                ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"),
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            ).stdout.strip()
+            compiled = subprocess.run(
+                (
+                    clang,
+                    "-arch",
+                    "arm64",
+                    "-isysroot",
+                    sdk,
+                    "-mmacosx-version-min=15.0",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    str(source),
+                    "-o",
+                    str(base),
+                ),
+                cwd=root,
+                capture_output=True,
+                timeout=60,
+            )
+            self.assertEqual(
+                compiled.returncode,
+                0,
+                compiled.stderr.decode("utf-8", errors="replace"),
+            )
+            shutil.copy2(base, pre)
+            shutil.copy2(base, signed)
+            small_entitlements = root / "small.plist"
+            large_entitlements = root / "large.plist"
+            with small_entitlements.open("wb") as handle:
+                plistlib.dump({"com.bill.cfw.fixture": "small"}, handle)
+            with large_entitlements.open("wb") as handle:
+                plistlib.dump({"com.bill.cfw.fixture": "L" * (128 * 1024)}, handle)
+            for executable, entitlements in (
+                (pre, small_entitlements),
+                (signed, large_entitlements),
+            ):
+                signed_result = subprocess.run(
+                    (
+                        "/usr/bin/codesign",
+                        "--force",
+                        "--sign",
+                        "-",
+                        "--timestamp=none",
+                        "--identifier",
+                        "com.bill.cfw.fixture",
+                        "--entitlements",
+                        str(entitlements),
+                        str(executable),
+                    ),
+                    cwd=root,
+                    capture_output=True,
+                    timeout=60,
+                )
+                self.assertEqual(
+                    signed_result.returncode,
+                    0,
+                    signed_result.stderr.decode("utf-8", errors="replace"),
+                )
+            pre_layout = transformation._inspect_signed_macho(pre, "real pre-sign")
+            signed_layout = transformation._inspect_signed_macho(
+                signed, "real alternate signature"
+            )
+            self.assertNotEqual(
+                pre_layout.linkedit_vmsize, signed_layout.linkedit_vmsize
+            )
+            for executable, layout, label in (
+                (pre, pre_layout, "real pre-sign"),
+                (signed, signed_layout, "real alternate signature"),
+            ):
+                transformation.production_codesign_runner(
+                    ("/usr/bin/codesign", "--remove-signature", str(executable)),
+                    root,
+                )
+                transformation._normalize_removed_signature_macho(
+                    executable, label, layout
+                )
+            self.assertEqual(pre.read_bytes(), signed.read_bytes())
 
 
 class SigningTransformationTests(unittest.TestCase):
@@ -262,11 +597,11 @@ class SigningTransformationTests(unittest.TestCase):
 
     def test_executable_tampering_is_not_hidden_by_signature_removal(self) -> None:
         authority = self.fixture.signed_app.joinpath(
-            *Path(transformation.CODE_OBJECTS[1]).parts
+            *Path(transformation.MACHO_EXECUTABLES[1]).parts
         )
-        authority.write_bytes(
-            b"different-executable" + DEVELOPER_ID_SIGNATURE_SUFFIX
-        )
+        data = bytearray(authority.read_bytes())
+        data[0x200] ^= 0x01
+        authority.write_bytes(data)
         with self.assertRaisesRegex(
             transformation.SigningTransformationError,
             "outside signatures and profiles",
@@ -321,6 +656,19 @@ class SigningTransformationTests(unittest.TestCase):
         ):
             self.fixture.create()
 
+    def test_unexpected_code_signature_container_is_rejected(self) -> None:
+        unexpected = (
+            self.fixture.signed_app
+            / "Contents/Resources/unexpected/_CodeSignature"
+        )
+        unexpected.mkdir(parents=True)
+        (unexpected / "CodeResources").write_bytes(b"unexpected")
+        with self.assertRaisesRegex(
+            transformation.SigningTransformationError,
+            "code-signature container inventory is invalid",
+        ):
+            self.fixture.create()
+
     def test_pre_sign_manifest_drift_is_rejected(self) -> None:
         manifest_path = self.fixture.root / transformation.PRE_SIGN_MANIFEST_RELATIVE
         original_manifest = manifest_path.read_bytes()
@@ -348,6 +696,19 @@ class SigningTransformationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             transformation.SigningTransformationError,
             "differs from the current exact GA apps",
+        ):
+            self.fixture.verify()
+
+    def test_legacy_receipt_schema_is_rejected(self) -> None:
+        receipt = self.fixture.create()
+        receipt["document"] = "cfm-ga-signing-transformation-v1"
+        receipt["schema_version"] = 1
+        path = self.fixture.signing_output / transformation.RECEIPT_NAME
+        path.write_bytes(transformation.canonical_json(receipt))
+        path.chmod(0o600)
+        with self.assertRaisesRegex(
+            transformation.SigningTransformationError,
+            "receipt identity is invalid",
         ):
             self.fixture.verify()
 

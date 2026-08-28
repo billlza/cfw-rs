@@ -137,11 +137,23 @@ class SigningAttemptFixture:
         helper=None,
         publisher=None,
         live_readiness=None,
+        transformation_verifier=None,
+        canonical_transformation_verifier=None,
     ) -> Path:
         helper_runner = self.helper_success if helper is None else helper
         selected_publisher = self.publisher if publisher is None else publisher
         readiness = (
             (lambda _root: None) if live_readiness is None else live_readiness
+        )
+        selected_transformation_verifier = (
+            self.transformation_verify
+            if transformation_verifier is None
+            else transformation_verifier
+        )
+        selected_canonical_transformation_verifier = (
+            self.canonical_verify
+            if canonical_transformation_verifier is None
+            else canonical_transformation_verifier
         )
         with patch.object(
             transaction,
@@ -158,8 +170,10 @@ class SigningAttemptFixture:
                 publisher=selected_publisher,
                 confirmer=self.confirmer,
                 transformation_creator=self.transformation_create,
-                transformation_verifier=self.transformation_verify,
-                canonical_transformation_verifier=self.canonical_verify,
+                transformation_verifier=selected_transformation_verifier,
+                canonical_transformation_verifier=(
+                    selected_canonical_transformation_verifier
+                ),
             )
 
     def attempts(self) -> Path:
@@ -281,6 +295,32 @@ class SigningAttemptTransactionTests(unittest.TestCase):
                         ),
                     ),
                 )
+
+    def test_production_verifier_reports_one_stable_failed_phase(self) -> None:
+        output = Path("/private/tmp/cfm-signing-output")
+        context = transaction.CandidateBundleContext.SIGNING_ATTEMPT_WORK
+        cases = (
+            (
+                [SimpleNamespace(returncode=7)],
+                "signing_codesign_failed",
+                "codesign verification failed",
+            ),
+            (
+                [SimpleNamespace(returncode=0), SimpleNamespace(returncode=9)],
+                "signing_release_app_failed",
+                "release_app verification failed",
+            ),
+        )
+        for results, expected_code, expected_message in cases:
+            with self.subTest(code=expected_code), patch.object(
+                transaction,
+                "run_bounded_process",
+                side_effect=results,
+            ), self.assertRaisesRegex(
+                transaction.SigningAttemptError, expected_message
+            ) as raised:
+                transaction.production_verification_runner(output, context)
+            self.assertEqual(raised.exception.code, expected_code)
 
     def test_helper_work_root_uses_shared_attempt_classifier(self) -> None:
         transactions = self.fixture.root / "transactions"
@@ -861,8 +901,8 @@ class SigningAttemptTransactionTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(
                 transaction.SigningAttemptError,
-                "did not pass complete verification",
-            ),
+                "private signing transformation failed: fixture mismatch",
+            ) as raised,
         ):
             transaction.run_signing_transaction(
                 self.fixture.repository,
@@ -877,10 +917,138 @@ class SigningAttemptTransactionTests(unittest.TestCase):
                 transformation_verifier=self.fixture.transformation_verify,
                 canonical_transformation_verifier=self.fixture.canonical_verify,
             )
-        self.assertEqual(self.fixture.load("00000001").state, "failed")
+        self.assertEqual(raised.exception.code, "signing_transformation_failed")
+        first = self.fixture.load("00000001")
+        self.assertEqual(first.state, "failed")
+        self.assertEqual(
+            first.events[-1]["failure_code"], "signing_transformation_failed"
+        )
+        self.assertTrue(first.work.is_dir())
+        self.assertFalse(first.publish_ready.exists())
         self.assertFalse((self.fixture.root / "signing-output").exists())
         self.assertFalse((self.fixture.root / "signing-input").exists())
         self.assertFalse((self.fixture.root / "signed-native-products").exists())
+
+        helper_called = False
+
+        def unexpected_helper(_work: Path, _sha1: str, _sha256: str) -> int:
+            nonlocal helper_called
+            helper_called = True
+            return 0
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError, "allocate a successor build"
+        ) as retirement:
+            self.fixture.run(resume=True, helper=unexpected_helper)
+        self.assertEqual(retirement.exception.code, "candidate_retirement_required")
+        self.assertFalse(helper_called)
+
+    def test_publish_ready_transformation_failure_is_recorded_and_retired(
+        self,
+    ) -> None:
+        verification_calls = 0
+
+        def fail_second_verification(
+            repository: Path, output: Path
+        ) -> dict[str, str]:
+            nonlocal verification_calls
+            verification_calls += 1
+            if verification_calls == 2:
+                raise transaction.SigningTransformationError(
+                    "fixture publish-ready mismatch"
+                )
+            return self.fixture.transformation_verify(repository, output)
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError,
+            "private signing transformation failed: fixture publish-ready mismatch",
+        ) as raised:
+            self.fixture.run(
+                resume=False,
+                transformation_verifier=fail_second_verification,
+            )
+
+        self.assertEqual(raised.exception.code, "signing_transformation_failed")
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(attempt.state, "failed")
+        self.assertEqual(
+            attempt.events[-1]["failure_code"],
+            "signing_transformation_failed",
+        )
+        self.assertTrue(attempt.publish_ready.is_dir())
+        self.assertFalse((self.fixture.root / "signing-output").exists())
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError,
+            "allocate a successor build",
+        ) as retirement:
+            self.fixture.run(resume=True)
+        self.assertEqual(
+            retirement.exception.code,
+            "candidate_retirement_required",
+        )
+        self.assertEqual(verification_calls, 2)
+
+    def test_outcome_unknown_reverification_failure_requires_retirement(
+        self,
+    ) -> None:
+        def fail_before_rename(_source: Path, _destination: Path) -> None:
+            raise PublicationError("simulated pre-rename failure")
+
+        with self.assertRaises(transaction.SigningAttemptOutcomeUnknown):
+            self.fixture.run(resume=False, publisher=fail_before_rename)
+        before = self.fixture.load("00000001")
+        self.assertEqual(before.state, "outcome_unknown")
+        self.assertTrue(before.publish_ready.is_dir())
+
+        def reject_publish_ready(
+            _repository: Path, _output: Path
+        ) -> dict[str, str]:
+            raise transaction.SigningTransformationError(
+                "fixture recovery mismatch"
+            )
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError,
+            "allocate a successor build",
+        ) as retirement:
+            self.fixture.run(
+                resume=True,
+                transformation_verifier=reject_publish_ready,
+            )
+        self.assertEqual(
+            retirement.exception.code,
+            "candidate_retirement_required",
+        )
+        after = self.fixture.load("00000001")
+        self.assertEqual(after.events, before.events)
+        self.assertTrue(after.publish_ready.is_dir())
+
+    def test_canonical_transformation_failure_has_one_stable_error_code(
+        self,
+    ) -> None:
+        def reject_canonical(_repository: Path) -> dict[str, str]:
+            raise transaction.SigningTransformationError(
+                "fixture canonical mismatch"
+            )
+
+        for resume in (False, True):
+            with self.subTest(resume=resume), self.assertRaisesRegex(
+                transaction.SigningAttemptError,
+                "canonical signing transformation verification failed: "
+                "fixture canonical mismatch",
+            ) as raised:
+                self.fixture.run(
+                    resume=resume,
+                    canonical_transformation_verifier=reject_canonical,
+                )
+            self.assertEqual(
+                raised.exception.code,
+                "canonical_signing_transformation_failed",
+            )
+            attempt = self.fixture.load("00000001")
+            self.assertEqual(attempt.state, "published")
+            self.assertTrue((self.fixture.root / "signing-output").is_dir())
 
     def test_existing_state_requires_explicit_resume(self) -> None:
         with self.assertRaises(transaction.SigningAttemptError):

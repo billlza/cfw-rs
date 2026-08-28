@@ -93,7 +93,7 @@ REQUIRED_SWIFT_TARGET_INFO_PROBE = (
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
-    "1450ed92f69d442847626e802823965e2c3ea66892f14e7f50824048ef7101ec"
+    "5932cb47a358bca72d49c0d96ce1c51da58dfc35957bc97111627ba9427ca38f"
 )
 REQUIRED_WORKFLOW_SHA256 = (
     "06443d9a15ec2aa9f2a7650610a1bb5d9f6114f780d384402e0c5703a0136a79"
@@ -873,6 +873,7 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
         "/bin/pwd -P",
         "tauri_temporary_mode=",
         "must not be group- or other-writable",
+        "must not contain ':'",
         'TMPDIR="$tauri_temporary_parent"',
     )
     for fragment in required_implementation:

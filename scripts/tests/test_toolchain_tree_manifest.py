@@ -1462,10 +1462,28 @@ LIBBOX_VET_PACKAGES=(".")
 
     def test_tauri_installer_uses_isolated_clean_payload(self) -> None:
         installer = (SCRIPTS / "install_pinned_tauri_cli.sh").read_text(encoding="utf-8")
+        lock_patch_command_prefix = (
+            'GIT_CEILING_DIRECTORIES="$staging" ' + "\\" + "\n  "
+        )
+        lock_patch_check_command = (
+            lock_patch_command_prefix
+            + '/usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"'
+        )
+        lock_patch_apply_command = (
+            lock_patch_command_prefix
+            + '/usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"'
+        )
+        lock_patch_reverse_check_command = (
+            lock_patch_command_prefix
+            + '/usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"'
+        )
         for fragment in (
             'readonly temporary_parent_input="${TMPDIR:-}"',
             '"$(/usr/bin/stat -f \'%u\' "$temporary_parent")" == "$(/usr/bin/id -u)"',
             '"$temporary_parent" == "$temporary_parent_input"',
+            '[[ "$temporary_parent" != *:* ]]',
+            'staging="$(/usr/bin/mktemp -d '
+            '"$temporary_parent/cfw-tauri-cli.XXXXXX")"',
             "(( (8#$temporary_mode & 8#22) == 0 ))",
             "/usr/bin/env -i",
             'CARGO_HOME="$prepared_cargo_home"',
@@ -1478,6 +1496,9 @@ LIBBOX_VET_PACKAGES=(".")
             'cfw_verify_release_toolchain_manifest',
             'RUSTC="$rustc_bin"',
             "--target aarch64-apple-darwin",
+            lock_patch_check_command,
+            lock_patch_apply_command,
+            lock_patch_reverse_check_command,
             'readonly payload="$staging/payload/tauri-cli-$TAURI_CLI_VERSION"',
             '/bin/mv "$source_root" "$payload/source"',
             "artifactKind=pinned-tauri-cli-v2",
@@ -1505,6 +1526,9 @@ LIBBOX_VET_PACKAGES=(".")
         self.assertEqual(installer.count(normalization_call), 2)
         self.assertEqual(installer.count(fetch_warning_call), 1)
         self.assertEqual(installer.count(install_warning_call), 1)
+        self.assertEqual(installer.count(lock_patch_check_command), 1)
+        self.assertEqual(installer.count(lock_patch_apply_command), 1)
+        self.assertEqual(installer.count(lock_patch_reverse_check_command), 1)
         self.assertEqual(
             installer.count(
                 'offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest'
@@ -1521,8 +1545,24 @@ LIBBOX_VET_PACKAGES=(".")
         equality = '[[ "$offline_cache_sha256_after" == "$offline_cache_sha256_before" ]]'
         self.assertEqual(installer.count(equality), 1)
         self.assertNotIn("cargo_path_warning", installer)
+        upstream_lock_digest = installer.index(
+            'printf \'%s  %s\\n\' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock"'
+        )
+        lock_patch_check = installer.index(lock_patch_check_command, upstream_lock_digest)
+        lock_patch_apply = installer.index(lock_patch_apply_command, lock_patch_check)
+        patched_lock_digest = installer.index(
+            'printf \'%s  %s\\n\' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock"',
+            lock_patch_apply,
+        )
+        reverse_check = installer.index(
+            lock_patch_reverse_check_command, patched_lock_digest
+        )
+        spin_semantic_check = installer.index(
+            "patched Tauri CLI lock has unexpected spin records",
+            reverse_check,
+        )
         preparation_before = installer.index(preparation_call)
-        fetch = installer.index('"$cargo_bin" fetch', preparation_before)
+        fetch = installer.index('"$cargo_bin" fetch', spin_semantic_check)
         fetch_warning = installer.index(fetch_warning_call, fetch)
         preparation_after = installer.index(preparation_call, fetch_warning)
         copied = installer.index(

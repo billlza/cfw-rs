@@ -197,6 +197,8 @@ temporary_parent="$(cd "$temporary_parent_input" && /bin/pwd -P)" ||
 readonly temporary_parent
 [[ "$temporary_parent" == "$temporary_parent_input" ]] ||
   die "the temporary directory must use its canonical physical path"
+[[ "$temporary_parent" != *:* ]] ||
+  die "the temporary directory must not contain ':'"
 [[ "$(/usr/bin/stat -f '%u' "$temporary_parent")" == "$(/usr/bin/id -u)" ]] ||
   die "the temporary directory must belong to the release account"
 temporary_mode="$(/usr/bin/stat -f '%Lp' "$temporary_parent")"
@@ -272,12 +274,18 @@ printf '%s  %s\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock" |
 
 # The exact upstream lock digest was verified above, so the two zero-context
 # scalar replacements cannot be redirected onto a different published lock.
-git -C "$source_root" apply --unidiff-zero --check "$lock_patch"
-git -C "$source_root" apply --unidiff-zero "$lock_patch"
+# Bound Git discovery to this staging root: TMPDIR may itself be inside a
+# release worktree, where an unbounded `git apply` silently skips Cargo.lock.
+GIT_CEILING_DIRECTORIES="$staging" \
+  /usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"
+GIT_CEILING_DIRECTORIES="$staging" \
+  /usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"
 printf '%s  %s\n' "$TAURI_CLI_LOCK_PATCH_SHA256" "$lock_patch" |
   shasum -a 256 --check >/dev/null
 printf '%s  %s\n' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock" |
   shasum -a 256 --check
+GIT_CEILING_DIRECTORIES="$staging" \
+  /usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"
 
 PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
   "$cargo_manifest" \

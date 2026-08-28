@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import errno
 import io
 import json
 import os
 from pathlib import Path
 import selectors
+import signal
 import shutil
 import stat
 import subprocess
@@ -13,7 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 
 from scripts.candidate_artifact_binding import CandidateBindingError
 from scripts import dormant_app_install as install
@@ -1781,9 +1783,11 @@ class BoundedCommandRunnerTests(unittest.TestCase):
             *,
             descriptor: int = 11,
             close_error: bool = False,
+            close_exception: BaseException | None = None,
         ) -> None:
             self.descriptor = descriptor
             self.close_error = close_error
+            self.close_exception = close_exception
             self.closed = False
 
         def fileno(self) -> int:
@@ -1791,6 +1795,8 @@ class BoundedCommandRunnerTests(unittest.TestCase):
 
         def close(self) -> None:
             self.closed = True
+            if self.close_exception is not None:
+                raise self.close_exception
             if self.close_error:
                 raise OSError("fixture pipe close failure")
 
@@ -1803,6 +1809,560 @@ class BoundedCommandRunnerTests(unittest.TestCase):
             self.pid = 424_242
             self.stdout = stdout
             self.stderr = stderr
+
+    @staticmethod
+    def _unreaped_process() -> Mock:
+        process = Mock()
+        process.pid = 424_242
+        process.returncode = None
+
+        def reap(*, timeout: float) -> int:
+            if timeout <= 0:
+                raise AssertionError("fixture received a nonpositive wait timeout")
+            process.returncode = 0
+            return 0
+
+        process.wait.side_effect = reap
+        return process
+
+    def test_leader_exit_observation_is_nonreaping_and_fail_closed(self) -> None:
+        process = self._unreaped_process()
+        with patch(
+            "scripts.dormant_app_install.os.waitid",
+            return_value=object(),
+        ) as waitid:
+            self.assertTrue(install._leader_exited_without_reaping(process))
+        waitid.assert_called_once_with(
+            os.P_PID,
+            process.pid,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+        self.assertIsNone(process.returncode)
+
+        for error, expected_code in (
+            (ChildProcessError("fixture ECHILD"), "command_wait_failed"),
+            (OSError("fixture waitid"), "command_wait_failed"),
+            (KeyboardInterrupt(), "command_cleanup_interrupted"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch(
+                    "scripts.dormant_app_install.os.waitid",
+                    side_effect=error,
+                ),
+                self.assertRaises(InstallError) as captured,
+            ):
+                install._leader_exited_without_reaping(process)
+            self.assertEqual(captured.exception.code, expected_code)
+            self.assertIs(captured.exception.__cause__, error)
+
+    def test_unreaped_leader_fallback_preserves_signal_failures(self) -> None:
+        process = self._unreaped_process()
+        missing_error = ProcessLookupError("fixture leader signal race")
+        process.kill.side_effect = missing_error
+        with patch(
+            "scripts.dormant_app_install._leader_exited_without_reaping",
+            return_value=False,
+        ):
+            failure = install._kill_unreaped_leader(process)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "command_termination_failed")
+        self.assertIs(failure.__cause__, missing_error)
+
+        for signal_error, expected_code in (
+            (
+                OSError(errno.EPERM, "fixture leader signal denied"),
+                "command_termination_failed",
+            ),
+            (KeyboardInterrupt(), "command_cleanup_interrupted"),
+        ):
+            with self.subTest(signal_error=type(signal_error).__name__):
+                process = self._unreaped_process()
+                process.kill.side_effect = signal_error
+                failure = install._kill_unreaped_leader(process)
+                self.assertIsNotNone(failure)
+                self.assertEqual(failure.code, expected_code)
+                self.assertIs(failure.__cause__, signal_error)
+
+    def test_group_cleanup_sends_one_signal_then_only_observes(self) -> None:
+        process = self._unreaped_process()
+        outcomes: list[BaseException | None] = [
+            None,
+            None,
+            PermissionError("fixture transient EPERM"),
+            ProcessLookupError("fixture group absent"),
+        ]
+
+        def killpg(_group: int, _requested_signal: int) -> None:
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        with patch(
+            "scripts.dormant_app_install.os.killpg",
+            side_effect=killpg,
+        ) as signal_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            return_value=0,
+        ), patch("scripts.dormant_app_install.time.sleep"):
+            failure = install._terminate_process_group(process, process.pid)
+        self.assertIsNone(failure)
+        self.assertEqual(
+            signal_group.call_args_list,
+            [
+                call(process.pid, signal.SIGKILL),
+                call(process.pid, 0),
+                call(process.pid, 0),
+                call(process.pid, 0),
+            ],
+        )
+        self.assertFalse(outcomes)
+
+    def test_initial_group_signal_interruption_uses_safe_leader_fallback(
+        self,
+    ) -> None:
+        process = self._unreaped_process()
+        signal_interruption = KeyboardInterrupt()
+        outcomes: list[BaseException | None] = [
+            signal_interruption,
+            ProcessLookupError("fixture group absent"),
+        ]
+
+        def killpg(_group: int, _requested_signal: int) -> None:
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        with patch(
+            "scripts.dormant_app_install.os.killpg",
+            side_effect=killpg,
+        ) as signal_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            return_value=0,
+        ):
+            failure = install._terminate_process_group(process, process.pid)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "command_cleanup_interrupted")
+        self.assertIs(failure.__cause__, signal_interruption)
+        process.kill.assert_called_once_with()
+        self.assertEqual(
+            signal_group.call_args_list,
+            [call(process.pid, signal.SIGKILL), call(process.pid, 0)],
+        )
+        self.assertFalse(outcomes)
+
+    def test_group_cleanup_never_signals_a_persistently_visible_reused_id(
+        self,
+    ) -> None:
+        process = self._unreaped_process()
+        with patch(
+            "scripts.dormant_app_install.os.killpg",
+            return_value=None,
+        ) as signal_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            side_effect=(0, 0, 6),
+        ), patch("scripts.dormant_app_install.time.sleep"):
+            failure = install._terminate_process_group(process, process.pid)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "command_termination_failed")
+        self.assertEqual(
+            str(failure),
+            "spawned command group did not disappear after SIGKILL",
+        )
+        self.assertEqual(
+            signal_group.call_args_list,
+            [call(process.pid, signal.SIGKILL), call(process.pid, 0)],
+        )
+
+    def test_group_cleanup_requires_absence_after_permission_limited_probe(
+        self,
+    ) -> None:
+        process = self._unreaped_process()
+        outcomes: list[BaseException | None] = [
+            None,
+            PermissionError("fixture persistent EPERM"),
+        ]
+
+        def killpg(_group: int, _requested_signal: int) -> None:
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        with patch(
+            "scripts.dormant_app_install.os.killpg",
+            side_effect=killpg,
+        ) as signal_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            side_effect=(0, 0, 6),
+        ), patch("scripts.dormant_app_install.time.sleep"):
+            failure = install._terminate_process_group(process, process.pid)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "command_termination_failed")
+        self.assertEqual(
+            str(failure),
+            "spawned command group absence could not be observed",
+        )
+        self.assertEqual(
+            signal_group.call_args_list,
+            [call(process.pid, signal.SIGKILL), call(process.pid, 0)],
+        )
+
+    def test_initial_group_failure_distinguishes_running_and_exited_leader(
+        self,
+    ) -> None:
+        for signal_error in (PermissionError, ProcessLookupError):
+            for leader_exited, expected_failure in ((False, True), (True, False)):
+                with self.subTest(
+                    signal_error=signal_error.__name__,
+                    leader_exited=leader_exited,
+                ):
+                    process = self._unreaped_process()
+                    outcomes: list[BaseException | None] = [
+                        signal_error("fixture initial group failure"),
+                        ProcessLookupError("fixture group absent"),
+                    ]
+
+                    def killpg(_group: int, _requested_signal: int) -> None:
+                        outcome = outcomes.pop(0)
+                        if outcome is not None:
+                            raise outcome
+
+                    with patch(
+                        "scripts.dormant_app_install.os.killpg",
+                        side_effect=killpg,
+                    ) as signal_group, patch(
+                        "scripts.dormant_app_install._leader_exited_without_reaping",
+                        return_value=leader_exited,
+                    ), patch(
+                        "scripts.dormant_app_install.time.monotonic",
+                        return_value=0,
+                    ):
+                        failure = install._terminate_process_group(process, process.pid)
+                    self.assertEqual(failure is not None, expected_failure)
+                    self.assertEqual(
+                        signal_group.call_args_list,
+                        [
+                            call(process.pid, signal.SIGKILL),
+                            call(process.pid, 0),
+                        ],
+                    )
+                    self.assertFalse(outcomes)
+                    self.assertEqual(process.kill.call_count, int(not leader_exited))
+
+    def test_initial_group_and_leader_observation_failure_kills_leader(self) -> None:
+        for signal_error in (PermissionError, ProcessLookupError):
+            with self.subTest(signal_error=signal_error.__name__):
+                process = self._unreaped_process()
+                observation_cause = ChildProcessError("fixture waitid failure")
+                observation_failure = InstallError(
+                    "command_wait_failed",
+                    "fixture leader observation failure",
+                )
+                observation_failure.__cause__ = observation_cause
+                outcomes: list[BaseException | None] = [
+                    signal_error("fixture initial group failure"),
+                    ProcessLookupError("fixture group absent"),
+                ]
+
+                def killpg(_group: int, _requested_signal: int) -> None:
+                    outcome = outcomes.pop(0)
+                    if outcome is not None:
+                        raise outcome
+
+                with patch(
+                    "scripts.dormant_app_install.os.killpg",
+                    side_effect=killpg,
+                ) as signal_group, patch(
+                    "scripts.dormant_app_install._leader_exited_without_reaping",
+                    side_effect=observation_failure,
+                ), patch(
+                    "scripts.dormant_app_install.time.monotonic",
+                    return_value=0,
+                ):
+                    failure = install._terminate_process_group(process, process.pid)
+                self.assertIs(failure, observation_failure)
+                self.assertIs(failure.__cause__, observation_cause)
+                process.kill.assert_called_once_with()
+                self.assertEqual(
+                    signal_group.call_args_list,
+                    [
+                        call(process.pid, signal.SIGKILL),
+                        call(process.pid, 0),
+                    ],
+                )
+                self.assertFalse(outcomes)
+
+    def test_interrupted_group_wait_uses_one_signal_and_the_same_deadline(
+        self,
+    ) -> None:
+        process = self._unreaped_process()
+        attempts = 0
+
+        def wait(*, timeout: float) -> int:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise KeyboardInterrupt
+            process.returncode = 0
+            return 0
+
+        process.wait.side_effect = wait
+        outcomes: list[BaseException | None] = [
+            None,
+            ProcessLookupError("fixture group absent"),
+        ]
+
+        def killpg(_group: int, _requested_signal: int) -> None:
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        with patch(
+            "scripts.dormant_app_install.os.killpg",
+            side_effect=killpg,
+        ) as signal_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            side_effect=(10, 11, 12),
+        ):
+            failure = install._terminate_process_group(process, process.pid)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "command_cleanup_interrupted")
+        self.assertIsInstance(failure.__cause__, KeyboardInterrupt)
+        self.assertEqual(
+            [entry.args[1] for entry in signal_group.call_args_list],
+            [signal.SIGKILL, 0],
+        )
+        self.assertFalse(outcomes)
+        self.assertEqual(
+            [entry.kwargs["timeout"] for entry in process.wait.call_args_list],
+            [4, 3],
+        )
+
+    def test_group_wait_timeout_fails_without_resignalling(self) -> None:
+        process = self._unreaped_process()
+        process.wait.side_effect = subprocess.TimeoutExpired(
+            cmd=("fixture",),
+            timeout=5,
+        )
+        with patch(
+            "scripts.dormant_app_install.os.killpg",
+            return_value=None,
+        ) as signal_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            side_effect=(0, 0),
+        ):
+            failure = install._terminate_process_group(process, process.pid)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "command_termination_failed")
+        self.assertIsInstance(failure.__cause__, subprocess.TimeoutExpired)
+        self.assertEqual(
+            signal_group.call_args_list,
+            [call(process.pid, signal.SIGKILL)],
+        )
+
+    def test_absence_observation_interruption_continues_without_resignalling(
+        self,
+    ) -> None:
+        process = self._unreaped_process()
+        outcomes: list[BaseException | None] = [
+            None,
+            None,
+            ProcessLookupError("fixture group absent"),
+        ]
+
+        def killpg(_group: int, _requested_signal: int) -> None:
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        with patch(
+            "scripts.dormant_app_install.os.killpg",
+            side_effect=killpg,
+        ) as signal_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            return_value=0,
+        ), patch(
+            "scripts.dormant_app_install.time.sleep",
+            side_effect=KeyboardInterrupt,
+        ):
+            failure = install._terminate_process_group(process, process.pid)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "command_cleanup_interrupted")
+        self.assertIsInstance(failure.__cause__, KeyboardInterrupt)
+        self.assertEqual(
+            [entry.args[1] for entry in signal_group.call_args_list],
+            [signal.SIGKILL, 0, 0],
+        )
+        self.assertFalse(outcomes)
+
+    def test_generic_absence_probe_error_is_preserved(self) -> None:
+        process = self._unreaped_process()
+        probe_error = OSError(errno.EIO, "fixture probe failure")
+        outcomes: list[BaseException | None] = [None, probe_error]
+
+        def killpg(_group: int, _requested_signal: int) -> None:
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        with patch(
+            "scripts.dormant_app_install.os.killpg",
+            side_effect=killpg,
+        ) as signal_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            return_value=0,
+        ):
+            failure = install._terminate_process_group(process, process.pid)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "command_termination_failed")
+        self.assertIs(failure.__cause__, probe_error)
+        self.assertEqual(
+            signal_group.call_args_list,
+            [call(process.pid, signal.SIGKILL), call(process.pid, 0)],
+        )
+        self.assertFalse(outcomes)
+
+    def test_absence_probe_interruption_is_typed_and_retried(self) -> None:
+        process = self._unreaped_process()
+        probe_interruption = KeyboardInterrupt()
+        outcomes: list[BaseException | None] = [
+            None,
+            probe_interruption,
+            ProcessLookupError("fixture group absent"),
+        ]
+
+        def killpg(_group: int, _requested_signal: int) -> None:
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        with patch(
+            "scripts.dormant_app_install.os.killpg",
+            side_effect=killpg,
+        ) as signal_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            return_value=0,
+        ), patch(
+            "scripts.dormant_app_install.time.sleep",
+        ):
+            failure = install._terminate_process_group(process, process.pid)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "command_cleanup_interrupted")
+        self.assertIs(failure.__cause__, probe_interruption)
+        self.assertEqual(
+            [entry.args[1] for entry in signal_group.call_args_list],
+            [signal.SIGKILL, 0, 0],
+        )
+        self.assertFalse(outcomes)
+
+    def test_secondary_cleanup_errors_are_retained_as_notes(self) -> None:
+        process = self._unreaped_process()
+        group_error = OSError(errno.EIO, "fixture group signal failure")
+        probe_error = OSError(errno.EBUSY, "fixture group probe failure")
+        outcomes: list[BaseException | None] = [group_error, probe_error]
+
+        def killpg(_group: int, _requested_signal: int) -> None:
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
+
+        with patch(
+            "scripts.dormant_app_install.os.killpg",
+            side_effect=killpg,
+        ) as signal_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            return_value=0,
+        ):
+            failure = install._terminate_process_group(process, process.pid)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "command_termination_failed")
+        self.assertIs(failure.__cause__, group_error)
+        self.assertIn(
+            "secondary cleanup failure: spawned command group absence could "
+            "not be observed (OSError errno=16)",
+            failure.__notes__,
+        )
+        self.assertEqual(
+            signal_group.call_args_list,
+            [call(process.pid, signal.SIGKILL), call(process.pid, 0)],
+        )
+        process.kill.assert_called_once_with()
+        self.assertFalse(outcomes)
+
+    def test_primary_and_cleanup_causes_are_both_retained(self) -> None:
+        stdout = self._FakePipe()
+        stderr = self._FakePipe()
+        process = self._FakeProcess(stdout, stderr)
+        cleanup_cause = KeyboardInterrupt()
+        cleanup_failure = InstallError(
+            "command_cleanup_interrupted",
+            "fixture cleanup interruption",
+        )
+        cleanup_failure.__cause__ = cleanup_cause
+        with patch(
+            "scripts.dormant_app_install.subprocess.Popen",
+            return_value=process,
+        ), patch(
+            "scripts.dormant_app_install.selectors.DefaultSelector",
+            side_effect=OSError("fixture selector exhaustion"),
+        ), patch(
+            "scripts.dormant_app_install._terminate_process_group",
+            return_value=cleanup_failure,
+        ), self.assertRaises(InstallError) as captured:
+            _run_bounded_process(("/usr/bin/true",), timeout=1)
+        self.assertIs(captured.exception, cleanup_failure)
+        self.assertIsInstance(captured.exception.__cause__, InstallError)
+        self.assertEqual(captured.exception.__cause__.code, "command_io_unavailable")
+        self.assertIn(
+            "cleanup failure cause before primary failure chaining "
+            "(KeyboardInterrupt)",
+            captured.exception.__notes__,
+        )
+
+    def test_cleanup_failure_stops_pipe_drain_without_command_deadline_delay(
+        self,
+    ) -> None:
+        stdout = self._FakePipe(descriptor=11)
+        stderr = self._FakePipe(descriptor=12)
+        process = self._FakeProcess(stdout, stderr)
+        process.returncode = None
+        selector = Mock()
+        selector.get_map.return_value = {11: object(), 12: object()}
+        selector.select.return_value = []
+        cleanup_failure = InstallError(
+            "command_termination_failed",
+            "fixture cleanup failure",
+        )
+
+        def terminate(_process: object, _group: int) -> InstallError:
+            process.returncode = 0
+            return cleanup_failure
+
+        with patch(
+            "scripts.dormant_app_install.subprocess.Popen",
+            return_value=process,
+        ), patch(
+            "scripts.dormant_app_install.selectors.DefaultSelector",
+            return_value=selector,
+        ), patch(
+            "scripts.dormant_app_install.os.set_blocking",
+        ), patch(
+            "scripts.dormant_app_install._leader_exited_without_reaping",
+            return_value=True,
+        ), patch(
+            "scripts.dormant_app_install._terminate_process_group",
+            side_effect=terminate,
+        ) as terminate_group, patch(
+            "scripts.dormant_app_install.time.monotonic",
+            side_effect=(0, 0),
+        ) as monotonic, self.assertRaises(InstallError) as captured:
+            _run_bounded_process(("/usr/bin/true",), timeout=600)
+        self.assertIs(captured.exception, cleanup_failure)
+        terminate_group.assert_called_once_with(process, process.pid)
+        selector.select.assert_called_once()
+        self.assertEqual(monotonic.call_count, 2)
+        self.assertTrue(stdout.closed)
+        self.assertTrue(stderr.closed)
 
     def test_selector_initialization_failure_cleans_process_and_both_pipes(
         self,
@@ -1858,15 +2418,73 @@ class BoundedCommandRunnerTests(unittest.TestCase):
         self.assertTrue(stdout.closed)
         self.assertTrue(stderr.closed)
 
+    def test_close_interruptions_do_not_skip_remaining_cleanup(self) -> None:
+        for interrupted_resource in ("selector", "stdout"):
+            with self.subTest(interrupted_resource=interrupted_resource):
+                close_interruption = KeyboardInterrupt()
+                stdout = self._FakePipe(
+                    descriptor=11,
+                    close_exception=(
+                        close_interruption
+                        if interrupted_resource == "stdout"
+                        else None
+                    ),
+                )
+                stderr = self._FakePipe(descriptor=12)
+                process = self._FakeProcess(stdout, stderr)
+                selector = Mock()
+                if interrupted_resource == "selector":
+                    selector.close.side_effect = close_interruption
+                with patch(
+                    "scripts.dormant_app_install.subprocess.Popen",
+                    return_value=process,
+                ), patch(
+                    "scripts.dormant_app_install.selectors.DefaultSelector",
+                    return_value=selector,
+                ), patch(
+                    "scripts.dormant_app_install.os.set_blocking",
+                    side_effect=OSError("fixture descriptor exhaustion"),
+                ), patch(
+                    "scripts.dormant_app_install._terminate_process_group",
+                    return_value=None,
+                ) as terminate, self.assertRaises(InstallError) as captured:
+                    _run_bounded_process(("/usr/bin/true",), timeout=1)
+                self.assertEqual(
+                    captured.exception.code,
+                    "command_cleanup_interrupted",
+                )
+                self.assertIsInstance(captured.exception.__cause__, InstallError)
+                self.assertEqual(
+                    captured.exception.__cause__.code,
+                    "command_io_unavailable",
+                )
+                self.assertIn(
+                    "cleanup failure cause before primary failure chaining "
+                    "(KeyboardInterrupt)",
+                    captured.exception.__notes__,
+                )
+                terminate.assert_called_once_with(process, process.pid)
+                self.assertTrue(stdout.closed)
+                self.assertTrue(stderr.closed)
+
     def test_immediate_exit_has_a_result_and_only_uses_its_spawned_group(self) -> None:
         observed_groups: list[int] = []
+        cleanup_events: list[tuple[str, int]] = []
         spawned_pids: list[int] = []
         real_killpg = os.killpg
+        real_waitid = os.waitid
         real_popen = subprocess.Popen
 
         def observe(group: int, requested_signal: int) -> None:
             observed_groups.append(group)
+            cleanup_events.append((f"signal-{requested_signal}", group))
             real_killpg(group, requested_signal)
+
+        def observe_leader(idtype: int, pid: int, options: int):
+            observation = real_waitid(idtype, pid, options)
+            if observation is not None:
+                cleanup_events.append(("leader-exited-unreaped", pid))
+            return observation
 
         def spawn(*arguments, **keywords):
             process = real_popen(*arguments, **keywords)
@@ -1875,12 +2493,26 @@ class BoundedCommandRunnerTests(unittest.TestCase):
 
         with patch("scripts.dormant_app_install.os.killpg", side_effect=observe), patch(
             "scripts.dormant_app_install.subprocess.Popen", side_effect=spawn
+        ), patch(
+            "scripts.dormant_app_install.os.waitid", side_effect=observe_leader
         ):
             result = _run_bounded_process((sys.executable, "-c", "raise SystemExit(0)"), timeout=2)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(spawned_pids, list(set(spawned_pids)))
         self.assertTrue(observed_groups)
         self.assertEqual(set(observed_groups), set(spawned_pids))
+        self.assertEqual(
+            cleanup_events[0],
+            ("leader-exited-unreaped", spawned_pids[0]),
+        )
+        self.assertEqual(
+            [
+                event
+                for event in cleanup_events
+                if event[0] == f"signal-{signal.SIGKILL}"
+            ],
+            [(f"signal-{signal.SIGKILL}", spawned_pids[0])],
+        )
         self.assertNotIn(100, observed_groups)
         self.assertNotIn(101, observed_groups)
 

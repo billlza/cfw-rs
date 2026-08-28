@@ -298,10 +298,20 @@ normalize_cargo_offline_cache() {
   cfw_run_release_python_script "$repo_root" "$cargo_cache_contract" \
     normalize-offline "$root"
 }
-git apply --unidiff-zero "$TAURI_CLI_LOCK_PATCH_PATH"
 cargo_bin="$CFW_RELEASE_CARGO_EXECUTABLE"
 rustc_bin="$CFW_RELEASE_RUSTC_EXECUTABLE"
+[[ "$temporary_parent" != *:* ]]
+staging="$(/usr/bin/mktemp -d "$temporary_parent/cfw-tauri-cli.XXXXXX")"
 verify_cargo_preparation_cache "$prepared_cargo_home"
+printf '%s  %s\\n' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock"
+GIT_CEILING_DIRECTORIES="$staging" \\
+  /usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"
+GIT_CEILING_DIRECTORIES="$staging" \\
+  /usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"
+printf '%s  %s\\n' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock"
+GIT_CEILING_DIRECTORIES="$staging" \\
+  /usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"
+echo "patched Tauri CLI lock has unexpected spin records"
 /usr/bin/env -i CARGO_HOME="$prepared_cargo_home" \
   CARGO_HTTP_LOW_SPEED_LIMIT=1 CARGO_HTTP_MULTIPLEXING=true \
   CARGO_HTTP_TIMEOUT=600 CARGO_NET_RETRY=3 \
@@ -341,6 +351,22 @@ echo "xcodeBuild=$XCODE_BUILD_VERSION"
 echo "xcodeVersion=$XCODE_VERSION"
 echo "cfw_verify_tauri_toolchain_tree"
 """
+TAURI_LOCK_PATCH_COMMAND_PREFIX = (
+    'GIT_CEILING_DIRECTORIES="$staging" ' + "\\" + "\n  "
+)
+TAURI_LOCK_PATCH_CHECK_COMMAND = (
+    TAURI_LOCK_PATCH_COMMAND_PREFIX
+    + '/usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"'
+)
+TAURI_LOCK_PATCH_APPLY_COMMAND = (
+    TAURI_LOCK_PATCH_COMMAND_PREFIX
+    + '/usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"'
+)
+TAURI_LOCK_PATCH_REVERSE_CHECK_COMMAND = (
+    TAURI_LOCK_PATCH_COMMAND_PREFIX
+    + '/usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"'
+)
+TAURI_INSTALLER_SHA = _sha(TAURI_INSTALLER.encode("utf-8"))
 CI_WORKFLOW = """\
 jobs:
   release:
@@ -659,6 +685,7 @@ class Fixture:
                 "ciWorkflowPath": ".github/workflows/ci.yml",
                 "requiredCiFragment": "install-tauri-cli",
                 "installerPath": "scripts/install_pinned_tauri_cli.sh",
+                "installerSha256": TAURI_INSTALLER_SHA,
                 "requiredInstallerFragments": [
                     "https://static.crates.io/crates/tauri-cli/tauri-cli-$TAURI_CLI_VERSION.crate",
                     "$TAURI_CLI_CRATE_SHA256",
@@ -688,7 +715,12 @@ class Fixture:
                     "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse",
                     "CARGO_TERM_COLOR=never",
                     'RUSTC="$rustc_bin"',
-                    "--unidiff-zero",
+                    TAURI_LOCK_PATCH_CHECK_COMMAND,
+                    TAURI_LOCK_PATCH_APPLY_COMMAND,
+                    TAURI_LOCK_PATCH_REVERSE_CHECK_COMMAND,
+                    '[[ "$temporary_parent" != *:* ]]',
+                    'staging="$(/usr/bin/mktemp -d '
+                    '"$temporary_parent/cfw-tauri-cli.XXXXXX")"',
                     "fetch",
                     "--manifest-path",
                     "install",
@@ -989,6 +1021,10 @@ class PinnedBuildInputsTests(unittest.TestCase):
             mock.patch(
                 "scripts.verify_pinned_build_inputs._ANDROID_LAN_PEER_SOURCE_SIZE",
                 source_binding["size"],
+            ),
+            mock.patch(
+                "scripts.verify_pinned_build_inputs.REQUIRED_TAURI_CLI_INSTALLER_SHA256",
+                TAURI_INSTALLER_SHA,
             ),
         )
 
@@ -1601,6 +1637,126 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         fixture.tauri_lock_patch = b"tampered tauri-cli lock patch\n"
         self._assert_fails(fixture, "lock patch digest")
+
+    def test_tauri_cli_installer_content_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer += '/usr/bin/touch "$source_root/UNREVIEWED"\n'
+        self._assert_fails(fixture, "installer source digest")
+
+    def test_tauri_cli_installer_manifest_digest_drift_fails(self) -> None:
+        fixture = Fixture()
+        fixture.manifest["tauriCli"]["installerSha256"] = "a" * 64
+        self._assert_fails(fixture, "installer digest differs")
+
+    def test_tauri_cli_installer_must_isolate_lock_patch_from_parent_git(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            'GIT_CEILING_DIRECTORIES="$staging"',
+            'GIT_CEILING_DIRECTORIES="$source_root"',
+        )
+        self._assert_fails(fixture, "required pinned fragment|exact occurrences")
+
+    def test_tauri_cli_installer_must_bind_ceiling_to_each_git_command(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            TAURI_LOCK_PATCH_COMMAND_PREFIX,
+            'GIT_CEILING_DIRECTORIES="$staging" /usr/bin/true\n',
+            1,
+        )
+        self._assert_fails(fixture, "required pinned fragment|exact occurrences")
+
+    def test_tauri_cli_installer_rejects_extra_unbound_lock_patch_apply(self) -> None:
+        unsafe_commands = (
+            '/usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"',
+            '/usr/bin/git -C "$staging/tauri-cli-$TAURI_CLI_VERSION" apply '
+            '--unidiff-zero "$TAURI_CLI_LOCK_PATCH_PATH"',
+            'git apply --unidiff-zero "$TAURI_CLI_LOCK_PATCH_PATH"',
+        )
+        for unsafe_command in unsafe_commands:
+            with self.subTest(unsafe_command=unsafe_command):
+                fixture = Fixture()
+                fixture.tauri_installer = fixture.tauri_installer.replace(
+                    "printf '%s  %s\\n' \"$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256\" "
+                    '"$cargo_lock"\n',
+                    unsafe_command
+                    + "\n"
+                    + "printf '%s  %s\\n' "
+                    '"$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock"\n',
+                    1,
+                )
+                self._assert_fails(
+                    fixture,
+                    "unexpected lock patch apply operation",
+                )
+
+    def test_tauri_cli_installer_must_reject_colon_in_temporary_parent(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            '[[ "$temporary_parent" != *:* ]]',
+            "true",
+            1,
+        )
+        self._assert_fails(fixture, "required pinned fragment")
+
+    def test_tauri_cli_installer_rejects_late_colon_path_check(self) -> None:
+        fixture = Fixture()
+        colon_check = '[[ "$temporary_parent" != *:* ]]\n'
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            colon_check,
+            "",
+            1,
+        )
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            TAURI_LOCK_PATCH_REVERSE_CHECK_COMMAND,
+            TAURI_LOCK_PATCH_REVERSE_CHECK_COMMAND + "\n" + colon_check.rstrip(),
+            1,
+        )
+        self._assert_fails(
+            fixture,
+            "lacks ordered operation|staging boundary",
+        )
+
+    def test_tauri_cli_installer_must_use_absolute_git_for_lock_patch(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            '/usr/bin/git -C "$source_root"',
+            'git -C "$source_root"',
+            1,
+        )
+        self._assert_fails(fixture, "required pinned fragment|exact occurrences")
+
+    def test_tauri_cli_installer_must_reverse_check_applied_lock_patch(self) -> None:
+        fixture = Fixture()
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            '/usr/bin/git -C "$source_root" apply --unidiff-zero '
+            '--reverse --check "$lock_patch"',
+            "true",
+            1,
+        )
+        self._assert_fails(fixture, "required pinned fragment|exact occurrences")
+
+    def test_tauri_cli_installer_rejects_lock_patch_order_drift(self) -> None:
+        fixture = Fixture()
+        patched_digest = (
+            "printf '%s  %s\\n' \"$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256\" "
+            '"$cargo_lock"\n'
+        )
+        reverse_command = TAURI_LOCK_PATCH_REVERSE_CHECK_COMMAND
+        self.assertGreater(
+            fixture.tauri_installer.index(reverse_command),
+            fixture.tauri_installer.index(patched_digest),
+        )
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            reverse_command,
+            "",
+            1,
+        )
+        fixture.tauri_installer = fixture.tauri_installer.replace(
+            patched_digest,
+            reverse_command + "\n" + patched_digest,
+            1,
+        )
+        self._assert_fails(fixture, "lacks ordered operation")
 
     def test_tauri_cache_contract_content_drift_fails(self) -> None:
         fixture = Fixture()

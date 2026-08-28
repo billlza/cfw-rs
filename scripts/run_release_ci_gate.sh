@@ -348,6 +348,8 @@ case "$gate" in
     [[ "$tauri_temporary_parent" == /* && \
       -d "$tauri_temporary_parent" && ! -L "$tauri_temporary_parent" ]] ||
       die "the resolved Tauri CLI temporary directory is unsafe"
+    [[ "$tauri_temporary_parent" != *:* ]] ||
+      die "the Tauri CLI temporary directory must not contain ':'"
     [[ "$(/usr/bin/stat -f '%u' "$tauri_temporary_parent")" == \
       "$(/usr/bin/id -u)" ]] ||
       die "the Tauri CLI temporary directory must belong to the release account"

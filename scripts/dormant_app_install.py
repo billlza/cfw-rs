@@ -710,120 +710,295 @@ def _require_fixed_command(arguments: tuple[str, ...]) -> None:
     )
 
 
+def _leader_exited_without_reaping(process: subprocess.Popen[bytes]) -> bool:
+    try:
+        observation = os.waitid(
+            os.P_PID,
+            process.pid,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+    except BaseException as error:
+        raise InstallError(
+            (
+                "command_wait_failed"
+                if isinstance(error, OSError)
+                else "command_cleanup_interrupted"
+            ),
+            (
+                "fixed command leader state could not be observed"
+                if isinstance(error, OSError)
+                else "fixed command leader observation was interrupted"
+            ),
+        ) from error
+    return observation is not None
+
+
+def _kill_unreaped_leader(
+    process: subprocess.Popen[bytes],
+) -> InstallError | None:
+    try:
+        process.kill()
+    except ProcessLookupError as error:
+        try:
+            leader_exited = _leader_exited_without_reaping(process)
+        except InstallError as observation_error:
+            _add_secondary_exception_note(
+                observation_error,
+                "preceding fixed command leader signal failure",
+                error,
+            )
+            return observation_error
+        if not leader_exited:
+            failure = InstallError(
+                "command_termination_failed",
+                "spawned command could not be terminated",
+            )
+            failure.__cause__ = error
+            return failure
+    except BaseException as error:
+        failure = InstallError(
+            (
+                "command_termination_failed"
+                if isinstance(error, OSError)
+                else "command_cleanup_interrupted"
+            ),
+            (
+                "spawned command could not be terminated"
+                if isinstance(error, OSError)
+                else "fixed command leader cleanup was interrupted"
+            ),
+        )
+        failure.__cause__ = error
+        return failure
+    return None
+
+
+def _add_failure_note_once(failure: InstallError, note: str) -> None:
+    if note not in getattr(failure, "__notes__", ()):
+        failure.add_note(note)
+
+
+def _exception_identity(error: BaseException) -> str:
+    if isinstance(error, InstallError):
+        return f"InstallError code={error.code}"
+    if isinstance(error, OSError) and error.errno is not None:
+        return f"{type(error).__name__} errno={error.errno}"
+    return type(error).__name__
+
+
+def _add_secondary_exception_note(
+    failure: InstallError,
+    context: str,
+    error: BaseException,
+) -> None:
+    _add_failure_note_once(
+        failure,
+        f"{context} ({_exception_identity(error)})",
+    )
+
+
 def _terminate_process_group(
     process: subprocess.Popen[bytes], group: int
 ) -> InstallError | None:
+    # Keep one deadline across signalling, leader reaping, and the descendant
+    # absence proof. The caller has not reaped the leader, so this first and
+    # only nonzero signal is anchored against PID/PGID reuse.
+    deadline = time.monotonic() + 5
     failure: InstallError | None = None
+    group_visibility_restricted = False
     try:
         os.killpg(group, signal.SIGKILL)
-    except ProcessLookupError:
-        if process.poll() is None:
-            failure = InstallError(
-                "command_termination_failed",
-                "spawned command group disappeared while its leader remained",
+    except (ProcessLookupError, PermissionError) as error:
+        if isinstance(error, PermissionError):
+            group_visibility_restricted = True
+        try:
+            leader_exited = _leader_exited_without_reaping(process)
+        except InstallError as observation_error:
+            _add_secondary_exception_note(
+                observation_error,
+                "preceding fixed command group signal failure",
+                error,
             )
-    except PermissionError:
-        # macOS can transiently report EPERM for an already-killed orphaned
-        # group while its descendants are being reparented and reaped.  Keep
-        # the bounded absence proof below armed; a live leader is still an
-        # unambiguous termination failure.
-        if process.poll() is None:
-            failure = InstallError(
-                "command_termination_failed",
-                "spawned command group could not be signalled",
-            )
-    except OSError:
+            failure = observation_error
+            leader_failure = _kill_unreaped_leader(process)
+            if leader_failure is not None:
+                _add_secondary_exception_note(
+                    leader_failure,
+                    "preceding fixed command group signal failure",
+                    error,
+                )
+                _add_secondary_exception_note(
+                    leader_failure,
+                    "preceding fixed command leader observation failure",
+                    observation_error,
+                )
+                if observation_error.__cause__ is not None:
+                    _add_secondary_exception_note(
+                        leader_failure,
+                        "preceding fixed command leader observation cause",
+                        observation_error.__cause__,
+                    )
+                failure = leader_failure
+        else:
+            if not leader_exited:
+                failure = InstallError(
+                    "command_termination_failed",
+                    (
+                        "spawned command group could not be signalled"
+                        if isinstance(error, PermissionError)
+                        else "spawned command group disappeared while its leader remained"
+                    ),
+                )
+                failure.__cause__ = error
+                leader_failure = _kill_unreaped_leader(process)
+                if leader_failure is not None:
+                    _add_secondary_exception_note(
+                        leader_failure,
+                        "preceding fixed command group signal failure",
+                        error,
+                    )
+                    failure = leader_failure
+    except OSError as error:
         failure = InstallError(
             "command_termination_failed", "spawned command group could not be signalled"
         )
-        try:
-            process.kill()
-        except ProcessLookupError:
-            if process.poll() is None:
-                failure = InstallError(
-                    "command_termination_failed",
-                    "spawned command could not be terminated",
-                )
-        except OSError:
-            failure = InstallError(
-                "command_termination_failed", "spawned command could not be terminated"
+        failure.__cause__ = error
+        leader_failure = _kill_unreaped_leader(process)
+        if leader_failure is not None:
+            _add_secondary_exception_note(
+                leader_failure,
+                "preceding fixed command group signal failure",
+                error,
             )
-    deadline = time.monotonic() + 5
-    while process.poll() is None:
+            failure = leader_failure
+    except BaseException as error:
+        failure = InstallError(
+            "command_cleanup_interrupted",
+            "fixed command group cleanup was interrupted while signalling",
+        )
+        failure.__cause__ = error
+        leader_failure = _kill_unreaped_leader(process)
+        if leader_failure is not None:
+            _add_secondary_exception_note(
+                leader_failure,
+                "preceding fixed command group signal interruption",
+                error,
+            )
+            failure = leader_failure
+
+    while process.returncode is None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            failure = InstallError(
-                "command_termination_failed",
-                "fixed command process group did not terminate",
-            )
+            if failure is None:
+                failure = InstallError(
+                    "command_termination_failed",
+                    "fixed command process group did not terminate",
+                )
             break
         try:
             process.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            failure = InstallError(
-                "command_termination_failed",
-                "fixed command process group did not terminate",
-            )
+        except subprocess.TimeoutExpired as error:
+            if failure is None:
+                failure = InstallError(
+                    "command_termination_failed",
+                    "fixed command process group did not terminate",
+                )
+                failure.__cause__ = error
+            else:
+                _add_secondary_exception_note(
+                    failure,
+                    "secondary cleanup failure: fixed command leader did not "
+                    "terminate before the shared deadline",
+                    error,
+                )
             break
-        except BaseException:
-            # Cleanup is an integrity boundary: record the interruption, issue
-            # SIGKILL again, and keep waiting until the bounded deadline.
-            failure = InstallError(
-                "command_cleanup_interrupted",
-                "command cleanup was interrupted before termination was proven",
-            )
-            try:
-                os.killpg(group, signal.SIGKILL)
-            except ProcessLookupError:
-                if process.poll() is not None:
-                    break
-            except OSError:
-                try:
-                    process.kill()
-                except OSError:
-                    continue
-    while failure is None:
-        group_visibility_restricted = False
+        except BaseException as error:
+            # SIGKILL was already sent while the leader anchored the group.
+            # Preserve the interruption and continue waiting within the same
+            # deadline without signalling a possibly reused numeric PGID.
+            if failure is None:
+                failure = InstallError(
+                    "command_cleanup_interrupted",
+                    "command cleanup was interrupted before termination was proven",
+                )
+                failure.__cause__ = error
+            else:
+                _add_secondary_exception_note(
+                    failure,
+                    "secondary cleanup interruption while waiting for the fixed "
+                    "command leader",
+                    error,
+                )
+
+    while process.returncode is not None:
         try:
             os.killpg(group, 0)
         except ProcessLookupError:
             break
         except PermissionError:
             group_visibility_restricted = True
-        except OSError:
-            failure = InstallError(
-                "command_termination_failed",
-                "spawned command group absence could not be observed",
-            )
-            break
-        if time.monotonic() >= deadline:
-            failure = InstallError(
-                "command_termination_failed",
-                (
-                    "spawned command group absence could not be observed"
-                    if group_visibility_restricted
-                    else "spawned command group did not disappear after SIGKILL"
-                ),
-            )
-            break
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except ProcessLookupError:
-            break
-        except PermissionError:
-            if not group_visibility_restricted:
+        except OSError as error:
+            if failure is None:
                 failure = InstallError(
                     "command_termination_failed",
-                    "spawned command group could not be re-signalled",
+                    "spawned command group absence could not be observed",
                 )
-                break
-        except OSError:
-            failure = InstallError(
-                "command_termination_failed",
-                "spawned command group could not be re-signalled",
-            )
+                failure.__cause__ = error
+            else:
+                _add_secondary_exception_note(
+                    failure,
+                    "secondary cleanup failure: spawned command group absence "
+                    "could not be observed",
+                    error,
+                )
             break
-        time.sleep(0.01)
+        except BaseException as error:
+            if failure is None:
+                failure = InstallError(
+                    "command_cleanup_interrupted",
+                    "command cleanup was interrupted while observing group absence",
+                )
+                failure.__cause__ = error
+            else:
+                _add_secondary_exception_note(
+                    failure,
+                    "secondary cleanup interruption while probing the fixed "
+                    "command group",
+                    error,
+                )
+        if time.monotonic() >= deadline:
+            absence_message = (
+                "spawned command group absence could not be observed"
+                if group_visibility_restricted
+                else "spawned command group did not disappear after SIGKILL"
+            )
+            if failure is None:
+                failure = InstallError(
+                    "command_termination_failed",
+                    absence_message,
+                )
+            else:
+                _add_failure_note_once(
+                    failure,
+                    f"secondary cleanup failure: {absence_message}",
+                )
+            break
+        try:
+            time.sleep(0.01)
+        except BaseException as error:
+            if failure is None:
+                failure = InstallError(
+                    "command_cleanup_interrupted",
+                    "command cleanup was interrupted before absence was proven",
+                )
+                failure.__cause__ = error
+            else:
+                _add_secondary_exception_note(
+                    failure,
+                    "secondary cleanup interruption while observing the fixed "
+                    "command group",
+                    error,
+                )
     return failure
 
 
@@ -891,7 +1066,8 @@ def _run_bounded_process(
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, destination)
         deadline = time.monotonic() + timeout
-        while selector.get_map() or process.poll() is None:
+        leader_exited = False
+        while selector.get_map() or not leader_exited:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise InstallError("command_timeout", "fixed installer command timed out")
@@ -915,14 +1091,18 @@ def _run_bounded_process(
                             "fixed installer command exceeded its output bound",
                         )
             else:
-                try:
-                    process.wait(timeout=min(COMMAND_POLL_SECONDS, remaining))
-                except subprocess.TimeoutExpired:
-                    continue
-            if process.poll() is not None and not leader_cleanup_attempted:
+                time.sleep(min(COMMAND_POLL_SECONDS, remaining))
+            if not leader_exited:
+                leader_exited = _leader_exited_without_reaping(process)
+            if leader_exited and not leader_cleanup_attempted:
                 leader_cleanup_attempted = True
                 cleanup_failure = _terminate_process_group(process, group)
-        returncode = process.poll()
+                if cleanup_failure is not None:
+                    # Cleanup already used its complete bounded deadline. Do not
+                    # wait on pipes retained by an uncontained descendant until
+                    # the unrelated command deadline also expires.
+                    break
+        returncode = process.returncode
         if returncode is None:
             raise InstallError("command_timeout", "fixed installer command timed out")
         try:
@@ -946,26 +1126,71 @@ def _run_bounded_process(
         if selector is not None:
             try:
                 selector.close()
-            except OSError:
+            except BaseException as error:
                 close_failure = InstallError(
-                    "command_cleanup_failed", "command selector could not be closed"
+                    (
+                        "command_cleanup_failed"
+                        if isinstance(error, OSError)
+                        else "command_cleanup_interrupted"
+                    ),
+                    (
+                        "command selector could not be closed"
+                        if isinstance(error, OSError)
+                        else "command selector cleanup was interrupted"
+                    ),
                 )
+                close_failure.__cause__ = error
         for stream in (process.stdout, process.stderr):
             if stream is None:
                 continue
             try:
                 stream.close()
-            except OSError:
+            except BaseException as error:
                 if close_failure is None:
                     close_failure = InstallError(
-                        "command_cleanup_failed", "command pipes could not be closed"
+                        (
+                            "command_cleanup_failed"
+                            if isinstance(error, OSError)
+                            else "command_cleanup_interrupted"
+                        ),
+                        (
+                            "command pipes could not be closed"
+                            if isinstance(error, OSError)
+                            else "command pipe cleanup was interrupted"
+                        ),
+                    )
+                    close_failure.__cause__ = error
+                else:
+                    _add_secondary_exception_note(
+                        close_failure,
+                        "secondary command resource close failure",
+                        error,
                     )
         if not leader_cleanup_attempted:
             cleanup_failure = _terminate_process_group(process, group)
         if cleanup_failure is None:
             cleanup_failure = close_failure
+        elif close_failure is not None:
+            _add_secondary_exception_note(
+                cleanup_failure,
+                "secondary command resource cleanup failure",
+                close_failure,
+            )
+            if close_failure.__cause__ is not None:
+                _add_secondary_exception_note(
+                    cleanup_failure,
+                    "secondary command resource cleanup cause",
+                    close_failure.__cause__,
+                )
     if cleanup_failure is not None:
         if primary is not None:
+            cleanup_cause = cleanup_failure.__cause__
+            if cleanup_cause is not None and cleanup_cause is not primary:
+                _add_secondary_exception_note(
+                    cleanup_failure,
+                    "cleanup failure cause before primary failure chaining",
+                    cleanup_cause,
+                )
             raise cleanup_failure from primary
         raise cleanup_failure
     if primary is not None:

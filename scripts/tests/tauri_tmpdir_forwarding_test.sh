@@ -19,10 +19,19 @@ test_parent="$repo_root/target/release-gate-tests"
 }
 test_root="$(/usr/bin/mktemp -d "$test_parent/tauri-tmpdir.XXXXXX")"
 cleanup() {
+  local original_status=$?
+  trap - EXIT
   if [[ "$test_root" == "$test_parent/tauri-tmpdir."* && \
     -d "$test_root" && ! -L "$test_root" ]]; then
-    /bin/rm -rf -- "$test_root"
+    if ! /bin/rm -rf -- "$test_root"; then
+      echo "error: failed to clean the Tauri TMPDIR fixture" >&2
+      exit 1
+    fi
+  else
+    echo "error: refusing to clean an unexpected Tauri TMPDIR fixture" >&2
+    exit 1
   fi
+  exit "$original_status"
 }
 trap cleanup EXIT
 /bin/chmod 0700 "$test_root"
@@ -69,5 +78,26 @@ fi
   'error: the Tauri CLI temporary directory must not be group- or other-writable' \
   "$test_root/unsafe.stderr" || {
   echo "error: unsafe Tauri TMPDIR did not reach the mode boundary" >&2
+  exit 1
+}
+
+colon_temporary_parent="$test_root/colon:path"
+/bin/mkdir -m 0700 "$colon_temporary_parent"
+if TMPDIR="$colon_temporary_parent" \
+  "${gate_command[@]}" \
+  >"$test_root/colon.stdout" 2>"$test_root/colon.stderr"; then
+  echo "error: colon-containing Tauri TMPDIR was accepted" >&2
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" -eq 1 ]] || {
+  echo "error: colon-containing Tauri TMPDIR did not fail with the policy status" >&2
+  exit 1
+}
+/usr/bin/grep -Fqx \
+  "error: the Tauri CLI temporary directory must not contain ':'" \
+  "$test_root/colon.stderr" || {
+  echo "error: colon-containing Tauri TMPDIR did not reach the path boundary" >&2
   exit 1
 }

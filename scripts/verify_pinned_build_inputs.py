@@ -66,6 +66,12 @@ else:
 MANIFEST_RELATIVE_PATH = "scripts/pinned_build_inputs.json"
 DEPENDENCY_PINS_RELATIVE_PATH = "scripts/dependency_pins.env"
 NATIVE_LOCK_RELATIVE_PATH = "native/macos/Dependencies.lock.json"
+TAURI_CLI_INSTALLER_RELATIVE_PATH = "scripts/install_pinned_tauri_cli.sh"
+# Level 1 source identity: detect accidental or unreviewed installer drift.
+# Exact Git/hosted-CI identity remains the trust root; this is not authentication.
+REQUIRED_TAURI_CLI_INSTALLER_SHA256 = (
+    "d4c1c518db2f4dd90276895ef18ba540a19503ef9d10e03983078898c12d601f"
+)
 MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024
 MAX_PINNED_MANIFEST_BYTES = 512 * 1024
 MAX_NATIVE_LOCK_BYTES = 256 * 1024
@@ -112,7 +118,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "9e1ec0bf8e1ea599424c7983ec58fd3a0291a64dc7f067a16ccc216b11b0cc73"
+    "4f6a46ab798a1fc21f484b36feb8c406dfa9561da1c310ba1f1688c91529c763"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -160,11 +166,11 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     "_artifact_binding_surface": "18b90d7d34036b0a51c55daef674b9edc0d404aaf6d579ce488099de71114890",
     "_verify_build_scripts": "a8cf93cc988322f742d31a3914338d53eb4e805ceb87422b164ca25da8933910",
     "_verify_pinned_verifier_structure": (
-        "3357fafe1c9bc3b5f4406ad4a6d0eb82e0d5fc2d8bfba9a96dff6407903f5b58"
+        "5d96a84581058e47ab256211dbc97d5c7e4728c770e515a1ab2b72bd2004743c"
     ),
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "b0bf69f0b45831ecbbcf9f11bb5d657e29d84079a18a0bdd8d5a25d8ab157bd8"
+    "3ae00548c6c9f4c0a72a745230b393ae4f436c562ed867699ef75ebfb5ea8ec7"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -1697,6 +1703,8 @@ def _verify_pinned_verifier_structure(module: ast.Module) -> None:
         "GA_RELEASE_CLI_MAIN_AST_SHA256",
         "PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256",
         "PINNED_VERIFIER_MODULE_AST_SHA256",
+        "TAURI_CLI_INSTALLER_RELATIVE_PATH",
+        "REQUIRED_TAURI_CLI_INSTALLER_SHA256",
         "REQUIRED_TOOL_PIN_KEYS",
         "REQUIRED_VERIFIED_GO_MODULE_INPUT_KEYS",
         "REQUIRED_PATCH_POLICIES",
@@ -3163,13 +3171,52 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         )
 
     installer_relative = spec.get("installerPath")
+    installer_expected_sha256 = spec.get("installerSha256")
     fragments = spec.get("requiredInstallerFragments")
-    if not isinstance(installer_relative, str) or not isinstance(fragments, list) or not fragments:
+    if (
+        installer_relative != TAURI_CLI_INSTALLER_RELATIVE_PATH
+        or not isinstance(installer_expected_sha256, str)
+        or not isinstance(fragments, list)
+        or not fragments
+    ):
         raise PinnedInputError("Tauri CLI installer binding is incomplete")
-    installer = _read_text(
+    _require_sha256(
+        installer_expected_sha256,
+        "manifest digest for Tauri CLI installer",
+    )
+    if installer_expected_sha256 != REQUIRED_TAURI_CLI_INSTALLER_SHA256:
+        raise PinnedInputError(
+            "Tauri CLI installer digest differs from the fixed release policy"
+        )
+    installer_body = _read_bytes(
         repository,
         installer_relative,
         "Tauri CLI installer",
+    )
+    computed_installer_sha256 = hashlib.sha256(installer_body).hexdigest()
+    try:
+        installer = installer_body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise PinnedInputError("Tauri CLI installer is not strict UTF-8") from error
+    lock_patch_command_prefix = (
+        'GIT_CEILING_DIRECTORIES="$staging" ' + "\\" + "\n  "
+    )
+    lock_patch_check_command = (
+        lock_patch_command_prefix
+        + '/usr/bin/git -C "$source_root" apply --unidiff-zero --check "$lock_patch"'
+    )
+    lock_patch_apply_command = (
+        lock_patch_command_prefix
+        + '/usr/bin/git -C "$source_root" apply --unidiff-zero "$lock_patch"'
+    )
+    lock_patch_reverse_check_command = (
+        lock_patch_command_prefix
+        + '/usr/bin/git -C "$source_root" apply --unidiff-zero --reverse --check "$lock_patch"'
+    )
+    colon_path_rejection_command = '[[ "$temporary_parent" != *:* ]]'
+    staging_creation_command = (
+        'staging="$(/usr/bin/mktemp -d '
+        '"$temporary_parent/cfw-tauri-cli.XXXXXX")"'
     )
     for fragment in fragments:
         if not isinstance(fragment, str) or not fragment or fragment not in installer:
@@ -3188,6 +3235,11 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         'offline_cache_sha256_before="$(cfw_verify_release_toolchain_manifest': 1,
         'offline_cache_sha256_after="$(cfw_verify_release_toolchain_manifest': 1,
         '[[ "$offline_cache_sha256_after" == "$offline_cache_sha256_before" ]]': 1,
+        lock_patch_check_command: 1,
+        lock_patch_apply_command: 1,
+        lock_patch_reverse_check_command: 1,
+        colon_path_rejection_command: 1,
+        staging_creation_command: 1,
     }
     for fragment, expected_count in exact_counts.items():
         actual_count = installer.count(fragment)
@@ -3197,6 +3249,27 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
                 f"{fragment!r}, found {actual_count}"
             )
 
+    def normalized_shell_operation(operation: str) -> str:
+        return " ".join(operation.replace("\\\n", " ").split())
+
+    expected_lock_patch_operations = {
+        normalized_shell_operation(lock_patch_check_command),
+        normalized_shell_operation(lock_patch_apply_command),
+        normalized_shell_operation(lock_patch_reverse_check_command),
+    }
+    observed_lock_patch_operations = [
+        normalized_shell_operation(line)
+        for line in installer.replace("\\\n", " ").splitlines()
+        if not line.lstrip().startswith("#") and re.search(r"\bapply\b", line)
+    ]
+    if (
+        len(observed_lock_patch_operations) != len(expected_lock_patch_operations)
+        or set(observed_lock_patch_operations) != expected_lock_patch_operations
+    ):
+        raise PinnedInputError(
+            "Tauri CLI installer contains an unexpected lock patch apply operation"
+        )
+
     def locate(fragment: str, after: int = 0) -> int:
         try:
             return installer.index(fragment, after)
@@ -3205,10 +3278,30 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
                 f"Tauri CLI installer lacks ordered operation {fragment!r}"
             ) from error
 
+    colon_path_rejection = locate(colon_path_rejection_command)
+    staging_creation = locate(staging_creation_command, colon_path_rejection)
     preparation_before = locate(
-        'verify_cargo_preparation_cache "$prepared_cargo_home"'
+        'verify_cargo_preparation_cache "$prepared_cargo_home"',
+        staging_creation,
     )
-    fetch = locate('"$cargo_bin" fetch', preparation_before)
+    upstream_lock_digest = locate(
+        'printf \'%s  %s\\n\' "$TAURI_CLI_UPSTREAM_CARGO_LOCK_SHA256" "$cargo_lock"',
+        preparation_before,
+    )
+    lock_patch_check = locate(lock_patch_check_command, upstream_lock_digest)
+    lock_patch_apply = locate(lock_patch_apply_command, lock_patch_check)
+    patched_lock_digest = locate(
+        'printf \'%s  %s\\n\' "$TAURI_CLI_PATCHED_CARGO_LOCK_SHA256" "$cargo_lock"',
+        lock_patch_apply,
+    )
+    lock_patch_reverse_check = locate(
+        lock_patch_reverse_check_command, patched_lock_digest
+    )
+    spin_semantic_check = locate(
+        "patched Tauri CLI lock has unexpected spin records",
+        lock_patch_reverse_check,
+    )
+    fetch = locate('"$cargo_bin" fetch', spin_semantic_check)
     fetch_warning_gate = locate(
         'reject_cargo_warnings "$fetch_log" "Tauri CLI dependency preparation"',
         fetch,
@@ -3269,6 +3362,10 @@ def _verify_tauri_cli(manifest: dict, env: dict[str, str], repository: Path) -> 
         raise PinnedInputError("CI does not use the checksum-bound Tauri CLI installer")
     if re.search(r"cargo\s+install\s+tauri-cli", workflow):
         raise PinnedInputError("CI still contains a floating direct Tauri CLI installation")
+    if computed_installer_sha256 != installer_expected_sha256:
+        raise PinnedInputError(
+            "Tauri CLI installer source digest differs from the pinned release policy"
+        )
 
 
 def _verify_commits(manifest: dict, env: dict[str, str]) -> None:

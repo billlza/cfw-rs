@@ -10,7 +10,7 @@ tombstone_test_root="$(mktemp -d "${TMPDIR:-/tmp}/cfw-tombstone-provenance.XXXXX
 tombstone_test_root="$(cd "$tombstone_test_root" && pwd -P)"
 trap '/bin/rm -rf "$tombstone_test_root"' EXIT
 fixture_repository="$tombstone_test_root/repository"
-fixture_ga_root="$fixture_repository/target/candidates/0.4.0/ga/40035"
+fixture_ga_root="$fixture_repository/target/candidates/0.4.0/ga/40036"
 pre_sign_products="$fixture_ga_root/native-products"
 transactions_root="$fixture_ga_root/transactions"
 attempts_root="$transactions_root/signing-attempts"
@@ -53,7 +53,7 @@ from pathlib import Path
 app = Path(sys.argv[1])
 identity = {
     "CFBundleShortVersionString": "0.4.0",
-    "CFBundleVersion": "40035",
+    "CFBundleVersion": "40036",
 }
 for relative in (
     "Contents/Info.plist",
@@ -109,7 +109,7 @@ cfw_run_release_python_script \
   --output "$pre_sign_products/CFWLegacyTombstone.manifest.json" \
   --metadata "artifactKind=legacy-service-tombstone-v1" \
   --metadata "architecture=arm64" \
-  --metadata "buildNumber=40035" \
+  --metadata "buildNumber=40036" \
   --metadata "deploymentTarget=$MACOS_DEPLOYMENT_TARGET" \
   --metadata "signingMode=pre-sign" \
   --metadata "rustVersion=$RUST_VERSION" \
@@ -130,7 +130,7 @@ verify_tombstone_provenance_fixture() {
   cfw_run_release_python_script \
     "$repo_root" "$repo_root/scripts/verify_legacy_tombstone_provenance.py" \
     --repository "$fixture_repository" \
-    --build-number 40035 \
+    --build-number 40036 \
     --deployment-target "$MACOS_DEPLOYMENT_TARGET" \
     --rust-version "$RUST_VERSION" \
     --pre-sign-artifact "$pre_sign_root" \

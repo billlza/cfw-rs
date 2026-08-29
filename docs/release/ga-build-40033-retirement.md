@@ -59,7 +59,8 @@ Scoping distribution mode creation around the fixed `codesign` boundary and
 closing unsafe fresh-signing recovery change tracked release source after
 build 40033 was consumed. Build 40034 became its successor and was later
 consumed and retired independently; its history is recorded in
-`ga-build-40034-retirement.md`. Build 40035 is therefore the only active GA
+`ga-build-40034-retirement.md`. Build 40035 was later consumed and retired in
+`ga-build-40035-retirement.md`. Build 40036 is therefore the only active GA
 successor. It must start from one new clean source identity and repeat the
 complete source, hosted-CI, build, freeze, signing, notarization, package,
 installation, runtime, and publication evidence sequence. No application tree,

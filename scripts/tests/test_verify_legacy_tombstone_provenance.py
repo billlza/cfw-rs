@@ -18,7 +18,7 @@ from scripts import verify_legacy_tombstone_provenance as provenance
 
 
 class LegacyTombstoneProvenanceTests(unittest.TestCase):
-    BUILD_NUMBER = "40035"
+    BUILD_NUMBER = "40036"
     DEPLOYMENT_TARGET = "15.0"
     RUST_VERSION = "1.97.1"
 
@@ -415,17 +415,19 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
             self.verify(build_number="40034")
 
     def test_retired_candidate_build_is_rejected_even_when_coherent(self) -> None:
-        metadata = self.base_metadata()
-        metadata["buildNumber"] = "40034"
-        self.write_pre_sign_manifest(metadata)
-        self.write_signed_manifest()
-        self.write_bundle_identity("40034")
+        for build_number in ("40034", "40035"):
+            with self.subTest(build_number=build_number):
+                metadata = self.base_metadata()
+                metadata["buildNumber"] = build_number
+                self.write_pre_sign_manifest(metadata)
+                self.write_signed_manifest()
+                self.write_bundle_identity(build_number)
 
-        with self.assertRaisesRegex(
-            provenance.LegacyTombstoneProvenanceError,
-            "not the fixed active GA identity",
-        ):
-            self.verify(build_number="40034")
+                with self.assertRaisesRegex(
+                    provenance.LegacyTombstoneProvenanceError,
+                    "not the fixed active GA identity",
+                ):
+                    self.verify(build_number=build_number)
 
     def test_current_source_and_lock_bindings_are_required(self) -> None:
         mutations = {

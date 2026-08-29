@@ -86,6 +86,11 @@ RETIRED_GA_ALLOCATIONS: Final = (
         "ga",
         "retired_after_candidate_freeze_before_canonical_signing_output",
     ),
+    (
+        "40035",
+        "ga",
+        "retired_after_candidate_freeze_before_canonical_signing_output",
+    ),
 )
 
 
@@ -223,6 +228,19 @@ def validate_contract(
     ]
     if active_records != [active_ga]:
         raise ReleaseBuildAllocationError("allocation ledger must have exactly one active GA")
+    if len(allocations) != retired_ga_end + 1:
+        raise ReleaseBuildAllocationError(
+            "allocation ledger must end with exactly one active GA allocation"
+        )
+    active_tail = allocations[retired_ga_end]
+    if (
+        active_tail["build"],
+        active_tail["role"],
+        active_tail["status"],
+    ) != (expected_ga, "ga", "active_ga"):
+        raise ReleaseBuildAllocationError(
+            "active GA allocation differs from the fixed successor"
+        )
     for build, record in records.items():
         status = record["status"]
         if status == "retired_unbuilt_reserved_final_companion":

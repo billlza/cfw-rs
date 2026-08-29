@@ -18,7 +18,7 @@ class SigningAttemptFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
-        self.root = self.repository / "target/candidates/0.4.0/ga/40035"
+        self.root = self.repository / "target/candidates/0.4.0/ga/40036"
         self.root.mkdir(parents=True, mode=0o700)
         self.root.chmod(0o700)
         intent = self.root / "candidate-freeze/intent.json"
@@ -30,7 +30,7 @@ class SigningAttemptFixture:
             intent_path=intent,
             intent_sha256="a" * 64,
             product_version="0.4.0",
-            build_number="40035",
+            build_number="40036",
             recovered=False,
         )
         self.bindings = transaction.FrozenSigningBindings(
@@ -137,6 +137,7 @@ class SigningAttemptFixture:
         helper=None,
         publisher=None,
         live_readiness=None,
+        transformation_creator=None,
         transformation_verifier=None,
         canonical_transformation_verifier=None,
     ) -> Path:
@@ -149,6 +150,11 @@ class SigningAttemptFixture:
             self.transformation_verify
             if transformation_verifier is None
             else transformation_verifier
+        )
+        selected_transformation_creator = (
+            self.transformation_create
+            if transformation_creator is None
+            else transformation_creator
         )
         selected_canonical_transformation_verifier = (
             self.canonical_verify
@@ -169,7 +175,7 @@ class SigningAttemptFixture:
                 live_readiness_verifier=readiness,
                 publisher=selected_publisher,
                 confirmer=self.confirmer,
-                transformation_creator=self.transformation_create,
+                transformation_creator=selected_transformation_creator,
                 transformation_verifier=selected_transformation_verifier,
                 canonical_transformation_verifier=(
                     selected_canonical_transformation_verifier
@@ -942,6 +948,80 @@ class SigningAttemptTransactionTests(unittest.TestCase):
             self.fixture.run(resume=True, helper=unexpected_helper)
         self.assertEqual(retirement.exception.code, "candidate_retirement_required")
         self.assertFalse(helper_called)
+
+    def test_private_output_os_error_is_terminal_and_requires_successor(self) -> None:
+        def fail_private_output(_repository: Path, _output: Path) -> dict[str, str]:
+            raise OSError("fixture private output verification failure")
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError,
+            "private signed output did not pass complete verification",
+        ) as raised:
+            self.fixture.run(
+                resume=False,
+                transformation_creator=fail_private_output,
+            )
+
+        self.assertEqual(raised.exception.code, "signed_output_verification_failed")
+        before = self.fixture.load("00000001")
+        self.assertEqual(
+            tuple(event["state"] for event in before.events),
+            ("prepared", "signing", "failed"),
+        )
+        self.assertEqual(
+            before.events[-1]["failure_code"],
+            "signed_output_verification_failed",
+        )
+        self.assertIsNone(before.events[-1]["exit_code"])
+        self.assertTrue(before.work.is_dir())
+        self.assertFalse(before.publish_ready.exists())
+        self.assertFalse((self.fixture.root / "signing-output").exists())
+        intent_before = (before.root / transaction.INTENT_NAME).read_bytes()
+        events_before = tuple(
+            path.read_bytes() for path in sorted(before.root.glob("event-*.json"))
+        )
+        work_before = {
+            str(path.relative_to(before.work)): path.read_bytes()
+            for path in sorted(before.work.rglob("*"))
+            if path.is_file()
+        }
+
+        helper_called = False
+
+        def unexpected_helper(_work: Path, _sha1: str, _sha256: str) -> int:
+            nonlocal helper_called
+            helper_called = True
+            return 0
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError,
+            "allocate a successor build",
+        ) as retirement:
+            self.fixture.run(resume=True, helper=unexpected_helper)
+
+        self.assertEqual(retirement.exception.code, "candidate_retirement_required")
+        self.assertFalse(helper_called)
+        after = self.fixture.load("00000001")
+        self.assertEqual(after.events, before.events)
+        self.assertEqual(
+            (after.root / transaction.INTENT_NAME).read_bytes(),
+            intent_before,
+        )
+        self.assertEqual(
+            tuple(
+                path.read_bytes()
+                for path in sorted(after.root.glob("event-*.json"))
+            ),
+            events_before,
+        )
+        self.assertEqual(
+            {
+                str(path.relative_to(after.work)): path.read_bytes()
+                for path in sorted(after.work.rglob("*"))
+                if path.is_file()
+            },
+            work_before,
+        )
 
     def test_publish_ready_transformation_failure_is_recorded_and_retired(
         self,

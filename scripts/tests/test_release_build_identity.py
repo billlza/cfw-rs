@@ -38,13 +38,13 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
     def test_active_identity_is_one_fixed_ga_build(self) -> None:
         self.assertEqual(
             ACTIVE_RELEASE_IDENTITY,
-            ReleaseIdentity("0.4.0", "40035"),
+            ReleaseIdentity("0.4.0", "40036"),
         )
 
     def test_release_identity_rejects_version_or_build_drift(self) -> None:
         for identity in (
-            ("0.4.1", "40035"),
-            ("0.4.0", "040035"),
+            ("0.4.1", "40036"),
+            ("0.4.0", "040036"),
             ("0.4.0", "0"),
         ):
             with self.subTest(identity=identity), self.assertRaises(
@@ -111,7 +111,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             os.chmod(private, 0o700)
         app = self.make_app(
             signing_input,
-            ("40035", "40035", "40035", "40035"),
+            ("40036", "40036", "40036", "40036"),
         )
         return app, native_products, output
 
@@ -392,26 +392,26 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
         repository = Path("/repo")
         self.assertEqual(
             ga_preflight_root(repository),
-            Path("/repo/target/candidates/0.4.0/ga-preflight/40035"),
+            Path("/repo/target/candidates/0.4.0/ga-preflight/40036"),
         )
         self.assertEqual(
             ga_root(repository),
-            Path("/repo/target/candidates/0.4.0/ga/40035"),
+            Path("/repo/target/candidates/0.4.0/ga/40036"),
         )
         self.assertEqual(
             ga_pre_sign_native_products_root(repository),
             Path(
-                "/repo/target/candidates/0.4.0/ga-preflight/40035/native-products"
+                "/repo/target/candidates/0.4.0/ga-preflight/40036/native-products"
             ),
         )
         self.assertEqual(
             ga_signed_root(repository),
-            Path("/repo/target/candidates/0.4.0/ga/40035/signed"),
+            Path("/repo/target/candidates/0.4.0/ga/40036/signed"),
         )
         self.assertEqual(
             ga_signed_native_products_root(repository),
             Path(
-                "/repo/target/candidates/0.4.0/ga/40035/signing-output/signed-native-products"
+                "/repo/target/candidates/0.4.0/ga/40036/signing-output/signed-native-products"
             ),
         )
 
@@ -606,14 +606,14 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             repository = Path(directory).resolve()
             rejected = (
                 (
-                    "40035",
+                    "40036",
                     repository
-                    / "target/candidates/0.4.0/validation/40035/native-products",
+                    / "target/candidates/0.4.0/validation/40036/native-products",
                 ),
                 (
-                    "40035",
+                    "40036",
                     repository
-                    / "target/candidates/0.4.0/release-build/40035/native-products",
+                    / "target/candidates/0.4.0/release-build/40036/native-products",
                 ),
                 (
                     "40030",
@@ -636,7 +636,17 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                     / "target/candidates/0.4.0/ga-preflight/40033/native-products",
                 ),
                 (
+                    "40034",
+                    repository
+                    / "target/candidates/0.4.0/ga-preflight/40034/native-products",
+                ),
+                (
                     "40035",
+                    repository
+                    / "target/candidates/0.4.0/ga-preflight/40035/native-products",
+                ),
+                (
+                    "40036",
                     repository
                     / "target/candidates/0.4.0/ga-preflight/../../../../tmp/escape/native-products",
                 ),
@@ -652,8 +662,8 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 candidate_native_products_output(
                     repository,
                     str(repository)
-                    + "/target/candidates/0.4.0/ga-preflight//40035/native-products",
-                    "40035",
+                    + "/target/candidates/0.4.0/ga-preflight//40036/native-products",
+                    "40036",
                 )
 
     def test_candidate_native_output_rejects_a_symlink_ancestor(self) -> None:
@@ -667,7 +677,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             output = ga_pre_sign_native_products_root(repository)
             with self.assertRaisesRegex(BuildIdentityError, "real directory"):
                 candidate_native_products_output(
-                    repository, str(output), "40035"
+                    repository, str(output), "40036"
                 )
 
     def test_candidate_derived_data_is_the_exact_native_output_sibling(self) -> None:
@@ -680,7 +690,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                     repository,
                     str(native_products),
                     str(expected),
-                    "40035",
+                    "40036",
                 ),
                 expected,
             )
@@ -695,7 +705,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                         repository,
                         str(native_products),
                         str(rejected),
-                        "40035",
+                        "40036",
                     )
 
     def test_candidate_derived_data_rejects_a_symlink_ancestor(self) -> None:
@@ -714,7 +724,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                     repository,
                     str(native_products),
                     str(preflight_root / "xcode-derived-data"),
-                    "40035",
+                    "40036",
                 )
 
     def test_bundle_context_accepts_exact_private_work_and_publish_ready(self) -> None:
@@ -733,7 +743,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 self.assertEqual(paths.app, app)
                 self.assertEqual(paths.native_products, native_products)
                 self.assertEqual(paths.context, context)
-                self.assertEqual(paths.build_identity.build_version, "40035")
+                self.assertEqual(paths.build_identity.build_version, "40036")
 
     def test_bundle_context_accepts_canonical_native_with_safe_app_copies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -747,7 +757,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 with self.subTest(app_root=app_root):
                     app = self.make_app(
                         app_root,
-                        ("40035", "40035", "40035", "40035"),
+                        ("40036", "40036", "40036", "40036"),
                     )
                     paths = candidate_bundle_verification_paths(
                         repository,
@@ -892,7 +902,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
                 native_products = self.make_canonical_native_products(repository)
                 app = self.make_app(
                     ga_signed_root(repository),
-                    ("40035", "40035", "40035", "40035"),
+                    ("40036", "40036", "40036", "40036"),
                 )
                 target = (
                     native_products.parent
@@ -917,7 +927,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             with (
                 patch(
                     "scripts.release_build_identity.bundle_build_identity",
-                    return_value=BundleBuildIdentity("0.4.0", "40035"),
+                    return_value=BundleBuildIdentity("0.4.0", "40036"),
                 ),
                 patch(
                     "scripts.release_build_identity.os.geteuid",
@@ -938,7 +948,7 @@ class ReleaseBuildIdentityTests(unittest.TestCase):
             native_products = self.make_canonical_native_products(repository)
             app = self.make_app(
                 ga_signed_root(repository),
-                ("40035", "40035", "40035", "40035"),
+                ("40036", "40036", "40036", "40036"),
             )
             alias = str(app.parent / "nested/.." / app.name)
             with self.assertRaisesRegex(BuildIdentityError, "canonical absolute"):

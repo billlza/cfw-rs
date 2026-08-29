@@ -22,7 +22,7 @@ cfw_select_release_apple_toolchain
 # shellcheck source=scripts/release_publication_path_contract.sh
 source "$publication_repo_root/scripts/release_publication_path_contract.sh"
 
-readonly publication_ga_root="$publication_repo_root/target/candidates/0.4.0/ga/40035"
+readonly publication_ga_root="$publication_repo_root/target/candidates/0.4.0/ga/40036"
 readonly publication_native_products="$publication_ga_root/signing-output/signed-native-products"
 
 run_production_ga_stage() {

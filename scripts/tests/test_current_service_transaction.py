@@ -18,7 +18,7 @@ from scripts import ga_acceptance_environment as ga_environment
 
 PREVIOUS = install.AppIdentity("0.4.0", "40019", "a" * 64)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40035", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40036", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
@@ -156,11 +156,11 @@ class ServiceEventStoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.fixture.cleanup()
 
-    def test_ga_service_transaction_is_fixed_to_40019_to_40035(self) -> None:
+    def test_ga_service_transaction_is_fixed_to_40019_to_40036(self) -> None:
         paths = service.ServicePaths.production()
 
         self.assertEqual(paths.install_paths.profile, install.GA_INSTALL_PROFILE)
-        self.assertEqual(paths.install_paths.profile.build_number, "40035")
+        self.assertEqual(paths.install_paths.profile.build_number, "40036")
         self.assertEqual(
             paths.install_paths.profile.previous_build_number,
             "40019",

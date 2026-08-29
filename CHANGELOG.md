@@ -23,7 +23,7 @@
   every step to an unchanged Clash for Windows process and network projection.
   One inode-bound outer lock serializes service and bundle mutations, and
   independent fixed journals cover historical validation migrations and the
-  40019→40035 GA installation without overwriting earlier evidence. The
+  40019→40036 GA installation without overwriting earlier evidence. The
   canonical allocation ledger prevents a retired validation build or its
   reserved final companion from being reused by a later source closure. The
   validation-only compatibility island can prove the already-installed 40019
@@ -69,8 +69,12 @@
   notarization. Build 40034 is retired. One shared validator now re-derives the
   promoted Tombstone manifest from its frozen artifact and manifest, binds it
   to the current source and lockfile, and runs before outer Host signing as
-  well as during downstream release verification. Build 40035 is the only
-  active GA successor.
+  well as during downstream release verification. Build 40035 then completed
+  candidate freeze and entered its single private signing attempt, but the
+  attempt terminated during complete private signed-output verification before
+  canonical output or notarization. Its durable journal does not identify a
+  narrower failing substage, so build 40035 is retired without inferring one.
+  Build 40036 is the only active GA successor.
 - Authenticate nested release-worktree managed caches through bounded,
   descriptor-relative Git administrative control files plus an explicit
   empty-target lifecycle receipt before excluding them from the path/name-only

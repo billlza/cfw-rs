@@ -525,8 +525,23 @@ class NotarizationReadinessPolicyTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertEqual(
-            {identity.build_version for identity in MACOS_27_COMPATIBILITY_IDENTITIES},
-            {"26A5388g", "26A5406e", "26A5416b", "26A5421a"},
+            MACOS_27_COMPATIBILITY_IDENTITIES,
+            frozenset(
+                HostSystemIdentity(
+                    product_name="macOS",
+                    product_version="27.0",
+                    build_version=build_version,
+                    kernel_name="Darwin",
+                    kernel_release="27.0.0",
+                    architecture="arm64",
+                )
+                for build_version in (
+                    "26A5388g",
+                    "26A5406e",
+                    "26A5416b",
+                    "26A5421a",
+                )
+            ),
         )
         for identity in MACOS_27_COMPATIBILITY_IDENTITIES:
             with self.subTest(build_version=identity.build_version):
@@ -809,7 +824,7 @@ class NotarizationReadinessPolicyMutationTests(unittest.TestCase):
                     _establish_pre_submission_policy(
                         runner,
                         self.app,
-                        lambda: MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
+                        lambda: MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
                     )
                 self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
 
@@ -857,7 +872,7 @@ class NotarizationReadinessPolicyMutationTests(unittest.TestCase):
                     _establish_pre_submission_policy(
                         runner,
                         self.app,
-                        lambda: MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
+                        lambda: MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
                     )
                 self.assertEqual(
                     runner.calls,

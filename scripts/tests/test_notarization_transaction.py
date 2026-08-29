@@ -28,6 +28,7 @@ from scripts.hash_artifact import build_manifest
 from scripts.notarization_transaction import (
     MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
     MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
+    MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
     MACOS_27_COMPATIBILITY_IDENTITIES,
     MAX_COMMAND_OUTPUT_BYTES,
     CommandResult,
@@ -525,7 +526,7 @@ class NotarizationReadinessPolicyTests(unittest.TestCase):
     ) -> None:
         self.assertEqual(
             {identity.build_version for identity in MACOS_27_COMPATIBILITY_IDENTITIES},
-            {"26A5388g", "26A5406e", "26A5416b"},
+            {"26A5388g", "26A5406e", "26A5416b", "26A5421a"},
         )
         for identity in MACOS_27_COMPATIBILITY_IDENTITIES:
             with self.subTest(build_version=identity.build_version):
@@ -546,6 +547,28 @@ class NotarizationReadinessPolicyTests(unittest.TestCase):
                         CommandRole.NOTARY_READINESS_CORROBORATION,
                     ],
                 )
+
+    def test_exact_host_rejects_a_different_codesign_failure(self) -> None:
+        finding = known_notary_false_positive(self.app)
+        finding["SyspolicyCheckLongError"] = (
+            "Main executable is missing one or more executable bits."
+        )
+        runner = ReadinessRunner(
+            CommandResult(70, json.dumps({"output": [finding]}), "")
+        )
+
+        with self.assertRaises(TransactionError) as raised:
+            _establish_pre_submission_policy(
+                runner,
+                self.app,
+                lambda: MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            "notary-readiness_finding_mismatch",
+        )
+        self.assertEqual(runner.calls, [CommandRole.NOTARY_READINESS])
 
 
 class ProductionArchiveBuilderTests(unittest.TestCase):
@@ -1239,7 +1262,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         final_app = fixture.execute(
             command_runner=compatibility_runner,
             host_system_identity_reader=(
-                lambda: MACOS_27_26A5416B_COMPATIBILITY_IDENTITY
+                lambda: MACOS_27_26A5421A_COMPATIBILITY_IDENTITY
             ),
         )
         self.assertTrue(final_app.is_dir())

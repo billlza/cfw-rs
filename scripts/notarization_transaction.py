@@ -452,11 +452,20 @@ MACOS_27_26A5416B_COMPATIBILITY_IDENTITY = HostSystemIdentity(
     kernel_release="27.0.0",
     architecture="arm64",
 )
+MACOS_27_26A5421A_COMPATIBILITY_IDENTITY = HostSystemIdentity(
+    product_name="macOS",
+    product_version="27.0",
+    build_version="26A5421a",
+    kernel_name="Darwin",
+    kernel_release="27.0.0",
+    architecture="arm64",
+)
 MACOS_27_COMPATIBILITY_IDENTITIES = frozenset(
     {
         MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
         MACOS_27_26A5406E_COMPATIBILITY_IDENTITY,
         MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
+        MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
     }
 )
 

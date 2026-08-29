@@ -144,10 +144,10 @@ REQUIRED_SWIFT_TARGET_INFO_PROBE = (
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
-    "5932cb47a358bca72d49c0d96ce1c51da58dfc35957bc97111627ba9427ca38f"
+    "64e77b03b9eaad53baf47c0201dc4d44f489fd5de177a0b59cfb9e2ab92cc4ad"
 )
 REQUIRED_WORKFLOW_SHA256 = (
-    "a2809cfbb6618a83b5c369254cdd1970775af7d2f58619da20024fff5f755f81"
+    "b0881faa331b4072b1d0e9d957fe5db99920aef0e7ee8d6284accb6531d3a724"
 )
 
 # Constructs that swallow a failure, suppress warnings, or conditionally skip a
@@ -1133,14 +1133,37 @@ def _check_job_bounds(jobs: dict[str, str]) -> list[str]:
 def _check_release_tool_test_dependencies(jobs: dict[str, str]) -> list[str]:
     findings: list[str] = []
     for name, body in jobs.items():
+        gates = _release_gate_commands(body)
         if (
             "unittest discover" not in body
-            and not _uses_release_gate(body, "release-tool-tests")
+            and "release-tool-tests" not in gates
         ):
             continue
-        if not _uses_release_gate(body, "bootstrap-policy-tools"):
+        if gates.count("bootstrap-policy-tools") != 1:
             findings.append(
                 f"job {name!r} runs release-tool tests without pinned identity tool bootstrap"
+            )
+        if gates.count("release-tool-tests") != 1:
+            findings.append(
+                f"job {name!r} must run exactly one closed release-tool test gate"
+            )
+        if gates.count("apple-toolchain") != 1:
+            findings.append(
+                f"job {name!r} must run exactly one strict Apple toolchain preflight"
+            )
+        if (
+            gates.count("bootstrap-policy-tools") == 1
+            and gates.count("apple-toolchain") == 1
+            and gates.count("release-tool-tests") == 1
+            and not (
+                gates.index("bootstrap-policy-tools")
+                < gates.index("apple-toolchain")
+                < gates.index("release-tool-tests")
+            )
+        ):
+            findings.append(
+                f"job {name!r} must run the strict Apple toolchain preflight after "
+                "identity-tool bootstrap and before release-tool tests"
             )
     return findings
 

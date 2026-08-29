@@ -175,6 +175,11 @@ cfw_select_release_apple_toolchain
 export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
 
 case "$gate" in
+  apple-toolchain)
+    [[ $# -eq 0 ]] || die "$gate accepts no arguments"
+    cfw_run_release_python_script \
+      "$repo_root" "$repo_root/scripts/release_apple_toolchain.py"
+    ;;
   build-script-boundary)
     [[ $# -eq 0 ]] || die "$gate accepts no arguments"
     /bin/bash -p "$repo_root/scripts/verify_build_boundaries.sh"

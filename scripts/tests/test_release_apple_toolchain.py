@@ -4,16 +4,24 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts.release_apple_toolchain import (
     APPLE_TOOLCHAIN_DOCUMENT,
     APPLE_TOOLCHAIN_SCHEMA_VERSION,
     DEVELOPER_DIRECTORY_PLACEHOLDER,
+    MAX_CLANG_TOOL_BYTES,
+    MAX_LINKER_TOOL_BYTES,
     ReleaseAppleToolchainError,
+    _file_record,
     _trusted_directory,
+    _validate_apple_toolchain_binding_shape,
+    _validate_file_binding,
     capture_release_apple_toolchain,
     validate_recorded_release_apple_toolchain,
 )
@@ -138,6 +146,217 @@ class ReleaseAppleToolchainTests(unittest.TestCase):
                 drifted, REPOSITORY, self.environment
             )
 
+    def test_clang_and_linker_have_distinct_fixed_size_limits(self) -> None:
+        self.assertEqual(MAX_CLANG_TOOL_BYTES, 512 * 1024 * 1024)
+        self.assertEqual(MAX_LINKER_TOOL_BYTES, 32 * 1024 * 1024)
+        for label, maximum in (
+            ("recorded clang", MAX_CLANG_TOOL_BYTES),
+            ("recorded linker", MAX_LINKER_TOOL_BYTES),
+        ):
+            with self.subTest(label=label, boundary="maximum"):
+                binding = {
+                    "path": "Toolchains/tool",
+                    "sha256": "a" * 64,
+                    "size": maximum,
+                }
+                self.assertEqual(
+                    _validate_file_binding(
+                        binding,
+                        label=label,
+                        maximum=maximum,
+                    ),
+                    binding,
+                )
+            with self.subTest(label=label, boundary="maximum-plus-one"):
+                with self.assertRaisesRegex(
+                    ReleaseAppleToolchainError,
+                    "outside its fixed limit",
+                ):
+                    _validate_file_binding(
+                        {
+                            "path": "Toolchains/tool",
+                            "sha256": "a" * 64,
+                            "size": maximum + 1,
+                        },
+                        label=label,
+                        maximum=maximum,
+                    )
+            for invalid_size in (True, float(maximum)):
+                with self.subTest(label=label, invalid_size=invalid_size):
+                    with self.assertRaisesRegex(
+                        ReleaseAppleToolchainError,
+                        "outside its fixed limit",
+                    ):
+                        _validate_file_binding(
+                            {
+                                "path": "Toolchains/tool",
+                                "sha256": "a" * 64,
+                                "size": invalid_size,
+                            },
+                            label=label,
+                            maximum=maximum,
+                        )
+
+        self.assertGreater(MAX_CLANG_TOOL_BYTES, MAX_LINKER_TOOL_BYTES)
+        representative_universal_clang_size = 300 * 1024 * 1024
+        universal_clang_binding = {
+            "path": "Toolchains/clang",
+            "sha256": "a" * 64,
+            "size": representative_universal_clang_size,
+        }
+        self.assertEqual(
+            _validate_file_binding(
+                universal_clang_binding,
+                label="recorded clang",
+                maximum=MAX_CLANG_TOOL_BYTES,
+            ),
+            universal_clang_binding,
+        )
+        with self.assertRaisesRegex(
+            ReleaseAppleToolchainError,
+            "outside its fixed limit",
+        ):
+            _validate_file_binding(
+                universal_clang_binding,
+                label="recorded linker",
+                maximum=MAX_LINKER_TOOL_BYTES,
+            )
+
+    def test_capture_routes_each_tool_through_its_own_size_limit(self) -> None:
+        with mock.patch(
+            "scripts.release_apple_toolchain._file_record",
+            wraps=_file_record,
+        ) as file_record:
+            capture_release_apple_toolchain(REPOSITORY, self.environment)
+
+        limits = {
+            call.kwargs["label"]: call.kwargs["maximum"]
+            for call in file_record.call_args_list
+        }
+        self.assertEqual(limits["selected clang"], MAX_CLANG_TOOL_BYTES)
+        self.assertEqual(limits["selected linker"], MAX_LINKER_TOOL_BYTES)
+
+        with mock.patch(
+            "scripts.release_apple_toolchain._validate_file_binding",
+            wraps=_validate_file_binding,
+        ) as validate_file_binding:
+            _validate_apple_toolchain_binding_shape(self.observed.binding)
+        recorded_limits = {
+            call.kwargs["label"]: call.kwargs["maximum"]
+            for call in validate_file_binding.call_args_list
+        }
+        self.assertEqual(recorded_limits["recorded clang"], MAX_CLANG_TOOL_BYTES)
+        self.assertEqual(
+            recorded_limits["recorded linker"], MAX_LINKER_TOOL_BYTES
+        )
+
+    def test_selected_tool_trust_errors_remain_fail_closed_and_specific(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            tool = root / "tool"
+            tool.write_bytes(b"tool")
+            tool.chmod(0o755)
+            observed = tool.lstat()
+
+            for name, mode in (
+                ("group", observed.st_mode | stat.S_IWGRP),
+                ("other", observed.st_mode | stat.S_IWOTH),
+            ):
+                trusted_metadata = mock.Mock(
+                    st_mode=mode,
+                    st_nlink=1,
+                    st_uid=0,
+                    st_size=observed.st_size,
+                )
+                with self.subTest(name=name), mock.patch.object(
+                    Path,
+                    "lstat",
+                    return_value=trusted_metadata,
+                ):
+                    with self.assertRaisesRegex(
+                        ReleaseAppleToolchainError,
+                        "group- or other-writable",
+                    ):
+                        _file_record(
+                            tool,
+                            developer_directory=root,
+                            label="selected tool",
+                            maximum=1024,
+                            executable=True,
+                        )
+
+            for name, overrides, diagnostic in (
+                ("owner", {"st_uid": 501}, "not root-owned"),
+                ("empty", {"st_size": 0}, "is empty"),
+                (
+                    "oversize",
+                    {"st_size": 1025},
+                    "exceeds the fixed 1024-byte limit",
+                ),
+                (
+                    "not-regular",
+                    {"st_mode": stat.S_IFDIR | 0o755},
+                    "not a regular file",
+                ),
+            ):
+                metadata = {
+                    "st_mode": observed.st_mode,
+                    "st_nlink": 1,
+                    "st_uid": 0,
+                    "st_size": observed.st_size,
+                }
+                metadata.update(overrides)
+                with self.subTest(name=name), mock.patch.object(
+                    Path,
+                    "lstat",
+                    return_value=mock.Mock(**metadata),
+                ):
+                    with self.assertRaisesRegex(
+                        ReleaseAppleToolchainError,
+                        diagnostic,
+                    ):
+                        _file_record(
+                            tool,
+                            developer_directory=root,
+                            label="selected tool",
+                            maximum=1024,
+                            executable=True,
+                        )
+
+            linked = root / "linked"
+            os.link(tool, linked)
+            with self.assertRaisesRegex(
+                ReleaseAppleToolchainError,
+                "multiple hard links",
+            ):
+                _file_record(
+                    tool,
+                    developer_directory=root,
+                    label="selected tool",
+                    maximum=1024,
+                    executable=True,
+                )
+
+            tool.unlink()
+            linked.unlink()
+            target = root / "target"
+            target.write_bytes(b"tool")
+            symlink = root / "symlink"
+            symlink.symlink_to(target.name)
+            with self.assertRaisesRegex(
+                ReleaseAppleToolchainError,
+                "canonical real file",
+            ):
+                _file_record(
+                    symlink,
+                    developer_directory=root,
+                    label="selected tool",
+                    maximum=1024,
+                    executable=True,
+                )
+
     def test_json_type_equivalents_cannot_bypass_nested_binding_types(self) -> None:
         mutations = {
             "boolean-schema": lambda binding: binding.__setitem__(
@@ -156,6 +375,23 @@ class ReleaseAppleToolchainTests(unittest.TestCase):
                     validate_recorded_release_apple_toolchain(
                         drifted, REPOSITORY, self.environment
                     )
+
+    def test_cli_rejects_unexpected_arguments(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY / "scripts/release_apple_toolchain.py"),
+                "unexpected-argument",
+            ],
+            cwd=REPOSITORY,
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, b"")
+        self.assertIn(b"unrecognized arguments", completed.stderr)
+        self.assertNotIn(b"verified", completed.stderr)
 
 
 if __name__ == "__main__":

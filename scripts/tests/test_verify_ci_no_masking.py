@@ -62,14 +62,14 @@ jobs:
           update-environment: false
       - name: Bootstrap Node
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-node-toolchain
-      - name: Assert toolchain
-        run: test "$(/usr/bin/xcodebuild -version)" = $'Xcode 26.6\\nBuild version 17F113'
       - name: Verify policy
         run: PYTHONDONTWRITEBYTECODE=1 python3 -S -B scripts/verify_policy.py
       - name: Prepare Cargo workspace inputs
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' prepare-cargo-workspace-inputs
       - name: Bootstrap policy tools
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-policy-tools
+      - name: Assert Apple release toolchain
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' apple-toolchain
       - name: Check formatting
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' rust-fmt
       - name: Metadata
@@ -1233,6 +1233,107 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
             )
             workflow_path, pins_path = self._write(Path(tmp), bad)
             with self.assertRaisesRegex(CiPolicyError, "pinned identity tool"):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_release_tool_test_gate_must_be_unique(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            release_tests = (
+                "      - name: Release tool tests\n"
+                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' release-tool-tests\n"
+            )
+            self.assertIn(release_tests, GOOD_WORKFLOW)
+            workflow_path, pins_path = self._write(
+                Path(tmp), GOOD_WORKFLOW.replace(release_tests, release_tests * 2, 1)
+            )
+            with self.assertRaisesRegex(
+                CiPolicyError,
+                "exactly one closed release-tool test gate",
+            ):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_release_tool_tests_require_strict_apple_toolchain_preflight(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            preflight = (
+                "      - name: Assert Apple release toolchain\n"
+                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' apple-toolchain\n"
+            )
+            self.assertIn(preflight, GOOD_WORKFLOW)
+            workflow_path, pins_path = self._write(
+                Path(tmp), GOOD_WORKFLOW.replace(preflight, "", 1)
+            )
+            with self.assertRaisesRegex(
+                CiPolicyError,
+                "strict Apple toolchain preflight",
+            ):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_strict_apple_toolchain_preflight_must_precede_release_tests(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            preflight = (
+                "      - name: Assert Apple release toolchain\n"
+                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' apple-toolchain\n"
+            )
+            release_tests = (
+                "      - name: Release tool tests\n"
+                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' release-tool-tests\n"
+            )
+            self.assertIn(preflight, GOOD_WORKFLOW)
+            self.assertIn(release_tests, GOOD_WORKFLOW)
+            reordered = GOOD_WORKFLOW.replace(preflight, "", 1).replace(
+                release_tests,
+                release_tests + preflight,
+                1,
+            )
+            workflow_path, pins_path = self._write(Path(tmp), reordered)
+            with self.assertRaisesRegex(
+                CiPolicyError,
+                "before release-tool tests",
+            ):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_strict_apple_toolchain_preflight_must_follow_identity_bootstrap(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bootstrap = (
+                "      - name: Bootstrap policy tools\n"
+                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-policy-tools\n"
+            )
+            preflight = (
+                "      - name: Assert Apple release toolchain\n"
+                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' apple-toolchain\n"
+            )
+            self.assertIn(bootstrap + preflight, GOOD_WORKFLOW)
+            reordered = GOOD_WORKFLOW.replace(
+                bootstrap + preflight,
+                preflight + bootstrap,
+                1,
+            )
+            workflow_path, pins_path = self._write(Path(tmp), reordered)
+            with self.assertRaisesRegex(
+                CiPolicyError,
+                "after identity-tool bootstrap",
+            ):
+                audit_workflow(workflow_path, pins_path)
+
+    def test_strict_apple_toolchain_preflight_must_be_unique(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            preflight = (
+                "      - name: Assert Apple release toolchain\n"
+                "        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' apple-toolchain\n"
+            )
+            self.assertIn(preflight, GOOD_WORKFLOW)
+            workflow_path, pins_path = self._write(
+                Path(tmp), GOOD_WORKFLOW.replace(preflight, preflight * 2, 1)
+            )
+            with self.assertRaisesRegex(
+                CiPolicyError,
+                "exactly one strict Apple toolchain preflight",
+            ):
                 audit_workflow(workflow_path, pins_path)
 
     def test_policy_bootstrap_requires_workspace_cargo_input_preparation(self) -> None:

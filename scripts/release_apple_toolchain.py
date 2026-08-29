@@ -8,6 +8,7 @@ returns the exact paths that a closed subprocess environment must use.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 import hashlib
 import os
@@ -34,7 +35,12 @@ APPLE_TOOLCHAIN_SCHEMA_VERSION = 1
 APPLE_XCODEBUILD = Path("/usr/bin/xcodebuild")
 APPLE_XCRUN = Path("/usr/bin/xcrun")
 MAX_IDENTITY_OUTPUT_BYTES = 4096
-MAX_LINKER_TOOL_BYTES = 256 * 1024 * 1024
+# Xcode 26.6 on the hosted release runner is the reviewed Universal build.
+# Its two-slice clang is materially larger than the arm64-only distribution,
+# while ld remains small.  Keep separate hard resource bounds so admitting the
+# reviewed compiler does not unnecessarily widen every linker-input read.
+MAX_CLANG_TOOL_BYTES = 512 * 1024 * 1024
+MAX_LINKER_TOOL_BYTES = 32 * 1024 * 1024
 MAX_SDK_SETTINGS_BYTES = 1024 * 1024
 PROCESS_TIMEOUT_SECONDS = 120
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -166,18 +172,26 @@ def _file_record(
         before = path.lstat()
     except (OSError, RuntimeError) as error:
         raise ReleaseAppleToolchainError(f"{label} is unavailable") from error
-    if (
-        resolved != path.absolute()
-        or not stat.S_ISREG(before.st_mode)
-        or path.is_symlink()
-        or before.st_nlink != 1
-        or before.st_uid != 0
-        or stat.S_IMODE(before.st_mode) & 0o022
-        or before.st_size <= 0
-        or before.st_size > maximum
-        or (executable and not os.access(path, os.X_OK))
-    ):
-        raise ReleaseAppleToolchainError(f"{label} is not a trusted regular file")
+    if resolved != path.absolute() or path.is_symlink():
+        raise ReleaseAppleToolchainError(f"{label} is not a canonical real file")
+    if not stat.S_ISREG(before.st_mode):
+        raise ReleaseAppleToolchainError(f"{label} is not a regular file")
+    if before.st_nlink != 1:
+        raise ReleaseAppleToolchainError(f"{label} has multiple hard links")
+    if before.st_uid != 0:
+        raise ReleaseAppleToolchainError(f"{label} is not root-owned")
+    if stat.S_IMODE(before.st_mode) & 0o022:
+        raise ReleaseAppleToolchainError(
+            f"{label} is group- or other-writable"
+        )
+    if before.st_size <= 0:
+        raise ReleaseAppleToolchainError(f"{label} is empty")
+    if before.st_size > maximum:
+        raise ReleaseAppleToolchainError(
+            f"{label} size {before.st_size} exceeds the fixed {maximum}-byte limit"
+        )
+    if executable and not os.access(path, os.X_OK):
+        raise ReleaseAppleToolchainError(f"{label} is not executable")
     _trusted_directory_chain(
         resolved.parent,
         developer_directory.parent.parent,
@@ -420,7 +434,7 @@ def capture_release_apple_toolchain(
             clang,
             developer_directory=developer_directory,
             label="selected clang",
-            maximum=MAX_LINKER_TOOL_BYTES,
+            maximum=MAX_CLANG_TOOL_BYTES,
             executable=True,
         ),
         "deployment_target": deployment_target,
@@ -554,7 +568,7 @@ def _validate_apple_toolchain_binding_shape(
     _validate_file_binding(
         value["clang"],
         label="recorded clang",
-        maximum=MAX_LINKER_TOOL_BYTES,
+        maximum=MAX_CLANG_TOOL_BYTES,
     )
     _validate_file_binding(
         value["ld"],
@@ -603,6 +617,26 @@ def validate_recorded_release_apple_toolchain(
     return value
 
 
+def main() -> None:
+    """Fail fast on the exact production Apple linker-input contract."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.parse_args()
+    repository = Path(__file__).resolve().parent.parent
+    try:
+        observed = capture_release_apple_toolchain(repository)
+    except (OSError, ReleaseAppleToolchainError) as error:
+        raise SystemExit(f"error: Apple release toolchain: {error}") from error
+    binding = observed.binding
+    print(
+        "Apple release toolchain verified: "
+        f"Xcode {binding['xcode_version']} ({binding['xcode_build_version']}), "
+        f"clang={binding['clang']['size']} bytes, "
+        f"ld={binding['ld']['size']} bytes, "
+        f"macOS SDK {binding['sdk']['version']}"
+    )
+
+
 __all__ = [
     "APPLE_TOOLCHAIN_DOCUMENT",
     "APPLE_TOOLCHAIN_SCHEMA_VERSION",
@@ -612,3 +646,7 @@ __all__ = [
     "capture_release_apple_toolchain",
     "validate_recorded_release_apple_toolchain",
 ]
+
+
+if __name__ == "__main__":
+    main()

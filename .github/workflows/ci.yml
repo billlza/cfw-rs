@@ -88,10 +88,10 @@ jobs:
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' prepare-cargo-workspace-inputs
       - name: Install pinned release identity tools
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' bootstrap-policy-tools
+      - name: Assert Apple Silicon host
+        run: ./scripts/assert_apple_silicon.sh
       - name: Assert pinned Apple toolchain
-        run: |
-          ./scripts/assert_apple_silicon.sh
-          test "$(/usr/bin/xcodebuild -version)" = $'Xcode 26.6\nBuild version 17F113'
+        run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' apple-toolchain
       - name: Verify build-script boundary
         run: ./scripts/run_release_ci_gate.sh --validation-python-executable '${{ steps.validation-python.outputs.python-path }}' build-script-boundary
       - name: Audit deterministic CI lanes for masking and toolchain drift

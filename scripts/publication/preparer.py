@@ -19,6 +19,7 @@ from .common import (
 from .graph_collectors import collect_all
 from .graph_model import CollectedGraphs, ComponentSeed, RELEASE_VERSION, load_pins, run
 from .license_resolution import resolve_license
+from .release_app_verifier import verify_release_app
 from .release_environment import release_tool_environment
 from .release_contract import (
     PRODUCT_NAME,
@@ -240,20 +241,13 @@ def prepare(
     require_fixed_path(output, fixed_output, "prepared evidence")
     if output.exists() or output.is_symlink():
         raise PublicationError(f"refusing to replace prepared publication evidence: {output}")
+    verify_release_app(
+        repository=repository,
+        environment=release_environment,
+    )
     build_identity = bundle_build_identity(app)
-    native_products = release_native_products_root(repository, build_identity.build_version)
-    run(
-        [
-            "/bin/bash",
-            "-p",
-            str(repository / "scripts/verify_release_app.sh"),
-            str(app),
-            str(native_products),
-            "--context",
-            "canonical-native-content",
-        ],
-        repository,
-        release_environment,
+    native_products = release_native_products_root(
+        repository, build_identity.build_version
     )
     _require_clean_repository(repository, release_environment)
     collected = _complete_collected_graphs(

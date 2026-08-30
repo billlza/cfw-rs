@@ -95,11 +95,15 @@ from scripts.harness.raw_artifacts import (
 )
 from scripts.publication.common import tree_digest
 from scripts.tests.performance_evidence_fixture import build_performance_report
+from scripts.tests.release_app_verifier_fixture import (
+    complete_verifier_stderr,
+    complete_verifier_stdout,
+)
 
 
 APP_MANIFEST = "a" * 64
 SIGNED_TREE = "b" * 64
-BUILD_NUMBER = "40036"
+BUILD_NUMBER = "40037"
 BUILT_AT = "2026-07-01T00:00:00Z"
 CAPTURED_AT = "2026-07-27T12:00:00Z"
 PERFORMANCE_COMPLETED_AT = "2026-07-27T15:20:00Z"
@@ -2308,32 +2312,20 @@ class PhysicalEvidenceFixture:
         identity_finished = identity_started + timedelta(seconds=1)
         identity_app = (
             "/fixture/repository/"
-            "target/candidates/0.4.0/ga/40036/signed/Clash for Mac.app"
+            "target/candidates/0.4.0/ga/40037/signed/Clash for Mac.app"
         )
-        identity_stdout = (
-            f"release app verified: {identity_app}\n"
-            "identity: YKUPL7Z869 / com.bill.clashformac / "
-            "com.bill.clashformac.packet-tunnel / "
-            "com.bill.clashformac.proxy-agent\n"
-            "platform: arm64 / macOS 15.0+\n"
-            "build number: 40036\n"
-        )
-        identity_stderr = (
-            f"{identity_app}: valid on disk\n"
-            f"{identity_app}: satisfies its Designated Requirement\n"
-        )
+        identity_stdout_bytes = complete_verifier_stdout(identity_app)
+        identity_stderr_bytes = complete_verifier_stderr(identity_app)
+        identity_stdout = identity_stdout_bytes.decode("utf-8")
+        identity_stderr = identity_stderr_bytes.decode("utf-8")
         identity_command = {
             "role": IDENTITY_VERIFIER_ROLE,
             "command": list(IDENTITY_FIXED_COMMAND),
             "command_sha256": IDENTITY_FIXED_COMMAND_SHA256,
             "exit_code": 0,
             "duration_ms": 1000,
-            "stdout_sha256": hashlib.sha256(
-                identity_stdout.encode("utf-8")
-            ).hexdigest(),
-            "stderr_sha256": hashlib.sha256(
-                identity_stderr.encode("utf-8")
-            ).hexdigest(),
+            "stdout_sha256": hashlib.sha256(identity_stdout_bytes).hexdigest(),
+            "stderr_sha256": hashlib.sha256(identity_stderr_bytes).hexdigest(),
             "stdout": identity_stdout,
             "stderr": identity_stderr,
         }

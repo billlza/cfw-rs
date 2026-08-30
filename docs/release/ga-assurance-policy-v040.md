@@ -10,14 +10,14 @@ passes for the single candidate below.
 
 ## One releasable application identity
 
-Build 40036 is the only application identity signed, notarized, installed,
+Build 40037 is the only application identity signed, notarized, installed,
 accepted, and published for the v0.4.0 GA. The DMG and updater archive will be
-two distribution envelopes around the exact same 40036 application tree, not
+two distribution envelopes around the exact same 40037 application tree, not
 separate application candidates.
 
 Build 40030 must not be built, signed, submitted to Apple, installed, or used as
-a substitute for 40036 evidence. It is recorded as
-`retired_unbuilt_policy_superseded`; 40036 is the single `active_ga` build.
+a substitute for 40037 evidence. It is recorded as
+`retired_unbuilt_policy_superseded`; 40037 is the single `active_ga` build.
 
 Build 40031 completed candidate freeze and began one private signing attempt,
 but no canonical signed output or notarization submission was produced. It is
@@ -25,7 +25,7 @@ permanently recorded as
 `retired_after_candidate_freeze_before_canonical_signing_output`; its frozen
 root and failed attempt remain immutable under
 [`ga-build-40031-retirement.md`](ga-build-40031-retirement.md). Build 40031
-must not be rebuilt, resumed, promoted, installed, or substituted for 40036.
+must not be rebuilt, resumed, promoted, installed, or substituted for 40037.
 
 Build 40032 also completed candidate freeze and began one private signing
 attempt. Five nested products were signed, but the fixed verifier rejected the
@@ -34,7 +34,7 @@ contracts differed. No canonical signed output or notarization submission was
 produced. Build 40032 is permanently recorded with the same consumed status;
 its frozen root and failed attempt remain immutable under
 [`ga-build-40032-retirement.md`](ga-build-40032-retirement.md). It must not be
-resumed, rebuilt, promoted, installed, or substituted for 40036.
+resumed, rebuilt, promoted, installed, or substituted for 40037.
 
 Build 40033 completed candidate freeze and began one private signing attempt.
 Five nested products were signed, but the private helper's `umask 077` caused
@@ -44,7 +44,7 @@ signing. No canonical signed output or notarization submission was produced.
 Build 40033 is permanently recorded with the same consumed status; its frozen
 root and failed attempt remain immutable under
 [`ga-build-40033-retirement.md`](ga-build-40033-retirement.md). It must not be
-resumed, rebuilt, promoted, installed, or substituted for 40036.
+resumed, rebuilt, promoted, installed, or substituted for 40037.
 
 Build 40034 completed candidate freeze and one private signing attempt. Its
 five nested roles and outer Host were correctly Developer ID signed, but the
@@ -53,7 +53,7 @@ pre-sign lineage fields. The fail-closed verifier rejected the attempt before
 canonical output or notarization. Build 40034 is permanently recorded with the
 same consumed status; its frozen root and failed attempt remain immutable under
 [`ga-build-40034-retirement.md`](ga-build-40034-retirement.md). It must not be
-resumed, rebuilt, promoted, installed, or substituted for 40036.
+resumed, rebuilt, promoted, installed, or substituted for 40037.
 
 Build 40035 completed candidate freeze and entered one private signing attempt.
 The attempt terminated with `signed_output_verification_failed` during complete
@@ -62,7 +62,16 @@ The durable journal does not identify a narrower failing substage. Build 40035
 is permanently recorded with the same consumed status; its frozen root and
 failed attempt remain immutable under
 [`ga-build-40035-retirement.md`](ga-build-40035-retirement.md). It must not be
-resumed, rebuilt, promoted, installed, or substituted for 40036.
+resumed, rebuilt, promoted, installed, or substituted for 40037.
+
+Build 40036 completed candidate freeze, canonical Developer ID signing, Apple
+notarization, stapling, and Gatekeeper assessment. Publication preparation then
+exposed verifier and code-closure contract defects whose correction changes the
+tracked release-source identity bound into the frozen product input. Build
+40036 is permanently recorded as `retired_after_notarization_before_install`;
+its signed lineage and receipts remain immutable under
+[`ga-build-40036-retirement.md`](ga-build-40036-retirement.md). It must not be
+resumed, rebuilt, installed, packaged, promoted, or substituted for 40037.
 
 No further build pair may be allocated for a source, CI, documentation, test,
 verifier, or preflight failure that occurs before an application candidate is
@@ -127,7 +136,7 @@ Every GA-required gate is explicit and fail closed. The GA manifest must bind:
 - the signed and notarized DMG seal, plus an updater archive, updater signature,
   manifest, official URL, and exact application-tree binding when updater
   publication is enabled;
-- an exact-DMG install and 40019-to-40036 migration on a fixed Apple Silicon
+- an exact-DMG install and 40019-to-40037 migration on a fixed Apple Silicon
   GA environment, including launch, service registration, System Extension and
   Network Extension approval, and real TCP, UDP, and DNS traffic;
 - shutdown and restoration of Network Extension, proxy, DNS, and route state;
@@ -166,7 +175,7 @@ pending, foreign-environment, or mixed-candidate export cannot authorize GA
 acceptance.
 
 The fixed container path is
-`target/candidates/0.4.0/ga/40036/stage-inputs/ga-acceptance/migration-journals`.
+`target/candidates/0.4.0/ga/40037/stage-inputs/ga-acceptance/migration-journals`.
 It contains exactly the private `dormant-install.json`, the complete
 `service-transaction` directory, `export-intent.json`, and
 `export-receipt.json`. The sole environment document is
@@ -220,7 +229,7 @@ a GA product failure.
 The implementation must expose three closed stages without skip flags or
 fallback success:
 
-1. `prepackage` verifies the exact 40036 application, source and CI identity,
+1. `prepackage` verifies the exact 40037 application, source and CI identity,
    signing, notarization, Gatekeeper result, and license/source closure. Only a
    passing prepackage manifest may create the candidate DMG and updater sets.
 2. `ga-acceptance` freezes and binds the DMG and updater set seals, then installs
@@ -253,11 +262,12 @@ override may turn missing evidence into success.
 
 The release-policy implementation must preserve all of these invariants:
 
-1. replaces the validation/final pair with one enforced `ga_build=40036`;
-2. keeps build 40030 unbuilt and builds 40031/40032/40033/40034/40035
-   consumed, failed, and permanently outside every active notarization,
-   installation, and review path;
-3. performs the existing guarded 40019-to-40036 migration directly;
+1. replaces the validation/final pair with one enforced `ga_build=40037`;
+2. keeps build 40030 unbuilt; builds 40031/40032/40033/40034/40035 consumed and
+   failed; and build 40036 consumed, notarized, then retired before install;
+   all remain permanently outside every active notarization, installation, and
+   review path;
+3. performs the existing guarded 40019-to-40037 migration directly;
 4. splits prepackage authorization from final publication authorization;
 5. binds exact-DMG acceptance and updater-set identity before upload;
 6. extracts the shared GA artifact core from the current final-candidate graph;
@@ -270,6 +280,6 @@ The release-policy implementation must preserve all of these invariants:
 
 All nine items and their fail-closed tests are required together. Even when the
 source implementation passes, ordinary GA authorization exists only after the
-immutable 40036 prepackage, GA-acceptance, and publication stages have each
+immutable 40037 prepackage, GA-acceptance, and publication stages have each
 reopened and accepted their real inputs. The assurance extension cannot replace
 a missing GA stage.

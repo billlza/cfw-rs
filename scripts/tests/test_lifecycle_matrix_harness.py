@@ -140,7 +140,7 @@ class LifecycleMatrixTests(unittest.TestCase):
         ).hexdigest()
         self.fixture.rewrite_json(descriptor, observation)
         self.fixture.rewrite_json(probe["artifact"], event)
-        with self.assertRaisesRegex(LifecycleMatrixError, "warning or error"):
+        with self.assertRaisesRegex(LifecycleMatrixError, "verifier output is invalid"):
             self.validate()
 
     def test_identity_observation_duration_must_match_timestamps(self) -> None:
@@ -171,7 +171,14 @@ class LifecycleMatrixTests(unittest.TestCase):
 
     def test_valid_but_foreign_identity_batch_cannot_be_spliced(self) -> None:
         probe, event, descriptor, observation = self.named_observation("provisioning")
-        observation["command"]["stdout"] += "additional verified detail\n"
+        observation["command"]["stdout"] = observation["command"]["stdout"].replace(
+            (
+                "origin-status=not-reported-by-spctl, "
+                "identity-source=codesign-leaf-authority"
+            ),
+            "origin-status=reported-by-spctl, identity-source=spctl-origin",
+            1,
+        )
         observation["command"]["stdout_sha256"] = hashlib.sha256(
             observation["command"]["stdout"].encode("utf-8")
         ).hexdigest()

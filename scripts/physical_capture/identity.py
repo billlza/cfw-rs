@@ -19,12 +19,15 @@ from scripts.harness.lifecycle_matrix import (
     IDENTITY_GA_BUILD,
     IDENTITY_FIXED_COMMAND,
     IDENTITY_FIXED_COMMAND_SHA256,
+    IDENTITY_FINAL_APP_RELATIVE,
+    IDENTITY_FINAL_NATIVE_PRODUCTS_RELATIVE,
     IDENTITY_OBSERVATION_DOCUMENT,
     IDENTITY_OBSERVATION_SCHEMA_VERSION,
     IDENTITY_OBSERVATION_MAXIMUM_BYTES,
     IDENTITY_PROBE_IDS,
     IDENTITY_VERIFIER_OUTPUT_LIMIT,
     IDENTITY_VERIFIER_ROLE,
+    IDENTITY_VERIFIER_TIMEOUT_SECONDS,
     LifecycleMatrixError,
     PROBE_SPECS,
     parse_lifecycle_environment,
@@ -68,9 +71,9 @@ from scripts.physical_capture.session import (
 GA_VERSION: Final = PRODUCT_VERSION
 GA_BUILD: Final = GA_RELEASE_BUILD
 VERIFIER_RELATIVE: Final = Path(IDENTITY_FIXED_COMMAND[0])
-FINAL_APP_RELATIVE: Final = Path(IDENTITY_FIXED_COMMAND[1])
-FINAL_NATIVE_PRODUCTS_RELATIVE: Final = Path(IDENTITY_FIXED_COMMAND[2])
-VERIFIER_TIMEOUT_SECONDS: Final = 600.0
+FINAL_APP_RELATIVE: Final = Path(IDENTITY_FINAL_APP_RELATIVE)
+FINAL_NATIVE_PRODUCTS_RELATIVE: Final = Path(IDENTITY_FINAL_NATIVE_PRODUCTS_RELATIVE)
+VERIFIER_TIMEOUT_SECONDS: Final = float(IDENTITY_VERIFIER_TIMEOUT_SECONDS)
 OBSERVATION_DIRECTORY: Final = "raw/lifecycle/observations"
 
 _PROOF_CANDIDATE_FIELDS: Final = (
@@ -150,12 +153,7 @@ def _fixed_command(repository: Path) -> tuple[CommandSpec, Path]:
     return (
         CommandSpec(
             role=IDENTITY_VERIFIER_ROLE,
-            argv=(
-                str(repository / VERIFIER_RELATIVE),
-                str(app),
-                str(repository / FINAL_NATIVE_PRODUCTS_RELATIVE),
-                *IDENTITY_FIXED_COMMAND[3:],
-            ),
+            argv=(str(repository / VERIFIER_RELATIVE),),
             cwd=repository,
             timeout_seconds=VERIFIER_TIMEOUT_SECONDS,
             accepted_exit_codes=frozenset({0}),

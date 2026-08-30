@@ -18,7 +18,7 @@ from scripts import verify_legacy_tombstone_provenance as provenance
 
 
 class LegacyTombstoneProvenanceTests(unittest.TestCase):
-    BUILD_NUMBER = "40036"
+    BUILD_NUMBER = "40037"
     DEPLOYMENT_TARGET = "15.0"
     RUST_VERSION = "1.97.1"
 
@@ -415,7 +415,7 @@ class LegacyTombstoneProvenanceTests(unittest.TestCase):
             self.verify(build_number="40034")
 
     def test_retired_candidate_build_is_rejected_even_when_coherent(self) -> None:
-        for build_number in ("40034", "40035"):
+        for build_number in ("40034", "40035", "40036"):
             with self.subTest(build_number=build_number):
                 metadata = self.base_metadata()
                 metadata["buildNumber"] = build_number

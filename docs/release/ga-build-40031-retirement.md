@@ -55,7 +55,9 @@ after build 40031 was consumed, so build 40032 became its successor. Build
 `ga-build-40032-retirement.md`. Build 40033 was later consumed and retired in
 `ga-build-40033-retirement.md`. Build 40034 was later consumed and retired in
 `ga-build-40034-retirement.md`. Build 40035 was later consumed and retired in
-`ga-build-40035-retirement.md`. Build 40036 is now the only active GA identity
+`ga-build-40035-retirement.md`. Build 40036 was later signed, notarized, and
+retired before install; its history is recorded in
+`ga-build-40036-retirement.md`. Build 40037 is now the only active GA identity
 and must repeat the complete source, hosted-CI, build, signing, notarization,
 package, installation, runtime, and publication evidence sequence. No
 application tree, profile, possession proof, signature, manifest, attempt file,

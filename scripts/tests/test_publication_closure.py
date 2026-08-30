@@ -16,9 +16,19 @@ from scripts.publication.closure import (
 from scripts.publication.common import PublicationError
 
 
+EXPECTED_CODE_PATHS = {
+    "Contents/MacOS/clash-for-mac",
+    "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/CFWNativeBridge",
+    "Contents/Library/HelperTools/CFWGlobalAuthority",
+    "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/MacOS/CFWProxyAgent",
+    "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/MacOS/CFWPacketTunnel",
+    "Contents/Library/HelperTools/cfw-helper-tombstone",
+}
+
+
 class PublicationClosureTests(unittest.TestCase):
     def make_app_code(self, app: Path) -> None:
-        for relative in ALLOWED_CODE_PATHS:
+        for relative in EXPECTED_CODE_PATHS:
             path = app / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"MZfixture")
@@ -40,6 +50,17 @@ class PublicationClosureTests(unittest.TestCase):
             self.make_app_code(app)
             scan_app_code(app, fixture=False)
 
+    def test_code_closure_matches_independent_product_contract(self) -> None:
+        self.assertEqual(ALLOWED_CODE_PATHS, EXPECTED_CODE_PATHS)
+
+    def test_missing_global_authority_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "Clash for Mac.app"
+            self.make_app_code(app)
+            (app / "Contents/Library/HelperTools/CFWGlobalAuthority").unlink()
+            with self.assertRaisesRegex(PublicationError, "code closure is incomplete"):
+                scan_app_code(app, fixture=False)
+
     def test_reference_reverse_tree_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory) / "Clash for Mac.app"
@@ -60,7 +81,7 @@ class PublicationClosureTests(unittest.TestCase):
         )
 
     def test_prepackage_evidence_has_no_future_stage_dependency(self) -> None:
-        root = Path("target/candidates/0.4.0/ga/40036")
+        root = Path("target/candidates/0.4.0/ga/40037")
         sources = _prepackage_evidence_sources(root)
         self.assertEqual(
             set(sources),

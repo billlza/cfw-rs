@@ -62,7 +62,9 @@ be copied forward as successful evidence.
 That successor plan was later superseded: policy retired build 40030 unbuilt,
 and builds 40031, 40032, 40033, and 40034 were each retired after candidate
 freeze but before canonical signing output. Build 40035 was later consumed and
-retired under the same lifecycle classification. Build 40036 is the only active
-GA allocation; see `ga-build-40031-retirement.md`,
+retired under the same lifecycle classification. Build 40036 was later signed,
+notarized, and retired before install. Build 40037 is the only active GA
+allocation; see `ga-build-40031-retirement.md`,
 `ga-build-40032-retirement.md`, `ga-build-40033-retirement.md`, and
-`ga-build-40034-retirement.md`, plus `ga-build-40035-retirement.md`.
+`ga-build-40034-retirement.md`, plus `ga-build-40035-retirement.md` and
+`ga-build-40036-retirement.md`.

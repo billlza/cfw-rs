@@ -81,7 +81,7 @@ class ReleaseIdentity:
         canonical_build_version(self.ga_build, "active GA build")
 
 
-ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40036")
+ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40037")
 UNSIGNED_VALIDATION_BUILD = "40000"
 SIGNING_OUTPUT_RELATIVE = Path("signing-output")
 SIGNING_INPUT_NAME = "signing-input"

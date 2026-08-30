@@ -5,7 +5,7 @@ The only production state transition is::
     prepackage -> ga-acceptance -> publication
 
 Each stage is derived by reopening every required input and validating the
-exact 40036 identity.  State mutation is owned by ``orchestrator``; this module
+exact 40037 identity.  State mutation is owned by ``orchestrator``; this module
 only composes expected bytes and reopens immutable evidence.
 Assurance-only physical, performance, and capability-report evidence is kept
 outside this graph and can never satisfy a missing GA-required input.
@@ -19,7 +19,6 @@ from pathlib import Path
 import stat
 from typing import Any, Final
 
-from .bounded_process import BoundedProcessError, run_bounded_process
 from .common import (
     MAX_JSON_BYTES,
     PublicationError,
@@ -38,6 +37,7 @@ from .durable_file import (
     read_private_directory_contents_locked,
 )
 from .graph_model import load_pins
+from .release_app_verifier import verify_release_app
 from .release_environment import release_tool_environment
 from .sealed_manifest import validate_ci_lane_document
 from scripts.candidate_artifact_binding import (
@@ -146,7 +146,6 @@ STAGE_SCHEMA_VERSIONS: Final = {
     "ga-acceptance": 2,
     "publication": 2,
 }
-MAX_COMMAND_OUTPUT: Final = 8 * 1024 * 1024
 
 STAGE_DOCUMENTS: Final = {
     "prepackage": PREPACKAGE_DOCUMENT,
@@ -314,26 +313,6 @@ def _require_private_regular(path: Path) -> None:
         raise PublicationError(f"GA adapter is not one owned 0600 regular file: {path}")
 
 
-def _run_checked(
-    command: list[str],
-    repository: Path,
-    environment: dict[str, str],
-    label: str,
-) -> None:
-    try:
-        completed = run_bounded_process(
-            command,
-            cwd=repository,
-            environment=environment,
-            timeout=900,
-            output_limit=MAX_COMMAND_OUTPUT,
-        )
-    except (OSError, BoundedProcessError) as error:
-        raise PublicationError(f"{label} did not complete in its closed process boundary") from error
-    if completed.returncode != 0:
-        raise PublicationError(f"{label} failed with exit code {completed.returncode}")
-
-
 def _release_environment(repository: Path) -> dict[str, str]:
     pins = load_pins(repository / "scripts/dependency_pins.env")
     return release_tool_environment(repository, pins)
@@ -342,19 +321,9 @@ def _release_environment(repository: Path) -> dict[str, str]:
 def _validate_release_application(
     repository: Path, environment: dict[str, str]
 ) -> None:
-    _run_checked(
-        [
-            "/bin/bash",
-            "-p",
-            str(repository / "scripts/verify_release_app.sh"),
-            str(_path(repository, SIGNED_APP)),
-            str(_path(repository, GA_NATIVE_PRODUCTS)),
-            "--context",
-            "canonical-native-content",
-        ],
-        repository,
-        environment,
-        "GA signed application verification",
+    verify_release_app(
+        repository=repository,
+        environment=environment,
     )
 
 
@@ -371,7 +340,7 @@ def _verify_publication_adapter(repository: Path) -> None:
         or release_contract.evidence_root(repository) != expected_evidence
     ):
         raise PublicationError(
-            "GA publication verifier adapter is not migrated to ga/40036; "
+            "GA publication verifier adapter is not migrated to ga/40037; "
             "legacy path fallback is forbidden"
         )
 
@@ -482,8 +451,8 @@ def _verified_prepackage_inputs(
         verify_ga_workspace_path_preconditions(repository)
     except ReleaseWorkspaceError as error:
         raise PublicationError(str(error)) from error
-    if (PRODUCT_VERSION, GA_BUILD) != ("0.4.0", "40036"):
-        raise PublicationError("prepackage requires the fixed v0.4.0/40036 identity")
+    if (PRODUCT_VERSION, GA_BUILD) != ("0.4.0", "40037"):
+        raise PublicationError("prepackage requires the fixed v0.4.0/40037 identity")
     try:
         frozen = verify_frozen_candidate(repository)
     except CandidateFreezeError as error:
@@ -612,7 +581,7 @@ def _verified_prepackage_inputs(
         bundle_identity.product_version != PRODUCT_VERSION
         or bundle_identity.build_version != GA_BUILD
     ):
-        raise PublicationError("signed application is not exactly v0.4.0/40036")
+        raise PublicationError("signed application is not exactly v0.4.0/40037")
     environment = _release_environment(repository)
     _validate_release_application(repository, environment)
 
@@ -831,7 +800,7 @@ def _require_artifact_set_adapter(repository: Path):
     expected = _repo_relative(repository, _path(repository, SIGNED_APP))
     if release_artifact_set.CANDIDATE_APP_RELATIVE != expected:
         raise PublicationError(
-            "GA package verifier adapter is not migrated to ga/40036; "
+            "GA package verifier adapter is not migrated to ga/40037; "
             "legacy package fallback is forbidden"
         )
     return release_artifact_set
@@ -1005,7 +974,7 @@ def _require_migration_matches_prepackage(
         ) from error
     if not closed_migration:
         raise PublicationError(
-            "install journal is not a closed 40019 to 40036 migration"
+            "install journal is not a closed 40019 to 40037 migration"
         )
     if not candidate_matches:
         raise PublicationError(
@@ -1295,9 +1264,9 @@ def self_check(repository: Path) -> None:
     repository = _canonical_source_repository(repository)
     if (
         ACTIVE_RELEASE_IDENTITY.product_version != "0.4.0"
-        or ACTIVE_RELEASE_IDENTITY.ga_build != "40036"
+        or ACTIVE_RELEASE_IDENTITY.ga_build != "40037"
         or _path(repository, GA_ROOT)
-        != repository / "target/candidates/0.4.0/ga/40036"
+        != repository / "target/candidates/0.4.0/ga/40037"
         or STAGES != ("prepackage", "ga-acceptance", "publication")
         or STAGE_SCHEMA_VERSIONS
         != {"prepackage": 1, "ga-acceptance": 2, "publication": 2}

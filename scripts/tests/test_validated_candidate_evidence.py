@@ -18,26 +18,31 @@ class RetiredValidatedCandidateEvidenceTests(unittest.TestCase):
         )
 
     def test_in_process_entrypoint_fails_explicitly(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "single frozen GA 40036"):
+        with self.assertRaisesRegex(SystemExit, "single frozen GA 40037"):
             validated_candidate_evidence.main([])
 
     def test_cli_rejects_old_review_arguments(self) -> None:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(REPOSITORY / "scripts/validated_candidate_evidence.py"),
-                "target/candidates/0.4.0/review/validated-candidate.json",
-                "--final-build-number",
-                "40035",
-            ],
-            cwd=REPOSITORY,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        for retired_build in ("40035", "40036"):
+            with self.subTest(retired_build=retired_build):
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(REPOSITORY / "scripts/validated_candidate_evidence.py"),
+                        "target/candidates/0.4.0/review/validated-candidate.json",
+                        "--final-build-number",
+                        retired_build,
+                    ],
+                    cwd=REPOSITORY,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
 
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("validated-candidate evidence is retired", completed.stderr)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "validated-candidate evidence is retired",
+                    completed.stderr,
+                )
 
 
 if __name__ == "__main__":

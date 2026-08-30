@@ -934,8 +934,7 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             "make_dmg.sh": (2, 2),
             "make_updater_manifest.sh": (1, 1),
             "release_publication_gate.sh": (1, 1),
-            "publication/ga_release_contract.py": (1, 1),
-            "publication/preparer.py": (1, 1),
+            "run_release_app_verifier.sh": (1, 1),
             "dormant_app_install.py": (2, 1),
         }
         for relative, counts in expected_canonical_calls.items():
@@ -948,6 +947,22 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                 self.assertEqual(
                     source.count("canonical-native-content"), context_count
                 )
+
+        for relative in (
+            "publication/ga_release_contract.py",
+            "publication/preparer.py",
+        ):
+            with self.subTest(adapter_caller=relative):
+                source = (SCRIPTS / relative).read_text(encoding="utf-8")
+                self.assertEqual(source.count("verify_release_app("), 1)
+                self.assertNotIn("verify_release_app.sh", source)
+                self.assertNotIn("canonical-native-content", source)
+
+        adapter = (SCRIPTS / "publication/release_app_verifier.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(adapter.count("verify_release_app.sh"), 1)
+        self.assertEqual(adapter.count("canonical-native-content"), 1)
 
         release_verifier = (SCRIPTS / "verify_release_app.sh").read_text(
             encoding="utf-8"

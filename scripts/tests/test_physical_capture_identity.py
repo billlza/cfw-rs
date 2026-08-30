@@ -4,6 +4,7 @@ import copy
 import hashlib
 import inspect
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -31,6 +32,10 @@ from scripts.physical_capture.session import (
     CaptureEvent,
     CaptureState,
     PhysicalCaptureSession,
+)
+from scripts.tests.release_app_verifier_fixture import (
+    complete_verifier_stderr,
+    complete_verifier_stdout,
 )
 
 
@@ -128,21 +133,9 @@ class IdentityProbeTests(unittest.TestCase):
         completed_at: str = "2026-08-02T00:00:01.000Z",
     ) -> CommandResult:
         if stdout is None:
-            stdout = (
-                f"release app verified: {self.app}\n"
-                "identity: YKUPL7Z869 / com.bill.clashformac / "
-                "com.bill.clashformac.packet-tunnel / "
-                "com.bill.clashformac.proxy-agent\n"
-                "platform: arm64 / macOS 15.0+\n"
-                f"build number: {identity.GA_BUILD}\n"
-            ).encode("utf-8")
+            stdout = complete_verifier_stdout(str(self.app), identity.GA_BUILD)
         if stderr is None:
-            stderr = (
-                f"--prepared:{self.app}/Contents\n"
-                f"--validated:{self.app}/Contents\n"
-                f"{self.app}: valid on disk\n"
-                f"{self.app}: satisfies its Designated Requirement\n"
-            ).encode("utf-8")
+            stderr = complete_verifier_stderr(str(self.app))
         return CommandResult(
             role=spec.role,
             argv_sha256=command_sha256(spec.argv),
@@ -170,13 +163,7 @@ class IdentityProbeTests(unittest.TestCase):
         spec = runner.call_args.args[0]
         self.assertEqual(
             spec.argv,
-            (
-                str(self.repository / identity.VERIFIER_RELATIVE),
-                str(self.app),
-                str(self.repository / identity.FINAL_NATIVE_PRODUCTS_RELATIVE),
-                "--context",
-                "canonical-native-content",
-            ),
+            (str(self.repository / identity.VERIFIER_RELATIVE),),
         )
         self.captured = captured
         return captured
@@ -253,10 +240,10 @@ class IdentityProbeTests(unittest.TestCase):
                 if result_kind == "warning":
                     runner.side_effect = lambda spec: self.command_result(
                         spec,
-                        stdout=(
-                            f"release app verified: {self.app}\n"
-                            "warning: degraded signature verification\n"
-                        ).encode("utf-8"),
+                        stdout=complete_verifier_stdout(
+                            str(self.app), identity.GA_BUILD
+                        )
+                        + b"warning: degraded signature verification\n",
                     )
                     expected_code = "identity_observation_invalid"
                 else:
@@ -365,6 +352,51 @@ class IdentityProbeTests(unittest.TestCase):
         forbidden = {"passed", "exit", "exit_code", "observation", "argv"}
         self.assertTrue(forbidden.isdisjoint(capture_parameters))
         self.assertFalse(hasattr(identity, "materialize_identity_events"))
+
+
+class ReleaseAppVerifierWrapperTests(unittest.TestCase):
+    def test_wrapper_owns_the_sealed_environment_and_fixed_verifier_argv(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        wrapper = repository / "scripts/run_release_app_verifier.sh"
+        source = wrapper.read_text(encoding="utf-8")
+        self.assertTrue(wrapper.stat().st_mode & 0o111)
+        for required in (
+            'source "$repo_root/scripts/dependency_pins.env"',
+            'source "$repo_root/scripts/release_tool_environment.sh"',
+            "cfw_seal_release_tool_environment production",
+            "cfw_select_release_apple_toolchain",
+            'exec /bin/bash -p \\\n  "$repo_root/scripts/verify_release_app.sh"',
+            "--context canonical-native-content",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, source)
+        self.assertIn("[[ $# -ne 0 ]]", source)
+        self.assertNotIn('"$@"', source)
+
+    def test_wrapper_rejects_arguments_before_environment_bootstrap(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        wrapper = repository / "scripts/run_release_app_verifier.sh"
+        completed = subprocess.run(
+            [str(wrapper), "unexpected"],
+            cwd="/",
+            env={
+                "ADB_MDNS": "0",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            },
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, b"")
+        self.assertEqual(
+            completed.stderr,
+            b"error: the release app verifier wrapper accepts no arguments\n",
+        )
 
 
 if __name__ == "__main__":

@@ -66,7 +66,9 @@ The failure outcome is known and terminal.
 The shared tombstone-promotion verifier and its regression tests change tracked
 release source after build 40034 was consumed. Build 40035 became its successor
 and was later consumed and retired independently; its history is recorded in
-`ga-build-40035-retirement.md`. Build 40036 is now the only active GA successor.
+`ga-build-40035-retirement.md`. Build 40036 was later signed, notarized, and
+retired before install; its history is recorded in
+`ga-build-40036-retirement.md`. Build 40037 is now the only active GA successor.
 It must start from one new clean source identity and repeat the complete source,
 hosted-CI, build, freeze, signing, notarization, package, installation, runtime,
 and publication evidence sequence. No application tree, profile copy,

@@ -58,7 +58,9 @@ Unifying the verifier path contract changed tracked release source after build
 consumed and retired independently; its history is recorded in
 `ga-build-40033-retirement.md`. Build 40034 was later consumed and retired in
 `ga-build-40034-retirement.md`. Build 40035 was later consumed and retired in
-`ga-build-40035-retirement.md`. Build 40036 is therefore the only active GA
+`ga-build-40035-retirement.md`. Build 40036 was later signed, notarized, and
+retired before install; its history is recorded in
+`ga-build-40036-retirement.md`. Build 40037 is therefore the only active GA
 successor. It must start from one new clean source identity and repeat the
 complete source, hosted-CI, build, freeze, signing, notarization, package,
 installation, runtime, and publication evidence sequence. No application tree,

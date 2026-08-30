@@ -13,12 +13,17 @@ import argparse
 from datetime import datetime
 import hashlib
 import ipaddress
-import os
 from pathlib import Path
 import re
 from typing import Any, Callable
 
 if __package__:
+    from ..release_app_verifier_output import (
+        RELEASE_APP_VERIFIER_OUTPUT_LIMIT,
+        RELEASE_APP_VERIFIER_TIMEOUT_SECONDS,
+        ReleaseAppVerifierOutputError,
+        parse_release_app_verifier_output,
+    )
     from ..release_build_identity import ACTIVE_RELEASE_IDENTITY
     from .physical_machine_identity import (
         BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
@@ -47,6 +52,12 @@ else:  # pragma: no cover - direct-script import path
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from release_app_verifier_output import (
+        RELEASE_APP_VERIFIER_OUTPUT_LIMIT,
+        RELEASE_APP_VERIFIER_TIMEOUT_SECONDS,
+        ReleaseAppVerifierOutputError,
+        parse_release_app_verifier_output,
+    )
     from release_build_identity import ACTIVE_RELEASE_IDENTITY  # type: ignore
     from physical_machine_identity import (  # type: ignore
         BOOT_DOCUMENT as BOOT_ENVIRONMENT_SCHEME,
@@ -170,19 +181,18 @@ IDENTITY_GA_BUILD = ACTIVE_RELEASE_IDENTITY.ga_build
 IDENTITY_OBSERVATION_DOCUMENT = "cfw-physical-identity-observation-v2"
 IDENTITY_OBSERVATION_SCHEMA_VERSION = 2
 IDENTITY_OBSERVATION_MAXIMUM_BYTES = 1024 * 1024
-IDENTITY_VERIFIER_OUTPUT_LIMIT = 384 * 1024
+IDENTITY_VERIFIER_OUTPUT_LIMIT = RELEASE_APP_VERIFIER_OUTPUT_LIMIT
+IDENTITY_VERIFIER_TIMEOUT_SECONDS = RELEASE_APP_VERIFIER_TIMEOUT_SECONDS
 IDENTITY_VERIFIER_ROLE = "release-identity-verifier"
-IDENTITY_FIXED_COMMAND = (
-    "scripts/verify_release_app.sh",
+IDENTITY_FINAL_APP_RELATIVE = (
     f"target/candidates/{ACTIVE_RELEASE_IDENTITY.product_version}/ga/"
-    f"{IDENTITY_GA_BUILD}/signed/Clash for Mac.app",
-    (
-        f"target/candidates/{ACTIVE_RELEASE_IDENTITY.product_version}/ga/"
-        f"{IDENTITY_GA_BUILD}/signing-output/signed-native-products"
-    ),
-    "--context",
-    "canonical-native-content",
+    f"{IDENTITY_GA_BUILD}/signed/Clash for Mac.app"
 )
+IDENTITY_FINAL_NATIVE_PRODUCTS_RELATIVE = (
+    f"target/candidates/{ACTIVE_RELEASE_IDENTITY.product_version}/ga/"
+    f"{IDENTITY_GA_BUILD}/signing-output/signed-native-products"
+)
+IDENTITY_FIXED_COMMAND = ("scripts/run_release_app_verifier.sh",)
 IDENTITY_FIXED_COMMAND_SHA256 = hashlib.sha256(
     canonical_json(list(IDENTITY_FIXED_COMMAND))
 ).hexdigest()
@@ -402,16 +412,6 @@ def _environment(value: Any, label: str = "environment") -> dict[str, Any]:
     }
 
 
-_IDENTITY_DIAGNOSTIC_RE = re.compile(
-    r"(?i)(?:^|[^a-z])(warnings?|errors?)(?:[^a-z]|$)"
-)
-_IDENTITY_CODESIGN_PREFIXES = ("--prepared:", "--validated:")
-_IDENTITY_CODESIGN_SUFFIXES = (
-    ": valid on disk",
-    ": satisfies its Designated Requirement",
-)
-
-
 def parse_lifecycle_environment(
     value: Any, label: str = "environment"
 ) -> dict[str, Any]:
@@ -420,7 +420,7 @@ def parse_lifecycle_environment(
     return _environment(value, label)
 
 
-def _identity_verifier_text(value: Any, label: str) -> tuple[str, bytes]:
+def _identity_verifier_bytes(value: Any, label: str) -> bytes:
     if not isinstance(value, str):
         raise LifecycleMatrixError(f"{label} must be UTF-8 text")
     try:
@@ -429,84 +429,7 @@ def _identity_verifier_text(value: Any, label: str) -> tuple[str, bytes]:
         raise LifecycleMatrixError(f"{label} contains invalid Unicode") from error
     if len(data) > IDENTITY_VERIFIER_OUTPUT_LIMIT:
         raise LifecycleMatrixError(f"{label} exceeds its byte bound")
-    if "\x00" in value:
-        raise LifecycleMatrixError(f"{label} contains a NUL byte")
-    if _IDENTITY_DIAGNOSTIC_RE.search(value) is not None:
-        raise LifecycleMatrixError(f"{label} contains a warning or error diagnostic")
-    return value, data
-
-
-def _identity_candidate_app(stdout: str) -> str:
-    lines = stdout.splitlines()
-    prefix = "release app verified: "
-    app_lines = [line for line in lines if line.startswith(prefix)]
-    if len(app_lines) != 1:
-        raise LifecycleMatrixError(
-            "identity verifier stdout must contain one release-app success line"
-        )
-    app = app_lines[0][len(prefix) :]
-    expected_suffix = "/" + IDENTITY_FIXED_COMMAND[1]
-    if (
-        not os.path.isabs(app)
-        or os.path.normpath(app) != app
-        or not app.endswith(expected_suffix)
-        or len(app) == len(expected_suffix)
-    ):
-        raise LifecycleMatrixError(
-            "identity verifier stdout names a non-final candidate path"
-        )
-    required = {
-        (
-            "identity: YKUPL7Z869 / com.bill.clashformac / "
-            "com.bill.clashformac.packet-tunnel / "
-            "com.bill.clashformac.proxy-agent"
-        ),
-        "platform: arm64 / macOS 15.0+",
-        f"build number: {IDENTITY_GA_BUILD}",
-    }
-    for line in required:
-        if lines.count(line) != 1:
-            raise LifecycleMatrixError(
-                "identity verifier stdout is missing a fixed success assertion"
-            )
-    if any(line.startswith("notarization: pre-submission") for line in lines):
-        raise LifecycleMatrixError(
-            "identity verifier observation used the pre-notary command mode"
-        )
-    return app
-
-
-def _identity_codesign_subject(line: str) -> str | None:
-    for prefix in _IDENTITY_CODESIGN_PREFIXES:
-        if line.startswith(prefix):
-            return line[len(prefix) :]
-    for suffix in _IDENTITY_CODESIGN_SUFFIXES:
-        if line.endswith(suffix):
-            return line[: -len(suffix)]
-    return None
-
-
-def _validate_identity_codesign_stderr(stderr: str, app: str) -> None:
-    lines = [line for line in stderr.splitlines() if line]
-    for line in lines:
-        subject = _identity_codesign_subject(line)
-        if (
-            subject is None
-            or not os.path.isabs(subject)
-            or os.path.normpath(subject) != subject
-            or (subject != app and not subject.startswith(app + os.sep))
-        ):
-            raise LifecycleMatrixError(
-                "identity verifier stderr contains a non-candidate codesign line"
-            )
-    for required in (
-        f"{app}: valid on disk",
-        f"{app}: satisfies its Designated Requirement",
-    ):
-        if lines.count(required) != 1:
-            raise LifecycleMatrixError(
-                "identity verifier stderr lacks the final app codesign result"
-            )
+    return data
 
 
 def _identity_observation_command(value: Any) -> dict[str, Any]:
@@ -515,14 +438,25 @@ def _identity_observation_command(value: Any) -> dict[str, Any]:
         IDENTITY_OBSERVATION_COMMAND_FIELDS,
         "identity observation.command",
     )
-    stdout, stdout_bytes = _identity_verifier_text(
+    stdout_bytes = _identity_verifier_bytes(
         command["stdout"], "identity observation.command.stdout"
     )
-    stderr, stderr_bytes = _identity_verifier_text(
+    stderr_bytes = _identity_verifier_bytes(
         command["stderr"], "identity observation.command.stderr"
     )
-    app = _identity_candidate_app(stdout)
-    _validate_identity_codesign_stderr(stderr, app)
+    try:
+        transcript = parse_release_app_verifier_output(
+            stdout_bytes,
+            stderr_bytes,
+            expected_app_suffix="/" + IDENTITY_FINAL_APP_RELATIVE,
+            expected_build_number=IDENTITY_GA_BUILD,
+        )
+    except ReleaseAppVerifierOutputError as error:
+        raise LifecycleMatrixError(
+            f"identity verifier output is invalid: {error}"
+        ) from error
+    stdout = transcript.stdout
+    stderr = transcript.stderr
     stdout_sha256 = require_sha256(
         command["stdout_sha256"], "identity observation.command.stdout_sha256"
     )
@@ -538,7 +472,7 @@ def _identity_observation_command(value: Any) -> dict[str, Any]:
         or command["exit_code"] != 0
         or type(duration_ms) is not int
         or duration_ms < 1
-        or duration_ms > 600_000
+        or duration_ms > IDENTITY_VERIFIER_TIMEOUT_SECONDS * 1000
         or hashlib.sha256(stdout_bytes).hexdigest() != stdout_sha256
         or hashlib.sha256(stderr_bytes).hexdigest() != stderr_sha256
     ):
@@ -619,7 +553,7 @@ def validate_identity_observation(
         raise LifecycleMatrixError(
             "identity observation predates its complete candidate binding"
         )
-    if not 0 < (finished - started).total_seconds() <= 600:
+    if not 0 < (finished - started).total_seconds() <= IDENTITY_VERIFIER_TIMEOUT_SECONDS:
         raise LifecycleMatrixError("identity observation duration is outside 0..10min")
     command = _identity_observation_command(raw["command"])
     wall_duration_ms = _duration_milliseconds(

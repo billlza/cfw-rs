@@ -216,7 +216,7 @@ class PhysicalEvidenceAggregatorTests(unittest.TestCase):
         self.fixture.rewrite_json(probe["artifact"], raw)
         self.fixture.resign_run(0)
 
-        with self.assertRaisesRegex(PhysicalEvidenceError, "warning or error"):
+        with self.assertRaisesRegex(PhysicalEvidenceError, "verifier output is invalid"):
             self.validate()
 
     def test_static_self_check_accepts_the_source_pinned_policy(self) -> None:

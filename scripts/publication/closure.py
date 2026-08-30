@@ -70,6 +70,7 @@ REQUIRED_ARTIFACT_KINDS = {
 ALLOWED_CODE_PATHS = {
     "Contents/MacOS/clash-for-mac",
     "Contents/Frameworks/CFWNativeBridge.framework/Versions/A/CFWNativeBridge",
+    "Contents/Library/HelperTools/CFWGlobalAuthority",
     "Contents/Library/LoginItems/CFWProxyAgent.app/Contents/MacOS/CFWProxyAgent",
     "Contents/Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension/Contents/MacOS/CFWPacketTunnel",
     "Contents/Library/HelperTools/cfw-helper-tombstone",

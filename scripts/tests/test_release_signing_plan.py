@@ -25,7 +25,7 @@ class ReleaseSigningPlanTests(unittest.TestCase):
         source = self.repository / plan.SOURCE_PLAN_RELATIVE
         source.parent.mkdir(parents=True)
         source.write_text(json.dumps(SOURCE_PLAN), encoding="utf-8")
-        self.root = self.repository / "target/candidates/0.4.0/ga-preflight/40038"
+        self.root = self.repository / "target/candidates/0.4.0/ga-preflight/40039"
         (self.root / "profiles").mkdir(parents=True)
         (self.root / "entitlements").mkdir()
         (self.root / "entitlements/signing-order.json").write_bytes(source.read_bytes())

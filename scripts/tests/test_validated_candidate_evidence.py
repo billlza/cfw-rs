@@ -18,11 +18,11 @@ class RetiredValidatedCandidateEvidenceTests(unittest.TestCase):
         )
 
     def test_in_process_entrypoint_fails_explicitly(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "single frozen GA 40038"):
+        with self.assertRaisesRegex(SystemExit, "single frozen GA 40039"):
             validated_candidate_evidence.main([])
 
     def test_cli_rejects_old_review_arguments(self) -> None:
-        for retired_build in ("40035", "40036", "40037"):
+        for retired_build in ("40035", "40036", "40037", "40038"):
             with self.subTest(retired_build=retired_build):
                 completed = subprocess.run(
                     [

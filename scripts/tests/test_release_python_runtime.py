@@ -62,7 +62,7 @@ class ReleaseEnvironmentBootstrapTests(unittest.TestCase):
             "DYLD_LIBRARY_PATH": "/tmp/untrusted-library",
             "LD_PRELOAD": "/tmp/untrusted-preload.dylib",
             "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
-            "CFW_BUILD_NUMBER": "40038",
+            "CFW_BUILD_NUMBER": "40039",
             "CFW_UNSIGNED_VALIDATION_PYTHON": "/opt/release/bin/python3",
             "NOTARY_PROFILE": "release-profile",
         }
@@ -76,7 +76,7 @@ class ReleaseEnvironmentBootstrapTests(unittest.TestCase):
                 "LANG": "C",
                 "LC_ALL": "C",
                 "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
-                "CFW_BUILD_NUMBER": "40038",
+                "CFW_BUILD_NUMBER": "40039",
                 "CFW_UNSIGNED_VALIDATION_PYTHON": "/opt/release/bin/python3",
                 "NOTARY_PROFILE": "release-profile",
             },
@@ -150,14 +150,54 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
 
         with mock.patch.object(
             release_environment, "run_bounded_process", return_value=completed
-        ), mock.patch.object(
+        ) as process_runner, mock.patch.object(
             release_environment, "identity_output", side_effect=identity
         ):
-            return release_environment.release_tool_environment(
+            result = release_environment.release_tool_environment(
                 REPOSITORY,
                 self.pins,
                 role=self.role,
             )
+        self.last_environment_process_call = process_runner.call_args
+        return result
+
+    def test_environment_construction_has_its_own_bounded_timeout(self) -> None:
+        self.call_with_output(self.encoded(self.baseline))
+        self.assertEqual(
+            release_environment.RELEASE_ENVIRONMENT_TIMEOUT_SECONDS,
+            900,
+        )
+        self.assertEqual(
+            self.last_environment_process_call.kwargs["timeout"],
+            release_environment.RELEASE_ENVIRONMENT_TIMEOUT_SECONDS,
+        )
+
+    def test_identity_process_keeps_the_short_timeout(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["fixture-identity"],
+            returncode=0,
+            stdout=b"fixture identity\n",
+            stderr=b"",
+        )
+        with mock.patch.object(
+            release_environment,
+            "run_bounded_process",
+            return_value=completed,
+        ) as process_runner:
+            self.assertEqual(
+                release_environment.identity_output(
+                    ["fixture-identity"],
+                    REPOSITORY,
+                    "fixture",
+                    {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+                ),
+                "fixture identity",
+            )
+        self.assertEqual(release_environment.IDENTITY_TIMEOUT_SECONDS, 120)
+        self.assertEqual(
+            process_runner.call_args.kwargs["timeout"],
+            release_environment.IDENTITY_TIMEOUT_SECONDS,
+        )
 
     def test_identity_output_is_streaming_bounded(self) -> None:
         command = [

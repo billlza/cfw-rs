@@ -147,7 +147,7 @@ class Fixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.candidate = self.repository / "target/candidates/0.4.0"
-        self.build = self.candidate / "ga/40038"
+        self.build = self.candidate / "ga/40039"
         self.signing_output = self.build / "signing-output"
         self.native = self.signing_output / "signed-native-products"
         self.staging = self.signing_output / "signing-input"
@@ -177,7 +177,7 @@ class Fixture:
             "normalized_app_tree_sha256": "9" * 64,
             "pre_sign_app_manifest_sha256": "a" * 64,
             "pre_sign_app_tree_sha256": "b" * 64,
-            "product": {"build_number": "40038", "version": "0.4.0"},
+            "product": {"build_number": "40039", "version": "0.4.0"},
             "profiles": {
                 "host": "c" * 64,
                 "packet_tunnel": "d" * 64,
@@ -202,7 +202,7 @@ class Fixture:
         self.context = TransactionContext(
             repository=self.repository,
             build_kind="ga",
-            build_number="40038",
+            build_number="40039",
             staged_app=self.app,
             native_products=self.native,
             notary_profile=transaction_module.NOTARY_PROFILE,
@@ -282,7 +282,7 @@ class Fixture:
                     intent_path=self.build / "candidate-freeze/intent.json",
                     intent_sha256="f" * 64,
                     product_version="0.4.0",
-                    build_number="40038",
+                    build_number="40039",
                     recovered=False,
                 )
             ),
@@ -1188,7 +1188,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             intent_path=self.fixture.build / "candidate-freeze/intent.json",
             intent_sha256="f" * 64,
             product_version="0.4.0",
-            build_number="40038",
+            build_number="40039",
             recovered=False,
         )
         mutations = {
@@ -1206,6 +1206,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             "build-40035": replace(exact, build_number="40035"),
             "build-40036": replace(exact, build_number="40036"),
             "build-40037": replace(exact, build_number="40037"),
+            "build-40038": replace(exact, build_number="40038"),
         }
         for label, frozen in mutations.items():
             with self.subTest(label=label):
@@ -1527,18 +1528,18 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         final_app = self.fixture.execute()
         self.assertEqual(
             final_app,
-            self.fixture.candidate / "ga/40038/signed/Clash for Mac.app",
+            self.fixture.candidate / "ga/40039/signed/Clash for Mac.app",
         )
         self.assertEqual(
             context.native_products,
             (
                 self.fixture.candidate
-                / "ga/40038/signing-output/signed-native-products"
+                / "ga/40039/signing-output/signed-native-products"
             ),
         )
         self.assertEqual(
             context.attempt_root,
-            self.fixture.candidate / "ga/40038/transactions/app-notary",
+            self.fixture.candidate / "ga/40039/transactions/app-notary",
         )
         manifest = json.loads(
             (final_app.parent / "Clash for Mac.app.manifest.json").read_text(
@@ -1550,7 +1551,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             manifest["metadata"]["artifactKind"],
             "notarized-ga-candidate-v1",
         )
-        self.assertEqual(manifest["metadata"]["buildNumber"], "40038")
+        self.assertEqual(manifest["metadata"]["buildNumber"], "40039")
 
     def test_nonfixed_notary_profile_is_rejected_before_attempt_or_remote_io(
         self,
@@ -2122,10 +2123,10 @@ class NotarizationRecoveryTests(unittest.TestCase):
 
     def test_current_ga_fixture_continues_once_then_recovers_locally(self) -> None:
         fixture = self._current_ga_failed_finalization_fixture()
-        self.assertEqual(fixture.context.build_number, "40038")
+        self.assertEqual(fixture.context.build_number, "40039")
         self.assertEqual(
             fixture.context.archive_name,
-            "Clash.for.Mac_0.4.0_40038_notary.zip",
+            "Clash.for.Mac_0.4.0_40039_notary.zip",
         )
         attempt_root = fixture.context.attempt_root
         original_event_paths = sorted(
@@ -2152,7 +2153,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
 
         self.assertEqual(
             first,
-            fixture.candidate / "ga/40038/signed/Clash for Mac.app",
+            fixture.candidate / "ga/40039/signed/Clash for Mac.app",
         )
         self.assertTrue(first.is_dir())
         self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
@@ -2294,7 +2295,7 @@ class NotarizationRecoveryTests(unittest.TestCase):
                 / "Clash for Mac.app.manifest.json"
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(final_manifest["metadata"]["buildNumber"], "40038")
+        self.assertEqual(final_manifest["metadata"]["buildNumber"], "40039")
         self.assertEqual(
             final_manifest["metadata"]["repositoryCommit"],
             "a" * 40,
@@ -8065,10 +8066,10 @@ die() {{
   exit 1
 }}
 repo_root=/release
-candidate_root=/release/target/candidates/0.4.0/ga/40038
+candidate_root=/release/target/candidates/0.4.0/ga/40039
 staged_app="$candidate_root/signing-output/signing-input/Clash for Mac.app"
 toolchain_root=/release/target/toolchains
-CFW_BUILD_NUMBER=40038
+CFW_BUILD_NUMBER=40039
 signed_native_products="$candidate_root/signing-output/signed-native-products"
 NOTARY_PROFILE=clashformac-notary
 repository_commit={'a' * 40}
@@ -8119,10 +8120,10 @@ run_isolated_python_script() {{
             "--build-kind",
             "ga",
             "--build-number",
-            "40038",
+            "40039",
             *mode,
             "--native-products",
-            "/release/target/candidates/0.4.0/ga/40038/signing-output/signed-native-products",
+            "/release/target/candidates/0.4.0/ga/40039/signing-output/signed-native-products",
             "--notary-profile",
             "clashformac-notary",
             "--repository-commit",
@@ -8154,7 +8155,7 @@ run_isolated_python_script() {{
     def test_build_and_signing_resume_keep_full_signing_verification(self) -> None:
         staged = (
             "--staged-app",
-            "/release/target/candidates/0.4.0/ga/40038/signing-output/"
+            "/release/target/candidates/0.4.0/ga/40039/signing-output/"
             "signing-input/Clash for Mac.app",
         )
         cases = (
@@ -8228,8 +8229,8 @@ class ShellCleanupContractTests(unittest.TestCase):
     ) -> tuple[bool, bool]:
         with tempfile.TemporaryDirectory() as temporary:
             candidate = Path(temporary) / "target/candidates/0.4.0"
-            preflight = candidate / "ga-preflight/40038"
-            frozen = candidate / "ga/40038"
+            preflight = candidate / "ga-preflight/40039"
+            frozen = candidate / "ga/40039"
             preflight.mkdir(parents=True)
             if freeze_intent_exists:
                 intent = preflight / "candidate-freeze/intent.json"
@@ -8354,6 +8355,7 @@ class AttemptConcurrencyTests(unittest.TestCase):
             "40035",
             "40036",
             "40037",
+            "40038",
         ):
             with self.subTest(build_number=build_number):
                 fixture = Fixture()
@@ -8475,7 +8477,7 @@ class NotarizationCliTests(unittest.TestCase):
         self,
         *,
         build_kind: str = "ga",
-        build_number: str = "40038",
+        build_number: str = "40039",
     ) -> list[str]:
         return [
             "--build-kind",
@@ -8517,7 +8519,7 @@ class NotarizationCliTests(unittest.TestCase):
         mode_arguments: list[str],
         *,
         build_kind: str = "ga",
-        build_number: str = "40038",
+        build_number: str = "40039",
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
@@ -8586,6 +8588,7 @@ class NotarizationCliTests(unittest.TestCase):
             "40035",
             "40036",
             "40037",
+            "40038",
         ):
             with self.subTest(build_number=build_number):
                 result = self._run(
@@ -8594,7 +8597,7 @@ class NotarizationCliTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("invalid choice", result.stderr)
-                self.assertIn("choose from '40038'", result.stderr)
+                self.assertIn("choose from '40039'", result.stderr)
 
     def test_recovery_dispatch_separates_artifact_tool_and_toolchain_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -8605,7 +8608,7 @@ class NotarizationCliTests(unittest.TestCase):
             toolchain_root.mkdir()
             final_app = (
                 artifact_repository
-                / "target/candidates/0.4.0/ga/40038/signed/Clash for Mac.app"
+                / "target/candidates/0.4.0/ga/40039/signed/Clash for Mac.app"
             )
             argv = [
                 str(Path(transaction_module.__file__).resolve()),

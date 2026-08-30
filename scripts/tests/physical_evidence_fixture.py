@@ -103,7 +103,7 @@ from scripts.tests.release_app_verifier_fixture import (
 
 APP_MANIFEST = "a" * 64
 SIGNED_TREE = "b" * 64
-BUILD_NUMBER = "40038"
+BUILD_NUMBER = "40039"
 BUILT_AT = "2026-07-01T00:00:00Z"
 CAPTURED_AT = "2026-07-27T12:00:00Z"
 PERFORMANCE_COMPLETED_AT = "2026-07-27T15:20:00Z"
@@ -2312,7 +2312,7 @@ class PhysicalEvidenceFixture:
         identity_finished = identity_started + timedelta(seconds=1)
         identity_app = (
             "/fixture/repository/"
-            "target/candidates/0.4.0/ga/40038/signed/Clash for Mac.app"
+            "target/candidates/0.4.0/ga/40039/signed/Clash for Mac.app"
         )
         identity_stdout_bytes = complete_verifier_stdout(identity_app)
         identity_stderr_bytes = complete_verifier_stderr(identity_app)

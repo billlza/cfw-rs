@@ -59,7 +59,7 @@ from scripts.dormant_app_install import (
 
 
 OLD = AppIdentity("0.4.0", "40019", "a" * 64)
-NEW = AppIdentity("0.4.0", "40038", "b" * 64)
+NEW = AppIdentity("0.4.0", "40039", "b" * 64)
 CANDIDATE = CandidateIdentity(
     app=NEW,
     manifest_sha256="c" * 64,
@@ -1158,22 +1158,22 @@ class DormantInstallValidationTests(unittest.TestCase):
                 )
         self.assertEqual(captured.exception.code, "candidate_toolchain_override")
 
-    def test_ga_profile_has_one_fixed_40019_to_40038_path_and_journal(self) -> None:
+    def test_ga_profile_has_one_fixed_40019_to_40039_path_and_journal(self) -> None:
         paths = InstallPaths.production()
 
         self.assertEqual(paths.profile, GA_INSTALL_PROFILE)
-        self.assertEqual(paths.profile.build_number, "40038")
+        self.assertEqual(paths.profile.build_number, "40039")
         self.assertEqual(paths.profile.previous_build_number, "40019")
         self.assertEqual(paths.repository, paths.operator_repository)
         self.assertTrue(
             str(paths.candidate_app).endswith(
-                "/target/candidates/0.4.0/ga/40038/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40039/signed/Clash for Mac.app"
             )
         )
         self.assertEqual(
             paths.profile.native_products_relative,
             Path(
-                "target/candidates/0.4.0/ga/40038/signing-output/signed-native-products"
+                "target/candidates/0.4.0/ga/40039/signing-output/signed-native-products"
             ),
         )
         self.assertEqual(paths.journal_name, JOURNAL_NAME)
@@ -1356,11 +1356,11 @@ class DormantInstallValidationTests(unittest.TestCase):
             ".com.bill.clashformac.dormant-install.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         )
 
-    def test_production_candidate_is_fixed_to_40038_ga_root(self) -> None:
+    def test_production_candidate_is_fixed_to_40039_ga_root(self) -> None:
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                "/target/candidates/0.4.0/ga/40038/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40039/signed/Clash for Mac.app"
             )
         )
 

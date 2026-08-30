@@ -63,7 +63,8 @@ consumed and retired independently; its history is recorded in
 `ga-build-40035-retirement.md`. Build 40036 was later signed, notarized, and
 retired before install; its history is recorded in
 `ga-build-40036-retirement.md`. Build 40037 was later consumed and retired in
-`ga-build-40037-retirement.md`. Build 40038 is therefore the only active GA
+`ga-build-40037-retirement.md`. Build 40038 was later consumed and retired in
+`ga-build-40038-retirement.md`. Build 40039 is therefore the only active GA
 successor. It must start from one new clean source identity and repeat the
 complete source, hosted-CI, build, freeze, signing, notarization, package,
 installation, runtime, and publication evidence sequence. No application tree,

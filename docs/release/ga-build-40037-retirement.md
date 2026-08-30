@@ -77,14 +77,14 @@ applied retroactively to this consumed identity.
 
 ## Successor generation
 
-Build 40038 is the only active GA successor. Its source may introduce a narrow
-recovery state for a future attempt whose complete signed work and
-transformation receipt are durably present but whose post-receipt, read-only
-verification is operationally blocked. Such recovery must verify the exact
-private bytes, must not invoke the signing helper or receipt creator again,
-and must remain unavailable to this terminal build-40037 attempt.
+Build 40038 became the active GA successor and was later consumed and retired
+independently; its history is recorded in `ga-build-40038-retirement.md`.
+Build 40039 is now the only active GA successor. Its source retains the narrow
+post-receipt recovery rule and adds one in-process fresh-session replay for a
+typed operational verifier failure after signing succeeds. Neither rule can be
+applied retroactively to this terminal build-40037 attempt.
 
-Build 40038 must start from one new clean source identity and repeat the
+Build 40039 must start from one new clean source identity and repeat the
 complete hosted-CI, build, freeze, signing, notarization,
 publication-evidence, package, installation, runtime, physical, and final
 publication sequence. No application tree, profile copy, possession proof,

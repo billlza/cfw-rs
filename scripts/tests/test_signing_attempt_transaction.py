@@ -5,6 +5,7 @@ from dataclasses import replace
 import os
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -163,6 +164,7 @@ class SigningAttemptFixture:
         transformation_receipt_loader=None,
         canonical_transformation_verifier=None,
         frozen_inputs_verifier=None,
+        embedded_verifier_session_factory=None,
     ) -> Path:
         helper_runner = self.helper_success if helper is None else helper
         selected_publisher = self.publisher if publisher is None else publisher
@@ -194,6 +196,11 @@ class SigningAttemptFixture:
             if frozen_inputs_verifier is None
             else frozen_inputs_verifier
         )
+        selected_session_factory = (
+            self.embedded_verifier_session
+            if embedded_verifier_session_factory is None
+            else embedded_verifier_session_factory
+        )
         with patch.object(
             transaction,
             "_verify_frozen_inputs",
@@ -216,9 +223,7 @@ class SigningAttemptFixture:
                 canonical_transformation_verifier=(
                     selected_canonical_transformation_verifier
                 ),
-                embedded_verifier_session_factory=(
-                    self.embedded_verifier_session
-                ),
+                embedded_verifier_session_factory=selected_session_factory,
             )
 
     def attempts(self) -> Path:
@@ -235,6 +240,193 @@ class SigningAttemptTransactionTests(unittest.TestCase):
         durability = patch.object(durable_file, "full_fsync", side_effect=os.fsync)
         durability.start()
         self.addCleanup(durability.stop)
+
+    def run_with_post_sign_verifier_sessions(
+        self,
+        session_behaviors: tuple[dict[str, BaseException], ...],
+        observed: dict[str, object],
+        *,
+        resume: bool = False,
+        helper_result: object = 0,
+    ) -> Path:
+        active_sessions: set[int] = set()
+        session_events: list[tuple[str, int]] = []
+        replay_arguments: list[tuple[Path, Path, Path]] = []
+        helper_calls = 0
+        receipt_creator_calls = 0
+        receipt_inode: int | None = None
+        session_factory_calls = 0
+
+        @contextmanager
+        def session_factory(repository: Path):
+            nonlocal session_factory_calls
+            self.assertEqual(repository, self.fixture.repository)
+            session_factory_calls += 1
+            index = session_factory_calls
+            if index > len(session_behaviors):
+                raise AssertionError("unexpected third verifier session")
+            behavior = session_behaviors[index - 1]
+            enter_error = behavior.get("enter_error")
+            if enter_error is not None:
+                raise enter_error
+            self.assertEqual(active_sessions, set())
+            active_sessions.add(index)
+            session_events.append(("enter", index))
+
+            def embedded_verifier(
+                selected_repository: Path,
+                challenge: Path,
+                signature: Path,
+            ) -> tuple[dict[str, object], dict[str, object]]:
+                replay_arguments.append(
+                    (selected_repository, challenge, signature)
+                )
+                replay_error = behavior.get("replay_error")
+                if replay_error is not None:
+                    raise replay_error
+                return ({"result": "verified"}, {"binding": "verified"})
+
+            try:
+                yield embedded_verifier
+            finally:
+                active_sessions.remove(index)
+                session_events.append(("exit", index))
+                cleanup_error = behavior.get("cleanup_error")
+                if cleanup_error is not None:
+                    raise cleanup_error
+
+        def helper(work: Path, sha1: str, sha256: str) -> int:
+            nonlocal helper_calls
+            helper_calls += 1
+            if isinstance(helper_result, BaseException):
+                raise helper_result
+            if type(helper_result) is int and helper_result == 0:
+                return self.fixture.helper_success(work, sha1, sha256)
+            if isinstance(helper_result, bool) or type(helper_result) is int:
+                return helper_result
+            raise AssertionError("fixture helper result is not int-compatible")
+
+        def proof(
+            repository: Path,
+            root: Path,
+            *,
+            embedded_verifier: transaction.EmbeddedVerifier,
+            **_keywords: object,
+        ) -> SimpleNamespace:
+            embedded_verifier(
+                repository,
+                root / "fixture-challenge.json",
+                root / "fixture-challenge.json.sig",
+            )
+            return SimpleNamespace(
+                proof_sha256="f" * 64,
+                embedded_public_key_sha256="1" * 64,
+                tauri_config_sha256="2" * 64,
+            )
+
+        def frozen_verifier(
+            repository: Path,
+            *,
+            possession_verifier: transaction.PossessionVerifier,
+        ) -> FrozenCandidate:
+            try:
+                possession_verifier(repository, self.fixture.root)
+            except possession.UpdaterKeyPossessionOperationalError as error:
+                raise transaction.CandidateFreezeError(
+                    "updater_verifier_unavailable",
+                    "fixture updater verifier is operationally unavailable",
+                    consumed=True,
+                ) from error
+            except possession.UpdaterKeyPossessionError as error:
+                raise transaction.CandidateFreezeError(
+                    "updater_key_possession_invalid",
+                    "fixture updater possession proof is invalid",
+                    consumed=True,
+                ) from error
+            return self.fixture.bindings.frozen
+
+        def create_receipt(
+            repository: Path,
+            output: Path,
+            *,
+            freeze_verifier: transaction.FreezeVerifier,
+        ) -> dict[str, str]:
+            nonlocal receipt_creator_calls, receipt_inode
+            receipt_creator_calls += 1
+            try:
+                freeze_verifier(repository)
+            except transaction.CandidateFreezeError as error:
+                code = (
+                    "candidate_freeze_updater_verifier_unavailable"
+                    if error.code == "updater_verifier_unavailable"
+                    else "signing_transformation_generic"
+                )
+                raise transaction.SigningTransformationError(
+                    "fixture candidate freeze verification failed",
+                    code=code,
+                ) from error
+            result = self.fixture.transformation_create(repository, output)
+            receipt_inode = (
+                output / transaction.TRANSFORMATION_RECEIPT_NAME
+            ).stat().st_ino
+            return result
+
+        try:
+            with (
+                patch.object(
+                    transaction,
+                    "_verify_frozen_inputs",
+                    return_value=self.fixture.bindings,
+                ),
+                patch.object(
+                    transaction,
+                    "verify_possession_proof",
+                    side_effect=proof,
+                ),
+                patch.object(
+                    transaction,
+                    "verify_frozen_candidate",
+                    side_effect=frozen_verifier,
+                ) as selected_freeze_verifier,
+                patch.object(
+                    transaction,
+                    "create_attempt_receipt",
+                    side_effect=create_receipt,
+                ),
+            ):
+                return transaction.run_signing_transaction(
+                    self.fixture.repository,
+                    resume=resume,
+                    clock=self.fixture.clock,
+                    helper_runner=helper,
+                    verification_runner=self.fixture.verification,
+                    freeze_verifier=selected_freeze_verifier,
+                    live_readiness_verifier=lambda _root: None,
+                    publisher=self.fixture.publisher,
+                    confirmer=self.fixture.confirmer,
+                    transformation_verifier=(
+                        self.fixture.transformation_verify
+                    ),
+                    transformation_receipt_loader=(
+                        self.fixture.transformation_load
+                    ),
+                    canonical_transformation_verifier=(
+                        self.fixture.canonical_verify
+                    ),
+                    embedded_verifier_session_factory=session_factory,
+                )
+        finally:
+            observed.update(
+                {
+                    "active_sessions": set(active_sessions),
+                    "helper_calls": helper_calls,
+                    "receipt_creator_calls": receipt_creator_calls,
+                    "receipt_inode": receipt_inode,
+                    "replay_arguments": tuple(replay_arguments),
+                    "session_events": tuple(session_events),
+                    "session_factory_calls": session_factory_calls,
+                }
+            )
 
     def enter_verification_blocked(self) -> transaction.Attempt:
         def create_then_block(
@@ -396,6 +588,398 @@ class SigningAttemptTransactionTests(unittest.TestCase):
             )
         self.assertEqual(session_entries, 1)
         self.assertFalse(session_active)
+
+    def test_post_sign_operational_replay_uses_one_fresh_session(self) -> None:
+        observed: dict[str, object] = {}
+        output = self.run_with_post_sign_verifier_sessions(
+            (
+                {
+                    "replay_error": (
+                        possession.UpdaterKeyPossessionOperationalError(
+                            "timeout"
+                        )
+                    )
+                },
+                {},
+            ),
+            observed,
+        )
+
+        self.assertEqual(output, self.fixture.root / "signing-output")
+        self.assertEqual(observed["helper_calls"], 1)
+        self.assertEqual(observed["receipt_creator_calls"], 1)
+        self.assertEqual(observed["session_factory_calls"], 2)
+        self.assertEqual(
+            observed["session_events"],
+            (("enter", 1), ("exit", 1), ("enter", 2), ("exit", 2)),
+        )
+        replay_arguments = observed["replay_arguments"]
+        self.assertIsInstance(replay_arguments, tuple)
+        self.assertEqual(len(replay_arguments), 2)
+        self.assertEqual(replay_arguments[0], replay_arguments[1])
+        self.assertEqual(observed["active_sessions"], set())
+        self.assertEqual(os.listdir(self.fixture.attempts()), ["00000001"])
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(attempt.state, "published")
+        receipt = output / transaction.TRANSFORMATION_RECEIPT_NAME
+        self.assertEqual(receipt.read_bytes(), b'{"fixture":"verified"}\n')
+        self.assertEqual(receipt.stat().st_ino, observed["receipt_inode"])
+
+    def test_second_post_sign_operational_failure_is_terminal(self) -> None:
+        observed: dict[str, object] = {}
+        with self.assertRaises(transaction.SigningAttemptError) as raised:
+            self.run_with_post_sign_verifier_sessions(
+                (
+                    {
+                        "replay_error": (
+                            possession.UpdaterKeyPossessionOperationalError(
+                                "timeout"
+                            )
+                        )
+                    },
+                    {
+                        "replay_error": (
+                            possession.UpdaterKeyPossessionOperationalError(
+                                "pipe"
+                            )
+                        )
+                    },
+                ),
+                observed,
+            )
+
+        self.assertEqual(raised.exception.code, "updater_verifier_retry_exhausted")
+        self.assertEqual(observed["helper_calls"], 1)
+        self.assertEqual(observed["receipt_creator_calls"], 1)
+        self.assertEqual(observed["session_factory_calls"], 2)
+        self.assertEqual(observed["active_sessions"], set())
+        self.assertEqual(
+            observed["session_events"],
+            (("enter", 1), ("exit", 1), ("enter", 2), ("exit", 2)),
+        )
+        cause = raised.exception.__cause__
+        self.assertIsInstance(cause, ExceptionGroup)
+        self.assertEqual(
+            tuple(error.reason for error in cause.exceptions),
+            ("timeout", "pipe"),
+        )
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(attempt.state, "failed")
+        self.assertEqual(
+            attempt.events[-1]["failure_code"],
+            "updater_verifier_retry_exhausted",
+        )
+        self.assertFalse(
+            (attempt.work / transaction.TRANSFORMATION_RECEIPT_NAME).exists()
+        )
+        with self.assertRaises(transaction.SigningAttemptError) as retirement:
+            self.fixture.run(resume=True)
+        self.assertEqual(
+            retirement.exception.code, "candidate_retirement_required"
+        )
+
+    def test_failed_session_cleanup_blocks_fresh_session(self) -> None:
+        observed: dict[str, object] = {}
+        with self.assertRaises(transaction.SigningAttemptError) as raised:
+            self.run_with_post_sign_verifier_sessions(
+                (
+                    {
+                        "replay_error": (
+                            possession.UpdaterKeyPossessionOperationalError(
+                                "timeout"
+                            )
+                        ),
+                        "cleanup_error": possession.UpdaterKeyPossessionError(
+                            "fixture cleanup failure"
+                        ),
+                    },
+                ),
+                observed,
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            "updater_verifier_session_cleanup_failed",
+        )
+        self.assertEqual(observed["session_factory_calls"], 1)
+        self.assertEqual(observed["active_sessions"], set())
+        cause = raised.exception.__cause__
+        self.assertIsInstance(cause, ExceptionGroup)
+        self.assertIsInstance(
+            cause.exceptions[0],
+            possession.UpdaterKeyPossessionOperationalError,
+        )
+        self.assertIsInstance(
+            cause.exceptions[1], possession.UpdaterKeyPossessionError
+        )
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(attempt.state, "failed")
+        self.assertEqual(
+            attempt.events[-1]["failure_code"],
+            "updater_verifier_session_cleanup_failed",
+        )
+
+    def test_fresh_session_enter_failure_is_terminal_without_third_session(
+        self,
+    ) -> None:
+        observed: dict[str, object] = {}
+        with self.assertRaises(transaction.SigningAttemptError) as raised:
+            self.run_with_post_sign_verifier_sessions(
+                (
+                    {
+                        "replay_error": (
+                            possession.UpdaterKeyPossessionOperationalError(
+                                "timeout"
+                            )
+                        )
+                    },
+                    {
+                        "enter_error": (
+                            possession.UpdaterKeyPossessionOperationalError(
+                                "start"
+                            )
+                        )
+                    },
+                ),
+                observed,
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            "updater_verifier_session_rebuild_failed",
+        )
+        self.assertEqual(observed["session_factory_calls"], 2)
+        self.assertEqual(
+            observed["session_events"], (("enter", 1), ("exit", 1))
+        )
+        cause = raised.exception.__cause__
+        self.assertIsInstance(cause, ExceptionGroup)
+        self.assertEqual(
+            tuple(error.reason for error in cause.exceptions),
+            ("timeout", "start"),
+        )
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(attempt.state, "failed")
+        self.assertEqual(
+            attempt.events[-1]["failure_code"],
+            "updater_verifier_session_rebuild_failed",
+        )
+
+    def test_semantic_replay_failure_does_not_open_fresh_session(self) -> None:
+        observed: dict[str, object] = {}
+        with self.assertRaises(transaction.SigningAttemptError) as raised:
+            self.run_with_post_sign_verifier_sessions(
+                (
+                    {
+                        "replay_error": possession.UpdaterKeyPossessionError(
+                            "fixture semantic mismatch"
+                        )
+                    },
+                ),
+                observed,
+            )
+
+        self.assertEqual(raised.exception.code, "signing_transformation_failed")
+        self.assertEqual(observed["session_factory_calls"], 1)
+        self.assertEqual(observed["helper_calls"], 1)
+        self.assertEqual(self.fixture.load("00000001").state, "failed")
+
+    def test_retry_budget_arms_only_for_non_resume_exact_integer_zero(
+        self,
+    ) -> None:
+        cases = (
+            (False, 0, "updater_verifier_retry_exhausted", 2),
+            (False, False, "updater_possession_verifier_unavailable", 1),
+            (False, True, "updater_possession_verifier_unavailable", 1),
+            (False, 7, "updater_possession_verifier_unavailable", 1),
+            (True, 0, "updater_possession_verifier_unavailable", 1),
+        )
+        for resume, helper_result, expected_code, expected_sessions in cases:
+            with self.subTest(resume=resume, helper_result=helper_result):
+                session_count = 0
+                helper_calls = 0
+
+                @contextmanager
+                def session_factory(_repository: Path):
+                    nonlocal session_count
+                    session_count += 1
+
+                    def embedded_verifier(
+                        _selected_repository: Path,
+                        _challenge: Path,
+                        _signature: Path,
+                    ) -> tuple[dict[str, object], dict[str, object]]:
+                        raise possession.UpdaterKeyPossessionOperationalError(
+                            "timeout"
+                        )
+
+                    yield embedded_verifier
+
+                def helper(_work: Path, _sha1: str, _sha256: str) -> int:
+                    nonlocal helper_calls
+                    helper_calls += 1
+                    return helper_result
+
+                def proof(
+                    repository: Path,
+                    root: Path,
+                    *,
+                    embedded_verifier: transaction.EmbeddedVerifier,
+                    **_keywords: object,
+                ) -> SimpleNamespace:
+                    embedded_verifier(
+                        repository,
+                        root / "fixture-challenge.json",
+                        root / "fixture-challenge.json.sig",
+                    )
+                    raise AssertionError("operational verifier unexpectedly returned")
+
+                def execute(
+                    repository: Path,
+                    **keywords: object,
+                ) -> Path:
+                    bound_helper = keywords["helper_runner"]
+                    possession_verifier = keywords["possession_verifier"]
+                    self.assertTrue(callable(bound_helper))
+                    self.assertTrue(callable(possession_verifier))
+                    self.assertEqual(
+                        bound_helper(self.fixture.root, "A" * 40, "B" * 64),
+                        helper_result,
+                    )
+                    possession_verifier(repository, self.fixture.root)
+                    raise AssertionError("operational possession unexpectedly returned")
+
+                with (
+                    patch.object(
+                        transaction,
+                        "verify_possession_proof",
+                        side_effect=proof,
+                    ),
+                    patch.object(
+                        transaction,
+                        "_run_signing_transaction_with_verifiers",
+                        side_effect=execute,
+                    ),
+                    self.assertRaises(transaction.SigningAttemptError) as raised,
+                ):
+                    transaction.run_signing_transaction(
+                        self.fixture.repository,
+                        resume=resume,
+                        helper_runner=helper,
+                        embedded_verifier_session_factory=session_factory,
+                    )
+
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertEqual(helper_calls, 1)
+                self.assertEqual(session_count, expected_sessions)
+
+    def test_verifier_operation_rejects_concurrent_replay(self) -> None:
+        replay_started = threading.Event()
+        allow_replay = threading.Event()
+        replay_errors: list[BaseException] = []
+
+        @contextmanager
+        def session_factory(_repository: Path):
+            yield object()
+
+        def proof(
+            _repository: Path,
+            _root: Path,
+            *,
+            embedded_verifier: object,
+            **_keywords: object,
+        ) -> SimpleNamespace:
+            self.assertIsNotNone(embedded_verifier)
+            replay_started.set()
+            if not allow_replay.wait(timeout=5):
+                raise AssertionError("fixture verifier replay was not released")
+            return SimpleNamespace()
+
+        operation = transaction._EmbeddedVerifierSessionOperation(
+            self.fixture.repository,
+            session_factory,
+            allow_post_sign_retry=True,
+        )
+        with patch.object(
+            transaction,
+            "verify_possession_proof",
+            side_effect=proof,
+        ), operation:
+            def run_replay() -> None:
+                try:
+                    operation.verify_possession(
+                        self.fixture.repository, self.fixture.root
+                    )
+                except BaseException as error:
+                    replay_errors.append(error)
+
+            replay = threading.Thread(target=run_replay, daemon=True)
+            replay.start()
+            try:
+                self.assertTrue(replay_started.wait(timeout=2))
+                with self.assertRaises(transaction.SigningAttemptError) as raised:
+                    operation.verify_possession(
+                        self.fixture.repository, self.fixture.root
+                    )
+                self.assertEqual(
+                    raised.exception.code,
+                    "updater_verifier_replay_concurrent",
+                )
+            finally:
+                allow_replay.set()
+                replay.join(timeout=5)
+            self.assertFalse(replay.is_alive())
+
+        self.assertEqual(replay_errors, [])
+
+    def test_session_cleanup_does_not_mask_existing_primary_failure(self) -> None:
+        @contextmanager
+        def session_factory(_repository: Path):
+            try:
+                yield object()
+            finally:
+                raise possession.UpdaterKeyPossessionError(
+                    "fixture cleanup failure"
+                )
+
+        operation = transaction._EmbeddedVerifierSessionOperation(
+            self.fixture.repository,
+            session_factory,
+            allow_post_sign_retry=True,
+        )
+        with self.assertRaises(transaction.SigningAttemptError) as raised:
+            with operation:
+                raise transaction.SigningAttemptError(
+                    "fixture_primary_failure",
+                    "fixture primary failure",
+                )
+
+        self.assertEqual(raised.exception.code, "fixture_primary_failure")
+        notes = getattr(raised.exception, "__notes__", ())
+        self.assertEqual(len(notes), 1)
+        self.assertIn("secondary operation-scoped", notes[0])
+        self.assertIn("fixture cleanup failure", notes[0])
+
+    def test_session_cleanup_failure_without_primary_is_raised(self) -> None:
+        @contextmanager
+        def session_factory(_repository: Path):
+            try:
+                yield object()
+            finally:
+                raise possession.UpdaterKeyPossessionError(
+                    "fixture cleanup failure"
+                )
+
+        operation = transaction._EmbeddedVerifierSessionOperation(
+            self.fixture.repository,
+            session_factory,
+            allow_post_sign_retry=True,
+        )
+        with self.assertRaises(possession.UpdaterKeyPossessionError) as raised:
+            with operation:
+                pass
+
+        self.assertEqual(str(raised.exception), "fixture cleanup failure")
 
     def test_full_publish_reuses_one_possession_verifier(self) -> None:
         observed: list[tuple[object, object]] = []

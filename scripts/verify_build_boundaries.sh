@@ -258,7 +258,7 @@ for contract in \
   'scripts/signing_attempt_transaction.py:verify_attempt_receipt' \
   'scripts/signing_attempt_transaction.py:outcome_unknown' \
   'scripts/run_ga_signing_attempt.sh:--transaction-owned' \
-  'scripts/run_ga_signing_attempt.sh:target/candidates/0.4.0/ga/40038' \
+  'scripts/run_ga_signing_attempt.sh:target/candidates/0.4.0/ga/40039' \
   'scripts/verify_signing_transformation.py:cfm-ga-signing-transformation-v2' \
   'scripts/verify_signing_transformation.py:cfm-candidate-freeze-intent-v3' \
   'scripts/verify_signing_transformation.py:RECOVERABLE_VERIFICATION_ERROR_CODES' \

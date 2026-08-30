@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run and recover append-only Developer ID signing attempts for GA build 40038.
+"""Run and recover append-only Developer ID signing attempts for GA build 40039.
 
 The frozen candidate is never copied into a canonical signing path until one
 private attempt has passed signing, full app verification, and transformation
@@ -14,6 +14,7 @@ import argparse
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import threading
 from typing import Any, Callable, Final, Mapping, Sequence
 
 if __package__:
@@ -75,6 +77,7 @@ if __package__:
     )
     from .updater_key_possession_proof import (
         UpdaterKeyPossessionError,
+        UpdaterKeyPossessionOperationalError,
         VerifiedUpdaterKeyPossession,
         production_embedded_verifier_session,
         verify_possession_proof,
@@ -135,6 +138,7 @@ else:
     from repository_source_identity import SourceIdentityError, current_identity
     from updater_key_possession_proof import (
         UpdaterKeyPossessionError,
+        UpdaterKeyPossessionOperationalError,
         VerifiedUpdaterKeyPossession,
         production_embedded_verifier_session,
         verify_possession_proof,
@@ -350,6 +354,210 @@ EmbeddedVerifierSessionFactory = Callable[
 ]
 
 
+class _VerifierRetryBudget(str, Enum):
+    DISARMED = "disarmed"
+    ARMED = "armed"
+    SPENT = "spent"
+
+
+class _EmbeddedVerifierSessionOperation:
+    """Own one verifier session and one post-sign operational replacement."""
+
+    def __init__(
+        self,
+        repository: Path,
+        session_factory: EmbeddedVerifierSessionFactory,
+        *,
+        allow_post_sign_retry: bool,
+    ) -> None:
+        self._repository = repository
+        self._session_factory = session_factory
+        self._allow_post_sign_retry = allow_post_sign_retry
+        self._manager: AbstractContextManager[EmbeddedVerifier] | None = None
+        self._embedded_verifier: EmbeddedVerifier | None = None
+        self._budget = _VerifierRetryBudget.DISARMED
+        self._first_operational_error: UpdaterKeyPossessionOperationalError | None = (
+            None
+        )
+        self._active = False
+        self._replay_lock = threading.Lock()
+
+    def __enter__(self) -> "_EmbeddedVerifierSessionOperation":
+        if self._active or self._manager is not None:
+            raise SigningAttemptError(
+                "updater_verifier_session_state_invalid",
+                "operation-scoped updater verifier session is already active",
+            )
+        self._open_current()
+        self._active = True
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: object,
+    ) -> bool:
+        del exception_type, traceback
+        self._active = False
+        self._replay_lock.acquire()
+        try:
+            try:
+                self._close_current(exception)
+            except BaseException as cleanup_error:
+                if exception is None:
+                    raise
+                exception.add_note(
+                    "secondary operation-scoped updater verifier cleanup failure: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+        finally:
+            self._replay_lock.release()
+        return False
+
+    def _open_current(self) -> None:
+        if self._manager is not None or self._embedded_verifier is not None:
+            raise SigningAttemptError(
+                "updater_verifier_session_state_invalid",
+                "operation-scoped updater verifier session was not closed",
+            )
+        manager = self._session_factory(self._repository)
+        embedded_verifier = manager.__enter__()
+        self._manager = manager
+        self._embedded_verifier = embedded_verifier
+
+    def _close_current(self, primary: BaseException | None) -> None:
+        manager = self._manager
+        self._manager = None
+        self._embedded_verifier = None
+        if manager is None:
+            return
+        suppressed = manager.__exit__(
+            type(primary) if primary is not None else None,
+            primary,
+            primary.__traceback__ if primary is not None else None,
+        )
+        if primary is not None and suppressed:
+            raise SigningAttemptError(
+                "updater_verifier_session_cleanup_failed",
+                "updater verifier session unexpectedly suppressed its primary failure",
+            )
+
+    def arm_post_sign_retry(self) -> None:
+        with self._replay_lock:
+            if (
+                not self._active
+                or self._manager is None
+                or not self._allow_post_sign_retry
+                or self._budget is not _VerifierRetryBudget.DISARMED
+            ):
+                raise SigningAttemptError(
+                    "updater_verifier_retry_budget_invalid",
+                    "post-sign updater verifier retry budget cannot be armed",
+                )
+            self._budget = _VerifierRetryBudget.ARMED
+
+    def _verify_once(
+        self,
+        repository: Path,
+        root: Path,
+    ) -> VerifiedUpdaterKeyPossession:
+        embedded_verifier = self._embedded_verifier
+        if embedded_verifier is None:
+            raise SigningAttemptError(
+                "updater_verifier_session_state_invalid",
+                "operation-scoped updater verifier session is unavailable",
+            )
+        return verify_possession_proof(
+            repository,
+            root,
+            embedded_verifier=embedded_verifier,
+        )
+
+    def _retry_exhausted(
+        self,
+        error: UpdaterKeyPossessionOperationalError,
+    ) -> SigningAttemptError:
+        first = self._first_operational_error
+        if first is None:
+            return SigningAttemptError(
+                "updater_verifier_retry_state_invalid",
+                "updater verifier retry state lost its first operational failure",
+            )
+        exhausted = SigningAttemptError(
+            "updater_verifier_retry_exhausted",
+            "fresh updater verifier session was operationally unavailable",
+        )
+        exhausted.__cause__ = ExceptionGroup(
+            "updater verifier operational retry failures",
+            [first, error],
+        )
+        return exhausted
+
+    def verify_possession(
+        self,
+        repository: Path,
+        root: Path,
+    ) -> VerifiedUpdaterKeyPossession:
+        if not self._replay_lock.acquire(blocking=False):
+            raise SigningAttemptError(
+                "updater_verifier_replay_concurrent",
+                "updater verifier replay cannot be concurrent or reentrant",
+            )
+        try:
+            if not self._active or self._manager is None:
+                raise SigningAttemptError(
+                    "updater_verifier_session_state_invalid",
+                    "operation-scoped updater verifier session is not active",
+                )
+            try:
+                return self._verify_once(repository, root)
+            except UpdaterKeyPossessionOperationalError as first_error:
+                if self._budget is _VerifierRetryBudget.DISARMED:
+                    raise
+                if self._budget is _VerifierRetryBudget.SPENT:
+                    raise self._retry_exhausted(first_error)
+
+                self._budget = _VerifierRetryBudget.SPENT
+                self._first_operational_error = first_error
+                try:
+                    self._close_current(first_error)
+                except Exception as cleanup_error:
+                    raise SigningAttemptError(
+                        "updater_verifier_session_cleanup_failed",
+                        "failed updater verifier session could not be cleaned up",
+                    ) from ExceptionGroup(
+                        "updater verifier operational and cleanup failures",
+                        [first_error, cleanup_error],
+                    )
+
+                try:
+                    self._open_current()
+                except Exception as rebuild_error:
+                    raise SigningAttemptError(
+                        "updater_verifier_session_rebuild_failed",
+                        "fresh updater verifier session could not be established",
+                    ) from ExceptionGroup(
+                        "updater verifier operational and rebuild failures",
+                        [first_error, rebuild_error],
+                    )
+
+                try:
+                    return self._verify_once(repository, root)
+                except UpdaterKeyPossessionOperationalError as retry_error:
+                    raise self._retry_exhausted(retry_error)
+                except (OSError, UpdaterKeyPossessionError, ValueError) as error:
+                    raise SigningAttemptError(
+                        "updater_verifier_fresh_replay_invalid",
+                        "fresh updater verifier replay failed semantic validation",
+                    ) from ExceptionGroup(
+                        "updater verifier operational and semantic failures",
+                        [first_error, error],
+                    )
+        finally:
+            self._replay_lock.release()
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
         "+00:00", "Z"
@@ -502,6 +710,11 @@ def _verify_frozen_inputs(
     try:
         frozen = freeze_verifier(repository)
     except CandidateFreezeError as error:
+        if error.code == "updater_verifier_unavailable":
+            raise SigningAttemptError(
+                "updater_possession_verifier_unavailable",
+                "candidate updater verifier is operationally unavailable",
+            ) from error
         raise SigningAttemptError(
             "candidate_freeze_invalid", f"frozen GA candidate is invalid: {error}"
         ) from error
@@ -584,6 +797,11 @@ def _verify_frozen_inputs(
         ) from error
     try:
         updater = possession_verifier(repository, root)
+    except UpdaterKeyPossessionOperationalError as error:
+        raise SigningAttemptError(
+            "updater_possession_verifier_unavailable",
+            "operation-scoped updater verifier session is unavailable",
+        ) from error
     except (OSError, UpdaterKeyPossessionError, ValueError) as error:
         raise SigningAttemptError(
             "updater_possession_receipt_invalid",
@@ -1911,17 +2129,34 @@ def run_signing_transaction(
     """Run one transaction with a single operation-scoped embedded verifier."""
 
     repository = _canonical_repository(repository)
+    verifier_operation = _EmbeddedVerifierSessionOperation(
+        repository,
+        embedded_verifier_session_factory,
+        allow_post_sign_retry=not resume,
+    )
     try:
-        with embedded_verifier_session_factory(repository) as embedded_verifier:
+        with verifier_operation:
             def possession_verifier(
                 selected_repository: Path,
                 root: Path,
             ) -> VerifiedUpdaterKeyPossession:
-                return verify_possession_proof(
-                    selected_repository,
-                    root,
-                    embedded_verifier=embedded_verifier,
+                return verifier_operation.verify_possession(
+                    selected_repository, root
                 )
+
+            def session_helper_runner(
+                work: Path,
+                certificate_sha1: str,
+                certificate_sha256: str,
+            ) -> int:
+                exit_code = helper_runner(
+                    work,
+                    certificate_sha1,
+                    certificate_sha256,
+                )
+                if not resume and type(exit_code) is int and exit_code == 0:
+                    verifier_operation.arm_post_sign_retry()
+                return exit_code
 
             selected_freeze_verifier = freeze_verifier
             if freeze_verifier is verify_frozen_candidate:
@@ -1975,7 +2210,7 @@ def run_signing_transaction(
                 repository,
                 resume=resume,
                 clock=clock,
-                helper_runner=helper_runner,
+                helper_runner=session_helper_runner,
                 verification_runner=verification_runner,
                 freeze_verifier=selected_freeze_verifier,
                 possession_verifier=possession_verifier,
@@ -1987,10 +2222,15 @@ def run_signing_transaction(
                 transformation_receipt_loader=transformation_receipt_loader,
                 canonical_transformation_verifier=selected_canonical_verifier,
             )
-    except UpdaterKeyPossessionError as error:
+    except UpdaterKeyPossessionOperationalError as error:
         raise SigningAttemptError(
             "updater_possession_verifier_unavailable",
             "operation-scoped updater verifier session is unavailable",
+        ) from error
+    except UpdaterKeyPossessionError as error:
+        raise SigningAttemptError(
+            "updater_possession_verifier_invalid",
+            "operation-scoped updater verifier session failed semantic validation",
         ) from error
 
 

@@ -28,6 +28,7 @@ else:
 
 
 IDENTITY_TIMEOUT_SECONDS = 120
+RELEASE_ENVIRONMENT_TIMEOUT_SECONDS = 900
 APPLE_XCODEBUILD = "/usr/bin/xcodebuild"
 APPLE_XCRUN = "/usr/bin/xcrun"
 APPLE_SWIFT = "/usr/bin/swift"
@@ -411,7 +412,7 @@ def release_tool_environment(
             ],
             cwd=repository,
             environment=bootstrap_environment,
-            timeout=IDENTITY_TIMEOUT_SECONDS,
+            timeout=RELEASE_ENVIRONMENT_TIMEOUT_SECONDS,
             output_limit=MAX_RELEASE_ENVIRONMENT_PROCESS_BYTES,
         )
     except BoundedProcessError as error:
@@ -666,6 +667,7 @@ __all__ = [
     "APPLE_XCODEBUILD",
     "APPLE_XCRUN",
     "IDENTITY_TIMEOUT_SECONDS",
+    "RELEASE_ENVIRONMENT_TIMEOUT_SECONDS",
     "MAX_SWIFT_IDENTITY_BYTES",
     "RELEASE_ENVIRONMENT_COMMAND",
     "RELEASE_ENVIRONMENT_SCRIPT",

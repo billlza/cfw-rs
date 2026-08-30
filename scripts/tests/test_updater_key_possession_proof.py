@@ -90,7 +90,7 @@ class PossessionFixture:
         tauri_config.write_bytes(TAURI_CONFIG_DATA)
         tauri_config.chmod(0o644)
         self.preflight_root = (
-            self.repository / "target/candidates/0.4.0/ga-preflight/40038"
+            self.repository / "target/candidates/0.4.0/ga-preflight/40039"
         )
         self.preflight_root.mkdir(parents=True, mode=0o700)
         self.preflight_root.chmod(0o700)
@@ -1087,7 +1087,7 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
 
     def test_frozen_root_verification_uses_the_same_proof(self) -> None:
         created = self.fixture.create()
-        frozen_root = self.fixture.repository / "target/candidates/0.4.0/ga/40038"
+        frozen_root = self.fixture.repository / "target/candidates/0.4.0/ga/40039"
         frozen_root.parent.mkdir(parents=True)
         self.fixture.preflight_root.rename(frozen_root)
 
@@ -1100,22 +1100,24 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
 
         self.assertEqual(verified.proof_sha256, created.proof_sha256)
 
-    def test_retired_40037_root_is_not_an_active_candidate(self) -> None:
+    def test_retired_roots_are_not_active_candidates(self) -> None:
         verifier_calls = list(self.fixture.verifier_calls)
-        retired_root = (
-            self.fixture.repository / "target/candidates/0.4.0/ga/40037"
-        )
-
-        with self.assertRaisesRegex(
-            possession.UpdaterKeyPossessionError,
-            "not a fixed GA candidate root",
-        ):
-            possession.verify_possession_proof(
-                self.fixture.repository,
-                retired_root,
-                source_identity_reader=self.fixture.source_reader,
-                embedded_verifier=self.fixture.embedded_verifier,
+        for build_number in ("40037", "40038"):
+            retired_root = (
+                self.fixture.repository
+                / f"target/candidates/0.4.0/ga/{build_number}"
             )
+
+            with self.subTest(build_number=build_number), self.assertRaisesRegex(
+                possession.UpdaterKeyPossessionError,
+                "not a fixed GA candidate root",
+            ):
+                possession.verify_possession_proof(
+                    self.fixture.repository,
+                    retired_root,
+                    source_identity_reader=self.fixture.source_reader,
+                    embedded_verifier=self.fixture.embedded_verifier,
+                )
 
         self.assertEqual(self.fixture.verifier_calls, verifier_calls)
 

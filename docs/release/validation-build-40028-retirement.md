@@ -64,9 +64,10 @@ and builds 40031, 40032, 40033, and 40034 were each retired after candidate
 freeze but before canonical signing output. Build 40035 was later consumed and
 retired under the same lifecycle classification. Build 40036 was later signed,
 notarized, and retired before install. Build 40037 was later consumed and
-retired before canonical signing output. Build 40038 is the only active GA
+retired before canonical signing output. Build 40038 was later consumed and
+retired before canonical signing output. Build 40039 is the only active GA
 allocation; see `ga-build-40031-retirement.md`,
 `ga-build-40032-retirement.md`, `ga-build-40033-retirement.md`, and
 `ga-build-40034-retirement.md`, plus `ga-build-40035-retirement.md` and
 `ga-build-40036-retirement.md`, followed by
-`ga-build-40037-retirement.md`.
+`ga-build-40037-retirement.md` and `ga-build-40038-retirement.md`.

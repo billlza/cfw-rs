@@ -101,6 +101,11 @@ RETIRED_GA_ALLOCATIONS: Final = (
         "ga",
         "retired_after_candidate_freeze_before_canonical_signing_output",
     ),
+    (
+        "40038",
+        "ga",
+        "retired_after_candidate_freeze_before_canonical_signing_output",
+    ),
 )
 
 

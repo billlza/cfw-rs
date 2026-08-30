@@ -3108,7 +3108,7 @@
     "scripts/release_publication_path_contract.sh": "7dcefca587eccc5a2f0adfb91114134491e78b4f3abd2fc37ba9b4c058372f38",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "89658d553b95620da3e229b6c230ea1a735f30ecb80765dd617e52cb948d7049",
-    "RELEASE.md": "19004966bd8ee35d4b2c9471bd74fe81e08eec3aa12eda48cd1c0e73b7a0631c",
+    "RELEASE.md": "16f5547aa86660c693767ca1faf2db1c14cdef1580f0ec0204618b5d9ba99861",
     "scripts/updater_signing_launcher.py": "36464710b78d8e279003457368acf99828a38e3cbe5dee197bb63d53e2276a27",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
     "CHANGELOG.md": "75fc2cac00b7f17db253c52bd006071c36e367787294212f8c6ae83509343fe6",

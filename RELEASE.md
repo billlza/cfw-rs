@@ -40,6 +40,11 @@ releasable Network Extension product.
 > receipt, but a later mandatory read-only replay failed before publish-ready,
 > canonical output, or notarization. Its frozen terminal history is recorded in
 > [`docs/release/ga-build-40037-retirement.md`](docs/release/ga-build-40037-retirement.md).
+> Build 40038 likewise completed candidate freeze and one private signing
+> attempt. The helper returned success, but the attempt failed before a
+> transformation receipt, canonical output, or notarization was durably
+> created. Its frozen terminal history is recorded in
+> [`docs/release/ga-build-40038-retirement.md`](docs/release/ga-build-40038-retirement.md).
 > A passing policy or source check alone does not consume build 40039. Its
 > first durable candidate freeze does, after which only supported recovery may
 > reuse those exact frozen bytes and their append-only transaction identities.
@@ -579,6 +584,8 @@ lineages with no canonical signed output or notarization submission. Build
 40036 is a consumed, signed, and notarized lineage retired before install.
 Build 40037 is a consumed private signed-work lineage retired before canonical
 output or notarization.
+Build 40038 is a consumed private signed-work lineage retired before a
+transformation receipt, canonical output, or notarization.
 Build 40039 is the sole `active_ga` identity.
 
 Run the sequence below from one clean release commit. Source, CI, preflight, or

@@ -62,7 +62,7 @@ class ReleaseEnvironmentBootstrapTests(unittest.TestCase):
             "DYLD_LIBRARY_PATH": "/tmp/untrusted-library",
             "LD_PRELOAD": "/tmp/untrusted-preload.dylib",
             "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
-            "CFW_BUILD_NUMBER": "40037",
+            "CFW_BUILD_NUMBER": "40038",
             "CFW_UNSIGNED_VALIDATION_PYTHON": "/opt/release/bin/python3",
             "NOTARY_PROFILE": "release-profile",
         }
@@ -76,7 +76,7 @@ class ReleaseEnvironmentBootstrapTests(unittest.TestCase):
                 "LANG": "C",
                 "LC_ALL": "C",
                 "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
-                "CFW_BUILD_NUMBER": "40037",
+                "CFW_BUILD_NUMBER": "40038",
                 "CFW_UNSIGNED_VALIDATION_PYTHON": "/opt/release/bin/python3",
                 "NOTARY_PROFILE": "release-profile",
             },

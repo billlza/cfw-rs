@@ -47,6 +47,8 @@ if __package__:
     from .release_signing_plan import SigningPlanError, validate_plan
     from .updater_key_possession_proof import (
         UpdaterKeyPossessionError,
+        UpdaterKeyPossessionOperationalError,
+        VerifiedUpdaterKeyPossession,
         verify_possession_proof,
     )
     from .verify_release_build_allocations import (
@@ -73,6 +75,8 @@ else:
     from release_signing_plan import SigningPlanError, validate_plan
     from updater_key_possession_proof import (
         UpdaterKeyPossessionError,
+        UpdaterKeyPossessionOperationalError,
+        VerifiedUpdaterKeyPossession,
         verify_possession_proof,
     )
     from verify_release_build_allocations import (
@@ -93,6 +97,11 @@ MAX_TREE_BYTES: Final = 16 * 1024 * 1024 * 1024
 SHA256_RE: Final = re.compile(r"\A[0-9a-f]{64}\Z")
 COMMIT_RE: Final = re.compile(r"\A[0-9a-f]{40}\Z")
 COMPONENT_ID_RE: Final = re.compile(r"\A[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
+
+PossessionVerifier = Callable[[Path, Path], VerifiedUpdaterKeyPossession]
+OPERATIONAL_REOPEN_ERROR_CODES: Final = frozenset(
+    {"updater_verifier_unavailable"}
+)
 
 RENAME_EXCL: Final = 0x00000004
 RENAME_NOFOLLOW_ANY: Final = 0x00000010
@@ -373,16 +382,16 @@ def _fixed_roots(repository: Path) -> tuple[Path, Path]:
         not isinstance(identity.product_version, str)
         or not isinstance(identity.ga_build, str)
         or identity.product_version != "0.4.0"
-        or identity.ga_build != "40037"
+        or identity.ga_build != "40038"
     ):
         raise CandidateFreezeError(
             "active_release_identity_invalid",
-            "candidate freeze requires the fixed v0.4.0 build 40037 identity",
+            "candidate freeze requires the fixed v0.4.0 build 40038 identity",
         )
     base = repository / "target/candidates/0.4.0"
     preflight = ga_preflight_root(repository)
     frozen = ga_root(repository)
-    if preflight != base / "ga-preflight/40037" or frozen != base / "ga/40037":
+    if preflight != base / "ga-preflight/40038" or frozen != base / "ga/40038":
         raise CandidateFreezeError(
             "active_release_path_invalid",
             "candidate-freeze roots differ from the fixed active release identity",
@@ -999,7 +1008,18 @@ def _validate_signing_plan(value: dict[str, Any]) -> None:
         )
 
 
-def _expected_intent(repository: Path, root: Path, *, require_intent: bool) -> dict[str, Any]:
+def _expected_intent(
+    repository: Path,
+    root: Path,
+    *,
+    require_intent: bool,
+    possession_verifier: PossessionVerifier | None = None,
+) -> dict[str, Any]:
+    selected_possession_verifier = (
+        verify_possession_proof
+        if possession_verifier is None
+        else possession_verifier
+    )
     _validate_root_layout(root, require_intent=require_intent)
     _validate_signing_material_layout(root)
     source_identity = _read_source_identity(repository)
@@ -1041,7 +1061,13 @@ def _expected_intent(repository: Path, root: Path, *, require_intent: bool) -> d
             f"candidate provisioning profiles differ from the preflight receipt: {error}",
         ) from error
     try:
-        updater_possession = verify_possession_proof(repository, root)
+        updater_possession = selected_possession_verifier(repository, root)
+    except UpdaterKeyPossessionOperationalError as error:
+        raise CandidateFreezeError(
+            "updater_verifier_unavailable",
+            "candidate updater-key verifier is operationally unavailable",
+            consumed=require_intent,
+        ) from error
     except UpdaterKeyPossessionError as error:
         raise CandidateFreezeError(
             "updater_key_possession_invalid",
@@ -1438,13 +1464,29 @@ def _receipt(root: Path, intent_raw: bytes, *, recovered: bool) -> FrozenCandida
     )
 
 
-def _verify_exact_intent(repository: Path, root: Path) -> bytes:
+def _verify_exact_intent(
+    repository: Path,
+    root: Path,
+    *,
+    possession_verifier: PossessionVerifier | None = None,
+) -> bytes:
     value, raw = _load_intent(root)
     try:
-        expected = _expected_intent(repository, root, require_intent=True)
+        expected = _expected_intent(
+            repository,
+            root,
+            require_intent=True,
+            possession_verifier=possession_verifier,
+        )
     except CandidateFreezeQuarantined:
         raise
     except CandidateFreezeError as error:
+        if error.code in OPERATIONAL_REOPEN_ERROR_CODES:
+            raise CandidateFreezeError(
+                error.code,
+                "consumed candidate inputs are temporarily unavailable",
+                consumed=True,
+            ) from error
         raise CandidateFreezeQuarantined(
             "consumed candidate inputs cannot be reopened exactly"
         ) from error
@@ -1592,7 +1634,11 @@ def recover_candidate(repository: Path) -> FrozenCandidate:
     return _receipt(final_root, verified_raw, recovered=True)
 
 
-def verify_frozen_candidate(repository: Path) -> FrozenCandidate:
+def verify_frozen_candidate(
+    repository: Path,
+    *,
+    possession_verifier: PossessionVerifier | None = None,
+) -> FrozenCandidate:
     """Reopen and verify the exact frozen candidate without mutating it."""
 
     repository = _require_canonical_repository(repository)
@@ -1602,7 +1648,11 @@ def verify_frozen_candidate(repository: Path) -> FrozenCandidate:
         raise CandidateFreezeQuarantined(
             "candidate-freeze intent exists only in the unpublished preflight root"
         )
-    raw = _verify_exact_intent(repository, final_root)
+    raw = _verify_exact_intent(
+        repository,
+        final_root,
+        possession_verifier=possession_verifier,
+    )
     return _receipt(final_root, raw, recovered=False)
 
 

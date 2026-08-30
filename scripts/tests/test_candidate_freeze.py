@@ -55,9 +55,9 @@ class CandidateFreezeTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.preflight = (
-            self.repository / "target/candidates/0.4.0/ga-preflight/40037"
+            self.repository / "target/candidates/0.4.0/ga-preflight/40038"
         )
-        self.final = self.repository / "target/candidates/0.4.0/ga/40037"
+        self.final = self.repository / "target/candidates/0.4.0/ga/40038"
         (self.repository / "docs/release").mkdir(parents=True)
         allocations = [
             {"build": build, "role": role, "status": status}
@@ -65,13 +65,13 @@ class CandidateFreezeTests(unittest.TestCase):
                 *IMMUTABLE_RETIRED_PREFIX,
                 POLICY_SUPERSEDED_ALLOCATION,
                 *RETIRED_GA_ALLOCATIONS,
-                ("40037", "ga", "active_ga"),
+                ("40038", "ga", "active_ga"),
             )
         ]
         (self.repository / "docs/release/build-allocations-v040.json").write_bytes(
             _canonical_json(
                 {
-                    "active_ga": "40037",
+                    "active_ga": "40038",
                     "allocations": allocations,
                     "document": "cfm-release-build-allocation-v2",
                     "product_version": "0.4.0",
@@ -263,7 +263,7 @@ class CandidateFreezeTests(unittest.TestCase):
             _canonical_json(
                 {
                     "document": "cfm-ga-product-input-v1",
-                    "product": {"build_number": "40037", "version": "0.4.0"},
+                    "product": {"build_number": "40038", "version": "0.4.0"},
                     "schema_version": 1,
                     "source": {
                         "release_source_sha256": "b" * 64,
@@ -312,7 +312,7 @@ class CandidateFreezeTests(unittest.TestCase):
         receipt = self.freeze()
 
         self.assertEqual(receipt.root, self.final)
-        self.assertEqual(receipt.build_number, "40037")
+        self.assertEqual(receipt.build_number, "40038")
         self.assertFalse(receipt.recovered)
         self.assertFalse(self.preflight.exists())
         self.assertTrue((self.final / "candidate-freeze/intent.json").is_file())
@@ -541,7 +541,7 @@ class CandidateFreezeTests(unittest.TestCase):
             _canonical_json(
                 {
                     "document": "cfm-ga-product-input-v1",
-                    "product": {"build_number": "40037", "version": "0.4.0"},
+                    "product": {"build_number": "40038", "version": "0.4.0"},
                     "schema_version": 1,
                     "source": {
                         "release_source_sha256": "b" * 64,
@@ -649,7 +649,7 @@ class CandidateFreezeTests(unittest.TestCase):
     def test_nonfinite_json_constant_is_rejected_before_consumption(self) -> None:
         (self.preflight / "signing-plan.json").write_bytes(
             b'{"components":{"host":NaN},"document":"cfm-ga-signing-plan-v1",'
-            b'"order":["host"],"product":{"build_number":"40037",'
+            b'"order":["host"],"product":{"build_number":"40038",'
             b'"version":"0.4.0"},"schema_version":1}\n'
         )
 
@@ -903,6 +903,52 @@ class CandidateFreezeTests(unittest.TestCase):
 
         with self.assertRaises(candidate_freeze.CandidateAlreadyConsumed):
             self.freeze()
+
+    def test_operational_updater_reopen_cause_remains_typed(self) -> None:
+        self.freeze()
+
+        def unavailable(_repository: Path, _root: Path) -> object:
+            raise candidate_freeze.UpdaterKeyPossessionOperationalError("timeout")
+
+        with self.assertRaises(candidate_freeze.CandidateFreezeError) as caught:
+            candidate_freeze.verify_frozen_candidate(
+                self.repository,
+                possession_verifier=unavailable,
+            )
+        self.assertEqual(caught.exception.code, "updater_verifier_unavailable")
+        self.assertTrue(caught.exception.consumed)
+
+    def test_generic_updater_reopen_failure_stays_quarantined(self) -> None:
+        self.freeze()
+
+        def invalid(_repository: Path, _root: Path) -> object:
+            raise candidate_freeze.UpdaterKeyPossessionError(
+                "injected semantic proof mismatch"
+            )
+
+        with self.assertRaises(
+            candidate_freeze.CandidateFreezeQuarantined
+        ) as caught:
+            candidate_freeze.verify_frozen_candidate(
+                self.repository,
+                possession_verifier=invalid,
+            )
+        self.assertEqual(caught.exception.code, "candidate_freeze_quarantined")
+
+    def test_default_possession_verifier_is_resolved_at_call_time(self) -> None:
+        self.freeze()
+        with patch.object(
+            candidate_freeze,
+            "verify_possession_proof",
+            side_effect=candidate_freeze.UpdaterKeyPossessionOperationalError(
+                "start"
+            ),
+        ) as verifier, self.assertRaises(
+            candidate_freeze.CandidateFreezeError
+        ) as caught:
+            candidate_freeze.verify_frozen_candidate(self.repository)
+        verifier.assert_called_once_with(self.repository, self.final)
+        self.assertEqual(caught.exception.code, "updater_verifier_unavailable")
 
 
 if __name__ == "__main__":

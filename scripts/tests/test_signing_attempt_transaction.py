@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 import os
 from pathlib import Path
@@ -12,13 +13,17 @@ from scripts.candidate_freeze import FrozenCandidate
 from scripts.publication import durable_file
 from scripts.publication.common import PublicationError
 from scripts import signing_attempt_transaction as transaction
+from scripts import updater_key_possession_proof as possession
 
 
 class SigningAttemptFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
-        self.root = self.repository / "target/candidates/0.4.0/ga/40037"
+        build_number = transaction.ACTIVE_RELEASE_IDENTITY.ga_build
+        self.root = (
+            self.repository / f"target/candidates/0.4.0/ga/{build_number}"
+        )
         self.root.mkdir(parents=True, mode=0o700)
         self.root.chmod(0o700)
         intent = self.root / "candidate-freeze/intent.json"
@@ -30,7 +35,7 @@ class SigningAttemptFixture:
             intent_path=intent,
             intent_sha256="a" * 64,
             product_version="0.4.0",
-            build_number="40037",
+            build_number=build_number,
             recovered=False,
         )
         self.bindings = transaction.FrozenSigningBindings(
@@ -46,6 +51,7 @@ class SigningAttemptFixture:
             updater_tauri_config_sha256="2" * 64,
         )
         self.clock_count = 0
+        self.session_count = 0
         self.verification_contexts: list[
             tuple[Path, transaction.CandidateBundleContext]
         ] = []
@@ -62,10 +68,11 @@ class SigningAttemptFixture:
         if sha1 != "A" * 40 or sha256 != "B" * 64:
             raise AssertionError("unexpected certificate binding")
         app = work / transaction.SIGNED_APP_WITHIN_OUTPUT
-        app.mkdir(parents=True)
+        app.parent.mkdir(parents=True, mode=0o700)
+        app.mkdir()
         (app / "fixture.bin").write_bytes(b"signed-app")
         native = work / "signed-native-products"
-        native.mkdir()
+        native.mkdir(mode=0o700)
         (native / "fixture.bin").write_bytes(b"signed-native")
         return 0
 
@@ -113,6 +120,20 @@ class SigningAttemptFixture:
             )
         return {"fixture": "verified"}
 
+    transformation_load = transformation_verify
+
+    @contextmanager
+    def embedded_verifier_session(self, repository: Path):
+        if repository != self.repository:
+            raise AssertionError("verifier session used another repository")
+
+        self.session_count += 1
+
+        def unexpected_embedded_verifier(*_arguments: object) -> object:
+            raise AssertionError("fixture unexpectedly invoked embedded verifier")
+
+        yield unexpected_embedded_verifier
+
     def canonical_verify(self, repository: Path) -> dict[str, str]:
         return self.transformation_verify(
             repository,
@@ -139,7 +160,9 @@ class SigningAttemptFixture:
         live_readiness=None,
         transformation_creator=None,
         transformation_verifier=None,
+        transformation_receipt_loader=None,
         canonical_transformation_verifier=None,
+        frozen_inputs_verifier=None,
     ) -> Path:
         helper_runner = self.helper_success if helper is None else helper
         selected_publisher = self.publisher if publisher is None else publisher
@@ -156,15 +179,25 @@ class SigningAttemptFixture:
             if transformation_creator is None
             else transformation_creator
         )
+        selected_transformation_receipt_loader = (
+            self.transformation_load
+            if transformation_receipt_loader is None
+            else transformation_receipt_loader
+        )
         selected_canonical_transformation_verifier = (
             self.canonical_verify
             if canonical_transformation_verifier is None
             else canonical_transformation_verifier
         )
+        selected_frozen_inputs_verifier = (
+            (lambda _repository, **_keywords: self.bindings)
+            if frozen_inputs_verifier is None
+            else frozen_inputs_verifier
+        )
         with patch.object(
             transaction,
             "_verify_frozen_inputs",
-            return_value=self.bindings,
+            side_effect=selected_frozen_inputs_verifier,
         ):
             return transaction.run_signing_transaction(
                 self.repository,
@@ -177,8 +210,14 @@ class SigningAttemptFixture:
                 confirmer=self.confirmer,
                 transformation_creator=selected_transformation_creator,
                 transformation_verifier=selected_transformation_verifier,
+                transformation_receipt_loader=(
+                    selected_transformation_receipt_loader
+                ),
                 canonical_transformation_verifier=(
                     selected_canonical_transformation_verifier
+                ),
+                embedded_verifier_session_factory=(
+                    self.embedded_verifier_session
                 ),
             )
 
@@ -196,6 +235,30 @@ class SigningAttemptTransactionTests(unittest.TestCase):
         durability = patch.object(durable_file, "full_fsync", side_effect=os.fsync)
         durability.start()
         self.addCleanup(durability.stop)
+
+    def enter_verification_blocked(self) -> transaction.Attempt:
+        def create_then_block(
+            repository: Path,
+            output: Path,
+        ) -> dict[str, str]:
+            self.fixture.transformation_create(repository, output)
+            raise transaction.SigningTransformationError(
+                "injected operational verifier failure",
+                code="candidate_freeze_updater_verifier_unavailable",
+            )
+
+        with self.assertRaises(transaction.SigningVerificationBlocked):
+            self.fixture.run(
+                resume=False,
+                transformation_creator=create_then_block,
+            )
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(attempt.state, "verification_blocked")
+        self.assertEqual(
+            attempt.events[-1]["failure_code"],
+            "candidate_freeze_updater_verifier_unavailable",
+        )
+        return attempt
 
     def test_success_publishes_one_complete_container_after_verified_event(self) -> None:
         output = self.fixture.run(resume=False)
@@ -222,6 +285,160 @@ class SigningAttemptTransactionTests(unittest.TestCase):
         )
         self.assertFalse(attempt.work.exists())
         self.assertFalse(attempt.publish_ready.exists())
+
+    def test_production_defaults_share_one_embedded_verifier_session(self) -> None:
+        session_entries = 0
+        session_active = False
+        embedded_verifier = object()
+        expected_output = self.fixture.root / "session-bound-output"
+
+        @contextmanager
+        def session_factory(repository: Path):
+            nonlocal session_entries, session_active
+            self.assertEqual(repository, self.fixture.repository)
+            session_entries += 1
+            session_active = True
+            try:
+                yield embedded_verifier
+            finally:
+                session_active = False
+
+        def execute_with_bound_verifiers(
+            repository: Path,
+            **keywords: object,
+        ) -> Path:
+            self.assertTrue(session_active)
+            possession_verifier = keywords["possession_verifier"]
+            freeze_verifier = keywords["freeze_verifier"]
+            creator = keywords["transformation_creator"]
+            verifier = keywords["transformation_verifier"]
+            canonical_verifier = keywords["canonical_transformation_verifier"]
+            self.assertTrue(callable(possession_verifier))
+            self.assertTrue(callable(freeze_verifier))
+            self.assertTrue(callable(creator))
+            self.assertTrue(callable(verifier))
+            self.assertTrue(callable(canonical_verifier))
+
+            with patch.object(
+                transaction,
+                "verify_possession_proof",
+                return_value="possession",
+            ) as proof:
+                self.assertEqual(
+                    possession_verifier(repository, self.fixture.root),
+                    "possession",
+                )
+            self.assertIs(
+                proof.call_args.kwargs["embedded_verifier"],
+                embedded_verifier,
+            )
+
+            with patch.object(
+                transaction,
+                "verify_frozen_candidate",
+                return_value=self.fixture.bindings.frozen,
+            ) as frozen:
+                self.assertEqual(
+                    freeze_verifier(repository),
+                    self.fixture.bindings.frozen,
+                )
+            self.assertIs(
+                frozen.call_args.kwargs["possession_verifier"],
+                possession_verifier,
+            )
+
+            with patch.object(
+                transaction,
+                "create_attempt_receipt",
+                return_value={},
+            ) as create:
+                creator(repository, self.fixture.root)
+            self.assertIs(
+                create.call_args.kwargs["freeze_verifier"],
+                freeze_verifier,
+            )
+
+            with patch.object(
+                transaction,
+                "verify_attempt_receipt",
+                return_value={},
+            ) as verify_attempt:
+                verifier(repository, self.fixture.root)
+            self.assertIs(
+                verify_attempt.call_args.kwargs["freeze_verifier"],
+                freeze_verifier,
+            )
+
+            with patch.object(
+                transaction,
+                "verify_receipt",
+                return_value={},
+            ) as verify_canonical:
+                canonical_verifier(repository)
+            self.assertIs(
+                verify_canonical.call_args.kwargs["freeze_verifier"],
+                freeze_verifier,
+            )
+            return expected_output
+
+        with patch.object(
+            transaction,
+            "_run_signing_transaction_with_verifiers",
+            side_effect=execute_with_bound_verifiers,
+        ):
+            self.assertEqual(
+                transaction.run_signing_transaction(
+                    self.fixture.repository,
+                    resume=False,
+                    embedded_verifier_session_factory=session_factory,
+                ),
+                expected_output,
+            )
+        self.assertEqual(session_entries, 1)
+        self.assertFalse(session_active)
+
+    def test_full_publish_reuses_one_possession_verifier(self) -> None:
+        observed: list[tuple[object, object]] = []
+
+        def reopen(
+            repository: Path,
+            *,
+            freeze_verifier: object,
+            possession_verifier: object,
+        ) -> transaction.FrozenSigningBindings:
+            self.assertEqual(repository, self.fixture.repository)
+            self.assertTrue(callable(possession_verifier))
+            possession_verifier(repository, self.fixture.root)
+            observed.append((freeze_verifier, possession_verifier))
+            return self.fixture.bindings
+
+        with patch.object(
+            transaction,
+            "verify_possession_proof",
+            return_value=object(),
+        ) as direct_proof, patch.object(
+            possession,
+            "_production_embedded_verifier",
+        ) as forbidden_one_shot:
+            self.assertEqual(
+                self.fixture.run(
+                    resume=False,
+                    frozen_inputs_verifier=reopen,
+                ),
+                self.fixture.root / "signing-output",
+            )
+
+        self.assertEqual(len(observed), 2)
+        self.assertIs(observed[0][0], observed[1][0])
+        self.assertIs(observed[0][1], observed[1][1])
+        self.assertEqual(self.fixture.session_count, 1)
+        self.assertEqual(direct_proof.call_count, 2)
+        embedded = {
+            call.kwargs["embedded_verifier"]
+            for call in direct_proof.call_args_list
+        }
+        self.assertEqual(len(embedded), 1)
+        forbidden_one_shot.assert_not_called()
 
     def test_live_profile_readiness_fails_before_attempt_allocation(self) -> None:
         def reject(_root: Path) -> None:
@@ -907,7 +1124,7 @@ class SigningAttemptTransactionTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(
                 transaction.SigningAttemptError,
-                "private signing transformation failed: fixture mismatch",
+                "private signing transformation failed",
             ) as raised,
         ):
             transaction.run_signing_transaction(
@@ -921,7 +1138,11 @@ class SigningAttemptTransactionTests(unittest.TestCase):
                 confirmer=self.fixture.confirmer,
                 transformation_creator=reject,
                 transformation_verifier=self.fixture.transformation_verify,
+                transformation_receipt_loader=self.fixture.transformation_load,
                 canonical_transformation_verifier=self.fixture.canonical_verify,
+                embedded_verifier_session_factory=(
+                    self.fixture.embedded_verifier_session
+                ),
             )
         self.assertEqual(raised.exception.code, "signing_transformation_failed")
         first = self.fixture.load("00000001")
@@ -948,6 +1169,485 @@ class SigningAttemptTransactionTests(unittest.TestCase):
             self.fixture.run(resume=True, helper=unexpected_helper)
         self.assertEqual(retirement.exception.code, "candidate_retirement_required")
         self.assertFalse(helper_called)
+
+    def test_post_receipt_operational_failure_resumes_exact_work_once(self) -> None:
+        self.enter_verification_blocked()
+        helper_calls = 0
+        creator_calls = 0
+        observed: list[tuple[object, object]] = []
+
+        def forbidden_helper(_work: Path, _sha1: str, _sha256: str) -> int:
+            nonlocal helper_calls
+            helper_calls += 1
+            raise AssertionError("verification recovery invoked signing helper")
+
+        def forbidden_creator(_repository: Path, _output: Path) -> dict[str, str]:
+            nonlocal creator_calls
+            creator_calls += 1
+            raise AssertionError("verification recovery invoked receipt creator")
+
+        def reopen(
+            repository: Path,
+            *,
+            freeze_verifier: object,
+            possession_verifier: object,
+        ) -> transaction.FrozenSigningBindings:
+            self.assertTrue(callable(possession_verifier))
+            possession_verifier(repository, self.fixture.root)
+            observed.append((freeze_verifier, possession_verifier))
+            return self.fixture.bindings
+
+        with patch.object(
+            transaction,
+            "verify_possession_proof",
+            return_value=object(),
+        ) as direct_proof, patch.object(
+            possession,
+            "_production_embedded_verifier",
+        ) as forbidden_one_shot:
+            output = self.fixture.run(
+                resume=True,
+                helper=forbidden_helper,
+                transformation_creator=forbidden_creator,
+                frozen_inputs_verifier=reopen,
+            )
+
+        self.assertEqual(output, self.fixture.root / "signing-output")
+        self.assertEqual(helper_calls, 0)
+        self.assertEqual(creator_calls, 0)
+        self.assertEqual(self.fixture.session_count, 2)
+        self.assertEqual(len(observed), 2)
+        self.assertIs(observed[0][0], observed[1][0])
+        self.assertIs(observed[0][1], observed[1][1])
+        self.assertEqual(direct_proof.call_count, 2)
+        forbidden_one_shot.assert_not_called()
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(
+            tuple(event["state"] for event in attempt.events),
+            (
+                "prepared",
+                "signing",
+                "verification_blocked",
+                "verification_recovering",
+                "verification_committing",
+                "verified",
+                "publishing",
+                "published",
+            ),
+        )
+
+    def test_missing_receipt_never_enters_verification_blocked(self) -> None:
+        def reject_without_receipt(
+            _repository: Path,
+            _output: Path,
+        ) -> dict[str, str]:
+            raise transaction.SigningTransformationError(
+                "injected operational verifier failure",
+                code="candidate_freeze_updater_verifier_unavailable",
+            )
+
+        with self.assertRaises(transaction.SigningAttemptError) as caught:
+            self.fixture.run(
+                resume=False,
+                transformation_creator=reject_without_receipt,
+            )
+        self.assertEqual(caught.exception.code, "signing_transformation_failed")
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(attempt.state, "failed")
+        self.assertEqual(
+            attempt.events[-1]["failure_code"],
+            "signing_transformation_failed",
+        )
+
+    def test_semantic_failure_after_receipt_is_terminal(self) -> None:
+        def create_then_reject(
+            repository: Path,
+            output: Path,
+        ) -> dict[str, str]:
+            self.fixture.transformation_create(repository, output)
+            raise transaction.SigningTransformationError(
+                "injected semantic mismatch"
+            )
+
+        with self.assertRaises(transaction.SigningAttemptError) as caught:
+            self.fixture.run(
+                resume=False,
+                transformation_creator=create_then_reject,
+            )
+        self.assertEqual(caught.exception.code, "signing_transformation_failed")
+        self.assertEqual(self.fixture.load("00000001").state, "failed")
+
+    def test_receipt_write_outcome_unknown_never_enters_blocked(self) -> None:
+        def create_outcome_unknown(
+            repository: Path,
+            output: Path,
+        ) -> dict[str, str]:
+            self.fixture.transformation_create(repository, output)
+            raise transaction.SigningTransformationOutcomeUnknown(
+                "injected receipt durability reply loss"
+            )
+
+        def operational_reverification_failure(
+            _repository: Path,
+            _output: Path,
+        ) -> dict[str, str]:
+            raise transaction.SigningTransformationError(
+                "injected operational verifier failure",
+                code="candidate_freeze_updater_verifier_unavailable",
+            )
+
+        with self.assertRaises(transaction.SigningAttemptError) as caught:
+            self.fixture.run(
+                resume=False,
+                transformation_creator=create_outcome_unknown,
+                transformation_verifier=operational_reverification_failure,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "signing_transformation_outcome_unknown",
+        )
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(attempt.state, "failed")
+        self.assertEqual(
+            attempt.events[-1]["failure_code"],
+            "signing_transformation_outcome_unknown",
+        )
+
+    def test_bounded_recovery_failure_is_terminal_without_resigning(self) -> None:
+        self.enter_verification_blocked()
+        helper_calls = 0
+        creator_calls = 0
+
+        def forbidden_helper(_work: Path, _sha1: str, _sha256: str) -> int:
+            nonlocal helper_calls
+            helper_calls += 1
+            raise AssertionError("verification recovery invoked signing helper")
+
+        def forbidden_creator(_repository: Path, _output: Path) -> dict[str, str]:
+            nonlocal creator_calls
+            creator_calls += 1
+            raise AssertionError("verification recovery invoked receipt creator")
+
+        def still_unavailable(
+            _repository: Path,
+            _output: Path,
+        ) -> dict[str, str]:
+            raise transaction.SigningTransformationError(
+                "sensitive operational detail must not enter the journal",
+                code="candidate_freeze_updater_verifier_unavailable",
+            )
+
+        with self.assertRaises(transaction.SigningAttemptError) as caught:
+            self.fixture.run(
+                resume=True,
+                helper=forbidden_helper,
+                transformation_creator=forbidden_creator,
+                transformation_verifier=still_unavailable,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "candidate_freeze_updater_verifier_unavailable",
+        )
+        self.assertEqual(helper_calls, 0)
+        self.assertEqual(creator_calls, 0)
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(
+            tuple(event["state"] for event in attempt.events[-3:]),
+            ("verification_blocked", "verification_recovering", "failed"),
+        )
+        self.assertEqual(
+            attempt.events[-1]["failure_code"],
+            "candidate_freeze_updater_verifier_unavailable",
+        )
+        self.assertNotIn(
+            "sensitive",
+            (attempt.root / "event-00000005.json").read_text(encoding="ascii"),
+        )
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError,
+            "allocate a successor build",
+        ):
+            self.fixture.run(
+                resume=True,
+                helper=forbidden_helper,
+                transformation_creator=forbidden_creator,
+            )
+        self.assertEqual(helper_calls, 0)
+        self.assertEqual(creator_calls, 0)
+
+    def test_semantic_failure_code_cannot_forge_verification_blocked(self) -> None:
+        attempt = self.enter_verification_blocked()
+        terminal = attempt.events[-1]
+        forged = transaction._event(
+            sequence=int(terminal["sequence"]),
+            previous=str(attempt.events[-2]["event_sha256"]),
+            intent_sha256=attempt.intent_sha256,
+            state="verification_blocked",
+            recorded_at=str(terminal["recorded_at"]),
+            failure_code="signing_transformation_generic",
+        )
+        event_path = attempt.root / "event-00000003.json"
+        event_path.write_bytes(transaction._canonical_json(forged))
+        event_path.chmod(0o600)
+
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError,
+            "failure evidence",
+        ) as caught:
+            self.fixture.load("00000001")
+        self.assertEqual(caught.exception.code, "invalid_attempt_event")
+
+    def test_interrupted_recovery_is_terminal_without_second_verification(self) -> None:
+        attempt = self.enter_verification_blocked()
+        attempt = transaction._append_event(
+            self.fixture.repository,
+            attempt,
+            "verification_recovering",
+            clock=self.fixture.clock,
+        )
+        verifier_calls = 0
+
+        def forbidden_verifier(
+            _repository: Path,
+            _output: Path,
+        ) -> dict[str, str]:
+            nonlocal verifier_calls
+            verifier_calls += 1
+            raise AssertionError("interrupted recovery was retried")
+
+        with self.assertRaises(transaction.SigningAttemptError) as caught:
+            self.fixture.run(
+                resume=True,
+                transformation_verifier=forbidden_verifier,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            transaction.VERIFICATION_RECOVERY_INTERRUPTED,
+        )
+        self.assertEqual(verifier_calls, 0)
+        reloaded = self.fixture.load("00000001")
+        self.assertEqual(reloaded.state, "failed")
+        self.assertEqual(
+            reloaded.events[-1]["failure_code"],
+            transaction.VERIFICATION_RECOVERY_INTERRUPTED,
+        )
+
+    def test_verification_committing_recovers_pre_rename_failure(self) -> None:
+        self.enter_verification_blocked()
+        with patch.object(
+            transaction,
+            "publish_private_directory_exclusive",
+            side_effect=PublicationError("injected pre-rename failure"),
+        ), self.assertRaises(transaction.SigningAttemptOutcomeUnknown):
+            self.fixture.run(resume=True)
+
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(attempt.state, "verification_committing")
+        self.assertTrue(attempt.work.is_dir())
+        self.assertFalse(attempt.publish_ready.exists())
+
+        self.assertEqual(
+            self.fixture.run(
+                resume=True,
+                helper=lambda *_arguments: self.fail("helper was re-run"),
+                transformation_creator=lambda *_arguments: self.fail(
+                    "receipt creator was re-run"
+                ),
+            ),
+            self.fixture.root / "signing-output",
+        )
+        self.assertEqual(self.fixture.load("00000001").state, "published")
+
+    def test_verification_committing_recovers_post_rename_reply_loss(self) -> None:
+        self.enter_verification_blocked()
+
+        def rename_then_lose_reply(source: Path, destination: Path) -> None:
+            source.rename(destination)
+            raise durable_file.DurabilityOutcomeUnknown(
+                "injected post-rename durability reply loss"
+            )
+
+        with patch.object(
+            transaction,
+            "publish_private_directory_exclusive",
+            side_effect=rename_then_lose_reply,
+        ), self.assertRaises(transaction.SigningAttemptOutcomeUnknown):
+            self.fixture.run(resume=True)
+
+        attempt = self.fixture.load("00000001")
+        self.assertEqual(attempt.state, "verification_committing")
+        self.assertFalse(attempt.work.exists())
+        self.assertTrue(attempt.publish_ready.is_dir())
+
+        self.assertEqual(
+            self.fixture.run(
+                resume=True,
+                helper=lambda *_arguments: self.fail("helper was re-run"),
+                transformation_creator=lambda *_arguments: self.fail(
+                    "receipt creator was re-run"
+                ),
+            ),
+            self.fixture.root / "signing-output",
+        )
+        self.assertEqual(self.fixture.load("00000001").state, "published")
+
+    def test_extra_work_inventory_never_enters_verification_blocked(self) -> None:
+        def create_extra_then_block(
+            repository: Path,
+            output: Path,
+        ) -> dict[str, str]:
+            self.fixture.transformation_create(repository, output)
+            (output / "unexpected").write_bytes(b"unexpected")
+            raise transaction.SigningTransformationError(
+                "injected operational verifier failure",
+                code="candidate_freeze_updater_verifier_unavailable",
+            )
+
+        with self.assertRaises(transaction.SigningAttemptError) as caught:
+            self.fixture.run(
+                resume=False,
+                transformation_creator=create_extra_then_block,
+            )
+        self.assertEqual(caught.exception.code, "signing_transformation_failed")
+        self.assertEqual(self.fixture.load("00000001").state, "failed")
+
+    def test_work_tree_fsync_failure_never_enters_verification_blocked(self) -> None:
+        def create_then_block(
+            repository: Path,
+            output: Path,
+        ) -> dict[str, str]:
+            self.fixture.transformation_create(repository, output)
+            raise transaction.SigningTransformationError(
+                "injected operational verifier failure",
+                code="candidate_freeze_updater_verifier_unavailable",
+            )
+
+        with patch.object(
+            transaction,
+            "fsync_private_tree",
+            side_effect=PublicationError("injected work fsync failure"),
+        ), self.assertRaises(transaction.SigningAttemptError) as caught:
+            self.fixture.run(
+                resume=False,
+                transformation_creator=create_then_block,
+            )
+        self.assertEqual(caught.exception.code, "signing_transformation_failed")
+        self.assertEqual(self.fixture.load("00000001").state, "failed")
+
+    def test_unsafe_nested_work_tree_never_enters_verification_blocked(self) -> None:
+        def create_unsafe_then_block(
+            repository: Path,
+            output: Path,
+        ) -> dict[str, str]:
+            self.fixture.transformation_create(repository, output)
+            app_file = output / transaction.SIGNED_APP_WITHIN_OUTPUT / "fixture.bin"
+            app_file.chmod(0o666)
+            raise transaction.SigningTransformationError(
+                "injected operational verifier failure",
+                code="candidate_freeze_updater_verifier_unavailable",
+            )
+
+        with self.assertRaises(transaction.SigningAttemptError) as caught:
+            self.fixture.run(
+                resume=False,
+                transformation_creator=create_unsafe_then_block,
+            )
+        self.assertEqual(caught.exception.code, "signing_transformation_failed")
+        self.assertEqual(self.fixture.load("00000001").state, "failed")
+
+    def test_symlinked_signing_input_never_enters_verification_blocked(self) -> None:
+        def create_symlink_then_block(
+            repository: Path,
+            output: Path,
+        ) -> dict[str, str]:
+            self.fixture.transformation_create(repository, output)
+            signing_input = output / "signing-input"
+            external = self.fixture.root / "external-signing-input"
+            signing_input.rename(external)
+            signing_input.symlink_to(external)
+            raise transaction.SigningTransformationError(
+                "injected operational verifier failure",
+                code="candidate_freeze_updater_verifier_unavailable",
+            )
+
+        with self.assertRaises(transaction.SigningAttemptError) as caught:
+            self.fixture.run(
+                resume=False,
+                transformation_creator=create_symlink_then_block,
+            )
+        self.assertEqual(caught.exception.code, "signing_transformation_failed")
+        self.assertEqual(self.fixture.load("00000001").state, "failed")
+
+    def test_nonprivate_top_level_mode_never_enters_blocked(self) -> None:
+        def create_nonprivate_then_block(
+            repository: Path,
+            output: Path,
+        ) -> dict[str, str]:
+            self.fixture.transformation_create(repository, output)
+            (output / "signed-native-products").chmod(0o755)
+            raise transaction.SigningTransformationError(
+                "injected operational verifier failure",
+                code="candidate_freeze_updater_verifier_unavailable",
+            )
+
+        with self.assertRaises(transaction.SigningAttemptError) as caught:
+            self.fixture.run(
+                resume=False,
+                transformation_creator=create_nonprivate_then_block,
+            )
+        self.assertEqual(caught.exception.code, "signing_transformation_failed")
+        self.assertEqual(self.fixture.load("00000001").state, "failed")
+
+    def test_all_downstream_surfaces_block_verification_recovery(self) -> None:
+        guarded = (
+            transaction.SIGNING_OUTPUT_RELATIVE,
+            *transaction._DOWNSTREAM_RECOVERY_GUARDS,
+        )
+        for relative in guarded:
+            with self.subTest(relative=relative):
+                fixture = SigningAttemptFixture()
+                try:
+                    path = fixture.root / relative
+                    path.mkdir(parents=True, mode=0o700)
+                    with self.assertRaisesRegex(
+                        transaction.SigningAttemptError,
+                        "downstream state",
+                    ) as caught:
+                        transaction._require_no_canonical_or_notary_state(
+                            fixture.repository
+                        )
+                    self.assertEqual(
+                        caught.exception.code,
+                        transaction.VERIFICATION_RECOVERY_PRECONDITION_FAILED,
+                    )
+                finally:
+                    fixture.cleanup()
+
+    def test_ci_stage_inputs_remain_allowed_before_signing(self) -> None:
+        stage_inputs = self.fixture.root / "stage-inputs"
+        stage_inputs.mkdir(mode=0o700)
+        for name in ("hosted-ci.json", "local-ci-lanes.json"):
+            (stage_inputs / name).write_bytes(b"fixture")
+        transaction._require_no_canonical_or_notary_state(
+            self.fixture.repository
+        )
+
+    def test_publish_ready_presence_blocks_initial_recovery_boundary(self) -> None:
+        attempt = self.enter_verification_blocked()
+        attempt.publish_ready.mkdir(mode=0o700)
+        with self.assertRaisesRegex(
+            transaction.SigningAttemptError,
+            "publish-ready",
+        ) as caught:
+            transaction._require_no_downstream_recovery_state(
+                self.fixture.repository,
+                attempt,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            transaction.VERIFICATION_RECOVERY_PRECONDITION_FAILED,
+        )
 
     def test_private_output_os_error_is_terminal_and_requires_successor(self) -> None:
         def fail_private_output(_repository: Path, _output: Path) -> dict[str, str]:
@@ -1165,7 +1865,13 @@ class SigningAttemptTransactionTests(unittest.TestCase):
                         confirmer=self.fixture.confirmer,
                         transformation_creator=self.fixture.transformation_create,
                         transformation_verifier=self.fixture.transformation_verify,
+                        transformation_receipt_loader=(
+                            self.fixture.transformation_load
+                        ),
                         canonical_transformation_verifier=self.fixture.canonical_verify,
+                        embedded_verifier_session_factory=(
+                            self.fixture.embedded_verifier_session
+                        ),
                     )
 
     def test_frozen_binding_drift_blocks_resume_without_new_attempt(self) -> None:
@@ -1194,7 +1900,11 @@ class SigningAttemptTransactionTests(unittest.TestCase):
                 confirmer=self.fixture.confirmer,
                 transformation_creator=self.fixture.transformation_create,
                 transformation_verifier=self.fixture.transformation_verify,
+                transformation_receipt_loader=self.fixture.transformation_load,
                 canonical_transformation_verifier=self.fixture.canonical_verify,
+                embedded_verifier_session_factory=(
+                    self.fixture.embedded_verifier_session
+                ),
             )
         self.assertEqual(os.listdir(self.fixture.attempts()), ["00000001"])
 

@@ -246,16 +246,24 @@ done
 
 for contract in \
   'scripts/candidate_freeze.py:cfm-candidate-freeze-intent-v3' \
-  'scripts/candidate_freeze.py:verify_possession_proof(repository, root)' \
+  'scripts/candidate_freeze.py:selected_possession_verifier(repository, root)' \
+  'scripts/candidate_freeze.py:updater_verifier_unavailable' \
   'scripts/candidate_freeze.py:signing-output' \
   'scripts/signing_attempt_transaction.py:cfm-ga-signing-attempt-v1' \
+  'scripts/signing_attempt_transaction.py:verification_blocked' \
+  'scripts/signing_attempt_transaction.py:production_embedded_verifier_session' \
+  'scripts/signing_attempt_transaction.py:fsync_private_tree(attempt.work)' \
+  'scripts/signing_attempt_transaction.py:possession_verifier=possession_verifier' \
   'scripts/signing_attempt_transaction.py:publish_private_directory_exclusive' \
   'scripts/signing_attempt_transaction.py:verify_attempt_receipt' \
   'scripts/signing_attempt_transaction.py:outcome_unknown' \
   'scripts/run_ga_signing_attempt.sh:--transaction-owned' \
-  'scripts/run_ga_signing_attempt.sh:target/candidates/0.4.0/ga/40037' \
+  'scripts/run_ga_signing_attempt.sh:target/candidates/0.4.0/ga/40038' \
   'scripts/verify_signing_transformation.py:cfm-ga-signing-transformation-v2' \
   'scripts/verify_signing_transformation.py:cfm-candidate-freeze-intent-v3' \
+  'scripts/verify_signing_transformation.py:RECOVERABLE_VERIFICATION_ERROR_CODES' \
+  'scripts/verify_signing_transformation.py:def load_attempt_receipt(' \
+  'scripts/release_artifact_set.py:def _updater_verification_session(' \
   'scripts/notarization_transaction.py:signing_transformation_receipt_sha256' \
   'scripts/notarization_transaction.py:validate_published_transaction_receipt' \
   'scripts/ga_acceptance_environment.py:DOCUMENT: Final = "cfm-ga-environment-identity-v1"' \

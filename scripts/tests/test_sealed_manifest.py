@@ -1049,7 +1049,7 @@ class SealedManifestContractTests(unittest.TestCase):
     def test_default_state_is_confined_to_the_active_ga_stage_root(self) -> None:
         self.assertEqual(
             DEFAULT_EVIDENCE_DIRECTORY,
-            "target/candidates/0.4.0/ga/40037/stage-inputs/sealed-manifest",
+            "target/candidates/0.4.0/ga/40038/stage-inputs/sealed-manifest",
         )
         self.assertEqual(
             DEFAULT_MANIFEST_PATH,

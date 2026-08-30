@@ -57,7 +57,8 @@ The failure outcome is known and terminal.
 Retiring the consumed identity and binding the corrected release source to a
 new allocation made build 40036 its successor. Build 40036 was later signed,
 notarized, and retired before install; its history is recorded in
-`ga-build-40036-retirement.md`. Build 40037 is now the only active GA successor.
+`ga-build-40036-retirement.md`. Build 40037 was later consumed and retired in
+`ga-build-40037-retirement.md`. Build 40038 is now the only active GA successor.
 It must start from one new clean source identity and repeat the complete source,
 hosted-CI, build, freeze, signing, notarization, package, installation, runtime,
 and publication evidence sequence. No application tree, profile copy,

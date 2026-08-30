@@ -97,7 +97,9 @@ not be copied forward as build-40037 approval.
 
 ## Successor generation
 
-Build 40037 is the only active GA successor. It must start from one new clean
+Build 40037 became the active successor and was later consumed and retired
+independently; its history is recorded in `ga-build-40037-retirement.md`. Build
+40038 is now the only active GA successor. It must start from one new clean
 source identity and repeat the complete hosted-CI, build, freeze, signing,
 notarization, publication-evidence, package, installation, runtime, physical,
 and final publication sequence. No application tree, profile copy, possession

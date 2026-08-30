@@ -123,7 +123,7 @@ class SigningTransformationFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.root = (
-            self.repository / "target/candidates/0.4.0/ga/40037"
+            self.repository / "target/candidates/0.4.0/ga/40038"
         )
         self.pre_sign_app = self.root / transformation.PRE_SIGN_APP_RELATIVE
         self.signing_output = (
@@ -182,7 +182,7 @@ class SigningTransformationFixture:
     def _write_pre_sign_manifest(self) -> None:
         metadata = {
             "artifactKind": "pre-sign-application-v1",
-            "buildNumber": "40037",
+            "buildNumber": "40038",
             "version": "0.4.0",
         }
         value = build_manifest(
@@ -232,7 +232,7 @@ class SigningTransformationFixture:
 
     def _write_intent(self) -> None:
         value = {
-            "build_number": "40037",
+            "build_number": "40038",
             "consumption_state": "candidate_frozen_consumed",
             "document": "cfm-candidate-freeze-intent-v3",
             "pre_sign_app_tree_sha256": "a" * 64,
@@ -251,7 +251,7 @@ class SigningTransformationFixture:
             intent_path=self.intent_path,
             intent_sha256=hashlib.sha256(self.intent_path.read_bytes()).hexdigest(),
             product_version="0.4.0",
-            build_number="40037",
+            build_number="40038",
             recovered=False,
         )
 
@@ -680,6 +680,7 @@ class SigningTransformationTests(unittest.TestCase):
             "40034",
             "40035",
             "40036",
+            "40037",
         ):
             manifest = json.loads(original_manifest)
             manifest["metadata"]["buildNumber"] = build_number
@@ -857,6 +858,86 @@ class SigningTransformationTests(unittest.TestCase):
                 freeze_verifier=self.fixture.freeze_verifier,
             ),
             receipt,
+        )
+
+    def test_private_receipt_can_be_loaded_without_claiming_verification(self) -> None:
+        receipt = self.fixture.create()
+        self.assertEqual(
+            transformation.load_attempt_receipt(
+                self.fixture.repository,
+                self.fixture.signing_output,
+            ),
+            receipt,
+        )
+
+        canonical = self.fixture.root / transformation.SIGNING_OUTPUT_RELATIVE
+        self.fixture.signing_output.rename(canonical)
+        with self.assertRaisesRegex(
+            transformation.SigningTransformationError,
+            "fixed private attempt workspace",
+        ):
+            transformation.load_attempt_receipt(
+                self.fixture.repository,
+                canonical,
+            )
+
+    def test_signing_transformation_error_codes_are_closed(self) -> None:
+        generic = transformation.SigningTransformationError("fixture")
+        self.assertEqual(generic.code, transformation.GENERIC_ERROR_CODE)
+        outcome = transformation.SigningTransformationOutcomeUnknown("fixture")
+        self.assertEqual(
+            outcome.code,
+            transformation.OUTCOME_UNKNOWN_ERROR_CODE,
+        )
+        with self.assertRaisesRegex(ValueError, "not allowlisted"):
+            transformation.SigningTransformationError(
+                "fixture",
+                code="attacker_controlled_code",
+            )
+
+    def test_operational_candidate_freeze_code_maps_to_recoverable_enum(self) -> None:
+        def unavailable(_repository: Path) -> FrozenCandidate:
+            raise transformation.CandidateFreezeError(
+                "updater_verifier_unavailable",
+                "typed operational verifier failure",
+                consumed=True,
+            )
+
+        with self.assertRaises(
+            transformation.SigningTransformationError
+        ) as caught:
+            transformation._freeze_inputs(
+                self.fixture.repository,
+                unavailable,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "candidate_freeze_updater_verifier_unavailable",
+        )
+        self.assertIn(
+            caught.exception.code,
+            transformation.RECOVERABLE_VERIFICATION_ERROR_CODES,
+        )
+
+    def test_quarantined_candidate_freeze_code_maps_to_terminal_generic(self) -> None:
+        def quarantined(_repository: Path) -> FrozenCandidate:
+            raise transformation.CandidateFreezeError(
+                "candidate_freeze_quarantined",
+                "semantic or operational cause is ambiguous",
+                consumed=True,
+            )
+
+        with self.assertRaises(
+            transformation.SigningTransformationError
+        ) as caught:
+            transformation._freeze_inputs(
+                self.fixture.repository,
+                quarantined,
+            )
+        self.assertEqual(caught.exception.code, transformation.GENERIC_ERROR_CODE)
+        self.assertNotIn(
+            caught.exception.code,
+            transformation.RECOVERABLE_VERIFICATION_ERROR_CODES,
         )
 
     def test_build_wires_signing_transaction_before_notary_submission(self) -> None:

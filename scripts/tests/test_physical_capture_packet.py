@@ -49,7 +49,7 @@ class PacketPhysicalCaptureTests(unittest.TestCase):
         )
         self.candidate = {
             "version": "0.4.0",
-            "build_number": "40037",
+            "build_number": "40038",
             "app_manifest_sha256": _sha256("app"),
             "signed_app_tree_sha256": _sha256("tree"),
             "artifact_hash_manifest_sha256": _sha256("artifacts"),

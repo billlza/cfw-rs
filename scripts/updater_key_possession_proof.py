@@ -14,6 +14,7 @@ accessing the updater private key or its Keychain password.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -25,7 +26,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Final, Mapping, Sequence
+from typing import Any, Callable, Final, Iterator, Mapping, Sequence
 
 if __package__:
     from .publication.bounded_process import BoundedProcessError, run_bounded_process
@@ -95,6 +96,28 @@ ProcessRunner = Callable[..., subprocess.CompletedProcess[bytes]]
 
 class UpdaterKeyPossessionError(RuntimeError):
     """The updater-key possession proof is absent, unsafe, or invalid."""
+
+
+EMBEDDED_VERIFIER_UNAVAILABLE: Final = "embedded_verifier_unavailable"
+EMBEDDED_VERIFIER_OPERATIONAL_REASONS: Final = frozenset(
+    {"descendant", "output_limit", "pipe", "start", "timeout"}
+)
+
+
+class UpdaterKeyPossessionOperationalError(UpdaterKeyPossessionError):
+    """The fixed public verifier did not reach one completed process result."""
+
+    code = EMBEDDED_VERIFIER_UNAVAILABLE
+
+    def __init__(self, reason: str) -> None:
+        if reason not in EMBEDDED_VERIFIER_OPERATIONAL_REASONS:
+            raise ValueError(
+                "embedded verifier operational reason is not allowlisted"
+            )
+        super().__init__(
+            "source-pinned embedded updater-key verifier is operationally unavailable"
+        )
+        self.reason = reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,21 +471,61 @@ def _validate_release_verifier_binding(
     )
 
 
-def _production_embedded_verifier(
-    repository: Path, challenge: Path, signature: Path
-) -> tuple[dict[str, Any], dict[str, Any]]:
+@contextmanager
+def production_embedded_verifier_session(
+    repository: Path,
+) -> Iterator[EmbeddedVerifier]:
+    """Bind repeated public proof replays to one private verifier build."""
+
+    repository = _canonical_repository(repository)
     release_artifacts = _release_artifact_verifier_module()
 
     try:
-        verification, binding = _produce_updater_verification(
-            repository, challenge, signature
-        )
-        binding = _validate_release_verifier_binding(binding, repository)
+        with release_artifacts._updater_verification_session(
+            repository
+        ) as produce:
+            def embedded_verifier(
+                selected_repository: Path,
+                challenge: Path,
+                signature: Path,
+            ) -> tuple[dict[str, Any], dict[str, Any]]:
+                if _canonical_repository(selected_repository) != repository:
+                    raise UpdaterKeyPossessionError(
+                        "embedded verifier session is bound to another repository"
+                    )
+                try:
+                    verification, binding = produce(challenge, signature)
+                    binding = _validate_release_verifier_binding(
+                        binding, repository
+                    )
+                except release_artifacts.ReleaseVerifierOperationalError as error:
+                    raise UpdaterKeyPossessionOperationalError(
+                        error.reason
+                    ) from error
+                except (
+                    release_artifacts.ArtifactSetError,
+                    OSError,
+                    ValueError,
+                ) as error:
+                    raise UpdaterKeyPossessionError(
+                        "source-pinned embedded updater-key verification failed"
+                    ) from error
+                return verification, binding
+
+            yield embedded_verifier
+    except release_artifacts.ReleaseVerifierOperationalError as error:
+        raise UpdaterKeyPossessionOperationalError(error.reason) from error
     except (release_artifacts.ArtifactSetError, OSError, ValueError) as error:
         raise UpdaterKeyPossessionError(
             "source-pinned embedded updater-key verification failed"
         ) from error
-    return verification, binding
+
+
+def _production_embedded_verifier(
+    repository: Path, challenge: Path, signature: Path
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with production_embedded_verifier_session(repository) as verifier:
+        return verifier(repository, challenge, signature)
 
 
 def _validate_embedded_verification(
@@ -918,7 +981,9 @@ if __name__ == "__main__":
 __all__ = [
     "PROOF_RELATIVE",
     "UpdaterKeyPossessionError",
+    "UpdaterKeyPossessionOperationalError",
     "VerifiedUpdaterKeyPossession",
     "create_possession_proof",
+    "production_embedded_verifier_session",
     "verify_possession_proof",
 ]

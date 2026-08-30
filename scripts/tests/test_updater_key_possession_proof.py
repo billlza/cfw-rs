@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -33,6 +34,51 @@ TAURI_CONFIG_SHA256 = hashlib.sha256(TAURI_CONFIG_DATA).hexdigest()
 SIGNATURE_PREFIX = b"fixture-updater-signature:"
 
 
+class ControlledReplayLock:
+    def __init__(
+        self,
+        *,
+        pause_nonblocking_acquire: bool = False,
+        pause_release: bool = False,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._control = threading.Lock()
+        self._pause_nonblocking_acquire = pause_nonblocking_acquire
+        self._pause_release = pause_release
+        self.nonblocking_acquire_paused = threading.Event()
+        self.allow_nonblocking_acquire = threading.Event()
+        self.release_paused = threading.Event()
+        self.allow_release = threading.Event()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        pause = False
+        if not blocking:
+            with self._control:
+                pause = self._pause_nonblocking_acquire
+                self._pause_nonblocking_acquire = False
+        if pause:
+            self.nonblocking_acquire_paused.set()
+            if not self.allow_nonblocking_acquire.wait(timeout=5):
+                raise AssertionError(
+                    "controlled replay acquire was not released"
+                )
+        if timeout == -1:
+            return self._lock.acquire(blocking)
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+        with self._control:
+            pause = self._pause_release
+            self._pause_release = False
+        if pause:
+            self.release_paused.set()
+            if not self.allow_release.wait(timeout=5):
+                raise AssertionError(
+                    "controlled replay release was not released"
+                )
+
+
 class PossessionFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -44,7 +90,7 @@ class PossessionFixture:
         tauri_config.write_bytes(TAURI_CONFIG_DATA)
         tauri_config.chmod(0o644)
         self.preflight_root = (
-            self.repository / "target/candidates/0.4.0/ga-preflight/40037"
+            self.repository / "target/candidates/0.4.0/ga-preflight/40038"
         )
         self.preflight_root.mkdir(parents=True, mode=0o700)
         self.preflight_root.chmod(0o700)
@@ -184,6 +230,16 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
         durability = patch.object(durable_file, "full_fsync", side_effect=os.fsync)
         durability.start()
         self.addCleanup(durability.stop)
+
+    def _production_verifier_inputs(
+        self,
+    ) -> tuple[release_artifact_set.ReleaseVerifierBuild, Path, Path]:
+        build = create_release_verifier_build(self.fixture.repository)
+        challenge = self.fixture.repository / "production-challenge.json"
+        signature = self.fixture.repository / "production-challenge.json.sig"
+        challenge.write_bytes(b'{"fixed":"challenge"}\n')
+        signature.write_bytes(b"fixture-signature\n")
+        return build, challenge, signature
 
     def test_create_uses_fixed_production_launcher_boundary_and_reopens(self) -> None:
         result = self.fixture.create()
@@ -390,11 +446,7 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
     def test_production_source_pinned_verifier_binding_is_rebuilt_and_validated(
         self,
     ) -> None:
-        build = create_release_verifier_build(self.fixture.repository)
-        challenge = self.fixture.repository / "production-challenge.json"
-        signature = self.fixture.repository / "production-challenge.json.sig"
-        challenge.write_bytes(b'{"fixed":"challenge"}\n')
-        signature.write_bytes(b"fixture-signature\n")
+        build, challenge, signature = self._production_verifier_inputs()
 
         @contextmanager
         def compiled(repository: Path):
@@ -428,9 +480,614 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
         )
         binding_validator.assert_called_once()
 
+    def test_production_session_compiles_once_for_three_real_replays(
+        self,
+    ) -> None:
+        build, challenge, signature = self._production_verifier_inputs()
+        compile_calls = 0
+
+        @contextmanager
+        def compiled(repository: Path):
+            nonlocal compile_calls
+            self.assertEqual(repository, self.fixture.repository)
+            compile_calls += 1
+            yield build
+
+        real_invoke = release_artifact_set._invoke_release_verifier
+        real_state_verifier = (
+            release_artifact_set._verify_updater_verification_session_state
+        )
+        with (
+            patch.object(
+                release_artifact_set,
+                "_compiled_release_verifier",
+                compiled,
+            ),
+            patch.object(
+                release_artifact_set,
+                "_invoke_release_verifier",
+                wraps=real_invoke,
+            ) as invocation,
+            patch.object(
+                release_artifact_set,
+                "_verify_updater_verification_session_state",
+                wraps=real_state_verifier,
+            ) as state_verifier,
+            verified_cargo_fixture(build),
+        ):
+            environment_before = dict(os.environ)
+            with possession.production_embedded_verifier_session(
+                self.fixture.repository
+            ) as verifier:
+                first_verification, first_binding = verifier(
+                    self.fixture.repository, challenge, signature
+                )
+                original_executable_sha256 = first_binding["executable"][
+                    "sha256"
+                ]
+                first_binding["executable"]["sha256"] = "8" * 64
+                second_verification, second_binding = verifier(
+                    self.fixture.repository, challenge, signature
+                )
+                third_verification, third_binding = verifier(
+                    self.fixture.repository, challenge, signature
+                )
+                escaped_verifier = verifier
+            self.assertEqual(dict(os.environ), environment_before)
+
+        self.assertEqual(compile_calls, 1)
+        self.assertEqual(invocation.call_count, 3)
+        self.assertEqual(state_verifier.call_count, 8)
+        self.assertEqual(first_verification, second_verification)
+        self.assertEqual(second_verification, third_verification)
+        self.assertEqual(second_binding, third_binding)
+        self.assertEqual(
+            second_binding["executable"]["sha256"],
+            original_executable_sha256,
+        )
+        self.assertIsNot(first_binding, second_binding)
+        self.assertIsNot(
+            first_binding["executable"], second_binding["executable"]
+        )
+        with self.assertRaisesRegex(
+            possession.UpdaterKeyPossessionError,
+            "source-pinned embedded updater-key verification failed",
+        ):
+            escaped_verifier(self.fixture.repository, challenge, signature)
+
+    def test_failed_session_replay_is_not_retried_and_cleans_build_scope(
+        self,
+    ) -> None:
+        build, challenge, signature = self._production_verifier_inputs()
+        build_scope = self.fixture.repository / "fixture-verifier-build-scope"
+
+        @contextmanager
+        def compiled(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            build_scope.mkdir(mode=0o700)
+            try:
+                yield build
+            finally:
+                shutil.rmtree(build_scope)
+
+        with (
+            patch.object(
+                release_artifact_set,
+                "_compiled_release_verifier",
+                compiled,
+            ),
+            patch.object(
+                release_artifact_set,
+                "_invoke_release_verifier",
+                side_effect=release_artifact_set.ArtifactSetError(
+                    "fixture verifier execution failed"
+                ),
+            ) as invocation,
+            verified_cargo_fixture(build),
+        ):
+            with possession.production_embedded_verifier_session(
+                self.fixture.repository
+            ) as verifier:
+                with self.assertRaisesRegex(
+                    possession.UpdaterKeyPossessionError,
+                    "source-pinned embedded updater-key verification failed",
+                ) as first_failure:
+                    verifier(self.fixture.repository, challenge, signature)
+                with self.assertRaisesRegex(
+                    possession.UpdaterKeyPossessionError,
+                    "source-pinned embedded updater-key verification failed",
+                ) as poisoned_failure:
+                    verifier(self.fixture.repository, challenge, signature)
+
+        self.assertEqual(invocation.call_count, 1)
+        self.assertNotIsInstance(
+            first_failure.exception,
+            possession.UpdaterKeyPossessionOperationalError,
+        )
+        self.assertNotIsInstance(
+            poisoned_failure.exception,
+            possession.UpdaterKeyPossessionOperationalError,
+        )
+        self.assertFalse(build_scope.exists())
+
+    def test_failed_replay_poisons_state_before_another_thread_can_enter(
+        self,
+    ) -> None:
+        build, challenge, signature = self._production_verifier_inputs()
+        controlled_replay_lock = ControlledReplayLock(pause_release=True)
+        first_errors: list[BaseException] = []
+
+        @contextmanager
+        def compiled(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            yield build
+
+        def run_first_replay(verifier: possession.EmbeddedVerifier) -> None:
+            try:
+                verifier(self.fixture.repository, challenge, signature)
+            except BaseException as error:
+                first_errors.append(error)
+
+        with (
+            patch.object(
+                release_artifact_set,
+                "_compiled_release_verifier",
+                compiled,
+            ),
+            patch.object(
+                release_artifact_set,
+                "_new_updater_verification_session_lock",
+                side_effect=(threading.Lock(), controlled_replay_lock),
+            ),
+            patch.object(
+                release_artifact_set,
+                "_invoke_release_verifier",
+                side_effect=release_artifact_set.ArtifactSetError(
+                    "fixture verifier execution failed"
+                ),
+            ) as invocation,
+            verified_cargo_fixture(build),
+        ):
+            with possession.production_embedded_verifier_session(
+                self.fixture.repository
+            ) as verifier:
+                replay = threading.Thread(
+                    target=run_first_replay,
+                    args=(verifier,),
+                    daemon=True,
+                )
+                replay.start()
+                try:
+                    self.assertTrue(
+                        controlled_replay_lock.release_paused.wait(timeout=2)
+                    )
+                    with self.assertRaisesRegex(
+                        possession.UpdaterKeyPossessionError,
+                        "source-pinned embedded updater-key verification failed",
+                    ) as concurrent_failure:
+                        verifier(
+                            self.fixture.repository, challenge, signature
+                        )
+                    self.assertEqual(invocation.call_count, 1)
+                    self.assertNotIsInstance(
+                        concurrent_failure.exception,
+                        possession.UpdaterKeyPossessionOperationalError,
+                    )
+                finally:
+                    controlled_replay_lock.allow_release.set()
+                    replay.join(timeout=5)
+                self.assertFalse(replay.is_alive())
+
+        self.assertEqual(len(first_errors), 1)
+        self.assertIsInstance(
+            first_errors[0], possession.UpdaterKeyPossessionError
+        )
+        self.assertEqual(invocation.call_count, 1)
+
+    def test_session_exit_closes_gate_before_waiting_replay_can_enter(
+        self,
+    ) -> None:
+        build, challenge, signature = self._production_verifier_inputs()
+        build_scope = self.fixture.repository / "fixture-verifier-build-scope"
+        controlled_replay_lock = ControlledReplayLock(
+            pause_nonblocking_acquire=True
+        )
+        replay_errors: list[BaseException] = []
+
+        @contextmanager
+        def compiled(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            build_scope.mkdir(mode=0o700)
+            try:
+                yield build
+            finally:
+                shutil.rmtree(build_scope)
+
+        def run_replay(verifier: possession.EmbeddedVerifier) -> None:
+            try:
+                verifier(self.fixture.repository, challenge, signature)
+            except BaseException as error:
+                replay_errors.append(error)
+
+        with (
+            patch.object(
+                release_artifact_set,
+                "_compiled_release_verifier",
+                compiled,
+            ),
+            patch.object(
+                release_artifact_set,
+                "_new_updater_verification_session_lock",
+                side_effect=(threading.Lock(), controlled_replay_lock),
+            ),
+            patch.object(
+                release_artifact_set,
+                "_invoke_release_verifier",
+                wraps=release_artifact_set._invoke_release_verifier,
+            ) as invocation,
+            verified_cargo_fixture(build),
+        ):
+            manager = possession.production_embedded_verifier_session(
+                self.fixture.repository
+            )
+            verifier = manager.__enter__()
+            replay = threading.Thread(
+                target=run_replay,
+                args=(verifier,),
+                daemon=True,
+            )
+            replay.start()
+            try:
+                self.assertTrue(
+                    controlled_replay_lock.nonblocking_acquire_paused.wait(
+                        timeout=2
+                    )
+                )
+                self.assertFalse(manager.__exit__(None, None, None))
+                self.assertFalse(build_scope.exists())
+            finally:
+                controlled_replay_lock.allow_nonblocking_acquire.set()
+                replay.join(timeout=5)
+            self.assertFalse(replay.is_alive())
+
+        self.assertEqual(invocation.call_count, 0)
+        self.assertEqual(len(replay_errors), 1)
+        self.assertIsInstance(
+            replay_errors[0], possession.UpdaterKeyPossessionError
+        )
+
+    def test_session_exit_waits_for_inflight_replay_before_cleanup(
+        self,
+    ) -> None:
+        build, challenge, signature = self._production_verifier_inputs()
+        build_scope = self.fixture.repository / "fixture-verifier-build-scope"
+        invocation_started = threading.Event()
+        allow_invocation = threading.Event()
+        exit_started = threading.Event()
+        exit_finished = threading.Event()
+        replay_errors: list[BaseException] = []
+        exit_errors: list[BaseException] = []
+        real_invoke = release_artifact_set._invoke_release_verifier
+
+        @contextmanager
+        def compiled(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            build_scope.mkdir(mode=0o700)
+            try:
+                yield build
+            finally:
+                shutil.rmtree(build_scope)
+
+        def blocked_invoke(*args: object, **kwargs: object):
+            invocation_started.set()
+            if not allow_invocation.wait(timeout=5):
+                raise AssertionError("blocked verifier invocation was not released")
+            return real_invoke(*args, **kwargs)
+
+        def run_replay(verifier: possession.EmbeddedVerifier) -> None:
+            try:
+                verifier(self.fixture.repository, challenge, signature)
+            except BaseException as error:
+                replay_errors.append(error)
+
+        with (
+            patch.object(
+                release_artifact_set,
+                "_compiled_release_verifier",
+                compiled,
+            ),
+            patch.object(
+                release_artifact_set,
+                "_invoke_release_verifier",
+                side_effect=blocked_invoke,
+            ) as invocation,
+            verified_cargo_fixture(build),
+        ):
+            manager = possession.production_embedded_verifier_session(
+                self.fixture.repository
+            )
+            verifier = manager.__enter__()
+
+            def close_session() -> None:
+                exit_started.set()
+                try:
+                    manager.__exit__(None, None, None)
+                except BaseException as error:
+                    exit_errors.append(error)
+                finally:
+                    exit_finished.set()
+
+            replay = threading.Thread(
+                target=run_replay,
+                args=(verifier,),
+                daemon=True,
+            )
+            closer = threading.Thread(target=close_session, daemon=True)
+            replay.start()
+            self.assertTrue(invocation_started.wait(timeout=2))
+            closer.start()
+            try:
+                self.assertTrue(exit_started.wait(timeout=2))
+                self.assertFalse(exit_finished.wait(timeout=0.1))
+                self.assertTrue(build_scope.exists())
+                with self.assertRaisesRegex(
+                    possession.UpdaterKeyPossessionError,
+                    "source-pinned embedded updater-key verification failed",
+                ):
+                    verifier(self.fixture.repository, challenge, signature)
+            finally:
+                allow_invocation.set()
+                replay.join(timeout=5)
+                closer.join(timeout=5)
+            self.assertFalse(replay.is_alive())
+            self.assertFalse(closer.is_alive())
+
+        self.assertEqual(invocation.call_count, 1)
+        self.assertEqual(replay_errors, [])
+        self.assertEqual(exit_errors, [])
+        self.assertTrue(exit_finished.is_set())
+        self.assertFalse(build_scope.exists())
+
+    def test_operational_replay_failure_has_one_allowlisted_typed_code(
+        self,
+    ) -> None:
+        build, challenge, signature = self._production_verifier_inputs()
+
+        @contextmanager
+        def compiled(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            yield build
+
+        for reason in sorted(
+            release_artifact_set.RELEASE_VERIFIER_OPERATIONAL_REASONS
+        ):
+            with (
+                self.subTest(reason=reason),
+                patch.object(
+                    release_artifact_set,
+                    "_compiled_release_verifier",
+                    compiled,
+                ),
+                patch.object(
+                    release_artifact_set,
+                    "_invoke_release_verifier",
+                    side_effect=(
+                        release_artifact_set.ReleaseVerifierOperationalError(
+                            reason, "fixture verifier execution"
+                        )
+                    ),
+                ),
+                verified_cargo_fixture(build),
+            ):
+                with possession.production_embedded_verifier_session(
+                    self.fixture.repository
+                ) as verifier:
+                    with self.assertRaises(
+                        possession.UpdaterKeyPossessionOperationalError
+                    ) as raised:
+                        verifier(
+                            self.fixture.repository, challenge, signature
+                        )
+            self.assertEqual(
+                raised.exception.code,
+                possession.EMBEDDED_VERIFIER_UNAVAILABLE,
+            )
+            self.assertEqual(raised.exception.reason, reason)
+
+    def test_operational_build_failure_has_the_same_typed_code(self) -> None:
+        build, _challenge, _signature = self._production_verifier_inputs()
+
+        @contextmanager
+        def unavailable(_repository: Path):
+            raise release_artifact_set.ReleaseVerifierOperationalError(
+                "timeout", "fixture verifier build"
+            )
+            yield build
+
+        with (
+            patch.object(
+                release_artifact_set,
+                "_compiled_release_verifier",
+                unavailable,
+            ),
+            verified_cargo_fixture(build),
+            self.assertRaises(
+                possession.UpdaterKeyPossessionOperationalError
+            ) as raised,
+        ):
+            with possession.production_embedded_verifier_session(
+                self.fixture.repository
+            ):
+                raise AssertionError("unavailable verifier session was entered")
+
+        self.assertEqual(
+            raised.exception.code,
+            possession.EMBEDDED_VERIFIER_UNAVAILABLE,
+        )
+        self.assertEqual(raised.exception.reason, "timeout")
+
+    def test_session_rejects_reentrant_replay_and_cleans_build_scope(
+        self,
+    ) -> None:
+        build, challenge, signature = self._production_verifier_inputs()
+        build_scope = self.fixture.repository / "fixture-verifier-build-scope"
+        active_verifier: dict[str, possession.EmbeddedVerifier] = {}
+
+        @contextmanager
+        def compiled(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            build_scope.mkdir(mode=0o700)
+            try:
+                yield build
+            finally:
+                shutil.rmtree(build_scope)
+
+        def reenter(
+            _build: release_artifact_set.ReleaseVerifierBuild,
+            repository: Path,
+            archive: Path,
+            archive_signature: Path,
+        ) -> dict[str, object]:
+            active_verifier["value"](
+                repository, archive, archive_signature
+            )
+            raise AssertionError("reentrant verifier unexpectedly returned")
+
+        with (
+            patch.object(
+                release_artifact_set,
+                "_compiled_release_verifier",
+                compiled,
+            ),
+            patch.object(
+                release_artifact_set,
+                "_invoke_release_verifier",
+                side_effect=reenter,
+            ) as invocation,
+            verified_cargo_fixture(build),
+        ):
+            with possession.production_embedded_verifier_session(
+                self.fixture.repository
+            ) as verifier:
+                active_verifier["value"] = verifier
+                with self.assertRaisesRegex(
+                    possession.UpdaterKeyPossessionError,
+                    "source-pinned embedded updater-key verification failed",
+                ):
+                    verifier(self.fixture.repository, challenge, signature)
+
+        self.assertEqual(invocation.call_count, 1)
+        self.assertFalse(build_scope.exists())
+
+    def test_session_rejects_verification_input_drift_and_cleans_build_scope(
+        self,
+    ) -> None:
+        build, challenge, signature = self._production_verifier_inputs()
+        build_scope = self.fixture.repository / "fixture-verifier-build-scope"
+        real_invoke = release_artifact_set._invoke_release_verifier
+
+        @contextmanager
+        def compiled(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            build_scope.mkdir(mode=0o700)
+            try:
+                yield build
+            finally:
+                shutil.rmtree(build_scope)
+
+        def mutate_after_verification(*args: object, **kwargs: object):
+            receipt = real_invoke(*args, **kwargs)
+            challenge.write_bytes(b'{"changed":"after-verification"}\n')
+            return receipt
+
+        with (
+            patch.object(
+                release_artifact_set,
+                "_compiled_release_verifier",
+                compiled,
+            ),
+            patch.object(
+                release_artifact_set,
+                "_invoke_release_verifier",
+                side_effect=mutate_after_verification,
+            ) as invocation,
+            verified_cargo_fixture(build),
+            self.assertRaisesRegex(
+                possession.UpdaterKeyPossessionError,
+                "source-pinned embedded updater-key verification failed",
+            ) as raised,
+        ):
+            with possession.production_embedded_verifier_session(
+                self.fixture.repository
+            ) as verifier:
+                verifier(self.fixture.repository, challenge, signature)
+
+        self.assertEqual(invocation.call_count, 1)
+        self.assertNotIsInstance(
+            raised.exception,
+            possession.UpdaterKeyPossessionOperationalError,
+        )
+        self.assertIsInstance(
+            raised.exception.__cause__, release_artifact_set.ArtifactSetError
+        )
+        self.assertIn(
+            "updater archive or signature changed during embedded-key verification",
+            str(raised.exception.__cause__),
+        )
+        self.assertFalse(build_scope.exists())
+
+    def test_session_exit_revalidates_source_inputs_and_cleans_build_scope(
+        self,
+    ) -> None:
+        build, challenge, signature = self._production_verifier_inputs()
+        build_scope = self.fixture.repository / "fixture-verifier-build-scope"
+
+        @contextmanager
+        def compiled(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            build_scope.mkdir(mode=0o700)
+            try:
+                yield build
+            finally:
+                shutil.rmtree(build_scope)
+
+        with (
+            patch.object(
+                release_artifact_set,
+                "_compiled_release_verifier",
+                compiled,
+            ),
+            verified_cargo_fixture(build),
+            self.assertRaisesRegex(
+                possession.UpdaterKeyPossessionError,
+                "source-pinned embedded updater-key verification failed",
+            ) as raised,
+        ):
+            with possession.production_embedded_verifier_session(
+                self.fixture.repository
+            ) as verifier:
+                verifier(self.fixture.repository, challenge, signature)
+                (self.fixture.repository / "Cargo.toml").write_text(
+                    "[workspace]\nmembers = []\n",
+                    encoding="utf-8",
+                )
+
+        self.assertIsInstance(
+            raised.exception.__cause__, release_artifact_set.ArtifactSetError
+        )
+        self.assertNotIsInstance(
+            raised.exception,
+            possession.UpdaterKeyPossessionOperationalError,
+        )
+        self.assertIn(
+            "release verifier source inputs changed during verification",
+            str(raised.exception.__cause__),
+        )
+        self.assertFalse(build_scope.exists())
+
     def test_frozen_root_verification_uses_the_same_proof(self) -> None:
         created = self.fixture.create()
-        frozen_root = self.fixture.repository / "target/candidates/0.4.0/ga/40037"
+        frozen_root = self.fixture.repository / "target/candidates/0.4.0/ga/40038"
         frozen_root.parent.mkdir(parents=True)
         self.fixture.preflight_root.rename(frozen_root)
 
@@ -442,6 +1099,25 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
         )
 
         self.assertEqual(verified.proof_sha256, created.proof_sha256)
+
+    def test_retired_40037_root_is_not_an_active_candidate(self) -> None:
+        verifier_calls = list(self.fixture.verifier_calls)
+        retired_root = (
+            self.fixture.repository / "target/candidates/0.4.0/ga/40037"
+        )
+
+        with self.assertRaisesRegex(
+            possession.UpdaterKeyPossessionError,
+            "not a fixed GA candidate root",
+        ):
+            possession.verify_possession_proof(
+                self.fixture.repository,
+                retired_root,
+                source_identity_reader=self.fixture.source_reader,
+                embedded_verifier=self.fixture.embedded_verifier,
+            )
+
+        self.assertEqual(self.fixture.verifier_calls, verifier_calls)
 
     def test_repeated_create_refuses_to_replace_existing_proof(self) -> None:
         created = self.fixture.create()

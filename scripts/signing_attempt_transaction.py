@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run and recover append-only Developer ID signing attempts for GA build 40037.
+"""Run and recover append-only Developer ID signing attempts for GA build 40038.
 
 The frozen candidate is never copied into a canonical signing path until one
 private attempt has passed signing, full app verification, and transformation
@@ -11,6 +11,7 @@ evidence and a crash is reconciled explicitly by the fixed ``resume`` entry.
 from __future__ import annotations
 
 import argparse
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -40,6 +41,7 @@ if __package__:
         confirm_private_directory_published,
         ensure_private_directory_locked,
         exclusive_rooted_directory_lock,
+        fsync_private_tree,
         publish_private_directory_exclusive,
         publish_private_directory_locked,
         read_private_pending,
@@ -73,13 +75,17 @@ if __package__:
     )
     from .updater_key_possession_proof import (
         UpdaterKeyPossessionError,
+        VerifiedUpdaterKeyPossession,
+        production_embedded_verifier_session,
         verify_possession_proof,
     )
     from .verify_signing_transformation import (
+        RECOVERABLE_VERIFICATION_ERROR_CODES,
         RECEIPT_NAME as TRANSFORMATION_RECEIPT_NAME,
         SigningTransformationError,
         SigningTransformationOutcomeUnknown,
         create_attempt_receipt,
+        load_attempt_receipt,
         verify_attempt_receipt,
         verify_receipt,
     )
@@ -98,6 +104,7 @@ else:
         confirm_private_directory_published,
         ensure_private_directory_locked,
         exclusive_rooted_directory_lock,
+        fsync_private_tree,
         publish_private_directory_exclusive,
         publish_private_directory_locked,
         read_private_pending,
@@ -128,13 +135,17 @@ else:
     from repository_source_identity import SourceIdentityError, current_identity
     from updater_key_possession_proof import (
         UpdaterKeyPossessionError,
+        VerifiedUpdaterKeyPossession,
+        production_embedded_verifier_session,
         verify_possession_proof,
     )
     from verify_signing_transformation import (
+        RECOVERABLE_VERIFICATION_ERROR_CODES,
         RECEIPT_NAME as TRANSFORMATION_RECEIPT_NAME,
         SigningTransformationError,
         SigningTransformationOutcomeUnknown,
         create_attempt_receipt,
+        load_attempt_receipt,
         verify_attempt_receipt,
         verify_receipt,
     )
@@ -161,6 +172,25 @@ ABANDONED_BEFORE_SIGNING: Final = "attempt_abandoned_before_signing"
 INTERRUPTED_DURING_SIGNING: Final = "interrupted_during_signing"
 SIGNING_OUTPUT_PUBLISH_REPLY_UNKNOWN: Final = (
     "signing_output_publish_reply_unknown"
+)
+VERIFICATION_RECOVERY_FAILED: Final = "verification_recovery_failed"
+VERIFICATION_RECOVERY_INTERRUPTED: Final = "verification_recovery_interrupted"
+VERIFICATION_RECOVERY_PRECONDITION_FAILED: Final = (
+    "verification_recovery_precondition_failed"
+)
+_DOWNSTREAM_RECOVERY_GUARDS: Final = (
+    Path("packages"),
+    Path("prepackage"),
+    Path("ga-acceptance"),
+    Path("publication"),
+    Path("signed"),
+    Path("stage-inputs/final-candidate"),
+    Path("stage-inputs/ga-acceptance"),
+    Path("stage-inputs/publication"),
+    Path("stage-inputs/sealed-manifest"),
+    Path("transactions/app-notary"),
+    Path("transactions/notarization"),
+    Path("transactions/dmg-notary"),
 )
 
 INTENT_FIELDS: Final = frozenset(
@@ -196,17 +226,36 @@ EVENT_FIELDS: Final = frozenset(
     }
 )
 STATES: Final = frozenset(
-    {"prepared", "signing", "verified", "publishing", "published", "failed", "outcome_unknown"}
+    {
+        "prepared",
+        "signing",
+        "verification_blocked",
+        "verification_recovering",
+        "verification_committing",
+        "verified",
+        "publishing",
+        "published",
+        "failed",
+        "outcome_unknown",
+    }
 )
 TRANSITIONS: Final = {
     "prepared": frozenset({"signing", "failed"}),
-    "signing": frozenset({"verified", "failed", "outcome_unknown"}),
+    "signing": frozenset(
+        {"verification_blocked", "verified", "failed", "outcome_unknown"}
+    ),
+    "verification_blocked": frozenset({"verification_recovering", "failed"}),
+    "verification_recovering": frozenset({"verification_committing", "failed"}),
+    "verification_committing": frozenset({"verified", "failed"}),
     "verified": frozenset({"publishing", "failed"}),
     "publishing": frozenset({"published", "outcome_unknown"}),
     "outcome_unknown": frozenset({"publishing", "published"}),
     "published": frozenset(),
     "failed": frozenset(),
 }
+FAILURE_EVIDENCE_STATES: Final = frozenset(
+    {"failed", "outcome_unknown", "verification_blocked"}
+)
 LEGACY_OUTPUTS: Final = (
     Path("signing-input"),
     Path(SIGNED_NATIVE_PRODUCTS_NAME),
@@ -228,6 +277,20 @@ class SigningAttemptOutcomeUnknown(SigningAttemptError):
 
     def __init__(self, message: str) -> None:
         super().__init__("signing_publication_outcome_unknown", message)
+
+
+class SigningVerificationBlocked(SigningAttemptError):
+    """A durable private receipt needs one bounded read-only verification retry."""
+
+    def __init__(self, cause_code: str) -> None:
+        if cause_code not in RECOVERABLE_VERIFICATION_ERROR_CODES:
+            raise ValueError("verification-blocked cause code is not allowlisted")
+        super().__init__(
+            "signing_verification_blocked",
+            "private signing transformation verification is blocked; use the "
+            "fixed resume entry once",
+        )
+        self.cause_code = cause_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +337,17 @@ Publisher = Callable[[Path, Path], None]
 Confirmer = Callable[[Path, Path], None]
 TransformationCreator = Callable[[Path, Path], Mapping[str, Any]]
 TransformationVerifier = Callable[[Path, Path], Mapping[str, Any]]
+TransformationReceiptLoader = Callable[[Path, Path], Mapping[str, Any]]
 CanonicalTransformationVerifier = Callable[[Path], Mapping[str, Any]]
+EmbeddedVerifier = Callable[
+    [Path, Path, Path],
+    tuple[dict[str, Any], dict[str, Any]],
+]
+PossessionVerifier = Callable[[Path, Path], VerifiedUpdaterKeyPossession]
+EmbeddedVerifierSessionFactory = Callable[
+    [Path],
+    AbstractContextManager[EmbeddedVerifier],
+]
 
 
 def _utc_now() -> str:
@@ -423,6 +496,7 @@ def _verify_frozen_inputs(
     repository: Path,
     *,
     freeze_verifier: FreezeVerifier = verify_frozen_candidate,
+    possession_verifier: PossessionVerifier = verify_possession_proof,
 ) -> FrozenSigningBindings:
     repository = _canonical_repository(repository)
     try:
@@ -509,7 +583,7 @@ def _verify_frozen_inputs(
             "frozen signing plan is invalid",
         ) from error
     try:
-        updater = verify_possession_proof(repository, root)
+        updater = possession_verifier(repository, root)
     except (OSError, UpdaterKeyPossessionError, ValueError) as error:
         raise SigningAttemptError(
             "updater_possession_receipt_invalid",
@@ -679,12 +753,14 @@ def _validate_event(
             "invalid_attempt_event", "signing-attempt event identity is invalid"
         )
     if (
-        state in {"failed", "outcome_unknown"}
+        state in FAILURE_EVIDENCE_STATES
         and value["failure_code"] is None
-        or state not in {"failed", "outcome_unknown"}
+        or state not in FAILURE_EVIDENCE_STATES
         and value["failure_code"] is not None
         or state != "failed"
         and value["exit_code"] is not None
+        or state == "verification_blocked"
+        and value["failure_code"] not in RECOVERABLE_VERIFICATION_ERROR_CODES
     ):
         raise SigningAttemptError(
             "invalid_attempt_event", "signing-attempt failure evidence is invalid"
@@ -1046,6 +1122,13 @@ def _verify_transformation(repository: Path, output: Path) -> Mapping[str, Any]:
     return verify_attempt_receipt(repository, output)
 
 
+def _load_transformation_receipt(
+    repository: Path,
+    output: Path,
+) -> Mapping[str, Any]:
+    return load_attempt_receipt(repository, output)
+
+
 def _verify_canonical_transformation(repository: Path) -> Mapping[str, Any]:
     return verify_receipt(repository)
 
@@ -1069,14 +1152,114 @@ def _validate_output_inventory(output: Path) -> None:
         raise SigningAttemptError(
             "signing_output_inventory_invalid", "signing-output inventory is invalid"
         )
-    app = output / SIGNED_APP_WITHIN_OUTPUT
+    signing_input = output / "signing-input"
     native = output / SIGNED_NATIVE_PRODUCTS_NAME
+    for path in (signing_input, native):
+        try:
+            child = path.lstat()
+        except OSError as error:
+            raise SigningAttemptError(
+                "signing_output_inventory_invalid",
+                "signing-output private root is unavailable",
+            ) from error
+        if (
+            not stat.S_ISDIR(child.st_mode)
+            or path.is_symlink()
+            or child.st_uid != os.geteuid()
+            or stat.S_IMODE(child.st_mode) != 0o700
+        ):
+            raise SigningAttemptError(
+                "signing_output_inventory_invalid",
+                "signing-output contains an unsafe private root",
+            )
+
+    app = output / SIGNED_APP_WITHIN_OUTPUT
     for path in (app, native):
         child = path.lstat()
         if path.is_symlink() or not stat.S_ISDIR(child.st_mode):
             raise SigningAttemptError(
                 "signing_output_inventory_invalid", "signing-output contains an unsafe root"
             )
+
+
+def _require_no_canonical_or_notary_state(
+    repository: Path,
+) -> None:
+    root = ga_root(repository)
+    guarded = (
+        root / SIGNING_OUTPUT_RELATIVE,
+        *(root / relative for relative in _DOWNSTREAM_RECOVERY_GUARDS),
+    )
+    if any(os.path.lexists(path) for path in guarded):
+        raise SigningAttemptError(
+            VERIFICATION_RECOVERY_PRECONDITION_FAILED,
+            "verification recovery is unavailable after downstream state exists",
+        )
+
+
+def _require_no_downstream_recovery_state(
+    repository: Path,
+    attempt: Attempt,
+) -> None:
+    _require_no_canonical_or_notary_state(repository)
+    if os.path.lexists(attempt.publish_ready):
+        raise SigningAttemptError(
+            VERIFICATION_RECOVERY_PRECONDITION_FAILED,
+            "verification-blocked work already has a publish-ready stage",
+        )
+
+
+def _can_block_transformation_verification(
+    repository: Path,
+    attempt: Attempt,
+    error: SigningTransformationError,
+    *,
+    receipt_loader: TransformationReceiptLoader,
+) -> bool:
+    if error.code not in RECOVERABLE_VERIFICATION_ERROR_CODES:
+        return False
+    try:
+        _require_no_downstream_recovery_state(repository, attempt)
+        _validate_output_inventory(attempt.work)
+        receipt_loader(repository, attempt.work)
+        fsync_private_tree(attempt.work)
+        _require_no_downstream_recovery_state(repository, attempt)
+        _validate_output_inventory(attempt.work)
+        receipt_loader(repository, attempt.work)
+    except (
+        OSError,
+        PublicationError,
+        SigningAttemptError,
+        SigningTransformationError,
+    ):
+        return False
+    return True
+
+
+def _raise_transformation_failure(
+    repository: Path,
+    attempt: Attempt,
+    error: SigningTransformationError,
+    *,
+    receipt_loader: TransformationReceiptLoader,
+    outcome_unknown: bool = False,
+) -> None:
+    if not outcome_unknown and _can_block_transformation_verification(
+        repository,
+        attempt,
+        error,
+        receipt_loader=receipt_loader,
+    ):
+        raise SigningVerificationBlocked(error.code) from error
+    if outcome_unknown:
+        raise SigningAttemptError(
+            "signing_transformation_outcome_unknown",
+            "private signing-transformation receipt cannot be recovered",
+        ) from error
+    raise SigningAttemptError(
+        "signing_transformation_failed",
+        "private signing transformation failed",
+    ) from error
 
 
 def _prepare_output(
@@ -1086,6 +1269,7 @@ def _prepare_output(
     verification_runner: VerificationRunner,
     transformation_creator: TransformationCreator,
     transformation_verifier: TransformationVerifier,
+    transformation_receipt_loader: TransformationReceiptLoader,
 ) -> None:
     if not attempt.work.is_dir() or attempt.work.is_symlink():
         raise SigningAttemptError(
@@ -1098,22 +1282,29 @@ def _prepare_output(
         try:
             transformation_verifier(repository, attempt.work)
         except SigningTransformationError as error:
-            raise SigningAttemptError(
-                "signing_transformation_outcome_unknown",
-                f"private signing-transformation receipt cannot be recovered: {error}",
-            ) from error
+            _raise_transformation_failure(
+                repository,
+                attempt,
+                error,
+                receipt_loader=transformation_receipt_loader,
+                outcome_unknown=True,
+            )
     except SigningTransformationError as error:
-        raise SigningAttemptError(
-            "signing_transformation_failed",
-            f"private signing transformation failed: {error}",
-        ) from error
+        _raise_transformation_failure(
+            repository,
+            attempt,
+            error,
+            receipt_loader=transformation_receipt_loader,
+        )
     try:
         transformation_verifier(repository, attempt.work)
     except SigningTransformationError as error:
-        raise SigningAttemptError(
-            "signing_transformation_failed",
-            f"private signing transformation failed: {error}",
-        ) from error
+        _raise_transformation_failure(
+            repository,
+            attempt,
+            error,
+            receipt_loader=transformation_receipt_loader,
+        )
     _validate_output_inventory(attempt.work)
     try:
         publish_private_directory_exclusive(attempt.work, attempt.publish_ready)
@@ -1148,6 +1339,212 @@ def _reverify_publish_ready(
         ) from error
 
 
+def _reverify_private_stage(
+    repository: Path,
+    output: Path,
+    context: CandidateBundleContext,
+    *,
+    verification_runner: VerificationRunner,
+    transformation_verifier: TransformationVerifier,
+    transformation_receipt_loader: TransformationReceiptLoader,
+) -> None:
+    _validate_output_inventory(output)
+    transformation_receipt_loader(repository, output)
+    verification_runner(output, context)
+    transformation_verifier(repository, output)
+
+
+def _verification_recovery_failure_code(error: BaseException) -> str:
+    if (
+        isinstance(error, SigningTransformationError)
+        and error.code in RECOVERABLE_VERIFICATION_ERROR_CODES
+    ):
+        return error.code
+    if (
+        isinstance(error, SigningAttemptError)
+        and error.code == VERIFICATION_RECOVERY_PRECONDITION_FAILED
+    ):
+        return error.code
+    return VERIFICATION_RECOVERY_FAILED
+
+
+def _fail_verification_recovery(
+    repository: Path,
+    attempt: Attempt,
+    error: BaseException,
+    *,
+    clock: Clock,
+) -> None:
+    failure_code = _verification_recovery_failure_code(error)
+    _append_event(
+        repository,
+        attempt,
+        "failed",
+        clock=clock,
+        failure_code=failure_code,
+    )
+    raise SigningAttemptError(
+        failure_code,
+        "bounded private signing verification recovery failed",
+    ) from error
+
+
+def _resume_exact_work_verification(
+    repository: Path,
+    attempt: Attempt,
+    canonical: Path,
+    *,
+    bindings: FrozenSigningBindings,
+    clock: Clock,
+    freeze_verifier: FreezeVerifier,
+    possession_verifier: PossessionVerifier,
+    publisher: Publisher,
+    verification_runner: VerificationRunner,
+    transformation_verifier: TransformationVerifier,
+    transformation_receipt_loader: TransformationReceiptLoader,
+) -> Path:
+    if attempt.state == "verification_blocked":
+        try:
+            if (
+                attempt.events[-1]["failure_code"]
+                not in RECOVERABLE_VERIFICATION_ERROR_CODES
+            ):
+                raise SigningAttemptError(
+                    VERIFICATION_RECOVERY_PRECONDITION_FAILED,
+                    "verification-blocked cause is not recoverable",
+                )
+            _require_no_downstream_recovery_state(repository, attempt)
+            _validate_output_inventory(attempt.work)
+            transformation_receipt_loader(repository, attempt.work)
+        except (
+            OSError,
+            PublicationError,
+            SigningAttemptError,
+            SigningTransformationError,
+        ) as error:
+            _fail_verification_recovery(repository, attempt, error, clock=clock)
+        attempt = _append_event(
+            repository,
+            attempt,
+            "verification_recovering",
+            clock=clock,
+        )
+        try:
+            _reverify_private_stage(
+                repository,
+                attempt.work,
+                CandidateBundleContext.SIGNING_ATTEMPT_WORK,
+                verification_runner=verification_runner,
+                transformation_verifier=transformation_verifier,
+                transformation_receipt_loader=transformation_receipt_loader,
+            )
+        except (
+            OSError,
+            PublicationError,
+            SigningAttemptError,
+            SigningTransformationError,
+        ) as error:
+            _fail_verification_recovery(repository, attempt, error, clock=clock)
+        attempt = _append_event(
+            repository,
+            attempt,
+            "verification_committing",
+            clock=clock,
+        )
+    elif attempt.state == "verification_recovering":
+        attempt = _append_event(
+            repository,
+            attempt,
+            "failed",
+            clock=clock,
+            failure_code=VERIFICATION_RECOVERY_INTERRUPTED,
+        )
+        raise SigningAttemptError(
+            VERIFICATION_RECOVERY_INTERRUPTED,
+            "bounded private signing verification recovery was interrupted",
+        )
+    elif attempt.state != "verification_committing":
+        raise SigningAttemptError(
+            "verification_recovery_state_invalid",
+            "signing attempt is not at a verification recovery state",
+        )
+
+    try:
+        _require_no_canonical_or_notary_state(repository)
+        work_exists = os.path.lexists(attempt.work)
+        ready_exists = os.path.lexists(attempt.publish_ready)
+        if work_exists == ready_exists:
+            raise SigningAttemptError(
+                VERIFICATION_RECOVERY_PRECONDITION_FAILED,
+                "verification commit requires exactly one private stage",
+            )
+        selected = attempt.work if work_exists else attempt.publish_ready
+        selected_context = (
+            CandidateBundleContext.SIGNING_ATTEMPT_WORK
+            if work_exists
+            else CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY
+        )
+        _reverify_private_stage(
+            repository,
+            selected,
+            selected_context,
+            verification_runner=verification_runner,
+            transformation_verifier=transformation_verifier,
+            transformation_receipt_loader=transformation_receipt_loader,
+        )
+    except (
+        OSError,
+        PublicationError,
+        SigningAttemptError,
+        SigningTransformationError,
+    ) as error:
+        _fail_verification_recovery(repository, attempt, error, clock=clock)
+
+    if work_exists:
+        try:
+            publish_private_directory_exclusive(attempt.work, attempt.publish_ready)
+        except (DurabilityOutcomeUnknown, OSError, PublicationError) as error:
+            raise SigningAttemptOutcomeUnknown(
+                "verification commit rename outcome is unknown; resume is required"
+            ) from error
+        if attempt.work.exists() or not attempt.publish_ready.exists():
+            raise SigningAttemptOutcomeUnknown(
+                "verification commit rename cannot be confirmed; resume is required"
+            )
+
+    try:
+        _reverify_private_stage(
+            repository,
+            attempt.publish_ready,
+            CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY,
+            verification_runner=verification_runner,
+            transformation_verifier=transformation_verifier,
+            transformation_receipt_loader=transformation_receipt_loader,
+        )
+    except (
+        OSError,
+        PublicationError,
+        SigningAttemptError,
+        SigningTransformationError,
+    ) as error:
+        _fail_verification_recovery(repository, attempt, error, clock=clock)
+
+    attempt = _append_event(repository, attempt, "verified", clock=clock)
+    _publish_attempt(
+        repository,
+        attempt,
+        canonical,
+        bindings=bindings,
+        clock=clock,
+        freeze_verifier=freeze_verifier,
+        possession_verifier=possession_verifier,
+        publisher=publisher,
+        verification_runner=verification_runner,
+        transformation_verifier=transformation_verifier,
+    )
+    return canonical
+
+
 def _reverify_canonical_transformation(
     repository: Path,
     verifier: CanonicalTransformationVerifier,
@@ -1169,6 +1566,7 @@ def _publish_attempt(
     bindings: FrozenSigningBindings,
     clock: Clock,
     freeze_verifier: FreezeVerifier,
+    possession_verifier: PossessionVerifier,
     publisher: Publisher,
     verification_runner: VerificationRunner,
     transformation_verifier: TransformationVerifier,
@@ -1179,7 +1577,11 @@ def _publish_attempt(
         _candidate_retirement_required(
             attempt, "has no publication-bound recoverable output"
         )
-    reopened = _verify_frozen_inputs(repository, freeze_verifier=freeze_verifier)
+    reopened = _verify_frozen_inputs(
+        repository,
+        freeze_verifier=freeze_verifier,
+        possession_verifier=possession_verifier,
+    )
     if reopened != bindings:
         raise SigningAttemptError(
             "frozen_input_drift", "frozen inputs changed during the signing attempt"
@@ -1334,8 +1736,10 @@ def _reconcile_existing(
     publisher: Publisher,
     verification_runner: VerificationRunner,
     transformation_verifier: TransformationVerifier,
+    transformation_receipt_loader: TransformationReceiptLoader,
     canonical_transformation_verifier: CanonicalTransformationVerifier,
     freeze_verifier: FreezeVerifier,
+    possession_verifier: PossessionVerifier,
 ) -> Path | None:
     names = _attempt_names(attempts_root)
     if not names:
@@ -1394,6 +1798,24 @@ def _reconcile_existing(
         raise SigningAttemptError(
             "published_output_missing", "published signing-output is missing"
         )
+    if latest.state in {
+        "verification_blocked",
+        "verification_recovering",
+        "verification_committing",
+    }:
+        return _resume_exact_work_verification(
+            repository,
+            latest,
+            canonical,
+            bindings=bindings,
+            clock=clock,
+            freeze_verifier=freeze_verifier,
+            possession_verifier=possession_verifier,
+            publisher=publisher,
+            verification_runner=verification_runner,
+            transformation_verifier=transformation_verifier,
+            transformation_receipt_loader=transformation_receipt_loader,
+        )
     if (
         latest.state == "publishing" or publication_outcome_unknown
     ) and ready_exists:
@@ -1404,6 +1826,7 @@ def _reconcile_existing(
             bindings=bindings,
             clock=clock,
             freeze_verifier=freeze_verifier,
+            possession_verifier=possession_verifier,
             publisher=publisher,
             verification_runner=verification_runner,
             transformation_verifier=transformation_verifier,
@@ -1417,6 +1840,7 @@ def _reconcile_existing(
             bindings=bindings,
             clock=clock,
             freeze_verifier=freeze_verifier,
+            possession_verifier=possession_verifier,
             publisher=publisher,
             verification_runner=verification_runner,
             transformation_verifier=transformation_verifier,
@@ -1474,14 +1898,126 @@ def run_signing_transaction(
     confirmer: Confirmer = confirm_private_directory_published,
     transformation_creator: TransformationCreator = _create_transformation,
     transformation_verifier: TransformationVerifier = _verify_transformation,
+    transformation_receipt_loader: TransformationReceiptLoader = (
+        _load_transformation_receipt
+    ),
     canonical_transformation_verifier: CanonicalTransformationVerifier = (
         _verify_canonical_transformation
     ),
+    embedded_verifier_session_factory: EmbeddedVerifierSessionFactory = (
+        production_embedded_verifier_session
+    ),
 ) -> Path:
-    """Run a fresh signing attempt or explicitly reconcile and resume one."""
+    """Run one transaction with a single operation-scoped embedded verifier."""
 
     repository = _canonical_repository(repository)
-    bindings = _verify_frozen_inputs(repository, freeze_verifier=freeze_verifier)
+    try:
+        with embedded_verifier_session_factory(repository) as embedded_verifier:
+            def possession_verifier(
+                selected_repository: Path,
+                root: Path,
+            ) -> VerifiedUpdaterKeyPossession:
+                return verify_possession_proof(
+                    selected_repository,
+                    root,
+                    embedded_verifier=embedded_verifier,
+                )
+
+            selected_freeze_verifier = freeze_verifier
+            if freeze_verifier is verify_frozen_candidate:
+                def session_freeze_verifier(
+                    selected_repository: Path,
+                ) -> FrozenCandidate:
+                    return verify_frozen_candidate(
+                        selected_repository,
+                        possession_verifier=possession_verifier,
+                    )
+                selected_freeze_verifier = session_freeze_verifier
+
+            selected_transformation_creator = transformation_creator
+            if transformation_creator is _create_transformation:
+                def session_transformation_creator(
+                    selected_repository: Path,
+                    output: Path,
+                ) -> Mapping[str, Any]:
+                    return create_attempt_receipt(
+                        selected_repository,
+                        output,
+                        freeze_verifier=selected_freeze_verifier,
+                    )
+                selected_transformation_creator = session_transformation_creator
+
+            selected_transformation_verifier = transformation_verifier
+            if transformation_verifier is _verify_transformation:
+                def session_transformation_verifier(
+                    selected_repository: Path,
+                    output: Path,
+                ) -> Mapping[str, Any]:
+                    return verify_attempt_receipt(
+                        selected_repository,
+                        output,
+                        freeze_verifier=selected_freeze_verifier,
+                    )
+                selected_transformation_verifier = session_transformation_verifier
+
+            selected_canonical_verifier = canonical_transformation_verifier
+            if canonical_transformation_verifier is _verify_canonical_transformation:
+                def session_canonical_verifier(
+                    selected_repository: Path,
+                ) -> Mapping[str, Any]:
+                    return verify_receipt(
+                        selected_repository,
+                        freeze_verifier=selected_freeze_verifier,
+                    )
+                selected_canonical_verifier = session_canonical_verifier
+
+            return _run_signing_transaction_with_verifiers(
+                repository,
+                resume=resume,
+                clock=clock,
+                helper_runner=helper_runner,
+                verification_runner=verification_runner,
+                freeze_verifier=selected_freeze_verifier,
+                possession_verifier=possession_verifier,
+                live_readiness_verifier=live_readiness_verifier,
+                publisher=publisher,
+                confirmer=confirmer,
+                transformation_creator=selected_transformation_creator,
+                transformation_verifier=selected_transformation_verifier,
+                transformation_receipt_loader=transformation_receipt_loader,
+                canonical_transformation_verifier=selected_canonical_verifier,
+            )
+    except UpdaterKeyPossessionError as error:
+        raise SigningAttemptError(
+            "updater_possession_verifier_unavailable",
+            "operation-scoped updater verifier session is unavailable",
+        ) from error
+
+
+def _run_signing_transaction_with_verifiers(
+    repository: Path,
+    *,
+    resume: bool,
+    clock: Clock,
+    helper_runner: HelperRunner,
+    verification_runner: VerificationRunner,
+    freeze_verifier: FreezeVerifier,
+    possession_verifier: PossessionVerifier,
+    live_readiness_verifier: LiveReadinessVerifier,
+    publisher: Publisher,
+    confirmer: Confirmer,
+    transformation_creator: TransformationCreator,
+    transformation_verifier: TransformationVerifier,
+    transformation_receipt_loader: TransformationReceiptLoader,
+    canonical_transformation_verifier: CanonicalTransformationVerifier,
+) -> Path:
+    """Execute after all production verifier dependencies are explicitly bound."""
+
+    bindings = _verify_frozen_inputs(
+        repository,
+        freeze_verifier=freeze_verifier,
+        possession_verifier=possession_verifier,
+    )
     attempts_root = _ensure_attempts_root(repository)
     canonical = ga_root(repository) / SIGNING_OUTPUT_RELATIVE
     try:
@@ -1507,10 +2043,12 @@ def run_signing_transaction(
                     publisher=publisher,
                     verification_runner=verification_runner,
                     transformation_verifier=transformation_verifier,
+                    transformation_receipt_loader=transformation_receipt_loader,
                     canonical_transformation_verifier=(
                         canonical_transformation_verifier
                     ),
                     freeze_verifier=freeze_verifier,
+                    possession_verifier=possession_verifier,
                 )
                 if recovered is not None:
                     return recovered
@@ -1558,8 +2096,18 @@ def run_signing_transaction(
                     verification_runner=verification_runner,
                     transformation_creator=transformation_creator,
                     transformation_verifier=transformation_verifier,
+                    transformation_receipt_loader=transformation_receipt_loader,
                 )
             except SigningAttemptOutcomeUnknown:
+                raise
+            except SigningVerificationBlocked as error:
+                _append_event(
+                    repository,
+                    attempt,
+                    "verification_blocked",
+                    clock=clock,
+                    failure_code=error.cause_code,
+                )
                 raise
             except SigningAttemptError as error:
                 _append_event(
@@ -1591,6 +2139,7 @@ def run_signing_transaction(
                 bindings=bindings,
                 clock=clock,
                 freeze_verifier=freeze_verifier,
+                possession_verifier=possession_verifier,
                 publisher=publisher,
                 verification_runner=verification_runner,
                 transformation_verifier=transformation_verifier,

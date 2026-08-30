@@ -24,8 +24,9 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
 import tomllib
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 import uuid
 
 if __package__:
@@ -72,6 +73,7 @@ if __package__:
     from .release_cargo_inputs import (
         CRATES_IO_SOURCE,
         ReleaseCargoInputsError,
+        WorkspaceCargoInputs,
         create_runtime_cargo_home,
         release_verifier_dependency_records,
         verify_runtime_cargo_home,
@@ -134,6 +136,7 @@ else:
     from release_cargo_inputs import (
         CRATES_IO_SOURCE,
         ReleaseCargoInputsError,
+        WorkspaceCargoInputs,
         create_runtime_cargo_home,
         release_verifier_dependency_records,
         verify_runtime_cargo_home,
@@ -404,6 +407,30 @@ class ArtifactSetError(RuntimeError):
     """A release asset set is partial, mutable, or not bound by its seal."""
 
 
+RELEASE_VERIFIER_OPERATIONAL_REASONS = frozenset(
+    {"descendant", "output_limit", "pipe", "start", "timeout"}
+)
+_RELEASE_VERIFIER_PROCESS_REASON_BY_CODE = {
+    "command_descendant_survived": "descendant",
+    "command_output_oversized": "output_limit",
+    "command_pipe_failed": "pipe",
+    "command_start_failed": "start",
+    "command_timeout": "timeout",
+}
+
+
+class ReleaseVerifierOperationalError(ArtifactSetError):
+    """A fixed verifier command did not reach a completed process result."""
+
+    code = "release_verifier_unavailable"
+
+    def __init__(self, reason: str, label: str) -> None:
+        if reason not in RELEASE_VERIFIER_OPERATIONAL_REASONS:
+            raise ValueError("release verifier operational reason is not allowlisted")
+        super().__init__(f"{label} did not complete ({reason})")
+        self.reason = reason
+
+
 class _DuplicateFieldError(ValueError):
     pass
 
@@ -433,6 +460,11 @@ class ReleaseVerifierBuild:
     toolchain: str
     toolchain_surface: dict[str, Any]
     sdk_root: Path
+
+
+UpdaterVerificationProducer = Callable[
+    [Path, Path], tuple[dict[str, Any], dict[str, Any]]
+]
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -985,7 +1017,16 @@ def _run_bounded_process(
             cwd=cwd,
             environment=environment,
         )
-    except (OSError, TransactionError) as error:
+    except TransactionError as error:
+        operational_reason = _RELEASE_VERIFIER_PROCESS_REASON_BY_CODE.get(
+            error.code
+        )
+        if operational_reason is not None:
+            raise ReleaseVerifierOperationalError(
+                operational_reason, label
+            ) from error
+        raise ArtifactSetError(f"{label} did not complete") from error
+    except OSError as error:
         raise ArtifactSetError(f"{label} did not complete") from error
     stdout = result.stdout.encode("utf-8")
     stderr = result.stderr.encode("utf-8")
@@ -1340,13 +1381,143 @@ def _invoke_release_verifier(
     return value
 
 
-def _produce_updater_verification(
-    repository: Path,
-    archive: Path,
-    signature: Path,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+def _release_verifier_binding(
+    build: ReleaseVerifierBuild,
+    *,
+    cargo: dict[str, object],
+    rustc: dict[str, object],
+    executable: dict[str, object],
+    source_inputs: dict[str, dict[str, object]],
+) -> dict[str, Any]:
+    return {
+        "apple_toolchain": build.apple_toolchain,
+        "build_invocation": RELEASE_VERIFIER_BUILD_INVOCATION,
+        "cargo": {**cargo, "version": build.cargo_version},
+        "cargo_workspace_lock_sha256": build.cargo_lock_sha256,
+        "cargo_workspace_vendor_sha256": build.cargo_vendor_sha256,
+        "dependency_sources": build.dependency_sources,
+        "document": RELEASE_VERIFIER_BINDING_DOCUMENT,
+        "executable": executable,
+        "isolated_workspace_sha256": hashlib.sha256(
+            RELEASE_VERIFIER_ISOLATED_WORKSPACE.encode("utf-8")
+        ).hexdigest(),
+        "lock_invocation": RELEASE_VERIFIER_LOCK_INVOCATION,
+        "lock_sha256": build.isolated_lock_sha256,
+        "network": "offline",
+        "rustc": {**rustc, "version": build.rustc_version},
+        "schema_version": RELEASE_VERIFIER_BINDING_SCHEMA_VERSION,
+        "source_inputs": source_inputs,
+        "target": RELEASE_VERIFIER_TARGET,
+        "toolchain": build.toolchain,
+        "toolchain_surface": build.toolchain_surface,
+        "verification_invocation": RELEASE_VERIFIER_VERIFY_INVOCATION,
+    }
+
+
+def _fresh_release_verifier_binding(data: bytes) -> dict[str, Any]:
     try:
-        workspace_inputs_before = verify_workspace_cargo_inputs(
+        value = json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=_strict_object,
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        _DuplicateFieldError,
+    ) as error:
+        raise ArtifactSetError(
+            "release verifier session binding is not strict JSON"
+        ) from error
+    if not isinstance(value, dict) or canonical_json(value) != data:
+        raise ArtifactSetError(
+            "release verifier session binding is not canonical JSON"
+        )
+    return value
+
+
+def _verify_updater_verification_session_state(
+    repository: Path,
+    build: ReleaseVerifierBuild,
+    *,
+    workspace_inputs: WorkspaceCargoInputs,
+    source_inputs: dict[str, dict[str, object]],
+    cargo: dict[str, object],
+    rustc: dict[str, object],
+    executable: dict[str, object],
+) -> None:
+    if _release_verifier_source_inputs(repository) != source_inputs:
+        raise ArtifactSetError(
+            "release verifier source inputs changed during verification"
+        )
+
+    try:
+        configured_cargo_root = Path(
+            os.environ["CFW_RELEASE_CARGO_INPUT_ROOT"]
+        )
+        observed_workspace_inputs = verify_workspace_cargo_inputs(
+            repository, configured_cargo_root
+        )
+    except (KeyError, OSError, ReleaseCargoInputsError) as error:
+        raise ArtifactSetError(
+            "verified Cargo workspace inputs changed during release verification"
+        ) from error
+    if (
+        configured_cargo_root != build.cargo_input_root
+        or observed_workspace_inputs != workspace_inputs
+    ):
+        raise ArtifactSetError(
+            "verified Cargo workspace inputs changed during release verification"
+        )
+
+    if (
+        _artifact_record(build.cargo, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
+        != cargo
+        or _artifact_record(build.rustc, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
+        != rustc
+        or _artifact_record(
+            build.executable, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES
+        )
+        != executable
+    ):
+        raise ArtifactSetError(
+            "release verifier toolchain or executable changed during verification"
+        )
+
+    toolchain_surface = _release_toolchain_surface(build.cargo.parent.parent)
+    if toolchain_surface != build.toolchain_surface:
+        raise ArtifactSetError(
+            "pinned Rust toolchain changed during release verification"
+        )
+
+    try:
+        apple_toolchain = capture_release_apple_toolchain(repository)
+    except ReleaseAppleToolchainError as error:
+        raise ArtifactSetError(
+            "Apple release linker inputs changed during release verification"
+        ) from error
+    if (
+        apple_toolchain.binding != build.apple_toolchain
+        or apple_toolchain.developer_directory != build.developer_directory
+        or apple_toolchain.sdk_root != build.sdk_root
+        or apple_toolchain.deployment_target != build.deployment_target
+    ):
+        raise ArtifactSetError(
+            "Apple release linker inputs changed during release verification"
+        )
+
+
+def _new_updater_verification_session_lock():
+    return threading.Lock()
+
+
+@contextmanager
+def _updater_verification_session(
+    repository: Path,
+) -> Iterator[UpdaterVerificationProducer]:
+    """Build one private verifier and replay it against stable bound inputs."""
+
+    try:
+        workspace_inputs = verify_workspace_cargo_inputs(
             repository,
             Path(os.environ["CFW_RELEASE_CARGO_INPUT_ROOT"]),
         )
@@ -1354,96 +1525,143 @@ def _produce_updater_verification(
         raise ArtifactSetError(
             "verified Cargo workspace inputs are unavailable"
         ) from error
-    inputs_before = _release_verifier_source_inputs(repository)
+    source_inputs = _release_verifier_source_inputs(repository)
     with _compiled_release_verifier(repository) as build:
-        cargo_before = _artifact_record(
+        cargo = _artifact_record(
             build.cargo, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES
         )
-        rustc_before = _artifact_record(
+        rustc = _artifact_record(
             build.rustc, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES
         )
-        executable_before = _artifact_record(
+        executable = _artifact_record(
             build.executable, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES
         )
-        receipt = _invoke_release_verifier(
-            build, repository, archive, signature
+        _verify_updater_verification_session_state(
+            repository,
+            build,
+            workspace_inputs=workspace_inputs,
+            source_inputs=source_inputs,
+            cargo=cargo,
+            rustc=rustc,
+            executable=executable,
         )
-        if (
-            _artifact_record(build.cargo, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
-            != cargo_before
-            or _artifact_record(build.rustc, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES)
-            != rustc_before
-            or _artifact_record(
-                build.executable, MAX_RELEASE_VERIFIER_EXECUTABLE_BYTES
+        binding_data = canonical_json(
+            _release_verifier_binding(
+                build,
+                cargo=cargo,
+                rustc=rustc,
+                executable=executable,
+                source_inputs=source_inputs,
             )
-            != executable_before
-        ):
-            raise ArtifactSetError(
-                "release verifier toolchain or executable changed during verification"
-            )
-    inputs_after = _release_verifier_source_inputs(repository)
-    if inputs_after != inputs_before:
-        raise ArtifactSetError(
-            "release verifier source inputs changed during verification"
         )
-    try:
-        workspace_inputs_after = verify_workspace_cargo_inputs(
-            repository, build.cargo_input_root
-        )
-    except ReleaseCargoInputsError as error:
-        raise ArtifactSetError(
-            "verified Cargo workspace inputs changed during release verification"
-        ) from error
-    if workspace_inputs_after != workspace_inputs_before:
-        raise ArtifactSetError(
-            "verified Cargo workspace inputs changed during release verification"
-        )
-    toolchain_surface_after = _release_toolchain_surface(
-        build.cargo.parent.parent
-    )
-    if toolchain_surface_after != build.toolchain_surface:
-        raise ArtifactSetError(
-            "pinned Rust toolchain changed during release verification"
-        )
-    try:
-        apple_toolchain_after = capture_release_apple_toolchain(repository)
-    except ReleaseAppleToolchainError as error:
-        raise ArtifactSetError(
-            "Apple release linker inputs changed during release verification"
-        ) from error
-    if (
-        apple_toolchain_after.binding != build.apple_toolchain
-        or apple_toolchain_after.developer_directory != build.developer_directory
-        or apple_toolchain_after.sdk_root != build.sdk_root
-        or apple_toolchain_after.deployment_target != build.deployment_target
-    ):
-        raise ArtifactSetError(
-            "Apple release linker inputs changed during release verification"
-        )
-    binding = {
-        "apple_toolchain": build.apple_toolchain,
-        "build_invocation": RELEASE_VERIFIER_BUILD_INVOCATION,
-        "cargo": {**cargo_before, "version": build.cargo_version},
-        "cargo_workspace_lock_sha256": build.cargo_lock_sha256,
-        "cargo_workspace_vendor_sha256": build.cargo_vendor_sha256,
-        "dependency_sources": build.dependency_sources,
-        "document": RELEASE_VERIFIER_BINDING_DOCUMENT,
-        "executable": executable_before,
-        "isolated_workspace_sha256": hashlib.sha256(
-            RELEASE_VERIFIER_ISOLATED_WORKSPACE.encode("utf-8")
-        ).hexdigest(),
-        "lock_invocation": RELEASE_VERIFIER_LOCK_INVOCATION,
-        "lock_sha256": build.isolated_lock_sha256,
-        "network": "offline",
-        "rustc": {**rustc_before, "version": build.rustc_version},
-        "schema_version": RELEASE_VERIFIER_BINDING_SCHEMA_VERSION,
-        "source_inputs": inputs_after,
-        "target": RELEASE_VERIFIER_TARGET,
-        "toolchain": build.toolchain,
-        "toolchain_surface": build.toolchain_surface,
-        "verification_invocation": RELEASE_VERIFIER_VERIFY_INVOCATION,
-    }
-    return receipt, binding
+        active = True
+        poisoned = False
+        state_lock = _new_updater_verification_session_lock()
+        replay_lock = _new_updater_verification_session_lock()
+
+        def produce(
+            archive: Path, signature: Path
+        ) -> tuple[dict[str, Any], dict[str, Any]]:
+            nonlocal poisoned
+            if not replay_lock.acquire(blocking=False):
+                raise ArtifactSetError(
+                    "release verifier session does not allow concurrent or reentrant replay"
+                )
+
+            accepted = False
+            completed = False
+            try:
+                with state_lock:
+                    if not active:
+                        raise ArtifactSetError(
+                            "release verifier session is no longer active"
+                        )
+                    if poisoned:
+                        raise ArtifactSetError(
+                            "release verifier session cannot continue after a failed replay"
+                        )
+                    accepted = True
+                _verify_updater_verification_session_state(
+                    repository,
+                    build,
+                    workspace_inputs=workspace_inputs,
+                    source_inputs=source_inputs,
+                    cargo=cargo,
+                    rustc=rustc,
+                    executable=executable,
+                )
+                archive_before = _artifact_record(
+                    archive, MAX_UPDATER_ARCHIVE_BYTES
+                )
+                signature_before = _artifact_record(
+                    signature, MAX_SIGNATURE_BYTES
+                )
+                try:
+                    receipt = _invoke_release_verifier(
+                        build, repository, archive, signature
+                    )
+                finally:
+                    try:
+                        if (
+                            _artifact_record(
+                                archive, MAX_UPDATER_ARCHIVE_BYTES
+                            )
+                            != archive_before
+                            or _artifact_record(
+                                signature, MAX_SIGNATURE_BYTES
+                            )
+                            != signature_before
+                        ):
+                            raise ArtifactSetError(
+                                "updater archive or signature changed during "
+                                "embedded-key verification"
+                            )
+                    finally:
+                        _verify_updater_verification_session_state(
+                            repository,
+                            build,
+                            workspace_inputs=workspace_inputs,
+                            source_inputs=source_inputs,
+                            cargo=cargo,
+                            rustc=rustc,
+                            executable=executable,
+                        )
+                fresh_binding = _fresh_release_verifier_binding(binding_data)
+                completed = True
+                return receipt, fresh_binding
+            finally:
+                if accepted and not completed:
+                    with state_lock:
+                        poisoned = True
+                replay_lock.release()
+
+        try:
+            yield produce
+        finally:
+            with state_lock:
+                active = False
+            replay_lock.acquire()
+            try:
+                _verify_updater_verification_session_state(
+                    repository,
+                    build,
+                    workspace_inputs=workspace_inputs,
+                    source_inputs=source_inputs,
+                    cargo=cargo,
+                    rustc=rustc,
+                    executable=executable,
+                )
+            finally:
+                replay_lock.release()
+
+
+def _produce_updater_verification(
+    repository: Path,
+    archive: Path,
+    signature: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with _updater_verification_session(repository) as produce:
+        return produce(archive, signature)
 
 
 def _candidate_app_paths(repository: Path) -> tuple[Path, Path]:

@@ -23,7 +23,7 @@
   every step to an unchanged Clash for Windows process and network projection.
   One inode-bound outer lock serializes service and bundle mutations, and
   independent fixed journals cover historical validation migrations and the
-  40019→40037 GA installation without overwriting earlier evidence. The
+  40019→40038 GA installation without overwriting earlier evidence. The
   canonical allocation ledger prevents a retired validation build or its
   reserved final companion from being reused by a later source closure. The
   validation-only compatibility island can prove the already-installed 40019
@@ -79,7 +79,17 @@
   successful-`codesign` stderr contract mismatch and an omitted signed
   GlobalAuthority closure entry. Correcting those tracked release inputs changes
   the frozen product-input identity, so build 40036 is retired before install.
-  Build 40037 is the only active GA successor.
+  Build 40037 then completed candidate freeze and one private signing attempt.
+  The signing helper returned success and durably wrote a complete
+  transformation receipt, but a later mandatory read-only replay failed before
+  publish-ready or canonical output. Later replays passed without recovering
+  the historical nested cause, and the frozen state machine made the recorded
+  failure terminal, so build 40037 is retired before notarization. Future
+  signing transactions compile the updater verifier once per operation while
+  preserving every independent replay, and may resume only an explicitly
+  blocked post-receipt verification of the exact private work without invoking
+  the signing helper or receipt creator again.
+  Build 40038 is the only active GA successor.
 - Authenticate nested release-worktree managed caches through bounded,
   descriptor-relative Git administrative control files plus an explicit
   empty-target lifecycle receipt before excluding them from the path/name-only

@@ -97,6 +97,24 @@ MAX_MACHO_BYTES: Final = 512 * 1024 * 1024
 MAX_CODESIGN_OUTPUT: Final = 1024 * 1024
 SHA256_RE: Final = re.compile(r"\A[0-9a-f]{64}\Z")
 
+GENERIC_ERROR_CODE: Final = "signing_transformation_generic"
+OUTCOME_UNKNOWN_ERROR_CODE: Final = "signing_transformation_outcome_unknown"
+_CANDIDATE_FREEZE_ERROR_CODE_MAP: Final = {
+    "updater_verifier_unavailable": (
+        "candidate_freeze_updater_verifier_unavailable"
+    ),
+}
+STABLE_ERROR_CODES: Final = frozenset(
+    {
+        GENERIC_ERROR_CODE,
+        OUTCOME_UNKNOWN_ERROR_CODE,
+        *_CANDIDATE_FREEZE_ERROR_CODE_MAP.values(),
+    }
+)
+RECOVERABLE_VERIFICATION_ERROR_CODES: Final = frozenset(
+    _CANDIDATE_FREEZE_ERROR_CODE_MAP.values()
+)
+
 MH_MAGIC_64: Final = 0xFEEDFACF
 CPU_TYPE_ARM64: Final = 0x0100000C
 MH_EXECUTE: Final = 0x2
@@ -235,9 +253,23 @@ RECEIPT_FIELDS: Final = frozenset(
 class SigningTransformationError(RuntimeError):
     """The signed Host app cannot be proven equivalent to its frozen input."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = GENERIC_ERROR_CODE,
+    ) -> None:
+        if code not in STABLE_ERROR_CODES:
+            raise ValueError("signing-transformation error code is not allowlisted")
+        super().__init__(message)
+        self.code = code
+
 
 class SigningTransformationOutcomeUnknown(SigningTransformationError):
     """Receipt bytes may exist but their publication reply was not durable."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code=OUTCOME_UNKNOWN_ERROR_CODE)
 
 
 CodeSignRunner = Callable[[tuple[str, ...], Path], None]
@@ -729,7 +761,11 @@ def _freeze_inputs(
         frozen = verifier(repository)
     except CandidateFreezeError as error:
         raise SigningTransformationError(
-            f"active GA candidate freeze cannot be verified: {error}"
+            f"active GA candidate freeze cannot be verified: {error}",
+            code=_CANDIDATE_FREEZE_ERROR_CODE_MAP.get(
+                error.code,
+                GENERIC_ERROR_CODE,
+            ),
         ) from error
     root = ga_root(repository)
     expected_intent = root / "candidate-freeze/intent.json"
@@ -1328,6 +1364,28 @@ def verify_attempt_receipt(
         codesign_runner=codesign_runner,
         freeze_verifier=freeze_verifier,
     )
+
+
+def load_attempt_receipt(
+    repository: Path,
+    signing_output: Path,
+) -> dict[str, Any]:
+    """Durably reopen one private receipt without recomputing its bindings.
+
+    This deliberately narrower operation establishes that a creator left one
+    complete immutable receipt before a later read-only recomputation failed.
+    It never turns the receipt into verified evidence; callers must still use
+    :func:`verify_attempt_receipt` before publication.
+    """
+
+    repository = _canonical_repository(repository)
+    output = _signing_output_path(repository, signing_output)
+    if output == ga_root(repository) / SIGNING_OUTPUT_RELATIVE:
+        raise SigningTransformationError(
+            "attempt receipt loading requires a fixed private attempt workspace"
+        )
+    observed, _raw = _read_receipt(repository, output)
+    return observed
 
 
 def verify_receipt(

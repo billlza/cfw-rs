@@ -1440,7 +1440,8 @@
       "isolated release Python entrypoint escaped the reviewed scripts directory",
       "metadata.st_nlink != 1",
       "metadata.st_uid != os.geteuid()",
-      "runpy.run_path(script, run_name=\"__main__\")"
+      "module_name = \".\".join([\"scripts\", *module_components])",
+      "runpy.run_module(module_name, run_name=\"__main__\", alter_sys=True)"
     ],
     "scripts/release_python_runtime.py": [
       "class ReleasePythonRuntimeError",
@@ -3081,7 +3082,7 @@
     "scripts/hash_artifact.py": "fd524dc2d44bbb00cfeadfe3052ed3c8c7871c632d8b8ad704c728a0d3b17f66",
     "scripts/release_cargo_inputs.py": "46cc74cd18e2c92a9300da62dadf765e647419cb03213f1188ab19e0c37de0f8",
     "scripts/release_cargo_inputs.sh": "548f5279e951c90492aba0e6cf8162705d8bad140d899a4eb963aabbea58f7aa",
-    "scripts/release_python_launcher.sh": "cd9bc4308a5f8c6336e01158f0d17c5113c50d6feca05f3abe1f769be6775163",
+    "scripts/release_python_launcher.sh": "80c2be4bc813785a9be4e3abed1f360a5c09a72a95ff96629a9fd568bd1600e2",
     "scripts/release_python_runtime.py": "dcb0bad2c02253d6cb5b9281f219510310308ee3b6047f3a8fbb7bc7a269ae17",
     "scripts/release_build_identity.py": "7e9ea4229740ccde29d2f2cd7271a20dd8ea5b34e3586cf55a21952dea671d8c",
     "scripts/release_regular_file.py": "9b623ad7d818abb35400e33a92bd408d200451aa20b8bbaf06319f73571190f0",

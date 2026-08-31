@@ -51,8 +51,17 @@ if (
     or stat.S_ISLNK(metadata.st_mode)
 ):
     raise RuntimeError("isolated release Python entrypoint is not a safe source file")
-sys.path[:0] = [scripts_directory, repository]
+if not relative.endswith(".py"):
+    raise RuntimeError("isolated release Python entrypoint is not a Python module")
+module_components = relative[:-3].split(os.sep)
+if any(not component.isidentifier() for component in module_components):
+    raise RuntimeError("isolated release Python entrypoint module name is invalid")
+module_name = ".".join(["scripts", *module_components])
+# Keep every nested import under the same source-owned package. Running a file
+# by path drops its package context and makes shared parent-relative imports
+# fail before the production runtime can perform its admission checks.
+sys.path[:0] = [repository, scripts_directory]
 sys.argv = [script, *arguments]
-runpy.run_path(script, run_name="__main__")
+runpy.run_module(module_name, run_name="__main__", alter_sys=True)
 ' "$cfw_python_repository" "$cfw_python_script" "$@"
 }

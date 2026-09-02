@@ -42,29 +42,31 @@ def _group_exists(group: int) -> bool:
 
 
 def _terminate_group(process: subprocess.Popen[bytes]) -> None:
+    # Reap an already-exited leader before addressing its process group. macOS
+    # may return EPERM while an exited group is being removed. A denied signal
+    # is never proof of cleanup: both wait() and group disappearance must finish.
+    process.poll()
+    signal_error: PermissionError | None = None
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
     except PermissionError as error:
-        raise BoundedProcessError(
-            "cleanup",
-            "bounded command process group cannot be terminated",
-        ) from error
+        signal_error = error
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired as error:
         raise BoundedProcessError(
             "cleanup",
-            "bounded command leader did not terminate after SIGKILL",
-        ) from error
+            "bounded command leader did not exit during cleanup",
+        ) from (signal_error if signal_error is not None else error)
     deadline = time.monotonic() + 5
     while _group_exists(process.pid):
         if time.monotonic() >= deadline:
             raise BoundedProcessError(
                 "cleanup",
-                "bounded command descendants did not terminate after SIGKILL",
-            )
+                "bounded command descendants did not exit during cleanup",
+            ) from signal_error
         time.sleep(0.01)
 
 

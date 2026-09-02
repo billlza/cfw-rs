@@ -29,6 +29,7 @@ from scripts.notarization_transaction import (
     MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
     MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
     MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
+    MACOS_27_26A5425A_COMPATIBILITY_IDENTITY,
     MACOS_27_COMPATIBILITY_IDENTITIES,
     MAX_COMMAND_OUTPUT_BYTES,
     CommandResult,
@@ -540,6 +541,7 @@ class NotarizationReadinessPolicyTests(unittest.TestCase):
                     "26A5406e",
                     "26A5416b",
                     "26A5421a",
+                    "26A5425a",
                 )
             ),
         )
@@ -664,7 +666,8 @@ class ProductionArchiveBuilderTests(unittest.TestCase):
             "archive validation did not complete",
         ):
             fixture.execute(archive_validator=reject)
-        self.assertEqual(fixture.runner.calls, [])
+        self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
         self.assertFalse((fixture.context.attempt_root / "intent.json").exists())
         self.assertFalse(
             (fixture.context.attempt_root / "submission-receipt.json").exists()
@@ -883,6 +886,162 @@ class NotarizationReadinessPolicyMutationTests(unittest.TestCase):
                 )
 
 
+class ArtifactToolchainReaderTests(unittest.TestCase):
+    def test_dispatch_uses_frozen_source_and_maps_its_exact_positional_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve()
+            values = [str(index) * 64 for index in range(9)]
+            with (
+                patch.object(transaction_module, "require_closed_release_runtime") as runtime,
+                patch.object(
+                    transaction_module,
+                    "_run_bounded_process",
+                    return_value=CommandResult(0, " ".join(values) + "\n", ""),
+                ) as runner,
+            ):
+                result = transaction_module.production_artifact_toolchain_metadata_reader(repository)
+            runtime.assert_called_once_with()
+            self.assertEqual(
+                result, dict(zip(transaction_module.TOOLCHAIN_METADATA_ORDER, values, strict=True))
+            )
+            command, timeout = runner.call_args.args
+            self.assertEqual(command[:3], ["/bin/bash", "-p", "-c"])
+            self.assertIn('source "$1/scripts/release_python_launcher.sh"', command[3])
+            self.assertIn('"$1/scripts/candidate_artifact_binding.py" --repository "$1"', command[3])
+            self.assertEqual(command[-1], str(repository))
+            self.assertEqual(timeout, 1800)
+            self.assertEqual(runner.call_args.kwargs, {"cwd": repository})
+
+    def test_verifier_diagnostics_and_every_output_near_match_fail_closed(self) -> None:
+        exact = " ".join(str(index) * 64 for index in range(9)) + "\n"
+        malformed = (
+            CommandResult(1, exact, ""),
+            CommandResult(0, exact, "warning\n"),
+            CommandResult(0, exact[:-1], ""),
+            CommandResult(0, exact + "\n", ""),
+            CommandResult(0, " " + exact, ""),
+            CommandResult(0, exact.replace(" ", "  ", 1), ""),
+            CommandResult(0, exact.replace("0", "A", 1), ""),
+            CommandResult(0, " ".join(exact.split(" ")[:-1]) + "\n", ""),
+            CommandResult(0, "", ""),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve()
+            for result in malformed:
+                with self.subTest(result=result):
+                    with (
+                        patch.object(transaction_module, "require_closed_release_runtime"),
+                        patch.object(transaction_module, "_run_bounded_process", return_value=result),
+                        self.assertRaises(TransactionError),
+                    ):
+                        transaction_module.production_artifact_toolchain_metadata_reader(repository)
+
+    def test_unsealed_runtime_prevents_any_child_verifier(self) -> None:
+        with (
+            patch.object(
+                transaction_module,
+                "require_closed_release_runtime",
+                side_effect=transaction_module.ReleasePythonRuntimeError("unsealed"),
+            ),
+            patch.object(transaction_module, "_run_bounded_process") as runner,
+            self.assertRaises(transaction_module.ReleasePythonRuntimeError),
+        ):
+            transaction_module.production_artifact_toolchain_metadata_reader(Path("/unused"))
+        runner.assert_not_called()
+
+
+class FrozenCandidateExecutorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = Fixture()
+        self.addCleanup(self.fixture.close)
+        self.fixture.build.chmod(0o700)
+        self.executor = self.fixture.repository / "executor"
+        self.executor.mkdir()
+        self.identity = {"repositoryCommit": "c" * 40, "releaseSourceSha256": "d" * 64}
+
+    def arguments(self) -> dict:
+        return {
+            "executor_repository": self.executor,
+            "executor_source_reader": lambda _repository: self.identity,
+            "executor_historical_reader": lambda _repository, _commit: self.identity,
+        }
+
+    def test_first_submission_uses_original_artifact_identity_and_retains_executor(self) -> None:
+        fixture = self.fixture
+        final_app = fixture.execute(**self.arguments())
+        self.assertTrue(final_app.is_dir())
+        intent = json.loads((fixture.context.attempt_root / "intent.json").read_bytes())
+        self.assertEqual(intent["repository_commit"], fixture.context.repository_commit)
+        self.assertEqual(intent["release_source_sha256"], fixture.context.release_source_sha256)
+        binding = json.loads(
+            (fixture.build / "stage-inputs/notarization-executor.json").read_bytes()
+        )
+        self.assertEqual(binding["artifact_source"], fixture.context.source_identity)
+        self.assertEqual(binding["executor_source"], self.identity)
+        verified = PublishedTransactionReceiptValidationTests._validate(fixture)
+        self.assertEqual(verified.receipt["submission_id"], SUBMISSION_ID)
+        calls = list(fixture.runner.calls)
+        with self.assertRaises(TransactionError) as repeated:
+            fixture.execute(**self.arguments())
+        self.assertEqual(repeated.exception.code, "attempt_exists")
+        self.assertEqual(fixture.runner.calls, calls)
+        self.assertEqual(calls.count(CommandRole.SUBMIT), 1)
+
+    def test_readiness_failure_writes_no_executor_binding_and_keeps_signed_app(self) -> None:
+        self.fixture.runner.fail_role = CommandRole.NOTARY_READINESS
+        with self.assertRaises(TransactionError):
+            self.fixture.execute(**self.arguments())
+        self.assertFalse(self.fixture.context.attempt_root.exists())
+        self.assertFalse((self.fixture.build / "stage-inputs").exists())
+        self.assertTrue(self.fixture.app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_executor_drift_at_admission_prevents_claim(self) -> None:
+        reads = 0
+
+        def source(_repository: Path) -> dict[str, str]:
+            nonlocal reads
+            reads += 1
+            return self.identity if reads == 1 else {**self.identity, "repositoryCommit": "0" * 40}
+
+        arguments = {**self.arguments(), "executor_source_reader": source}
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.execute(**arguments)
+        self.assertEqual(raised.exception.code, "notarization_executor_identity_failed")
+        self.assertFalse(self.fixture.context.attempt_root.exists())
+        self.assertTrue(self.fixture.app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+    def test_executor_drift_during_archive_preparation_prevents_remote_submit(self) -> None:
+        def archive_builder(app: Path, archive: Path) -> None:
+            self.fixture.archive_builder(app, archive)
+            self.identity = {**self.identity, "repositoryCommit": "0" * 40}
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.execute(**self.arguments(), archive_builder=archive_builder)
+        self.assertEqual(raised.exception.code, "notarization_executor_identity_failed")
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        events = sorted((self.fixture.context.attempt_root / "events").glob("*.json"))
+        terminal = json.loads(events[-1].read_bytes())
+        self.assertEqual(terminal["state"], "failed")
+        self.assertEqual(terminal["failure_code"], raised.exception.code)
+        self.assertTrue(
+            (self.fixture.context.attempt_root / "work/Clash for Mac.app").is_dir()
+        )
+
+    def test_missing_executor_git_history_blocks_claim(self) -> None:
+        def missing(_repository: Path, _commit: str) -> dict[str, str]:
+            raise transaction_module.SourceIdentityError("missing Git object")
+
+        arguments = {**self.arguments(), "executor_historical_reader": missing}
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.execute(**arguments)
+        self.assertEqual(raised.exception.code, "notarization_executor_binding_failed")
+        self.assertFalse(self.fixture.context.attempt_root.exists())
+        self.assertTrue(self.fixture.app.is_dir())
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+
+
 class NotarizationTransactionSuccessTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = Fixture()
@@ -909,9 +1068,6 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
                 CommandRole.FINAL_VERIFY,
             ],
         )
-        submitted_work_app = str(
-            self.fixture.context.attempt_root / "work/Clash for Mac.app"
-        )
         commands = self.fixture.runner.command_calls
         self.assertEqual(
             commands[0],
@@ -920,7 +1076,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
                 (
                     "/usr/bin/syspolicy_check",
                     "notary-submission",
-                    submitted_work_app,
+                    str(self.fixture.app),
                     "--json",
                 ),
                 600,
@@ -1142,7 +1298,8 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         )
         self.assertTrue(self.fixture.context.attempt_root.is_dir())
         self.assertFalse(self.fixture.app.exists())
-        self.assertEqual(self.fixture.runner.calls, [])
+        self.assertEqual(self.fixture.runner.calls, [CommandRole.NOTARY_READINESS])
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
 
     def test_signing_receipt_change_during_claim_is_detected_before_submit(self) -> None:
         changed = self.fixture.signing_transformation(self.fixture.repository)
@@ -1158,7 +1315,8 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         )
         self.assertTrue(self.fixture.context.attempt_root.is_dir())
         self.assertFalse(self.fixture.app.exists())
-        self.assertEqual(self.fixture.runner.calls, [])
+        self.assertEqual(self.fixture.runner.calls, [CommandRole.NOTARY_READINESS])
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
 
     def test_candidate_freeze_is_verified_before_attempt_consumption(self) -> None:
         verifier_called = False
@@ -1252,7 +1410,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         self,
     ) -> None:
         fixture = self.fixture
-        work_app = fixture.context.attempt_root / "work/Clash for Mac.app"
+        checked_app = fixture.app
 
         def compatibility_runner(
             role: CommandRole,
@@ -1265,22 +1423,24 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             }:
                 fixture.runner.calls.append(role)
                 fixture.runner.command_calls.append((role, tuple(command), timeout))
+                self.assertEqual(Path(command[2]), checked_app)
+                self.assertFalse(fixture.context.attempt_root.exists())
                 finding = (
-                    known_notary_false_positive(work_app)
+                    known_notary_false_positive(checked_app)
                     if role is CommandRole.NOTARY_READINESS
-                    else known_missing_ticket(work_app)
+                    else known_missing_ticket(checked_app)
                 )
                 return CommandResult(
                     70,
                     json.dumps({"output": [finding]}),
-                    single_signature_diagnostic(work_app),
+                    single_signature_diagnostic(checked_app),
                 )
             return fixture.runner(role, command, timeout)
 
         final_app = fixture.execute(
             command_runner=compatibility_runner,
             host_system_identity_reader=(
-                lambda: MACOS_27_26A5421A_COMPATIBILITY_IDENTITY
+                lambda: MACOS_27_26A5425A_COMPATIBILITY_IDENTITY
             ),
         )
         self.assertTrue(final_app.is_dir())
@@ -1315,9 +1475,9 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             ],
         )
 
-    def test_beta_near_match_fails_before_submit_and_persists_failure(self) -> None:
+    def test_beta_near_match_fails_without_claiming_or_moving_app(self) -> None:
         fixture = self.fixture
-        work_app = fixture.context.attempt_root / "work/Clash for Mac.app"
+        checked_app = fixture.app
 
         def mismatch_runner(
             role: CommandRole,
@@ -1328,11 +1488,11 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             fixture.runner.command_calls.append((role, tuple(command), timeout))
             if role is not CommandRole.NOTARY_READINESS:
                 self.fail(f"unexpected command after readiness mismatch: {role}")
-            finding = known_notary_false_positive(work_app)
-            finding["SyspolicyCheckErrorFile"] = str(work_app.resolve())
+            finding = known_notary_false_positive(checked_app)
+            finding["SyspolicyCheckErrorFile"] = str(checked_app.resolve())
             return CommandResult(70, json.dumps({"output": [finding]}), "")
 
-        with self.assertRaises(TransactionError):
+        with self.assertRaises(TransactionError) as raised:
             fixture.execute(
                 command_runner=mismatch_runner,
                 host_system_identity_reader=(
@@ -1344,19 +1504,18 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         self.assertFalse(
             (fixture.context.attempt_root / "submission-receipt.json").exists()
         )
-        events = sorted((fixture.context.attempt_root / "events").glob("*.json"))
-        terminal = json.loads(events[-1].read_text(encoding="utf-8"))
-        self.assertEqual(terminal["state"], "failed")
+        self.assertFalse(fixture.context.attempt_root.exists())
+        self.assertTrue(fixture.app.is_dir())
         self.assertEqual(
-            terminal["failure_code"],
+            raised.exception.code,
             "notary-readiness_finding_mismatch",
         )
 
-    def test_unsupported_beta_host_is_terminal_before_submit_or_recovery(
+    def test_unsupported_beta_host_retains_the_same_first_submission_input(
         self,
     ) -> None:
         fixture = self.fixture
-        work_app = fixture.context.attempt_root / "work/Clash for Mac.app"
+        checked_app = fixture.app
 
         def readiness_runner(
             role: CommandRole,
@@ -1369,8 +1528,8 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
                 self.fail(f"unexpected command after unsupported host: {role}")
             return CommandResult(
                 70,
-                json.dumps({"output": [known_notary_false_positive(work_app)]}),
-                single_signature_diagnostic(work_app),
+                json.dumps({"output": [known_notary_false_positive(checked_app)]}),
+                single_signature_diagnostic(checked_app),
             )
 
         unsupported = replace(
@@ -1387,25 +1546,19 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             "notary-readiness_compatibility_unsupported_host",
         )
         self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
-        events = sorted((fixture.context.attempt_root / "events").glob("*.json"))
-        terminal = json.loads(events[-1].read_text(encoding="utf-8"))
-        self.assertEqual(terminal["state"], "failed")
+        self.assertFalse(fixture.context.attempt_root.exists())
+        self.assertTrue(fixture.app.is_dir())
         self.assertEqual(
-            terminal["failure_code"],
-            "notary-readiness_compatibility_unsupported_host",
+            build_manifest(fixture.app, algorithm="sha256-tree-v2")["sha256"],
+            fixture.signed_app_tree_sha256,
         )
-        calls = list(fixture.runner.calls)
-        with self.assertRaises(TransactionError) as repeated:
-            fixture.execute()
-        self.assertEqual(repeated.exception.code, "attempt_exists")
-        with self.assertRaises(TransactionError) as recovery:
-            fixture.recover()
-        self.assertEqual(recovery.exception.code, "recovery_state_unsupported")
-        self.assertEqual(fixture.runner.calls, calls)
+        final_app = fixture.execute()
+        self.assertTrue(final_app.is_dir())
+        self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
 
-    def test_beta_corroboration_near_match_is_persisted_before_submit(self) -> None:
+    def test_beta_corroboration_near_match_retains_canonical_signed_input(self) -> None:
         fixture = self.fixture
-        work_app = fixture.context.attempt_root / "work/Clash for Mac.app"
+        checked_app = fixture.app
 
         def mismatch_runner(
             role: CommandRole,
@@ -1415,17 +1568,17 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
             fixture.runner.calls.append(role)
             fixture.runner.command_calls.append((role, tuple(command), timeout))
             if role is CommandRole.NOTARY_READINESS:
-                finding = known_notary_false_positive(work_app)
+                finding = known_notary_false_positive(checked_app)
             elif role is CommandRole.NOTARY_READINESS_CORROBORATION:
-                finding = known_missing_ticket(work_app)
+                finding = known_missing_ticket(checked_app)
                 finding["SyspolicyCheckErrorFile"] = str(
-                    work_app.resolve() / "Contents"
+                    checked_app.resolve() / "Contents"
                 )
             else:
                 self.fail(f"unexpected command after corroboration mismatch: {role}")
             return CommandResult(70, json.dumps({"output": [finding]}), "")
 
-        with self.assertRaises(TransactionError):
+        with self.assertRaises(TransactionError) as raised:
             fixture.execute(
                 command_runner=mismatch_runner,
                 host_system_identity_reader=(
@@ -1443,11 +1596,10 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         self.assertFalse(
             (fixture.context.attempt_root / "submission-receipt.json").exists()
         )
-        events = sorted((fixture.context.attempt_root / "events").glob("*.json"))
-        terminal = json.loads(events[-1].read_text(encoding="utf-8"))
-        self.assertEqual(terminal["state"], "failed")
+        self.assertFalse(fixture.context.attempt_root.exists())
+        self.assertTrue(fixture.app.is_dir())
         self.assertEqual(
-            terminal["failure_code"],
+            raised.exception.code,
             "notary-readiness-corroboration_finding_mismatch",
         )
 
@@ -6601,9 +6753,25 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
         self.assertEqual(states[-2:], ["distribution_verified", "failed"])
         self.assertEqual(events[-1]["failure_code"], expected_code)
 
-    def test_each_external_failure_retains_the_attempt(self) -> None:
+    def test_local_readiness_failure_preserves_input_without_claiming_attempt(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        fixture.runner.fail_role = CommandRole.NOTARY_READINESS
+        with self.assertRaises(TransactionError) as raised:
+            fixture.execute()
+        self.assertEqual(raised.exception.code, "notary-readiness_failed")
+        self.assertEqual(raised.exception.exit_code, 9)
+        self.assertFalse(fixture.context.attempt_root.exists())
+        self.assertFalse(fixture.context.final_root.exists())
+        self.assertTrue(fixture.app.is_dir())
+        self.assertEqual(
+            build_manifest(fixture.app, algorithm="sha256-tree-v2")["sha256"],
+            fixture.signed_app_tree_sha256,
+        )
+        self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
+
+    def test_each_post_claim_external_failure_retains_the_attempt(self) -> None:
         for role in (
-            CommandRole.NOTARY_READINESS,
             CommandRole.SUBMIT,
             CommandRole.WAIT,
             CommandRole.FETCH_LOG,
@@ -7824,7 +7992,8 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TransactionError, "single-link regular file"):
             fixture.execute(archive_builder=hardlinked_archive)
-        self.assertEqual(fixture.runner.calls, [])
+        self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
+        self.assertNotIn(CommandRole.SUBMIT, fixture.runner.calls)
 
     def test_transaction_file_hash_never_reads_past_captured_size(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -7921,6 +8090,29 @@ class NotarizationTransactionFailureTests(unittest.TestCase):
 
 
 class BoundedProcessTests(unittest.TestCase):
+    def test_shared_runner_failure_reasons_remain_distinct(self) -> None:
+        expected = {
+            "invalid": "command_contract_invalid",
+            "start": "command_start_failed",
+            "timeout": "command_timeout",
+            "output-limit": "command_output_oversized",
+            "descendant": "command_descendant_survived",
+            "cleanup": "command_cleanup_failed",
+            "unrecognized": "command_error_contract_drift",
+        }
+        for reason, code in expected.items():
+            with self.subTest(reason=reason):
+                with (
+                    patch.object(
+                        transaction_module,
+                        "run_release_bounded_process",
+                        side_effect=transaction_module.BoundedProcessError(reason, "failure"),
+                    ),
+                    self.assertRaises(TransactionError) as raised,
+                ):
+                    _run_bounded_process(["/bin/false"], 5)
+                self.assertEqual(raised.exception.code, code)
+
     def test_captures_bounded_stdout_stderr_and_exit_code(self) -> None:
         result = _run_bounded_process(
             [
@@ -8314,10 +8506,27 @@ class AttemptConcurrencyTests(unittest.TestCase):
                     raised.exception.code,
                     "recovery_in_progress",
                 )
-                self.assertEqual(fixture.runner.calls, [])
+                self.assertEqual(fixture.runner.calls, [CommandRole.NOTARY_READINESS])
             finally:
                 release_claim.set()
             self.assertTrue(executing.result(timeout=5).is_dir())
+
+    def test_local_readiness_holds_the_lock_before_claiming_or_moving_input(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+
+        def readiness(role: CommandRole, command: list[str], timeout: float) -> CommandResult:
+            if role is CommandRole.NOTARY_READINESS:
+                self.assertFalse(fixture.context.attempt_root.exists())
+                self.assertTrue(fixture.app.is_dir())
+                self.assertEqual(Path(command[2]), fixture.app)
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.execute()
+                self.assertEqual(raised.exception.code, "recovery_in_progress")
+            return fixture.runner(role, command, timeout)
+
+        self.assertTrue(fixture.execute(command_runner=readiness).is_dir())
+        self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
 
     def test_fixed_ga_attempt_can_only_be_claimed_once(self) -> None:
         fixture = Fixture()
@@ -8568,6 +8777,121 @@ class NotarizationCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("recovery requires --toolchain-root", result.stderr)
 
+    def test_frozen_submission_requires_artifact_and_toolchain_roots(self) -> None:
+        for extra, message in (
+            ([], "frozen submission requires --artifact-repository"),
+            (
+                ["--artifact-repository", "/tmp/artifact-repository"],
+                "frozen submission requires --toolchain-root",
+            ),
+        ):
+            with self.subTest(message=message):
+                result = self._run(["--submit-frozen-candidate", *extra])
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+
+    def test_frozen_submission_cannot_mix_with_submit_or_recovery(self) -> None:
+        for other in (
+            ["--staged-app", "/tmp/Clash for Mac.app"],
+            ["--recover-submission-id", SUBMISSION_ID],
+        ):
+            with self.subTest(other=other):
+                result = self._run(["--submit-frozen-candidate", *other])
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("not allowed with argument", result.stderr)
+
+    def test_frozen_submission_rejects_symlinked_toolchain_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            toolchains = root / "toolchains"
+            toolchains.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(toolchains, target_is_directory=True)
+            result = self._run(
+                [
+                    "--submit-frozen-candidate",
+                    "--artifact-repository", str(root),
+                    "--toolchain-root", str(alias),
+                ]
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--toolchain-root must be an absolute real directory", result.stderr)
+
+    def test_frozen_submission_dispatch_derives_only_the_canonical_signed_app(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            artifact_repository = root / "artifact-repository"
+            toolchain_root = root / "toolchains"
+            artifact_repository.mkdir()
+            toolchain_root.mkdir()
+            final_app = (
+                artifact_repository
+                / "target/candidates/0.4.0/ga/40040/signed/Clash for Mac.app"
+            )
+            argv = [
+                str(Path(transaction_module.__file__).resolve()),
+                *self._common_arguments(),
+                "--submit-frozen-candidate",
+                "--artifact-repository", str(artifact_repository),
+                "--toolchain-root", str(toolchain_root),
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.dict(os.environ, {}, clear=False),
+                patch.object(transaction_module, "execute_transaction", return_value=final_app) as execute,
+                patch.object(transaction_module, "require_closed_release_runtime") as runtime,
+                patch.object(transaction_module, "recover_transaction") as recover,
+                patch("builtins.print"),
+            ):
+                transaction_module.main()
+                self.assertEqual(os.environ["CFW_TOOLCHAIN_ROOT"], str(toolchain_root))
+            context = execute.call_args.args[0]
+            self.assertEqual(context.repository, artifact_repository)
+            self.assertEqual(
+                context.staged_app,
+                artifact_repository
+                / "target/candidates/0.4.0/ga/40040/signing-output/signing-input/Clash for Mac.app",
+            )
+            self.assertEqual(
+                execute.call_args.kwargs,
+                {
+                    "executor_repository": Path(transaction_module.__file__).resolve().parent.parent,
+                    "toolchain_metadata_reader": transaction_module.production_artifact_toolchain_metadata_reader,
+                },
+            )
+            recover.assert_not_called()
+            runtime.assert_called_once_with()
+
+    def test_frozen_submission_rejects_unsealed_python_before_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            result = self._run(
+                [
+                    "--submit-frozen-candidate",
+                    "--artifact-repository", str(root),
+                    "--toolchain-root", str(root),
+                ]
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("notarization runtime admission", result.stderr)
+            self.assertFalse((root / "target").exists())
+
+    def test_notary_shell_entry_uses_the_existing_closed_environment(self) -> None:
+        wrapper = Path(transaction_module.__file__).with_name("run_notarization_transaction.sh")
+        source = wrapper.read_text(encoding="utf-8")
+        self.assertTrue(source.startswith("#!/bin/bash -p\n"))
+        self.assertTrue(wrapper.stat().st_mode & stat.S_IXUSR)
+        self.assertIn("cfw_seal_release_tool_environment production", source)
+        self.assertIn("cfw_select_release_apple_toolchain", source)
+        self.assertIn("cfw_run_release_python_script", source)
+        self.assertIn('"$repo_root/scripts/notarization_transaction.py"', source)
+        result = subprocess.run(
+            ["/bin/bash", "-p", "-n", str(wrapper)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+
     def test_legacy_build_kinds_are_explicitly_rejected(self) -> None:
         for legacy_kind in ("validation", "release"):
             with self.subTest(legacy_kind=legacy_kind):
@@ -8643,6 +8967,10 @@ class NotarizationCliTests(unittest.TestCase):
             self.assertEqual(
                 recovery_tool_repository,
                 Path(transaction_module.__file__).resolve().parent.parent,
+            )
+            self.assertEqual(
+                recover.call_args.kwargs,
+                {"toolchain_metadata_reader": transaction_module.production_artifact_toolchain_metadata_reader},
             )
 
 

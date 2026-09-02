@@ -57,6 +57,7 @@ PY
 
 for release_helper in \
   scripts/run_ga_signing_attempt.sh \
+  scripts/run_notarization_transaction.sh \
   scripts/run_ga_acceptance_journal_export.sh \
   scripts/run_ga_runtime_acceptance.sh; do
   [[ -f "$release_helper" && ! -L "$release_helper" && -O "$release_helper" && \
@@ -67,6 +68,7 @@ for release_helper in \
 done
 
 for release_module in \
+  scripts/notarization_executor.py \
   scripts/ga_acceptance_environment.py \
   scripts/ga_acceptance_journal_export.py; do
   [[ -f "$release_module" && ! -L "$release_module" && -O "$release_module" && \

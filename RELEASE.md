@@ -692,7 +692,30 @@ wire proof.
    complete candidate. Signing then runs in append-only private attempts and
    atomically publishes one `signing-output` container. The notarization
    transaction reopens that transformation before Apple submission and binds
-   it through stapling, Gatekeeper, and the final app manifest;
+   it through stapling, Gatekeeper, and the final app manifest.
+
+   If signing is already complete but no app-notary attempt has been claimed,
+   a tooling-only host compatibility correction can use
+   `scripts/run_notarization_transaction.sh --submit-frozen-candidate` from a
+   separate clean executor checkout. Supply `--artifact-repository`, an explicit
+   `--toolchain-root`, and the original candidate's source/toolchain arguments
+   shown by `--help`. The app path is derived from canonical `signing-output`;
+   arbitrary staged apps, existing attempts and repeated submissions are rejected.
+   Local readiness runs before claiming the attempt or moving signed bytes.
+   Only individually observed host identities with the exact known finding and
+   independent missing-ticket corroboration can use the compatibility branch.
+   Toolchain derivation executes the original candidate's isolated verifier,
+   not the executor checkout's newer pinned-source policy. Its complete fixed
+   digest output must still match the candidate, with no diagnostics admitted.
+
+   The executor's Git/source identity is rederived from shared Git objects,
+   checked again before submission, and retained separately at
+   `stage-inputs/notarization-executor.json` with the frozen/signing receipt
+   identities. This immutable record is provenance, not an Apple success
+   receipt. Product source, app bytes, prior receipts, and receipt schemas remain
+   unchanged. Executor CI does not replace the original product's exact-SHA CI.
+   An existing app-notary attempt must use its explicit recovery protocol;
+   never use this entry to retry an unknown submission or rerun the builder;
 3. after freeze, capture the hosted run through the fixed public GitHub API and
    run the separate deterministic local lane reproduction. The capture command
    creates the private `stage-inputs` directory and writes only

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import signal
+import subprocess
 import tempfile
 import time
 import unittest
@@ -9,11 +11,61 @@ from unittest.mock import Mock, patch
 
 from scripts.publication.bounded_process import (
     BoundedProcessError,
+    _terminate_group,
     run_bounded_process,
 )
 
 
 class BoundedProcessTests(unittest.TestCase):
+    def test_exit_race_reaps_leader_before_accepting_denied_group_signal(self) -> None:
+        real_killpg = os.killpg
+        denied = []
+        with subprocess.Popen(
+            ["/bin/sleep", "0.01"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as process:
+            def killpg(group: int, requested_signal: int) -> None:
+                self.assertEqual(group, process.pid)
+                if requested_signal == signal.SIGKILL:
+                    denied.append(group)
+                    raise PermissionError("exiting process group")
+                real_killpg(group, requested_signal)
+
+            with patch("scripts.publication.bounded_process.os.killpg", side_effect=killpg):
+                _terminate_group(process)
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(denied, [process.pid])
+            self.assert_process_gone(process.pid)
+
+    def test_denied_signal_never_hides_an_unreaped_leader(self) -> None:
+        process = Mock(pid=12345)
+        process.poll.return_value = None
+        process.wait.side_effect = subprocess.TimeoutExpired("owned child", 5)
+        with (
+            patch("scripts.publication.bounded_process.os.killpg", side_effect=PermissionError("denied")),
+            self.assertRaises(BoundedProcessError) as raised,
+        ):
+            _terminate_group(process)
+        self.assertEqual(raised.exception.reason, "cleanup")
+        self.assertIsInstance(raised.exception.__cause__, PermissionError)
+        process.wait.assert_called_once_with(timeout=5)
+
+    def test_denied_group_probe_is_not_mistaken_for_absence(self) -> None:
+        process = Mock(pid=12345)
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        with (
+            patch("scripts.publication.bounded_process.os.killpg", side_effect=PermissionError("denied")),
+            patch("scripts.publication.bounded_process.time.monotonic", side_effect=[0, 6]),
+            self.assertRaises(BoundedProcessError) as raised,
+        ):
+            _terminate_group(process)
+        self.assertEqual(raised.exception.reason, "cleanup")
+        self.assertIn("descendants", str(raised.exception))
+        process.wait.assert_called_once_with(timeout=5)
+
     def environment(self) -> dict[str, str]:
         return {"HOME": str(Path.home()), "LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"}
 

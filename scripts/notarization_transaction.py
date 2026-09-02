@@ -25,13 +25,9 @@ import json
 import os
 from pathlib import Path
 import re
-import selectors
 import shutil
-import signal
 import stat
-import subprocess
 import sys
-import time
 from typing import Any, Callable, Iterator
 import uuid
 
@@ -47,6 +43,18 @@ if __package__:
     )
     from .hash_artifact import build_manifest, write_new_manifest
     from .macos_durability import full_fsync
+    from .publication.bounded_process import (
+        BoundedProcessError,
+        run_bounded_process as run_release_bounded_process,
+    )
+    from .notarization_executor import (
+        ExecutorSource,
+        HistoricalSourceReader,
+        NotarizationExecutorError,
+        bind_executor,
+        capture_executor_source,
+        require_executor_unchanged,
+    )
     from .release_build_identity import (
         ACTIVE_RELEASE_IDENTITY,
         ga_root,
@@ -55,6 +63,10 @@ if __package__:
         ga_signed_root,
     )
     from .release_signing_preflight import NOTARY_PROFILE
+    from .release_python_runtime import (
+        ReleasePythonRuntimeError,
+        require_closed_release_runtime,
+    )
     from .repository_source_identity import (
         SourceIdentityError,
         current_identity,
@@ -90,6 +102,18 @@ else:
     )
     from hash_artifact import build_manifest, write_new_manifest
     from macos_durability import full_fsync
+    from publication.bounded_process import (
+        BoundedProcessError,
+        run_bounded_process as run_release_bounded_process,
+    )
+    from notarization_executor import (
+        ExecutorSource,
+        HistoricalSourceReader,
+        NotarizationExecutorError,
+        bind_executor,
+        capture_executor_source,
+        require_executor_unchanged,
+    )
     from release_build_identity import (
         ACTIVE_RELEASE_IDENTITY,
         ga_root,
@@ -98,6 +122,10 @@ else:
         ga_signed_root,
     )
     from release_signing_preflight import NOTARY_PROFILE
+    from release_python_runtime import (
+        ReleasePythonRuntimeError,
+        require_closed_release_runtime,
+    )
     from repository_source_identity import (
         SourceIdentityError,
         current_identity,
@@ -460,12 +488,21 @@ MACOS_27_26A5421A_COMPATIBILITY_IDENTITY = HostSystemIdentity(
     kernel_release="27.0.0",
     architecture="arm64",
 )
+MACOS_27_26A5425A_COMPATIBILITY_IDENTITY = HostSystemIdentity(
+    product_name="macOS",
+    product_version="27.0",
+    build_version="26A5425a",
+    kernel_name="Darwin",
+    kernel_release="27.0.0",
+    architecture="arm64",
+)
 MACOS_27_COMPATIBILITY_IDENTITIES = frozenset(
     {
         MACOS_27_26A5388G_COMPATIBILITY_IDENTITY,
         MACOS_27_26A5406E_COMPATIBILITY_IDENTITY,
         MACOS_27_26A5416B_COMPATIBILITY_IDENTITY,
         MACOS_27_26A5421A_COMPATIBILITY_IDENTITY,
+        MACOS_27_26A5425A_COMPATIBILITY_IDENTITY,
     }
 )
 
@@ -1554,98 +1591,40 @@ def _run_bounded_process(
     environment: dict[str, str] | None = None,
 ) -> CommandResult:
     try:
-        process = subprocess.Popen(
+        completed = run_release_bounded_process(
             command,
-            cwd=cwd,
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+            cwd=Path.cwd() if cwd is None else cwd,
+            environment=dict(os.environ) if environment is None else environment,
+            timeout=timeout,
+            output_limit=MAX_COMMAND_OUTPUT_BYTES,
         )
-    except OSError as error:
-        raise TransactionError(
-            "command_start_failed",
-            "release command could not start",
-        ) from error
-    if process.stdout is None or process.stderr is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        raise TransactionError("command_pipe_failed", "release command pipes are absent")
-    stdout_fd = process.stdout.fileno()
-    stderr_fd = process.stderr.fileno()
-    selector = selectors.DefaultSelector()
-    buffers = {
-        stdout_fd: bytearray(),
-        stderr_fd: bytearray(),
-    }
-    selector.register(process.stdout, selectors.EVENT_READ)
-    selector.register(process.stderr, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout
-    try:
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TransactionError(
-                    "command_timeout", "release command exceeded its time limit"
-                )
-            for key, _events in selector.select(min(remaining, 1.0)):
-                chunk = os.read(key.fd, 64 * 1024)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                buffers[key.fd].extend(chunk)
-                if sum(len(buffer) for buffer in buffers.values()) > MAX_COMMAND_OUTPUT_BYTES:
-                    raise TransactionError(
-                        "command_output_oversized",
-                        "release command output exceeded the safety limit",
-                    )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+    except BoundedProcessError as error:
+        failures = {
+            "invalid": ("command_contract_invalid", "release command contract is invalid"),
+            "start": ("command_start_failed", "release command could not start"),
+            "timeout": ("command_timeout", "release command exceeded its time limit"),
+            "output-limit": (
+                "command_output_oversized", "release command output exceeded the safety limit"
+            ),
+            "descendant": (
+                "command_descendant_survived", "release command left a descendant process running"
+            ),
+            "cleanup": ("command_cleanup_failed", "release command cleanup could not be confirmed"),
+        }
+        if error.reason not in failures:
             raise TransactionError(
-                "command_timeout", "release command exceeded its time limit"
-            )
-        returncode = process.wait(timeout=remaining)
-        try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
-            pass
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-            raise TransactionError(
-                "command_descendant_survived",
-                "release command left a descendant process running",
-            )
-    except subprocess.TimeoutExpired as error:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        raise TransactionError(
-            "command_timeout", "release command exceeded its time limit"
-        ) from error
-    except BaseException:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        raise
-    finally:
-        selector.close()
-        process.stdout.close()
-        process.stderr.close()
+                "command_error_contract_drift", "bounded command returned an unknown failure reason"
+            ) from error
+        code, message = failures[error.reason]
+        raise TransactionError(code, message) from error
     try:
-        stdout = bytes(buffers[stdout_fd]).decode("utf-8", errors="strict")
-        stderr = bytes(buffers[stderr_fd]).decode("utf-8", errors="strict")
+        stdout = completed.stdout.decode("utf-8", errors="strict")
+        stderr = completed.stderr.decode("utf-8", errors="strict")
     except UnicodeError as error:
         raise TransactionError(
             "command_output_invalid_utf8", "release command output is not UTF-8"
         ) from error
-    return CommandResult(returncode, stdout, stderr)
+    return CommandResult(completed.returncode, stdout, stderr)
 
 
 def production_command_runner(
@@ -1907,6 +1886,49 @@ def production_source_identity_reader(repository: Path) -> dict[str, str]:
 
 def production_toolchain_metadata_reader(repository: Path) -> dict[str, str]:
     return derive_candidate_toolchain_metadata(repository)
+
+
+def production_artifact_toolchain_metadata_reader(repository: Path) -> dict[str, str]:
+    """Run the frozen source's verifier without importing another policy into it."""
+
+    require_closed_release_runtime()
+    _require_real_directory(repository, trusted=True)
+    if not repository.is_absolute() or repository.resolve(strict=True) != repository:
+        raise TransactionError(
+            "artifact_toolchain_repository_invalid",
+            "artifact toolchain verification requires a canonical repository",
+        )
+    result = _run_bounded_process(
+        [
+            "/bin/bash",
+            "-p",
+            "-c",
+            'set -euo pipefail; source "$1/scripts/release_python_launcher.sh"; '
+            'cfw_run_release_python_script "$1" '
+            '"$1/scripts/candidate_artifact_binding.py" --repository "$1"',
+            "artifact-toolchain-verification",
+            str(repository),
+        ],
+        1800,
+        cwd=repository,
+    )
+    if result.returncode != 0 or result.stderr:
+        raise TransactionError(
+            "artifact_toolchain_verification_failed",
+            "the frozen source's toolchain verifier failed or emitted diagnostics",
+            exit_code=result.returncode,
+        )
+    values = result.stdout.removesuffix("\n").split(" ")
+    if (
+        len(values) != len(TOOLCHAIN_METADATA_ORDER)
+        or result.stdout != " ".join(values) + "\n"
+        or any(SHA256_RE.fullmatch(value) is None for value in values)
+    ):
+        raise TransactionError(
+            "artifact_toolchain_output_invalid",
+            "the frozen source's toolchain verifier returned malformed identities",
+        )
+    return dict(zip(TOOLCHAIN_METADATA_ORDER, values, strict=True))
 
 
 def publish_exclusive(source: Path, destination: Path) -> None:
@@ -8392,9 +8414,25 @@ def recover_transaction(
         )
 
 
+def _require_submission_executor_unchanged(
+    executor: ExecutorSource | None,
+    source_reader: SourceIdentityReader,
+) -> None:
+    if executor is not None:
+        try:
+            require_executor_unchanged(executor, source_reader=source_reader)
+        except NotarizationExecutorError as error:
+            raise TransactionError(
+                "notarization_executor_identity_failed", str(error)
+            ) from error
+
+
 def execute_transaction(
     context: TransactionContext,
     *,
+    executor_repository: Path | None = None,
+    executor_source_reader: SourceIdentityReader = production_source_identity_reader,
+    executor_historical_reader: HistoricalSourceReader = identity_at_commit,
     command_runner: CommandRunner = production_command_runner,
     archive_builder: ArchiveBuilder = production_archive_builder,
     archive_validator: ArchiveValidator = production_archive_validator,
@@ -8422,6 +8460,16 @@ def execute_transaction(
     ),
 ) -> Path:
     _validate_context(context)
+    executor = None
+    if executor_repository is not None:
+        try:
+            executor = capture_executor_source(
+                executor_repository, source_reader=executor_source_reader
+            )
+        except NotarizationExecutorError as error:
+            raise TransactionError(
+                "notarization_executor_identity_failed", str(error)
+            ) from error
     _require_source_identity(context, source_identity_reader)
     _require_toolchain_identity(context, toolchain_metadata_reader)
     candidate_freeze_intent_sha256 = (
@@ -8453,6 +8501,31 @@ def execute_transaction(
             _exclusive_attempt_recovery_lock(context)
         )
         attempt_lock_held = True
+        _validate_context(context)
+        # Local admission must not consume the only first-submission attempt
+        # or move the canonical signed app when the host policy check fails.
+        readiness_mode = _establish_pre_submission_policy(
+            command_runner,
+            staged_app,
+            host_system_identity_reader,
+        )
+        _require_submission_executor_unchanged(executor, executor_source_reader)
+        if executor is not None:
+            try:
+                bind_executor(
+                    context.repository,
+                    executor,
+                    artifact_identity=context.source_identity,
+                    candidate_freeze_intent_sha256=candidate_freeze_intent_sha256,
+                    signing_transformation_receipt_sha256=(
+                        signing_transformation.signing_transformation_receipt_sha256
+                    ),
+                    historical_reader=executor_historical_reader,
+                )
+            except NotarizationExecutorError as error:
+                raise TransactionError(
+                    "notarization_executor_binding_failed", str(error)
+                ) from error
         events, work = _claim_attempt(context)
         work_app = work / "Clash for Mac.app"
         try:
@@ -8543,17 +8616,13 @@ def execute_transaction(
         intent_sha256 = _sha256_file(intent_path)
         journal = EventJournal(events, intent_sha256, clock)
         journal.append("prepared")
-        readiness_mode = _establish_pre_submission_policy(
-            command_runner,
-            work_app,
-            host_system_identity_reader,
-        )
         if readiness_mode is PreSubmissionPolicyMode.NATIVE:
             journal.append("notary_ready")
         else:
             journal.append("pre_submission_policy_compatibility_applied")
         _require_source_identity(context, source_identity_reader)
         _require_toolchain_identity(context, toolchain_metadata_reader)
+        _require_submission_executor_unchanged(executor, executor_source_reader)
         _require_archive_identity(archive, archive_sha256, archive_size)
         submission_inventory = _decode_attempt_inventory(
             replace(context, staged_app=None),
@@ -8755,6 +8824,7 @@ def execute_transaction(
                 "Apple notarization did not reach a terminal result",
                 terminal_state="outcome_unknown",
             )
+        _require_submission_executor_unchanged(executor, executor_source_reader)
         attempt = _load_recoverable_attempt(
             replace(context, staged_app=None),
             archive_validator=archive_validator,
@@ -9302,6 +9372,7 @@ def main() -> None:
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--staged-app", type=Path)
+    mode.add_argument("--submit-frozen-candidate", action="store_true")
     mode.add_argument("--recover-submission-id")
     parser.add_argument("--artifact-repository", type=Path)
     parser.add_argument("--toolchain-root", type=Path)
@@ -9320,18 +9391,19 @@ def main() -> None:
     parser.add_argument("--ui-dependencies-tree-sha256", required=True)
     parser.add_argument("--xcodegen-toolchain-tree-sha256", required=True)
     arguments = parser.parse_args()
-    recovery_tool_repository = Path(__file__).resolve().parent.parent
-    if arguments.recover_submission_id is None:
+    tool_repository = Path(__file__).resolve().parent.parent
+    if arguments.staged_app is not None:
         if arguments.artifact_repository is not None:
-            parser.error("--artifact-repository is only valid with recovery")
+            parser.error("--artifact-repository is not valid with --staged-app")
         if arguments.toolchain_root is not None:
-            parser.error("--toolchain-root is only valid with recovery")
-        repository = recovery_tool_repository
+            parser.error("--toolchain-root is not valid with --staged-app")
+        repository = tool_repository
     else:
+        operation = "frozen submission" if arguments.submit_frozen_candidate else "recovery"
         if arguments.artifact_repository is None:
-            parser.error("recovery requires --artifact-repository")
+            parser.error(f"{operation} requires --artifact-repository")
         if arguments.toolchain_root is None:
-            parser.error("recovery requires --toolchain-root")
+            parser.error(f"{operation} requires --toolchain-root")
         try:
             toolchain_root = arguments.toolchain_root
             if (
@@ -9345,11 +9417,14 @@ def main() -> None:
             parser.error("--toolchain-root must be an absolute real directory")
         os.environ["CFW_TOOLCHAIN_ROOT"] = str(toolchain_root)
         repository = arguments.artifact_repository
+    staged_app = arguments.staged_app
+    if arguments.submit_frozen_candidate:
+        staged_app = ga_signing_input_root(repository) / "Clash for Mac.app"
     context = TransactionContext(
         repository=repository,
         build_kind=arguments.build_kind,
         build_number=arguments.build_number,
-        staged_app=arguments.staged_app,
+        staged_app=staged_app,
         native_products=arguments.native_products,
         notary_profile=arguments.notary_profile,
         repository_commit=arguments.repository_commit,
@@ -9358,14 +9433,28 @@ def main() -> None:
         toolchain_metadata=_metadata(arguments),
     )
     try:
-        if arguments.recover_submission_id is None:
+        if arguments.submit_frozen_candidate:
+            require_closed_release_runtime()
+            app = execute_transaction(
+                context,
+                executor_repository=tool_repository,
+                toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
+            )
+        elif arguments.recover_submission_id is None:
             app = execute_transaction(context)
         else:
             app = recover_transaction(
                 context,
                 arguments.recover_submission_id,
-                recovery_tool_repository,
+                tool_repository,
+                toolchain_metadata_reader=(
+                    production_toolchain_metadata_reader
+                    if repository == tool_repository
+                    else production_artifact_toolchain_metadata_reader
+                ),
             )
+    except ReleasePythonRuntimeError as error:
+        raise SystemExit(f"error: notarization runtime admission: {error}") from error
     except (OSError, TransactionError, ValueError) as error:
         code = error.code if isinstance(error, TransactionError) else "unexpected_error"
         raise SystemExit(f"error: notarization transaction [{code}]: {error}") from error

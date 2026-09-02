@@ -24,7 +24,7 @@ from scripts.publication.durable_file import (
 
 PREVIOUS = install.AppIdentity("0.4.0", "40019", "a" * 64)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40039", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40040", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,

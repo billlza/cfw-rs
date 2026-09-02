@@ -81,7 +81,7 @@ class PublicationClosureTests(unittest.TestCase):
         )
 
     def test_prepackage_evidence_has_no_future_stage_dependency(self) -> None:
-        root = Path("target/candidates/0.4.0/ga/40039")
+        root = Path("target/candidates/0.4.0/ga/40040")
         sources = _prepackage_evidence_sources(root)
         self.assertEqual(
             set(sources),

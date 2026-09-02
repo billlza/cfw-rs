@@ -11,6 +11,72 @@ import Testing
   decoded.erase()
 }
 
+@Test func socks5CredentialsRoundTripAndInjectOnlyIntoTheirExactFields() throws {
+  let username = CredentialReference(
+    id: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!, kind: .socks5Username
+  )
+  let password = CredentialReference(
+    id: UUID(uuidString: "22222222-2222-4222-8222-222222222222")!, kind: .socks5Password
+  )
+  let slots = [
+    try CredentialSlot(
+      reference: username, target: .socks5Username,
+      outboundIndex: 0, jsonPointer: "/outbounds/0/username"
+    ),
+    try CredentialSlot(
+      reference: password, target: .socks5Password,
+      outboundIndex: 0, jsonPointer: "/outbounds/0/password"
+    ),
+  ]
+  var material = try CredentialMaterial(entries: [
+    CredentialMaterialEntry(reference: username, secret: Data(" user ".utf8)),
+    CredentialMaterialEntry(reference: password, secret: Data("pass:word@value".utf8)),
+  ])
+  defer { material.erase() }
+  var decoded = try EphemeralCredentialCodec.decode(EphemeralCredentialCodec.encode(material))
+  defer { decoded.erase() }
+  let template = Data(
+    #"{"outbounds":[{"type":"socks","version":"5","username":"","password":""}]}"#.utf8
+  )
+  let injected = try CredentialInjector.inject(template: template, slots: slots, material: decoded)
+  let root = try #require(JSONSerialization.jsonObject(with: injected) as? [String: Any])
+  let outbounds = try #require(root["outbounds"] as? [[String: Any]])
+  #expect(outbounds[0]["username"] as? String == " user ")
+  #expect(outbounds[0]["password"] as? String == "pass:word@value")
+  #expect(outbounds[0]["version"] as? String == "5")
+
+  var incomplete = try CredentialMaterial(entries: [
+    CredentialMaterialEntry(reference: username, secret: Data(" user ".utf8))
+  ])
+  defer { incomplete.erase() }
+  #expect(throws: CredentialMaterialError.missingReference(password.id)) {
+    try CredentialInjector.inject(template: template, slots: slots, material: incomplete)
+  }
+  #expect(throws: CredentialMaterialError.nonEmptyPlaceholder("/outbounds/0/username")) {
+    try CredentialInjector.inject(
+      template: Data(
+        #"{"outbounds":[{"type":"socks","version":"5","username":"occupied","password":""}]}"#.utf8
+      ), slots: slots, material: decoded
+    )
+  }
+}
+
+@Test func socks5RuntimeCredentialsRejectOversizedUtf8Values() throws {
+  for kind in [CredentialKind.socks5Username, .socks5Password] {
+    let reference = CredentialReference(
+      id: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!, kind: kind
+    )
+    for value in ["x", String(repeating: "x", count: 255), String(repeating: "界", count: 85)] {
+      _ = try CredentialMaterialEntry(reference: reference, secret: Data(value.utf8))
+    }
+    for value in ["", String(repeating: "x", count: 256), String(repeating: "界", count: 86)] {
+      #expect(throws: CredentialMaterialError.invalidSecret) {
+        try CredentialMaterialEntry(reference: reference, secret: Data(value.utf8))
+      }
+    }
+  }
+}
+
 @Test func runtimeMaterialRejectsInvalidUUIDCredentialsBeforeInjection() throws {
   for (index, kind) in [CredentialKind.vmessUUID, .vlessUUID, .tuicUUID].enumerated() {
     let reference = CredentialReference(

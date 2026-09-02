@@ -236,8 +236,13 @@ public enum CredentialInjector {
         throw CredentialMaterialError.invalidConfiguration
       }
       switch slot.target {
+      case .socks5Username:
+        guard outbound["username"] as? String == "" else {
+          throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
+        }
+        outbound["username"] = secret
       case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
-        .tuicPassword:
+        .tuicPassword, .socks5Password:
         guard outbound["password"] as? String == "" else {
           throw CredentialMaterialError.nonEmptyPlaceholder(slot.jsonPointer)
         }

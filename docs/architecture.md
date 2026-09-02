@@ -64,7 +64,7 @@ separate Proxy and Tunnel projections. Business configuration is not copied
 into two independent models.
 
 The validator accepts a deliberately closed local JSON schema: one to 128
-uniquely tagged `direct`, `block`, Shadowsocks, VMess, VLESS/Reality, Trojan,
+uniquely tagged `direct`, `block`, SOCKS5, Shadowsocks, VMess, VLESS/Reality, Trojan,
 Hysteria2, AnyTLS, or TUIC v5 outbounds and, optionally, `route.final` naming a
 declared tag. Protocol fields, TLS, transports, endpoint syntax, limits, and
 credential kind are typed and unknown fields fail closed. TUIC owns separate
@@ -77,6 +77,13 @@ User-managed DNS/services,
 subscriptions and remote resources, scripts, executable paths, and raw secret
 values remain forbidden. This is not full sing-box compatibility.
 
+SOCKS5 is projected by the existing engine adapter, not a separate proxy stack.
+It is either anonymous or carries one typed username/password reference pair;
+both Rust and native credential boundaries enforce RFC 1929's 1..255-byte
+limit. TCP/UDP restrictions are preserved. The stored `socks5` type projects
+to sing-box `socks` version 5, with no TLS or UDP-over-TCP extension. SOCKS5
+itself supplies no transport encryption.
+
 The subscription source boundary accepts only a restricted upstream sing-box
 `outbounds` document, a Clash/Mihomo `proxies` list, Shadowsocks SIP008 JSON,
 or a bounded URI bundle. VMess accepts traditional base64 JSON and the
@@ -86,6 +93,10 @@ and an optional fixed-second hop interval before projection to sing-box 1.13.
 Shadowsocks 2022 sources normalize the method first and validate each
 standard-base64 key in a single- or multi-user PSK chain before allocating any
 credential reference; SIP002 URI input additionally rejects Base64 userinfo.
+SOCKS5 source normalization is shared by URI, Clash, and sing-box adapters.
+Local files and text use the same converter and vault-first import transaction
+as downloaded sources. Only local canonical reference-only profiles retain
+the existing manual-provisioning path; source refresh remains vault-confirmed.
 It extracts source secrets before constructing the closed profile and rejects
 root-level sing-box DNS, inbounds, routes, selectors, scripts, and unknown
 fields. Source refresh reuses references in outbound order when possible; an

@@ -12,6 +12,8 @@ const MAX_VAULT_REFERENCES = 512;
 const MAX_CREDENTIAL_SECRET_BYTES = 16 * 1024;
 
 export const CREDENTIAL_KINDS = Object.freeze([
+  "socks5_username",
+  "socks5_password",
   "shadowsocks_password",
   "vmess_uuid",
   "vless_uuid",
@@ -25,6 +27,8 @@ export const CREDENTIAL_KINDS = Object.freeze([
 
 const KINDS = new Set(CREDENTIAL_KINDS);
 const CREDENTIAL_LABELS = Object.freeze({
+  socks5_username: "SOCKS5 Username",
+  socks5_password: "SOCKS5 Password",
   anytls_password: "AnyTLS Password",
   tuic_uuid: "TUIC UUID",
   tuic_password: "TUIC Password",
@@ -116,7 +120,10 @@ export function credentialProvisionBatch(requirements, secrets) {
     if (bytes > MAX_CREDENTIAL_SECRET_BYTES) {
       throw new TypeError(`${credentialLabel(reference.kind)} is larger than 16 KiB`);
     }
-    if (/[\u0000-\u001f\u007f]/u.test(secret)) {
+    if ((reference.kind === "socks5_username" || reference.kind === "socks5_password") && bytes > 255) {
+      throw new TypeError(`${credentialLabel(reference.kind)} is larger than 255 UTF-8 bytes`);
+    }
+    if (/[\u0000-\u001f\u007f-\u009f]/u.test(secret)) {
       throw new TypeError(`${credentialLabel(reference.kind)} contains control characters`);
     }
     return { reference: { id: reference.id, kind: reference.kind }, secret };

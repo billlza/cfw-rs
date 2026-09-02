@@ -11,10 +11,9 @@ use cfw_engine_api::{
     CredentialVaultError, CredentialVaultProvisioner, CredentialVaultReceipt,
 };
 use cfw_profiles::{
-    ProfileCredentialSnapshot, ProfileImportResult, ProfileRecord, ProfileRepository,
-    ProfileRepositorySnapshot,
+    ProfileCredentialSnapshot, ProfileRecord, ProfileRepository, ProfileRepositorySnapshot,
 };
-use cfw_singbox_config::{CredentialRef, CredentialSecret, ValidatedSingBoxProfile};
+use cfw_singbox_config::{CredentialRef, CredentialSecret};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use zeroize::Zeroize;
@@ -51,7 +50,6 @@ pub(crate) struct ManagedProfiles {
 }
 
 const CREDENTIAL_GC_PREVIEW_TTL: Duration = Duration::from_secs(5 * 60);
-const PROJECTION_VALIDATION_PROFILE_ID: &str = "00000000-0000-4000-8000-000000000000";
 
 #[derive(Debug)]
 struct CredentialGcAuthority {
@@ -142,38 +140,6 @@ pub(crate) fn build_managed_profiles(
         ProfileRepository::new(store.paths().profiles_dir.clone()),
         credential_vault,
     ))
-}
-
-#[tauri::command]
-pub(crate) fn import_profile_text(
-    engine: State<'_, ManagedEngine>,
-    profiles: State<'_, ManagedProfiles>,
-    name: Option<String>,
-    body: String,
-) -> Result<ProfileImportResult, String> {
-    let _maintenance = engine
-        .reserve_profile_mutation()
-        .map_err(|error| error.to_string())?;
-    let profile = ValidatedSingBoxProfile::parse(&body).map_err(|error| error.to_string())?;
-    let settings = engine.engine_settings()?;
-    profile
-        .project(
-            PROJECTION_VALIDATION_PROFILE_ID,
-            cfw_singbox_config::ProjectionMode::SystemProxy,
-            &settings,
-        )
-        .map_err(|error| error.to_string())?;
-    profile
-        .project(
-            PROJECTION_VALIDATION_PROFILE_ID,
-            cfw_singbox_config::ProjectionMode::Tunnel,
-            &settings,
-        )
-        .map_err(|error| error.to_string())?;
-    profiles
-        .repository
-        .import(name.as_deref(), &profile)
-        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -513,6 +479,7 @@ mod tests {
         CredentialPresenceRequest, CredentialProvisionRequest, CredentialVaultError,
         CredentialVaultFuture,
     };
+    use cfw_singbox_config::ValidatedSingBoxProfile;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;

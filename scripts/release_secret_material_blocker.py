@@ -58,6 +58,7 @@ RELEASE_WORKTREE_CACHE_SCOPE_PENDING = (
     ".cfm-release-worktree-cache-scope-v1.json.pending"
 )
 RELEASE_WORKTREE_CACHE_SCOPE_LOCK = ".cfm-release-worktree-cache-scope-v1.lock"
+RELEASE_WORKTREE_CACHE_RECOVERY_SCHEMA = "cfm-release-worktree-cache-recovery-v1"
 
 
 class ReleaseWorktreeCacheScopeError(ValueError):
@@ -112,9 +113,13 @@ class ReleaseWorktreeCacheScopeReceipt:
 def canonical_scope_receipt_bytes(
     receipt: ReleaseWorktreeCacheScopeReceipt,
 ) -> bytes:
+    return _canonical_scope_json(receipt.as_dict())
+
+
+def _canonical_scope_json(value: dict[str, object]) -> bytes:
     return (
         json.dumps(
-            receipt.as_dict(),
+            value,
             ensure_ascii=True,
             allow_nan=False,
             sort_keys=True,
@@ -151,9 +156,9 @@ def _scope_path_identity(value: object, label: str) -> StablePathIdentity:
     return StablePathIdentity(device=value["device"], inode=value["inode"])
 
 
-def parse_scope_receipt(data: bytes) -> ReleaseWorktreeCacheScopeReceipt:
+def _decode_scope_json(data: bytes) -> object:
     try:
-        value = json.loads(
+        return json.loads(
             data.decode("ascii"),
             object_pairs_hook=_unique_scope_object,
             parse_constant=_reject_scope_constant,
@@ -169,6 +174,9 @@ def parse_scope_receipt(data: bytes) -> ReleaseWorktreeCacheScopeReceipt:
         raise ReleaseWorktreeCacheScopeError(
             "release-worktree receipt is not canonical JSON"
         ) from exc
+
+
+def _scope_receipt_from_value(value: object) -> ReleaseWorktreeCacheScopeReceipt:
     expected_keys = {
         "adminIdentity",
         "build",
@@ -194,7 +202,7 @@ def parse_scope_receipt(data: bytes) -> ReleaseWorktreeCacheScopeReceipt:
         raise ReleaseWorktreeCacheScopeError(
             "release-worktree receipt string fields are malformed"
         )
-    receipt = ReleaseWorktreeCacheScopeReceipt(
+    return ReleaseWorktreeCacheScopeReceipt(
         build=value["build"],
         worktree_path=value["worktreePath"],
         head=value["head"],
@@ -203,11 +211,119 @@ def parse_scope_receipt(data: bytes) -> ReleaseWorktreeCacheScopeReceipt:
         marker=_scope_path_identity(value["markerIdentity"], "marker"),
         target=_scope_path_identity(value["targetIdentity"], "target"),
     )
+
+
+def parse_scope_receipt(data: bytes) -> ReleaseWorktreeCacheScopeReceipt:
+    receipt = _scope_receipt_from_value(_decode_scope_json(data))
     if canonical_scope_receipt_bytes(receipt) != data:
         raise ReleaseWorktreeCacheScopeError(
             "release-worktree receipt is not in canonical form"
         )
     return receipt
+
+
+@dataclass(frozen=True)
+class ReleaseWorktreeCacheRecoveryReceipt:
+    """An explicit device-only reassignment, retaining the original authority.
+
+    A v1 receipt cannot prove a historical volume UUID or reboot event. Recovery
+    therefore requires operator authorization, never inference during a scan.
+    Paths, HEAD and all four inodes must remain identical, and device mappings
+    must preserve the original filesystem partitioning in both directions.
+    """
+
+    original: ReleaseWorktreeCacheScopeReceipt
+    recovered: ReleaseWorktreeCacheScopeReceipt
+
+    def __post_init__(self) -> None:
+        if (
+            self.original.build != self.recovered.build
+            or self.original.worktree_path != self.recovered.worktree_path
+            or self.original.head != self.recovered.head
+        ):
+            raise ReleaseWorktreeCacheScopeError(
+                "cache-scope recovery cannot change build, path or HEAD"
+            )
+        forward: dict[int, int] = {}
+        reverse: dict[int, int] = {}
+        for original, recovered in zip(
+            _scope_identities(self.original),
+            _scope_identities(self.recovered),
+            strict=True,
+        ):
+            if original.inode != recovered.inode:
+                raise ReleaseWorktreeCacheScopeError(
+                    "cache-scope recovery cannot change an inode"
+                )
+            if (
+                original.device in forward
+                and forward[original.device] != recovered.device
+            ) or (
+                recovered.device in reverse
+                and reverse[recovered.device] != original.device
+            ):
+                raise ReleaseWorktreeCacheScopeError(
+                    "cache-scope recovery device mapping is not one-to-one"
+                )
+            forward[original.device] = recovered.device
+            reverse[recovered.device] = original.device
+        if all(before == after for before, after in forward.items()):
+            raise ReleaseWorktreeCacheScopeError(
+                "cache-scope recovery requires a device reassignment"
+            )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "original": self.original.as_dict(),
+            "recovered": self.recovered.as_dict(),
+            "schema": RELEASE_WORKTREE_CACHE_RECOVERY_SCHEMA,
+        }
+
+
+def _scope_identities(
+    receipt: ReleaseWorktreeCacheScopeReceipt,
+) -> tuple[StablePathIdentity, ...]:
+    return receipt.admin, receipt.worktree, receipt.marker, receipt.target
+
+
+def canonical_scope_recovery_bytes(
+    receipt: ReleaseWorktreeCacheRecoveryReceipt,
+) -> bytes:
+    return _canonical_scope_json(receipt.as_dict())
+
+
+def parse_scope_recovery(data: bytes) -> ReleaseWorktreeCacheRecoveryReceipt:
+    value = _decode_scope_json(data)
+    if not isinstance(value, dict) or set(value) != {"schema", "original", "recovered"}:
+        raise ReleaseWorktreeCacheScopeError(
+            "cache-scope recovery fields are malformed"
+        )
+    if value["schema"] != RELEASE_WORKTREE_CACHE_RECOVERY_SCHEMA:
+        raise ReleaseWorktreeCacheScopeError(
+            "cache-scope recovery schema is unsupported"
+        )
+    receipt = ReleaseWorktreeCacheRecoveryReceipt(
+        original=_scope_receipt_from_value(value["original"]),
+        recovered=_scope_receipt_from_value(value["recovered"]),
+    )
+    if canonical_scope_recovery_bytes(receipt) != data:
+        raise ReleaseWorktreeCacheScopeError(
+            "cache-scope recovery is not in canonical form"
+        )
+    return receipt
+
+
+def _scope_recovery_name(receipt: ReleaseWorktreeCacheScopeReceipt) -> str:
+    # Direct lookup is bounded and never falls back to a historical record.
+    devices = "-".join(
+        str(identity.device) for identity in _scope_identities(receipt)
+    )
+    name = f"{RELEASE_WORKTREE_CACHE_RECOVERY_SCHEMA}-{devices}.json"
+    if len(name) > 240:
+        raise ReleaseWorktreeCacheScopeError(
+            "cache-scope recovery device identity exceeds the filename limit"
+        )
+    return name
 
 
 # Secret material is detected by extension only; classification additionally
@@ -315,6 +431,13 @@ class DetectedSecretMaterial:
 
 
 @dataclass(frozen=True)
+class _CacheScopeRecoveryFile:
+    name: str
+    identity: tuple[int, int]
+    data: bytes
+
+
+@dataclass(frozen=True)
 class _RegisteredReleaseWorktreeIdentity:
     owner: int
     admin_path: Path
@@ -327,6 +450,7 @@ class _RegisteredReleaseWorktreeIdentity:
     target: tuple[int, int]
     receipt: tuple[int, int] | None
     receipt_data: bytes | None
+    recovery: _CacheScopeRecoveryFile | None = None
 
 
 @dataclass(frozen=True)
@@ -526,12 +650,70 @@ def _scope_receipt(
     )
 
 
+def _registered_scope_receipt(
+    registered: _RegisteredReleaseWorktreeIdentity,
+) -> ReleaseWorktreeCacheScopeReceipt:
+    return _scope_receipt(
+        build=registered.path.name,
+        worktree_path=registered.path,
+        head=registered.head,
+        admin=registered.admin,
+        worktree=registered.worktree,
+        marker=registered.marker,
+        target=registered.target,
+    )
+
+
+def _verified_scope_recovery(
+    admin_fd: int,
+    *,
+    owner: int,
+    original: ReleaseWorktreeCacheScopeReceipt,
+    current: ReleaseWorktreeCacheScopeReceipt,
+) -> _CacheScopeRecoveryFile | None:
+    name = _scope_recovery_name(current)
+    if _scope_file_exists(admin_fd, f".{name}.pending"):
+        raise SecretMaterialReleaseBlock(
+            "release-worktree cache-scope recovery publication is incomplete"
+        )
+    if not _scope_file_exists(admin_fd, name):
+        if original != current:
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope receipt identity is stale"
+            )
+        return None
+    if _scope_file_exists(admin_fd, RELEASE_WORKTREE_CACHE_SCOPE_PENDING):
+        raise SecretMaterialReleaseBlock(
+            "release-worktree original cache-scope publication is incomplete"
+        )
+    data, identity = _read_scope_file(admin_fd, name, expected_owner=owner)
+    try:
+        recovery = parse_scope_recovery(data)
+    except ReleaseWorktreeCacheScopeError as exc:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree cache-scope recovery is malformed"
+        ) from exc
+    if recovery.original != original or recovery.recovered != current:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree cache-scope recovery identity is stale"
+        )
+    return _CacheScopeRecoveryFile(name=name, identity=identity, data=data)
+
+
 def _registered_release_worktree_targets(
     canonical_root: Path,
     *,
     require_scope_receipt: bool = True,
+    selected_build: str | None = None,
+    for_device_recovery: bool = False,
 ) -> dict[str, _RegisteredReleaseWorktreeIdentity]:
     """Authenticate nested release targets through fixed Git control files."""
+    if for_device_recovery and (
+        selected_build is None or not require_scope_receipt
+    ):
+        raise SecretMaterialReleaseBlock(
+            "cache-scope recovery requires one build and its original receipt"
+        )
     try:
         root_metadata = canonical_root.stat(follow_symlinks=False)
         git_metadata = (canonical_root / ".git").stat(follow_symlinks=False)
@@ -622,6 +804,8 @@ def _registered_release_worktree_targets(
                     ):
                         continue
                     build = relative.parts[2]
+                    if selected_build is not None and build != selected_build:
+                        continue
                     expected_worktree = (
                         canonical_root / "target/release-worktrees" / build
                     )
@@ -688,6 +872,7 @@ def _registered_release_worktree_targets(
                     )
                     receipt_identity: tuple[int, int] | None = None
                     receipt_data: bytes | None = None
+                    recovery_file: _CacheScopeRecoveryFile | None = None
                     try:
                         receipt_metadata = os.stat(
                             RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
@@ -744,9 +929,31 @@ def _registered_release_worktree_targets(
                                 raise SecretMaterialReleaseBlock(
                                     "release-worktree cache-scope receipt is malformed"
                                 ) from exc
-                            if parsed_receipt != expected_scope_receipt:
-                                raise SecretMaterialReleaseBlock(
-                                    "release-worktree cache-scope receipt identity is stale"
+                            if for_device_recovery:
+                                if _scope_file_exists(
+                                    admin_fd, RELEASE_WORKTREE_CACHE_SCOPE_PENDING
+                                ):
+                                    raise SecretMaterialReleaseBlock(
+                                        "release-worktree original cache-scope "
+                                        "publication is incomplete"
+                                    )
+                                if parsed_receipt != expected_scope_receipt:
+                                    try:
+                                        ReleaseWorktreeCacheRecoveryReceipt(
+                                            original=parsed_receipt,
+                                            recovered=expected_scope_receipt,
+                                        )
+                                    except ReleaseWorktreeCacheScopeError as exc:
+                                        raise SecretMaterialReleaseBlock(
+                                            "release-worktree cache-scope recovery "
+                                            f"rejected: {exc}"
+                                        ) from exc
+                            else:
+                                recovery_file = _verified_scope_recovery(
+                                    admin_fd,
+                                    owner=root_owner,
+                                    original=parsed_receipt,
+                                    current=expected_scope_receipt,
                                 )
                     try:
                         current_admin = os.fstat(admin_fd)
@@ -782,6 +989,7 @@ def _registered_release_worktree_targets(
                         target=target_identity,
                         receipt=receipt_identity,
                         receipt_data=receipt_data,
+                        recovery=recovery_file,
                     )
                 finally:
                     os.close(admin_fd)
@@ -925,7 +1133,9 @@ def _scope_file_exists(admin_fd: int, name: str) -> bool:
     return True
 
 
-def _write_scope_pending(admin_fd: int, data: bytes, owner: int) -> None:
+def _write_scope_pending(
+    admin_fd: int, name: str, data: bytes, owner: int
+) -> None:
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -936,7 +1146,7 @@ def _write_scope_pending(admin_fd: int, data: bytes, owner: int) -> None:
     )
     try:
         descriptor = os.open(
-            RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+            name,
             flags,
             0o600,
             dir_fd=admin_fd,
@@ -971,42 +1181,46 @@ def _write_scope_pending(admin_fd: int, data: bytes, owner: int) -> None:
         os.close(descriptor)
 
 
-def _fsync_scope_pending(
+def _fsync_scope_file(
     admin_fd: int,
+    name: str,
     *,
     expected_owner: int,
     expected_identity: tuple[int, int],
     expected_size: int,
+    expected_links: int = 1,
 ) -> None:
     flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
         descriptor = os.open(
-            RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+            name,
             flags,
             dir_fd=admin_fd,
         )
     except OSError as exc:
         raise SecretMaterialReleaseBlock(
-            "release-worktree cache-scope pending file could not be reopened"
+            "release-worktree cache-scope file could not be reopened for fsync"
         ) from exc
     try:
         try:
             before = os.fstat(descriptor)
             if (
                 not _scope_file_metadata_is_safe(
-                    before, expected_owner=expected_owner
+                    before,
+                    expected_owner=expected_owner,
+                    expected_links=expected_links,
                 )
                 or (before.st_dev, before.st_ino) != expected_identity
                 or before.st_size != expected_size
             ):
                 raise SecretMaterialReleaseBlock(
-                    "release-worktree cache-scope pending identity is stale"
+                    "release-worktree cache-scope file identity is stale before fsync"
                 )
             os.fsync(descriptor)
             after = os.fstat(descriptor)
         except OSError as exc:
             raise SecretMaterialReleaseBlock(
-                "release-worktree cache-scope pending durability could not be proven"
+                "release-worktree cache-scope file durability could not be proven"
             ) from exc
         if (
             before.st_dev,
@@ -1024,7 +1238,7 @@ def _fsync_scope_pending(
             after.st_size,
         ):
             raise SecretMaterialReleaseBlock(
-                "release-worktree cache-scope pending changed during fsync"
+                "release-worktree cache-scope file changed during fsync"
             )
     finally:
         os.close(descriptor)
@@ -1032,17 +1246,29 @@ def _fsync_scope_pending(
 
 def _publish_scope_receipt(
     registered: _RegisteredReleaseWorktreeIdentity,
+    *,
+    recovery: ReleaseWorktreeCacheRecoveryReceipt | None = None,
 ) -> None:
-    expected_receipt = _scope_receipt(
-        build=registered.path.name,
-        worktree_path=registered.path,
-        head=registered.head,
-        admin=registered.admin,
-        worktree=registered.worktree,
-        marker=registered.marker,
-        target=registered.target,
-    )
-    expected_data = canonical_scope_receipt_bytes(expected_receipt)
+    expected_receipt = _registered_scope_receipt(registered)
+    if recovery is None:
+        final_name = RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT
+        expected_data = canonical_scope_receipt_bytes(expected_receipt)
+    else:
+        if (
+            canonical_scope_receipt_bytes(recovery.original)
+            != registered.receipt_data
+            or recovery.recovered != expected_receipt
+        ):
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope recovery does not match registration"
+            )
+        final_name = _scope_recovery_name(expected_receipt)
+        expected_data = canonical_scope_recovery_bytes(recovery)
+    pending_name = f".{final_name}.pending"
+    if len(expected_data) > MAXIMUM_GIT_CONTROL_FILE_BYTES:
+        raise SecretMaterialReleaseBlock(
+            "release-worktree cache-scope receipt exceeds the parser limit"
+        )
     admin_fd, admin_identity = _open_verified_directory(
         registered.admin_path,
         expected_owner=registered.owner,
@@ -1089,21 +1315,26 @@ def _publish_scope_receipt(
                 "release-worktree cache-scope enrollment is already active"
             ) from exc
 
-        final_exists = _scope_file_exists(
-            admin_fd, RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT
-        )
-        pending_exists = _scope_file_exists(
-            admin_fd, RELEASE_WORKTREE_CACHE_SCOPE_PENDING
-        )
+        if recovery is not None:
+            _require_current_release_worktree_identity(
+                registered.path.name, {registered.path.name: registered}
+            )
+            if _scope_file_exists(admin_fd, RELEASE_WORKTREE_CACHE_SCOPE_PENDING):
+                raise SecretMaterialReleaseBlock(
+                    "release-worktree original cache-scope publication is incomplete"
+                )
+
+        final_exists = _scope_file_exists(admin_fd, final_name)
+        pending_exists = _scope_file_exists(admin_fd, pending_name)
         if final_exists and pending_exists:
             try:
                 final_metadata = os.stat(
-                    RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+                    final_name,
                     dir_fd=admin_fd,
                     follow_symlinks=False,
                 )
                 pending_metadata = os.stat(
-                    RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+                    pending_name,
                     dir_fd=admin_fd,
                     follow_symlinks=False,
                 )
@@ -1120,9 +1351,9 @@ def _publish_scope_receipt(
                 raise SecretMaterialReleaseBlock(
                     "release-worktree cache-scope publish state is contradictory"
                 )
-            linked_data, _ = _read_linked_scope_file(
+            linked_data, linked_identity = _read_linked_scope_file(
                 admin_fd,
-                RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+                final_name,
                 expected_owner=registered.owner,
                 expected_links=2,
             )
@@ -1130,8 +1361,16 @@ def _publish_scope_receipt(
                 raise SecretMaterialReleaseBlock(
                     "release-worktree cache-scope linked receipt is stale"
                 )
+            _fsync_scope_file(
+                admin_fd,
+                final_name,
+                expected_owner=registered.owner,
+                expected_identity=linked_identity,
+                expected_size=len(expected_data),
+                expected_links=2,
+            )
             try:
-                os.unlink(RELEASE_WORKTREE_CACHE_SCOPE_PENDING, dir_fd=admin_fd)
+                os.unlink(pending_name, dir_fd=admin_fd)
                 os.fsync(admin_fd)
             except OSError as exc:
                 raise SecretMaterialReleaseBlock(
@@ -1140,36 +1379,52 @@ def _publish_scope_receipt(
             pending_exists = False
 
         if final_exists:
-            final_data, _ = _read_scope_file(
+            final_data, final_identity = _read_scope_file(
                 admin_fd,
-                RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+                final_name,
                 expected_owner=registered.owner,
             )
             if final_data != expected_data:
                 raise SecretMaterialReleaseBlock(
                     "release-worktree cache-scope receipt is stale"
                 )
+            _fsync_scope_file(
+                admin_fd,
+                final_name,
+                expected_owner=registered.owner,
+                expected_identity=final_identity,
+                expected_size=len(expected_data),
+            )
+            try:
+                os.fsync(admin_fd)
+            except OSError as exc:
+                raise SecretMaterialReleaseBlock(
+                    "release-worktree cache-scope publication durability is unproven"
+                ) from exc
             return
 
         if pending_exists:
             pending_data, pending_identity = _read_scope_file(
                 admin_fd,
-                RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+                pending_name,
                 expected_owner=registered.owner,
             )
         else:
-            _write_scope_pending(admin_fd, expected_data, registered.owner)
+            _write_scope_pending(
+                admin_fd, pending_name, expected_data, registered.owner
+            )
             pending_data, pending_identity = _read_scope_file(
                 admin_fd,
-                RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
+                pending_name,
                 expected_owner=registered.owner,
             )
         if pending_data != expected_data:
             raise SecretMaterialReleaseBlock(
                 "release-worktree cache-scope pending receipt is stale"
             )
-        _fsync_scope_pending(
+        _fsync_scope_file(
             admin_fd,
+            pending_name,
             expected_owner=registered.owner,
             expected_identity=pending_identity,
             expected_size=len(expected_data),
@@ -1177,14 +1432,14 @@ def _publish_scope_receipt(
 
         try:
             os.link(
-                RELEASE_WORKTREE_CACHE_SCOPE_PENDING,
-                RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+                pending_name,
+                final_name,
                 src_dir_fd=admin_fd,
                 dst_dir_fd=admin_fd,
                 follow_symlinks=False,
             )
             os.fsync(admin_fd)
-            os.unlink(RELEASE_WORKTREE_CACHE_SCOPE_PENDING, dir_fd=admin_fd)
+            os.unlink(pending_name, dir_fd=admin_fd)
             os.fsync(admin_fd)
         except OSError as exc:
             raise SecretMaterialReleaseBlock(
@@ -1192,7 +1447,7 @@ def _publish_scope_receipt(
             ) from exc
         final_data, _ = _read_scope_file(
             admin_fd,
-            RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT,
+            final_name,
             expected_owner=registered.owner,
         )
         if final_data != expected_data:
@@ -1224,11 +1479,10 @@ def _publish_scope_receipt(
             ) from cleanup_error
 
 
-def _authorize_release_worktree_cache_scope(
+def _cache_scope_workspace_root(
     workspace_root: str | os.PathLike[str],
     build: str,
 ) -> Path:
-    """Explicitly enroll one trusted detached worktree before cache writes."""
     if RELEASE_WORKTREE_BUILD_RE.fullmatch(build) is None:
         raise SecretMaterialReleaseBlock(
             "release-worktree cache-scope build is not five digits"
@@ -1244,6 +1498,15 @@ def _authorize_release_worktree_cache_scope(
         raise SecretMaterialReleaseBlock(
             "workspace root could not be resolved for cache-scope enrollment"
         ) from exc
+    return canonical_root
+
+
+def _authorize_release_worktree_cache_scope(
+    workspace_root: str | os.PathLike[str],
+    build: str,
+) -> Path:
+    """Explicitly enroll one trusted detached worktree before cache writes."""
+    canonical_root = _cache_scope_workspace_root(workspace_root, build)
     registered_targets = _registered_release_worktree_targets(
         canonical_root, require_scope_receipt=False
     )
@@ -1288,6 +1551,61 @@ def authorize_release_worktree_cache_scope(
     """Serialize explicit enrollment within this process and across processes."""
     with _SCOPE_ENROLLMENT_LOCK:
         return _authorize_release_worktree_cache_scope(workspace_root, build)
+
+
+def recover_release_worktree_cache_scope(
+    workspace_root: str | os.PathLike[str],
+    build: str,
+) -> Path:
+    """Append operator-authorized device recovery without rewriting v1 history.
+
+    Populated targets are allowed only under a complete original receipt and
+    an unchanged registration. A recovery operation never grants scan access
+    until the new receipt has been reopened through normal admission checks.
+    """
+    with _SCOPE_ENROLLMENT_LOCK:
+        canonical_root = _cache_scope_workspace_root(workspace_root, build)
+        registered = _registered_release_worktree_targets(
+            canonical_root, selected_build=build, for_device_recovery=True
+        ).get(build)
+        if registered is None or registered.receipt_data is None:
+            raise SecretMaterialReleaseBlock(
+                "cache-scope recovery requires a live registration and original receipt"
+            )
+        original = parse_scope_receipt(registered.receipt_data)
+        current = _registered_scope_receipt(registered)
+        if original != current:
+            recovery = ReleaseWorktreeCacheRecoveryReceipt(
+                original=original, recovered=current
+            )
+            _publish_scope_receipt(registered, recovery=recovery)
+        verified = _registered_release_worktree_targets(
+            canonical_root, selected_build=build
+        ).get(build)
+        if verified is None:
+            raise SecretMaterialReleaseBlock(
+                "release-worktree cache-scope recovery did not verify"
+            )
+        # The new proof is the only expected difference from pre-publication
+        # identity; concurrent replacement of any original file is an error.
+        if (
+            verified.owner != registered.owner
+            or verified.admin_path != registered.admin_path
+            or _registered_scope_receipt(verified) != current
+            or verified.receipt != registered.receipt
+            or verified.receipt_data != registered.receipt_data
+            or verified.marker_data != registered.marker_data
+        ):
+            raise SecretMaterialReleaseBlock(
+                "release-worktree identity changed during cache-scope recovery"
+            )
+        _require_current_release_worktree_identity(build, {build: verified})
+        name = (
+            verified.recovery.name
+            if verified.recovery is not None
+            else RELEASE_WORKTREE_CACHE_SCOPE_RECEIPT
+        )
+        return verified.admin_path / name
 
 
 def _require_current_release_worktree_identity(
@@ -1338,6 +1656,23 @@ def _require_current_release_worktree_identity(
         current_head, _ = _read_git_control_file(
             admin_fd, "HEAD", expected_owner=registered.owner
         )
+        current_gitdir, _ = _read_git_control_file(
+            admin_fd, "gitdir", expected_owner=registered.owner
+        )
+        current_commondir, _ = _read_git_control_file(
+            admin_fd, "commondir", expected_owner=registered.owner
+        )
+        if registered.recovery is not None:
+            current_recovery = _verified_scope_recovery(
+                admin_fd,
+                owner=registered.owner,
+                original=parse_scope_receipt(registered.receipt_data),
+                current=_registered_scope_receipt(registered),
+            )
+            if current_recovery != registered.recovery:
+                raise SecretMaterialReleaseBlock(
+                    "cache-scope recovery identity changed during the scan"
+                )
     finally:
         os.close(admin_fd)
     if (
@@ -1345,6 +1680,8 @@ def _require_current_release_worktree_identity(
         or current_receipt != registered.receipt
         or current_receipt_data != registered.receipt_data
         or current_head != registered.head.encode("ascii") + b"\n"
+        or current_gitdir != os.fsencode(worktree / ".git") + b"\n"
+        or current_commondir != b"../..\n"
     ):
         raise SecretMaterialReleaseBlock(
             "release-worktree administrative identity changed during the scan"
@@ -1909,7 +2246,8 @@ def main(argv: list[str] | None = None) -> int:
         default=os.getcwd(),
         help="Absolute path to the repository workspace root to scan.",
     )
-    parser.add_argument(
+    scope_actions = parser.add_mutually_exclusive_group()
+    scope_actions.add_argument(
         "--authorize-release-worktree",
         metavar="BUILD",
         help=(
@@ -1917,10 +2255,18 @@ def main(argv: list[str] | None = None) -> int:
             "live detached five-digit release worktree."
         ),
     )
+    scope_actions.add_argument(
+        "--recover-release-worktree",
+        metavar="BUILD",
+        help=(
+            "Explicitly authorize a reboot-related device reassignment for "
+            "one existing scope, preserving its original receipt and candidates."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
-        if args.authorize_release_worktree:
+        if args.authorize_release_worktree or args.recover_release_worktree:
             if __package__:
                 from .release_python_runtime import (
                     ReleasePythonRuntimeError,
@@ -1938,11 +2284,16 @@ def main(argv: list[str] | None = None) -> int:
                 raise SecretMaterialReleaseBlock(
                     f"release-worktree runtime admission failed: {error}"
                 ) from error
-            receipt = authorize_release_worktree_cache_scope(
-                args.workspace_root,
-                args.authorize_release_worktree,
-            )
-            print(f"release-worktree cache scope enrolled: {receipt}")
+            if args.recover_release_worktree:
+                receipt = recover_release_worktree_cache_scope(
+                    args.workspace_root, args.recover_release_worktree
+                )
+                print(f"release-worktree cache scope recovery verified: {receipt}")
+            else:
+                receipt = authorize_release_worktree_cache_scope(
+                    args.workspace_root, args.authorize_release_worktree
+                )
+                print(f"release-worktree cache scope enrolled: {receipt}")
             return 0
         responses = evaluate_workspace(args.workspace_root)
     except SecretMaterialReleaseBlock as exc:

@@ -68,6 +68,7 @@ test("a provisioning batch must supply every missing reference at once", () => {
   ]);
   assert.throws(() => credentialProvisionBatch([FIRST, SECOND], ["one"]), /at once/u);
   assert.throws(() => credentialProvisionBatch([FIRST], [""]), /required/u);
+  assert.throws(() => credentialProvisionBatch([FIRST], ["bad\u0085secret"]), /control characters/u);
   assert.throws(() => credentialProvisionBatch([FIRST], ["a\u0000b"]), /control characters/u);
   assert.throws(() => credentialProvisionBatch([FIRST], ["x".repeat(16 * 1024 + 1)]), /16 KiB/u);
   assert.throws(() => credentialProvisionBatch([FIRST], [42]), /invalid/u);
@@ -112,9 +113,32 @@ test("cleanup keeps same-reference entries from distinct profile audiences", () 
 });
 
 test("credential kinds are labelled for a person, not for a schema", () => {
+  assert.equal(credentialLabel("socks5_username"), "SOCKS5 Username");
+  assert.equal(credentialLabel("socks5_password"), "SOCKS5 Password");
   assert.equal(credentialLabel("hysteria2_obfs_password"), "Hysteria2 Obfs Password");
   assert.equal(credentialLabel("vmess_uuid"), "Vmess Uuid");
   assert.equal(credentialLabel("anytls_password"), "AnyTLS Password");
   assert.equal(credentialLabel("tuic_uuid"), "TUIC UUID");
   assert.equal(credentialLabel("tuic_password"), "TUIC Password");
+});
+
+test("SOCKS5 credentials preserve text and enforce 255-byte authentication fields", () => {
+  const references = normalizeCredentialReferences([
+    { id: FIRST.id, kind: "socks5_username" },
+    { id: SECOND.id, kind: "socks5_password" },
+  ]);
+  assert.deepEqual(
+    credentialProvisionBatch(references, [" user ", "pass:word@value"]),
+    [{ reference: references[0], secret: " user " }, { reference: references[1], secret: "pass:word@value" }],
+  );
+  for (const reference of references) {
+    for (const value of ["x", "x".repeat(255), "界".repeat(85)]) {
+      assert.equal(credentialProvisionBatch([reference], [value])[0].secret, value);
+    }
+    for (const value of ["x".repeat(256), "界".repeat(86)]) {
+      assert.throws(() => credentialProvisionBatch([reference], [value]), /255 UTF-8 bytes/u);
+    }
+    assert.throws(() => credentialProvisionBatch([reference], [""]), /required/u);
+    assert.throws(() => credentialProvisionBatch([reference], ["bad\nvalue"]), /control/u);
+  }
 });

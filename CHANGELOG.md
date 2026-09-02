@@ -23,7 +23,7 @@
   every step to an unchanged Clash for Windows process and network projection.
   One inode-bound outer lock serializes service and bundle mutations, and
   independent fixed journals cover historical validation migrations and the
-  40019→40039 GA installation without overwriting earlier evidence. The
+  40019→40040 GA installation without overwriting earlier evidence. The
   canonical allocation ledger prevents a retired validation build or its
   reserved final companion from being reused by a later source closure. The
   validation-only compatibility island can prove the already-installed 40019
@@ -98,8 +98,12 @@
   a typed operational failure closes the poisoned verifier session and replays
   the same public proof once through one fresh source-pinned session. Cleanup,
   startup, semantic, or second operational failure remains terminal; the
-  helper, attempt, and receipt creator are never rerun. Build 40039 is the only
-  active GA successor.
+  helper, attempt, and receipt creator are never rerun. Build 40039 completed
+  freeze and canonical signing, but its original notarization outcome remains
+  unknown. Adding SOCKS5 changes the frozen product inputs, so build 40039 is
+  retired with all old bytes and receipts preserved and its Apple transaction
+  quarantined. Build 40040 is the only active GA successor; source and CI
+  retries before freeze do not consume additional builds.
 - Authenticate nested release-worktree managed caches through bounded,
   descriptor-relative Git administrative control files plus an explicit
   empty-target lifecycle receipt before excluding them from the path/name-only
@@ -107,6 +111,11 @@
   path. Release-worktree source and generated candidate roots remain scanned,
   aliases into excluded caches fail closed, and candidate or secret bytes are
   never opened.
+- Recover an explicitly authorized post-reboot device-number reassignment
+  through a separate immutable cache-scope receipt. The original receipt,
+  detached source, directory inodes and historical candidates remain unchanged;
+  replacement directories, inconsistent remapping and partial records fail
+  closed.
 
 ### Network architecture
 
@@ -129,7 +138,7 @@
 
 - Replace Clash YAML/REST/WebSocket configuration with a closed app profile
   schema that projects deterministically to native sing-box JSON.
-- Add closed typed profile schemas for `direct`, `block`, Shadowsocks, VMess,
+- Add closed typed profile schemas for `direct`, `block`, SOCKS5, Shadowsocks, VMess,
   VLESS/Reality, Trojan, Hysteria2, AnyTLS, and TUIC v5, plus optional
   `route.final`. Persistent profiles contain canonical credential references
   only, including separate TUIC UUID and password references; raw credentials,
@@ -137,6 +146,17 @@
   fields are rejected. Runtime projection produces empty secret placeholders
   and closed native injection slots. References are immutable: retries must be
   byte-identical and secret rotation requires a new UUID and profile update.
+- Add anonymous and authenticated SOCKS5 with IPv4/IPv6/domain endpoints and
+  TCP/UDP policy preservation. Import `socks://`/`socks5://` links (plain or
+  base64 userinfo), Clash `socks5` nodes, and sing-box SOCKS v5 nodes through one
+  adapter. Username and password use separate native vault references and
+  RFC 1929 byte bounds. SOCKS4/4a, SOCKS-over-TLS and UDP-over-TCP remain explicit
+  unsupported errors; ordinary SOCKS5 does not encrypt transport.
+- Unify local file, pasted node link, and remote subscription conversion with
+  the same vault-first commit boundary. Add YAML/text file and drag-drop
+  admission, strict UTF-8 decoding, and the bounded 512 KiB source limit while
+  retaining the independent canonical-profile limit and local reference-only
+  manual provisioning. The profile editor still edits only the closed schema.
 - Add missing-only credential entry backed by an atomic shared-Keychain vault.
   Renderer and bridge buffers are redacted and zeroized, present references are
   never re-prompted, and explicit two-phase garbage collection deletes only

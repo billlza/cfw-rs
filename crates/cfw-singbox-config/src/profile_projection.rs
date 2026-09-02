@@ -101,6 +101,36 @@ impl ProfileOutbound {
         let (mut object, slots) = match self {
             Self::Direct { tag } => (base_outbound("direct", tag), Vec::new()),
             Self::Block { tag } => (base_outbound("block", tag), Vec::new()),
+            Self::Socks5 {
+                tag,
+                server,
+                server_port,
+                authentication,
+                network,
+            } => {
+                let mut object =
+                    remote_outbound("socks", tag, server, *server_port, bootstrap_resolver);
+                object.insert("version".into(), Value::String("5".into()));
+                if let Some(network) = network {
+                    object.insert("network".into(), serde_json::to_value(network)?);
+                }
+                let mut slots = Vec::new();
+                if let Some(authentication) = authentication {
+                    object.insert("username".into(), Value::String(String::new()));
+                    object.insert("password".into(), Value::String(String::new()));
+                    slots.push(CredentialSlot::new(
+                        authentication.username_credential_ref.clone(),
+                        CredentialTarget::Socks5Username,
+                        index,
+                    )?);
+                    slots.push(CredentialSlot::new(
+                        authentication.password_credential_ref.clone(),
+                        CredentialTarget::Socks5Password,
+                        index,
+                    )?);
+                }
+                (object, slots)
+            }
             Self::Shadowsocks {
                 tag,
                 server,

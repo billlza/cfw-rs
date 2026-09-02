@@ -28,6 +28,7 @@ STATUSES: Final = frozenset(
         "retired_after_notarization_before_install_runtime_preflight_failed",
         "retired_after_notarization_before_install_runtime_preflight_toolchain_binding_mismatch",
         "retired_after_candidate_freeze_before_canonical_signing_output",
+        "retired_product_change_notarization_outcome_unknown",
         "retired_before_candidate_build_source_gate_contract_incomplete",
         "retired_unbuilt_policy_superseded",
         "retired_unbuilt_reserved_final_companion",
@@ -105,6 +106,11 @@ RETIRED_GA_ALLOCATIONS: Final = (
         "40038",
         "ga",
         "retired_after_candidate_freeze_before_canonical_signing_output",
+    ),
+    (
+        "40039",
+        "ga",
+        "retired_product_change_notarization_outcome_unknown",
     ),
 )
 

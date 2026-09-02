@@ -11,6 +11,7 @@ use cfw_singbox_config::CredentialKind;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::socks5::Network as Socks5Network;
 use super::{
     ImportedSubscription, OutboundCollector, build_tls_parts, canonical_uuid_credential,
     credential_ref_json, normalize_hysteria2_server_ports,
@@ -29,6 +30,21 @@ struct SourceDocument {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum SourceOutbound {
+    Socks {
+        tag: String,
+        server: String,
+        server_port: u16,
+        #[serde(default)]
+        version: Option<String>,
+        #[serde(default)]
+        username: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        network: Option<Socks5Network>,
+        #[serde(default)]
+        udp_over_tcp: bool,
+    },
     Shadowsocks {
         tag: String,
         server: String,
@@ -291,6 +307,24 @@ fn convert_outbound(
     source: SourceOutbound,
 ) -> Result<Value, String> {
     match source {
+        SourceOutbound::Socks {
+            tag,
+            server,
+            server_port,
+            version,
+            username,
+            password,
+            network,
+            udp_over_tcp,
+        } => {
+            if version.as_deref().is_some_and(|version| version != "5") {
+                return Err("sing-box SOCKS import requires protocol version 5".into());
+            }
+            if udp_over_tcp {
+                return Err("sing-box SOCKS5 UDP-over-TCP is unsupported".into());
+            }
+            collector.socks5_outbound(tag, server, server_port, username, password, network)
+        }
         SourceOutbound::Shadowsocks {
             tag,
             server,

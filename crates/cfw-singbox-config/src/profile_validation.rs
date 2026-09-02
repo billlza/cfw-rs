@@ -67,6 +67,29 @@ impl ProfileOutbound {
         validate_tag(self.tag(), &format!("{path}.tag"))?;
         match self {
             Self::Direct { .. } | Self::Block { .. } => Ok(()),
+            Self::Socks5 {
+                server,
+                server_port,
+                authentication,
+                ..
+            } => {
+                validate_remote_endpoint(server, *server_port, path)?;
+                if let Some(authentication) = authentication {
+                    validate_reference_kind_at(
+                        &authentication.username_credential_ref,
+                        CredentialKind::Socks5Username,
+                        path,
+                        "authentication.username_credential_ref",
+                    )?;
+                    validate_reference_kind_at(
+                        &authentication.password_credential_ref,
+                        CredentialKind::Socks5Password,
+                        path,
+                        "authentication.password_credential_ref",
+                    )?;
+                }
+                Ok(())
+            }
             Self::Shadowsocks {
                 server,
                 server_port,

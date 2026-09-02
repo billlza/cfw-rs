@@ -144,6 +144,37 @@ private func modernProtocolStartRequest(
   }
 }
 
+@Test func socks5ProvisioningAndSlotWireEnforceAuthenticationBounds() throws {
+  for (kind, target, suffix) in [
+    (CredentialKind.socks5Username, CredentialTarget.socks5Username, "username"),
+    (CredentialKind.socks5Password, CredentialTarget.socks5Password, "password"),
+  ] {
+    let reference = CredentialReference(id: firstCredentialReference.id, kind: kind)
+    let slot = try CredentialSlot(
+      reference: reference, target: target, outboundIndex: 0,
+      jsonPointer: "/outbounds/0/\(suffix)"
+    )
+    #expect(try JSONDecoder().decode(CredentialSlot.self, from: JSONEncoder().encode(slot)) == slot)
+    for value in ["x", String(repeating: "x", count: 255), String(repeating: "界", count: 85)] {
+      let entry = try CredentialProvisionEntry(reference: reference, secret: value)
+      #expect(
+        try JSONDecoder().decode(CredentialProvisionEntry.self, from: JSONEncoder().encode(entry))
+          == entry)
+    }
+    for value in ["", String(repeating: "x", count: 256), String(repeating: "界", count: 86)] {
+      #expect(throws: NativeBridgeProtocolError.invalidCredentialSlot) {
+        try CredentialProvisionEntry(reference: reference, secret: value)
+      }
+    }
+    #expect(throws: NativeBridgeProtocolError.invalidCredentialSlot) {
+      try CredentialSlot(
+        reference: reference, target: target, outboundIndex: 0,
+        jsonPointer: "/outbounds/0/uuid"
+      )
+    }
+  }
+}
+
 @Test func modernProtocolCredentialSlotsKeepKindsAndPointersClosed() throws {
   let anytlsID = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
   let tuicUUIDID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!

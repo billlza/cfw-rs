@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub const MAX_CREDENTIAL_SLOTS: usize = 256;
 const MAX_CREDENTIAL_OUTBOUNDS: usize = 128;
 const MAX_CREDENTIAL_SECRET_BYTES: usize = 16 * 1024;
+const MAX_SOCKS5_CREDENTIAL_SECRET_BYTES: usize = 255;
 
 /// Exact, secret-free profile identity authorized to use a credential.
 ///
@@ -115,6 +116,8 @@ impl CredentialBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialKind {
+    Socks5Username,
+    Socks5Password,
     ShadowsocksPassword,
     VmessUuid,
     VlessUuid,
@@ -188,6 +191,8 @@ pub struct InvalidCredentialRef;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialTarget {
+    Socks5Username,
+    Socks5Password,
     ShadowsocksPassword,
     VmessUuid,
     VlessUuid,
@@ -203,6 +208,8 @@ pub enum CredentialTarget {
 impl CredentialTarget {
     pub fn credential_kind(self) -> CredentialKind {
         match self {
+            Self::Socks5Username => CredentialKind::Socks5Username,
+            Self::Socks5Password => CredentialKind::Socks5Password,
             Self::ShadowsocksPassword => CredentialKind::ShadowsocksPassword,
             Self::VmessUuid => CredentialKind::VmessUuid,
             Self::VlessUuid => CredentialKind::VlessUuid,
@@ -217,7 +224,9 @@ impl CredentialTarget {
 
     fn pointer_suffix(self) -> &'static str {
         match self {
-            Self::ShadowsocksPassword
+            Self::Socks5Username => "username",
+            Self::Socks5Password
+            | Self::ShadowsocksPassword
             | Self::TrojanPassword
             | Self::Hysteria2Password
             | Self::AnyTlsPassword
@@ -385,6 +394,13 @@ impl<'a> CredentialSecret<'a> {
     }
 
     pub fn validate_for_kind(&self, kind: CredentialKind) -> Result<(), InvalidCredentialSecret> {
+        if matches!(
+            kind,
+            CredentialKind::Socks5Username | CredentialKind::Socks5Password
+        ) && self.0.len() > MAX_SOCKS5_CREDENTIAL_SECRET_BYTES
+        {
+            return Err(InvalidCredentialSecret);
+        }
         if matches!(
             kind,
             CredentialKind::VmessUuid | CredentialKind::VlessUuid | CredentialKind::TuicUuid

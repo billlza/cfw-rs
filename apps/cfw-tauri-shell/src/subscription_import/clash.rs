@@ -33,6 +33,7 @@
 use cfw_singbox_config::{CredentialKind, MAX_OUTBOUNDS};
 use serde_json::{Value, json};
 
+use super::socks5::Network as Socks5Network;
 use super::yaml::{YamlMapping, YamlScalar, YamlValue, load_single_document};
 use super::{
     ImportedSubscription, OutboundCollector, build_tls_parts, canonical_uuid_credential,
@@ -101,6 +102,7 @@ fn convert_proxy(
     let name = fields.require_string("name")?;
     enforce_common_guards(&mut fields)?;
     let outbound = match kind.as_str() {
+        "socks5" => convert_socks5(collector, &mut fields, name)?,
         "ss" => convert_shadowsocks(collector, &mut fields, name)?,
         "vmess" => convert_vmess(collector, &mut fields, name)?,
         "vless" => convert_vless(collector, &mut fields, name)?,
@@ -110,7 +112,7 @@ fn convert_proxy(
         "tuic" => convert_tuic(collector, &mut fields, name)?,
         other => {
             return Err(format!(
-                "{} has a proxy type outside the supported set (ss, vmess, vless, trojan, hysteria2, anytls, tuic): {}",
+                "{} has a proxy type outside the supported set (socks5, ss, vmess, vless, trojan, hysteria2, anytls, tuic): {}",
                 fields.context(),
                 sanitized_token(other)
             ));
@@ -118,6 +120,39 @@ fn convert_proxy(
     };
     fields.reject_leftovers()?;
     Ok(outbound)
+}
+
+fn convert_socks5(
+    collector: &mut OutboundCollector,
+    fields: &mut ProxyFields,
+    name: String,
+) -> Result<Value, String> {
+    for (key, feature) in [
+        ("tls", "SOCKS5 over TLS"),
+        ("udp-over-tcp", "SOCKS5 UDP-over-TCP"),
+    ] {
+        if fields.take_bool(key)?.unwrap_or(false) {
+            return Err(format!(
+                "{} requires {feature}, which is not supported",
+                fields.context()
+            ));
+        }
+    }
+    // Clash defaults UDP support off for SOCKS5. Consume this before the
+    // generic tuning-key filter so the imported node never gains UDP access.
+    let network = if fields.take_bool("udp")?.unwrap_or(false) {
+        None
+    } else {
+        Some(Socks5Network::Tcp)
+    };
+    collector.socks5_outbound(
+        name,
+        fields.require_string("server")?,
+        fields.require_port()?,
+        fields.take_string("username")?,
+        fields.take_string("password")?,
+        network,
+    )
 }
 
 /// Fails closed on requests the closed schema cannot honour, independent of

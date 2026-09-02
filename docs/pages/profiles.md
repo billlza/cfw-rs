@@ -9,14 +9,17 @@ converts restricted upstream sing-box `outbounds` JSON, Clash Meta YAML
 `proxies` lists, Shadowsocks SIP008 JSON, and node-URI bundles into this schema
 at the boundary. VMess links may use either traditional base64 JSON or the
 URL-shaped AEAD form; URL-shaped VMess has no legacy `alterId` path.
-everything outside the node list (rules, groups, listeners, DNS) is owned by
+Local JSON/YAML/text files and pasted node links use this same conversion
+boundary, not a JSON-only import path. Source input is at most 512 KiB and
+must be valid UTF-8; the converted profile retains its independent size limit.
+Everything outside the node list (rules, groups, listeners, DNS) is owned by
 the app's projection and is not carried over.
 
 The safe schema is intentionally closed:
 
 - top-level `outbounds` is required and contains one to 128 entries;
 - every outbound has a unique `tag` and a typed `direct`, `block`,
-  Shadowsocks, VMess, VLESS/Reality, Trojan, Hysteria2, AnyTLS, or TUIC v5
+  SOCKS5, Shadowsocks, VMess, VLESS/Reality, Trojan, Hysteria2, AnyTLS, or TUIC v5
   shape;
 - top-level `route` is optional and may contain only `final`;
 - `route.final`, when present, must reference a declared outbound tag;
@@ -25,6 +28,19 @@ The safe schema is intentionally closed:
 - credential-bearing outbounds contain canonical credential reference objects;
   single-secret types use `credential_ref`, while raw passwords, UUID values,
   private keys, and other secret fields fail validation;
+- SOCKS5 supports anonymous access or a complete username/password pair,
+  IPv4/IPv6/domain endpoints, and TCP/UDP. Its optional `authentication` object
+  contains `username_credential_ref` (`socks5_username`) and
+  `password_credential_ref` (`socks5_password`); both values are 1..=255 UTF-8
+  bytes without control characters. Projection emits sing-box `type: socks`,
+  `version: 5`. Optional `network: tcp` or `network: udp` restricts transport;
+  omission enables both. `socks://` and `socks5://` links accept anonymous,
+  percent-encoded plain, or base64 username/password userinfo, with an explicit
+  port. Clash `type: socks5` preserves `udp: false` (including its default) as
+  TCP-only; `udp: true` permits both. Upstream sing-box `type: socks` accepts
+  version 5 or its omitted default. SOCKS4/4a, SOCKS-over-TLS and UDP-over-TCP
+  are rejected rather than silently downgraded. Ordinary SOCKS5 does not encrypt
+  its authentication or transport;
 - TUIC carries separate `uuid_credential_ref` and `password_credential_ref`
   values. Hysteria2 and TUIC use QUIC TLS and reject uTLS and Reality, while
   AnyTLS may use the standard TLS schema including those extensions. Runtime
@@ -58,6 +74,14 @@ revalidates both the full managed-profile snapshot and Keychain revision before
 atomic deletion. Installed-signature, entitlement, and physical runtime proof
 are still required before release. A rejected profile is shown as an error; it
 is never converted to an empty/default profile.
+
+Imported inline credentials are committed through the same native vault-first
+transaction for local and remote sources. A refused, unknown, or mismatched
+vault result does not expose a partially imported profile. Local canonical
+reference-only JSON retains the explicit manual-provisioning workflow; remote
+reference-only subscriptions must still confirm the existing vault audience.
+The file picker and drag-drop accept `.json`, `.yaml`, `.yml`, and `.txt`.
+Excel is not a profile format: use its node link or accompanying YAML/JSON.
 
 Application-managed storage is also bounded and fail closed: each complete
 profile envelope is at most 384 KiB, the repository contains at most 4,096

@@ -14,9 +14,16 @@ use zeroize::Zeroize;
 mod clash;
 mod sing_box;
 mod sip008;
+mod socks5;
 mod yaml;
 
+/// Source-only rules, groups, and comments can exceed the closed profile limit.
+/// Conversion still independently enforces `cfw_singbox_config::MAX_PROFILE_BYTES`.
+pub(crate) const MAX_SUBSCRIPTION_DOCUMENT_BYTES: usize = 512 * 1024;
+
 const SUPPORTED_URI_SCHEMES: &[&str] = &[
+    "socks",
+    "socks5",
     "ss",
     "vmess",
     "vless",
@@ -222,6 +229,11 @@ fn import_subscription_document_with_collector(
     body: &str,
     mut collector: OutboundCollector,
 ) -> Result<ImportedSubscription, String> {
+    if body.len() > MAX_SUBSCRIPTION_DOCUMENT_BYTES {
+        return Err(format!(
+            "profile source exceeds the {MAX_SUBSCRIPTION_DOCUMENT_BYTES}-byte limit"
+        ));
+    }
     let body = strip_document_bom(body);
     if let Ok(profile) = ValidatedSingBoxProfile::parse(body) {
         return Ok(ImportedSubscription {
@@ -373,6 +385,7 @@ impl OutboundCollector {
             .unwrap_or_default()
             .to_ascii_lowercase();
         let outbound = match scheme.as_str() {
+            "socks" | "socks5" => self.parse_socks5(entry, index)?,
             "ss" => self.parse_shadowsocks(entry, index)?,
             "vmess" => self.parse_vmess(entry, index)?,
             "vless" => self.parse_vless(entry, index)?,
@@ -1088,6 +1101,8 @@ fn credential_kind_discriminant(kind: CredentialKind) -> u8 {
         CredentialKind::AnyTlsPassword => 7,
         CredentialKind::TuicUuid => 8,
         CredentialKind::TuicPassword => 9,
+        CredentialKind::Socks5Username => 10,
+        CredentialKind::Socks5Password => 11,
     }
 }
 
@@ -1452,10 +1467,17 @@ fn split_host_port(value: &str) -> Result<(String, u16), String> {
 }
 
 fn host_string(url: &Url) -> Result<String, String> {
-    url.host_str()
+    let host = url
+        .host_str()
         .filter(|host| !host.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| "subscription endpoint host is missing".to_owned())
+        .ok_or_else(|| "subscription endpoint host is missing".to_owned())?;
+    // URL authorities bracket IPv6 literals; the typed profile stores the
+    // address itself, matching every other endpoint source format.
+    Ok(host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host)
+        .to_owned())
 }
 
 fn port_from_url(url: &Url) -> Result<u16, String> {
@@ -2728,9 +2750,11 @@ mod tests {
                 CredentialKind::AnyTlsPassword,
                 CredentialKind::TuicUuid,
                 CredentialKind::TuicPassword,
+                CredentialKind::Socks5Username,
+                CredentialKind::Socks5Password,
             ]
             .map(credential_kind_discriminant),
-            [1, 2, 3, 4, 5, 6, 7, 8, 9]
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         );
     }
 

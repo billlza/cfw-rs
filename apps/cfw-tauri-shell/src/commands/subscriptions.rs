@@ -29,9 +29,7 @@ use cfw_engine_api::CredentialVaultProvisioner;
 use cfw_profiles::{
     ExactProfileImportOutcome, ProfileImportResult, ProfileRepository, StoredProfile,
 };
-use cfw_singbox_config::{
-    EngineSettings, MAX_PROFILE_BYTES, ProjectionMode, ValidatedSingBoxProfile,
-};
+use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use futures_util::StreamExt as _;
 use qrcode::QrCode;
 use qrcode::render::svg;
@@ -53,7 +51,7 @@ use super::shell_ops::{open_path, owned_profile_path};
 use crate::engine::ManagedEngine;
 use crate::settings_store;
 use crate::subscription_import::{
-    ImportedCredential, import_subscription_document,
+    ImportedCredential, MAX_SUBSCRIPTION_DOCUMENT_BYTES, import_subscription_document,
     import_subscription_document_with_credential_namespace,
     import_subscription_document_with_reusable_references,
 };
@@ -69,11 +67,6 @@ const SUBSCRIPTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// schema deliberately rejects.
 const SUBSCRIPTION_USER_AGENT: &str = concat!("clash.meta cfw-rs/", env!("CARGO_PKG_VERSION"));
 const MAX_SUBSCRIPTION_REDIRECTS: usize = 5;
-/// A source document can be larger than the canonical profile it converts to:
-/// legacy Clash YAML carries discarded rules/groups/comments in addition to
-/// nodes. The converted typed profile remains independently bounded by
-/// `MAX_PROFILE_BYTES` at validation and repository boundaries.
-const MAX_SUBSCRIPTION_DOCUMENT_BYTES: usize = 512 * 1024;
 /// Subscription URLs may carry credentials in their query string. Never let
 /// reqwest synthesize a Referer header while following a redirect, including
 /// redirects between otherwise-valid public HTTPS origins.
@@ -138,14 +131,38 @@ pub(crate) async fn import_profile_url(
     let settings = engine.engine_settings()?;
     let imported = validated_subscription_import(&body, &settings)?;
     let profile_id = Uuid::new_v4().hyphenated().to_string();
-    commit_subscription_import(
+    commit_profile_import(
         profiles.repository(),
         profiles.credential_vault(),
         &profile_id,
         name.as_deref(),
-        target.as_str(),
+        ProfileImportSource::Subscription(target.as_str()),
         &imported,
         activate,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn import_profile_text(
+    engine: State<'_, ManagedEngine>,
+    profiles: State<'_, ManagedProfiles>,
+    name: Option<String>,
+    body: String,
+) -> Result<ProfileImportResult, String> {
+    let _maintenance = engine
+        .reserve_profile_mutation()
+        .map_err(|error| error.to_string())?;
+    let imported = validated_subscription_import(&body, &engine.engine_settings()?)?;
+    let profile_id = Uuid::new_v4().hyphenated().to_string();
+    commit_profile_import(
+        profiles.repository(),
+        profiles.credential_vault(),
+        &profile_id,
+        name.as_deref(),
+        ProfileImportSource::Local,
+        &imported,
+        false,
     )
     .await
 }
@@ -166,13 +183,18 @@ pub(crate) async fn import_profile_file(
         .reserve_profile_mutation()
         .map_err(|error| error.to_string())?;
     let settings = engine.engine_settings()?;
-    let profile = validated_profile(&body, &settings)?;
-    let imported = profiles
-        .repository()
-        .import_with_source(name.as_deref().or(fallback_name.as_deref()), &profile, None)
-        .map_err(|error| error.to_string())?;
-    activate_if_requested(profiles.repository(), &imported.id, activate)?;
-    Ok(imported)
+    let imported = validated_subscription_import(&body, &settings)?;
+    let profile_id = Uuid::new_v4().hyphenated().to_string();
+    commit_profile_import(
+        profiles.repository(),
+        profiles.credential_vault(),
+        &profile_id,
+        name.as_deref().or(fallback_name.as_deref()),
+        ProfileImportSource::Local,
+        &imported,
+        activate,
+    )
+    .await
 }
 
 /// Re-fetches a stored subscription and replaces the profile in place, keeping
@@ -403,12 +425,21 @@ fn validate_subscription_projection(
     Ok(())
 }
 
-async fn commit_subscription_import(
+/// Local canonical profiles can intentionally omit secret material for later
+/// manual provisioning. Converted sources with extracted credentials, and all
+/// remote subscriptions, must confirm their complete vault audience first.
+#[derive(Clone, Copy)]
+enum ProfileImportSource<'a> {
+    Local,
+    Subscription(&'a str),
+}
+
+async fn commit_profile_import(
     repository: &ProfileRepository,
     vault: &impl CredentialVaultProvisioner,
     profile_id: &str,
     name: Option<&str>,
-    source_url: &str,
+    source: ProfileImportSource<'_>,
     imported: &crate::subscription_import::ImportedSubscription,
     activate: bool,
 ) -> Result<ProfileImportResult, String> {
@@ -416,41 +447,47 @@ async fn commit_subscription_import(
         .begin_credential_profile_mutation()
         .map_err(|error| {
             format!(
-                "subscription repository mutation could not begin before credential provisioning: {error}"
+                "profile repository mutation could not begin before credential provisioning: {error}"
             )
         })?;
-    provision_subscription_credentials(vault, profile_id, &imported.profile, &imported.credentials)
+    if matches!(source, ProfileImportSource::Subscription(_)) || !imported.credentials.is_empty() {
+        provision_subscription_credentials(
+            vault,
+            profile_id,
+            &imported.profile,
+            &imported.credentials,
+        )
         .await?;
+    }
+    let source_url = match source {
+        ProfileImportSource::Local => None,
+        ProfileImportSource::Subscription(url) => Some(url),
+    };
     let ExactProfileImportOutcome { profile, created } = mutation
         .commit_exact_import(
             profile_id,
             name,
             &imported.profile,
-            Some(source_url),
+            source_url,
         )
         .map_err(|error| {
             format!(
-                "subscription repository import failed after credential provisioning; the unreferenced vault audience is eligible for credential garbage collection: {error}"
+                "profile repository import failed; any unreferenced vault audience is eligible for credential garbage collection: {error}"
             )
         })?;
     if !created {
-        return Err(
-            "subscription repository import rejected an unexpected exact-ID replay after credential provisioning"
-                .into(),
-        );
+        return Err("profile repository import rejected an unexpected exact-ID replay".into());
     }
     if activate {
         repository
             .select(&profile.id)
-            .map_err(subscription_import_activation_error)?;
+            .map_err(profile_import_activation_error)?;
     }
     Ok(profile)
 }
 
-fn subscription_import_activation_error(error: impl fmt::Display) -> String {
-    format!(
-        "subscription import committed with complete credentials, but selection failed: {error}"
-    )
+fn profile_import_activation_error(error: impl fmt::Display) -> String {
+    format!("profile import committed, but selection failed: {error}")
 }
 
 #[derive(Debug)]
@@ -562,7 +599,7 @@ async fn provision_subscription_credentials(
     provision_subscription_credentials_attempt(vault, profile_id, profile, credentials)
         .await
         .map_err(|error| {
-            format!("subscription credential provisioning failed before repository commit: {error}")
+            format!("imported credential provisioning failed before repository commit: {error}")
         })
 }
 
@@ -576,20 +613,6 @@ async fn provision_subscription_credentials_attempt(
         return Ok(());
     }
     provision_imported_credentials_with_exact_replay(vault, profile_id, profile, credentials).await
-}
-
-fn activate_if_requested(
-    repository: &ProfileRepository,
-    id: &str,
-    activate: bool,
-) -> Result<(), String> {
-    if !activate {
-        return Ok(());
-    }
-    repository
-        .select(id)
-        .map(|_record| ())
-        .map_err(|error| error.to_string())
 }
 
 fn load_profile(repository: &ProfileRepository, id: &str) -> Result<StoredProfile, String> {
@@ -1038,18 +1061,18 @@ fn read_opened_local_profile(file: File) -> Result<String, String> {
     if !metadata.file_type().is_file() {
         return Err("profile path is not a regular file".into());
     }
-    if metadata.len() > MAX_PROFILE_BYTES as u64 {
+    if metadata.len() > MAX_SUBSCRIPTION_DOCUMENT_BYTES as u64 {
         return Err(format!(
-            "profile file exceeds the {MAX_PROFILE_BYTES}-byte limit"
+            "profile file exceeds the {MAX_SUBSCRIPTION_DOCUMENT_BYTES}-byte limit"
         ));
     }
     let mut body = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_PROFILE_BYTES as u64 + 1)
+    file.take(MAX_SUBSCRIPTION_DOCUMENT_BYTES as u64 + 1)
         .read_to_end(&mut body)
         .map_err(|error| error.to_string())?;
-    if body.len() > MAX_PROFILE_BYTES {
+    if body.len() > MAX_SUBSCRIPTION_DOCUMENT_BYTES {
         return Err(format!(
-            "profile file exceeds the {MAX_PROFILE_BYTES}-byte limit"
+            "profile file exceeds the {MAX_SUBSCRIPTION_DOCUMENT_BYTES}-byte limit"
         ));
     }
     String::from_utf8(body).map_err(|_| "profile document is not UTF-8".to_owned())
@@ -1057,6 +1080,7 @@ fn read_opened_local_profile(file: File) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use cfw_singbox_config::MAX_PROFILE_BYTES;
     use std::collections::{BTreeSet, VecDeque};
     use std::sync::{Arc, Mutex};
 
@@ -1740,9 +1764,180 @@ mod tests {
     fn opened_profile_read_is_bounded_even_when_metadata_exceeds_the_limit() {
         let temporary = tempfile::TempDir::new().expect("temporary directory");
         let profile = temporary.path().join("oversized.json");
-        std::fs::write(&profile, vec![b'x'; MAX_PROFILE_BYTES + 1])
+        std::fs::write(&profile, vec![b'x'; MAX_SUBSCRIPTION_DOCUMENT_BYTES + 1])
             .expect("write oversized profile");
         assert!(read_local_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn local_source_limit_allows_clash_metadata_without_widening_stored_profiles() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let path = temporary.path().join("nodes.yaml");
+        let body = format!(
+            "# {}\nproxies:\n  - {{ name: SOCKS5, type: socks5, server: proxy.example.com, port: 1080, udp: true }}\n",
+            "x".repeat(MAX_PROFILE_BYTES)
+        );
+        assert!(body.len() < MAX_SUBSCRIPTION_DOCUMENT_BYTES);
+        std::fs::write(&path, &body).expect("write bounded source");
+        let loaded = read_local_profile(&path).expect("read larger source document");
+        let imported = validated_subscription_import(&loaded, &EngineSettings::default())
+            .expect("convert source metadata");
+        assert!(imported.profile.as_json().len() < MAX_PROFILE_BYTES);
+        assert!(imported.credentials.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_socks5_sources_provision_both_credentials_before_profile_visibility() {
+        for (extension, body) in [
+            (
+                "txt",
+                "socks://synthetic-user:synthetic-secret@proxy.example.com:29177",
+            ),
+            (
+                "yaml",
+                "proxies:\n  - { name: SOCKS5, type: socks5, server: proxy.example.com, port: 29177, username: synthetic-user, password: synthetic-secret, udp: true }",
+            ),
+            (
+                "json",
+                r#"{"outbounds":[{"type":"socks","tag":"SOCKS5","server":"proxy.example.com","server_port":29177,"username":"synthetic-user","password":"synthetic-secret"}]}"#,
+            ),
+        ] {
+            let temporary = tempfile::TempDir::new().expect("temporary directory");
+            let path = temporary.path().join(format!("nodes.{extension}"));
+            std::fs::write(&path, body).expect("write local source");
+            let loaded = read_local_profile(&path).expect("read local source");
+            let imported = validated_subscription_import(&loaded, &EngineSettings::default())
+                .expect("convert local SOCKS5 source");
+            let repository = ProfileRepository::new(temporary.path().join("profiles"));
+            let vault = ScriptedCredentialVault::new(
+                temporary.path().join("profiles"),
+                vec![Ok(successful_receipt(TRANSACTION_PROFILE_ID, &imported))],
+            );
+            let record = commit_profile_import(
+                &repository,
+                &vault,
+                TRANSACTION_PROFILE_ID,
+                Some("SOCKS5"),
+                ProfileImportSource::Local,
+                &imported,
+                true,
+            )
+            .await
+            .expect("local vault-first import");
+            let requests = vault.requests();
+            assert_eq!(requests.len(), 1);
+            assert!(!requests[0].repository_profile_visible);
+            assert_eq!(requests[0].required_references.len(), 2);
+            assert_eq!(requests[0].entries.len(), 2);
+            for credential in &imported.credentials {
+                let expected_secret: [u8; 32] = Sha256::digest(credential.secret.as_bytes()).into();
+                assert!(
+                    requests[0]
+                        .entries
+                        .contains(&(credential.reference.clone(), expected_secret))
+                );
+            }
+            let stored = repository
+                .load(&record.id)
+                .expect("load")
+                .expect("stored profile");
+            assert_eq!(stored.profile, imported.profile);
+            assert!(stored.source_url.is_none());
+            assert!(!stored.profile.as_json().contains("synthetic-user"));
+            assert!(!stored.profile.as_json().contains("synthetic-secret"));
+            assert_eq!(
+                repository
+                    .snapshot()
+                    .expect("snapshot")
+                    .selected_profile_id
+                    .as_deref(),
+                Some(record.id.as_str())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_socks5_vault_failures_never_commit_or_select_a_partial_profile() {
+        let imported = validated_subscription_import(
+            "socks://synthetic-user:synthetic-secret@proxy.example.com:1080",
+            &EngineSettings::default(),
+        )
+        .expect("SOCKS5 source");
+        for responses in [
+            vec![Err(CredentialVaultError::AccessDenied)],
+            vec![
+                Err(CredentialVaultError::OutcomeUnknown),
+                Err(CredentialVaultError::OutcomeUnknown),
+            ],
+            vec![Ok(CredentialVaultReceipt {
+                profile_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+                profile_digest: imported.profile.digest().into(),
+            })],
+        ] {
+            let temporary = tempfile::TempDir::new().expect("temporary directory");
+            let repository = ProfileRepository::new(temporary.path().join("profiles"));
+            let original = repository
+                .import(Some("Original"), &ValidatedSingBoxProfile::direct())
+                .expect("original profile");
+            repository.select(&original.id).expect("select original");
+            let before = repository.snapshot().expect("original snapshot");
+            let expected_attempts = responses.len();
+            let vault = ScriptedCredentialVault::new(temporary.path().join("profiles"), responses);
+            let error = commit_profile_import(
+                &repository,
+                &vault,
+                TRANSACTION_PROFILE_ID,
+                Some("SOCKS5"),
+                ProfileImportSource::Local,
+                &imported,
+                true,
+            )
+            .await
+            .expect_err("unconfirmed credentials must not become visible");
+            assert_eq!(repository.snapshot().expect("unchanged snapshot"), before);
+            assert_eq!(vault.requests().len(), expected_attempts);
+            if expected_attempts == 2 {
+                assert_eq!(vault.requests()[0], vault.requests()[1]);
+            }
+            assert!(!error.contains("synthetic-user"));
+            assert!(!error.contains("synthetic-secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn local_canonical_reference_only_profiles_preserve_manual_provisioning() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let imported = validated_subscription_import(PROFILE_JSON, &EngineSettings::default())
+            .expect("canonical profile awaiting manual provisioning");
+        let vault = ScriptedCredentialVault::new(temporary.path().join("profiles"), Vec::new());
+        let record = commit_profile_import(
+            &repository,
+            &vault,
+            TRANSACTION_PROFILE_ID,
+            Some("Manual"),
+            ProfileImportSource::Local,
+            &imported,
+            false,
+        )
+        .await
+        .expect("manual setup remains available");
+        assert!(vault.requests().is_empty());
+        assert_eq!(
+            repository
+                .load(&record.id)
+                .expect("load")
+                .expect("profile")
+                .profile,
+            imported.profile
+        );
+        assert!(
+            repository
+                .snapshot()
+                .expect("snapshot")
+                .selected_profile_id
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1755,12 +1950,12 @@ mod tests {
             vec![Ok(successful_receipt(TRANSACTION_PROFILE_ID, &imported))],
         );
 
-        let record = commit_subscription_import(
+        let record = commit_profile_import(
             &repository,
             &vault,
             TRANSACTION_PROFILE_ID,
             Some("Imported"),
-            TRANSACTION_SOURCE_URL,
+            ProfileImportSource::Subscription(TRANSACTION_SOURCE_URL),
             &imported,
             false,
         )
@@ -1830,12 +2025,12 @@ mod tests {
         let import_vault = Arc::clone(&vault);
         let import_candidate = imported.clone();
         let import_task = tokio::spawn(async move {
-            commit_subscription_import(
+            commit_profile_import(
                 &import_repository,
                 import_vault.as_ref(),
                 TRANSACTION_PROFILE_ID,
                 Some("Imported"),
-                TRANSACTION_SOURCE_URL,
+                ProfileImportSource::Subscription(TRANSACTION_SOURCE_URL),
                 &import_candidate,
                 false,
             )
@@ -1897,12 +2092,12 @@ mod tests {
             deterministic_directory.path().join("profiles"),
             vec![Err(CredentialVaultError::AccessDenied)],
         );
-        let deterministic_error = commit_subscription_import(
+        let deterministic_error = commit_profile_import(
             &deterministic_repository,
             &deterministic_vault,
             TRANSACTION_PROFILE_ID,
             None,
-            TRANSACTION_SOURCE_URL,
+            ProfileImportSource::Subscription(TRANSACTION_SOURCE_URL),
             &imported,
             false,
         )
@@ -1927,12 +2122,12 @@ mod tests {
                 Err(CredentialVaultError::OutcomeUnknown),
             ],
         );
-        let unknown_error = commit_subscription_import(
+        let unknown_error = commit_profile_import(
             &unknown_repository,
             &unknown_vault,
             TRANSACTION_PROFILE_ID,
             None,
-            TRANSACTION_SOURCE_URL,
+            ProfileImportSource::Subscription(TRANSACTION_SOURCE_URL),
             &imported,
             false,
         )
@@ -1965,12 +2160,12 @@ mod tests {
             vec![Err(CredentialVaultError::AccessDenied)],
         );
 
-        commit_subscription_import(
+        commit_profile_import(
             &repository,
             &vault,
             TRANSACTION_PROFILE_ID,
             None,
-            TRANSACTION_SOURCE_URL,
+            ProfileImportSource::Subscription(TRANSACTION_SOURCE_URL),
             &imported,
             false,
         )
@@ -2003,12 +2198,12 @@ mod tests {
             })],
         );
 
-        let error = commit_subscription_import(
+        let error = commit_profile_import(
             &repository,
             &vault,
             TRANSACTION_PROFILE_ID,
             None,
-            TRANSACTION_SOURCE_URL,
+            ProfileImportSource::Subscription(TRANSACTION_SOURCE_URL),
             &imported,
             false,
         )
@@ -2149,12 +2344,12 @@ mod tests {
             vec![Ok(receipt.clone()), Ok(receipt.clone()), Ok(receipt)],
         );
 
-        commit_subscription_import(
+        commit_profile_import(
             &repository,
             &vault,
             TRANSACTION_PROFILE_ID,
             Some("Work"),
-            TRANSACTION_SOURCE_URL,
+            ProfileImportSource::Subscription(TRANSACTION_SOURCE_URL),
             &initial,
             false,
         )
@@ -2359,12 +2554,12 @@ mod tests {
             vec![Ok(successful_receipt(TRANSACTION_PROFILE_ID, &imported))],
         );
 
-        let error = commit_subscription_import(
+        let error = commit_profile_import(
             &repository,
             &vault,
             TRANSACTION_PROFILE_ID,
             Some("Imported"),
-            TRANSACTION_SOURCE_URL,
+            ProfileImportSource::Subscription(TRANSACTION_SOURCE_URL),
             &imported,
             false,
         )
@@ -2388,10 +2583,10 @@ mod tests {
 
     #[test]
     fn activation_failure_reports_that_the_complete_import_remains_committed() {
-        let rendered = subscription_import_activation_error("selection storage unavailable");
+        let rendered = profile_import_activation_error("selection storage unavailable");
         assert_eq!(
             rendered,
-            "subscription import committed with complete credentials, but selection failed: selection storage unavailable"
+            "profile import committed, but selection failed: selection storage unavailable"
         );
     }
 

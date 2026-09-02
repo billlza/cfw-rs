@@ -305,7 +305,7 @@ misreported as package copyright: when no objective component-level attribution
 is available, the review template records the exact SPDX 2.3 sentinel
 `NOASSERTION`. This is not a license conclusion and is not a blocker. The
 authoritative machine-readable report is
-`target/candidates/0.4.0/ga/40039/stage-inputs/publication-blockers.json`; these counts must be
+`target/candidates/0.4.0/ga/40040/stage-inputs/publication-blockers.json`; these counts must be
 regenerated whenever the locked graph changes.
 
 After component review and source preparation, the `prepare`, `draft`, and
@@ -328,9 +328,9 @@ right.
 
 Production paths are fixed:
 
-- signed app: `target/candidates/0.4.0/ga/40039/signed/Clash for Mac.app`;
-- prepared closure: `target/candidates/0.4.0/ga/40039/stage-inputs/publication-prepared`;
-- final evidence: `target/candidates/0.4.0/ga/40039/stage-inputs/publication`.
+- signed app: `target/candidates/0.4.0/ga/40040/signed/Clash for Mac.app`;
+- prepared closure: `target/candidates/0.4.0/ga/40040/stage-inputs/publication-prepared`;
+- final evidence: `target/candidates/0.4.0/ga/40040/stage-inputs/publication`.
 
 The pipeline never scans `target/release`; historical 0.3.5 signed artifacts,
 cores, and helpers cannot be absorbed into 0.4.0 evidence. There is no

@@ -33,6 +33,15 @@ pub(crate) enum ProfileOutbound {
     Block {
         tag: String,
     },
+    Socks5 {
+        tag: String,
+        server: String,
+        server_port: u16,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        authentication: Option<Socks5Authentication>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        network: Option<Socks5Network>,
+    },
     Shadowsocks {
         tag: String,
         server: String,
@@ -116,6 +125,22 @@ pub(crate) enum ProfileOutbound {
         #[serde(skip_serializing_if = "Option::is_none")]
         udp_relay_mode: Option<TuicUdpRelayMode>,
     },
+}
+
+/// A SOCKS5 authenticated profile always owns both references. Keeping the
+/// pair in one optional value prevents a partial pair from becoming anonymous.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Socks5Authentication {
+    pub(crate) username_credential_ref: CredentialRef,
+    pub(crate) password_credential_ref: CredentialRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Socks5Network {
+    Tcp,
+    Udp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +423,7 @@ impl ProfileOutbound {
         match self {
             Self::Direct { tag }
             | Self::Block { tag }
+            | Self::Socks5 { tag, .. }
             | Self::Shadowsocks { tag, .. }
             | Self::Vmess { tag, .. }
             | Self::Vless { tag, .. }
@@ -411,6 +437,13 @@ impl ProfileOutbound {
     pub(crate) fn credential_refs(&self) -> Vec<&CredentialRef> {
         match self {
             Self::Direct { .. } | Self::Block { .. } => Vec::new(),
+            Self::Socks5 { authentication, .. } => match authentication {
+                Some(authentication) => vec![
+                    &authentication.username_credential_ref,
+                    &authentication.password_credential_ref,
+                ],
+                None => Vec::new(),
+            },
             Self::Hysteria2 {
                 credential_ref,
                 obfs,

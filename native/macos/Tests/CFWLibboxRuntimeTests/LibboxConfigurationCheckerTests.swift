@@ -3,6 +3,48 @@ import Foundation
 import Testing
 
 #if canImport(Libbox)
+  @Test func pinnedLibboxAcceptsProjectedSOCKS5AnonymousAndAuthenticatedShapes() throws {
+    for network: String? in [nil, "tcp", "udp"] {
+      var anonymous: [String: Any] = [
+        "type": "socks", "version": "5", "tag": "anonymous",
+        "server": "9.9.9.9", "server_port": 1080,
+      ]
+      var authenticated: [String: Any] = [
+        "type": "socks", "version": "5", "tag": "authenticated",
+        "server": "2606:4700:4700::1111", "server_port": 29177,
+        "username": " synthetic-user ", "password": " synthetic:secret ",
+      ]
+      if let network {
+        anonymous["network"] = network
+        authenticated["network"] = network
+      }
+      let configuration = try JSONSerialization.data(withJSONObject: [
+        "log": ["level": "error"],
+        "outbounds": [anonymous, authenticated],
+        "route": ["final": "authenticated"],
+      ])
+      try SourceBuiltLibboxConfigurationChecker().check(configuration: configuration)
+    }
+  }
+
+  @Test func pinnedLibboxRejectsUnsupportedSOCKS5TLSExtension() throws {
+    let configuration = Data(
+      #"""
+      {
+        "log": { "level": "error" },
+        "outbounds": [{
+          "type": "socks", "version": "5", "tag": "proxy",
+          "server": "9.9.9.9", "server_port": 1080,
+          "tls": { "enabled": true, "server_name": "proxy.example.com" }
+        }]
+      }
+      """#.utf8
+    )
+    #expect(throws: LibboxRuntimeError.self) {
+      try SourceBuiltLibboxConfigurationChecker().check(configuration: configuration)
+    }
+  }
+
   @Test func pinnedLibboxAcceptsProjectedLegacyVMessSelectorShape() throws {
     let configuration = Data(
       #"""

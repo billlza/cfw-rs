@@ -2160,6 +2160,90 @@ test("profile mutations are offered only while the engine is Off", async () => {
   assert.ok(running.includes("require the engine to be Off"));
 });
 
+test("SOCKS5 links, local YAML, and dropped text use native conversion and never log source credentials", async () => {
+  const overrideKeys = ["profiles_snapshot", "import_profile_text", "import_profile_file", "select_profile", "apply_active_profile", "profile_credential_requirements", "profile_credential_presence"];
+  const originalResponses = new Map(overrideKeys.map((key) => [key, { present: Object.hasOwn(responses, key), value: responses[key] }]));
+  const originalEngine = responses.engine_snapshot;
+  const originalLogs = [...state.logs];
+  const originalSetup = state.credentialSetup;
+  const originalDialog = state.glassDialog;
+  const link = "socks://synthetic-user:synthetic-secret@proxy.example.com:29177";
+  const importedRecord = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "SOCKS5", bytes: 400, active: false, updated_epoch_secs: 1 };
+  const references = [
+    { id: "11111111-1111-4111-8111-111111111111", kind: "socks5_username" },
+    { id: "22222222-2222-4222-8222-222222222222", kind: "socks5_password" },
+  ];
+  const input = element("input");
+  querySelectorElements.set("[data-profile-url]", input);
+  responses.import_profile_text = () => {
+    responses.profiles_snapshot = [{ ...importedRecord, active: false }];
+    return importedRecord;
+  };
+  responses.import_profile_file = () => {
+    responses.profiles_snapshot = [{ ...importedRecord, active: true }];
+    return importedRecord;
+  };
+  responses.select_profile = () => {
+    responses.profiles_snapshot = [{ ...importedRecord, active: true }];
+    return importedRecord;
+  };
+  responses.apply_active_profile = { ...importedRecord, applied: false };
+  responses.profile_credential_requirements = references;
+  responses.profile_credential_presence = references.map((reference) => ({ reference, present: true }));
+  try {
+    await setEngine(OFF_ENGINE);
+    const html = await renderPage("profiles");
+    assert.match(html, /HTTPS subscription or node link/u);
+    assert.match(html, /accept="\.json,\.yaml,\.yml,\.txt,/u);
+    input.value = link;
+    let before = invocationDetails.length;
+    await appModule.handleAction("import-profile");
+    let calls = invocationDetails.slice(before);
+    assert.deepEqual(calls.find(({ command }) => command === "import_profile_text")?.args, { name: null, body: link });
+    assert.equal(calls.some(({ command }) => command === "import_profile_url"), false);
+    assert.equal(input.value, "", "remove the credential-bearing link after successful import");
+    assert.equal(state.credentialSetup.presentCount, 2);
+    assert.deepEqual(state.credentialSetup.missing, []);
+
+    const fileInput = element("input");
+    const yaml = "proxies:\n  - {type: socks5, name: SOCKS5, server: proxy.example.com, port: 1080, username: synthetic-user, password: synthetic-secret}";
+    fileInput.files = [new File([yaml], "nodes.yaml")];
+    fileInput.value = "nodes.yaml";
+    querySelectorElements.set("[data-profile-file]", fileInput);
+    before = invocationDetails.length;
+    await appModule.handleAction("import-profile-file");
+    calls = invocationDetails.slice(before);
+    assert.deepEqual(calls.find(({ command }) => command === "import_profile_text")?.args, { name: "nodes.yaml", body: yaml });
+    assert.equal(fileInput.value, "");
+
+    before = invocationDetails.length;
+    await emit("tauri://drag-drop", { paths: ["/private/synthetic/nodes.yaml", "/private/synthetic/nodes.txt"] });
+    calls = invocationDetails.slice(before).filter(({ command }) => command === "import_profile_file");
+    assert.deepEqual(calls.map(({ args }) => args.path), ["/private/synthetic/nodes.yaml", "/private/synthetic/nodes.txt"]);
+    assert.ok(calls.every(({ args }) => args.activate === true));
+    assert.equal(JSON.stringify(state.logs).includes("synthetic-secret"), false);
+    assert.equal(JSON.stringify(state.logs).includes("synthetic-user"), false);
+
+    await setEngine(RUNNING_ENGINE);
+    input.value = link;
+    before = invocationDetails.length;
+    await appModule.handleAction("import-profile");
+    assert.equal(invocationDetails.slice(before).some(({ command }) => command.startsWith("import_profile_")), false);
+  } finally {
+    querySelectorElements.delete("[data-profile-url]");
+    querySelectorElements.delete("[data-profile-file]");
+    for (const [key, original] of originalResponses) {
+      if (original.present) responses[key] = original.value;
+      else delete responses[key];
+    }
+    state.credentialSetup = originalSetup;
+    state.glassDialog = originalDialog;
+    state.logs = originalLogs;
+    await setEngine(originalEngine);
+    await reloadButton.click();
+  }
+});
+
 test("the General page surfaces approval and capability reasons", async () => {
   await setEngine({
     snapshot: { desired_mode: "tunnel", generation: 1, config_digest: null, state: { state: "awaiting_approval", generation: 1 } },

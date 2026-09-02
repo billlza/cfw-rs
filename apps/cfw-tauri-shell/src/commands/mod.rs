@@ -21,7 +21,7 @@ pub(crate) use legacy_profiles::{
 };
 pub(crate) use profiles::{
     ManagedProfiles, build_managed_profiles, cancel_credential_gc, commit_credential_gc,
-    delete_profile, import_profile_text, preview_credential_gc, profile_credential_presence,
+    delete_profile, preview_credential_gc, profile_credential_presence,
     profile_credential_requirements, profiles_snapshot, provision_profile_credentials,
     select_profile,
 };
@@ -38,8 +38,9 @@ pub(crate) use shell_ops::{
     refresh_tray_menu, reveal_home_directory, reveal_logs_directory, toggle_devtools,
 };
 pub(crate) use subscriptions::{
-    import_profile_file, import_profile_url, open_profile_externally, profile_qrcode_svg,
-    read_profile_text, reveal_profile, save_profile_text, update_profile, update_profile_info,
+    import_profile_file, import_profile_text, import_profile_url, open_profile_externally,
+    profile_qrcode_svg, read_profile_text, reveal_profile, save_profile_text, update_profile,
+    update_profile_info,
 };
 pub(crate) use toggles::{
     apply_restore_dns_servers, current_platform_design, reset_settings_snapshot, set_allow_lan,

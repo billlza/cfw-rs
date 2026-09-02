@@ -52,6 +52,13 @@ import {
 } from "./credentials.js";
 
 import {
+  PROFILE_SOURCE_ACCEPT,
+  isProfileSourcePath,
+  isSubscriptionSource,
+  readProfileSourceFile,
+} from "./profile-import.js";
+
+import {
   clearCutoverReceipt,
   cutoverConfirmArguments,
   cutoverReceiptIsCurrent,
@@ -2479,13 +2486,13 @@ function renderProfiles() {
     <div class="profiles-layout">
       <section class="cfw-profile-remote">
         <div class="cfw-url-box">
-          <input data-profile-url placeholder="Download from a URL" aria-label="Profile URL" ${blocked} />
+          <input data-profile-url placeholder="HTTPS subscription or node link" aria-label="Subscription URL or node link" ${blocked} />
           <button class="paste-icon" data-action="paste-profile-url" title="Paste URL" ${blocked}>▣</button>
         </div>
-        <button class="cfw-big-button" data-action="import-profile" ${blocked}>Download</button>
+        <button class="cfw-big-button" data-action="import-profile" ${blocked}>Import Link</button>
         <button class="cfw-big-button" data-action="update-all-profiles" ${blocked}>Update All</button>
-        <button class="cfw-big-button" data-action="import-profile-file" ${blocked}>Import</button>
-        <input class="profile-file-hidden" data-profile-file type="file" accept=".json,application/json" aria-label="Local sing-box profile JSON" ${blocked} />
+        <button class="cfw-big-button" data-action="import-profile-file" ${blocked}>Import File</button>
+        <input class="profile-file-hidden" data-profile-file type="file" accept="${PROFILE_SOURCE_ACCEPT}" aria-label="Local JSON, YAML, or node-link profile" ${blocked} />
       </section>
 
       ${mutationReason ? `<p class="profile-note">${escapeHtml(mutationReason)}</p>` : ""}
@@ -4305,14 +4312,22 @@ export async function handleAction(action) {
     const input = document.querySelector("[data-profile-url]");
     const url = input?.value?.trim();
     if (!url) {
-      appendLog("warning", "profile", "Profile URL is required before download");
+      appendLog("warning", "profile", "A subscription URL or node link is required before import");
     } else if (!engineIsOff()) {
       appendLog("warning", "profile", REASONS.engineNotOff);
     } else {
-      const result = await invoke("import_profile_url", { url, name: null, activate: true });
+      const subscription = isSubscriptionSource(url);
+      const result = subscription
+        ? await invoke("import_profile_url", { url, name: null, activate: true })
+        : await invoke("import_profile_text", { name: null, body: url });
+      input.value = "";
       await loadProfilesSnapshot();
-      appendLog("info", "profile", `Remote profile imported: ${result.name} (${formatBytes(result.bytes ?? 0)})`);
-      await applyActiveProfile(`importing ${result.name}`);
+      appendLog("info", "profile", `Profile imported: ${result.name} (${formatBytes(result.bytes ?? 0)})`);
+      if (subscription) {
+        await applyActiveProfile(`importing ${result.name}`);
+      } else {
+        await selectProfileById(result.id);
+      }
       await openCredentialSetup(result.id);
     }
   }
@@ -4340,7 +4355,7 @@ export async function handleAction(action) {
       return;
     }
     try {
-      const body = await file.text();
+      const body = await readProfileSourceFile(file);
       const result = await invoke("import_profile_text", { name: file.name, body });
       await loadProfilesSnapshot();
       appendLog("info", "profile", `Local profile imported: ${result.name} (${formatBytes(result.bytes ?? 0)})`);
@@ -5255,10 +5270,10 @@ async function bootstrap() {
 
   await listen("tauri://drag-drop", async (event) => {
     const paths = event.payload?.paths ?? [];
-    const profilePaths = paths.filter((path) => /\.json$/i.test(path));
+    const profilePaths = paths.filter(isProfileSourcePath);
     if (!profilePaths.length) {
       if (paths.length) {
-        appendLog("warning", "profile", "Drag-drop ignored: only .json sing-box profiles are supported");
+        appendLog("warning", "profile", "Drag-drop requires a JSON, YAML, or node-link text profile");
       }
       return;
     }

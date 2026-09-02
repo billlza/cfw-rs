@@ -114,6 +114,8 @@ public struct CredentialAudience: Codable, Equatable, Hashable, Sendable {
 }
 
 public enum CredentialKind: String, Codable, CaseIterable, Sendable {
+  case socks5Username = "socks5_username"
+  case socks5Password = "socks5_password"
   case shadowsocksPassword = "shadowsocks_password"
   case vmessUUID = "vmess_uuid"
   case vlessUUID = "vless_uuid"
@@ -128,6 +130,8 @@ public enum CredentialKind: String, Codable, CaseIterable, Sendable {
 extension CredentialKind {
   public func admitsSecretSyntax(_ value: String) -> Bool {
     switch self {
+    case .socks5Username, .socks5Password:
+      return (1...255).contains(value.utf8.count)
     case .vmessUUID, .vlessUUID, .tuicUUID:
       guard let parsed = UUID(uuidString: value) else { return false }
       return parsed.uuidString.lowercased() == value
@@ -139,6 +143,8 @@ extension CredentialKind {
 }
 
 public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
+  case socks5Username = "socks5_username"
+  case socks5Password = "socks5_password"
   case shadowsocksPassword = "shadowsocks_password"
   case vmessUUID = "vmess_uuid"
   case vlessUUID = "vless_uuid"
@@ -151,6 +157,8 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
 
   fileprivate var credentialKind: CredentialKind {
     switch self {
+    case .socks5Username: .socks5Username
+    case .socks5Password: .socks5Password
     case .shadowsocksPassword: .shadowsocksPassword
     case .vmessUUID: .vmessUUID
     case .vlessUUID: .vlessUUID
@@ -165,8 +173,10 @@ public enum CredentialTarget: String, Codable, CaseIterable, Sendable {
 
   fileprivate var pointerSuffix: String {
     switch self {
+    case .socks5Username:
+      "username"
     case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
-      .tuicPassword:
+      .tuicPassword, .socks5Password:
       "password"
     case .vmessUUID, .vlessUUID, .tuicUUID:
       "uuid"
@@ -460,8 +470,10 @@ public struct EngineStartRequest: Codable, Equatable, Sendable {
     target: CredentialTarget
   ) -> String? {
     switch target {
+    case .socks5Username:
+      outbound["username"] as? String
     case .shadowsocksPassword, .trojanPassword, .hysteria2Password, .anytlsPassword,
-      .tuicPassword:
+      .tuicPassword, .socks5Password:
       outbound["password"] as? String
     case .vmessUUID, .vlessUUID, .tuicUUID:
       outbound["uuid"] as? String

@@ -193,14 +193,16 @@ class PhysicalCaptureExecutionTests(unittest.TestCase):
         self.assertEqual(result.argv_sha256, command_sha256(["/bin/sh", "-c", script]))
 
     def test_process_exit_before_readiness_fails_closed(self) -> None:
-        command = start_fixed_command(
+        with start_fixed_command(
             self.spec("/bin/echo", "not-the-ready-line", stdout_limit=1024)
-        )
-        time.sleep(0.05)
-        with self.assertRaisesRegex(ProbeExecutionError, "exited before.*readiness"):
-            command.wait_for_readiness(
-                ReadinessSpec("stdout", b"READY\n", 1.0)
-            )
+        ) as command:
+            # Establish the exited-process branch explicitly. A fixed sleep can
+            # observe pipe EOF before process exit under scheduler pressure.
+            self.assertEqual(command._process.wait(timeout=2.0), 0)
+            with self.assertRaisesRegex(ProbeExecutionError, "exited before.*readiness"):
+                command.wait_for_readiness(
+                    ReadinessSpec("stdout", b"READY\n", 1.0)
+                )
 
     def test_readiness_timeout_kills_the_complete_process_group(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

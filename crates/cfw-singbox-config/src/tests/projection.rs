@@ -655,7 +655,7 @@ fn every_supported_remote_protocol_uses_the_same_bounded_bootstrap_pair() {
         let config: serde_json::Value =
             serde_json::from_str(projected.as_json()).expect("projected config");
         let outbounds = config["outbounds"].as_array().expect("outbound matrix");
-        assert_eq!(outbounds.len(), 7);
+        assert_eq!(outbounds.len(), 8);
         for outbound in outbounds {
             assert_eq!(outbound["domain_resolver"], expected);
         }
@@ -1110,6 +1110,7 @@ fn remote_protocol_matrix_profile() -> ValidatedSingBoxProfile {
     ValidatedSingBoxProfile::parse(&format!(
         r#"{{
           "outbounds": [
+            {{"type":"socks5","tag":"socks5","server":"socks5.example.com","server_port":1080}},
             {{"type":"shadowsocks","tag":"ss","server":"ss.example.com","server_port":443,"method":"aes-256-gcm","credential_ref":{{"id":"{SS_ID}","kind":"shadowsocks_password"}}}},
             {{"type":"vmess","tag":"vmess","server":"vmess.example.com","server_port":443,"credential_ref":{{"id":"{VMESS_ID}","kind":"vmess_uuid"}},"security":"auto","tls":{{"enabled":true,"server_name":"vmess.example.com","utls":{{"enabled":true,"fingerprint":"chrome"}}}},"transport":{{"type":"ws","path":"/ws","headers":{{"Host":"vmess.example.com"}}}}}},
             {{"type":"vless","tag":"vless","server":"vless.example.com","server_port":443,"credential_ref":{{"id":"{VLESS_ID}","kind":"vless_uuid"}},"flow":"xtls-rprx-vision","tls":{{"enabled":true,"server_name":"www.example.com","utls":{{"enabled":true,"fingerprint":"chrome"}},"reality":{{"enabled":true,"public_key":"jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0","short_id":"0123456789abcdef"}}}}}},

@@ -38,8 +38,9 @@ EXPECTED_RAW_PACKET_PATCH_SHA256 = (
 # (scripts/libbox_source_contract.sh::libbox_combined_diff_sha256), which cannot
 # be recomputed from the patch files alone. A pinned literal is therefore the
 # only form of this assertion that still fails when a pin drifts.
+# This revision includes x/crypto v0.56.0 and its required Go 1.26.0 minimum.
 EXPECTED_COMBINED_DIFF_SHA256 = (
-    "1ad890f1e17a9ff9af3369bef3329650b4ac0e0fc4f33a4840c5911f1e6a2a7f"
+    "b4f0f760fbc5d4faad51e575077824eb5b815d723a33bf6e165c2a1c98052eaf"
 )
 
 

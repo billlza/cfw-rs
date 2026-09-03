@@ -153,8 +153,12 @@ same symbol scan reports zero reachable vulnerabilities. A fresh 2026-08-23
 database scan subsequently reported `GO-2026-6179` and `GO-2026-6180` against
 the then-pinned `golang.org/x/mod v0.37.0`. Sing-box imports `x/mod/semver`, so
 the dependency patch now pins the fixed `x/mod v0.40.0` and the exact coupled
-MVS closure: `x/crypto v0.55.0`, `x/net v0.58.0`, `x/sync v0.22.0`,
+MVS closure: `x/crypto v0.56.0`, `x/net v0.58.0`, `x/sync v0.22.0`,
 `x/sys v0.47.0`, `x/term v0.45.0`, `x/text v0.41.0`, and `x/tools v0.49.0`.
+The 2026-09-02 SSH advisories `GO-2026-6354` and `GO-2026-6355` prompted the
+isolated `x/crypto v0.56.0` update. Its minimum module Go version is `1.26.0`;
+the Go `1.26.6` compiler, Rust `1.97.1`, and all other selected dependencies
+remain unchanged.
 The sealed cache, source tests, and XCFramework were regenerated from this
 closure. The current scan reports zero symbol and imported-package
 vulnerabilities without an ignore. It still reports `GO-2026-5932` at module

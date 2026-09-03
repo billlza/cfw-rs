@@ -176,6 +176,49 @@ startup failure, semantic drift, or any later operational failure is terminal
 and cannot enter `verification_blocked`. This rule is also forward-only and
 cannot reinterpret build 40038's terminal journal.
 
+### Explicit reconciliation of build 40041's verified private output
+
+Build 40041 may use a separate, explicitly selected signing-output
+reconciliation transaction. This does not change the original signing state
+machine: `failed` remains terminal, ordinary `run`/`resume` never select this
+path, and the original intent and all four events remain byte-identical.
+Retired builds, including 40037 and 40038, are not eligible.
+
+The entry is `signing_attempt_transaction.py reconcile-failed`, with the
+absolute frozen `--artifact-repository`, `--expect-failed-event-sha256` and
+`--expect-transformation-sha256`. It is restricted to one original attempt
+whose exact history is `prepared -> signing -> verified -> failed`, with
+failure code `signing_transformation_failed`, no signing-helper failure exit,
+a complete original transformation receipt, and exactly one retained output.
+It must reject work-stage output, changed inputs or receipts, an ambiguous
+canonical/private pair, and every downstream notarization, package or release
+namespace. No signing helper, receipt creator or signing-admission callback
+may execute on this path.
+
+The evidence executor runs from its own clean commit. Its source identity is
+reopened from the artifact repository's Git objects and recorded separately
+from the unchanged artifact commit, freeze intent, signing intent, failed event
+and original transformation receipt. New tooling is not copied into the frozen
+source tree. A reconciliation binding cannot be overwritten or rebound to a
+different executor or artifact.
+
+`transactions/signing-reconciliation` owns only the new intent, numbered
+read-only verification starts/results, and publication-intent/completion
+records. Each invocation reopens the exact frozen inputs, verifies the entire
+signed application and transformation, and rechecks source, receipt and
+original-history identities. Failures and interrupted verification retain their
+records; at most eight explicit verification attempts are admitted. There is
+no automatic fallback, retry loop, re-signing or fresh build allocation.
+
+Only a passed full revalidation may record publication intent and use the
+existing exclusive atomic directory publisher. A missing reply or durability
+failure after that boundary remains unknown. A later explicit invocation must
+reconcile the same private/canonical locations, verify the same signed bytes,
+and confirm durability without repeating a completed rename. Completion is
+recorded only after full canonical verification. The new reconciliation does
+not rewrite the earlier failure as success, claim a historical transient root
+cause, or establish Apple acceptance, installation or publication evidence.
+
 Candidate provenance and evidence provenance must remain distinct. An
 evidence-only policy/tooling commit may advance only after it reopens the
 candidate source commit and proves the same product-input digest. It records a

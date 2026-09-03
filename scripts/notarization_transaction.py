@@ -48,10 +48,13 @@ if __package__:
         run_bounded_process as run_release_bounded_process,
     )
     from .notarization_executor import (
-        ExecutorSource,
-        HistoricalSourceReader,
         NotarizationExecutorError,
         bind_executor,
+    )
+    from .release_executor_source import (
+        ExecutorSource,
+        ExecutorSourceError,
+        HistoricalSourceReader,
         capture_executor_source,
         require_executor_unchanged,
     )
@@ -107,10 +110,13 @@ else:
         run_bounded_process as run_release_bounded_process,
     )
     from notarization_executor import (
-        ExecutorSource,
-        HistoricalSourceReader,
         NotarizationExecutorError,
         bind_executor,
+    )
+    from release_executor_source import (
+        ExecutorSource,
+        ExecutorSourceError,
+        HistoricalSourceReader,
         capture_executor_source,
         require_executor_unchanged,
     )
@@ -8421,7 +8427,7 @@ def _require_submission_executor_unchanged(
     if executor is not None:
         try:
             require_executor_unchanged(executor, source_reader=source_reader)
-        except NotarizationExecutorError as error:
+        except ExecutorSourceError as error:
             raise TransactionError(
                 "notarization_executor_identity_failed", str(error)
             ) from error
@@ -8466,7 +8472,7 @@ def execute_transaction(
             executor = capture_executor_source(
                 executor_repository, source_reader=executor_source_reader
             )
-        except NotarizationExecutorError as error:
+        except ExecutorSourceError as error:
             raise TransactionError(
                 "notarization_executor_identity_failed", str(error)
             ) from error

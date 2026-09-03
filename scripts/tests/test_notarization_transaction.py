@@ -8638,6 +8638,8 @@ class AttemptConcurrencyTests(unittest.TestCase):
                         transactions.symlink_to(target, target_is_directory=True)
                     else:
                         transactions.mkdir(mode=0o755)
+                        transactions.chmod(0o755)
+                        self.assertEqual(stat.S_IMODE(transactions.stat().st_mode), 0o755)
                     with self.assertRaises(TransactionError):
                         _claim_attempt(fixture.context)
                     self.assertFalse(fixture.context.attempt_root.exists())

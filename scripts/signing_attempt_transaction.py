@@ -23,6 +23,7 @@ import re
 import stat
 import sys
 import threading
+import traceback
 from typing import Any, Callable, Final, Mapping, Sequence
 
 if __package__:
@@ -74,6 +75,17 @@ if __package__:
     from .repository_source_identity import (
         SourceIdentityError,
         current_identity,
+    )
+    from .release_executor_source import (
+        capture_executor_source,
+        require_executor_unchanged,
+        require_historical_executor,
+    )
+    from .signing_reconciliation import (
+        ReconciliationBinding,
+        ReconciliationJournal,
+        ReconciliationRequest,
+        open_reconciliation,
     )
     from .updater_key_possession_proof import (
         UpdaterKeyPossessionError,
@@ -136,6 +148,17 @@ else:
         verify_materialized_profiles,
     )
     from repository_source_identity import SourceIdentityError, current_identity
+    from release_executor_source import (
+        capture_executor_source,
+        require_executor_unchanged,
+        require_historical_executor,
+    )
+    from signing_reconciliation import (
+        ReconciliationBinding,
+        ReconciliationJournal,
+        ReconciliationRequest,
+        open_reconciliation,
+    )
     from updater_key_possession_proof import (
         UpdaterKeyPossessionError,
         UpdaterKeyPossessionOperationalError,
@@ -1284,13 +1307,17 @@ def production_helper_runner(work: Path, certificate_sha1: str, certificate_sha2
 def production_verification_runner(
     signing_output: Path,
     context: CandidateBundleContext,
+    *,
+    repository: Path | None = None,
 ) -> None:
     if context is CandidateBundleContext.UNSIGNED_HOST:
         raise SigningAttemptError(
             "signing_verification_context_invalid",
             "signed GA verification cannot use unsigned-host context",
         )
-    repository = Path(__file__).resolve().parent.parent
+    repository = _canonical_repository(
+        Path(__file__).resolve().parent.parent if repository is None else repository
+    )
     app = signing_output / SIGNED_APP_WITHIN_OUTPUT
     native = signing_output / SIGNED_NATIVE_PRODUCTS_NAME
     commands = (
@@ -2105,6 +2132,7 @@ def run_signing_transaction(
     repository: Path,
     *,
     resume: bool,
+    reconciliation: ReconciliationRequest | None = None,
     clock: Clock = _utc_now,
     helper_runner: HelperRunner = production_helper_runner,
     verification_runner: VerificationRunner = production_verification_runner,
@@ -2129,6 +2157,12 @@ def run_signing_transaction(
     """Run one transaction with a single operation-scoped embedded verifier."""
 
     repository = _canonical_repository(repository)
+    if reconciliation is not None:
+        reconciliation.validate()
+        if not resume:
+            raise SigningAttemptError(
+                "reconciliation_mode_invalid", "reconciliation cannot enter fresh signing"
+            )
     verifier_operation = _EmbeddedVerifierSessionOperation(
         repository,
         embedded_verifier_session_factory,
@@ -2206,12 +2240,34 @@ def run_signing_transaction(
                     )
                 selected_canonical_verifier = session_canonical_verifier
 
+            selected_verification_runner = verification_runner
+            if verification_runner is production_verification_runner:
+                def artifact_verification_runner(
+                    output: Path, context: CandidateBundleContext,
+                ) -> None:
+                    production_verification_runner(output, context, repository=repository)
+                selected_verification_runner = artifact_verification_runner
+
+            if reconciliation is not None:
+                return _reconcile_failed_output_with_verifiers(
+                    repository,
+                    reconciliation,
+                    clock=clock,
+                    freeze_verifier=selected_freeze_verifier,
+                    possession_verifier=possession_verifier,
+                    verification_runner=selected_verification_runner,
+                    transformation_verifier=selected_transformation_verifier,
+                    canonical_transformation_verifier=selected_canonical_verifier,
+                    publisher=publisher,
+                    confirmer=confirmer,
+                )
+
             return _run_signing_transaction_with_verifiers(
                 repository,
                 resume=resume,
                 clock=clock,
                 helper_runner=session_helper_runner,
-                verification_runner=verification_runner,
+                verification_runner=selected_verification_runner,
                 freeze_verifier=selected_freeze_verifier,
                 possession_verifier=possession_verifier,
                 live_readiness_verifier=live_readiness_verifier,
@@ -2232,6 +2288,179 @@ def run_signing_transaction(
             "updater_possession_verifier_invalid",
             "operation-scoped updater verifier session failed semantic validation",
         ) from error
+
+
+def _failed_reconciliation_history(
+    attempts_root: Path,
+    bindings: FrozenSigningBindings,
+    request: ReconciliationRequest,
+) -> tuple[Attempt, ...]:
+    attempts = tuple(_load_attempt(attempts_root, name) for name in _attempt_names(attempts_root))
+    if not attempts or any(not _bindings_match_intent(bindings, item) for item in attempts):
+        raise SigningAttemptError("reconciliation_lineage_invalid", "original signing lineage differs")
+    latest = attempts[-1]
+    if (
+        tuple(event["state"] for event in latest.events)
+        != ("prepared", "signing", "verified", "failed")
+        or latest.events[-1]["failure_code"] != "signing_transformation_failed"
+        or latest.events[-1]["exit_code"] is not None
+        or latest.events[-1]["event_sha256"] != request.failed_event_sha256
+        or os.path.lexists(latest.work)
+    ):
+        raise SigningAttemptError(
+            "reconciliation_precondition_failed",
+            "explicit recovery requires the exact failed-after-verified signing attempt",
+        )
+    if len(attempts) != 1:
+        raise SigningAttemptError(
+            "reconciliation_lineage_ambiguous", "reconciliation requires one original signing attempt"
+        )
+    return attempts
+
+
+def _single_reconciliation_output(repository: Path, attempt: Attempt) -> Path:
+    root = ga_root(repository)
+    if any(os.path.lexists(root / relative) for relative in _DOWNSTREAM_RECOVERY_GUARDS):
+        raise SigningAttemptError(
+            "reconciliation_downstream_state", "reconciliation cannot run after notarization or packaging"
+        )
+    canonical = root / SIGNING_OUTPUT_RELATIVE
+    ready_exists, canonical_exists = os.path.lexists(attempt.publish_ready), os.path.lexists(canonical)
+    if ready_exists == canonical_exists:
+        raise SigningAttemptError(
+            "reconciliation_output_ambiguous", "signed output lacks one exact recorded location"
+        )
+    return canonical if canonical_exists else attempt.publish_ready
+
+
+def _reconciliation_output(
+    repository: Path, attempt: Attempt, journal: ReconciliationJournal,
+) -> Path:
+    output = _single_reconciliation_output(repository, attempt)
+    canonical = ga_root(repository) / SIGNING_OUTPUT_RELATIVE
+    if output == canonical and not journal.publication_started:
+        raise SigningAttemptError(
+            "reconciliation_output_unrecorded",
+            "canonical signed output lacks reconciliation publication intent",
+        )
+    if journal.completed and output != canonical:
+        raise SigningAttemptError("reconciliation_output_missing", "completed signing output is missing")
+    return output
+
+
+def _verify_reconciliation_output(
+    repository: Path,
+    output: Path,
+    request: ReconciliationRequest,
+    *,
+    verification_runner: VerificationRunner,
+    transformation_verifier: TransformationVerifier,
+    canonical_transformation_verifier: CanonicalTransformationVerifier,
+) -> None:
+    _validate_output_inventory(output)
+    receipt = output / TRANSFORMATION_RECEIPT_NAME
+    if _sha256_file(receipt) != request.transformation_receipt_sha256:
+        raise SigningAttemptError("reconciliation_receipt_changed", "original signing receipt differs")
+    canonical = ga_root(repository) / SIGNING_OUTPUT_RELATIVE
+    context = (CandidateBundleContext.CANONICAL_NATIVE_CONTENT if output == canonical
+               else CandidateBundleContext.SIGNING_ATTEMPT_PUBLISH_READY)
+    verification_runner(output, context)
+    if output == canonical:
+        canonical_transformation_verifier(repository)
+    else:
+        transformation_verifier(repository, output)
+    if _sha256_file(receipt) != request.transformation_receipt_sha256:
+        raise SigningAttemptError("reconciliation_receipt_changed", "signing receipt changed during replay")
+
+
+def _reconcile_failed_output_with_verifiers(
+    repository: Path,
+    request: ReconciliationRequest,
+    *,
+    clock: Clock,
+    freeze_verifier: FreezeVerifier,
+    possession_verifier: PossessionVerifier,
+    verification_runner: VerificationRunner,
+    transformation_verifier: TransformationVerifier,
+    canonical_transformation_verifier: CanonicalTransformationVerifier,
+    publisher: Publisher,
+    confirmer: Confirmer,
+) -> Path:
+    executor = capture_executor_source(request.executor_repository)
+    require_historical_executor(repository, executor)
+    bindings = _verify_frozen_inputs(
+        repository, freeze_verifier=freeze_verifier, possession_verifier=possession_verifier
+    )
+    attempts_root = ga_root(repository) / ATTEMPTS_RELATIVE
+    with exclusive_rooted_directory_lock(repository, attempts_root, require_private=True):
+        history = _failed_reconciliation_history(attempts_root, bindings, request)
+        attempt = history[-1]
+        original_output = _single_reconciliation_output(repository, attempt)
+        _validate_output_inventory(original_output)
+        if (
+            _sha256_file(original_output / TRANSFORMATION_RECEIPT_NAME)
+            != request.transformation_receipt_sha256
+        ):
+            raise SigningAttemptError("reconciliation_receipt_changed", "original signing receipt differs")
+        binding = ReconciliationBinding(
+            attempt.identifier, attempt.intent_sha256, request.failed_event_sha256,
+            bindings.frozen.intent_sha256, request.transformation_receipt_sha256,
+            bindings.repository_commit, bindings.release_source_sha256,
+        )
+        with open_reconciliation(repository, binding, executor, clock=clock) as journal:
+            output = _reconciliation_output(repository, attempt, journal)
+            sequence = journal.start_verification()
+            try:
+                _verify_reconciliation_output(
+                    repository, output, request, verification_runner=verification_runner,
+                    transformation_verifier=transformation_verifier,
+                    canonical_transformation_verifier=canonical_transformation_verifier,
+                )
+                reopened = _verify_frozen_inputs(
+                    repository, freeze_verifier=freeze_verifier, possession_verifier=possession_verifier
+                )
+                if reopened != bindings or _failed_reconciliation_history(
+                    attempts_root, reopened, request
+                ) != history or _reconciliation_output(repository, attempt, journal) != output:
+                    raise SigningAttemptError(
+                        "reconciliation_input_drift", "reconciliation inputs or original history changed"
+                    )
+                require_executor_unchanged(executor)
+            except (OSError, PublicationError, SigningAttemptError, SigningTransformationError) as error:
+                code = (
+                    error.code if isinstance(error, SigningAttemptError)
+                    else "reconciliation_verification_failed"
+                )
+                try:
+                    journal.finish_verification(sequence, code)
+                except (OSError, PublicationError) as journal_error:
+                    raise SigningAttemptError(
+                        "reconciliation_result_unknown", "failed revalidation result durability is unknown"
+                    ) from ExceptionGroup("revalidation and result-write failures", [error, journal_error])
+                raise
+            journal.finish_verification(sequence)
+            journal.begin_publication(sequence)
+            canonical = ga_root(repository) / SIGNING_OUTPUT_RELATIVE
+            try:
+                if output != canonical:
+                    publisher(output, canonical)
+                _verify_reconciliation_output(
+                    repository, canonical, request, verification_runner=verification_runner,
+                    transformation_verifier=transformation_verifier,
+                    canonical_transformation_verifier=canonical_transformation_verifier,
+                )
+                if _failed_reconciliation_history(attempts_root, bindings, request) != history:
+                    raise SigningAttemptError(
+                        "reconciliation_history_changed", "original signing history changed"
+                    )
+                require_executor_unchanged(executor)
+                confirmer(attempt.publish_ready, canonical)
+                journal.complete_publication()
+            except (OSError, PublicationError, SigningAttemptError, SigningTransformationError) as error:
+                raise SigningAttemptOutcomeUnknown(
+                    "reconciled output publication is unconfirmed; use the same explicit reconciliation entry"
+                ) from error
+            return canonical
 
 
 def _run_signing_transaction_with_verifiers(
@@ -2397,23 +2626,46 @@ def _run_signing_transaction_with_verifiers(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("run", "resume"))
+    parser.add_argument("command", choices=("run", "resume", "reconcile-failed"))
+    parser.add_argument("--artifact-repository", type=Path)
+    parser.add_argument("--expect-failed-event-sha256")
+    parser.add_argument("--expect-transformation-sha256")
     arguments = parser.parse_args(argv)
+    reconciliation = None
+    repository = Path(__file__).resolve().parent.parent
+    options = (
+        arguments.artifact_repository, arguments.expect_failed_event_sha256,
+        arguments.expect_transformation_sha256,
+    )
+    if arguments.command == "reconcile-failed":
+        if any(value is None for value in options):
+            parser.error("reconcile-failed requires --artifact-repository and both expected digests")
+        reconciliation = ReconciliationRequest(
+            repository, arguments.expect_failed_event_sha256, arguments.expect_transformation_sha256
+        )
+        repository = arguments.artifact_repository
+    elif any(value is not None for value in options):
+        parser.error("reconciliation options are not valid with run or resume")
     try:
         require_closed_release_runtime()
-        repository = Path(__file__).resolve().parent.parent
         output = run_signing_transaction(
             repository,
-            resume=arguments.command == "resume",
+            resume=arguments.command != "run",
+            reconciliation=reconciliation,
         )
     except (
         OSError,
         ReleasePythonRuntimeError,
         SigningAttemptError,
         SigningTransformationError,
+        PublicationError,
         ValueError,
     ) as error:
         code = error.code if isinstance(error, SigningAttemptError) else "invalid"
+        if reconciliation is not None:
+            print(f"error: signing reconciliation [{code}]: {error}", file=sys.stderr)
+            traceback.print_exception(error)
+            return 1
         raise SystemExit(f"error: GA signing attempt [{code}]: {error}") from error
     print(f"GA signing output verified: {output.relative_to(repository)}")
     return 0

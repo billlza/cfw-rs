@@ -1229,13 +1229,13 @@
     "scripts/notarization_executor.py": [
       "cfm-notarization-executor-v1",
       "notarization-executor.json",
-      "current_identity(repository, require_clean=True)",
       "identity_at_commit",
-      "historical != executor.identity",
       "exclusive_rooted_directory_lock",
       "write_private_pending_locked",
       "read_private_pending_locked",
-      "observed != data"
+      "observed != data",
+      "require_historical_executor(",
+      "validate_source_identity("
     ],
     "scripts/run_notarization_transaction.sh": [
       "#!/bin/bash -p",
@@ -2632,7 +2632,18 @@
       "def _reverify_canonical_transformation(",
       "failure_code=error.code",
       "failure_code=error.cause_code",
-      "def run_signing_transaction("
+      "def run_signing_transaction(",
+      "reconcile-failed",
+      "--artifact-repository",
+      "--expect-failed-event-sha256",
+      "--expect-transformation-sha256",
+      "_failed_reconciliation_history",
+      "open_reconciliation",
+      "_verify_reconciliation_output",
+      "require_historical_executor",
+      "require_executor_unchanged",
+      "reconciliation=reconciliation",
+      "traceback.print_exception(error)"
     ],
     "scripts/run_ga_signing_attempt.sh": [
       "#!/bin/bash -p",
@@ -3073,6 +3084,34 @@
     ],
     "scripts/publication/__init__.py": [
       "PUBLICATION_PACKAGE_POLICY = \"cfw-publication-package-v1\""
+    ],
+    "scripts/release_executor_source.py": [
+      "ExecutorSourceError",
+      "capture_executor_source",
+      "current_identity(repository, require_clean=True)",
+      "repository.resolve(strict=True) != repository",
+      "metadata.st_uid != os.geteuid()",
+      "require_executor_unchanged",
+      "require_historical_executor",
+      "identity_at_commit",
+      "historical != executor.identity",
+      "validate_source_identity"
+    ],
+    "scripts/signing_reconciliation.py": [
+      "cfm-signing-output-reconciliation-v1",
+      "transactions/signing-reconciliation",
+      "ReconciliationRequest",
+      "ReconciliationBinding",
+      "MAX_VERIFICATIONS",
+      "open_reconciliation",
+      "exclusive_rooted_directory_lock",
+      "write_private_pending_locked",
+      "read_private_pending_locked",
+      "verification_interrupted",
+      "canonical_json",
+      "publication.json",
+      "completed.json",
+      "reconciliation intent changed"
     ]
   },
   "artifactSourceSha256": {
@@ -3115,8 +3154,8 @@
     "scripts/dormant_app_install.py": "e11869f5fa619c6762021087165d19c23ce21e4114b44b253675426988232c10",
     "scripts/current_service_transaction.py": "1483349df74aba577bffd4d2653d12b69de1c9657857c8df8bee4535c7401f2d",
     "scripts/gatekeeper_assessment.py": "a4cee29500d0ada05455b5fed984253f99a484601c70c68cf2117792305ee433",
-    "scripts/notarization_transaction.py": "fdecbcf6caf8710200c91be056a57a74250f590fda98b4bad32a46e5ab2eaafb",
-    "scripts/notarization_executor.py": "060a9eaf795cbec476f8b67fbf42f23ccf310cd8cd8d61ca04d9e8b270768294",
+    "scripts/notarization_transaction.py": "b34a70b683a394651b78f237d1564f0b508c1b5e0102db1f75bfeaaed6b8123b",
+    "scripts/notarization_executor.py": "15a2065c0f7792d3b0609082471d557136b26575d3d7244b15434cc461e50005",
     "scripts/run_notarization_transaction.sh": "51fffc9706243a5f4188c63abe413f857dd16bd4d0b42f44f692ca8946319e6d",
     "scripts/dmg_notarization_transaction.py": "9cc69813d2f297f188f1931c14428743484cd22b5a2f346dbcf83dfc97ce56e4",
     "scripts/release_artifact_set.py": "386e5c3b8704c9c495d60eaae9b54a4ff288e3bc40a61130a0fce232d1692a4b",
@@ -3182,7 +3221,7 @@
     "scripts/physical_capture/session.py": "9afa0ae66577d9a104a8a38274fe88fee131a10919a086a80c07e7d410f6a347",
     "scripts/physical_capture/finalize.py": "328727e6615c24ecefec74dbb4bfa7b36c0cbce453a91909026a2ddeb8825a15",
     "scripts/verify_physical_capture_readiness.py": "4641c4f6cd6cc6086b7e2d3327146a99436dc2731182bd1e0dfcb59db1577c90",
-    "scripts/verify_build_boundaries.sh": "fbb9ba68d2cfb8f006874f3a52af75f4eea7b225380b47730b4d419a4ff53808",
+    "scripts/verify_build_boundaries.sh": "8a90dd50c1d52465e0b01024f916383d0c3d4fbf41d2e0a90cdc60701e00341c",
     "scripts/verify_release_build_allocations.py": "c9b31f6f9e08c22a4249c2c0c68a34108f69c5cdd1fe474cbf83a13f525464e4",
     "scripts/verify_release_environment.sh": "0dd60e1a6b5d78a98a560da932d3060c17f276b10f79bcf670522292678e8068",
     "scripts/physical_capture/performance_operator.py": "52cb974c954e4615d52b3d027651f86609578112e68946026221625f56b0137c",
@@ -3209,7 +3248,7 @@
     "scripts/release_entitlement_contract.py": "e29d7346f41d6fa8ff0394bf3f7e8bd42d1e12de5a07d58f595e5d99c0ea337e",
     "scripts/host_release_entitlements.py": "dec7d82b0050ae292c99602e575dbde03995a047ac81b5f1ea074fab09231003",
     "scripts/updater_key_possession_proof.py": "679216ff62ce8660021371b3d2705dc7e1c4808eb2f21a01a939ec839e4633d0",
-    "scripts/signing_attempt_transaction.py": "2badf4b3f38c3a1af509f73dd055115b190d91215438e7d44928a462cfb172ec",
+    "scripts/signing_attempt_transaction.py": "daeabb06f5acadddf89c89cd3e2adbc1f78c6aedf905e5081ca95cff2a8a1d22",
     "scripts/run_ga_signing_attempt.sh": "4b8e71c0c9ee02eb813a050e5641760c16a22fb895b462e5e81893a097e634ac",
     "scripts/promote_signed_native_manifest.py": "ac4c59c8b590d9567b3190c59bd3994a7caba60407125c874cff2dcd716276c7",
     "scripts/verify_legacy_tombstone_provenance.py": "6cb33669fc41ed7f1874dd32c1e1251383c11cf87bda9ec92a7a7b2d0146da47",
@@ -3241,6 +3280,8 @@
     "scripts/publication/license_resolution.py": "b50508a8f17c711a741ead3574236dc77d36b20409bad7bfd83d67cf38326122",
     "scripts/verify_release_authority_gate.py": "7e37868a9c8f48af23c00f25c533d71ff6f6e3b99aa924a40009f68507dd0f01",
     "scripts/verify_production_boundary_removal.py": "e32545944c88bdc1ac09ad5432ea18e5fb85460f38087b9b30341794c23f5159",
-    "scripts/publication/__init__.py": "5fc6024921e18d7ea6ea3f9f02a00a102c4ab5e89166f881cd8d001b24919271"
+    "scripts/publication/__init__.py": "5fc6024921e18d7ea6ea3f9f02a00a102c4ab5e89166f881cd8d001b24919271",
+    "scripts/release_executor_source.py": "7f70aab883c2a4bac0ad858f27199fa8070ccee25420cb46310da01f6394a4a6",
+    "scripts/signing_reconciliation.py": "da6c4b0e8789784dab808cc6fd2b4be258c797617d746fbfc110aae7c83f8979"
   }
 }

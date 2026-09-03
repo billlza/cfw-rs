@@ -13,6 +13,9 @@ from scripts.notarization_executor import (
     DOCUMENT,
     NotarizationExecutorError,
     bind_executor,
+)
+from scripts.release_executor_source import (
+    ExecutorSourceError,
     capture_executor_source,
     require_executor_unchanged,
 )
@@ -92,7 +95,7 @@ class NotarizationExecutorTests(unittest.TestCase):
 
     def test_source_drift_and_dirty_source_are_explicit_errors(self) -> None:
         require_executor_unchanged(self.executor, source_reader=lambda _root: self.identity)
-        with self.assertRaisesRegex(NotarizationExecutorError, "source changed"):
+        with self.assertRaisesRegex(ExecutorSourceError, "source changed"):
             require_executor_unchanged(
                 replace(self.executor, repository_commit="0" * 40),
                 source_reader=lambda _root: self.identity,
@@ -101,7 +104,7 @@ class NotarizationExecutorTests(unittest.TestCase):
         def dirty(_repository: Path) -> dict[str, str]:
             raise SourceIdentityError("dirty source")
 
-        with self.assertRaisesRegex(NotarizationExecutorError, "source is unavailable"):
+        with self.assertRaisesRegex(ExecutorSourceError, "source is unavailable"):
             capture_executor_source(self.executor_repository, source_reader=dirty)
 
     def test_executor_root_must_be_canonical_real_and_owned(self) -> None:
@@ -115,10 +118,10 @@ class NotarizationExecutorTests(unittest.TestCase):
         )
         for root in roots:
             with self.subTest(root=root):
-                with self.assertRaises(NotarizationExecutorError):
+                with self.assertRaises(ExecutorSourceError):
                     capture_executor_source(root, source_reader=lambda _root: self.identity)
         self.executor_repository.chmod(0o777)
-        with self.assertRaises(NotarizationExecutorError):
+        with self.assertRaises(ExecutorSourceError):
             capture_executor_source(
                 self.executor_repository, source_reader=lambda _root: self.identity
             )
@@ -131,7 +134,7 @@ class NotarizationExecutorTests(unittest.TestCase):
             {**self.identity, "releaseSourceSha256": "d" * 63},
         ):
             with self.subTest(identity=identity):
-                with self.assertRaises(NotarizationExecutorError):
+                with self.assertRaises(ExecutorSourceError):
                     capture_executor_source(
                         self.executor_repository,
                         source_reader=lambda _root, identity=identity: identity,

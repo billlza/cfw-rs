@@ -156,6 +156,7 @@ class SigningAttemptFixture:
         self,
         *,
         resume: bool,
+        reconciliation=None,
         helper=None,
         publisher=None,
         live_readiness=None,
@@ -209,6 +210,7 @@ class SigningAttemptFixture:
             return transaction.run_signing_transaction(
                 self.repository,
                 resume=resume,
+                reconciliation=reconciliation,
                 clock=self.clock,
                 helper_runner=helper_runner,
                 verification_runner=self.verification,

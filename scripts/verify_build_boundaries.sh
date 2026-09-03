@@ -69,11 +69,13 @@ done
 
 for release_module in \
   scripts/notarization_executor.py \
+  scripts/release_executor_source.py \
+  scripts/signing_reconciliation.py \
   scripts/ga_acceptance_environment.py \
   scripts/ga_acceptance_journal_export.py; do
   [[ -f "$release_module" && ! -L "$release_module" && -O "$release_module" && \
     -r "$release_module" && ! -x "$release_module" ]] || {
-    echo "error: GA acceptance module is not one owned source-only file: $release_module" >&2
+    echo "error: release module is not one owned source-only file: $release_module" >&2
     exit 1
   }
 done

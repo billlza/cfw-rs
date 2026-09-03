@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 
-def complete_verifier_stdout(app: str, build_number: str = "40040") -> bytes:
+def complete_verifier_stdout(app: str, build_number: str = "40041") -> bytes:
     candidate_root = os.path.dirname(os.path.dirname(app))
     native_products = os.path.join(
         candidate_root, "signing-output", "signed-native-products"

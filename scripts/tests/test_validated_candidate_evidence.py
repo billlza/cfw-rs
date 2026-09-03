@@ -18,7 +18,7 @@ class RetiredValidatedCandidateEvidenceTests(unittest.TestCase):
         )
 
     def test_in_process_entrypoint_fails_explicitly(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "single frozen GA 40040"):
+        with self.assertRaisesRegex(SystemExit, "single frozen GA 40041"):
             validated_candidate_evidence.main([])
 
     def test_cli_rejects_old_review_arguments(self) -> None:

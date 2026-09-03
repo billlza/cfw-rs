@@ -7,10 +7,10 @@
     "androidReferenceCommit": "124a7c13038fcc389e3efbe61504fe6ab14724d9",
     "securityPatch": {
       "path": "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
-      "sha256": "529ce3939fa23573e2cceaa4ee209ebd34a75204bd91e999c9bbf843b0867798",
-      "patchedDiffSha256": "0e839490c8c841532b2d13d88c24a94542f3fcb727700e6abf6040a9946e83e4",
-      "patchedGoModSha256": "58dd87dca554127aeb919fc2d5abb1ad1cc51fe72081ea4a7ab4c2d11d027e91",
-      "patchedGoSumSha256": "4c2976095a2cd3ced5b54268bc820d2d9c48c56d7399a3b832966070d011ae88"
+      "sha256": "ddf459a154945b48ab74407910380e2af0e2d9aeda823fcd340c8725b1808324",
+      "patchedDiffSha256": "6f40e24c33074682bcf14af20132fb05b1b05c75a09f21b085e011bd84445d82",
+      "patchedGoModSha256": "e40d230360d275e8116bf3eb91aa9083aed666b8940048b35f652832adea3481",
+      "patchedGoSumSha256": "66f63cb9736db00d95081e3163c53ccdb7d531626aabb5e1ad5c6146a28d8eca"
     },
     "rawPacketPatch": {
       "path": "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
@@ -24,7 +24,7 @@
       "path": "native/macos/patches/sing-box-v1.13.15-endpoint-conflict.patch",
       "sha256": "5a956c63025b4692db43d2c77ac46de1ae573e0afcc866de9b59704a273b0c02"
     },
-    "combinedDiffSha256": "1ad890f1e17a9ff9af3369bef3329650b4ac0e0fc4f33a4840c5911f1e6a2a7f"
+    "combinedDiffSha256": "b4f0f760fbc5d4faad51e575077824eb5b815d723a33bf6e165c2a1c98052eaf"
   },
   "singBoxForAppleReference": {
     "commit": "afb1ac6fd63aeb4660f39b21bde4a3f52cdee9fa"

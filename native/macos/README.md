@@ -224,11 +224,14 @@ materialization step applies four digest-pinned patches in a
 fixed order:
 
 1. `sing-box-v1.13.15-security-dependencies.patch` updates the pinned Go module
-   graph, including go-chi `v5.3.0`, `x/crypto v0.55.0`, `x/mod v0.40.0`,
+   graph, including go-chi `v5.3.0`, `x/crypto v0.56.0`, `x/mod v0.40.0`,
    `x/net v0.58.0`, `x/sync v0.22.0`, `x/sys v0.47.0`, `x/term v0.45.0`,
    `x/text v0.41.0`, `x/tools v0.49.0`, gRPC, and their exact coupled
    requirements. The `x/mod` refresh removes the module-level
-   `GO-2026-6179` and `GO-2026-6180` findings without an ignore.
+   `GO-2026-6179` and `GO-2026-6180` findings without an ignore. The
+   `x/crypto v0.56.0` refresh fixes `GO-2026-6354` and `GO-2026-6355` and
+   requires the module's minimum Go version to be `1.26.0`; the release
+   compiler remains `1.26.6` and all other selected dependencies are unchanged.
 2. `sing-box-v1.13.15-raw-packet-tun.patch` adds the explicit Darwin raw-packet
    contract. It accepts only a connected `AF_UNIX/SOCK_DGRAM` descriptor,
    validates MTU/routing/GSO constraints, transfers descriptor ownership, and

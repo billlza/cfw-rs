@@ -7,7 +7,7 @@ releasable Network Extension product.
 > **v0.4.0 policy calibration:** the executable ordinary-GA versus assurance
 > boundary is recorded in
 > [`docs/release/ga-assurance-policy-v040.md`](docs/release/ga-assurance-policy-v040.md).
-> The release has one candidate identity: build 40040. Build 40030 is retired
+> The release has one candidate identity: build 40041. Build 40030 is retired
 > unbuilt as `retired_unbuilt_policy_superseded`; it must never be rebuilt,
 > signed, installed, or used as a validation companion. Build 40031 is retired
 > after candidate freeze and a failed private signing attempt, before canonical
@@ -50,7 +50,12 @@ releasable Network Extension product.
 > cannot be added to those frozen bytes. Its consumed lineage is retired while
 > the original notarization transaction remains quarantined; see
 > [`docs/release/ga-build-40039-retirement.md`](docs/release/ga-build-40039-retirement.md).
-> A passing policy or source check alone does not consume build 40040. Its
+> Build 40040 completed freeze and canonical signing, but two subsequently
+> published SSH advisories require an `x/crypto` dependency change. It is
+> retired before any Apple submission, with its original bytes and receipts
+> preserved; see
+> [`docs/release/ga-build-40040-retirement.md`](docs/release/ga-build-40040-retirement.md).
+> A passing policy or source check alone does not consume build 40041. Its
 > first durable candidate freeze does, after which only supported recovery may
 > reuse those exact frozen bytes and their append-only transaction identities.
 
@@ -115,7 +120,10 @@ downloaded core, and private packet-flow file-descriptor access are not
 fallbacks.
 
 The security patch pins `golang.org/x/mod v0.40.0` and its exact tested `x/*`
-closure to remove `GO-2026-6179` and `GO-2026-6180`. The release vulnerability
+closure to remove `GO-2026-6179` and `GO-2026-6180`. It also pins
+`golang.org/x/crypto v0.56.0` to fix `GO-2026-6354` and `GO-2026-6355`, with
+the module's minimum Go version at `1.26.0`; the compiler remains `1.26.6`.
+No other selected dependency changed for this SSH correction. The release vulnerability
 scan must report zero affected symbols and zero affected imported packages
 without an ignore. `GO-2026-5932` may remain only as the documented module-level
 `x/crypto/openpgp` report: the package has no fixed version and must remain
@@ -557,8 +565,8 @@ the sealed publication evidence but remains fail closed until that evidence has
 been prepared, legally reviewed, and finalized for the exact signed app. It has
 no success override and accepts only:
 
-- `target/candidates/0.4.0/ga/40040/signed/Clash for Mac.app` as the signed binary root;
-- `target/candidates/0.4.0/ga/40040/stage-inputs/publication` as the final evidence root.
+- `target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app` as the signed binary root;
+- `target/candidates/0.4.0/ga/40041/stage-inputs/publication` as the final evidence root.
 
 It never scans or accepts `target/release`, which retains historical 0.3.5
 signed artifacts containing the old core/helper layout.
@@ -598,25 +606,25 @@ scripts/prepare_publication_evidence.sh review-template \
 # Resolve every item in component-review.json and every source blocker, then:
 scripts/prepare_publication_evidence.sh prepare \
   --libbox-source target/sources/sing-box-v1.13.15-patched \
-  --reviewed-components target/candidates/0.4.0/ga/40040/stage-inputs/component-review.json
+  --reviewed-components target/candidates/0.4.0/ga/40041/stage-inputs/component-review.json
 
 scripts/run_publication_evidence.sh draft \
-  --prepared target/candidates/0.4.0/ga/40040/stage-inputs/publication-prepared \
-  --app "target/candidates/0.4.0/ga/40040/signed/Clash for Mac.app" \
-  --output target/candidates/0.4.0/ga/40040/stage-inputs/machine-closure.draft.json
+  --prepared target/candidates/0.4.0/ga/40041/stage-inputs/publication-prepared \
+  --app "target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app" \
+  --output target/candidates/0.4.0/ga/40041/stage-inputs/machine-closure.draft.json
 
 # A human legal reviewer must approve the exact printed closure digest and
-# component set in target/candidates/0.4.0/ga/40040/stage-inputs/legal-review.json.
+# component set in target/candidates/0.4.0/ga/40041/stage-inputs/legal-review.json.
 scripts/run_publication_evidence.sh finalize \
-  --prepared target/candidates/0.4.0/ga/40040/stage-inputs/publication-prepared \
-  --app "target/candidates/0.4.0/ga/40040/signed/Clash for Mac.app" \
-  --review target/candidates/0.4.0/ga/40040/stage-inputs/legal-review.json \
-  --output target/candidates/0.4.0/ga/40040/stage-inputs/publication
+  --prepared target/candidates/0.4.0/ga/40041/stage-inputs/publication-prepared \
+  --app "target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app" \
+  --review target/candidates/0.4.0/ga/40041/stage-inputs/legal-review.json \
+  --output target/candidates/0.4.0/ga/40041/stage-inputs/publication
 
 scripts/release_publication_gate.sh --seal-prepackage
 ```
 
-### Single-GA 40040 release sequence
+### Single-GA 40041 release sequence
 
 The canonical allocation ledger is
 [`docs/release/build-allocations-v040.json`](docs/release/build-allocations-v040.json).
@@ -634,13 +642,17 @@ transformation receipt, canonical output, or notarization.
 Build 40039 is a consumed, canonically signed lineage retired because SOCKS5
 changes its product inputs. Its original notarization outcome remains unknown
 and quarantined, not accepted or failed. Do not resubmit or reuse its bytes.
-Build 40040 is the sole `active_ga` identity.
+Build 40040 is a consumed, canonically signed lineage retired before
+notarization because fixing the newly reported SSH vulnerabilities changes
+its dependency inputs. Its signed bytes and historical CI receipt remain
+unchanged and cannot be used as evidence for the corrected candidate.
+Build 40041 is the sole `active_ga` identity.
 
 Run the sequence below from one clean release commit. Source, CI, preflight, or
 evidence failures before candidate freeze use their own append-only attempt or
 run identity and do not allocate another application build. Once
 `candidate-freeze/intent.json` exists, recovery may only continue an exact
-supported 40040 transaction without changing application or nested-code
+supported 40041 transaction without changing application or nested-code
 signature bytes. A transaction in the explicit post-receipt
 `verification_blocked` state may reopen and verify only its complete exact
 private work and receipt; it must not invoke the signing helper or receipt
@@ -678,7 +690,7 @@ wire proof.
    profile, and updater-key custody configured on the release Mac:
 
    ```bash
-   CFW_BUILD_NUMBER=40040 \
+   CFW_BUILD_NUMBER=40041 \
    NOTARY_PROFILE=clashformac-notary \
    MACOS_SIGN_IDENTITY='Developer ID Application: Zi ang Li (YKUPL7Z869)' \
    HOST_PROVISIONING_PROFILE_PATH=/absolute/path/to/host.provisionprofile \
@@ -724,8 +736,8 @@ wire proof.
    ```bash
    scripts/release_publication_gate.sh --capture-hosted-ci RUN_ID
    scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
-     --output target/candidates/0.4.0/ga/40040/stage-inputs/local-ci-lanes.json \
-     --journal target/candidates/0.4.0/ga/40040/stage-inputs/local-ci-journal
+     --output target/candidates/0.4.0/ga/40041/stage-inputs/local-ci-lanes.json \
+     --journal target/candidates/0.4.0/ga/40041/stage-inputs/local-ci-journal
    scripts/release_publication_gate.sh --verify-hosted-ci
    ```
 
@@ -745,7 +757,7 @@ wire proof.
    fixed recovery entry:
 
    ```bash
-   CFW_BUILD_NUMBER=40040 NOTARY_PROFILE=clashformac-notary \
+   CFW_BUILD_NUMBER=40041 NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --resume-signing
    ```
 
@@ -759,14 +771,14 @@ wire proof.
    A helper failure, an interruption after signing may have started but before
    one complete receipt-bound output was durably recorded, or any other
    ambiguous signing state requires preserving the attempt, retiring build
-   40040, and allocating a successor. Never create fresh timestamped signature
+   40041, and allocating a successor. Never create fresh timestamped signature
    bytes under the same frozen build.
 
    If an Apple submit reply was lost before its submission ID was persisted,
    recover only with that observed ID:
 
    ```bash
-   CFW_BUILD_NUMBER=40040 NOTARY_PROFILE=clashformac-notary \
+   CFW_BUILD_NUMBER=40041 NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --recover-notarization-id UUID
    ```
 5. regenerate and legally review the fixed publication source/SBOM closure,
@@ -833,7 +845,7 @@ wire proof.
    environment; it must not overwrite an already published container;
 7. after the atomic journal export verifies, run the fixed GA runtime collector.
    It independently reopens the DMG set, proves the DMG's
-   contained app equals the installed 40040 tree, derives all twelve required
+   contained app equals the installed 40041 tree, derives all twelve required
    checks from bounded command output and packet captures, and proves shutdown
    restored the CFW guard:
 
@@ -940,7 +952,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 40040. No updater key, Apple notarization key, local private key, or older
+build 40041. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable
@@ -972,10 +984,10 @@ Tauri; neither the password nor a caller-selected key/signer path enters argv.
 Release assets do not become uploadable as independent files. The updater
 archive, signature, `latest.json`, and the verifier's embedded-public-key
 receipt are sealed and atomically published as
-`target/candidates/0.4.0/ga/40040/packages/updater/vVERSION/`. The DMG, accepted result,
+`target/candidates/0.4.0/ga/40041/packages/updater/vVERSION/`. The DMG, accepted result,
 normalized log, private Gatekeeper evidence, submission receipt, and artifact
 manifest are sealed and atomically published for release operations as
-`target/candidates/0.4.0/ga/40040/packages/dmg/vVERSION/`. The canonical seals bind exact
+`target/candidates/0.4.0/ga/40041/packages/dmg/vVERSION/`. The canonical seals bind exact
 names, sizes, SHA-256 values, version/build/source identity, official URL, and
 verification result. Each component seal also binds the exact
 `Clash for Mac.app.manifest.json` digest and signed-app tree SHA-256. The
@@ -1000,7 +1012,7 @@ scripts/release_publication_gate.sh --upload-assets 0.4.0
 ```
 
 The atomic
-`ga/40040/packages/distribution/vVERSION/distribution-set.seal.json` joins the
+`ga/40041/packages/distribution/vVERSION/distribution-set.seal.json` joins the
 same signed app and app manifest to both package seals and every DMG/updater
 asset. It also binds the complete publication-evidence tree and records direct
 digests for the sealed outer Evidence Manifest, machine closure, inventory,

@@ -1239,6 +1239,7 @@
     ],
     "scripts/run_notarization_transaction.sh": [
       "#!/bin/bash -p",
+      "umask 022",
       "source \"$repo_root/scripts/release_tool_environment.sh\"",
       "cfw_seal_release_tool_environment production",
       "cfw_select_release_apple_toolchain",
@@ -3156,7 +3157,7 @@
     "scripts/gatekeeper_assessment.py": "a4cee29500d0ada05455b5fed984253f99a484601c70c68cf2117792305ee433",
     "scripts/notarization_transaction.py": "b34a70b683a394651b78f237d1564f0b508c1b5e0102db1f75bfeaaed6b8123b",
     "scripts/notarization_executor.py": "15a2065c0f7792d3b0609082471d557136b26575d3d7244b15434cc461e50005",
-    "scripts/run_notarization_transaction.sh": "51fffc9706243a5f4188c63abe413f857dd16bd4d0b42f44f692ca8946319e6d",
+    "scripts/run_notarization_transaction.sh": "8ee5288ff7e441cf34c0295b0f8debe78c057c9cde1b1393c9f7ef77b401de0e",
     "scripts/dmg_notarization_transaction.py": "9cc69813d2f297f188f1931c14428743484cd22b5a2f346dbcf83dfc97ce56e4",
     "scripts/release_artifact_set.py": "386e5c3b8704c9c495d60eaae9b54a4ff288e3bc40a61130a0fce232d1692a4b",
     "scripts/release_apple_toolchain.py": "ccde3f60dfde9a8e07a06cd9906bc847445662eca1d0de357d5e2b774d51f192",

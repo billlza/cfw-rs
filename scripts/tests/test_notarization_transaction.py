@@ -8894,6 +8894,53 @@ class NotarizationCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
 
+    def test_notary_shell_entry_separates_public_and_private_output_modes(self) -> None:
+        wrapper = Path(transaction_module.__file__).with_name("run_notarization_transaction.sh")
+        for incoming_umask in (0o000, 0o022, 0o077):
+            with self.subTest(incoming_umask=oct(incoming_umask)), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                scripts = root / "scripts"
+                scripts.mkdir()
+                copied_wrapper = scripts / wrapper.name
+                shutil.copy2(wrapper, copied_wrapper)
+                (scripts / "dependency_pins.env").write_text("", encoding="utf-8")
+                (scripts / "release_tool_environment.sh").write_text(
+                    'cfw_seal_release_tool_environment() { test "$1" = production; }\n'
+                    'cfw_select_release_apple_toolchain() { :; }\n'
+                    'cfw_run_release_python_script() {\n'
+                    '  "$CFW_TEST_PYTHON" -I -S -B -W error "$2"\n'
+                    '}\n',
+                    encoding="utf-8",
+                )
+                (scripts / "notarization_transaction.py").write_text(
+                    'import os\n'
+                    'from pathlib import Path\n'
+                    'root = Path(__file__).resolve().parent.parent\n'
+                    '(root / "public-directory").mkdir()\n'
+                    '(root / "public-directory/ticket").write_bytes(b"ticket")\n'
+                    '(root / "private-directory").mkdir(mode=0o700)\n'
+                    'descriptor = os.open(root / "private-directory/receipt",\n'
+                    '                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)\n'
+                    'os.close(descriptor)\n',
+                    encoding="utf-8",
+                )
+                result = subprocess.run(
+                    ["/bin/bash", "-p", str(copied_wrapper)],
+                    env={"PATH": "/usr/bin:/bin", "CFW_TEST_PYTHON": sys.executable},
+                    capture_output=True, text=True, check=False, umask=incoming_umask,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, "")
+                for path, expected_mode in (
+                    ("public-directory", 0o755),
+                    ("public-directory/ticket", 0o644),
+                    ("private-directory", 0o700),
+                    ("private-directory/receipt", 0o600),
+                ):
+                    with self.subTest(path=path):
+                        self.assertEqual(stat.S_IMODE((root / path).stat().st_mode), expected_mode)
+
     def test_legacy_build_kinds_are_explicitly_rejected(self) -> None:
         for legacy_kind in ("validation", "release"):
             with self.subTest(legacy_kind=legacy_kind):

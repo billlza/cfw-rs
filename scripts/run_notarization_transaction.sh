@@ -2,6 +2,8 @@
 # Select the closed release environment before dispatching the notary CLI.
 set -euo pipefail
 unset CDPATH
+# Apple stapler creates public bundle files; journals set private modes explicitly.
+umask 022
 
 repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/dependency_pins.env

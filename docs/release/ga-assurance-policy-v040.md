@@ -225,6 +225,15 @@ candidate source commit and proves the same product-input digest. It records a
 new evidence-policy identity and must never rewrite or relabel the candidate's
 original source identity.
 
+The standalone notarization entry uses the same producer `umask 022` as the
+signed-candidate builder. Apple stapler creates a public bundle ticket, which
+must remain readable with mode `0644`; inheriting a private log wrapper's
+`umask 077` makes that ticket `0600` and correctly fails final verification.
+Journal files and directories retain their explicit `0600` and `0700` modes.
+Private logs may still use an outer `umask 077`. A failed finalization is kept
+unchanged; the existing same-submission recovery uses the immutable pre-staple
+source, without changing the failed bundle, re-signing, or submitting again.
+
 ## GA-required gates
 
 Every GA-required gate is explicit and fail closed. The GA manifest must bind:

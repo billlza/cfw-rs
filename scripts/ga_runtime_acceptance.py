@@ -389,6 +389,28 @@ def _fixed_paths(repository: Path) -> tuple[Path, Path]:
     )
 
 
+def _dmg_verifier_command(repository: Path) -> list[str]:
+    operator_repository = Path(__file__).resolve().parent.parent
+    return [
+        "/bin/bash",
+        "-p",
+        "-c",
+        "set -euo pipefail; "
+        'source "$1/scripts/release_python_launcher.sh"; '
+        'cfw_run_release_python_script "$1" '
+        '"$1/scripts/release_artifact_set_cli.py" "${@:2}"',
+        "ga-dmg-verification",
+        str(operator_repository),
+        "verify-dmg",
+        "--directory",
+        str(repository / DMG_SET_RELATIVE),
+        "--version",
+        PRODUCT_VERSION,
+        "--repository",
+        str(repository),
+    ]
+
+
 def _require_fixed_paths(
     repository: Path,
     acceptance_path: Path,
@@ -1096,23 +1118,13 @@ def _validate_exact_dmg_install(
         raise _error("raw DMG Gatekeeper output is not notarized acceptance")
     verification = _command(
         commands["dmg_set_verify"],
-        expected_argv=[
-            sys.executable,
-            "scripts/release_artifact_set_cli.py",
-            "verify-dmg",
-            "--directory",
-            DMG_SET_RELATIVE.as_posix(),
-            "--version",
-            PRODUCT_VERSION,
-            "--repository",
-            ".",
-        ],
+        expected_argv=_dmg_verifier_command(repository),
         expected_exit=0,
         label="DMG contained-app byte-proof observation",
     )
     if (
         verification["stdout"]
-        != f"DMG release set verified: {DMG_SET_RELATIVE.as_posix()}\n"
+        != f"DMG release set verified: {repository / DMG_SET_RELATIVE}\n"
         or verification["stderr"]
     ):
         raise _error("raw DMG verifier output is not the fixed byte-proof result")
@@ -2970,17 +2982,7 @@ def collect_ga_runtime_acceptance(
             step="dmg-gatekeeper",
             argv=gatekeeper_argv,
         )
-        dmg_verify_argv = [
-            sys.executable,
-            "scripts/release_artifact_set_cli.py",
-            "verify-dmg",
-            "--directory",
-            DMG_SET_RELATIVE.as_posix(),
-            "--version",
-            PRODUCT_VERSION,
-            "--repository",
-            ".",
-        ]
+        dmg_verify_argv = _dmg_verifier_command(repository)
         dmg_verify = _step_command(
             repository,
             collection_path,

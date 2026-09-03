@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 from typing import Any
 import unittest
@@ -501,20 +502,10 @@ class RuntimeFixture:
                     stderr="accepted\nsource=Notarized Developer ID\n",
                 ),
                 "dmg_set_verify": command(
-                    [
-                        os.sys.executable,
-                        "scripts/release_artifact_set_cli.py",
-                        "verify-dmg",
-                        "--directory",
-                        "target/candidates/0.4.0/ga/40041/packages/dmg/v0.4.0",
-                        "--version",
-                        "0.4.0",
-                        "--repository",
-                        ".",
-                    ],
+                    ga_runtime._dmg_verifier_command(self.repository),
                     stdout=(
-                        "DMG release set verified: target/candidates/0.4.0/ga/40041/"
-                        "packages/dmg/v0.4.0\n"
+                        f"DMG release set verified: "
+                        f"{self.repository / ga_runtime.DMG_SET_RELATIVE}\n"
                     ),
                 ),
             },
@@ -773,6 +764,118 @@ class RuntimeFixture:
                 raw_evidence_root=self.raw_root,
                 expected=self.expected,
                 prepackage_stage_verifier=prepackage_stage_verifier,
+            )
+
+
+class GARuntimeDmgLauncherTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.operator = self.root / "operator space;$(not-executed)"
+        self.artifact = self.root / "frozen artifact"
+        for repository in (self.operator, self.artifact):
+            (repository / "scripts").mkdir(parents=True)
+            (repository / "scripts/__init__.py").write_text("", encoding="utf-8")
+        shutil.copyfile(
+            REPOSITORY / "scripts/release_python_launcher.sh",
+            self.operator / "scripts/release_python_launcher.sh",
+        )
+        (self.artifact / "scripts/release_artifact_set_cli.py").write_text(
+            'raise RuntimeError("artifact verifier must not execute")\n',
+            encoding="utf-8",
+        )
+        self.runtime = object.__new__(ProductionCollectorRuntime)
+        self.runtime.repository = self.artifact
+        self.runtime.environment = {
+            "CFW_RELEASE_PYTHON_EXECUTABLE": os.sys.executable,
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG": "C",
+            "LC_ALL": "C",
+        }
+
+    def _run_operator_script(self, source: str) -> dict[str, Any]:
+        (self.operator / "scripts/release_artifact_set_cli.py").write_text(
+            source, encoding="utf-8"
+        )
+        with patch.object(
+            ga_runtime, "__file__", str(self.operator / "scripts/ga_runtime_acceptance.py")
+        ):
+            argv = ga_runtime._dmg_verifier_command(self.artifact)
+        self.assertEqual(argv[:3], ["/bin/bash", "-p", "-c"])
+        self.assertEqual(
+            argv[4:],
+            [
+                "ga-dmg-verification",
+                str(self.operator),
+                "verify-dmg",
+                "--directory",
+                str(self.artifact / ga_runtime.DMG_SET_RELATIVE),
+                "--version",
+                "0.4.0",
+                "--repository",
+                str(self.artifact),
+            ],
+        )
+        return self.runtime.run(argv, timeout=30)
+
+    def test_dmg_verifier_uses_operator_source_and_real_isolated_launcher(self) -> None:
+        poison = self.root / "ambient"
+        poison.mkdir()
+        (poison / "sitecustomize.py").write_text(
+            'raise RuntimeError("ambient site must not execute")\n', encoding="utf-8"
+        )
+        bash_startup = poison / "startup.sh"
+        bash_startup.write_text('echo AMBIENT_STARTUP >&2\nexit 97\n', encoding="utf-8")
+        self.runtime.environment.update(
+            {"PYTHONPATH": str(poison), "BASH_ENV": str(bash_startup)}
+        )
+        receipt = self._run_operator_script(
+            "import json, os, sys\n"
+            "print(json.dumps({\n"
+            "    'argv': sys.argv, 'cwd': os.getcwd(), 'package': __package__,\n"
+            "    'isolated': sys.flags.isolated, 'no_site': sys.flags.no_site,\n"
+            "    'no_user_site': sys.flags.no_user_site,\n"
+            "    'dont_write_bytecode': sys.flags.dont_write_bytecode,\n"
+            "    'warnings': sys.warnoptions, 'source_root': sys.path[0],\n"
+            "}))\n"
+        )
+        self.assertEqual(receipt["exit_code"], 0, receipt["stderr"])
+        self.assertEqual(receipt["stderr"], "")
+        observed = json.loads(receipt["stdout"])
+        self.assertEqual(
+            observed,
+            {
+                "argv": [
+                    str(self.operator / "scripts/release_artifact_set_cli.py"),
+                    *receipt["argv"][6:],
+                ],
+                "cwd": str(self.artifact),
+                "package": "scripts",
+                "isolated": 1,
+                "no_site": 1,
+                "no_user_site": 1,
+                "dont_write_bytecode": 1,
+                "warnings": ["error"],
+                "source_root": str(self.operator),
+            },
+        )
+        self.assertEqual(list(self.root.rglob("__pycache__")), [])
+
+    def test_dmg_verifier_failure_is_not_reported_as_byte_proof(self) -> None:
+        receipt = self._run_operator_script(
+            'import sys\nsys.stderr.write("fixture verifier rejected bytes\\n")\n'
+            "raise SystemExit(19)\n"
+        )
+        self.assertEqual(receipt["exit_code"], 19)
+        self.assertEqual(receipt["stdout"], "")
+        self.assertEqual(receipt["stderr"], "fixture verifier rejected bytes\n")
+        with self.assertRaises(GARuntimeAcceptanceError):
+            ga_runtime._command(
+                receipt,
+                expected_argv=receipt["argv"],
+                expected_exit=0,
+                label="DMG contained-app byte-proof observation",
             )
 
 

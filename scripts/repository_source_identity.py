@@ -9,6 +9,7 @@ import json
 import os
 import re
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
@@ -19,6 +20,7 @@ else:
 
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+MAX_HISTORICAL_BATCH_BYTES = 4 * 1024 * 1024
 
 # These paths are the complete reviewed product, test, packaging, and release
 # closure. Git supplies tracked files plus non-ignored new files, so generated
@@ -55,6 +57,8 @@ def _run_git(
     repository: Path,
     arguments: list[str],
     environment: Mapping[str, str] | None = None,
+    *,
+    input_bytes: bytes | None = None,
 ) -> bytes:
     try:
         return run_release_git(
@@ -62,6 +66,7 @@ def _run_git(
             arguments,
             environment=environment,
             protected_roots=RELEASE_PATHS,
+            input_bytes=input_bytes,
         )
     except ReleaseGitError as error:
         raise SourceIdentityError(
@@ -278,6 +283,76 @@ def _historical_release_paths(
     return tuple(paths)
 
 
+@dataclass(frozen=True, slots=True)
+class _HistoricalSourceFile:
+    path: str
+    executable: bool
+    object_id: bytes
+    size: int
+
+
+def _read_historical_blob_batch(
+    repository: Path,
+    objects: list[tuple[bytes, int]],
+    environment: Mapping[str, str] | None,
+) -> dict[bytes, str]:
+    payload = _run_git(
+        repository, ["cat-file", "--batch"], environment,
+        input_bytes=b"".join(object_id + b"\n" for object_id, _size in objects),
+    )
+    cursor = 0
+    digests: dict[bytes, str] = {}
+    for object_id, size in objects:
+        header = object_id + b" blob " + str(size).encode("ascii") + b"\n"
+        if not payload.startswith(header, cursor):
+            raise SourceIdentityError("historical Git batch header differs from its requested blob")
+        start = cursor + len(header)
+        end = start + size
+        if end >= len(payload) or payload[end:end + 1] != b"\n":
+            raise SourceIdentityError("historical Git batch contains a truncated blob")
+        digests[object_id] = hashlib.sha256(payload[start:end]).hexdigest()
+        cursor = end + 1
+    if cursor != len(payload):
+        raise SourceIdentityError("historical Git batch contains unrequested trailing bytes")
+    return digests
+
+
+def _historical_blob_digests(
+    repository: Path,
+    files: list[_HistoricalSourceFile],
+    environment: Mapping[str, str] | None,
+) -> dict[bytes, str]:
+    sizes: dict[bytes, int] = {}
+    for entry in files:
+        if entry.object_id in sizes and sizes[entry.object_id] != entry.size:
+            raise SourceIdentityError("historical Git object has inconsistent sizes")
+        sizes[entry.object_id] = entry.size
+    digests: dict[bytes, str] = {}
+    batch: list[tuple[bytes, int]] = []
+    batch_bytes = 0
+    for object_id, size in sizes.items():
+        response_bytes = len(object_id) + len(str(size)) + 8 + size
+        if batch and batch_bytes + response_bytes > MAX_HISTORICAL_BATCH_BYTES:
+            digests.update(_read_historical_blob_batch(repository, batch, environment))
+            batch = []
+            batch_bytes = 0
+        if response_bytes > MAX_HISTORICAL_BATCH_BYTES:
+            # A large individual object keeps the existing scalar bound; small
+            # objects share a bounded batch without changing their byte digest.
+            blob = _run_git(
+                repository, ["cat-file", "blob", object_id.decode("ascii")], environment
+            )
+            if len(blob) != size:
+                raise SourceIdentityError("historical Git blob size differs from its tree")
+            digests[object_id] = hashlib.sha256(blob).hexdigest()
+        else:
+            batch.append((object_id, size))
+            batch_bytes += response_bytes
+    if batch:
+        digests.update(_read_historical_blob_batch(repository, batch, environment))
+    return digests
+
+
 def identity_at_commit(
     repository: Path,
     commit: str,
@@ -303,19 +378,25 @@ def identity_at_commit(
     release_paths = _historical_release_paths(repository, commit, environment)
     listing = _run_git(
         repository,
-        ["ls-tree", "-rz", "--full-tree", commit, "--", *release_paths],
+        ["ls-tree", "-rlz", "--full-tree", commit, "--", *release_paths],
         environment,
     )
-    records: list[dict[str, object]] = []
+    files: list[_HistoricalSourceFile] = []
     seen: set[str] = set()
     for raw in (record for record in listing.split(b"\0") if record):
         try:
             metadata, raw_name = raw.split(b"\t", 1)
-            mode, kind, object_id = metadata.split(b" ", 2)
+            mode, kind, object_id, size_text = metadata.split()
         except ValueError as error:
             raise SourceIdentityError("historical release tree is malformed") from error
         if kind != b"blob" or mode not in {b"100644", b"100755"}:
             raise SourceIdentityError("historical release tree contains a non-regular input")
+        if (
+            re.fullmatch(rb"[0-9a-f]{40}", object_id) is None
+            or len(size_text) > 20
+            or re.fullmatch(rb"0|[1-9][0-9]*", size_text) is None
+        ):
+            raise SourceIdentityError("historical release tree has an invalid object identity or size")
         relative = Path(os.fsdecode(raw_name))
         if relative.is_absolute() or ".." in relative.parts:
             raise SourceIdentityError("historical release tree contains an unsafe path")
@@ -325,26 +406,22 @@ def identity_at_commit(
                 f"historical release source path is repeated: {canonical_name}"
             )
         seen.add(canonical_name)
-        blob = _run_git(
-            repository,
-            ["cat-file", "blob", object_id.decode("ascii")],
-            environment,
+        files.append(
+            _HistoricalSourceFile(canonical_name, mode == b"100755", object_id, int(size_text))
         )
-        records.append(
-            {
-                "executable": mode == b"100755",
-                "path": canonical_name,
-                "sha256": hashlib.sha256(blob).hexdigest(),
-                "size": len(blob),
-            }
-        )
-    if not records:
+    if not files:
         raise SourceIdentityError("historical release source closure is empty")
+    blob_digests = _historical_blob_digests(repository, files, environment)
     digest = hashlib.sha256()
-    for entry in sorted(records, key=lambda value: str(value["path"])):
+    for entry in sorted(files, key=lambda value: value.path):
         digest.update(
             json.dumps(
-                entry,
+                {
+                    "executable": entry.executable,
+                    "path": entry.path,
+                    "sha256": blob_digests[entry.object_id],
+                    "size": entry.size,
+                },
                 ensure_ascii=True,
                 sort_keys=True,
                 separators=(",", ":"),

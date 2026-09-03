@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts import repository_source_identity as source_identity
 from scripts.repository_source_identity import (
     RELEASE_PATHS,
     SourceIdentityError,
@@ -280,6 +282,112 @@ class RepositorySourceIdentityTests(unittest.TestCase):
             identity["releaseSourceSha256"],
             single_file_digest("old.txt", old_data),
         )
+
+    def test_many_binary_files_use_one_deduplicated_batch_and_the_same_digest(self) -> None:
+        for index in range(100):
+            (self.root / f"apps/input-{index}.bin").write_bytes(bytes([index]) * 32 + b"\0\n")
+        (self.root / "apps/duplicate.bin").write_bytes(b"\0" * 32 + b"\0\n")
+        unusual = self.root / "apps/space and\nnewline.txt"
+        unusual.write_bytes(b"binary\0with\nnewlines\n")
+        unusual.chmod(0o755)
+        git(self.root, "add", "apps")
+        git(self.root, "commit", "-q", "-m", "add binary source inputs")
+        commit = git_output(self.root, "rev-parse", "HEAD")
+        expected = release_source_digest(self.root)
+        with patch.object(source_identity, "_run_git", wraps=source_identity._run_git) as runner:
+            actual = identity_at_commit(self.root, commit)
+        self.assertEqual(actual["releaseSourceSha256"], expected)
+        batches = [call for call in runner.call_args_list if call.args[1] == ["cat-file", "--batch"]]
+        self.assertEqual(len(batches), 1)
+        requested = batches[0].kwargs["input_bytes"].splitlines()
+        self.assertEqual(len(requested), len(set(requested)))
+        scalar_reads = [
+            call.args[1] for call in runner.call_args_list
+            if call.args[1][:2] == ["cat-file", "blob"]
+        ]
+        self.assertEqual(
+            scalar_reads,
+            [["cat-file", "blob", f"{commit}:scripts/repository_source_identity.py"]],
+        )
+
+    def test_large_blob_routing_preserves_the_same_source_identity(self) -> None:
+        expected = release_source_digest(self.root)
+        commit = git_output(self.root, "rev-parse", "HEAD")
+        with (
+            patch.object(source_identity, "MAX_HISTORICAL_BATCH_BYTES", 128),
+            patch.object(source_identity, "_run_git", wraps=source_identity._run_git) as runner,
+        ):
+            actual = identity_at_commit(self.root, commit)
+        self.assertEqual(actual["releaseSourceSha256"], expected)
+        self.assertTrue(any(call.args[1] == ["cat-file", "--batch"] for call in runner.call_args_list))
+        large_object = git_output(self.root, "rev-parse", f"{commit}:scripts/repository_source_identity.py")
+        self.assertTrue(any(
+            call.args[1] == ["cat-file", "blob", large_object]
+            for call in runner.call_args_list
+        ))
+
+    def test_batch_failure_is_not_retried_as_scalar_reads(self) -> None:
+        commit = git_output(self.root, "rev-parse", "HEAD")
+        original = source_identity._run_git
+
+        def reject_batch(
+            repository: Path,
+            arguments: list[str],
+            environment: Mapping[str, str] | None = None,
+            *,
+            input_bytes: bytes | None = None,
+        ) -> bytes:
+            if arguments == ["cat-file", "--batch"]:
+                raise SourceIdentityError("batch rejected")
+            return original(repository, arguments, environment, input_bytes=input_bytes)
+
+        with patch.object(source_identity, "_run_git", side_effect=reject_batch) as runner:
+            with self.assertRaisesRegex(SourceIdentityError, "batch rejected"):
+                identity_at_commit(self.root, commit)
+        self.assertEqual(runner.call_args_list[-1].args[1], ["cat-file", "--batch"])
+        scalar_reads = [
+            call.args[1] for call in runner.call_args_list
+            if call.args[1][:2] == ["cat-file", "blob"]
+        ]
+        self.assertEqual(
+            scalar_reads,
+            [["cat-file", "blob", f"{commit}:scripts/repository_source_identity.py"]],
+        )
+
+    def test_batch_protocol_rejects_wrong_missing_short_or_extra_objects(self) -> None:
+        object_id = b"a" * 40
+        content = b"x\0\ny"
+        header = object_id + b" blob 4\n"
+        invalid = (
+            b"", object_id + b" missing\n", b"b" * 40 + b" blob 4\n" + content + b"\n",
+            object_id + b" tree 4\n" + content + b"\n",
+            object_id + b" blob 5\n" + content + b"\n",
+            header + content, header + content[:-1], header + content + b"\nextra",
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload), patch.object(
+                source_identity, "_run_git", return_value=payload
+            ) as runner, self.assertRaises(SourceIdentityError):
+                source_identity._read_historical_blob_batch(self.root, [(object_id, 4)], None)
+            runner.assert_called_once_with(
+                self.root, ["cat-file", "--batch"], None, input_bytes=object_id + b"\n"
+            )
+        with patch.object(source_identity, "_run_git", return_value=header + content + b"\n"):
+            self.assertEqual(
+                source_identity._read_historical_blob_batch(self.root, [(object_id, 4)], None),
+                {object_id: hashlib.sha256(content).hexdigest()},
+            )
+
+    def test_inconsistent_duplicate_blob_sizes_are_rejected_before_git(self) -> None:
+        files = [
+            source_identity._HistoricalSourceFile("a", False, b"a" * 40, 1),
+            source_identity._HistoricalSourceFile("b", False, b"a" * 40, 2),
+        ]
+        with patch.object(source_identity, "_run_git") as runner, self.assertRaisesRegex(
+            SourceIdentityError, "inconsistent sizes"
+        ):
+            source_identity._historical_blob_digests(self.root, files, None)
+        runner.assert_not_called()
 
     def test_git_replace_refs_cannot_substitute_historical_source_bytes(self) -> None:
         policy = self.root / "scripts/repository_source_identity.py"

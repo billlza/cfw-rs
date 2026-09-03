@@ -935,7 +935,6 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             "make_updater_manifest.sh": (1, 1),
             "release_publication_gate.sh": (1, 1),
             "run_release_app_verifier.sh": (1, 1),
-            "dormant_app_install.py": (2, 1),
         }
         for relative, counts in expected_canonical_calls.items():
             with self.subTest(caller=relative):
@@ -947,6 +946,13 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                 self.assertEqual(
                     source.count("canonical-native-content"), context_count
                 )
+
+        installer = (SCRIPTS / "dormant_app_install.py").read_text(encoding="utf-8")
+        self.assertEqual(installer.count("scripts/run_release_app_verifier.sh"), 2)
+        self.assertNotIn("verify_release_app.sh", installer)
+        self.assertNotIn("canonical-native-content", installer)
+        self.assertIn('("/bin/bash", "-p", str(verifier))', installer)
+        self.assertIn("parse_release_app_verifier_output(", installer)
 
         for relative in (
             "publication/ga_release_contract.py",
@@ -993,7 +999,12 @@ class ReleaseConsumerContractTests(unittest.TestCase):
         self.assertNotIn("cargo tauri", updater)
         self.assertNotIn("cargo-tauri", updater)
         self.assertIn("cfw_verify_tauri_toolchain_tree", updater)
-        self.assertIn('"$repo_root/scripts/updater_signing_launcher.py"', updater)
+        self.assertIn('"$artifact_repository/scripts/updater_signing_launcher.py"', updater)
+        self.assertNotIn('"$repo_root/scripts/updater_signing_launcher.py"', updater)
+        self.assertIn('readonly artifact_repository="$publication_artifact_repository"', updater)
+        self.assertEqual(
+            updater.count('cfw_verify_tauri_toolchain_tree "$artifact_repository"'), 2
+        )
 
         # Updater signing deliberately delegates custody to one fixed launcher.
         # Keep the cross-file contract stronger than the former shell-local

@@ -11,6 +11,9 @@ import time
 from typing import Mapping, Sequence
 
 
+MAX_INPUT_BYTES = 4 * 1024 * 1024
+
+
 class BoundedProcessError(RuntimeError):
     """A command exceeded a hard boundary or could not be cleaned up."""
 
@@ -77,6 +80,7 @@ def run_bounded_process(
     environment: Mapping[str, str],
     timeout: float,
     output_limit: int,
+    input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     if (
         not command
@@ -85,6 +89,10 @@ def run_bounded_process(
         or not environment
         or timeout <= 0
         or output_limit <= 0
+        or (
+            input_bytes is not None
+            and (type(input_bytes) is not bytes or len(input_bytes) > MAX_INPUT_BYTES)
+        )
     ):
         raise BoundedProcessError("invalid", "bounded command contract is invalid")
     try:
@@ -92,18 +100,28 @@ def run_bounded_process(
             list(command),
             cwd=cwd,
             env=dict(environment),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if input_bytes is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
     except OSError as error:
         raise BoundedProcessError("start", "bounded command could not start") from error
-    if process.stdout is None or process.stderr is None:
-        _terminate_group(process)
-        raise BoundedProcessError("start", "bounded command output pipes are unavailable")
+    if (
+        process.stdout is None or process.stderr is None
+        or (input_bytes is not None and process.stdin is None)
+    ):
+        try:
+            _terminate_group(process)
+        finally:
+            for stream in (process.stdout, process.stderr, process.stdin):
+                if stream is not None:
+                    stream.close()
+        raise BoundedProcessError("start", "bounded command pipes are unavailable")
 
     streams = (process.stdout, process.stderr)
+    input_pipe = process.stdin if input_bytes is not None else None
+    input_offset = 0
     buffers: dict[int, bytearray] = {}
     selector: selectors.BaseSelector | None = None
     try:
@@ -115,6 +133,12 @@ def run_bounded_process(
         for stream in streams:
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ)
+        if input_pipe is not None:
+            if input_bytes:
+                os.set_blocking(input_pipe.fileno(), False)
+                selector.register(input_pipe, selectors.EVENT_WRITE)
+            else:
+                input_pipe.close()
         deadline = time.monotonic() + timeout
         failure: BoundedProcessError | None = None
         while selector.get_map() or process.poll() is None:
@@ -127,6 +151,32 @@ def run_bounded_process(
             except InterruptedError:
                 continue
             for key, _events in events:
+                if (
+                    input_bytes is not None
+                    and input_pipe is not None
+                    and key.fileobj is input_pipe
+                ):
+                    try:
+                        written = os.write(
+                            key.fd, input_bytes[input_offset:input_offset + 64 * 1024]
+                        )
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        failure = BoundedProcessError(
+                            "input", "bounded command closed stdin before receiving all input"
+                        )
+                        break
+                    if written <= 0:
+                        failure = BoundedProcessError(
+                            "input", "bounded command stdin made no progress"
+                        )
+                        break
+                    input_offset += written
+                    if input_offset == len(input_bytes):
+                        selector.unregister(input_pipe)
+                        input_pipe.close()
+                    continue
                 while True:
                     try:
                         chunk = os.read(key.fd, 64 * 1024)
@@ -192,6 +242,8 @@ def run_bounded_process(
             if selector is not None:
                 selector.close()
         finally:
+            if input_pipe is not None:
+                input_pipe.close()
             for stream in streams:
                 stream.close()
 

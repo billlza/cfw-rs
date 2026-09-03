@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -17,6 +18,113 @@ from scripts.publication.bounded_process import (
 
 
 class BoundedProcessTests(unittest.TestCase):
+    def test_bounded_input_is_delivered_without_blocking_output(self) -> None:
+        payload = b"input\0bytes\n" * 32768
+        with tempfile.TemporaryDirectory() as temporary:
+            result = run_bounded_process(
+                [sys.executable, "-I", "-S", "-B", "-c",
+                 "import sys; sys.stdout.buffer.write(b'p' * 131072); "
+                 "sys.stdout.buffer.flush(); "
+                 "sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+                cwd=Path(temporary).resolve(), environment=self.environment(),
+                timeout=5, output_limit=len(payload) + 131072,
+                input_bytes=payload,
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"p" * 131072 + payload)
+        self.assertEqual(result.stderr, b"")
+
+    def test_empty_input_delivers_eof(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result = run_bounded_process(
+                ["/bin/cat"], cwd=Path(temporary).resolve(),
+                environment=self.environment(), timeout=2, output_limit=1024,
+                input_bytes=b"",
+            )
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+
+    def test_oversized_input_is_rejected_before_spawn(self) -> None:
+        with patch("scripts.publication.bounded_process.subprocess.Popen") as spawn:
+            with self.assertRaises(BoundedProcessError) as captured:
+                run_bounded_process(
+                    ["/bin/cat"], cwd=Path("/"), environment=self.environment(),
+                    timeout=2, output_limit=1024,
+                    input_bytes=b"x" * (4 * 1024 * 1024 + 1),
+                )
+        self.assertEqual(captured.exception.reason, "invalid")
+        spawn.assert_not_called()
+
+    def test_early_input_close_is_an_explicit_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(BoundedProcessError) as captured:
+                run_bounded_process(
+                    ["/bin/bash", "-p", "-c", "exec 0<&-; exec /bin/sleep 30"],
+                    cwd=Path(temporary).resolve(), environment=self.environment(),
+                    timeout=2, output_limit=1024,
+                    input_bytes=b"x" * (4 * 1024 * 1024),
+                )
+        self.assertEqual(captured.exception.reason, "input")
+
+    def test_pending_input_is_covered_by_the_same_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(BoundedProcessError) as captured:
+                run_bounded_process(
+                    ["/bin/sleep", "30"], cwd=Path(temporary).resolve(),
+                    environment=self.environment(), timeout=0.2, output_limit=1024,
+                    input_bytes=b"x" * (4 * 1024 * 1024),
+                )
+        self.assertEqual(captured.exception.reason, "timeout")
+
+    def test_input_pipe_closes_when_selector_setup_fails(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            tempfile.TemporaryFile() as stdin,
+            tempfile.TemporaryFile() as stdout,
+            tempfile.TemporaryFile() as stderr,
+        ):
+            process = Mock(pid=12345, stdin=stdin, stdout=stdout, stderr=stderr)
+            process.poll.return_value = None
+            with (
+                patch("scripts.publication.bounded_process.subprocess.Popen", return_value=process),
+                patch("scripts.publication.bounded_process.selectors.DefaultSelector", side_effect=OSError("selector unavailable")),
+                patch("scripts.publication.bounded_process._terminate_group") as terminate,
+                self.assertRaisesRegex(OSError, "selector unavailable"),
+            ):
+                run_bounded_process(
+                    ["/bin/cat"], cwd=Path(temporary).resolve(),
+                    environment=self.environment(), timeout=2, output_limit=1024,
+                    input_bytes=b"public input",
+                )
+            terminate.assert_called_once_with(process)
+            self.assertTrue(stdin.closed)
+            self.assertTrue(stdout.closed)
+            self.assertTrue(stderr.closed)
+
+    def test_available_pipes_close_when_missing_pipe_cleanup_fails(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            tempfile.TemporaryFile() as stdin,
+            tempfile.TemporaryFile() as stdout,
+        ):
+            process = Mock(pid=12345, stdin=stdin, stdout=stdout, stderr=None)
+            with (
+                patch("scripts.publication.bounded_process.subprocess.Popen", return_value=process),
+                patch(
+                    "scripts.publication.bounded_process._terminate_group",
+                    side_effect=BoundedProcessError("cleanup", "owned group remains"),
+                ) as terminate,
+                self.assertRaises(BoundedProcessError) as captured,
+            ):
+                run_bounded_process(
+                    ["/bin/cat"], cwd=Path(temporary).resolve(),
+                    environment=self.environment(), timeout=2, output_limit=1024,
+                    input_bytes=b"public input",
+                )
+            self.assertEqual(captured.exception.reason, "cleanup")
+            terminate.assert_called_once_with(process)
+            self.assertTrue(stdin.closed)
+            self.assertTrue(stdout.closed)
+
     def test_exit_race_reaps_leader_before_accepting_denied_group_signal(self) -> None:
         real_killpg = os.killpg
         denied = []

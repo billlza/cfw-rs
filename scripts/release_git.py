@@ -141,6 +141,7 @@ def _invoke(
     repository: Path,
     arguments: Sequence[str],
     environment: Mapping[str, str] | None,
+    input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     try:
         completed = run_bounded_process(
@@ -149,6 +150,7 @@ def _invoke(
             environment=_closed_environment(environment),
             timeout=GIT_TIMEOUT_SECONDS,
             output_limit=MAX_GIT_OUTPUT_BYTES,
+            input_bytes=input_bytes,
         )
     except (OSError, BoundedProcessError) as error:
         raise ReleaseGitError(f"cannot execute fixed release Git: {error}") from error
@@ -313,6 +315,7 @@ def run_release_git(
     *,
     environment: Mapping[str, str] | None = None,
     protected_roots: Sequence[str],
+    input_bytes: bytes | None = None,
 ) -> bytes:
     """Run one read-only release Git query through the fixed system binary."""
 
@@ -334,7 +337,7 @@ def run_release_git(
     _validate_local_filters(repository, environment)
     _validate_local_attributes(repository, environment)
     _validate_local_excludes(repository, protected_roots, environment)
-    completed = _invoke(repository, arguments, environment)
+    completed = _invoke(repository, arguments, environment, input_bytes)
     if completed.returncode != 0:
         detail = completed.stderr[-8192:].decode("utf-8", errors="replace").strip()
         raise ReleaseGitError(

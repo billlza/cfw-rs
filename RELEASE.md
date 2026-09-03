@@ -810,6 +810,18 @@ wire proof.
    frozen artifact checkout, because its offline trust anchor intentionally
    requires the exact artifact source identity.
 
+   After successful finalization, retain the complete `publication-prepared`
+   intermediate tree in a private history directory outside the reviewable
+   workspace, recording and rechecking its byte/mode tree identity. Do not
+   discard it or alter the finalized `stage-inputs/publication` directory.
+   Downstream verifiers consume that self-contained finalized directory, not
+   the preparation tree. Unpacked upstream cryptographic test fixtures are
+   legitimate corresponding source but deliberately still match the workspace
+   scanner's name-only private-key detection. Their staging lifecycle is not
+   a reason to exempt candidate directories or read secret contents in that
+   scanner. Pending or failed finalization must retain its preparation inputs
+   for explicit recovery rather than claiming a completed publication.
+
    ```bash
    scripts/release_publication_gate.sh --seal-prepackage
    NOTARY_PROFILE=clashformac-notary scripts/make_dmg.sh

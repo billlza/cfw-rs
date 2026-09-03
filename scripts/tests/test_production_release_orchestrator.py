@@ -14,7 +14,12 @@ from unittest.mock import patch
 from scripts import ga_acceptance_journal_export as journal_export
 from scripts import production_release_evidence
 from scripts.publication import durable_file
-from scripts.publication.common import PublicationError, canonical_json, sha256_file
+from scripts.publication.common import (
+    PublicationError,
+    canonical_json,
+    sha256_bytes,
+    sha256_file,
+)
 from scripts.release_build_identity import RETIRED_GA_WORKSPACE_PATHS
 from scripts.publication.ga_release_contract import (
     ACCEPTANCE_INPUT_ROOT,
@@ -29,6 +34,7 @@ from scripts.publication.ga_release_contract import (
     INSTALL_JOURNAL_INPUT,
     MIGRATION_JOURNAL_INPUT,
     PACKAGE_ROOT,
+    PREPACKAGE_OUTPUT,
     PRODUCT_VERSION,
     RUNTIME_ACCEPTANCE_DOCUMENT,
     RUNTIME_ACCEPTANCE_INPUT,
@@ -42,7 +48,9 @@ from scripts.publication.ga_release_contract import (
     STAGE_SCHEMA_VERSIONS,
     UPDATER_SET,
     _parse_strict_json,
+    _prepackage_ci_bindings,
     _record,
+    _repo_relative,
     _require_hosted_ci_source_binding,
     _require_artifact_set_adapter,
     _stage_manifest,
@@ -591,6 +599,50 @@ class AdapterContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = StageFixture()
         self.addCleanup(self.fixture.cleanup)
+
+    def test_prepackage_ci_records_use_fixed_repository_relative_output_paths(self) -> None:
+        normalized_ci = {"toolchain_sha256": "a" * 64}
+        hosted_ci = {
+            "repository": {"id": 12},
+            "run": {"id": 34, "run_attempt": 2},
+            "workflow": {"id": 56},
+        }
+        expected = {
+            "hosted": {
+                "path": (PREPACKAGE_OUTPUT / "hosted-ci.json").as_posix(),
+                "repository_id": 12,
+                "run_attempt": 2,
+                "run_id": 34,
+                "sha256": sha256_bytes(canonical_json(hosted_ci)),
+                "workflow_id": 56,
+            },
+            "local_deterministic": {
+                "path": (PREPACKAGE_OUTPUT / "local-ci-lanes.json").as_posix(),
+                "sha256": sha256_bytes(canonical_json(normalized_ci)),
+                "toolchain_sha256": "a" * 64,
+            },
+        }
+        for repository in (
+            self.fixture.repository,
+            self.fixture.repository / "target/release-worktrees/40041",
+        ):
+            with self.subTest(repository=repository):
+                self.assertEqual(
+                    _prepackage_ci_bindings(repository, normalized_ci, hosted_ci),
+                    expected,
+                )
+        self.assertFalse((self.fixture.ga_root / "prepackage").exists())
+
+    def test_evidence_path_boundary_rejects_relative_and_foreign_paths(self) -> None:
+        repository = self.fixture.repository
+        for path in (
+            PREPACKAGE_OUTPUT / "hosted-ci.json",
+            repository.parent / "foreign/hosted-ci.json",
+        ):
+            with self.subTest(path=path), self.assertRaisesRegex(
+                PublicationError, "outside the repository"
+            ):
+                _repo_relative(repository, path)
 
     def test_hosted_ci_source_binding_requires_v3_workflow_identity(self) -> None:
         expected_source = {

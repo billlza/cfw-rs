@@ -443,6 +443,32 @@ def _require_hosted_ci_source_binding(
         raise PublicationError("hosted CI receipt differs from the frozen candidate")
 
 
+def _prepackage_ci_bindings(
+    repository: Path,
+    normalized_ci: dict[str, Any],
+    hosted_ci: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "hosted": {
+            "path": _repo_relative(
+                repository, _path(repository, PREPACKAGE_OUTPUT / "hosted-ci.json")
+            ),
+            "repository_id": hosted_ci["repository"]["id"],
+            "run_attempt": hosted_ci["run"]["run_attempt"],
+            "run_id": hosted_ci["run"]["id"],
+            "sha256": sha256_bytes(canonical_json(hosted_ci)),
+            "workflow_id": hosted_ci["workflow"]["id"],
+        },
+        "local_deterministic": {
+            "path": _repo_relative(
+                repository, _path(repository, PREPACKAGE_OUTPUT / "local-ci-lanes.json")
+            ),
+            "sha256": sha256_bytes(canonical_json(normalized_ci)),
+            "toolchain_sha256": normalized_ci["toolchain_sha256"],
+        },
+    }
+
+
 def _verified_prepackage_inputs(
     repository: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, bytes]]:
@@ -675,23 +701,7 @@ def _verified_prepackage_inputs(
                 "tree_sha256": app_manifest["sha256"],
             },
         },
-        "ci": {
-            "hosted": {
-                "path": _repo_relative(repository, PREPACKAGE_OUTPUT / "hosted-ci.json"),
-                "repository_id": hosted_ci["repository"]["id"],
-                "run_attempt": hosted_ci["run"]["run_attempt"],
-                "run_id": hosted_ci["run"]["id"],
-                "sha256": sha256_bytes(canonical_json(hosted_ci)),
-                "workflow_id": hosted_ci["workflow"]["id"],
-            },
-            "local_deterministic": {
-                "path": _repo_relative(
-                    repository, PREPACKAGE_OUTPUT / "local-ci-lanes.json"
-                ),
-                "sha256": sha256_bytes(canonical_json(normalized_ci)),
-                "toolchain_sha256": normalized_ci["toolchain_sha256"],
-            },
-        },
+        "ci": _prepackage_ci_bindings(repository, normalized_ci, hosted_ci),
         "legal_source": legal_source,
         "notarization": {
             "archive": _record(repository, _path(repository, NOTARY_ARCHIVE)),

@@ -118,7 +118,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "2746141914df7fc98ced43447fc93a58f5ee0052a25ea79a6abc583a91e3d69d"
+    "a8660d82f50dd2693f3eca6fe367bbd20f37744478b2f11039d97dd476ce844c"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -132,7 +132,7 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
         "63a05e630f3622bbcd4d5b418ebe8174487d8690ea60b383147bd24e87696f0a"
     ),
     "_verified_prepackage_inputs": (
-        "b068d77b87ed0d4e709dc10444bc00646836e970d4a08f9d94fc39bd350b12d7"
+        "64e33879dffa73ddd6b6ad51191a0c55c3edb4936f6a44da61ee03287deb22a1"
     ),
     "_verified_package_sets": "6d530c9583863c1b56baa56554f2c8e576d90f0797c113e3d15dada9f8805b56",
     "_verified_migration_journals": (
@@ -173,7 +173,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     ),
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "a341c1ff8aa81124367d9c405ae93338ee1a040952186106b010facef6d3de6b"
+    "349b95c2551d80998bae8407df42fad17de18ff3f1a4b360c0dbeb14b6981cd4"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}

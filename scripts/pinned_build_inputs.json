@@ -3157,7 +3157,7 @@
     "scripts/publication/build_tool_preparation.py": "02575ee719cdd4185f1a7866af3b653ff451e0bad6567fc8a3cabbc5f1f87601",
     "scripts/publication/draft.py": "4e9024f1a0142294489740d5a5340e4bdb91ca0e84245c9fd59d8351240d6451",
     "scripts/publication/finalize.py": "c7795e1ba0b51d733123c3c54e220995489514ae9b7b445dcf9e74b7536959be",
-    "scripts/publication/ga_release_contract.py": "df92b78f71dff689afa8b6808d6ee1db6e7222a7fa9f4987bff8914931efcdee",
+    "scripts/publication/ga_release_contract.py": "fe0c683a47fe1b2d1c26106eae79606679ca9b6ae017edd4229be75afe4ac3e4",
     "scripts/publication/npm_collector.py": "781b2f63000b4dd4a258cd1fbdfb0808975751a9fea29b3a6a6093f782b48e9e",
     "scripts/publication_evidence.py": "41eccca6056c48b04f6ecbc5452149a1c9ad3d473dce6217e330947166575fe3",
     "scripts/release_artifact_set_cli.py": "2e094f66dff704bf1b3678c891efdda47475b11df4d44d84cf28875546f0b644",

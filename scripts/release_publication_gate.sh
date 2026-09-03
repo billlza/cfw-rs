@@ -22,7 +22,12 @@ cfw_select_release_apple_toolchain
 # shellcheck source=scripts/release_publication_path_contract.sh
 source "$publication_repo_root/scripts/release_publication_path_contract.sh"
 
-readonly publication_ga_root="$publication_repo_root/target/candidates/0.4.0/ga/40041"
+publication_artifact_repository="$(cfw_run_release_python_script \
+  "$publication_repo_root" \
+  "$publication_repo_root/scripts/release_executor_source.py" \
+  --print-frozen-artifact-repository)"
+readonly publication_artifact_repository
+readonly publication_ga_root="$publication_artifact_repository/target/candidates/0.4.0/ga/40041"
 readonly publication_native_products="$publication_ga_root/signing-output/signed-native-products"
 
 run_production_ga_stage() {
@@ -53,8 +58,8 @@ run_hosted_ci_receipt() {
     return 1
   }
   cfw_run_release_python_script \
-    "$publication_repo_root" \
-    "$publication_repo_root/scripts/github_hosted_ci_receipt.py" \
+    "$publication_artifact_repository" \
+    "$publication_artifact_repository/scripts/github_hosted_ci_receipt.py" \
     "$@"
 }
 
@@ -63,7 +68,7 @@ release_native_products_root_for_app() {
     echo "error: signed-native-products admission requires the fixed GA app" >&2
     return 1
   }
-  cfw_require_fixed_publication_app_path "$publication_repo_root" "$1" ||
+  cfw_require_fixed_publication_app_path "$publication_artifact_repository" "$1" ||
     return 1
   if [[ ! -d "$publication_native_products" || -L "$publication_native_products" ]]; then
     echo "error: fixed GA signed-native-products root is unavailable: $publication_native_products" >&2
@@ -78,11 +83,11 @@ verify_release_prepackage_evidence() {
     return 1
   }
   local app_path="$1"
-  cfw_require_fixed_publication_app_path "$publication_repo_root" "$app_path" ||
+  cfw_require_fixed_publication_app_path "$publication_artifact_repository" "$app_path" ||
     return 1
   run_production_ga_stage verify prepackage
   /bin/bash -p \
-    "$publication_repo_root/scripts/verify_release_app.sh" \
+    "$publication_artifact_repository/scripts/verify_release_app.sh" \
     "$app_path" \
     "$publication_native_products" \
     --context canonical-native-content
@@ -113,7 +118,7 @@ verify_release_upload_artifacts() {
   verify_release_publication_evidence "${@:2}"
   run_release_artifact_set \
     verify-release \
-    --repository "$publication_repo_root" \
+    --repository "$publication_artifact_repository" \
     --version "0.4.0"
 }
 
@@ -156,7 +161,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       run_production_ga_stage verify publication
       run_release_artifact_set \
         seal-release \
-        --repository "$publication_repo_root" \
+        --repository "$publication_artifact_repository" \
         --version "0.4.0"
       ;;
     --verify-prepackage)

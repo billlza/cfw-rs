@@ -1148,9 +1148,17 @@ class CommandBoundaryTests(unittest.TestCase):
 
     def test_main_dispatches_exactly_one_stage(self) -> None:
         manifest = _stage_manifest("prepackage", {"fixture": True})
+        sources = object()
         with (
             patch.object(sys, "argv", ["production_release_evidence.py", "prepackage"]),
             patch.object(production_release_evidence, "require_closed_release_runtime"),
+            patch.object(
+                production_release_evidence, "capture_frozen_release_sources",
+                return_value=sources,
+            ) as capture,
+            patch.object(
+                production_release_evidence, "require_frozen_sources_unchanged"
+            ) as unchanged,
             patch(
                 "scripts.publication.orchestrator.seal_prepackage",
                 return_value=manifest,
@@ -1161,6 +1169,10 @@ class CommandBoundaryTests(unittest.TestCase):
         ):
             production_release_evidence.main()
         prepackage.assert_called_once_with(production_release_evidence._repository())
+        capture.assert_called_once_with(
+            Path(production_release_evidence.__file__).resolve().parent.parent
+        )
+        unchanged.assert_called_once_with(sources)
         ga.assert_not_called()
         publication.assert_not_called()
 
@@ -1184,8 +1196,40 @@ class CommandBoundaryTests(unittest.TestCase):
             production_release_evidence.main()
         admission.assert_not_called()
         source_self_check.assert_called_once_with(
-            production_release_evidence._repository()
+            Path(production_release_evidence.__file__).resolve().parent.parent
         )
+
+    def test_dirty_executor_stops_before_any_stage_mutation(self) -> None:
+        with (
+            patch.object(sys, "argv", ["production_release_evidence.py", "prepackage"]),
+            patch.object(production_release_evidence, "require_closed_release_runtime"),
+            patch.object(
+                production_release_evidence, "capture_frozen_release_sources",
+                side_effect=production_release_evidence.ExecutorSourceError("dirty executor"),
+            ),
+            patch("scripts.publication.orchestrator.seal_prepackage") as prepackage,
+            self.assertRaisesRegex(SystemExit, "dirty executor"),
+        ):
+            production_release_evidence.main()
+        prepackage.assert_not_called()
+
+    def test_executor_drift_after_stage_publication_is_explicitly_unknown(self) -> None:
+        manifest = _stage_manifest("prepackage", {"fixture": True})
+        with (
+            patch.object(sys, "argv", ["production_release_evidence.py", "prepackage"]),
+            patch.object(production_release_evidence, "require_closed_release_runtime"),
+            patch.object(production_release_evidence, "capture_frozen_release_sources"),
+            patch.object(
+                production_release_evidence, "require_frozen_sources_unchanged",
+                side_effect=production_release_evidence.ExecutorSourceError("source drift"),
+            ),
+            patch(
+                "scripts.publication.orchestrator.seal_prepackage", return_value=manifest
+            ) as prepackage,
+            self.assertRaisesRegex(SystemExit, "outcome is unknown"),
+        ):
+            production_release_evidence.main()
+        prepackage.assert_called_once()
 
     def test_main_production_commands_remain_closed_runtime_only(self) -> None:
         commands = (

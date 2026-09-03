@@ -42,7 +42,7 @@ from scripts.dormant_app_install import (
     admit_fixed_candidate,
     _assert_guard_unchanged,
     _normalize_routes,
-    _matching_clean_source_identity,
+    _clean_profile_sources,
     _parse_processes,
     _parse_system_extension_identities,
     _require_fixed_command,
@@ -1164,7 +1164,10 @@ class DormantInstallValidationTests(unittest.TestCase):
         self.assertEqual(paths.profile, GA_INSTALL_PROFILE)
         self.assertEqual(paths.profile.build_number, "40041")
         self.assertEqual(paths.profile.previous_build_number, "40019")
-        self.assertEqual(paths.repository, paths.operator_repository)
+        self.assertEqual(
+            paths.repository,
+            paths.operator_repository / "target/release-worktrees/40041",
+        )
         self.assertTrue(
             str(paths.candidate_app).endswith(
                 "/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app"
@@ -1364,33 +1367,28 @@ class DormantInstallValidationTests(unittest.TestCase):
             )
         )
 
-    def test_operator_and_release_worktree_must_share_one_clean_source_identity(self) -> None:
-        identity = {
-            "repositoryCommit": "a" * 40,
-            "releaseSourceSha256": "b" * 64,
-        }
-        with patch(
-            "scripts.dormant_app_install.current_identity",
-            side_effect=[identity, identity],
-        ) as current:
-            self.assertEqual(
-                _matching_clean_source_identity(Path("/operator"), Path("/worktree")),
-                identity,
-            )
-        self.assertEqual(
-            current.call_args_list,
-            [
-                call(Path("/operator"), require_clean=True),
-                call(Path("/worktree"), require_clean=True),
-            ],
-        )
+    def test_operator_and_frozen_artifact_keep_distinct_checked_sources(self) -> None:
+        from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
-        drift = {**identity, "releaseSourceSha256": "c" * 64}
+        operator = Path("/operator")
+        artifact = operator / "target/release-worktrees/40041"
+        sources = FrozenReleaseSources(
+            executor=ExecutorSource(operator, "a" * 40, "b" * 64),
+            artifact=ExecutorSource(artifact, "c" * 40, "d" * 64),
+        )
         with patch(
-            "scripts.dormant_app_install.current_identity",
-            side_effect=[identity, drift],
+            "scripts.dormant_app_install.capture_frozen_release_sources",
+            return_value=sources,
+        ) as capture:
+            self.assertIs(
+                _clean_profile_sources(operator, artifact), sources
+            )
+        capture.assert_called_once_with(operator)
+        with patch(
+            "scripts.dormant_app_install.capture_frozen_release_sources",
+            return_value=sources,
         ), self.assertRaises(CandidateBindingError):
-            _matching_clean_source_identity(Path("/operator"), Path("/worktree"))
+            _clean_profile_sources(operator, Path("/other-worktree"))
 
     def test_local_user_inventory_blocks_logged_out_authenticated_users(self) -> None:
         def runner(output: str):

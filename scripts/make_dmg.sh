@@ -38,7 +38,8 @@ if [[ "${1:-}" == "--recover-submission-id" ]]; then
 else
   [[ $# -eq 0 ]] || die "usage: make_dmg.sh [--recover-submission-id UUID]"
 fi
-readonly ga_root="$repo_root/target/candidates/0.4.0/ga/40041"
+readonly artifact_repository="$publication_artifact_repository"
+readonly ga_root="$artifact_repository/target/candidates/0.4.0/ga/40041"
 readonly app_path="$ga_root/signed/Clash for Mac.app"
 [[ -d "$app_path" && ! -L "$app_path" ]] || die "app bundle not found or is a symlink: $app_path"
 
@@ -51,7 +52,7 @@ notary_profile="${NOTARY_PROFILE:-}"
 
 native_products_root="$(release_native_products_root_for_app "$app_path")" ||
   die "cannot resolve candidate-specific native products"
-"$repo_root/scripts/verify_release_app.sh" \
+/bin/bash -p "$artifact_repository/scripts/verify_release_app.sh" \
   "$app_path" "$native_products_root" \
   --context canonical-native-content
 
@@ -92,7 +93,7 @@ if [[ -n "$recovery_submission_id" ]]; then
     "$repo_root" \
     "$repo_root/scripts/dmg_notarization_transaction.py" \
     recover \
-    --repository "$repo_root" \
+    --repository "$artifact_repository" \
     --version "$version" \
     --build-number "$build_number" \
     --notary-profile "$notary_profile" \
@@ -105,7 +106,7 @@ cfw_run_release_python_script \
   "$repo_root" \
   "$repo_root/scripts/dmg_notarization_transaction.py" \
   preflight \
-  --repository "$repo_root" \
+  --repository "$artifact_repository" \
   --version "$version" \
   --build-number "$build_number" \
   --notary-profile "$notary_profile"
@@ -139,7 +140,7 @@ trap cleanup EXIT
 
 /usr/bin/ditto "$app_path" "$payload_directory/Clash for Mac.app"
 ln -s /Applications "$payload_directory/Applications"
-"$repo_root/scripts/verify_release_app.sh" \
+/bin/bash -p "$artifact_repository/scripts/verify_release_app.sh" \
   "$payload_directory/Clash for Mac.app" \
   "$native_products_root" \
   --context canonical-native-content
@@ -182,7 +183,7 @@ cfw_run_release_python_script \
   "$repo_root" \
   "$repo_root/scripts/dmg_notarization_transaction.py" \
   start \
-  --repository "$repo_root" \
+  --repository "$artifact_repository" \
   --version "$version" \
   --build-number "$build_number" \
   --notary-profile "$notary_profile" \

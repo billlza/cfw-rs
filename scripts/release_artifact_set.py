@@ -2032,7 +2032,7 @@ def verify_publication_semantics(
         else:
             from publication.verify import verify_evidence
 
-        verify_evidence(publication, app, False)
+        verify_evidence(publication, app, False, repository=repository)
     except (ImportError, OSError, PublicationError, ValueError) as error:
         raise ArtifactSetError("GA publication evidence is invalid") from error
 

@@ -57,13 +57,24 @@ if __package__:
     from .macos_durability import full_fsync
     from .release_build_identity import (
         ACTIVE_RELEASE_IDENTITY,
+        FROZEN_GA_REPOSITORY_RELATIVE,
         BuildIdentityError,
         bundle_build_identity,
         canonical_build_version,
         ga_signed_native_products_root,
         ga_signed_root,
     )
-    from .repository_source_identity import SourceIdentityError, current_identity
+    from .release_executor_source import (
+        ExecutorSourceError,
+        FrozenReleaseSources,
+        capture_frozen_release_sources,
+        require_frozen_sources_unchanged,
+    )
+    from .release_app_verifier_output import (
+        ReleaseAppVerifierOutputError,
+        parse_release_app_verifier_output,
+    )
+    from .repository_source_identity import SourceIdentityError
     from .verify_notary_log import NotaryLogError, validate_files as validate_notary_files
 else:
     from candidate_artifact_binding import (
@@ -81,13 +92,24 @@ else:
     from macos_durability import full_fsync
     from release_build_identity import (
         ACTIVE_RELEASE_IDENTITY,
+        FROZEN_GA_REPOSITORY_RELATIVE,
         BuildIdentityError,
         bundle_build_identity,
         canonical_build_version,
         ga_signed_native_products_root,
         ga_signed_root,
     )
-    from repository_source_identity import SourceIdentityError, current_identity
+    from release_executor_source import (
+        ExecutorSourceError,
+        FrozenReleaseSources,
+        capture_frozen_release_sources,
+        require_frozen_sources_unchanged,
+    )
+    from release_app_verifier_output import (
+        ReleaseAppVerifierOutputError,
+        parse_release_app_verifier_output,
+    )
+    from repository_source_identity import SourceIdentityError
     from verify_notary_log import NotaryLogError, validate_files as validate_notary_files
 
 
@@ -104,10 +126,10 @@ JOURNAL_PENDING_NAME: Final = ".com.bill.clashformac.dormant-install.pending"
 LOCK_NAME: Final = ".com.bill.clashformac.dormant-install.lock"
 MAINTENANCE_LOCK_NAME: Final = ".com.bill.clashformac.release-maintenance-v1.lock"
 STAGING_PREFIX: Final = ".com.bill.clashformac.dormant-install."
-REPOSITORY_RELATIVE: Final = Path(".")
-CANDIDATE_RELATIVE: Final = ga_signed_root(REPOSITORY_RELATIVE)
+REPOSITORY_RELATIVE: Final = FROZEN_GA_REPOSITORY_RELATIVE
+CANDIDATE_RELATIVE: Final = ga_signed_root(Path("."))
 NATIVE_PRODUCTS_RELATIVE: Final = ga_signed_native_products_root(
-    REPOSITORY_RELATIVE
+    Path(".")
 )
 MAX_JOURNAL_BYTES: Final = 1024 * 1024
 MAX_GUARD_SEGMENTS: Final = 8
@@ -1777,24 +1799,13 @@ def _assert_guard_unchanged(before: dict[str, Any], after: dict[str, Any]) -> No
         )
 
 
-def _matching_clean_source_identity(
-    operator_repository: Path, release_worktree: Path
-) -> dict[str, str]:
-    operator_source = current_identity(operator_repository, require_clean=True)
-    worktree_source = current_identity(release_worktree, require_clean=True)
-    if worktree_source != operator_source:
-        raise CandidateBindingError(
-            "operator and candidate worktree source identities differ"
-        )
-    return worktree_source
-
-
-def _clean_profile_source_identity(
+def _clean_profile_sources(
     operator_repository: Path, release_repository: Path
-) -> dict[str, str]:
-    if release_repository == operator_repository:
-        return current_identity(operator_repository, require_clean=True)
-    return _matching_clean_source_identity(operator_repository, release_repository)
+) -> FrozenReleaseSources:
+    sources = capture_frozen_release_sources(operator_repository)
+    if sources.artifact.repository != release_repository:
+        raise CandidateBindingError("candidate source is not the fixed frozen checkout")
+    return sources
 
 
 def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> CandidateIdentity:
@@ -1833,9 +1844,10 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
     ):
         raise InstallError("candidate_path_invalid", "candidate path is not the fixed signed output")
     try:
-        source = _clean_profile_source_identity(
+        sources = _clean_profile_sources(
             operator_repository, paths.repository
         )
+        source = sources.artifact.identity
         manifest = load_strict_json(paths.candidate_manifest, "signed candidate manifest")
         metadata = manifest.get("metadata")
         if not isinstance(metadata, dict):
@@ -1860,6 +1872,7 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
         bundle = bundle_build_identity(paths.candidate_app)
     except (
         CandidateBindingError,
+        ExecutorSourceError,
         SourceIdentityError,
         BuildIdentityError,
         KeyError,
@@ -1897,7 +1910,7 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
         raise InstallError("candidate_gatekeeper_mismatch", "Gatekeeper evidence targets other bytes")
 
     native_products = paths.repository / profile.native_products_relative
-    verifier = paths.repository / "scripts/verify_release_app.sh"
+    verifier = paths.repository / "scripts/run_release_app_verifier.sh"
     _require_command_success(
         _run_fixed_release_verifier(
             paths.repository, verifier, paths.candidate_app, native_products
@@ -1922,10 +1935,12 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
     # Close every read/command TOCTOU window before returning the admitted bytes.
     if _tree_sha256(paths.candidate_app, "signed candidate") != tree_sha256:
         raise InstallError("candidate_identity_drift", "candidate changed during admission")
-    if (
-        _clean_profile_source_identity(operator_repository, paths.repository) != source
-    ):
-        raise InstallError("candidate_source_drift", "release source changed during admission")
+    try:
+        require_frozen_sources_unchanged(sources)
+    except ExecutorSourceError as error:
+        raise InstallError(
+            "candidate_source_drift", "artifact or executor source changed during admission"
+        ) from error
     return CandidateIdentity(
         app=AppIdentity(VERSION, build_number, tree_sha256),
         manifest_sha256=_hash_regular(paths.candidate_manifest, "candidate manifest"),
@@ -1937,9 +1952,16 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
 def _run_fixed_release_verifier(
     repository: Path, verifier: Path, app: Path, native_products: Path
 ) -> CommandResult:
-    expected = repository / "scripts/verify_release_app.sh"
+    expected = repository / "scripts/run_release_app_verifier.sh"
     if verifier != expected or not verifier.is_file() or verifier.is_symlink():
         raise InstallError("release_verifier_invalid", "release verifier path is not fixed")
+    if (
+        app != repository / GA_INSTALL_PROFILE.candidate_relative / TARGET_NAME
+        or native_products != repository / GA_INSTALL_PROFILE.native_products_relative
+    ):
+        raise InstallError(
+            "release_verifier_invalid", "release verifier inputs are not the fixed GA paths"
+        )
     metadata = verifier.lstat()
     if (
         metadata.st_uid != os.geteuid()
@@ -1950,15 +1972,23 @@ def _run_fixed_release_verifier(
             "release_verifier_invalid",
             "release verifier ownership or mode is unsafe",
         )
-    return _run_bounded_process(
-        (
-            str(verifier),
-            str(app),
-            str(native_products),
-            "--context",
-            "canonical-native-content",
-        )
+    result = _run_bounded_process(
+        ("/bin/bash", "-p", str(verifier))
     )
+    if result.returncode == 0:
+        try:
+            parse_release_app_verifier_output(
+                result.stdout.encode("utf-8"),
+                result.stderr.encode("utf-8"),
+                expected_app=str(app),
+                expected_build_number=BUILD_NUMBER,
+            )
+        except ReleaseAppVerifierOutputError as error:
+            raise InstallError(
+                "release_verifier_output_invalid",
+                "release application verification output is incomplete or unrecognized",
+            ) from error
+    return result
 
 
 def verify_dormant_bundle(

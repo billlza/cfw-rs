@@ -20,6 +20,10 @@ from publication.common import PublicationError
 from publication.draft import draft
 from publication.finalize import finalize
 from publication.verify import verify
+from release_executor_source import (
+    capture_frozen_release_sources,
+    require_frozen_sources_unchanged,
+)
 
 
 def command_draft(arguments: argparse.Namespace) -> None:
@@ -37,7 +41,15 @@ def command_finalize(arguments: argparse.Namespace) -> None:
 
 
 def command_verify(arguments: argparse.Namespace) -> None:
-    verify(arguments.evidence, arguments.app, arguments.fixture)
+    if arguments.fixture:
+        verify(arguments.evidence, arguments.app, True)
+    else:
+        sources = capture_frozen_release_sources(Path(__file__).resolve().parent.parent)
+        verify(
+            arguments.evidence, arguments.app, False,
+            repository=sources.artifact.repository,
+        )
+        require_frozen_sources_unchanged(sources)
     print(f"publication evidence verified: {arguments.evidence.resolve(strict=True)}")
 
 

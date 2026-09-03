@@ -203,10 +203,13 @@ done
 
 for fragment in \
   'BUILD_NUMBER: Final = ACTIVE_RELEASE_IDENTITY.ga_build' \
-  'CANDIDATE_RELATIVE: Final = ga_signed_root(REPOSITORY_RELATIVE)' \
+  'REPOSITORY_RELATIVE: Final = FROZEN_GA_REPOSITORY_RELATIVE' \
+  'CANDIDATE_RELATIVE: Final = ga_signed_root(Path("."))' \
   'NATIVE_PRODUCTS_RELATIVE: Final = ga_signed_native_products_root(' \
   'artifact_kind="notarized-ga-candidate-v1"' \
-  '_matching_clean_source_identity' \
+  '_clean_profile_sources' \
+  'require_frozen_sources_unchanged' \
+  'scripts/run_release_app_verifier.sh' \
   'parse_service_maintenance_receipt' \
   'cfw-current-service-authority-recovery-intent-v1' \
   'recover-installed-40019-global-authority' \

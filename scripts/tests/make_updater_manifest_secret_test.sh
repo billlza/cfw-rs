@@ -173,10 +173,11 @@ fi
 }
 
 fixture_repo="$temporary_root/repository"
-ga_root="$fixture_repo/target/candidates/0.4.0/ga/40041"
+fixture_artifact_repository="$fixture_repo/target/release-worktrees/40041"
+ga_root="$fixture_artifact_repository/target/candidates/0.4.0/ga/40041"
 app_path="$ga_root/signed/Clash for Mac.app"
 native_products="$ga_root/signing-output/signed-native-products"
-mkdir -p "$fixture_repo/scripts" "$native_products" \
+mkdir -p "$fixture_repo/scripts" "$fixture_artifact_repository/scripts" "$native_products" \
   "$app_path/Contents"
 /bin/cp "$repo_root/scripts/make_updater_manifest.sh" "$fixture_repo/scripts/"
 
@@ -197,6 +198,7 @@ SH
 cat >"$fixture_repo/scripts/release_publication_gate.sh" <<SH
 CFW_RELEASE_PYTHON_EXECUTABLE="$trusted_python"
 export CFW_RELEASE_PYTHON_EXECUTABLE
+readonly publication_artifact_repository="$fixture_artifact_repository"
 
 cfw_run_release_python_script() {
   local repository="\$1"
@@ -207,16 +209,16 @@ cfw_run_release_python_script() {
 }
 
 release_native_products_root_for_app() {
-  [[ "\$1" == "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app" ]]
-  printf '%s\n' "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40041/signing-output/signed-native-products"
+  [[ "\$1" == "\$publication_artifact_repository/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app" ]]
+  printf '%s\n' "\$publication_artifact_repository/target/candidates/0.4.0/ga/40041/signing-output/signed-native-products"
 }
 
 verify_release_prepackage_evidence() {
-  [[ "\$#" -eq 1 && "\$1" == "\${BASH_SOURCE[0]%/scripts/release_publication_gate.sh}/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app" ]]
+  [[ "\$#" -eq 1 && "\$1" == "\$publication_artifact_repository/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app" ]]
 }
 SH
 
-cat >"$fixture_repo/scripts/verify_release_app.sh" <<'SH'
+cat >"$fixture_artifact_repository/scripts/verify_release_app.sh" <<'SH'
 #!/bin/bash
 set -euo pipefail
 repo_root="${BASH_SOURCE[0]%/scripts/verify_release_app.sh}"
@@ -226,7 +228,7 @@ repo_root="${BASH_SOURCE[0]%/scripts/verify_release_app.sh}"
 [[ "$3" == "--context" ]]
 [[ "$4" == "canonical-native-content" ]]
 SH
-chmod 755 "$fixture_repo/scripts/verify_release_app.sh"
+chmod 755 "$fixture_artifact_repository/scripts/verify_release_app.sh"
 
 cat >"$fixture_repo/scripts/validate_updater_archive.py" <<'PY'
 from __future__ import annotations
@@ -247,7 +249,7 @@ if any(
     raise SystemExit("caller signing secret reached archive validation")
 PY
 
-cat >"$fixture_repo/scripts/updater_signing_launcher.py" <<'PY'
+cat >"$fixture_artifact_repository/scripts/updater_signing_launcher.py" <<'PY'
 from __future__ import annotations
 
 import os
@@ -296,6 +298,10 @@ if not arguments or arguments[0] != "seal-updater":
     raise SystemExit("unexpected release-artifact-set invocation")
 staging = Path(arguments[arguments.index("--staging") + 1])
 destination = Path(arguments[arguments.index("--destination") + 1])
+repository = Path(arguments[arguments.index("--repository") + 1])
+expected_repository = Path(__file__).resolve().parents[1] / "target/release-worktrees/40041"
+if repository != expected_repository:
+    raise SystemExit("release-set sealer received executor source instead of artifact source")
 shutil.copytree(staging, destination)
 (destination / "updater-set.seal.json").write_text("{}\n", encoding="utf-8")
 PY
@@ -316,7 +322,7 @@ printf '%s\n' "fixture app" >"$app_path/Contents/fixture.txt"
 
 run_fixture() {
   run_clean_environment \
-    CFW_TOOLCHAIN_ROOT="$fixture_repo/target/toolchains" \
+    CFW_TOOLCHAIN_ROOT="$fixture_artifact_repository/target/toolchains" \
     "$fixture_repo/scripts/make_updater_manifest.sh"
 }
 
@@ -340,7 +346,7 @@ do
 done
 
 /bin/rm -rf "$final_set"
-touch "$fixture_repo/scripts/fail-signing"
+touch "$fixture_artifact_repository/scripts/fail-signing"
 failure_log="$temporary_root/failure.log"
 if run_fixture >"$failure_log" 2>&1; then
   echo "error: synthetic signer failure unexpectedly passed" >&2

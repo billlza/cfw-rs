@@ -82,6 +82,9 @@ class ReleaseIdentity:
 
 
 ACTIVE_RELEASE_IDENTITY = ReleaseIdentity(PRODUCT_VERSION, "40041")
+FROZEN_GA_REPOSITORY_RELATIVE = Path(
+    f"target/release-worktrees/{ACTIVE_RELEASE_IDENTITY.ga_build}"
+)
 UNSIGNED_VALIDATION_BUILD = "40000"
 SIGNING_OUTPUT_RELATIVE = Path("signing-output")
 SIGNING_INPUT_NAME = "signing-input"
@@ -193,6 +196,12 @@ def ga_root(repository: Path) -> Path:
         / f"target/candidates/{PRODUCT_VERSION}/ga/"
         f"{ACTIVE_RELEASE_IDENTITY.ga_build}"
     )
+
+
+def frozen_ga_repository(executor_repository: Path) -> Path:
+    """Locate the one frozen artifact checkout; never fall back to tool source."""
+
+    return executor_repository / FROZEN_GA_REPOSITORY_RELATIVE
 
 
 def ga_pre_sign_native_products_root(repository: Path) -> Path:

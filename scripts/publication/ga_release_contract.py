@@ -358,7 +358,7 @@ def _verified_legal_source_closure(
     _verify_publication_adapter(repository)
     root = _path(repository, PUBLICATION_INPUT_ROOT)
     try:
-        verify_publication_evidence(root, app, False)
+        verify_publication_evidence(root, app, False, repository=repository)
     except (OSError, PublicationError, ValueError) as error:
         raise PublicationError("GA legal/source/SBOM closure is invalid") from error
     required = (

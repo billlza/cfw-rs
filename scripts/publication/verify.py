@@ -111,6 +111,9 @@ def _verify_artifact_inputs(
         native_products_root(repository, build_number),
         app,
         build_number,
+        # This argument controls release_git reads. None selects that adapter's
+        # fixed minimal environment, never the caller's ambient Git state.
+        None,
     )
     by_kind = {item["kind"]: item for item in artifacts}
     if set(by_kind) != set(expected):
@@ -147,7 +150,9 @@ def _verify_inventory(
         raise PublicationError("publication inventory binding mismatch")
 
 
-def verify_evidence(root: Path, app: Path, fixture: bool) -> None:
+def verify_evidence(
+    root: Path, app: Path, fixture: bool, *, repository: Path | None = None
+) -> None:
     _verify_evidence_manifest(root)
     machine = require_exact_keys(
         load_json(root / "machine-closure.json"),
@@ -211,7 +216,8 @@ def verify_evidence(root: Path, app: Path, fixture: bool) -> None:
             if sha256_file(path) != item["sha256"]:
                 raise PublicationError(f"{collection_name} evidence differs from its binding")
     if not fixture:
-        repository = Path(__file__).resolve().parent.parent.parent
+        if repository is None:
+            repository = Path(__file__).resolve().parent.parent.parent
         _verify_artifact_inputs(
             repository,
             root,
@@ -257,11 +263,14 @@ def verify_evidence(root: Path, app: Path, fixture: bool) -> None:
     )
 
 
-def verify(root: Path, app: Path, fixture: bool) -> None:
+def verify(
+    root: Path, app: Path, fixture: bool, *, repository: Path | None = None
+) -> None:
     root = root.resolve(strict=True)
     app = app.resolve(strict=True)
     if not fixture:
-        repository = Path(__file__).resolve().parent.parent.parent
+        if repository is None:
+            repository = Path(__file__).resolve().parent.parent.parent
         require_fixed_path(root, evidence_root(repository), "publication evidence")
         require_fixed_path(app, signed_app(repository), "signed app")
-    verify_evidence(root, app, fixture)
+    verify_evidence(root, app, fixture, repository=repository)

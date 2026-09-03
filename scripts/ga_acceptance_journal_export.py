@@ -1190,7 +1190,7 @@ def main() -> None:
     mode.add_argument("--verify", action="store_true")
     mode.add_argument("--self-check", action="store_true")
     arguments = parser.parse_args()
-    repository = Path(__file__).resolve().parent.parent
+    repository = install.InstallPaths.production().repository
     try:
         if arguments.self_check:
             self_check()

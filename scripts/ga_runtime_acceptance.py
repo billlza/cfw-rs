@@ -3563,7 +3563,7 @@ def self_check() -> None:
 
 
 def _repository() -> Path:
-    return Path(__file__).resolve().parent.parent
+    return dormant_app_install.InstallPaths.production().repository
 
 
 def _arguments(argv: Iterable[str] | None = None) -> argparse.Namespace:

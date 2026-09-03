@@ -13,12 +13,26 @@ if __package__:
         require_closed_release_runtime,
     )
     from .publication.common import PublicationError, canonical_json, sha256_bytes
+    from .publication.durable_file import DurabilityOutcomeUnknown
+    from .release_build_identity import frozen_ga_repository
+    from .release_executor_source import (
+        ExecutorSourceError,
+        capture_frozen_release_sources,
+        require_frozen_sources_unchanged,
+    )
 else:
     from release_python_runtime import (
         ReleasePythonRuntimeError,
         require_closed_release_runtime,
     )
     from publication.common import PublicationError, canonical_json, sha256_bytes
+    from publication.durable_file import DurabilityOutcomeUnknown
+    from release_build_identity import frozen_ga_repository
+    from release_executor_source import (
+        ExecutorSourceError,
+        capture_frozen_release_sources,
+        require_frozen_sources_unchanged,
+    )
 
 
 STAGES = ("prepackage", "ga-acceptance", "publication")
@@ -33,7 +47,7 @@ RETIRED_COMMANDS = frozenset(
 
 
 def _repository() -> Path:
-    return Path(__file__).resolve().parent.parent
+    return frozen_ga_repository(Path(__file__).resolve().parent.parent)
 
 
 def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -76,8 +90,13 @@ def main() -> None:
         )
         from publication.ga_release_contract import self_check, verify_stage
 
-    repository = _repository()
     try:
+        if source_only_self_check:
+            self_check(Path(__file__).resolve().parent.parent)
+            print("production GA three-stage orchestrator self-check passed")
+            return
+        sources = capture_frozen_release_sources(Path(__file__).resolve().parent.parent)
+        repository = _repository()
         if arguments.command == "prepackage":
             manifest = seal_prepackage(repository)
         elif arguments.command == "ga-acceptance":
@@ -87,9 +106,16 @@ def main() -> None:
         elif arguments.command == "verify":
             manifest = verify_stage(repository, arguments.stage)
         else:
-            self_check(repository)
-            print("production GA three-stage orchestrator self-check passed")
-            return
+            raise PublicationError("unknown production GA operation")
+        try:
+            require_frozen_sources_unchanged(sources)
+        except ExecutorSourceError as error:
+            if arguments.command == "verify":
+                raise
+            raise DurabilityOutcomeUnknown(
+                "GA seal exists but its executor source binding outcome is unknown; "
+                "inspect the existing stage before retrying"
+            ) from error
     except (OSError, PublicationError, ValueError) as error:
         raise SystemExit(f"error: production release evidence: {error}") from error
     print(

@@ -735,9 +735,12 @@ wire proof.
 
    ```bash
    scripts/release_publication_gate.sh --capture-hosted-ci RUN_ID
-   scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
-     --output target/candidates/0.4.0/ga/40041/stage-inputs/local-ci-lanes.json \
-     --journal target/candidates/0.4.0/ga/40041/stage-inputs/local-ci-journal
+   (
+     cd target/release-worktrees/40041
+     scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
+       --output target/candidates/0.4.0/ga/40041/stage-inputs/local-ci-lanes.json \
+       --journal target/candidates/0.4.0/ga/40041/stage-inputs/local-ci-journal
+   )
    scripts/release_publication_gate.sh --verify-hosted-ci
    ```
 
@@ -785,6 +788,28 @@ wire proof.
    then seal `prepackage`. Only that immutable stage may authorize DMG and
    updater package creation:
 
+   Run post-freeze stage verification, packaging, installation, journal export and
+   runtime acceptance from the clean **operator checkout** containing the
+   fixed `target/release-worktrees/40041` artifact checkout. These operations
+   never fall back to treating the operator checkout as artifact source.
+   Publication preparation/draft/finalization remain artifact-source operations;
+   keep their already reviewed fixed outputs in the frozen checkout. A corrected
+   operator verifier reopens those exact outputs without regenerating or
+   relabeling the product, signing, notarization or legal-review records.
+
+   The shared source adapter checks both clean identities, recomputes the
+   operator identity from the artifact repository's shared Git objects, and
+   rechecks source stability at publication and installation admission. The
+   operator commit is deliberately distinct from the app's frozen commit;
+   retain both in the execution record and validate the operator's own CI.
+   Existing stage schemas, artifact digests and the final upload allowlist are
+   unchanged. The source checks detect accidental selection or drift; they do
+   not authenticate against the release account. Missing or dirty checkouts
+   fail before admission and are never a reason to alter frozen source bytes.
+   The independent public-download verifier is different: run it from the
+   frozen artifact checkout, because its offline trust anchor intentionally
+   requires the exact artifact source identity.
+
    ```bash
    scripts/release_publication_gate.sh --seal-prepackage
    NOTARY_PROFILE=clashformac-notary scripts/make_dmg.sh
@@ -812,6 +837,11 @@ wire proof.
    replacement share one inode-bound outer maintenance lock; the installer
    also requires the exact decommissioned service journal to bind both the
    candidate and the previous application before it can copy or swap bytes.
+   Candidate admission invokes `run_release_app_verifier.sh` through its
+   privileged-mode Bash entrypoint. That existing wrapper reconstructs the
+   closed Python/Apple environment from the fixed artifact checkout; the
+   installer does not invoke the lower-level verifier in its minimal process
+   environment. Only the shared typed, complete verifier transcript is accepted.
    After interruption, run only the matching `--recover` entrypoint. This is a
    forward-only release transaction: there is no production rollback command,
    because restoring the old bundle without a matching old-service

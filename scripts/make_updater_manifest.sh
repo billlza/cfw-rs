@@ -111,7 +111,8 @@ source "$repo_root/scripts/dependency_pins.env"
 source "$repo_root/scripts/release_toolchain_contract.sh"
 # shellcheck source=scripts/release_publication_gate.sh
 source "$repo_root/scripts/release_publication_gate.sh"
-readonly toolchain_root="$repo_root/target/toolchains"
+readonly artifact_repository="$publication_artifact_repository"
+readonly toolchain_root="$artifact_repository/target/toolchains"
 readonly official_release_origin="https://github.com/billlza/cfw-rs/releases/download"
 readonly maximum_updater_archive_bytes=$((192 * 1024 * 1024))
 
@@ -146,9 +147,9 @@ assert_semver() {
 
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] ||
   die "updater release creation requires Apple Silicon macOS"
-cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_tauri_toolchain_tree "$artifact_repository" "$toolchain_root"
 
-readonly ga_root="$repo_root/target/candidates/0.4.0/ga/40041"
+readonly ga_root="$artifact_repository/target/candidates/0.4.0/ga/40041"
 readonly app_path="$ga_root/signed/Clash for Mac.app"
 [[ -d "$app_path" && ! -L "$app_path" ]] || die "app bundle not found or is a symlink: $app_path"
 app_directory="$(dirname "$app_path")"
@@ -168,7 +169,7 @@ build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info_plist
 
 native_products_root="$(release_native_products_root_for_app "$app_path")" ||
   die "cannot resolve candidate-specific native products"
-"$repo_root/scripts/verify_release_app.sh" \
+/bin/bash -p "$artifact_repository/scripts/verify_release_app.sh" \
   "$app_path" "$native_products_root" \
   --context canonical-native-content
 
@@ -237,9 +238,9 @@ set +a
   LANG=C \
   PYTHONDONTWRITEBYTECODE=1 \
   "$python_bin" -I -S -B -W error \
-  "$repo_root/scripts/updater_signing_launcher.py" \
+  "$artifact_repository/scripts/updater_signing_launcher.py" \
   "$staged_archive"
-cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_tauri_toolchain_tree "$artifact_repository" "$toolchain_root"
 require_regular_file "$staged_signature"
 
 download_url="$official_release_origin/v${version}/${archive_name}"
@@ -287,7 +288,7 @@ cfw_run_release_python_script \
   --staging "$staging" \
   --destination "$final_set" \
   --version "$version" \
-  --repository "$repo_root"
+  --repository "$artifact_repository"
 
 echo "==> updater artifacts ready:"
 echo "    $final_set/$archive_name"

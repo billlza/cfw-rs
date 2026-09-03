@@ -887,67 +887,44 @@ class NotarizationReadinessPolicyMutationTests(unittest.TestCase):
 
 
 class ArtifactToolchainReaderTests(unittest.TestCase):
-    def test_dispatch_uses_frozen_source_and_maps_its_exact_positional_output(self) -> None:
+    def test_dispatch_uses_shared_artifact_reader_without_reinterpreting_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary).resolve()
             values = [str(index) * 64 for index in range(9)]
-            with (
-                patch.object(transaction_module, "require_closed_release_runtime") as runtime,
-                patch.object(
-                    transaction_module,
-                    "_run_bounded_process",
-                    return_value=CommandResult(0, " ".join(values) + "\n", ""),
-                ) as runner,
-            ):
+            expected = dict(zip(transaction_module.TOOLCHAIN_METADATA_ORDER, values, strict=True))
+            with patch.object(
+                transaction_module, "derive_artifact_toolchain_metadata", return_value=expected
+            ) as reader:
                 result = transaction_module.production_artifact_toolchain_metadata_reader(repository)
-            runtime.assert_called_once_with()
-            self.assertEqual(
-                result, dict(zip(transaction_module.TOOLCHAIN_METADATA_ORDER, values, strict=True))
-            )
-            command, timeout = runner.call_args.args
-            self.assertEqual(command[:3], ["/bin/bash", "-p", "-c"])
-            self.assertIn('source "$1/scripts/release_python_launcher.sh"', command[3])
-            self.assertIn('"$1/scripts/candidate_artifact_binding.py" --repository "$1"', command[3])
-            self.assertEqual(command[-1], str(repository))
-            self.assertEqual(timeout, 1800)
-            self.assertEqual(runner.call_args.kwargs, {"cwd": repository})
+            self.assertIs(result, expected)
+            reader.assert_called_once_with(repository)
 
-    def test_verifier_diagnostics_and_every_output_near_match_fail_closed(self) -> None:
-        exact = " ".join(str(index) * 64 for index in range(9)) + "\n"
-        malformed = (
-            CommandResult(1, exact, ""),
-            CommandResult(0, exact, "warning\n"),
-            CommandResult(0, exact[:-1], ""),
-            CommandResult(0, exact + "\n", ""),
-            CommandResult(0, " " + exact, ""),
-            CommandResult(0, exact.replace(" ", "  ", 1), ""),
-            CommandResult(0, exact.replace("0", "A", 1), ""),
-            CommandResult(0, " ".join(exact.split(" ")[:-1]) + "\n", ""),
-            CommandResult(0, "", ""),
+    def test_shared_reader_failure_preserves_code_status_and_cause(self) -> None:
+        error = transaction_module.ArtifactToolchainError(
+            "artifact_toolchain_verification_failed", "artifact verifier rejected", exit_code=23
         )
-        with tempfile.TemporaryDirectory() as temporary:
-            repository = Path(temporary).resolve()
-            for result in malformed:
-                with self.subTest(result=result):
-                    with (
-                        patch.object(transaction_module, "require_closed_release_runtime"),
-                        patch.object(transaction_module, "_run_bounded_process", return_value=result),
-                        self.assertRaises(TransactionError),
-                    ):
-                        transaction_module.production_artifact_toolchain_metadata_reader(repository)
-
-    def test_unsealed_runtime_prevents_any_child_verifier(self) -> None:
         with (
             patch.object(
-                transaction_module,
-                "require_closed_release_runtime",
-                side_effect=transaction_module.ReleasePythonRuntimeError("unsealed"),
+                transaction_module, "derive_artifact_toolchain_metadata", side_effect=error
+            ) as reader,
+            self.assertRaises(TransactionError) as captured,
+        ):
+            transaction_module.production_artifact_toolchain_metadata_reader(Path("/artifact"))
+        reader.assert_called_once_with(Path("/artifact"))
+        self.assertEqual(captured.exception.code, error.code)
+        self.assertEqual(captured.exception.exit_code, 23)
+        self.assertIs(captured.exception.__cause__, error)
+
+    def test_unsealed_runtime_is_not_relabelled_as_toolchain_success(self) -> None:
+        failure = transaction_module.ReleasePythonRuntimeError("unsealed")
+        with (
+            patch.object(
+                transaction_module, "derive_artifact_toolchain_metadata", side_effect=failure
             ),
-            patch.object(transaction_module, "_run_bounded_process") as runner,
-            self.assertRaises(transaction_module.ReleasePythonRuntimeError),
+            self.assertRaises(transaction_module.ReleasePythonRuntimeError) as captured,
         ):
             transaction_module.production_artifact_toolchain_metadata_reader(Path("/unused"))
-        runner.assert_not_called()
+        self.assertIs(captured.exception, failure)
 
 
 class FrozenCandidateExecutorTests(unittest.TestCase):
@@ -9048,9 +9025,14 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
             ),
             patch.object(
                 transaction_module,
-                "production_toolchain_metadata_reader",
+                "production_artifact_toolchain_metadata_reader",
                 side_effect=lambda _repository: fixture.context.toolchain_metadata,
             ),
+            patch.object(
+                transaction_module,
+                "production_toolchain_metadata_reader",
+                side_effect=AssertionError("operator policy cannot verify frozen artifact pins"),
+            ) as operator_policy,
             patch.object(
                 transaction_module,
                 "production_archive_validator",
@@ -9062,7 +9044,9 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
                 side_effect=historical_identity,
             ),
         ):
-            return transaction_module.validate_published_transaction_receipt(context)
+            evidence = transaction_module.validate_published_transaction_receipt(context)
+        operator_policy.assert_not_called()
+        return evidence
 
     def test_current_direct_publication_validates_without_mutating_attempt(self) -> None:
         fixture = Fixture()
@@ -9075,6 +9059,11 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
         self.assertEqual(evidence.receipt["state"], "publish-ready")
         self.assertEqual(evidence.receipt_path, sole_finalization_receipt(fixture))
         self.assertEqual(evidence.prepared_at, "2026-07-28T04:02:00Z")
+        self.assertIsNotNone(evidence.retained_signed_app)
+        self.assertEqual(
+            build_manifest(evidence.retained_signed_app, algorithm="sha256-tree-v2")["sha256"],
+            evidence.receipt["pre_staple_app_tree_sha256"],
+        )
 
     def test_unique_recovery_publication_validates_without_mutating_attempt(self) -> None:
         fixture = Fixture()
@@ -9087,6 +9076,11 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
         self.assertEqual(after, before)
         self.assertEqual(evidence.receipt_path, sole_finalization_receipt(fixture))
         self.assertIsNotNone(evidence.receipt["recovery_intent_sha256"])
+        self.assertIsNotNone(evidence.retained_signed_app)
+        self.assertEqual(
+            build_manifest(evidence.retained_signed_app, algorithm="sha256-tree-v2")["sha256"],
+            evidence.receipt["pre_staple_app_tree_sha256"],
+        )
 
     def test_ambiguous_recovery_receipts_fail_without_mutating_attempt(self) -> None:
         fixture = Fixture()

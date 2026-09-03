@@ -17,7 +17,7 @@ import time
 import unittest
 from unittest.mock import Mock, call, patch
 
-from scripts.candidate_artifact_binding import CandidateBindingError
+from scripts.candidate_artifact_binding import ArtifactToolchainError, CandidateBindingError
 from scripts import dormant_app_install as install
 from scripts import ga_acceptance_environment as ga_environment
 
@@ -1389,6 +1389,41 @@ class DormantInstallValidationTests(unittest.TestCase):
             return_value=sources,
         ), self.assertRaises(CandidateBindingError):
             _clean_profile_sources(operator, Path("/other-worktree"))
+
+    def test_artifact_toolchain_failure_stops_admission_before_app_or_service_actions(self) -> None:
+        from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
+
+        with tempfile.TemporaryDirectory() as temporary:
+            operator = Path(temporary).resolve()
+            with patch.object(install, "__file__", str(operator / "scripts/dormant_app_install.py")):
+                paths = InstallPaths.production()
+                paths.release_toolchain_root.mkdir(parents=True)
+                paths.candidate_manifest.parent.mkdir(parents=True)
+                paths.candidate_manifest.write_text(
+                    '{"metadata":{"buildNumber":"40041"}}\n', encoding="utf-8"
+                )
+                sources = FrozenReleaseSources(
+                    executor=ExecutorSource(operator, "a" * 40, "b" * 64),
+                    artifact=ExecutorSource(paths.repository, "c" * 40, "d" * 64),
+                )
+                failure = ArtifactToolchainError(
+                    "artifact_toolchain_verification_failed", "frozen toolchain rejected"
+                )
+                runner = Mock(side_effect=AssertionError("no application or service command"))
+                with (
+                    patch.object(install, "_clean_profile_sources", return_value=sources),
+                    patch.object(
+                        install, "derive_artifact_toolchain_metadata", side_effect=failure
+                    ) as reader,
+                    patch.object(install, "validate_candidate_app_manifest") as validate_app,
+                    self.assertRaises(InstallError) as captured,
+                ):
+                    admit_fixed_candidate(paths, runner)
+                self.assertEqual(captured.exception.code, "candidate_binding_invalid")
+                self.assertIs(captured.exception.__cause__, failure)
+                reader.assert_called_once_with(paths.repository)
+                validate_app.assert_not_called()
+                runner.assert_not_called()
 
     def test_local_user_inventory_blocks_logged_out_authenticated_users(self) -> None:
         def runner(output: str):

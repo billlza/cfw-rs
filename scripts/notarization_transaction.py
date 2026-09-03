@@ -34,7 +34,9 @@ import uuid
 if __package__:
     from .candidate_freeze import FrozenCandidate, verify_frozen_candidate
     from .candidate_artifact_binding import (
+        ArtifactToolchainError,
         TOOLCHAIN_METADATA_ORDER,
+        derive_artifact_toolchain_metadata,
         derive_candidate_toolchain_metadata,
     )
     from .gatekeeper_assessment import (
@@ -96,7 +98,9 @@ if __package__:
 else:
     from candidate_freeze import FrozenCandidate, verify_frozen_candidate
     from candidate_artifact_binding import (
+        ArtifactToolchainError,
         TOOLCHAIN_METADATA_ORDER,
+        derive_artifact_toolchain_metadata,
         derive_candidate_toolchain_metadata,
     )
     from gatekeeper_assessment import (
@@ -601,6 +605,7 @@ class PublishedTransactionEvidence:
     receipt: dict[str, Any]
     receipt_path: Path
     prepared_at: str
+    retained_signed_app: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1897,44 +1902,12 @@ def production_toolchain_metadata_reader(repository: Path) -> dict[str, str]:
 def production_artifact_toolchain_metadata_reader(repository: Path) -> dict[str, str]:
     """Run the frozen source's verifier without importing another policy into it."""
 
-    require_closed_release_runtime()
-    _require_real_directory(repository, trusted=True)
-    if not repository.is_absolute() or repository.resolve(strict=True) != repository:
+    try:
+        return derive_artifact_toolchain_metadata(repository)
+    except ArtifactToolchainError as error:
         raise TransactionError(
-            "artifact_toolchain_repository_invalid",
-            "artifact toolchain verification requires a canonical repository",
-        )
-    result = _run_bounded_process(
-        [
-            "/bin/bash",
-            "-p",
-            "-c",
-            'set -euo pipefail; source "$1/scripts/release_python_launcher.sh"; '
-            'cfw_run_release_python_script "$1" '
-            '"$1/scripts/candidate_artifact_binding.py" --repository "$1"',
-            "artifact-toolchain-verification",
-            str(repository),
-        ],
-        1800,
-        cwd=repository,
-    )
-    if result.returncode != 0 or result.stderr:
-        raise TransactionError(
-            "artifact_toolchain_verification_failed",
-            "the frozen source's toolchain verifier failed or emitted diagnostics",
-            exit_code=result.returncode,
-        )
-    values = result.stdout.removesuffix("\n").split(" ")
-    if (
-        len(values) != len(TOOLCHAIN_METADATA_ORDER)
-        or result.stdout != " ".join(values) + "\n"
-        or any(SHA256_RE.fullmatch(value) is None for value in values)
-    ):
-        raise TransactionError(
-            "artifact_toolchain_output_invalid",
-            "the frozen source's toolchain verifier returned malformed identities",
-        )
-    return dict(zip(TOOLCHAIN_METADATA_ORDER, values, strict=True))
+            error.code, str(error), exit_code=error.exit_code
+        ) from error
 
 
 def publish_exclusive(source: Path, destination: Path) -> None:
@@ -8960,7 +8933,7 @@ def _validate_published_transaction_receipt_once(
     """
     _validate_context(context, recovery=True)
     _require_source_identity(context, production_source_identity_reader)
-    _require_toolchain_identity(context, production_toolchain_metadata_reader)
+    _require_toolchain_identity(context, production_artifact_toolchain_metadata_reader)
     publication_root = context.final_root
     _require_real_directory(publication_root, private=True)
     direct_receipt_path = context.attempt_root / "receipt.json"
@@ -9049,7 +9022,7 @@ def _validate_published_transaction_receipt_once(
             receipt_path=direct_receipt_path,
             manifest_verifier=production_manifest_verifier,
             source_identity_reader=production_source_identity_reader,
-            toolchain_metadata_reader=production_toolchain_metadata_reader,
+            toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
             allow_direct_publish_failure=True,
             allow_receipt_durability_unknown=True,
         )
@@ -9057,6 +9030,7 @@ def _validate_published_transaction_receipt_once(
             receipt=validated_receipt,
             receipt_path=direct_receipt_path,
             prepared_at=intent["prepared_at"],
+            retained_signed_app=None,
         )
 
     attempt = _load_recoverable_attempt(
@@ -9064,7 +9038,7 @@ def _validate_published_transaction_receipt_once(
         archive_validator=production_archive_validator,
         manifest_verifier=production_manifest_verifier,
         source_identity_reader=production_source_identity_reader,
-        toolchain_metadata_reader=production_toolchain_metadata_reader,
+        toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
         clock=_utc_now,
     )
     reduction = _reduce_attempt_events(attempt.journal)
@@ -9117,7 +9091,7 @@ def _validate_published_transaction_receipt_once(
             publication_root=publication_root,
             manifest_verifier=production_manifest_verifier,
             source_identity_reader=production_source_identity_reader,
-            toolchain_metadata_reader=production_toolchain_metadata_reader,
+            toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
         )
         direct_receipt = _validate_sealed_publication(
             prepared_direct,
@@ -9126,12 +9100,13 @@ def _validate_published_transaction_receipt_once(
             receipt_path=matching_direct_receipt,
             manifest_verifier=production_manifest_verifier,
             source_identity_reader=production_source_identity_reader,
-            toolchain_metadata_reader=production_toolchain_metadata_reader,
+            toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
         )
         return PublishedTransactionEvidence(
             receipt=direct_receipt,
             receipt_path=matching_direct_receipt,
             prepared_at=attempt.intent["prepared_at"],
+            retained_signed_app=attempt.work_app,
         )
 
     preliminary_intent = _decode_json_bytes(
@@ -9268,7 +9243,7 @@ def _validate_published_transaction_receipt_once(
         publication_root=publication_root,
         manifest_verifier=production_manifest_verifier,
         source_identity_reader=production_source_identity_reader,
-        toolchain_metadata_reader=production_toolchain_metadata_reader,
+        toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
     )
     receipt = _validate_sealed_publication(
         prepared,
@@ -9277,12 +9252,13 @@ def _validate_published_transaction_receipt_once(
         receipt_path=matching_receipt,
         manifest_verifier=production_manifest_verifier,
         source_identity_reader=production_source_identity_reader,
-        toolchain_metadata_reader=production_toolchain_metadata_reader,
+        toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
     )
     return PublishedTransactionEvidence(
         receipt=receipt,
         receipt_path=matching_receipt,
         prepared_at=attempt.intent["prepared_at"],
+        retained_signed_app=attempt.work_app,
     )
 
 

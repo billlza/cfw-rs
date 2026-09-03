@@ -18,6 +18,7 @@ run_clean_environment() {
 }
 
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/cfw-updater-secret.XXXXXX")"
+temporary_root="$(cd "$temporary_root" && /bin/pwd -P)"
 trap '/bin/rm -rf "$temporary_root"' EXIT
 
 trace_log="$temporary_root/xtrace.log"

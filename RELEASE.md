@@ -797,6 +797,14 @@ wire proof.
    operator verifier reopens those exact outputs without regenerating or
    relabeling the product, signing, notarization or legal-review records.
 
+   Prepackage first reopens the complete notarization transaction and its
+   retained pre-staple application. It then recomputes the original signing
+   transformation against that exact retained app and the frozen unsigned app,
+   including normalization and embedded profiles. The consumed signing-input
+   path is never recreated. A receipt without its verified retained input
+   cannot authorize the active GA release, and loading a receipt alone does
+   not replace this byte-level comparison. No existing receipt is rewritten.
+
    The shared source adapter checks both clean identities, recomputes the
    operator identity from the artifact repository's shared Git objects, and
    rechecks source stability at publication and installation admission. The
@@ -854,6 +862,12 @@ wire proof.
    closed Python/Apple environment from the fixed artifact checkout; the
    installer does not invoke the lower-level verifier in its minimal process
    environment. Only the shared typed, complete verifier transcript is accepted.
+   Candidate toolchain admission likewise runs the frozen source's own isolated
+   verifier through the shared candidate-binding adapter, also used by app
+   notarization recovery. A newer operator's pin-policy constants never
+   reinterpret older artifact pins. The adapter retains the fixed nine-digest
+   output, hard process bounds and zero-diagnostics requirement; neither
+   consumer may replace a failed live toolchain check with stored metadata.
    After interruption, run only the matching `--recover` entrypoint. This is a
    forward-only release transaction: there is no production rollback command,
    because restoring the old bundle without a matching old-service

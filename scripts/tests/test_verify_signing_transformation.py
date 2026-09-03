@@ -289,6 +289,17 @@ class SigningTransformationFixture:
             freeze_verifier=self.freeze_verifier,
         )
 
+    def retain_published_signed_input(self) -> dict[str, object]:
+        receipt = self.create()
+        canonical = self.root / transformation.SIGNING_OUTPUT_RELATIVE
+        self.signing_output.rename(canonical)
+        self.signing_output = canonical
+        retained = self.root / "transactions/app-notary/recovery-source"
+        retained.parent.mkdir(mode=0o700)
+        (canonical / transformation.SIGNED_APP_WITHIN_OUTPUT.parent).rename(retained)
+        self.signed_app = retained / transformation.SIGNED_APP_WITHIN_OUTPUT.name
+        return receipt
+
 
 class MachONormalizationTests(unittest.TestCase):
     def test_signature_capacity_is_the_only_normalized_load_command_field(self) -> None:
@@ -540,6 +551,113 @@ class SigningTransformationTests(unittest.TestCase):
         durability = patch.object(durable_file, "full_fsync", side_effect=os.fsync)
         durability.start()
         self.addCleanup(durability.stop)
+
+    def test_retained_notary_input_recomputes_receipt_without_restoring_consumed_path(self) -> None:
+        expected = self.fixture.retain_published_signed_input()
+        consumed = self.fixture.signing_output / transformation.SIGNED_APP_WITHIN_OUTPUT
+        before = build_manifest(self.fixture.root, algorithm="sha256-tree-v2")
+        with self.assertRaises(transformation.SigningTransformationError):
+            transformation.verify_receipt(
+                self.fixture.repository,
+                codesign_runner=self.fixture.codesign_runner,
+                freeze_verifier=self.fixture.freeze_verifier,
+            )
+        actual = transformation.verify_retained_receipt(
+            self.fixture.repository,
+            self.fixture.signed_app,
+            codesign_runner=self.fixture.codesign_runner,
+            freeze_verifier=self.fixture.freeze_verifier,
+        )
+        self.assertEqual(actual, expected)
+        self.assertFalse(consumed.exists())
+        self.assertEqual(
+            build_manifest(self.fixture.root, algorithm="sha256-tree-v2"), before
+        )
+
+    def test_retained_input_tampering_does_not_rewrite_original_receipt(self) -> None:
+        self.fixture.retain_published_signed_input()
+        receipt = self.fixture.signing_output / transformation.RECEIPT_NAME
+        original_receipt = receipt.read_bytes()
+        (self.fixture.signed_app / "Contents/Resources/config.json").write_bytes(
+            b'{"fixed":false}\n'
+        )
+        with self.assertRaisesRegex(
+            transformation.SigningTransformationError, "outside signatures and profiles"
+        ):
+            transformation.verify_retained_receipt(
+                self.fixture.repository,
+                self.fixture.signed_app,
+                codesign_runner=self.fixture.codesign_runner,
+                freeze_verifier=self.fixture.freeze_verifier,
+            )
+        self.assertEqual(receipt.read_bytes(), original_receipt)
+
+    def test_retained_receipt_is_recomputed_not_only_loaded(self) -> None:
+        document = self.fixture.retain_published_signed_input()
+        document["normalized_app_tree_sha256"] = "0" * 64
+        receipt = self.fixture.signing_output / transformation.RECEIPT_NAME
+        changed = transformation.canonical_json(document)
+        receipt.write_bytes(changed)
+        with self.assertRaisesRegex(
+            transformation.SigningTransformationError, "differs from the current exact GA apps"
+        ):
+            transformation.verify_retained_receipt(
+                self.fixture.repository,
+                self.fixture.signed_app,
+                codesign_runner=self.fixture.codesign_runner,
+                freeze_verifier=self.fixture.freeze_verifier,
+            )
+        self.assertEqual(receipt.read_bytes(), changed)
+
+    def test_retained_app_path_boundary_prevents_any_normalization(self) -> None:
+        self.fixture.retain_published_signed_input()
+        linked = self.fixture.root / "linked/Clash for Mac.app"
+        linked.parent.mkdir()
+        linked.symlink_to(self.fixture.signed_app, target_is_directory=True)
+        foreign = self.fixture.repository / "Clash for Mac.app"
+        foreign.mkdir()
+        paths = (
+            linked,
+            foreign,
+            self.fixture.signed_app / "missing",
+            Path("relative/Clash for Mac.app"),
+        )
+        for path in paths:
+            with (
+                self.subTest(path=path),
+                patch.object(transformation, "_compose_receipt_for_app") as compose,
+                self.assertRaises(transformation.SigningTransformationError),
+            ):
+                transformation.verify_retained_receipt(
+                    self.fixture.repository, path,
+                    codesign_runner=self.fixture.codesign_runner,
+                    freeze_verifier=self.fixture.freeze_verifier,
+                )
+            compose.assert_not_called()
+
+    def test_retained_input_change_during_normalization_fails(self) -> None:
+        self.fixture.retain_published_signed_input()
+        mutated = False
+
+        def mutate_after_copy(command: tuple[str, ...], repository: Path) -> None:
+            nonlocal mutated
+            self.fixture.codesign_runner(command, repository)
+            if not mutated:
+                mutated = True
+                (self.fixture.signed_app / "Contents/Resources/config.json").write_bytes(
+                    b'{"fixed":false}\n'
+                )
+
+        with self.assertRaisesRegex(
+            transformation.SigningTransformationError, "changed during normalization"
+        ):
+            transformation.verify_retained_receipt(
+                self.fixture.repository,
+                self.fixture.signed_app,
+                codesign_runner=mutate_after_copy,
+                freeze_verifier=self.fixture.freeze_verifier,
+            )
+        self.assertTrue(mutated)
 
     def test_signature_only_macho_seam_publishes_and_reopens_fixed_receipt(self) -> None:
         receipt = self.fixture.create()

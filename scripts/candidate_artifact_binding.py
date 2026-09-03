@@ -25,9 +25,11 @@ if __package__:
         toolchain_sha256,
     )
     from .publication.common import PublicationError
+    from .publication.bounded_process import BoundedProcessError, run_bounded_process
     from .publication.graph_model import load_pins
     from .publication.release_environment import release_tool_environment
     from .publication.sealed_manifest import _ci_lane_document
+    from .release_python_runtime import require_closed_release_runtime
 else:
     from hash_artifact import SUPPORTED_ALGORITHMS, build_manifest
     from publication.ci_lanes import (
@@ -36,9 +38,11 @@ else:
         toolchain_sha256,
     )
     from publication.common import PublicationError
+    from publication.bounded_process import BoundedProcessError, run_bounded_process
     from publication.graph_model import load_pins
     from publication.release_environment import release_tool_environment
     from publication.sealed_manifest import _ci_lane_document
+    from release_python_runtime import require_closed_release_runtime
 
 
 MAX_BINDING_DOCUMENT_BYTES = 64 * 1024 * 1024
@@ -66,6 +70,17 @@ TOOLCHAIN_METADATA_ORDER = (
 
 class CandidateBindingError(ValueError):
     """A candidate artifact is not bound to its source and CI evidence."""
+
+
+class ArtifactToolchainError(CandidateBindingError):
+    """The frozen artifact source could not verify its own toolchain."""
+
+    def __init__(
+        self, code: str, message: str, *, exit_code: int | None = None
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.exit_code = exit_code
 
 
 class _DuplicateFieldError(ValueError):
@@ -265,6 +280,86 @@ def derive_candidate_toolchain_metadata(
         )
     digest, identity = derive_toolchain_binding(repository, environment)
     return toolchain_manifest_metadata(digest, identity)
+
+
+def derive_artifact_toolchain_metadata(repository: Path) -> dict[str, str]:
+    """Run the artifact's own policy in the existing isolated child launcher.
+
+    Post-freeze operators must not import their newer pin policy into the
+    artifact source. Both notarization and dormant installation use this one
+    read-only adapter; the fixed nine-field metadata format is unchanged.
+    """
+    require_closed_release_runtime()
+    try:
+        metadata = repository.lstat()
+        if (
+            not repository.is_absolute()
+            or repository.resolve(strict=True) != repository
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise ArtifactToolchainError(
+                "artifact_toolchain_repository_invalid",
+                "artifact toolchain verification requires one canonical owned repository",
+            )
+    except OSError as error:
+        raise ArtifactToolchainError(
+            "artifact_toolchain_repository_invalid",
+            "artifact toolchain repository is unavailable",
+        ) from error
+    command = [
+        "/bin/bash",
+        "-p",
+        "-c",
+        'set -euo pipefail; source "$1/scripts/release_python_launcher.sh"; '
+        'cfw_run_release_python_script "$1" '
+        '"$1/scripts/candidate_artifact_binding.py" --repository "$1"',
+        "artifact-toolchain-verification",
+        str(repository),
+    ]
+    try:
+        result = run_bounded_process(
+            command,
+            cwd=repository,
+            environment=dict(os.environ),
+            timeout=1800,
+            output_limit=4 * 1024 * 1024,
+        )
+    except BoundedProcessError as error:
+        raise ArtifactToolchainError(
+            "artifact_toolchain_execution_failed",
+            f"the frozen source's toolchain verifier did not complete ({error.reason})",
+        ) from error
+    except OSError as error:
+        raise ArtifactToolchainError(
+            "artifact_toolchain_execution_failed",
+            "the frozen source's toolchain verifier encountered an operating-system error",
+        ) from error
+    if result.returncode != 0 or result.stderr:
+        raise ArtifactToolchainError(
+            "artifact_toolchain_verification_failed",
+            "the frozen source's toolchain verifier failed or emitted diagnostics",
+            exit_code=result.returncode,
+        )
+    try:
+        output = result.stdout.decode("ascii", errors="strict")
+    except UnicodeDecodeError as error:
+        raise ArtifactToolchainError(
+            "artifact_toolchain_output_invalid",
+            "the frozen source's toolchain verifier returned non-ASCII identities",
+        ) from error
+    values = output.removesuffix("\n").split(" ")
+    if (
+        len(values) != len(TOOLCHAIN_METADATA_ORDER)
+        or output != " ".join(values) + "\n"
+        or any(SHA256_RE.fullmatch(value) is None for value in values)
+    ):
+        raise ArtifactToolchainError(
+            "artifact_toolchain_output_invalid",
+            "the frozen source's toolchain verifier returned malformed identities",
+        )
+    return dict(zip(TOOLCHAIN_METADATA_ORDER, values, strict=True))
 
 
 def main() -> None:

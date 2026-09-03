@@ -85,7 +85,7 @@ from scripts.verify_notary_log import (
 from scripts.verify_signing_transformation import (
     SigningTransformationError,
     canonical_json as canonical_signing_transformation_json,
-    verify_receipt as verify_signing_transformation_receipt,
+    verify_retained_receipt as verify_signing_transformation_receipt,
 )
 
 
@@ -585,20 +585,6 @@ def _verified_prepackage_inputs(
     environment = _release_environment(repository)
     _validate_release_application(repository, environment)
 
-    transformation_path = _path(repository, SIGNING_TRANSFORMATION)
-    try:
-        transformation = verify_signing_transformation_receipt(repository)
-    except (OSError, SigningTransformationError, ValueError) as error:
-        raise PublicationError(
-            "GA signing transformation cannot be independently reopened"
-        ) from error
-    transformation_sha256 = sha256_bytes(
-        canonical_signing_transformation_json(transformation)
-    )
-    if sha256_file(transformation_path) != transformation_sha256:
-        raise PublicationError(
-            "GA signing transformation path differs from its verified receipt"
-        )
     try:
         notarization_publication = validate_published_transaction_receipt(
             TransactionContext(
@@ -619,6 +605,23 @@ def _verified_prepackage_inputs(
             "GA notarization publication receipt cannot be independently reopened"
         ) from error
     notarization_receipt = notarization_publication.receipt
+    retained_signed_app = notarization_publication.retained_signed_app
+    if retained_signed_app is None:
+        raise PublicationError("GA notarization has no verified retained signing input")
+    transformation_path = _path(repository, SIGNING_TRANSFORMATION)
+    try:
+        transformation = verify_signing_transformation_receipt(repository, retained_signed_app)
+    except (OSError, SigningTransformationError, ValueError) as error:
+        raise PublicationError(
+            "GA signing transformation cannot be independently reopened"
+        ) from error
+    transformation_sha256 = sha256_bytes(
+        canonical_signing_transformation_json(transformation)
+    )
+    if sha256_file(transformation_path) != transformation_sha256:
+        raise PublicationError(
+            "GA signing transformation path differs from its verified receipt"
+        )
     _validate_signing_notarization_binding(
         candidate_freeze_intent_sha256=frozen.intent_sha256,
         transformation=transformation,

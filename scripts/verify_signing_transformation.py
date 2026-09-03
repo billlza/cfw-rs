@@ -1065,10 +1065,10 @@ def _same_freeze(first: FrozenCandidate, second: FrozenCandidate) -> bool:
     )
 
 
-def compose_receipt(
+def _compose_receipt_for_app(
     repository: Path,
+    signed_app: Path,
     *,
-    signing_output: Path | None = None,
     codesign_runner: CodeSignRunner = production_codesign_runner,
     freeze_verifier: FreezeVerifier = verify_frozen_candidate,
 ) -> dict[str, Any]:
@@ -1077,10 +1077,8 @@ def compose_receipt(
     repository = _canonical_repository(repository)
     frozen, intent = _freeze_inputs(repository, freeze_verifier)
     root = frozen.root
-    output = _signing_output_path(repository, signing_output)
     pre_sign_app = root / PRE_SIGN_APP_RELATIVE
     pre_sign_manifest = root / PRE_SIGN_MANIFEST_RELATIVE
-    signed_app = output / SIGNED_APP_WITHIN_OUTPUT
     with exclusive_rooted_directory_lock(repository, root):
         pre_sign_manifest_sha256 = _manifest_sha256(pre_sign_manifest, pre_sign_app)
         profiles = _profile_digests(root, signed_app)
@@ -1148,6 +1146,24 @@ def compose_receipt(
         "schema_version": SCHEMA_VERSION,
         "signed_app_tree_sha256": signed_source["sha256"],
     }
+
+
+def compose_receipt(
+    repository: Path,
+    *,
+    signing_output: Path | None = None,
+    codesign_runner: CodeSignRunner = production_codesign_runner,
+    freeze_verifier: FreezeVerifier = verify_frozen_candidate,
+) -> dict[str, Any]:
+    """Recompute the transformation from the fixed signing-output application."""
+    repository = _canonical_repository(repository)
+    output = _signing_output_path(repository, signing_output)
+    return _compose_receipt_for_app(
+        repository,
+        output / SIGNED_APP_WITHIN_OUTPUT,
+        codesign_runner=codesign_runner,
+        freeze_verifier=freeze_verifier,
+    )
 
 
 def _validate_receipt(value: object) -> dict[str, Any]:
@@ -1315,6 +1331,7 @@ def _verify_receipt_at(
     repository: Path,
     signing_output: Path | None,
     *,
+    retained_signed_app: Path | None = None,
     codesign_runner: CodeSignRunner = production_codesign_runner,
     freeze_verifier: FreezeVerifier = verify_frozen_candidate,
 ) -> dict[str, Any]:
@@ -1324,9 +1341,11 @@ def _verify_receipt_at(
     output = _signing_output_path(repository, signing_output)
     observed, raw_before = _read_receipt(repository, output)
     expected = _validate_receipt(
-        compose_receipt(
+        _compose_receipt_for_app(
             repository,
-            signing_output=output,
+            output / SIGNED_APP_WITHIN_OUTPUT
+            if retained_signed_app is None
+            else retained_signed_app,
             codesign_runner=codesign_runner,
             freeze_verifier=freeze_verifier,
         )
@@ -1404,10 +1423,53 @@ def verify_receipt(
     )
 
 
+def verify_retained_receipt(
+    repository: Path,
+    retained_signed_app: Path,
+    *,
+    codesign_runner: CodeSignRunner = production_codesign_runner,
+    freeze_verifier: FreezeVerifier = verify_frozen_candidate,
+) -> dict[str, Any]:
+    """Recompute the original receipt after notarization moved its signed input.
+
+    The publication consumer supplies its independently validated retained
+    pre-staple app. This boundary still checks the path and recomputes the full
+    normalization, profiles, frozen pre-sign app and exact signed tree. It never
+    recreates the consumed signing-input path or changes either retained tree.
+    """
+    repository = _canonical_repository(repository)
+    try:
+        metadata = retained_signed_app.lstat()
+        retained_signed_app.relative_to(ga_root(repository))
+        if (
+            not retained_signed_app.is_absolute()
+            or retained_signed_app.resolve(strict=True) != retained_signed_app
+            or retained_signed_app.name != SIGNED_APP_WITHIN_OUTPUT.name
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise SigningTransformationError(
+                "retained signed app must be one canonical owned GA application"
+            )
+    except (OSError, ValueError) as error:
+        raise SigningTransformationError(
+            "retained signed app is unavailable or outside the fixed GA root"
+        ) from error
+    return _verify_receipt_at(
+        repository,
+        None,
+        retained_signed_app=retained_signed_app,
+        codesign_runner=codesign_runner,
+        freeze_verifier=freeze_verifier,
+    )
+
+
 def load_receipt(repository: Path) -> dict[str, Any]:
     """Reopen and validate the immutable receipt without requiring source apps.
 
-    Fresh consumers must call :func:`verify_receipt`.  This narrower operation
+    Fresh consumers must call :func:`verify_receipt` or, after the signed input
+    moved, :func:`verify_retained_receipt`. This narrower operation
     exists for notarization recovery after the signed input has already moved
     into the non-replaceable attempt.
     """

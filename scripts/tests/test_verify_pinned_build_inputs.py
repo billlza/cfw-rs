@@ -2879,7 +2879,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded = "transformation = verify_signing_transformation_receipt(repository)"
+        guarded = "transformation = verify_signing_transformation_receipt(repository, retained_signed_app)"
         self.assertIn(guarded, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded,
@@ -3063,12 +3063,12 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded = "transformation = verify_signing_transformation_receipt(repository)"
+        guarded = "transformation = verify_signing_transformation_receipt(repository, retained_signed_app)"
         self.assertIn(guarded, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded,
             "if repository.name:\n"
-            "            transformation = verify_signing_transformation_receipt(repository)\n"
+            "            transformation = verify_signing_transformation_receipt(repository, retained_signed_app)\n"
             "        else:\n"
             '            transformation = {"signed_app_tree_sha256": "0" * 64}',
             1,
@@ -3083,12 +3083,12 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded = "transformation = verify_signing_transformation_receipt(repository)"
+        guarded = "transformation = verify_signing_transformation_receipt(repository, retained_signed_app)"
         self.assertIn(guarded, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded,
             "def delayed_transformation():\n"
-            "            return verify_signing_transformation_receipt(repository)\n"
+            "            return verify_signing_transformation_receipt(repository, retained_signed_app)\n"
             "        transformation = delayed_transformation()",
             1,
         )

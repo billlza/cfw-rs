@@ -110,7 +110,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "11013442fc2a50990197541a0779ef2b6f393508c431b49f45ac7c2fb2ffee20"
+    "dd27daa29371858ae36031f0791a3e961ad6018cfcbe68b3d1a0c677a30b045e"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -118,7 +118,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "8acf37d28ed8ff9183d33682b6598a46bf7210f9643dfbed84061ed688f36de0"
+    "2746141914df7fc98ced43447fc93a58f5ee0052a25ea79a6abc583a91e3d69d"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -132,7 +132,7 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
         "63a05e630f3622bbcd4d5b418ebe8174487d8690ea60b383147bd24e87696f0a"
     ),
     "_verified_prepackage_inputs": (
-        "f648f746872b9fde003e016b5ed48f088979e5c56f2df2500a5caabe4fbe4801"
+        "b068d77b87ed0d4e709dc10444bc00646836e970d4a08f9d94fc39bd350b12d7"
     ),
     "_verified_package_sets": "6d530c9583863c1b56baa56554f2c8e576d90f0797c113e3d15dada9f8805b56",
     "_verified_migration_journals": (
@@ -173,7 +173,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     ),
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "5ccf231fb5412c3cdef1bd648699b5424d2b132f44b971cf313e8ef328aaa74d"
+    "a341c1ff8aa81124367d9c405ae93338ee1a040952186106b010facef6d3de6b"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -1174,7 +1174,7 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
         "verify_signing_transformation_receipt": (
             "scripts.verify_signing_transformation",
             0,
-            "verify_receipt",
+            "verify_retained_receipt",
             "verify_signing_transformation_receipt",
         ),
     }

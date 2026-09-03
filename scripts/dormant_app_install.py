@@ -44,7 +44,7 @@ import uuid
 if __package__:
     from .candidate_artifact_binding import (
         CandidateBindingError,
-        derive_candidate_toolchain_metadata,
+        derive_artifact_toolchain_metadata,
         load_strict_json,
         validate_candidate_app_manifest,
     )
@@ -79,7 +79,7 @@ if __package__:
 else:
     from candidate_artifact_binding import (
         CandidateBindingError,
-        derive_candidate_toolchain_metadata,
+        derive_artifact_toolchain_metadata,
         load_strict_json,
         validate_candidate_app_manifest,
     )
@@ -1859,7 +1859,7 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
             raise CandidateBindingError(
                 f"signed candidate is not fixed build {profile.build_number}"
             )
-        toolchain = derive_candidate_toolchain_metadata(paths.repository)
+        toolchain = derive_artifact_toolchain_metadata(paths.repository)
         validated = validate_candidate_app_manifest(
             paths.candidate_manifest,
             paths.candidate_app,

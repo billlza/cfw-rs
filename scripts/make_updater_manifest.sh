@@ -54,7 +54,6 @@ export PATH
 LC_ALL=C
 LANG=C
 export LC_ALL LANG
-readonly LC_ALL LANG
 if [[ -n "${BASHOPTS-}" ||
   "$SHELLOPTS" != "braceexpand:hashall:interactive-comments:privileged" ]]; then
   printf '%s\n' \
@@ -111,6 +110,8 @@ source "$repo_root/scripts/dependency_pins.env"
 source "$repo_root/scripts/release_toolchain_contract.sh"
 # shellcheck source=scripts/release_publication_gate.sh
 source "$repo_root/scripts/release_publication_gate.sh"
+# The shared production seal assigns the fixed locale before it is frozen.
+readonly LC_ALL LANG
 readonly artifact_repository="$publication_artifact_repository"
 readonly toolchain_root="$artifact_repository/target/toolchains"
 readonly official_release_origin="https://github.com/billlza/cfw-rs/releases/download"

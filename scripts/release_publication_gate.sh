@@ -82,13 +82,12 @@ verify_release_prepackage_evidence() {
     echo "error: prepackage verification requires the fixed signed app" >&2
     return 1
   }
-  local app_path="$1"
-  cfw_require_fixed_publication_app_path "$publication_artifact_repository" "$app_path" ||
+  cfw_require_fixed_publication_app_path "$publication_artifact_repository" "$1" ||
     return 1
-  run_production_ga_stage verify prepackage
+  run_production_ga_stage verify prepackage || return 1
   /bin/bash -p \
     "$publication_artifact_repository/scripts/verify_release_app.sh" \
-    "$app_path" \
+    "$1" \
     "$publication_native_products" \
     --context canonical-native-content
 }

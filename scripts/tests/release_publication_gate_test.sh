@@ -19,6 +19,83 @@ ga_app="$fixture_root/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app"
 mkdir -p "$ga_app"
 cfw_require_fixed_publication_app_path "$fixture_root" "$ga_app"
 
+(
+  readonly repository="caller-owned-repository"
+  readonly app_path="$ga_app"
+  readonly canonical_repository="caller-owned-canonical-repository"
+  readonly canonical_app="caller-owned-canonical-app"
+  readonly expected_app="caller-owned-expected-app"
+  cfw_require_fixed_publication_app_path "$fixture_root" "$app_path"
+  [[ "$repository" == "caller-owned-repository" ]]
+  [[ "$canonical_repository" == "caller-owned-canonical-repository" ]]
+  [[ "$canonical_app" == "caller-owned-canonical-app" ]]
+  [[ "$expected_app" == "caller-owned-expected-app" ]]
+)
+
+gate_fixture="$fixture_root/gate-repository"
+gate_artifact="$gate_fixture/target/release-worktrees/40041"
+gate_ga_root="$gate_artifact/target/candidates/0.4.0/ga/40041"
+mkdir -p "$gate_fixture/scripts" "$gate_artifact/scripts" \
+  "$gate_ga_root/signed/Clash for Mac.app" \
+  "$gate_ga_root/signing-output/signed-native-products"
+/bin/cp "$repo_root/scripts/release_publication_gate.sh" \
+  "$repo_root/scripts/release_publication_path_contract.sh" "$gate_fixture/scripts/"
+: >"$gate_fixture/scripts/dependency_pins.env"
+cat >"$gate_fixture/scripts/release_tool_environment.sh" <<'SH'
+cfw_seal_release_tool_environment() {
+  [[ "$#" -eq 1 && "$1" == "production" ]]
+}
+cfw_select_release_apple_toolchain() {
+  [[ "$#" -eq 0 ]]
+}
+cfw_run_release_python_script() {
+  case "$2" in
+    "$1/scripts/release_executor_source.py")
+      [[ "$#" -eq 3 && "$3" == "--print-frozen-artifact-repository" ]] || return 1
+      printf '%s\n' "$1/target/release-worktrees/40041"
+      ;;
+    "$1/scripts/production_release_evidence.py")
+      [[ "$#" -eq 4 && "$3" == "verify" && "$4" == "prepackage" ]] || return 1
+      [[ ! -e "$1/scripts/fail-prepackage" ]] || return 1
+      printf '%s\n' "fixed prepackage stage reopened"
+      ;;
+    *) return 1 ;;
+  esac
+}
+SH
+cat >"$gate_artifact/scripts/verify_release_app.sh" <<'SH'
+#!/bin/bash -p
+set -euo pipefail
+fixture_artifact_root="${BASH_SOURCE[0]%/scripts/verify_release_app.sh}"
+fixture_ga_root="$fixture_artifact_root/target/candidates/0.4.0/ga/40041"
+[[ "$#" -eq 4 ]]
+[[ "$1" == "$fixture_ga_root/signed/Clash for Mac.app" ]]
+[[ "$2" == "$fixture_ga_root/signing-output/signed-native-products" ]]
+[[ "$3" == "--context" && "$4" == "canonical-native-content" ]]
+printf '%s\n' "fixed application verifier invoked"
+SH
+(
+  # shellcheck source=scripts/release_publication_gate.sh
+  source "$gate_fixture/scripts/release_publication_gate.sh"
+  readonly app_path="$gate_ga_root/signed/Clash for Mac.app"
+  verify_release_prepackage_evidence "$app_path"
+) >"$fixture_root/readonly-caller.stdout" 2>"$fixture_root/readonly-caller.stderr"
+[[ ! -s "$fixture_root/readonly-caller.stderr" ]]
+grep -Fxq "fixed prepackage stage reopened" "$fixture_root/readonly-caller.stdout"
+grep -Fxq "fixed application verifier invoked" "$fixture_root/readonly-caller.stdout"
+
+touch "$gate_fixture/scripts/fail-prepackage"
+if (
+  # shellcheck source=scripts/release_publication_gate.sh
+  source "$gate_fixture/scripts/release_publication_gate.sh"
+  readonly app_path="$gate_ga_root/signed/Clash for Mac.app"
+  verify_release_prepackage_evidence "$app_path"
+) >"$fixture_root/failed-stage.stdout" 2>"$fixture_root/failed-stage.stderr"; then
+  echo "error: failed prepackage verification was hidden by application verification" >&2
+  exit 1
+fi
+[[ ! -s "$fixture_root/failed-stage.stdout" ]]
+
 old_signed="$fixture_root/target/candidates/0.4.0/signed/Clash for Mac.app"
 mkdir -p "$old_signed"
 if cfw_require_fixed_publication_app_path "$fixture_root" "$old_signed" 2>"$fixture_root/old-path.stderr"; then

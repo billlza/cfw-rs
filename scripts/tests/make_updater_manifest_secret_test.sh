@@ -197,6 +197,8 @@ cfw_verify_tauri_toolchain_tree() {
 SH
 
 cat >"$fixture_repo/scripts/release_publication_gate.sh" <<SH
+export LANG=C
+export LC_ALL=C
 CFW_RELEASE_PYTHON_EXECUTABLE="$trusted_python"
 export CFW_RELEASE_PYTHON_EXECUTABLE
 readonly publication_artifact_repository="$fixture_artifact_repository"
@@ -216,6 +218,8 @@ release_native_products_root_for_app() {
 
 verify_release_prepackage_evidence() {
   [[ "\$#" -eq 1 && "\$1" == "\$publication_artifact_repository/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app" ]]
+  [[ "\$(declare -p LANG)" == 'declare -rx LANG="C"' ]]
+  [[ "\$(declare -p LC_ALL)" == 'declare -rx LC_ALL="C"' ]]
 }
 SH
 

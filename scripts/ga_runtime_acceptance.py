@@ -240,6 +240,7 @@ MAX_PCAP_BYTES: Final = 32 * 1024 * 1024
 MAX_TOTAL_BYTES: Final = 64 * 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES: Final = 256 * 1024
 MAX_COMMAND_SECONDS: Final = 15 * 60
+DMG_BYTE_PROOF_TIMEOUT_SECONDS: Final = 30 * 60
 PACKET_HOST_READY_SECONDS: Final = 10 * 60
 MAX_RUNTIME_FILES: Final = 32
 ADAPTER_PENDING_NAME: Final = ".runtime-acceptance.json.pending"
@@ -678,7 +679,13 @@ def _command(
     expected_argv: list[str],
     expected_exit: int,
     label: str,
+    maximum_seconds: int = MAX_COMMAND_SECONDS,
 ) -> dict[str, Any]:
+    if (
+        type(maximum_seconds) is not int
+        or not 1 <= maximum_seconds <= DMG_BYTE_PROOF_TIMEOUT_SECONDS
+    ):
+        raise _error(f"{label} maximum command duration is invalid")
     receipt = require_exact_keys(
         value,
         {
@@ -703,7 +710,7 @@ def _command(
         or type(receipt["exit_code"]) is not int
         or receipt["exit_code"] != expected_exit
         or not started < finished
-        or (finished - started).total_seconds() > MAX_COMMAND_SECONDS
+        or (finished - started).total_seconds() > maximum_seconds
     ):
         raise _error(f"{label} command identity, exit, or duration is invalid")
     _bounded_output(receipt["stdout"], f"{label}.stdout")
@@ -1121,6 +1128,7 @@ def _validate_exact_dmg_install(
         expected_argv=_dmg_verifier_command(repository),
         expected_exit=0,
         label="DMG contained-app byte-proof observation",
+        maximum_seconds=DMG_BYTE_PROOF_TIMEOUT_SECONDS,
     )
     if (
         verification["stdout"]
@@ -2626,6 +2634,7 @@ def _run_collector_command(
         expected_argv=argv,
         expected_exit=expected_exit,
         label=label,
+        maximum_seconds=timeout,
     )
 
 
@@ -2990,6 +2999,7 @@ def collect_ga_runtime_acceptance(
             selected_runtime,
             step="dmg-contained-app-byte-proof",
             argv=dmg_verify_argv,
+            timeout=DMG_BYTE_PROOF_TIMEOUT_SECONDS,
         )
         final_expected = initial
         installed_tree = _installed_candidate_tree(repository, final_expected)
@@ -3514,6 +3524,8 @@ def self_check() -> None:
         raise _error("GA runtime collector source/build registry is unavailable") from error
     if (
         (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40019", "40041")
+        or (MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS)
+        != (15 * 60, 30 * 60)
         or len(CHECKS) != 12
         or tuple(sorted(CHECKS)) != CHECKS
         or len(RAW_FILE_NAMES) != 15

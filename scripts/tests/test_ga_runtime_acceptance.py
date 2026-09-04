@@ -24,6 +24,7 @@ from scripts.ga_runtime_acceptance import (
     COLLECTION_SUCCESS_STEPS,
     COMMAND_DOCUMENT,
     DOCUMENT,
+    DMG_BYTE_PROOF_TIMEOUT_SECONDS,
     ENVIRONMENT_RELATIVE,
     FROM_BUILD,
     GARuntimeAcceptanceError,
@@ -888,6 +889,10 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self_check()
         self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40019", "40041"))
         self.assertEqual(
+            (ga_runtime.MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS),
+            (15 * 60, 30 * 60),
+        )
+        self.assertEqual(
             (
                 DOCUMENT,
                 SCHEMA_VERSION,
@@ -986,6 +991,33 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         adapter = json.loads(self.fixture.acceptance.read_text(encoding="utf-8"))
         self.assertEqual([entry["id"] for entry in adapter["checks"]], list(CHECKS))
         self.assertNotIn("passed", self.fixture.acceptance.read_text(encoding="utf-8"))
+
+    def test_dmg_byte_proof_alone_accepts_the_extended_bounded_duration(self) -> None:
+        verification = self.fixture.documents["exact-dmg-install.json"]["commands"][
+            "dmg_set_verify"
+        ]
+        verification["started_at"] = "2026-07-27T11:59:59Z"
+        verification["finished_at"] = "2026-07-27T12:20:00Z"
+        self.fixture.rewrite_json("exact-dmg-install.json")
+        self.fixture.rebuild_scan()
+        self.fixture.rewrite_json("credential-leak-scan.json")
+
+        result = self.fixture.seal()
+        self.assertEqual(result, self.fixture.validate())
+
+    def test_ordinary_command_keeps_the_fifteen_minute_duration_bound(self) -> None:
+        launch = self.fixture.documents["launch.json"]["launch_command"]
+        launch["started_at"] = "2026-07-27T11:59:59Z"
+        launch["finished_at"] = "2026-07-27T12:20:00Z"
+        self.fixture.rewrite_json("launch.json")
+        self.fixture.rebuild_scan()
+        self.fixture.rewrite_json("credential-leak-scan.json")
+
+        with self.assertRaisesRegex(
+            GARuntimeAcceptanceError,
+            "installed 40041 launch command command identity, exit, or duration is invalid",
+        ):
+            self.fixture.seal()
 
     def test_adapter_rename_reply_loss_is_outcome_unknown_and_recoverable(self) -> None:
         from scripts.publication.durable_file import promote_private_pending
@@ -1565,9 +1597,14 @@ class GARuntimeCollectorTests(unittest.TestCase):
         self.assertEqual(result["adapter"]["path"], ACCEPTANCE_RELATIVE.as_posix())
         self.assertEqual(set(os.listdir(self.fixture.raw_root)), set(RAW_FILE_NAMES))
         commands = [argv for argv, _timeout in runtime.calls]
+        timeouts = {tuple(argv): timeout for argv, timeout in runtime.calls}
         self.assertIn(["/usr/bin/open", "-a", "/Applications/Clash for Mac.app"], commands)
         self.assertIn(["/usr/bin/systemextensionsctl", "list"], commands)
         self.assertNotIn("CFWLifecycleProbe", repr(commands))
+        self.assertEqual(
+            timeouts[tuple(ga_runtime._dmg_verifier_command(self.fixture.repository))],
+            DMG_BYTE_PROOF_TIMEOUT_SECONDS,
+        )
         self.assertTrue(
             all(
                 argv[0]

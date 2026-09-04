@@ -278,6 +278,46 @@ def process_table(*, running: bool) -> str:
     return "\n".join(lines) + "\n"
 
 
+def launchctl_output(
+    *,
+    domain_target: str,
+    program_identifier: str,
+    service_label: str,
+    parent_bundle_version: str = "40041",
+) -> str:
+    """Reproduce the exact `launchctl print` shape for an SMAppService job.
+
+    Captured verbatim from the release Mac for the installed 40041 services.
+    Both plists declare `BundleProgram`, so launchd resolves the executable
+    inside the signed bundle and prints a bundle-relative `program identifier`
+    line with resolution `mode: 2`. It never prints the absolute `program =`
+    line that only an absolute-`Program` job produces. Host-specific values
+    (the submitting pid and the BTM uuid) are deliberately excluded.
+    """
+
+    return (
+        f"{domain_target} = {{\n"
+        "\tactive count = 4\n"
+        "\ttype = Submitted\n"
+        "\tmanaged_by = com.apple.xpc.ServiceManagement\n"
+        "\tstate = running\n"
+        "\n"
+        f"\tprogram identifier = {program_identifier} (mode: 2)\n"
+        "\tparent bundle identifier = com.bill.clashformac\n"
+        f"\tparent bundle version = {parent_bundle_version}\n"
+        "\n"
+        "\tLWCR = {\n"
+        '\t\t"reqs" => {\n'
+        f'\t\t\t"signing-identifier" => "{service_label}"\n'
+        '\t\t\t"validation-category" => 6\n'
+        '\t\t\t"team-identifier" => "YKUPL7Z869"\n'
+        "\t\t}\n"
+        '\t\t"vers" => 1\n'
+        "\t}\n"
+        "}\n"
+    )
+
+
 def system_extension_output() -> str:
     return (
         "1 extension(s)\n"
@@ -533,10 +573,14 @@ class RuntimeFixture:
                         "print",
                         "system/com.bill.clashformac.global-authority",
                     ],
-                    stdout=(
-                        "state = running\n"
-                        "program = /Applications/Clash for Mac.app/Contents/Library/"
-                        "HelperTools/CFWGlobalAuthority\n"
+                    stdout=launchctl_output(
+                        domain_target=(
+                            "system/com.bill.clashformac.global-authority"
+                        ),
+                        program_identifier=(
+                            "Contents/Library/HelperTools/CFWGlobalAuthority"
+                        ),
+                        service_label="com.bill.clashformac.global-authority",
                     ),
                 ),
                 "proxy_agent": command(
@@ -545,10 +589,15 @@ class RuntimeFixture:
                         "print",
                         f"gui/{uid}/com.bill.clashformac.proxy-agent",
                     ],
-                    stdout=(
-                        "state = running\n"
-                        "program = /Applications/Clash for Mac.app/Contents/Library/"
-                        "LoginItems/CFWProxyAgent.app/Contents/MacOS/CFWProxyAgent\n"
+                    stdout=launchctl_output(
+                        domain_target=(
+                            f"gui/{uid}/com.bill.clashformac.proxy-agent"
+                        ),
+                        program_identifier=(
+                            "Contents/Library/LoginItems/CFWProxyAgent.app"
+                            "/Contents/MacOS/CFWProxyAgent"
+                        ),
+                        service_label="com.bill.clashformac.proxy-agent",
                     ),
                 ),
             },
@@ -1217,6 +1266,125 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         shutdown["off_proof_command"]["stdout"] = ""
         self.fixture.write_all()
         with self.assertRaisesRegex(Exception, "did not prove the candidate globally Off"):
+            self.fixture.seal()
+
+    def _service_stdout(self, service: str) -> str:
+        commands = self.fixture.documents["service-registration.json"]["commands"]
+        return commands[service]["stdout"]
+
+    def _set_service_stdout(self, service: str, stdout: str) -> None:
+        commands = self.fixture.documents["service-registration.json"]["commands"]
+        commands[service]["stdout"] = stdout
+        self.fixture.write_all()
+
+    def test_service_registration_rejects_a_different_parent_bundle_build(self) -> None:
+        self._set_service_stdout(
+            "proxy_agent",
+            self._service_stdout("proxy_agent").replace(
+                "parent bundle version = 40041",
+                "parent bundle version = 40019",
+            ),
+        )
+        with self.assertRaisesRegex(
+            Exception, "does not show the fixed running ProxyAgent"
+        ):
+            self.fixture.seal()
+
+    def test_service_registration_rejects_a_foreign_program_identifier(self) -> None:
+        self._set_service_stdout(
+            "global_authority",
+            self._service_stdout("global_authority").replace(
+                "program identifier = Contents/Library/HelperTools/"
+                "CFWGlobalAuthority (mode: 2)",
+                "program identifier = Contents/Library/HelperTools/"
+                "CFWGlobalAuthorityOld (mode: 2)",
+            ),
+        )
+        with self.assertRaisesRegex(
+            Exception, "does not show the fixed running GlobalAuthority"
+        ):
+            self.fixture.seal()
+
+    def test_service_registration_rejects_a_job_that_is_not_running(self) -> None:
+        self._set_service_stdout(
+            "proxy_agent",
+            self._service_stdout("proxy_agent").replace(
+                "state = running",
+                "state = not running",
+            ),
+        )
+        with self.assertRaisesRegex(
+            Exception, "does not show the fixed running ProxyAgent"
+        ):
+            self.fixture.seal()
+
+    def test_service_registration_rejects_a_foreign_parent_bundle(self) -> None:
+        self._set_service_stdout(
+            "global_authority",
+            self._service_stdout("global_authority").replace(
+                "parent bundle identifier = com.bill.clashformac",
+                "parent bundle identifier = com.example.other",
+            ),
+        )
+        with self.assertRaisesRegex(
+            Exception, "does not show the fixed running GlobalAuthority"
+        ):
+            self.fixture.seal()
+
+    def test_service_registration_rejects_a_foreign_signing_team(self) -> None:
+        self._set_service_stdout(
+            "proxy_agent",
+            self._service_stdout("proxy_agent").replace(
+                '"team-identifier" => "YKUPL7Z869"',
+                '"team-identifier" => "AAAAAAAAAA"',
+            ),
+        )
+        with self.assertRaisesRegex(
+            Exception, "does not show the fixed running ProxyAgent"
+        ):
+            self.fixture.seal()
+
+    def test_service_registration_rejects_a_foreign_signing_identifier(self) -> None:
+        self._set_service_stdout(
+            "global_authority",
+            self._service_stdout("global_authority").replace(
+                '"signing-identifier" => "com.bill.clashformac.global-authority"',
+                '"signing-identifier" => "com.bill.clashformac.proxy-agent"',
+            ),
+        )
+        with self.assertRaisesRegex(
+            Exception, "does not show the fixed running GlobalAuthority"
+        ):
+            self.fixture.seal()
+
+    def test_service_registration_rejects_an_unmanaged_job(self) -> None:
+        self._set_service_stdout(
+            "proxy_agent",
+            self._service_stdout("proxy_agent").replace(
+                "managed_by = com.apple.xpc.ServiceManagement",
+                "managed_by = com.apple.launchd",
+            ),
+        )
+        with self.assertRaisesRegex(
+            Exception, "does not show the fixed running ProxyAgent"
+        ):
+            self.fixture.seal()
+
+    def test_service_registration_rejects_a_synthetic_absolute_program_line(
+        self,
+    ) -> None:
+        # launchd never emits an absolute `program =` line for these
+        # BundleProgram jobs. Accepting one would mean the assertion was
+        # written against a fabricated fixture rather than real output.
+        self._set_service_stdout(
+            "proxy_agent",
+            "state = running\n"
+            "program = /Applications/Clash for Mac.app/Contents/Library/"
+            "LoginItems/CFWProxyAgent.app/Contents/MacOS/CFWProxyAgent\n",
+        )
+        with self.assertRaisesRegex(
+            Exception, "does not show the fixed running ProxyAgent"
+        ):
             self.fixture.seal()
 
     def test_package_or_journal_binding_drift_is_rejected(self) -> None:

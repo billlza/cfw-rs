@@ -118,7 +118,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "326a7481cfcaa28b93fc41c5b1ad94c81349f8f5a3ee7d6f6bbf19c5235cfe5a"
+    "d05a97c0a837b56dd9ddaf76cbe55763441899953be85559ec892f55aef3051e"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the

@@ -180,6 +180,7 @@ PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 TO_BUILD: Final = ACTIVE_RELEASE_IDENTITY.ga_build
 FROM_BUILD: Final = "40019"
 TEAM_ID: Final = "YKUPL7Z869"
+APP_BUNDLE_ID: Final = "com.bill.clashformac"
 PACKET_EXTENSION_BUNDLE_ID: Final = "com.bill.clashformac.packet-tunnel"
 PROXY_LABEL: Final = "com.bill.clashformac.proxy-agent"
 AUTHORITY_LABEL: Final = "com.bill.clashformac.global-authority"
@@ -1190,9 +1191,45 @@ def _validate_launch(value: dict[str, Any]) -> None:
     _running_host_observation(document["process_observation"])
 
 
-def _require_launchctl_running(output: str, program: Path, label: str) -> None:
-    lines = {line.strip() for line in output.splitlines() if line.strip()}
-    if "state = running" not in lines or f"program = {program}" not in lines:
+def _require_launchctl_running(
+    output: str,
+    program: Path,
+    label: str,
+    *,
+    service_label: str,
+) -> None:
+    """Require the real launchd contract for the registered SMAppService job.
+
+    Both services are registered from the signed application bundle and declare
+    `BundleProgram`, so launchd resolves the executable inside that bundle and
+    reports a bundle-relative `program identifier` with resolution `mode: 2`
+    plus the owning bundle and code-signing identity. It never reports the
+    absolute `program` line that only an absolute-`Program` job produces.
+
+    This is the same fixed job contract the release service transaction already
+    proves in `current_service_transaction._registered_job_pid`, and it binds
+    strictly more than an absolute path: the running executable is the one
+    inside the installed 40041 bundle, registered through ServiceManagement,
+    and signed under the fixed team and service identifiers.
+    """
+
+    try:
+        relative = program.relative_to(INSTALLED_APP)
+    except ValueError as error:
+        raise _error(
+            f"fixed {label} executable is outside the installed 40041 bundle"
+        ) from error
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    required = (
+        "managed_by = com.apple.xpc.ServiceManagement",
+        "state = running",
+        f"program identifier = {relative.as_posix()} (mode: 2)",
+        f"parent bundle identifier = {APP_BUNDLE_ID}",
+        f"parent bundle version = {TO_BUILD}",
+        f'"signing-identifier" => "{service_label}"',
+        f'"team-identifier" => "{TEAM_ID}"',
+    )
+    if any(lines.count(value) != 1 for value in required):
         raise _error(f"raw launchctl output does not show the fixed running {label}")
 
 
@@ -1214,8 +1251,18 @@ def _validate_service_registration(value: dict[str, Any]) -> None:
         expected_exit=0,
         label="GlobalAuthority launchctl observation",
     )
-    _require_launchctl_running(proxy["stdout"], PROXY_EXECUTABLE, "ProxyAgent")
-    _require_launchctl_running(authority["stdout"], AUTHORITY_EXECUTABLE, "GlobalAuthority")
+    _require_launchctl_running(
+        proxy["stdout"],
+        PROXY_EXECUTABLE,
+        "ProxyAgent",
+        service_label=PROXY_LABEL,
+    )
+    _require_launchctl_running(
+        authority["stdout"],
+        AUTHORITY_EXECUTABLE,
+        "GlobalAuthority",
+        service_label=AUTHORITY_LABEL,
+    )
 
 
 def _validate_system_extension(value: dict[str, Any]) -> None:

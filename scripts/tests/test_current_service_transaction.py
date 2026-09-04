@@ -1451,8 +1451,12 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             patch.object(install, "verify_dormant_bundle"),
             patch.object(
                 install.JournalStore,
-                "load",
-                return_value=installation,
+                "terminal_snapshot",
+                return_value=install.TerminalInstallJournalSnapshot(
+                    document=installation,
+                    data=b"{}\n",
+                    metadata=os.stat(self.fixture.paths.install_paths.target_app),
+                ),
             ),
         ):
             with self.assertRaises(install.InstallError) as captured:
@@ -1467,6 +1471,47 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             captured.exception.code,
             "service_install_evidence_invalid",
         )
+
+    def test_installed_candidate_consumes_only_a_terminal_install_snapshot(self) -> None:
+        installation = {
+            "phase": "installed",
+            "candidate": CANDIDATE.document(),
+            "previous": PREVIOUS.document(),
+            "ga_environment_sha256": ga_environment.environment_sha256(
+                GA_ENVIRONMENT
+            ),
+        }
+        snapshot = install.TerminalInstallJournalSnapshot(
+            document=installation,
+            data=b"{}\n",
+            metadata=os.stat(self.fixture.paths.install_paths.target_app),
+        )
+        intent = {
+            "candidate": CANDIDATE.document(),
+            "previous": PREVIOUS.document(),
+            "ga_environment_sha256": installation["ga_environment_sha256"],
+        }
+        with (
+            patch.object(install, "read_app_identity", return_value=CANDIDATE.app),
+            patch.object(install, "verify_dormant_bundle"),
+            patch.object(
+                install.JournalStore,
+                "terminal_snapshot",
+                return_value=snapshot,
+            ) as terminal_snapshot,
+            patch.object(
+                install.JournalStore,
+                "load",
+                side_effect=AssertionError("service evidence must not publish pending state"),
+            ) as load,
+        ):
+            self.assertEqual(
+                self.fixture.transaction._require_installed_candidate(intent),
+                CANDIDATE.app,
+            )
+
+        terminal_snapshot.assert_called_once_with()
+        load.assert_not_called()
 
 
 if __name__ == "__main__":

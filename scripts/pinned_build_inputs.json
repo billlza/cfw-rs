@@ -3185,7 +3185,7 @@
     "scripts/verify_ci_no_masking.py": "8d3121c88192a82bc7ff19db63e672175148ffbcd9d9b15336b534b7192c32b3",
     ".github/workflows/ci.yml": "b0881faa331b4072b1d0e9d957fe5db99920aef0e7ee8d6284accb6531d3a724",
     "scripts/dormant_app_install.py": "da5ab55a3db55fbf7038cfca08267bc980dc6abfe0334545b60f2f4f785e180b",
-    "scripts/current_service_transaction.py": "1483349df74aba577bffd4d2653d12b69de1c9657857c8df8bee4535c7401f2d",
+    "scripts/current_service_transaction.py": "dbfd4d430919f372bea37e65b9a9fa8bac4e4177c782e2564e17805c39405f16",
     "scripts/gatekeeper_assessment.py": "a4cee29500d0ada05455b5fed984253f99a484601c70c68cf2117792305ee433",
     "scripts/notarization_transaction.py": "3aada7db6ad389c7852cde6a14e774c143772a22b789a8c6be5e69bca40768fe",
     "scripts/notarization_executor.py": "15a2065c0f7792d3b0609082471d557136b26575d3d7244b15434cc461e50005",

@@ -2261,7 +2261,7 @@ class CurrentServiceTransaction:
         )
         with install.JournalStore(self.paths.install_paths) as store:
             with store.locked():
-                installation = store.load()
+                installation = store.terminal_snapshot().document
         if (
             installation is None
             or installation["phase"] != "installed"

@@ -23,7 +23,8 @@
   every step to an unchanged Clash for Windows process and network projection.
   One inode-bound outer lock serializes service and bundle mutations, and
   independent fixed journals cover historical validation migrations and the
-  40019→40041 GA installation without overwriting earlier evidence. The
+  40019→40041 and 40041→40042 GA installations without overwriting earlier
+  evidence. The
   canonical allocation ledger prevents a retired validation build or its
   reserved final companion from being reused by a later source closure. The
   validation-only compatibility island can prove the already-installed 40019
@@ -107,7 +108,15 @@
   `golang.org/x/crypto` to `v0.56.0`. It is retired before notarization with
   its bytes, receipts and source unchanged. The module's minimum Go version
   is now `1.26.0`; Go `1.26.6`, Rust `1.97.1` and all other selected
-  dependencies remain unchanged. Build 40041 is the only active GA successor; source and CI
+  dependencies remain unchanged. Build 40041 then completed notarization,
+  packaging and the 40019→40041 install, but GA runtime acceptance aborted
+  before any mutation: the legacy cutover preflight attributed the live Clash
+  for Windows network to the retired installation, while acceptance requires
+  that network to be preserved. The preflight now attributes legacy absence to
+  the retired installation only, and the install binds its service vocabulary
+  to the observed predecessor. Build 40041 is retired after install with its
+  bytes, receipts, seals and journals unchanged. Build 40042 is the only
+  active GA successor; source and CI
   retries before freeze do not consume additional builds.
 - Authenticate nested release-worktree managed caches through bounded,
   descriptor-relative Git administrative control files plus an explicit

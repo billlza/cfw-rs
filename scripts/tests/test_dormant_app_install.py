@@ -70,7 +70,10 @@ from scripts.dormant_app_install import (
 # install admits a predecessor only against its exact recorded tree digest,
 # so an invented digest would be rejected as a tampered bundle, not admitted.
 OLD = AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256)
-NEW = AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256)
+NEW = AppIdentity("0.4.0", "40042", "b" * 64)
+# The installed 40041 with its real frozen tree identity: the production
+# predecessor of this build.
+INSTALLED = AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256)
 CANDIDATE = CandidateIdentity(
     app=NEW,
     manifest_sha256="c" * 64,
@@ -382,7 +385,8 @@ class DormantInstallTransactionTests(unittest.TestCase):
         cases = (
             (AppIdentity("0.4.0", "40030", "a" * 64), "predecessor_unsupported"),
             (AppIdentity("0.4.0", "40019", "f" * 64), "predecessor_identity_mismatch"),
-            (NEW, "candidate_not_newer"),
+            # The GA build itself is never a predecessor.
+            (NEW, "predecessor_unsupported"),
             (AppIdentity("0.3.5", "40019", OLD.tree_sha256), "install_identity_mismatch"),
         )
         for installed, code in cases:
@@ -402,6 +406,18 @@ class DormantInstallTransactionTests(unittest.TestCase):
         self.assertFalse((self.fixture.parent / JOURNAL_NAME).exists())
         self.assertEqual(self.fixture.copy_count, 0)
         self.assertEqual(self.fixture.swap_count, 0)
+
+    def test_install_over_the_installed_40041_records_that_predecessor(self) -> None:
+        self.fixture._write_identity(self.fixture.target, INSTALLED)
+        result = self.fixture.transaction().install()
+
+        self.assertEqual(result["phase"], "installed")
+        self.assertEqual(self.fixture.read_identity(self.fixture.target), NEW)
+        self.assertEqual(self.fixture.read_identity(self.fixture.staging_payload()), INSTALLED)
+        self.assertEqual(self.fixture.swap_count, 1)
+        journal = self.fixture.journal()
+        self.assertEqual(journal["previous"], INSTALLED.document())
+        validate_journal(journal, GA_INSTALL_PROFILE)
 
     def test_registered_or_running_cfm_blocks_before_any_journal_or_copy(self) -> None:
         def blocked(_guard) -> None:
@@ -708,7 +724,9 @@ class DormantInstallTransactionTests(unittest.TestCase):
     def test_second_install_cannot_overwrite_recovery_journal_or_backup(self) -> None:
         self.fixture.transaction().install()
         backup = self.fixture.staging_payload()
-        with self.assertRaisesRegex(InstallError, "not newer than installed"):
+        # The installed application is now this GA build itself, which is never
+        # a supported predecessor; admission fails before any mutation.
+        with self.assertRaisesRegex(InstallError, "not a supported install predecessor"):
             self.fixture.transaction().install()
         self.assertEqual(self.fixture.read_identity(backup), OLD)
         self.assertEqual(self.fixture.swap_count, 1)
@@ -1194,27 +1212,27 @@ class DormantInstallValidationTests(unittest.TestCase):
                 )
         self.assertEqual(captured.exception.code, "candidate_toolchain_override")
 
-    def test_ga_profile_has_one_fixed_40019_to_40041_path_and_journal(self) -> None:
+    def test_ga_profile_has_one_fixed_40042_path_and_journal(self) -> None:
         paths = InstallPaths.production()
 
         self.assertEqual(paths.profile, GA_INSTALL_PROFILE)
-        self.assertEqual(paths.profile.build_number, "40041")
+        self.assertEqual(paths.profile.build_number, "40042")
         # An unbound profile cannot express a predecessor claim at all; the
         # predecessor is observed on the machine and bound separately.
         self.assertFalse(hasattr(paths.profile, "previous_build_number"))
         self.assertEqual(
             paths.repository,
-            paths.operator_repository / "target/release-worktrees/40041",
+            paths.operator_repository / "target/release-worktrees/40042",
         )
         self.assertTrue(
             str(paths.candidate_app).endswith(
-                "/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40042/signed/Clash for Mac.app"
             )
         )
         self.assertEqual(
             paths.profile.native_products_relative,
             Path(
-                "target/candidates/0.4.0/ga/40041/signing-output/signed-native-products"
+                "target/candidates/0.4.0/ga/40042/signing-output/signed-native-products"
             ),
         )
         self.assertEqual(paths.journal_name, JOURNAL_NAME)
@@ -1405,11 +1423,11 @@ class DormantInstallValidationTests(unittest.TestCase):
             ".com.bill.clashformac.dormant-install.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         )
 
-    def test_production_candidate_is_fixed_to_40041_ga_root(self) -> None:
+    def test_production_candidate_is_fixed_to_40042_ga_root(self) -> None:
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                "/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40042/signed/Clash for Mac.app"
             )
         )
 
@@ -1417,7 +1435,7 @@ class DormantInstallValidationTests(unittest.TestCase):
         from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
         operator = Path("/operator")
-        artifact = operator / "target/release-worktrees/40041"
+        artifact = operator / "target/release-worktrees/40042"
         sources = FrozenReleaseSources(
             executor=ExecutorSource(operator, "a" * 40, "b" * 64),
             artifact=ExecutorSource(artifact, "c" * 40, "d" * 64),
@@ -1446,7 +1464,7 @@ class DormantInstallValidationTests(unittest.TestCase):
                 paths.release_toolchain_root.mkdir(parents=True)
                 paths.candidate_manifest.parent.mkdir(parents=True)
                 paths.candidate_manifest.write_text(
-                    '{"metadata":{"buildNumber":"40041"}}\n', encoding="utf-8"
+                    '{"metadata":{"buildNumber":"40042"}}\n', encoding="utf-8"
                 )
                 sources = FrozenReleaseSources(
                     executor=ExecutorSource(operator, "a" * 40, "b" * 64),
@@ -1706,7 +1724,7 @@ class InstallPredecessorTests(unittest.TestCase):
     def test_legacy_predecessor_still_selects_the_compatibility_vocabulary(self) -> None:
         predecessor = resolve_predecessor(
             AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256),
-            "40041",
+            "40042",
         )
         self.assertEqual(predecessor, INSTALLED_40019_PREDECESSOR)
         self.assertEqual(
@@ -1872,20 +1890,20 @@ class InstallPredecessorTests(unittest.TestCase):
         self.assertEqual(observed, recorded)
         self.assertEqual(observed.predecessor, INSTALLED_40019_PREDECESSOR)
         self.assertEqual(observed.profile.build_number, GA_INSTALL_PROFILE.build_number)
-        # Observation additionally demands strict supersession by this build.
-        with self.assertRaises(InstallError) as raised:
-            install.BoundInstallProfile.observed(
-                GA_INSTALL_PROFILE,
-                AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-            )
-        self.assertEqual(raised.exception.code, "candidate_not_newer")
-        # The record carries the same identity proof without the supersession
-        # rule, so it stays readable as evidence of any supported predecessor.
+        # The installed 40041 is the production observation for this build.
         self.assertEqual(
-            install.BoundInstallProfile.recorded(
-                GA_INSTALL_PROFILE,
-                AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-            ).predecessor,
+            install.BoundInstallProfile.observed(GA_INSTALL_PROFILE, INSTALLED).predecessor,
+            INSTALLED_40041_PREDECESSOR,
+        )
+        # Observation demands a supported predecessor strictly older than this
+        # build; the GA build itself is neither.
+        with self.assertRaises(InstallError) as raised:
+            install.BoundInstallProfile.observed(GA_INSTALL_PROFILE, NEW)
+        self.assertEqual(raised.exception.code, "predecessor_unsupported")
+        # The record carries the same identity proof, so it stays readable as
+        # evidence of any supported predecessor.
+        self.assertEqual(
+            install.BoundInstallProfile.recorded(GA_INSTALL_PROFILE, INSTALLED).predecessor,
             INSTALLED_40041_PREDECESSOR,
         )
         with self.assertRaises(InstallError) as raised:

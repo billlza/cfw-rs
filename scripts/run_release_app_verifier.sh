@@ -17,8 +17,8 @@ source "$repo_root/scripts/release_tool_environment.sh"
 cfw_seal_release_tool_environment production
 cfw_select_release_apple_toolchain
 
-readonly app_path="$repo_root/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app"
-readonly native_products="$repo_root/target/candidates/0.4.0/ga/40041/signing-output/signed-native-products"
+readonly app_path="$repo_root/target/candidates/0.4.0/ga/40042/signed/Clash for Mac.app"
+readonly native_products="$repo_root/target/candidates/0.4.0/ga/40042/signing-output/signed-native-products"
 exec /bin/bash -p \
   "$repo_root/scripts/verify_release_app.sh" \
   "$app_path" \

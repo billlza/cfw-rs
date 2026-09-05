@@ -42,7 +42,7 @@ class FrozenReleaseSourcesTests(unittest.TestCase):
 
     def test_fixed_artifact_repository_has_no_source_checkout_fallback(self) -> None:
         self.assertEqual(
-            self.artifact, self.executor / "target/release-worktrees/40041"
+            self.artifact, self.executor / "target/release-worktrees/40042"
         )
 
     def test_artifact_and_executor_keep_distinct_clean_identities(self) -> None:

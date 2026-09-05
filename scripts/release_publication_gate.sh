@@ -27,7 +27,7 @@ publication_artifact_repository="$(cfw_run_release_python_script \
   "$publication_repo_root/scripts/release_executor_source.py" \
   --print-frozen-artifact-repository)"
 readonly publication_artifact_repository
-readonly publication_ga_root="$publication_artifact_repository/target/candidates/0.4.0/ga/40041"
+readonly publication_ga_root="$publication_artifact_repository/target/candidates/0.4.0/ga/40042"
 readonly publication_native_products="$publication_ga_root/signing-output/signed-native-products"
 
 run_production_ga_stage() {

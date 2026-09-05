@@ -22,14 +22,15 @@ from scripts.publication.durable_file import (
 )
 
 
-# The recorded predecessor carries its real frozen tree identity; the install
-# journal is only readable against the exact predecessor it names.
+# The recorded predecessor is the installed 40041 with its real frozen tree
+# identity; the install journal is only readable against the exact predecessor
+# it names, and that predecessor selects the current service vocabulary.
 PREVIOUS = install.AppIdentity(
-    "0.4.0", "40019", install.INSTALLED_40019_PREDECESSOR.tree_sha256
+    "0.4.0", "40041", install.INSTALLED_40041_PREDECESSOR.tree_sha256
 )
 BOUND = install.BoundInstallProfile.recorded(install.GA_INSTALL_PROFILE, PREVIOUS)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40041", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40042", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,

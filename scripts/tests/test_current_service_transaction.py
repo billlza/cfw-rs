@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import dataclasses
 import io
 import json
 import os
@@ -26,24 +25,15 @@ PREVIOUS = install.AppIdentity(
 # vocabulary the production path selects.
 BOUND = install.BoundInstallProfile.recorded(install.GA_INSTALL_PROFILE, PREVIOUS)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40041", "b" * 64),
-    manifest_sha256="c" * 64,
-    repository_commit="d" * 40,
-    release_source_sha256="e" * 64,
-)
-# The successor lineage before build 40042 becomes the fixed GA identity: a
-# synthetic profile whose build number alone differs, the real installed 40041
-# identity as the observed predecessor, and a 40042 candidate. This is the
-# only way to run the current predecessor's vocabulary end to end today.
-SUCCESSOR_PROFILE = dataclasses.replace(install.GA_INSTALL_PROFILE, build_number="40042")
-INSTALLED_PREVIOUS = install.AppIdentity(
-    "0.4.0", "40041", install.INSTALLED_40041_PREDECESSOR.tree_sha256
-)
-SUCCESSOR_CANDIDATE = install.CandidateIdentity(
     app=install.AppIdentity("0.4.0", "40042", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
+)
+# The installed 40041 with its real frozen tree identity: the production
+# predecessor of this build, which selects the current service vocabulary.
+INSTALLED_PREVIOUS = install.AppIdentity(
+    "0.4.0", "40041", install.INSTALLED_40041_PREDECESSOR.tree_sha256
 )
 GA_ENVIRONMENT = {
     "architecture": "arm64",
@@ -178,11 +168,11 @@ class ServiceEventStoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.fixture.cleanup()
 
-    def test_ga_service_transaction_is_fixed_to_40019_to_40041(self) -> None:
+    def test_ga_service_transaction_is_fixed_to_the_ga_build(self) -> None:
         paths = service.ServicePaths.production()
 
         self.assertEqual(paths.install_paths.profile, install.GA_INSTALL_PROFILE)
-        self.assertEqual(paths.install_paths.profile.build_number, "40041")
+        self.assertEqual(paths.install_paths.profile.build_number, "40042")
         # The predecessor is observed and bound, never declared on the profile.
         self.assertFalse(hasattr(paths.install_paths.profile, "previous_build_number"))
         self.assertEqual(
@@ -1522,7 +1512,8 @@ class CurrentServiceTransactionTests(unittest.TestCase):
         rejected = (
             (CANDIDATE, install.AppIdentity("0.4.0", "40030", "a" * 64), "predecessor_unsupported"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40019", "f" * 64), "predecessor_identity_mismatch"),
-            (CANDIDATE, INSTALLED_PREVIOUS, "candidate_not_newer"),
+            # The GA build itself is never a predecessor.
+            (CANDIDATE, install.AppIdentity("0.4.0", "40042", "a" * 64), "predecessor_unsupported"),
             (CANDIDATE, install.AppIdentity("0.3.5", "40019", PREVIOUS.tree_sha256), "install_identity_mismatch"),
             (
                 install.CandidateIdentity(
@@ -1551,6 +1542,14 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             patch.object(install, "verify_dormant_bundle"),
         ):
             self.assertEqual(self.fixture.transaction._identity_pair(), (CANDIDATE, PREVIOUS))
+        with (
+            patch.object(self.fixture.transaction, "_candidate", return_value=CANDIDATE),
+            patch.object(install, "read_app_identity", return_value=INSTALLED_PREVIOUS),
+            patch.object(install, "verify_dormant_bundle"),
+        ):
+            self.assertEqual(
+                self.fixture.transaction._identity_pair(), (CANDIDATE, INSTALLED_PREVIOUS)
+            )
         # An absent or non-directory target is decided before any identity read.
         shutil.rmtree(target)
         for prepare, code in (
@@ -1569,11 +1568,11 @@ class CurrentServiceTransactionTests(unittest.TestCase):
                 read_identity.assert_not_called()
 
     def test_preflight_proves_off_in_the_observed_predecessors_vocabulary(self) -> None:
-        successor = ServiceFixture(profile=SUCCESSOR_PROFILE)
+        successor = ServiceFixture()
         self.addCleanup(successor.cleanup)
         cases = (
             (self.fixture, CANDIDATE, PREVIOUS, "prove-installed-40019-off", install.INSTALLED_40019_OFF_PROOF_PROFILE),
-            (successor, SUCCESSOR_CANDIDATE, INSTALLED_PREVIOUS, "prove-off", install.CURRENT_OFF_PROOF_PROFILE),
+            (successor, CANDIDATE, INSTALLED_PREVIOUS, "prove-off", install.CURRENT_OFF_PROOF_PROFILE),
         )
         for fixture, candidate, previous, prove_off, profile in cases:
             with self.subTest(prove_off=prove_off):
@@ -1604,7 +1603,7 @@ class CurrentServiceTransactionTests(unittest.TestCase):
     def test_current_predecessor_decommission_speaks_only_the_current_vocabulary(
         self,
     ) -> None:
-        fixture = ServiceFixture(profile=SUCCESSOR_PROFILE)
+        fixture = ServiceFixture()
         self.addCleanup(fixture.cleanup)
         actions: list[str] = []
 
@@ -1616,12 +1615,12 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             patch.object(
                 fixture.transaction,
                 "preflight",
-                return_value=(SUCCESSOR_CANDIDATE, INSTALLED_PREVIOUS, guard()),
+                return_value=(CANDIDATE, INSTALLED_PREVIOUS, guard()),
             ),
             patch.object(
                 fixture.transaction,
                 "_identity_pair",
-                return_value=(SUCCESSOR_CANDIDATE, INSTALLED_PREVIOUS),
+                return_value=(CANDIDATE, INSTALLED_PREVIOUS),
             ),
             patch.object(service, "_service_receipt", side_effect=run_action),
             patch.object(service, "_wait_for_service_absence"),
@@ -1665,11 +1664,11 @@ class CurrentServiceTransactionTests(unittest.TestCase):
         # that has only its prepare event: load must not treat it as this
         # transaction's own interrupted recovery and discard it.
         marker.unlink()
-        pending = ServiceFixture(profile=SUCCESSOR_PROFILE)
+        pending = ServiceFixture()
         self.addCleanup(pending.cleanup)
         with service.ServiceEventStore(pending.paths) as store:
             with store.locked():
-                store.create(SUCCESSOR_CANDIDATE, INSTALLED_PREVIOUS, guard(), GA_ENVIRONMENT)
+                store.create(CANDIDATE, INSTALLED_PREVIOUS, guard(), GA_ENVIRONMENT)
         pending_marker = (
             pending.paths.transaction_directory
             / install.AUTHORITY_RECOVERY_PENDING_INTENT_NAME

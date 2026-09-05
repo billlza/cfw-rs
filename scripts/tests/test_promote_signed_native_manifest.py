@@ -21,7 +21,7 @@ class SignedNativeManifestTests(unittest.TestCase):
         (self.unsigned / "binary").write_bytes(b"unsigned")
         self.metadata = {
             "artifactKind": "native-proxy-agent-v1",
-            "buildNumber": "40041",
+            "buildNumber": "40042",
             "signingMode": "pre-sign",
         }
         self.manifest = self.root / "CFWProxyAgent.app.manifest.json"
@@ -50,7 +50,7 @@ class SignedNativeManifestTests(unittest.TestCase):
         metadata = value["metadata"]
         pre_sign = json.loads(self.manifest.read_bytes())
         self.assertEqual(metadata["artifactKind"], "native-proxy-agent-v1")
-        self.assertEqual(metadata["buildNumber"], "40041")
+        self.assertEqual(metadata["buildNumber"], "40042")
         self.assertEqual(metadata["signingMode"], "developer-id")
         self.assertEqual(metadata["preSignArtifactSha256"], pre_sign["sha256"])
         self.assertEqual(

@@ -39,7 +39,7 @@ else
   [[ $# -eq 0 ]] || die "usage: make_dmg.sh [--recover-submission-id UUID]"
 fi
 readonly artifact_repository="$publication_artifact_repository"
-readonly ga_root="$artifact_repository/target/candidates/0.4.0/ga/40041"
+readonly ga_root="$artifact_repository/target/candidates/0.4.0/ga/40042"
 readonly app_path="$ga_root/signed/Clash for Mac.app"
 [[ -d "$app_path" && ! -L "$app_path" ]] || die "app bundle not found or is a symlink: $app_path"
 
@@ -63,8 +63,8 @@ build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/C
   die "cannot read the signed app build number"
 [[ "$build_number" =~ ^[1-9][0-9]*$ ]] ||
   die "signed app build number is not one canonical positive integer"
-[[ "$version" == "0.4.0" && "$build_number" == "40041" ]] ||
-  die "signed app is not the active GA 0.4.0/40041 identity"
+[[ "$version" == "0.4.0" && "$build_number" == "40042" ]] ||
+  die "signed app is not the active GA 0.4.0/40042 identity"
 
 verify_release_prepackage_evidence "$app_path"
 

@@ -18,7 +18,7 @@ from scripts import verify_legacy_tombstone_provenance as provenance
 
 
 class LegacyTombstoneProvenanceTests(unittest.TestCase):
-    BUILD_NUMBER = "40041"
+    BUILD_NUMBER = "40042"
     DEPLOYMENT_TARGET = "15.0"
     RUST_VERSION = "1.97.1"
 

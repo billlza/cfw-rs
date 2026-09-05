@@ -24,9 +24,9 @@ cfw_require_fixed_publication_app_path() {
     return 1
   fi
   publication_contract_canonical_app="$(cd "$publication_contract_app" && /bin/pwd -P)" || return 1
-  publication_contract_expected_app="$publication_contract_repository/target/candidates/0.4.0/ga/40041/signed/Clash for Mac.app"
+  publication_contract_expected_app="$publication_contract_repository/target/candidates/0.4.0/ga/40042/signed/Clash for Mac.app"
   if [[ "$publication_contract_canonical_app" != "$publication_contract_expected_app" ]]; then
-    echo "error: publication gate accepts only the fixed 0.4.0/40041 GA app: $publication_contract_expected_app" >&2
+    echo "error: publication gate accepts only the fixed 0.4.0/40042 GA app: $publication_contract_expected_app" >&2
     return 1
   fi
 }

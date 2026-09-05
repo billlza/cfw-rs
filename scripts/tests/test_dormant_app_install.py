@@ -56,6 +56,14 @@ from scripts.dormant_app_install import (
     _require_journal_successor,
     exclusive_release_maintenance_lock,
 )
+from scripts.dormant_app_install import (
+    INSTALLED_40019_PREDECESSOR,
+    INSTALLED_40041_PREDECESSOR,
+    SUPPORTED_PREDECESSORS,
+    bind_journal_predecessor,
+    require_target_application_present,
+    resolve_predecessor,
+)
 
 
 OLD = AppIdentity("0.4.0", "40019", "a" * 64)
@@ -1637,6 +1645,107 @@ class DormantInstallValidationTests(unittest.TestCase):
                 ),
             )
         self.assertEqual(tombstone_error.exception.code, "cfm_legacy_tombstone_invalid")
+
+
+class InstallPredecessorTests(unittest.TestCase):
+    """The install predecessor is observed, not pre-declared, and fails closed."""
+
+    def test_current_schema_predecessor_selects_the_current_vocabulary(self) -> None:
+        # 40041 speaks engine v6 / Authority v1.1, so a 40041 -> 40042 install
+        # needs none of the 40019 compatibility actions.
+        predecessor = resolve_predecessor(
+            AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
+            "40042",
+        )
+        self.assertEqual(predecessor, INSTALLED_40041_PREDECESSOR)
+        self.assertEqual(predecessor.off_proof_profile, "current_engine_v6_authority_v1_1")
+        self.assertEqual(predecessor.unregister_proxy_action, "unregister-proxy-agent")
+        self.assertEqual(
+            predecessor.unregister_authority_action, "unregister-global-authority"
+        )
+        self.assertFalse(predecessor.supports_authority_recovery_intent)
+
+    def test_legacy_predecessor_still_selects_the_compatibility_vocabulary(self) -> None:
+        predecessor = resolve_predecessor(
+            AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256),
+            "40041",
+        )
+        self.assertEqual(predecessor, INSTALLED_40019_PREDECESSOR)
+        self.assertEqual(
+            predecessor.off_proof_profile, "installed_40019_engine_v5_authority_v1_0"
+        )
+        self.assertEqual(
+            predecessor.unregister_authority_action,
+            "unregister-installed-40019-global-authority",
+        )
+        self.assertTrue(predecessor.supports_authority_recovery_intent)
+
+    def test_unrecognised_predecessor_is_rejected_rather_than_guessed(self) -> None:
+        # No admissible wire protocol exists for an unknown installed build.
+        with self.assertRaises(InstallError) as raised:
+            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), "40042")
+        self.assertEqual(raised.exception.code, "predecessor_unsupported")
+
+    def test_predecessor_build_number_alone_is_not_trusted(self) -> None:
+        # CFBundleVersion is an unauthenticated bundle string; the exact frozen
+        # tree identity must agree with it.
+        with self.assertRaises(InstallError) as raised:
+            resolve_predecessor(AppIdentity("0.4.0", "40041", "f" * 64), "40042")
+        self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
+
+    def test_downgrade_and_reinstall_are_rejected(self) -> None:
+        observed = AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256)
+        for candidate in ("40041", "40019"):
+            with self.assertRaises(InstallError) as raised:
+                resolve_predecessor(observed, candidate)
+            self.assertEqual(raised.exception.code, "candidate_not_newer")
+
+    def test_foreign_product_version_is_rejected(self) -> None:
+        with self.assertRaises(InstallError) as raised:
+            resolve_predecessor(
+                AppIdentity("0.3.5", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
+                "40042",
+            )
+        self.assertEqual(raised.exception.code, "install_identity_mismatch")
+
+    def test_absent_application_is_its_own_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "Clash for Mac.app"
+            with self.assertRaises(InstallError) as raised:
+                require_target_application_present(missing)
+            self.assertEqual(raised.exception.code, "previous_app_absent")
+
+    def test_a_symlinked_application_is_not_a_readable_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "real").mkdir()
+            link = root / "Clash for Mac.app"
+            link.symlink_to(root / "real")
+            with self.assertRaises(InstallError) as raised:
+                require_target_application_present(link)
+            self.assertEqual(raised.exception.code, "app_identity_invalid")
+
+    def test_an_old_journal_keeps_validating_against_its_own_vocabulary(self) -> None:
+        # The 40019 -> 40041 migration journal is immutable evidence. It is read
+        # with the vocabulary its own recorded predecessor implies.
+        predecessor = bind_journal_predecessor(
+            AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256)
+        )
+        self.assertEqual(
+            predecessor.unregister_proxy_action,
+            "unregister-installed-40019-proxy-agent",
+        )
+
+    def test_the_supported_predecessor_table_is_an_exact_frozen_contract(self) -> None:
+        self.assertEqual(
+            dict(SUPPORTED_PREDECESSORS),
+            {
+                "40019": INSTALLED_40019_PREDECESSOR,
+                "40041": INSTALLED_40041_PREDECESSOR,
+            },
+        )
+        with self.assertRaises(TypeError):
+            SUPPORTED_PREDECESSORS["40042"] = INSTALLED_40041_PREDECESSOR  # type: ignore[index]
 
 
 class SystemExtensionParserTests(unittest.TestCase):

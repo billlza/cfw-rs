@@ -38,6 +38,7 @@ import stat
 import subprocess
 import sys
 import time
+from types import MappingProxyType
 from typing import Any, Callable, Final, Iterator
 import uuid
 
@@ -192,6 +193,65 @@ AUTHORITY_RECOVERY_PENDING_INTENT_NAME: Final = (
 )
 AUTHORITY_RECOVERY_INTENT_SCHEMA_VERSION: Final = 1
 CURRENT_OFF_PROOF_PROFILE: Final = "current_engine_v6_authority_v1_1"
+
+
+@dataclass(frozen=True)
+class PredecessorProfile:
+    """The installed application a GA install may legitimately replace.
+
+    The service vocabulary is a wire protocol spoken to the outgoing signed
+    Host, so it is selected from the observed predecessor rather than declared
+    in advance. Both vocabularies below are already implemented by the shipped
+    application; nothing here invents an action name.
+    """
+
+    build_number: str
+    tree_sha256: str
+    off_proof_profile: str
+    prove_off_action: str
+    unregister_proxy_action: str
+    unregister_authority_action: str
+    authority_recovery_action: str | None
+    authority_recovery_off_proof_profile: str | None
+
+    @property
+    def supports_authority_recovery_intent(self) -> bool:
+        return self.authority_recovery_action is not None
+
+
+# Build 40019 speaks engine v5 / Authority v1.0. Its tree digest is the
+# `previous` identity recorded in the sealed 40019 -> 40041 install journal; it
+# cannot be re-observed because 40019 is no longer installed anywhere.
+INSTALLED_40019_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40019",
+    tree_sha256="527ac309a3047fb5aa1ec8eebacd759de3cba8fc71c5f2b1910d0827dcf4b225",
+    off_proof_profile=INSTALLED_40019_OFF_PROOF_PROFILE,
+    prove_off_action="prove-installed-40019-off",
+    unregister_proxy_action="unregister-installed-40019-proxy-agent",
+    unregister_authority_action="unregister-installed-40019-global-authority",
+    authority_recovery_action=INSTALLED_40019_RECOVERY_ACTION,
+    authority_recovery_off_proof_profile=INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE,
+)
+# Build 40041 speaks the current engine v6 / Authority v1.1 vocabulary, so it
+# needs none of the 40019 compatibility actions. Its tree digest is the sealed
+# signed-application tree, independently recorded by the install journal's
+# `candidate` entry and by the DMG release seal.
+INSTALLED_40041_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40041",
+    tree_sha256="d7b12dc1659ab0d812a249219195697f946329dbdd3fcf6b5f07b43a4c04ca37",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery_action=None,
+    authority_recovery_off_proof_profile=None,
+)
+SUPPORTED_PREDECESSORS: Final = MappingProxyType(
+    {
+        INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
+        INSTALLED_40041_PREDECESSOR.build_number: INSTALLED_40041_PREDECESSOR,
+    }
+)
 SERVICE_DECOMMISSION_PHASES: Final = (
     "prepared",
     "proxy_unregistered",
@@ -605,6 +665,84 @@ def read_app_identity(path: Path) -> AppIdentity:
         build_number=identity.build_version,
         tree_sha256=_tree_sha256(path, "application bundle"),
     )
+
+
+def require_target_application_present(path: Path) -> None:
+    """Prove an application is actually installed before anything reads it.
+
+    Absence is a distinct, explicit outcome. It must never be reached by an
+    identity read failing and being treated as "nothing was installed".
+    """
+
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as error:
+        raise InstallError(
+            "previous_app_absent", f"no application is installed at {path}"
+        ) from error
+    except OSError as error:
+        raise InstallError(
+            "app_identity_invalid", f"installed application is unreadable: {path}"
+        ) from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise InstallError(
+            "app_identity_invalid",
+            f"installed application is not a real directory: {path}",
+        )
+
+
+def resolve_predecessor(observed: AppIdentity, candidate_build: str) -> PredecessorProfile:
+    """Select the service vocabulary from the observed installed application.
+
+    The vocabulary is a wire protocol spoken to the outgoing signed Host, so an
+    unrecognised predecessor has no admissible protocol and is rejected rather
+    than guessed at. The exact tree digest is required as well as the build
+    number: the build number alone is an unauthenticated bundle string.
+    """
+
+    if observed.version != VERSION:
+        raise InstallError(
+            "install_identity_mismatch",
+            f"installed application version {observed.version} is not {VERSION}",
+        )
+    predecessor = SUPPORTED_PREDECESSORS.get(observed.build_number)
+    if predecessor is None:
+        raise InstallError(
+            "predecessor_unsupported",
+            f"installed build {observed.build_number} is not a supported install predecessor",
+        )
+    if observed.tree_sha256 != predecessor.tree_sha256:
+        raise InstallError(
+            "predecessor_identity_mismatch",
+            f"installed build {observed.build_number} does not have its fixed tree identity",
+        )
+    if int(candidate_build) <= int(observed.build_number):
+        raise InstallError(
+            "candidate_not_newer",
+            f"candidate build {candidate_build} does not supersede installed build {observed.build_number}",
+        )
+    return predecessor
+
+
+def bind_journal_predecessor(previous: AppIdentity) -> PredecessorProfile:
+    """Select the vocabulary a recorded journal was written with.
+
+    Keyed by the predecessor the journal itself recorded, so an older journal
+    written against build 40019 keeps validating against the 40019 vocabulary.
+    """
+
+    predecessor = SUPPORTED_PREDECESSORS.get(previous.build_number)
+    if predecessor is None:
+        raise InstallError(
+            "predecessor_unsupported",
+            f"journalled build {previous.build_number} is not a supported install predecessor",
+        )
+    if previous.tree_sha256 != predecessor.tree_sha256:
+        raise InstallError(
+            "predecessor_identity_mismatch",
+            f"journalled build {previous.build_number} does not have its fixed tree identity",
+        )
+    return predecessor
 
 
 def production_command_runner(arguments: tuple[str, ...]) -> CommandResult:

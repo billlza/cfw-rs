@@ -30,7 +30,7 @@ PREVIOUS = install.AppIdentity(
 )
 BOUND = install.BoundInstallProfile.recorded(install.GA_INSTALL_PROFILE, PREVIOUS)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40042", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40043", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,

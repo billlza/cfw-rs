@@ -15,7 +15,7 @@ cleanup() {
 trap cleanup EXIT
 fixture_root="$(cd "$fixture_root" && /bin/pwd -P)"
 
-ga_app="$fixture_root/target/candidates/0.4.0/ga/40042/signed/Clash for Mac.app"
+ga_app="$fixture_root/target/candidates/0.4.0/ga/40043/signed/Clash for Mac.app"
 mkdir -p "$ga_app"
 cfw_require_fixed_publication_app_path "$fixture_root" "$ga_app"
 
@@ -33,8 +33,8 @@ cfw_require_fixed_publication_app_path "$fixture_root" "$ga_app"
 )
 
 gate_fixture="$fixture_root/gate-repository"
-gate_artifact="$gate_fixture/target/release-worktrees/40042"
-gate_ga_root="$gate_artifact/target/candidates/0.4.0/ga/40042"
+gate_artifact="$gate_fixture/target/release-worktrees/40043"
+gate_ga_root="$gate_artifact/target/candidates/0.4.0/ga/40043"
 mkdir -p "$gate_fixture/scripts" "$gate_artifact/scripts" \
   "$gate_ga_root/signed/Clash for Mac.app" \
   "$gate_ga_root/signing-output/signed-native-products"
@@ -52,7 +52,7 @@ cfw_run_release_python_script() {
   case "$2" in
     "$1/scripts/release_executor_source.py")
       [[ "$#" -eq 3 && "$3" == "--print-frozen-artifact-repository" ]] || return 1
-      printf '%s\n' "$1/target/release-worktrees/40042"
+      printf '%s\n' "$1/target/release-worktrees/40043"
       ;;
     "$1/scripts/production_release_evidence.py")
       [[ "$#" -eq 4 && "$3" == "verify" && "$4" == "prepackage" ]] || return 1
@@ -67,7 +67,7 @@ cat >"$gate_artifact/scripts/verify_release_app.sh" <<'SH'
 #!/bin/bash -p
 set -euo pipefail
 fixture_artifact_root="${BASH_SOURCE[0]%/scripts/verify_release_app.sh}"
-fixture_ga_root="$fixture_artifact_root/target/candidates/0.4.0/ga/40042"
+fixture_ga_root="$fixture_artifact_root/target/candidates/0.4.0/ga/40043"
 [[ "$#" -eq 4 ]]
 [[ "$1" == "$fixture_ga_root/signed/Clash for Mac.app" ]]
 [[ "$2" == "$fixture_ga_root/signing-output/signed-native-products" ]]
@@ -102,16 +102,16 @@ if cfw_require_fixed_publication_app_path "$fixture_root" "$old_signed" 2>"$fixt
   echo "error: path contract accepted retired candidate-level signed path" >&2
   exit 1
 fi
-grep -Fq "only the fixed 0.4.0/40042 GA app" "$fixture_root/old-path.stderr"
+grep -Fq "only the fixed 0.4.0/40043 GA app" "$fixture_root/old-path.stderr"
 
-for retired_build_number in 40030 40031 40032 40033 40034 40035 40036 40037 40038 40039 40040 40041; do
+for retired_build_number in 40030 40031 40032 40033 40034 40035 40036 40037 40038 40039 40040 40041 40042; do
   retired_build="$fixture_root/target/candidates/0.4.0/ga/$retired_build_number/signed/Clash for Mac.app"
   mkdir -p "$retired_build"
   if cfw_require_fixed_publication_app_path "$fixture_root" "$retired_build" 2>"$fixture_root/retired-build-$retired_build_number.stderr"; then
     echo "error: path contract accepted retired build $retired_build_number" >&2
     exit 1
   fi
-  grep -Fq "only the fixed 0.4.0/40042 GA app" "$fixture_root/retired-build-$retired_build_number.stderr"
+  grep -Fq "only the fixed 0.4.0/40043 GA app" "$fixture_root/retired-build-$retired_build_number.stderr"
 done
 
 linked_app="$fixture_root/linked.app"

@@ -382,16 +382,16 @@ def _fixed_roots(repository: Path) -> tuple[Path, Path]:
         not isinstance(identity.product_version, str)
         or not isinstance(identity.ga_build, str)
         or identity.product_version != "0.4.0"
-        or identity.ga_build != "40042"
+        or identity.ga_build != "40043"
     ):
         raise CandidateFreezeError(
             "active_release_identity_invalid",
-            "candidate freeze requires the fixed v0.4.0 build 40042 identity",
+            "candidate freeze requires the fixed v0.4.0 build 40043 identity",
         )
     base = repository / "target/candidates/0.4.0"
     preflight = ga_preflight_root(repository)
     frozen = ga_root(repository)
-    if preflight != base / "ga-preflight/40042" or frozen != base / "ga/40042":
+    if preflight != base / "ga-preflight/40043" or frozen != base / "ga/40043":
         raise CandidateFreezeError(
             "active_release_path_invalid",
             "candidate-freeze roots differ from the fixed active release identity",

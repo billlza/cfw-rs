@@ -110,7 +110,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "c57936a45320c92d0461f67d51db14b9722f538aa813d1e8cff963601ff3282e"
+    "f3e816b526f2019b441a4eca43f27b8ff0ddf35bd71af87dc64ed7c5a147383a"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -118,7 +118,7 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "80c4f83d63fbfb7f64e6244f3e2a8a93aa6e84806dbaa31226d53cd796bc48bf"
+    "91083b0f724879ba3aa8391802316675a4e4e0a0bfc0b22d14862b583ca12fe5"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
@@ -132,7 +132,7 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
         "63a05e630f3622bbcd4d5b418ebe8174487d8690ea60b383147bd24e87696f0a"
     ),
     "_verified_prepackage_inputs": (
-        "39a914547b04d8a6c81ed25be0f8f627a45afc89c9fb7965801e8e944d54f19b"
+        "c41fe5eff769b2dc711fceea49a46ec5c5ab153a56b01688fc7216509eb375bc"
     ),
     "_verified_package_sets": "6d530c9583863c1b56baa56554f2c8e576d90f0797c113e3d15dada9f8805b56",
     "_verified_migration_journals": (
@@ -142,7 +142,7 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
         "6157ac3c2f944787433c9db2ed8bdc95e80d88866729b5a2351fd7c15975e42e"
     ),
     "_require_migration_matches_prepackage": (
-        "9c9b904bccca4cb27fd2dad4ae34f4c2c337e29771623637768b329c93f7a9d9"
+        "621ca9a9f33a1290d8a473b96e0b479a1701b6092470755b9d5fb6d4537d127c"
     ),
     "_verified_acceptance_inputs": (
         "099413649138b7298d94930f60dc51fcfa0927a6c7af5d60bd44fc623b53db3f"
@@ -158,7 +158,7 @@ GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
     "verify_publication_authorization": "181dd93f19fa706c5c25b839bf63b4f0fc4caf61656e87b5f20ff72768767d20",
     "derive_runtime_expectation": "3489567d56cae3ed2622e6f63b5dcfbe93a62e4865162d349c44b9d1371f7c75",
     "seal_prepackage": "758a9039726ae7d93a048ed4ba6989c2654dd3ae3cedb0c61d0f7a8ad77646e8",
-    "seal_ga_acceptance": "6ca9cdbcafaf332bb4ebbd106d105f2a4d26017e8393b3e71ef1f2f95a1cd3de",
+    "seal_ga_acceptance": "41e8dd61fb7d2779077e5e040b2481a934f00bb19c060eb2329309c86744d0fe",
     "seal_publication": "edf0ba7d44672ddb7cf23856d59ddb9c4f43f9caaea7f05f62b89c794729ef9a",
 }
 GA_RELEASE_CLI_MAIN_AST_SHA256 = {
@@ -173,7 +173,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     ),
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "97a6dd3159497ba0c75006b829ad45173771b6e555454ca0566234f7ab73758d"
+    "16b3c657078aba7e23a0df5a2c7f9f79fe7f13084030d3f89c23db6e78b913ea"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}

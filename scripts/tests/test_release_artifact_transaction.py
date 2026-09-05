@@ -108,7 +108,7 @@ def prepackage_binding(
 def create_prepackage_stage(repository: Path) -> tuple[Path, dict[str, object]]:
     manifest = (
         repository
-        / "target/candidates/0.4.0/ga/40042/prepackage/manifest.json"
+        / "target/candidates/0.4.0/ga/40043/prepackage/manifest.json"
     )
     manifest.parent.mkdir(parents=True, mode=0o700)
     manifest.write_text(
@@ -117,10 +117,10 @@ def create_prepackage_stage(repository: Path) -> tuple[Path, dict[str, object]]:
     return manifest, prepackage_binding(repository, manifest)
 
 
-def create_signed_candidate(repository: Path, build_number: str = "40042") -> Path:
+def create_signed_candidate(repository: Path, build_number: str = "40043") -> Path:
     app = (
         repository
-        / "target/candidates/0.4.0/ga/40042/signed/Clash for Mac.app"
+        / "target/candidates/0.4.0/ga/40043/signed/Clash for Mac.app"
     )
     executable = app / "Contents/MacOS/clash-for-mac"
     executable.parent.mkdir(parents=True)
@@ -748,7 +748,7 @@ class DmgFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.app = create_signed_candidate(self.repository)
-        self.ga_root = self.repository / "target/candidates/0.4.0/ga/40042"
+        self.ga_root = self.repository / "target/candidates/0.4.0/ga/40043"
         self.prepackage_manifest, self.prepackage = create_prepackage_stage(
             self.repository
         )
@@ -761,7 +761,7 @@ class DmgFixture:
         self.context = DmgContext(
             repository=self.repository,
             version="0.4.0",
-            build_number="40042",
+            build_number="40043",
             notary_profile=NOTARY_PROFILE,
             source_identity=SOURCE_IDENTITY,
             staged_dmg=self.dmg,
@@ -915,12 +915,12 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
         self.assertEqual(
             self.fixture.context.final_root,
             self.fixture.repository
-            / "target/candidates/0.4.0/ga/40042/packages/dmg/v0.4.0",
+            / "target/candidates/0.4.0/ga/40043/packages/dmg/v0.4.0",
         )
         self.assertEqual(
             self.fixture.context.attempt_root,
             self.fixture.repository
-            / "target/candidates/0.4.0/ga/40042/transactions/dmg-notary/v0.4.0",
+            / "target/candidates/0.4.0/ga/40043/transactions/dmg-notary/v0.4.0",
         )
 
     def test_non_ga_build_is_rejected_before_any_remote_command(self) -> None:
@@ -1022,7 +1022,7 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
             "--version",
             "0.4.0",
             "--build-number",
-            "40042",
+            "40043",
             "--notary-profile",
             NOTARY_PROFILE,
         ]
@@ -1038,7 +1038,7 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
                 self.fixture.dmg.parent,
                 repository=self.fixture.repository,
                 version="0.4.0",
-                build_number="40042",
+                build_number="40043",
                 pre_staple_sha256="a" * 64,
                 prepackage=self.fixture.prepackage,
                 source_identity=SEALED_SOURCE_IDENTITY,
@@ -1310,7 +1310,7 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             self.root
         )
         self.package_root = (
-            self.root / "target/candidates/0.4.0/ga/40042/packages"
+            self.root / "target/candidates/0.4.0/ga/40043/packages"
         )
         updater_root = self.package_root / "updater"
         updater_root.mkdir(parents=True, mode=0o700)
@@ -2597,7 +2597,7 @@ class ReleaseUploadGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory).resolve()
             package_root = (
-                repository / "target/candidates/0.4.0/ga/40042/packages"
+                repository / "target/candidates/0.4.0/ga/40043/packages"
             )
             package_root.mkdir(parents=True)
             (package_root / "latest.json").write_text("{}\n", encoding="utf-8")
@@ -2611,7 +2611,7 @@ class PackagingEntrypointContractTests(unittest.TestCase):
         for relative in ("make_dmg.sh", "make_updater_manifest.sh"):
             source = (repository / "scripts" / relative).read_text(encoding="utf-8")
             with self.subTest(script=relative):
-                self.assertIn("target/candidates/0.4.0/ga/40042", source)
+                self.assertIn("target/candidates/0.4.0/ga/40043", source)
                 self.assertNotIn("target/candidates/0.4.0/ga/40037", source)
                 self.assertNotIn("target/candidates/0.4.0/ga/40038", source)
                 self.assertIn("verify_release_prepackage_evidence", source)

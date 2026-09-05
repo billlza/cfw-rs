@@ -23,7 +23,7 @@
   every step to an unchanged Clash for Windows process and network projection.
   One inode-bound outer lock serializes service and bundle mutations, and
   independent fixed journals cover historical validation migrations and the
-  40019→40041 and 40041→40042 GA installations without overwriting earlier
+  40019→40041 and 40041→40043 GA installations without overwriting earlier
   evidence. The
   canonical allocation ledger prevents a retired validation build or its
   reserved final companion from being reused by a later source closure. The
@@ -115,7 +115,11 @@
   that network to be preserved. The preflight now attributes legacy absence to
   the retired installation only, and the install binds its service vocabulary
   to the observed predecessor. Build 40041 is retired after install with its
-  bytes, receipts, seals and journals unchanged. Build 40042 is the only
+  bytes, receipts, seals and journals unchanged. Build 40042 was then frozen,
+  signed and notarized, but its frozen source's own local lane reproduction
+  failed on one release-tooling test that read the lane's ambient toolchain
+  selection; that test is now isolated, and 40042 is retired after
+  notarization with its bytes and receipts unchanged. Build 40043 is the only
   active GA successor; source and CI
   retries before freeze do not consume additional builds.
 - Authenticate nested release-worktree managed caches through bounded,

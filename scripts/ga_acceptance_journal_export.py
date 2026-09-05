@@ -1162,10 +1162,10 @@ def verify_ga_acceptance_journal_export(
 
 def self_check() -> None:
     if (
-        (PRODUCT_VERSION, PREVIOUS_BUILD, GA_BUILD) != ("0.4.0", "40041", "40042")
+        (PRODUCT_VERSION, PREVIOUS_BUILD, GA_BUILD) != ("0.4.0", "40041", "40043")
         or MIGRATION_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40042/stage-inputs/"
+            "target/candidates/0.4.0/ga/40043/stage-inputs/"
             "ga-acceptance/migration-journals"
         )
         or ENVIRONMENT_RELATIVE

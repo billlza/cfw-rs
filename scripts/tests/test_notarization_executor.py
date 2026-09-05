@@ -63,7 +63,7 @@ class NotarizationExecutorTests(unittest.TestCase):
         self.assertEqual(document["document"], DOCUMENT)
         self.assertEqual(document["artifact_source"], self.arguments["artifact_identity"])
         self.assertEqual(document["executor_source"], self.identity)
-        self.assertEqual(document["product"], {"version": "0.4.0", "build_number": "40042"})
+        self.assertEqual(document["product"], {"version": "0.4.0", "build_number": "40043"})
         self.assertEqual(document["candidate_freeze_intent_sha256"], "e" * 64)
         self.assertEqual(document["signing_transformation_receipt_sha256"], "f" * 64)
         self.assertEqual(stat.S_IMODE(before.st_mode), 0o600)

@@ -283,11 +283,11 @@ def launchctl_output(
     domain_target: str,
     program_identifier: str,
     service_label: str,
-    parent_bundle_version: str = "40042",
+    parent_bundle_version: str = "40043",
 ) -> str:
     """Reproduce the exact `launchctl print` shape for an SMAppService job.
 
-    Captured verbatim from the release Mac for the installed 40042 services.
+    Captured verbatim from the release Mac for the installed 40043 services.
     Both plists declare `BundleProgram`, so launchd resolves the executable
     inside the signed bundle and prints a bundle-relative `program identifier`
     line with resolution `mode: 2`. It never prints the absolute `program =`
@@ -324,7 +324,7 @@ def system_extension_output() -> str:
         "--- com.apple.system_extension.network_extension\n"
         "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]\n"
         "*\t*\tYKUPL7Z869\tcom.bill.clashformac.packet-tunnel "
-        "(0.4.0/40042)\tCFWPacketTunnel\t[activated enabled]\n"
+        "(0.4.0/40043)\tCFWPacketTunnel\t[activated enabled]\n"
     )
 
 
@@ -536,7 +536,7 @@ class RuntimeFixture:
                         "context:primary-signature",
                         "-vv",
                         (
-                            "target/candidates/0.4.0/ga/40042/packages/dmg/v0.4.0/"
+                            "target/candidates/0.4.0/ga/40043/packages/dmg/v0.4.0/"
                             "Clash.for.Mac_0.4.0_arm64.dmg"
                         ),
                     ],
@@ -936,7 +936,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_contract_has_fixed_paths_and_twelve_raw_derived_checks(self) -> None:
         self_check()
-        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40041", "40042"))
+        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40041", "40043"))
         self.assertEqual(
             (ga_runtime.MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS),
             (15 * 60, 30 * 60),
@@ -964,28 +964,28 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             ACCEPTANCE_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40042/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
                 "runtime-acceptance.json"
             ),
         )
         self.assertEqual(
             RAW_ROOT_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40042/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
                 "runtime-evidence"
             ),
         )
         self.assertEqual(
             ENVIRONMENT_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40042/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
                 "migration-journals/service-transaction/environment.json"
             ),
         )
         self.assertEqual(
             INSTALL_JOURNAL_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40042/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
                 "migration-journals/dormant-install.json"
             ),
         )
@@ -1064,7 +1064,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             GARuntimeAcceptanceError,
-            "installed 40042 launch command command identity, exit, or duration is invalid",
+            "installed 40043 launch command command identity, exit, or duration is invalid",
         ):
             self.fixture.seal()
 
@@ -1281,7 +1281,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self._set_service_stdout(
             "proxy_agent",
             self._service_stdout("proxy_agent").replace(
-                "parent bundle version = 40042",
+                "parent bundle version = 40043",
                 "parent bundle version = 40041",
             ),
         )

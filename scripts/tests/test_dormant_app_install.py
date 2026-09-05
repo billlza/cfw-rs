@@ -70,7 +70,7 @@ from scripts.dormant_app_install import (
 # install admits a predecessor only against its exact recorded tree digest,
 # so an invented digest would be rejected as a tampered bundle, not admitted.
 OLD = AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256)
-NEW = AppIdentity("0.4.0", "40042", "b" * 64)
+NEW = AppIdentity("0.4.0", "40043", "b" * 64)
 # The installed 40041 with its real frozen tree identity: the production
 # predecessor of this build.
 INSTALLED = AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256)
@@ -1212,27 +1212,27 @@ class DormantInstallValidationTests(unittest.TestCase):
                 )
         self.assertEqual(captured.exception.code, "candidate_toolchain_override")
 
-    def test_ga_profile_has_one_fixed_40042_path_and_journal(self) -> None:
+    def test_ga_profile_has_one_fixed_40043_path_and_journal(self) -> None:
         paths = InstallPaths.production()
 
         self.assertEqual(paths.profile, GA_INSTALL_PROFILE)
-        self.assertEqual(paths.profile.build_number, "40042")
+        self.assertEqual(paths.profile.build_number, "40043")
         # An unbound profile cannot express a predecessor claim at all; the
         # predecessor is observed on the machine and bound separately.
         self.assertFalse(hasattr(paths.profile, "previous_build_number"))
         self.assertEqual(
             paths.repository,
-            paths.operator_repository / "target/release-worktrees/40042",
+            paths.operator_repository / "target/release-worktrees/40043",
         )
         self.assertTrue(
             str(paths.candidate_app).endswith(
-                "/target/candidates/0.4.0/ga/40042/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40043/signed/Clash for Mac.app"
             )
         )
         self.assertEqual(
             paths.profile.native_products_relative,
             Path(
-                "target/candidates/0.4.0/ga/40042/signing-output/signed-native-products"
+                "target/candidates/0.4.0/ga/40043/signing-output/signed-native-products"
             ),
         )
         self.assertEqual(paths.journal_name, JOURNAL_NAME)
@@ -1423,11 +1423,11 @@ class DormantInstallValidationTests(unittest.TestCase):
             ".com.bill.clashformac.dormant-install.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         )
 
-    def test_production_candidate_is_fixed_to_40042_ga_root(self) -> None:
+    def test_production_candidate_is_fixed_to_40043_ga_root(self) -> None:
         paths = InstallPaths.production()
         self.assertTrue(
             paths.candidate_app.as_posix().endswith(
-                "/target/candidates/0.4.0/ga/40042/signed/Clash for Mac.app"
+                "/target/candidates/0.4.0/ga/40043/signed/Clash for Mac.app"
             )
         )
 
@@ -1435,7 +1435,7 @@ class DormantInstallValidationTests(unittest.TestCase):
         from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
         operator = Path("/operator")
-        artifact = operator / "target/release-worktrees/40042"
+        artifact = operator / "target/release-worktrees/40043"
         sources = FrozenReleaseSources(
             executor=ExecutorSource(operator, "a" * 40, "b" * 64),
             artifact=ExecutorSource(artifact, "c" * 40, "d" * 64),
@@ -1459,12 +1459,20 @@ class DormantInstallValidationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             operator = Path(temporary).resolve()
-            with patch.object(install, "__file__", str(operator / "scripts/dormant_app_install.py")):
+            # The local CI lane collector exports CFW_TOOLCHAIN_ROOT for every
+            # lane, and admission refuses any ambient toolchain selection before
+            # it reads the artifact toolchain. This scenario is about the
+            # artifact reader, so it must run without that ambient selection.
+            with (
+                patch.dict(os.environ),
+                patch.object(install, "__file__", str(operator / "scripts/dormant_app_install.py")),
+            ):
+                os.environ.pop("CFW_TOOLCHAIN_ROOT", None)
                 paths = InstallPaths.production()
                 paths.release_toolchain_root.mkdir(parents=True)
                 paths.candidate_manifest.parent.mkdir(parents=True)
                 paths.candidate_manifest.write_text(
-                    '{"metadata":{"buildNumber":"40042"}}\n', encoding="utf-8"
+                    '{"metadata":{"buildNumber":"40043"}}\n', encoding="utf-8"
                 )
                 sources = FrozenReleaseSources(
                     executor=ExecutorSource(operator, "a" * 40, "b" * 64),
@@ -1707,11 +1715,11 @@ class InstallPredecessorTests(unittest.TestCase):
     """The install predecessor is observed, not pre-declared, and fails closed."""
 
     def test_current_schema_predecessor_selects_the_current_vocabulary(self) -> None:
-        # 40041 speaks engine v6 / Authority v1.1, so a 40041 -> 40042 install
+        # 40041 speaks engine v6 / Authority v1.1, so a 40041 -> 40043 install
         # needs none of the 40019 compatibility actions.
         predecessor = resolve_predecessor(
             AppIdentity("0.4.0", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-            "40042",
+            "40043",
         )
         self.assertEqual(predecessor, INSTALLED_40041_PREDECESSOR)
         self.assertEqual(predecessor.off_proof_profile, "current_engine_v6_authority_v1_1")
@@ -1724,7 +1732,7 @@ class InstallPredecessorTests(unittest.TestCase):
     def test_legacy_predecessor_still_selects_the_compatibility_vocabulary(self) -> None:
         predecessor = resolve_predecessor(
             AppIdentity("0.4.0", "40019", INSTALLED_40019_PREDECESSOR.tree_sha256),
-            "40042",
+            "40043",
         )
         self.assertEqual(predecessor, INSTALLED_40019_PREDECESSOR)
         self.assertEqual(
@@ -1739,14 +1747,14 @@ class InstallPredecessorTests(unittest.TestCase):
     def test_unrecognised_predecessor_is_rejected_rather_than_guessed(self) -> None:
         # No admissible wire protocol exists for an unknown installed build.
         with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), "40042")
+            resolve_predecessor(AppIdentity("0.4.0", "40040", "a" * 64), "40043")
         self.assertEqual(raised.exception.code, "predecessor_unsupported")
 
     def test_predecessor_build_number_alone_is_not_trusted(self) -> None:
         # CFBundleVersion is an unauthenticated bundle string; the exact frozen
         # tree identity must agree with it.
         with self.assertRaises(InstallError) as raised:
-            resolve_predecessor(AppIdentity("0.4.0", "40041", "f" * 64), "40042")
+            resolve_predecessor(AppIdentity("0.4.0", "40041", "f" * 64), "40043")
         self.assertEqual(raised.exception.code, "predecessor_identity_mismatch")
 
     def test_downgrade_and_reinstall_are_rejected(self) -> None:
@@ -1760,7 +1768,7 @@ class InstallPredecessorTests(unittest.TestCase):
         with self.assertRaises(InstallError) as raised:
             resolve_predecessor(
                 AppIdentity("0.3.5", "40041", INSTALLED_40041_PREDECESSOR.tree_sha256),
-                "40042",
+                "40043",
             )
         self.assertEqual(raised.exception.code, "install_identity_mismatch")
 
@@ -1801,13 +1809,13 @@ class InstallPredecessorTests(unittest.TestCase):
             },
         )
         with self.assertRaises(TypeError):
-            SUPPORTED_PREDECESSORS["40042"] = INSTALLED_40041_PREDECESSOR  # type: ignore[index]
+            SUPPORTED_PREDECESSORS["40043"] = INSTALLED_40041_PREDECESSOR  # type: ignore[index]
 
     def test_current_predecessor_event_contract_never_admits_recovery(self) -> None:
         # A current-schema predecessor speaks the plain vocabulary at every
         # event and can never be asked to recover a 40019-era Authority.
-        # Exercised on the bound contract directly: a full 40041 -> 40042
-        # transaction round-trip needs the 40042 profile.
+        # Exercised on the bound contract directly: a full 40041 -> 40043
+        # transaction round-trip needs the 40043 profile.
         bound = install.BoundInstallProfile(GA_INSTALL_PROFILE, INSTALLED_40041_PREDECESSOR)
         self.assertEqual(
             bound.service_actions,

@@ -1,6 +1,6 @@
 use cfw_core::{
-    LegacyControlSession, LegacyControlSessionObservation, LegacySettingsMigration, SettingsStore,
-    UiPreferences,
+    LegacyControlSession, LegacyControlSessionObservation, LegacyNetworkState,
+    LegacySettingsMigration, SettingsStore, UiPreferences,
 };
 use cfw_platform::{
     LegacyProxyCutoverPlan, LegacyProxyServiceIdentity, LegacyServiceJobObservation,
@@ -33,6 +33,50 @@ pub(super) struct LegacyCutoverPlan {
     control_session: Option<LegacyControlSessionObservation>,
     managed_process: Option<ProcessRecord>,
     runtime_kind: LegacyRuntimePlanKind,
+    proxy_absence: LegacyProxyAbsence,
+}
+
+/// The endpoint the retired installation recorded as its own, resolved once so
+/// every absence proof asks the same question. A proxy on any other endpoint
+/// belongs to a different product and is not evidence about this one.
+#[derive(Debug, Clone)]
+pub(super) struct LegacyProxyAbsence {
+    owned_ports: Vec<u16>,
+    pac_present: bool,
+}
+
+impl LegacyProxyAbsence {
+    /// Reads the endpoint straight from the retired installation's own settings.
+    /// Fail closed: an unreadable store, or one that never recorded its mixed
+    /// port, leaves nothing to prove absence against.
+    pub(super) fn resolve(store: &SettingsStore) -> Result<Self, String> {
+        let network = LegacySettingsMigration::read(store.paths())
+            .map_err(|error| {
+                format!(
+                    "legacy settings are unreadable; legacy proxy absence cannot be proven: {error}"
+                )
+            })?
+            .map(|migration| migration.network.clone())
+            .unwrap_or_default();
+        Self::from_network(&network, store)
+    }
+
+    fn from_network(network: &LegacyNetworkState, store: &SettingsStore) -> Result<Self, String> {
+        let owned_port = network.mixed_port.ok_or_else(|| {
+            "legacy settings do not record the retired mixed port, so legacy proxy absence cannot be proven; the existing proxy was not changed"
+                .to_owned()
+        })?;
+        Ok(Self {
+            owned_ports: vec![owned_port],
+            pac_present: store.paths().app_home.join("proxy.pac").exists(),
+        })
+    }
+
+    pub(super) fn verify(&self, context: &str) -> Result<(), String> {
+        MacOsPlatformService
+            .verify_no_legacy_owned_proxy(&self.owned_ports, self.pac_present)
+            .map_err(|error| format!("{context}: {error}"))
+    }
 }
 
 #[derive(Debug)]
@@ -136,6 +180,7 @@ impl LegacyCutoverPlan {
             }
         };
 
+        let proxy_absence = LegacyProxyAbsence::from_network(&network, &store)?;
         let proxy = if matches!(runtime_kind, LegacyRuntimePlanKind::LiveOwned { .. })
             && network.system_proxy
         {
@@ -153,13 +198,15 @@ impl LegacyCutoverPlan {
                     })?,
             )
         } else {
-            MacOsPlatformService
-                .verify_all_legacy_proxies_disabled()
-                .map_err(|error| {
-                    format!(
-                        "legacy settings report no owned proxy, but an enabled proxy remains. Disable it manually before cutover: {error}"
-                    )
-                })?;
+            // The retired installation is not holding a proxy it claims to own,
+            // so prove that nothing remains on the endpoint it recorded as its
+            // own. A proxy belonging to a different product on a different
+            // endpoint says nothing about this installation and is not consulted;
+            // the address range and the loopback host are shared across the whole
+            // tool family. Fail closed when the recorded endpoint is unknown.
+            proxy_absence.verify(
+                "the retired installation's system proxy is still applied; it must be off before cutover",
+            )?;
             None
         };
 
@@ -178,6 +225,7 @@ impl LegacyCutoverPlan {
             control_session,
             managed_process,
             runtime_kind,
+            proxy_absence,
         })
     }
 
@@ -377,9 +425,8 @@ impl LegacyCutoverPlan {
                 .verify_legacy_proxy_still_applied(proxy)
                 .map_err(|error| error.to_string())?;
         } else {
-            MacOsPlatformService
-                .verify_all_legacy_proxies_disabled()
-                .map_err(|error| format!("an unplanned legacy proxy appeared: {error}"))?;
+            self.proxy_absence
+                .verify("an unplanned legacy proxy appeared")?;
         }
         if let Some(tunnel) = &self.tunnel {
             tunnel.verify_still_present()?;
@@ -396,9 +443,7 @@ impl LegacyCutoverPlan {
             return Err("a legacy control session or managed core appeared".into());
         }
         LegacyNetworkFingerprint::verify_absent()?;
-        MacOsPlatformService
-            .verify_all_legacy_proxies_disabled()
-            .map_err(|error| format!("a legacy proxy appeared: {error}"))
+        self.proxy_absence.verify("a legacy proxy appeared")
     }
 
     fn verify_post_retirement_absence(&self) -> Result<(), String> {
@@ -413,8 +458,7 @@ impl LegacyCutoverPlan {
             return Err("legacy session or managed core remains before helper unregister".into());
         }
         LegacyNetworkFingerprint::verify_absent()?;
-        MacOsPlatformService
-            .verify_all_legacy_proxies_disabled()
-            .map_err(|error| format!("legacy proxy retirement is incomplete: {error}"))
+        self.proxy_absence
+            .verify("legacy proxy retirement is incomplete")
     }
 }

@@ -7,6 +7,7 @@ use cfw_platform::{
     MacOsPlatformService, ServiceModeStatus,
 };
 
+use super::cutover_plan::LegacyProxyAbsence;
 use super::gui_handoff::LegacyGuiHandoff;
 use super::journal::{CutoverJournal, CutoverJournalStore, CutoverPhase};
 use super::network_fingerprint::LegacyNetworkFingerprint;
@@ -107,9 +108,8 @@ pub(super) fn verify_legacy_network_intact(
         LegacyNetworkFingerprint::verify_absent()?;
     }
     if journal.legacy_proxy_services.is_empty() {
-        MacOsPlatformService
-            .verify_all_legacy_proxies_disabled()
-            .map_err(|error| error.to_string())?;
+        LegacyProxyAbsence::resolve(store)?
+            .verify("the retired installation's system proxy is still applied")?;
     } else {
         MacOsPlatformService
             .verify_legacy_proxy_still_applied(&proxy_plan(journal)?)
@@ -222,9 +222,7 @@ pub(super) fn verify_network_retirement_completed_with_active_replacement(
     }
     LegacyNetworkFingerprint::verify_absent()?;
     verify_active_replacement_proxy_postcondition(journal.target, || {
-        MacOsPlatformService
-            .verify_all_legacy_proxies_disabled()
-            .map_err(|error| format!("legacy proxy retirement is incomplete: {error}"))
+        LegacyProxyAbsence::resolve(store)?.verify("legacy proxy retirement is incomplete")
     })?;
     verify_network_retiring_gui_terminated(journal)
 }
@@ -282,9 +280,7 @@ fn verify_inactive_runtime_absence(store: &SettingsStore) -> Result<(), String> 
         return Err("a legacy session or managed core exists in an inactive upgrade plan".into());
     }
     LegacyNetworkFingerprint::verify_absent()?;
-    MacOsPlatformService
-        .verify_all_legacy_proxies_disabled()
-        .map_err(|error| format!("a legacy proxy remains in an inactive upgrade plan: {error}"))
+    LegacyProxyAbsence::resolve(store)?.verify("a legacy proxy remains in an inactive upgrade plan")
 }
 
 fn verify_pre_service_retirement_absence(
@@ -302,9 +298,8 @@ fn verify_pre_service_retirement_absence(
     }
     LegacyNetworkFingerprint::verify_absent()?;
     if require_proxy_absence {
-        MacOsPlatformService
-            .verify_all_legacy_proxies_disabled()
-            .map_err(|error| format!("legacy proxy remains before helper unregister: {error}"))?;
+        LegacyProxyAbsence::resolve(store)?
+            .verify("legacy proxy remains before helper unregister")?;
     }
     ensure_network_retiring_gui_terminated(journal)
 }

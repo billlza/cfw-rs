@@ -236,7 +236,16 @@ fn legacy_interface_matches(
     observation: &LegacyNetworkObservation,
 ) -> Result<Vec<LegacyInterfaceMatch>, String> {
     let mut matches = legacy_address_matches(&observation.interfaces);
+    // A route naming the legacy address is only attributable when it dangles:
+    // no live interface carries that name any more, so nothing can still own it
+    // and it can only be retirement residue. A route whose Netif is a live
+    // interface belongs to whatever currently holds that interface, and in the
+    // shared benchmarking range that is routinely a foreign product.
+    let live_interfaces = interface_names(&observation.interfaces);
     for interface in legacy_route_interfaces(&observation.ipv4_routes, &observation.ipv6_routes)? {
+        if live_interfaces.contains(&interface) {
+            continue;
+        }
         if !matches
             .iter()
             .any(|candidate| candidate.interface == interface)
@@ -275,7 +284,13 @@ fn legacy_address_matches(input: &str) -> Vec<LegacyInterfaceMatch> {
                 "prefixlen",
                 LEGACY_IPV6_PREFIX,
             );
-            if ipv4.is_empty() && ipv6.is_empty() {
+            // 198.18.0.0/15 is the RFC2544 benchmarking range that the whole
+            // Clash tool family uses for TUN, so the bare address is shared with
+            // foreign products. Only an exact qualifier -- the /30 netmask or the
+            // /126 prefix this product itself writes -- attributes an address to
+            // the retired network. A row that carries the address with a
+            // different qualifier belongs to something else and is not evidence.
+            if !ipv4.contains(&true) && !ipv6.contains(&true) {
                 return None;
             }
             let valid_utun = valid_utun_interface(name);
@@ -636,6 +651,56 @@ resolver #3
         ));
     }
 
+    // Captured from the release Mac while a different Clash product (Clash for
+    // Windows) held the network. 198.18.0.0/15 is the RFC2544 benchmarking range
+    // the whole Clash tool family uses for TUN, so the bare address collides with
+    // the retired product. Only the exact /30 qualifier and the .2 DNS peer are
+    // attributable to the retired cfw-rs network.
+    const FOREIGN_CLASH_INTERFACES: &str = r#"utun6: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 9000
+	inet 198.18.0.1 --> 198.18.0.1 netmask 0xffff0000
+"#;
+
+    const FOREIGN_CLASH_IPV4_ROUTES: &str = r#"Routing tables
+Destination        Gateway            Flags               Netif Expire
+128.0/1            198.18.0.1         UGSc                utun6
+198.18.0/16        utun6              UGSc                utun6
+198.18.0.1         198.18.0.1         UH                  utun6
+"#;
+
+    const FOREIGN_CLASH_DNS: &str = r#"resolver #1
+  nameserver[0] : 192.168.0.1
+  if_index : 35 (utun6)
+"#;
+
+    #[test]
+    fn foreign_clash_tunnel_does_not_block_absence() {
+        let observation = observation(
+            FOREIGN_CLASH_INTERFACES,
+            FOREIGN_CLASH_IPV4_ROUTES,
+            ROUTE_HEADER,
+            FOREIGN_CLASH_DNS,
+        );
+
+        LegacyNetworkFingerprint::verify_absent_in(&observation).expect(
+            "a foreign product holding 198.18.0.1 with a non-legacy netmask, whose routes all \
+             name a live interface and whose DNS has no legacy peer, is not legacy evidence",
+        );
+    }
+
+    #[test]
+    fn exact_legacy_netmask_still_blocks_even_without_ipv6() {
+        let observation = observation(
+            "utun6: flags=8051<UP> mtu 9000\n\tinet 198.18.0.1 --> 198.18.0.1 netmask 0xfffffffc\n",
+            ROUTE_HEADER,
+            ROUTE_HEADER,
+            "resolver #1\n  nameserver[0] : 192.168.0.1\n  if_index : 35 (utun6)\n",
+        );
+
+        let error = LegacyNetworkFingerprint::verify_absent_in(&observation)
+            .expect_err("the exact legacy /30 qualifier is attributable even without IPv6");
+        assert!(error.contains("utun6"), "{error}");
+    }
+
     #[test]
     fn unrelated_tunnel_routes_and_dns_do_not_invent_legacy_ownership() {
         let observation = observation(
@@ -650,7 +715,28 @@ resolver #3
     }
 
     #[test]
-    fn orphaned_legacy_route_carries_its_scoped_dns_into_absence_evidence() {
+    fn dangling_legacy_route_carries_its_scoped_dns_into_absence_evidence() {
+        // utun10 is absent from the interface block, so nothing can still own
+        // this route: it is retirement residue and must block.
+        let observation = observation(
+            "utun9: flags=8051<UP> mtu 9000\n\tinet 10.0.0.1 netmask 0xffffffff\n",
+            &format!("{ROUTE_HEADER}1 198.18.0.1 UGSc utun10\n"),
+            ROUTE_HEADER,
+            "resolver #1\n  if_index : 40 (utun10)\n",
+        );
+
+        let error = LegacyNetworkFingerprint::verify_absent_in(&observation)
+            .expect_err("a dangling legacy gateway route prevents an absence proof");
+
+        assert!(error.contains("utun10"), "{error}");
+        assert!(LegacyNetworkFingerprint::from_observation(&observation).is_err());
+    }
+
+    #[test]
+    fn legacy_gateway_route_on_a_live_interface_is_not_attributable() {
+        // Same route, but utun10 is live and carries no attributable legacy
+        // address. In the shared benchmarking range that is a foreign product
+        // holding its own tunnel, not residue of the retired network.
         let observation = observation(
             "utun10: flags=8051<UP> mtu 9000\n\tinet 10.0.0.1 netmask 0xffffffff\n",
             &format!("{ROUTE_HEADER}1 198.18.0.1 UGSc utun10\n"),
@@ -658,13 +744,8 @@ resolver #3
             "resolver #1\n  if_index : 40 (utun10)\n",
         );
 
-        let error = LegacyNetworkFingerprint::verify_absent_in(&observation)
-            .expect_err("a legacy gateway route prevents an absence proof");
-
-        assert!(error.contains(
-            "utun10 (partial or route-only fingerprint, 1 routes, 1 scoped DNS resolvers)"
-        ));
-        assert!(LegacyNetworkFingerprint::from_observation(&observation).is_err());
+        LegacyNetworkFingerprint::verify_absent_in(&observation)
+            .expect("a live foreign interface's gateway route is not legacy evidence");
     }
 
     #[test]

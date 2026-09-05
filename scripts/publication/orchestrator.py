@@ -15,6 +15,7 @@ from .durable_file import (
     read_private_directory_contents_locked,
 )
 from . import ga_release_contract as contract
+from scripts.release_executor_source import ExecutorSource
 
 
 def _publish_stage(
@@ -113,30 +114,34 @@ def _publish_and_confirm_stage(
         ) from error
 
 
-def seal_prepackage(repository: Path) -> dict[str, Any]:
+def seal_prepackage(repository: Path, *, executor: ExecutorSource) -> dict[str, Any]:
     """Atomically authorize package creation for the exact GA application."""
 
     expected = contract.build_expected_stage_files(
         repository,
         "prepackage",
+        executor=executor,
         require_live_hosted_ci=True,
     )
     return _publish_and_confirm_stage(repository, "prepackage", expected)
 
 
-def seal_ga_acceptance(repository: Path) -> dict[str, Any]:
+def seal_ga_acceptance(repository: Path, *, executor: ExecutorSource) -> dict[str, Any]:
     """Atomically bind exact packages and the completed 40041 -> 40043 run."""
 
-    expected = contract.build_expected_stage_files(repository, "ga-acceptance")
+    expected = contract.build_expected_stage_files(
+        repository, "ga-acceptance", executor=executor
+    )
     return _publish_and_confirm_stage(repository, "ga-acceptance", expected)
 
 
-def seal_publication(repository: Path) -> dict[str, Any]:
+def seal_publication(repository: Path, *, executor: ExecutorSource) -> dict[str, Any]:
     """Atomically authorize upload after every GA-required stage reopens."""
 
     expected = contract.build_expected_stage_files(
         repository,
         "publication",
+        executor=executor,
         require_live_hosted_ci=True,
     )
     return _publish_and_confirm_stage(repository, "publication", expected)

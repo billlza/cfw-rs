@@ -90,6 +90,17 @@ not new application builds. An ambiguous external outcome is quarantined and
 recovered from its original transaction identity; allocating another build is
 not a recovery mechanism.
 
+A changed whole-repository commit or release-source checksum does not by itself
+establish a product change. In particular, the test-isolation failure recorded
+for retired 40042 is historical evidence of a workflow limitation, not a rule
+for retiring later candidates. Preserve 40043 while repairing evidence tooling.
+The current frozen product-input v1 document includes the complete source
+identity; its digest cannot alone distinguish product and evidence changes.
+Do not relabel that document or claim that a newer test suite ran at its commit.
+An unsupported evidence-only repair remains an explicit evidence failure until
+its executor and product-input boundary are implemented and verified; it does
+not automatically authorize another build number.
+
 Android and iOS are not release targets. Physical interoperability may use an
 iOS device as a test peer, but its harness, device identity, transport capture,
 and receipts must be independently source-bound; an Android peer record cannot
@@ -636,6 +647,12 @@ scripts/run_publication_evidence.sh finalize \
 scripts/release_publication_gate.sh --seal-prepackage
 ```
 
+Previously approved component decisions can be reused after the exact checks
+described in [the supply-chain review policy](docs/supply-chain.md). Preserve
+the old approval and record the comparison separately. The current closure
+record must name its own digest and current release authorization; it must not
+pretend that the earlier reviewer saw a subsequently rebuilt source archive.
+
 ### Single-GA 40043 release sequence
 
 The canonical allocation ledger is
@@ -759,21 +776,40 @@ wire proof.
    unchanged. Executor CI does not replace the original product's exact-SHA CI.
    An existing app-notary attempt must use its explicit recovery protocol;
    never use this entry to retry an unknown submission or rerun the builder;
-3. after freeze, capture the hosted run through the fixed public GitHub API and
-   run the separate deterministic local lane reproduction. The capture command
+3. capture the hosted run through the fixed public GitHub API after freeze.
+   Run deterministic local checks before consumption where their inputs are
+   available, so test and environment defects remain pre-candidate failures.
+   The candidate-bound local lane reproduction still requires its own complete
+   record; source or hosted checks cannot substitute for it. The capture command
    creates the private `stage-inputs` directory and writes only
    `hosted-ci.json`; the local record is distinct:
 
    ```bash
    scripts/release_publication_gate.sh --capture-hosted-ci RUN_ID
-   (
-     cd target/release-worktrees/40043
-     scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
-       --output target/candidates/0.4.0/ga/40043/stage-inputs/local-ci-lanes.json \
-       --journal target/candidates/0.4.0/ga/40043/stage-inputs/local-ci-journal
-   )
+   scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
+     --artifact-repository /absolute/operator/target/release-worktrees/40043 \
+     --output /absolute/operator/target/release-worktrees/40043/target/candidates/0.4.0/ga/40043/stage-inputs/local-ci-lanes.json \
+     --journal /absolute/private/history/local-ci-40043
    scripts/release_publication_gate.sh --verify-hosted-ci
    ```
+
+   Run this entry from the clean operator checkout. The explicit artifact path
+   must equal its fixed frozen checkout. The collector records the separate
+   executor identity, but runs every lane script and test from the original
+   artifact source with its original toolchain. Each invocation retains an
+   immutable attempt; `--rerun` selects fresh lane executions without deleting
+   previous logs, failures, or toolchain bindings. Only a complete passing
+   attempt may create the fixed local lane record. A failed or interrupted
+   attempt stays in the journal and cannot authorize packaging.
+
+   Lane subprocesses use the fixed public-file producer `umask 022`; the
+   operator's private log or journal permissions do not change test inputs.
+   Journal records remain explicitly private. A complete failed attempt can
+   be retried with `--rerun`. If a crash leaves an incomplete intent or record,
+   preserve that journal, verify its lane processes have stopped, and select
+   a fresh explicitly named journal for the same candidate. Do not delete the
+   incomplete attempt, interpret it as passing, or allocate a successor build
+   merely to obtain a new evidence directory.
 
    Hosted capture and live verification fix the public repository ID, workflow
    ID/path/name, `pull_request` event, exact tested head SHA, run
@@ -841,8 +877,13 @@ wire proof.
    rechecks source stability at publication and installation admission. The
    operator commit is deliberately distinct from the app's frozen commit;
    retain both in the execution record and validate the operator's own CI.
-   Existing stage schemas, artifact digests and the final upload allowlist are
-   unchanged. The source checks detect accidental selection or drift; they do
+   New stage seals persist the original sealing executor identity separately
+   from the candidate source. Their schemas are prepackage v2, acceptance v3,
+   and publication v3. A later verifier reopens the original executor from the
+   artifact repository's Git history without replacing its identity or the
+   seal. Earlier candidate seals remain historical records; they are never
+   rewritten into the new schema. Artifact digests and the final upload
+   allowlist are unchanged. The source checks detect accidental selection or drift; they do
    not authenticate against the release account. Missing or dirty checkouts
    fail before admission and are never a reason to alter frozen source bytes.
    The independent public-download verifier is different: run it from the

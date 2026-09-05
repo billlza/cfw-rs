@@ -66,12 +66,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
 import selectors
 import signal
 import stat
 import subprocess
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,9 +86,16 @@ from .common import (
     require_sha256,
     sha256_bytes,
     sha256_file,
-    write_new,
 )
 from .sealed_closure import derive_supply_chain
+from .durable_file import (
+    exclusive_directory_lock,
+    fsync_directory,
+    fsync_locked_directory,
+    promote_private_pending,
+    read_private_pending,
+    write_private_pending,
+)
 from .sealed_manifest import REQUIRED_CI_LANES, _ci_lane_document, _require_command
 from .release_toolchains import verified_release_toolchain_trees
 from .release_environment import (
@@ -123,6 +131,11 @@ TIMEOUT_EXIT_CODE = 124
 PINS_RELATIVE = "scripts/dependency_pins.env"
 MAX_LOG_BYTES = 64 * 1024 * 1024
 MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
+MAX_CI_ATTEMPTS = 9999
+LANE_PROCESS_UMASK = 0o022
+ATTEMPT_NAME = re.compile(r"attempt-([0-9]{4})\Z")
+ATTEMPT_INTENT_KIND = "unsigned-ci-lane-attempt-intent-v1"
+ATTEMPT_RESULT_KIND = "unsigned-ci-lane-attempt-result-v1"
 
 # The patched sing-box tree the libbox lanes consume. The CI workflow
 # materializes it from the pinned upstream commit in a separate step; locally it
@@ -1034,6 +1047,7 @@ def execute_lane(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
+        umask=LANE_PROCESS_UMASK,
     )
     if process.stdout is None:
         process.kill()
@@ -1129,7 +1143,7 @@ def execute_lane(
 
 
 # --------------------------------------------------------------------------
-# Journal (one real run per lane, replayable without re-running)
+# Journal (immutable attempts, with explicit references to prior lane runs)
 # --------------------------------------------------------------------------
 
 
@@ -1140,14 +1154,20 @@ def _journal_paths(journal: Path, lane: Lane) -> tuple[Path, Path]:
 def write_journal_record(journal: Path, lane: Lane, record: dict[str, Any], output: bytes) -> None:
     if set(record) != JOURNAL_FIELDS:
         raise PublicationError(f"lane {lane.identifier!r} journal record has an unexpected shape")
-    journal.mkdir(parents=True, exist_ok=True)
     record_path, log_path = _journal_paths(journal, lane)
     for path in (record_path, log_path):
-        if path.is_symlink():
-            raise PublicationError(f"refusing to write through a symlink: {path}")
-        path.unlink(missing_ok=True)
-    write_new(log_path, output)
-    write_new(record_path, canonical_json(record))
+        if os.path.lexists(path):
+            raise PublicationError(f"refusing to replace a CI lane journal file: {path}")
+    _write_attempt_file(log_path, output)
+    _write_attempt_file(record_path, canonical_json(record))
+
+
+def _write_attempt_file(path: Path, payload: bytes) -> None:
+    pending = path.with_name(f".{path.name}.pending")
+    if os.path.lexists(path) or os.path.lexists(pending):
+        raise PublicationError(f"CI lane evidence destination is already occupied: {path}")
+    write_private_pending(pending, payload)
+    promote_private_pending(pending, path)
 
 
 def _read_journal_output(
@@ -1191,8 +1211,8 @@ def _publish_toolchain_binding(journal: Path, identity: dict[str, Any]) -> None:
     if binding_path.exists():
         if read_regular(binding_path) == payload:
             return
-        binding_path.unlink()
-    write_new(binding_path, payload)
+        raise PublicationError("CI lane toolchain binding differs from its immutable record")
+    _write_attempt_file(binding_path, payload)
 
 
 def read_journal_record(
@@ -1208,15 +1228,46 @@ def read_journal_record(
     commit or source tree, against another toolchain, for a different command,
     or when its log no longer hashes to the recorded digest.
     """
-    record_path, _log_path = _journal_paths(journal, lane)
-    if record_path.is_symlink() or not record_path.is_file():
+    record_path, log_path = _journal_paths(journal, lane)
+    if not os.path.lexists(record_path):
+        if os.path.lexists(log_path):
+            raise PublicationError(f"lane {lane.identifier!r} has an incomplete journal record")
         return None
     try:
-        record = json.loads(read_regular(record_path).decode("utf-8"))
+        payload = read_regular(record_path)
+        record = json.loads(payload.decode("utf-8"))
     except (PublicationError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise PublicationError(f"lane {lane.identifier!r} journal record is unreadable: {error}")
     if not isinstance(record, dict) or set(record) != JOURNAL_FIELDS:
         raise PublicationError(f"lane {lane.identifier!r} journal record has an unexpected shape")
+    if (
+        canonical_json(record) != payload
+        or type(record["schema_version"]) is not int
+        or record["schema_version"] != SCHEMA_VERSION
+        or record["document"] != DOCUMENT_KIND
+        or type(record["exit_code"]) is not int
+        or not 0 <= record["exit_code"] <= 255
+        or type(record["started_at"]) is not int
+        or record["started_at"] < 0
+        or type(record["duration_seconds"]) not in {int, float}
+        or not math.isfinite(record["duration_seconds"])
+        or record["duration_seconds"] < 0
+        or type(record["timeout_seconds"]) is not int
+        or record["timeout_seconds"] != lane.timeout
+        or type(record["commit"]) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", record["commit"]) is None
+    ):
+        raise PublicationError(f"lane {lane.identifier!r} journal record is malformed")
+    require_sha256(record["release_source_sha256"], "lane release source")
+    require_sha256(record["toolchain_sha256"], "lane toolchain")
+    _read_journal_output(journal, lane, record)
+    status, normalized = _normalized_exit(
+        record["exit_code"], record["status"] == TIMEOUT and record["exit_code"] == TIMEOUT_EXIT_CODE
+    )
+    if (status, normalized) != (record["status"], record["exit_code"]):
+        raise PublicationError(
+            f"lane {lane.identifier!r} journal record status does not match its exit code"
+        )
     if (
         record["id"] != lane.identifier
         or record["command"] != lane.command
@@ -1226,17 +1277,363 @@ def read_journal_record(
         or record["toolchain_sha256"] != toolchain
     ):
         return None
-    _read_journal_output(journal, lane, record)
-    # Re-derive the status from the recorded exit code so a hand-edited journal
-    # cannot promote a failure.
-    status, normalized = _normalized_exit(
-        record["exit_code"], record["status"] == TIMEOUT and record["exit_code"] == TIMEOUT_EXIT_CODE
-    )
-    if (status, normalized) != (record["status"], record["exit_code"]):
-        raise PublicationError(
-            f"lane {lane.identifier!r} journal record status does not match its exit code"
-        )
     return record
+
+
+@dataclass(frozen=True)
+class _LaneSelection:
+    attempt_number: int
+    directory: Path
+    record: dict[str, Any]
+    record_sha256: str
+
+    def reference(self) -> dict[str, Any]:
+        return {
+            "attempt_number": self.attempt_number,
+            "record_sha256": self.record_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class _CiHistory:
+    count: int
+    selected: dict[str, _LaneSelection]
+    snapshot: dict[str, str]
+
+
+def _read_ci_json(path: Path) -> dict[str, Any]:
+    payload = read_regular(path)
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PublicationError(f"CI lane journal JSON is unreadable: {path}") from error
+    if type(value) is not dict or canonical_json(value) != payload:
+        raise PublicationError(f"CI lane journal JSON is not canonical: {path}")
+    return value
+
+
+def _require_ci_directory(path: Path) -> None:
+    metadata = path.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise PublicationError(f"CI lane journal is not an owned real directory: {path}")
+
+
+def canonical_ci_evidence_path(path: Path, label: str) -> Path:
+    """Admit an explicit evidence location without following ancestor symlinks."""
+    if "\x00" in os.fspath(path) or ".." in path.parts:
+        raise PublicationError(f"{label} must use a canonical path without symlink ancestors")
+    absolute = Path(os.path.abspath(path))
+    try:
+        resolved = absolute.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise PublicationError(f"{label} ancestry cannot be resolved") from error
+    if resolved != absolute:
+        raise PublicationError(f"{label} must use a canonical path without symlink ancestors")
+    return absolute
+
+
+def _stored_lane(directory: Path, lane: Lane, number: int) -> _LaneSelection:
+    path, _log = _journal_paths(directory, lane)
+    value = _read_ci_json(path)
+    if set(value) != JOURNAL_FIELDS:
+        raise PublicationError(f"lane {lane.identifier!r} journal record has an unexpected shape")
+    command = _require_command(value["command"], "historical CI lane command")
+    cwd = value["cwd"]
+    if (
+        type(cwd) is not str or not cwd or len(cwd) > 1024
+        or Path(cwd).is_absolute() or ".." in Path(cwd).parts
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in cwd)
+        or type(value["timeout_seconds"]) is not int
+        or not 0 < value["timeout_seconds"] <= 24 * 60 * 60
+    ):
+        raise PublicationError("historical CI lane execution bounds are malformed")
+    # This passive shape is used only to validate retained evidence. Execution
+    # always receives the current source-owned Lane, never a journal command.
+    recorded_lane = Lane(lane.identifier, command, cwd=cwd, timeout=value["timeout_seconds"])
+    record = read_journal_record(
+        directory, recorded_lane, value["commit"], value["release_source_sha256"], value["toolchain_sha256"]
+    )
+    if record is None:
+        raise PublicationError(f"lane {lane.identifier!r} journal command differs from its contract")
+    return _LaneSelection(number, directory, record, sha256_bytes(canonical_json(record)))
+
+
+def _matches_selection(
+    selection: _LaneSelection, commit: str, source: str, toolchain: str
+) -> bool:
+    lane = LANE_INDEX[selection.record["id"]]
+    return (
+        _matches_source_binding(selection, commit, source, toolchain)
+        and selection.record["command"] == lane.command
+        and selection.record["cwd"] == lane.cwd
+        and selection.record["timeout_seconds"] == lane.timeout
+    )
+
+
+def _matches_source_binding(
+    selection: _LaneSelection, commit: str, source: str, toolchain: str
+) -> bool:
+    record = selection.record
+    return (
+        record["commit"] == commit
+        and record["release_source_sha256"] == source
+        and record["toolchain_sha256"] == toolchain
+    )
+
+
+def _resolve_selections(
+    value: object,
+    available: dict[tuple[int, str], _LaneSelection],
+    *,
+    before: int,
+) -> dict[str, _LaneSelection]:
+    if type(value) is not dict or not set(value) <= set(LANE_INDEX):
+        raise PublicationError("CI lane attempt selection has an unexpected lane set")
+    selected: dict[str, _LaneSelection] = {}
+    for identifier, reference in value.items():
+        if (
+            type(reference) is not dict
+            or set(reference) != {"attempt_number", "record_sha256"}
+            or type(reference["attempt_number"]) is not int
+            or not 0 <= reference["attempt_number"] < before
+        ):
+            raise PublicationError("CI lane attempt selection is malformed or points forward")
+        selection = available.get((reference["attempt_number"], identifier))
+        if selection is None or reference["record_sha256"] != selection.record_sha256:
+            raise PublicationError("CI lane attempt selection does not match an immutable record")
+        selected[identifier] = selection
+    return selected
+
+
+def _read_ci_history(
+    journal: Path,
+    commit: str,
+    source: str,
+    toolchain: str,
+    *,
+    active_attempt: Path | None = None,
+) -> _CiHistory:
+    """Read legacy records and every closed attempt without modifying either."""
+    _require_ci_directory(journal)
+    legacy_names = {"toolchain-binding.json"} | {
+        f"{lane.identifier}.{extension}" for lane in LANES for extension in ("json", "log")
+    }
+    entries = {entry.name: entry for entry in journal.iterdir()}
+    attempts: dict[int, Path] = {}
+    for name, path in entries.items():
+        if path == active_attempt:
+            continue
+        match = ATTEMPT_NAME.fullmatch(name)
+        if match is not None:
+            number = int(match[1])
+            if not 1 <= number <= MAX_CI_ATTEMPTS:
+                raise PublicationError("CI lane attempt number is outside its fixed bound")
+            _require_ci_directory(path)
+            attempts[number] = path
+        elif name not in legacy_names:
+            raise PublicationError(f"CI lane journal contains an unknown entry: {name}")
+    if sorted(attempts) != list(range(1, len(attempts) + 1)):
+        raise PublicationError("CI lane journal attempt numbering has a gap")
+    if active_attempt is not None and active_attempt.name != f"attempt-{len(attempts) + 1:04d}":
+        raise PublicationError("CI lane journal active attempt changed")
+
+    snapshot: dict[str, str] = {}
+    available: dict[tuple[int, str], _LaneSelection] = {}
+    selected: dict[str, _LaneSelection] = {}
+
+    def remember(selection: _LaneSelection) -> None:
+        identifier = selection.record["id"]
+        available[(selection.attempt_number, identifier)] = selection
+        relative = selection.directory.relative_to(journal)
+        snapshot[(relative / f"{identifier}.json").as_posix()] = selection.record_sha256
+        snapshot[(relative / f"{identifier}.log").as_posix()] = selection.record["log_sha256"]
+
+    legacy_binding = entries.get("toolchain-binding.json")
+    if legacy_binding is not None:
+        legacy_identity = _read_ci_json(legacy_binding)
+        if legacy_identity.get("document") != TOOLCHAIN_BINDING_KIND:
+            raise PublicationError("legacy CI toolchain binding has an unexpected document kind")
+        snapshot[legacy_binding.name] = sha256_bytes(canonical_json(legacy_identity))
+    for lane in LANES:
+        record_path, log_path = _journal_paths(journal, lane)
+        exists = (os.path.lexists(record_path), os.path.lexists(log_path))
+        if exists == (False, False):
+            continue
+        if exists != (True, True) or legacy_binding is None:
+            raise PublicationError(f"legacy CI lane {lane.identifier!r} has incomplete evidence")
+        selection = _stored_lane(journal, lane, 0)
+        if selection.record["toolchain_sha256"] != snapshot["toolchain-binding.json"]:
+            raise PublicationError("legacy CI lane toolchain differs from its binding document")
+        remember(selection)
+        if _matches_selection(selection, commit, source, toolchain):
+            selected[lane.identifier] = selection
+
+    for number, directory in sorted(attempts.items()):
+        names = {path.name for path in directory.iterdir()}
+        if not {"intent.json", "result.json", "toolchain-binding.json"} <= names:
+            raise PublicationError(f"CI lane attempt {number:04d} is incomplete; preserve it for review")
+        intent = _read_ci_json(directory / "intent.json")
+        result = _read_ci_json(directory / "result.json")
+        expected_intent = {
+            "document", "schema_version", "attempt_number", "repository_commit",
+            "release_source_sha256", "toolchain_sha256", "toolchain_binding_sha256",
+            "executor_source", "only", "rerun", "assemble_only", "selected",
+            "lane_process_umask",
+        }
+        if (
+            set(intent) != expected_intent
+            or intent["document"] != ATTEMPT_INTENT_KIND
+            or type(intent["schema_version"]) is not int or intent["schema_version"] != 1
+            or type(intent["attempt_number"]) is not int or intent["attempt_number"] != number
+            or type(intent["repository_commit"]) is not str
+            or re.fullmatch(r"[0-9a-f]{40}", intent["repository_commit"]) is None
+            or type(intent["assemble_only"]) is not bool
+            or type(intent["lane_process_umask"]) is not int
+            or intent["lane_process_umask"] != LANE_PROCESS_UMASK
+        ):
+            raise PublicationError("CI lane attempt intent has an unexpected shape")
+        for key in ("release_source_sha256", "toolchain_sha256", "toolchain_binding_sha256"):
+            require_sha256(intent[key], f"CI lane attempt {key}")
+        for key in ("only", "rerun"):
+            value = intent[key]
+            if type(value) is not list or any(type(item) is not str for item in value):
+                raise PublicationError("CI lane attempt request is malformed")
+            if value != sorted(set(value)) or not set(value) <= set(LANE_INDEX):
+                raise PublicationError("CI lane attempt request contains unknown or repeated lanes")
+        _validate_executor_identity(intent["executor_source"])
+        binding = canonical_json(_read_ci_json(directory / "toolchain-binding.json"))
+        if (
+            sha256_bytes(binding) != intent["toolchain_binding_sha256"]
+            or intent["toolchain_binding_sha256"] != intent["toolchain_sha256"]
+        ):
+            raise PublicationError("CI lane attempt toolchain binding changed")
+        inherited = _resolve_selections(intent["selected"], available, before=number)
+        if set(inherited) & set(intent["rerun"]):
+            raise PublicationError("CI lane attempt replays a lane it requested to rerun")
+        if any(
+            not _matches_source_binding(item, intent["repository_commit"], intent["release_source_sha256"], intent["toolchain_sha256"])
+            for item in inherited.values()
+        ):
+            raise PublicationError("CI lane attempt selected a different source or toolchain")
+        expected_result = {
+            "document", "schema_version", "attempt_number", "outcome", "phase",
+            "records", "selected", "document_sha256", "reproduction_sha256",
+            "observed_reproduction_sha256s",
+        }
+        if (
+            set(result) != expected_result
+            or result["document"] != ATTEMPT_RESULT_KIND
+            or type(result["schema_version"]) is not int or result["schema_version"] != 1
+            or type(result["attempt_number"]) is not int or result["attempt_number"] != number
+            or type(result["outcome"]) is not str
+            or result["outcome"] not in {"completed", "partial", "verification-failed"}
+            or type(result["phase"]) is not str
+            or result["phase"] not in CI_COLLECTION_PHASES
+            or type(result["records"]) is not dict
+            or not set(result["records"]) <= set(LANE_INDEX)
+        ):
+            raise PublicationError("CI lane attempt result has an unexpected shape")
+        observations = result["observed_reproduction_sha256s"]
+        if type(observations) is not list or len(observations) > 2:
+            raise PublicationError("CI lane reproduction observations exceed their fixed bound")
+        for observed in observations:
+            require_sha256(observed, "CI lane observed reproduction")
+        expected_names = {"intent.json", "result.json", "toolchain-binding.json"}
+        own: dict[str, _LaneSelection] = {}
+        for identifier, digest in result["records"].items():
+            if (
+                identifier in inherited or intent["assemble_only"]
+                or (intent["only"] and identifier not in intent["only"])
+            ):
+                raise PublicationError("CI lane attempt ran an unrequested lane")
+            selection = _stored_lane(directory, LANE_INDEX[identifier], number)
+            if digest != selection.record_sha256 or not _matches_source_binding(
+                selection, intent["repository_commit"], intent["release_source_sha256"], intent["toolchain_sha256"]
+            ):
+                raise PublicationError("CI lane attempt record differs from its bound result")
+            remember(selection)
+            own[identifier] = selection
+            expected_names.update({f"{identifier}.json", f"{identifier}.log"})
+        resolved = _resolve_selections(result["selected"], available, before=number + 1)
+        if resolved != {**inherited, **own}:
+            raise PublicationError("CI lane attempt result changed its explicit selection")
+        if "runner-temp" in names:
+            _require_ci_directory(directory / "runner-temp")
+            expected_names.add("runner-temp")
+        records = {identifier: item.record for identifier, item in resolved.items()}
+        if result["outcome"] == "completed":
+            if result["phase"] != "complete":
+                raise PublicationError("completed CI lane attempt has an unfinished phase")
+            document, failures = assemble_document(
+                records, intent["repository_commit"], intent["release_source_sha256"], intent["toolchain_sha256"]
+            )
+            document_raw = canonical_json(_read_ci_json(directory / "document.json"))
+            if document_raw != canonical_json(document) or sha256_bytes(document_raw) != result["document_sha256"]:
+                raise PublicationError("CI lane attempt document differs from its validated records")
+            if failures:
+                if result["reproduction_sha256"] is not None or observations:
+                    raise PublicationError("failed CI lanes claim a Libbox reproduction")
+            else:
+                require_sha256(result["reproduction_sha256"], "CI lane reproduction")
+                if observations != [result["reproduction_sha256"]] * 2:
+                    raise PublicationError("CI lane reproduction lacks two identical observations")
+            expected_names.add("document.json")
+        elif result["document_sha256"] is not None or result["reproduction_sha256"] is not None:
+            raise PublicationError("unverified CI lane attempt claims a completed document")
+        if result["outcome"] == "partial" and (
+            result["phase"] != "assembly" or set(records) == set(REQUIRED_CI_LANES)
+        ):
+            raise PublicationError("partial CI lane attempt has no explicit missing-lane boundary")
+        if names != expected_names:
+            if names == expected_names | {"admission-failure.json"} and result["outcome"] == "completed":
+                failure = _read_ci_json(directory / "admission-failure.json")
+                if (
+                    set(failure) != {"document", "attempt_number", "document_sha256", "phase", "code"}
+                    or failure["document"] != "unsigned-ci-lane-admission-failure-v1"
+                    or type(failure["attempt_number"]) is not int
+                    or failure["attempt_number"] != number
+                    or failure["document_sha256"] != result["document_sha256"]
+                    or type(failure["phase"]) is not str
+                    or failure["phase"] not in {"environment", "source", "toolchain", "executor"}
+                    or failure["code"] != f"{failure['phase']}_admission_failed"
+                ):
+                    raise PublicationError("CI lane admission failure has an unexpected binding")
+                expected_names.add("admission-failure.json")
+            else:
+                raise PublicationError(f"CI lane attempt {number:04d} contains unknown or incomplete files")
+        for name in ("intent.json", "result.json", "toolchain-binding.json", "document.json", "admission-failure.json"):
+            if name in expected_names:
+                snapshot[f"{directory.name}/{name}"] = sha256_file(directory / name)
+        if result["outcome"] in {"completed", "partial"} and "admission-failure.json" not in names:
+            for identifier, selection in resolved.items():
+                if _matches_selection(selection, commit, source, toolchain):
+                    selected[identifier] = selection
+        else:
+            for identifier in own:
+                del available[(number, identifier)]
+    return _CiHistory(len(attempts), selected, snapshot)
+
+
+def _validate_executor_identity(value: object) -> None:
+    if value is None:
+        return
+    if (
+        type(value) is not dict
+        or set(value) != {"repositoryCommit", "releaseSourceSha256"}
+        or type(value["repositoryCommit"]) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", value["repositoryCommit"]) is None
+    ):
+        raise PublicationError("CI lane executor source identity is malformed")
+    require_sha256(value["releaseSourceSha256"], "CI lane executor source")
+
+
+CI_COLLECTION_PHASES = frozenset({
+    "lanes", "environment", "source", "toolchain", "reproduction", "history", "assembly", "complete",
+})
 
 
 # --------------------------------------------------------------------------
@@ -1300,224 +1697,242 @@ def collect_ci_lanes(
     runner: Runner = execute_lane,
     reproduction_verifier: LibboxReproductionVerifier = verify_libbox_reproduction,
     report: Callable[[str], None] = print,
+    executor_source: dict[str, str] | None = None,
+    source_recheck: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Run the required deterministic local lanes and write their document.
+    """Append one real collection attempt; promote only a fully passing document.
 
-    Lanes already recorded in the journal against this commit, source tree, and
-    toolchain are replayed instead of re-run; ``rerun`` forces a fresh run,
-    ``only`` restricts which lanes may run at all. Nothing is fabricated: a lane
-    that is neither recorded nor run stays missing and the document is refused.
+    Legacy root-level records are read-only seeds. Each later selection names
+    the exact immutable attempt and record it reuses. Interrupted attempts are
+    retained and rejected; verification failures cannot seed later evidence.
     """
     self_check()
-    release_source_sha256 = require_sha256(
-        release_source_sha256, "unsigned CI release source SHA-256"
-    )
+    release_source_sha256 = require_sha256(release_source_sha256, "unsigned CI release source SHA-256")
     unknown = sorted((only | rerun) - set(LANE_INDEX))
     if unknown:
         raise PublicationError(f"unknown unsigned CI lane selection: {unknown}")
+    if assemble_only and rerun:
+        raise PublicationError("assemble-only cannot request lane reruns")
+    _validate_executor_identity(executor_source)
+    if executor_source is not None and source_recheck is None:
+        raise PublicationError("CI lane executor identity requires source revalidation")
     pins = _pins(repository)
     execution_environment = release_tool_environment(repository, pins)
-    expected_source_identity = {
-        "repositoryCommit": commit,
-        "releaseSourceSha256": release_source_sha256,
-    }
+    expected_source_identity = {"repositoryCommit": commit, "releaseSourceSha256": release_source_sha256}
     try:
-        starting_source_identity = current_identity(
-            repository,
-            require_clean=True,
-            environment=execution_environment,
-        )
+        starting_source_identity = current_identity(repository, require_clean=True, environment=execution_environment)
     except (OSError, SourceIdentityError) as error:
-        raise PublicationError(
-            "local deterministic CI lanes require one clean release source identity"
-        ) from error
+        raise PublicationError("local deterministic CI lanes require one clean release source identity") from error
     if starting_source_identity != expected_source_identity:
-        raise PublicationError(
-            "unsigned CI lane inputs differ from the current release source identity"
-        )
-    digest, identity = derive_toolchain_binding(
-        repository, release_environment=execution_environment
-    )
+        raise PublicationError("unsigned CI lane inputs differ from the current release source identity")
+    digest, identity = derive_toolchain_binding(repository, release_environment=execution_environment)
+    if sha256_bytes(canonical_json(identity)) != digest:
+        raise PublicationError("CI lane toolchain digest differs from its canonical identity")
     execution_toolchain_root, execution_tree_digests = verified_release_toolchain_trees(
         repository, pins, environment=execution_environment
     )
     if identity.get("release_tree_sha256") != execution_tree_digests:
-        raise PublicationError(
-            "CI lane execution toolchain differs from the canonical binding"
-        )
-    source = (
-        repository / DEFAULT_LIBBOX_SOURCE_TEMPLATE.format(version=pins["SING_BOX_VERSION"])
-        if libbox_source is None
-        else libbox_source
-    )
+        raise PublicationError("CI lane execution toolchain differs from the canonical binding")
+    source = repository / DEFAULT_LIBBOX_SOURCE_TEMPLATE.format(version=pins["SING_BOX_VERSION"]) if libbox_source is None else libbox_source
     artifact = repository / DEFAULT_LIBBOX_OUTPUT if libbox_output is None else libbox_output
-
-    if output.exists() or output.is_symlink():
+    output = canonical_ci_evidence_path(output, "CI lane output")
+    journal = canonical_ci_evidence_path(journal, "CI lane journal")
+    if journal.absolute() == output.absolute() or journal.absolute() in output.absolute().parents:
+        raise PublicationError("CI lane canonical output must be outside its attempt journal")
+    _require_ci_directory(output.parent)
+    _require_ci_directory(journal.parent)
+    if os.path.lexists(output):
         raise PublicationError(f"refusing to replace an unsigned CI lane record: {output}")
-    journal.mkdir(parents=True, exist_ok=True)
-    if journal.is_symlink() or not journal.is_dir():
-        raise PublicationError(f"CI lane journal is not a real directory: {journal}")
+    journal.mkdir(exist_ok=True, mode=0o700)
+    _require_ci_directory(journal)
+    report(f"local deterministic CI lanes: commit={commit} release_source_sha256={release_source_sha256} toolchain_sha256={digest}")
 
-    report(
-        "local deterministic CI lanes: "
-        f"commit={commit} release_source_sha256={release_source_sha256} "
-        f"toolchain_sha256={digest}"
-    )
-    records: dict[str, dict[str, Any]] = {}
-    pending_lanes: list[Lane] = []
-    reproduction_digest: str | None = None
-    with tempfile.TemporaryDirectory(prefix=".ci-lane-attempt.", dir=journal) as attempt:
-        attempt_journal = Path(attempt)
-        for lane in LANES:
-            existing = read_journal_record(
-                journal, lane, commit, release_source_sha256, digest
-            )
-            if existing is not None and lane.identifier not in rerun:
-                records[lane.identifier] = existing
-                report(
-                    f"  {lane.identifier}: replayed {existing['status']} "
-                    f"(exit {existing['exit_code']}, {existing['duration_seconds']}s)"
+    with exclusive_directory_lock(journal) as journal_descriptor:
+        history = _read_ci_history(journal, commit, release_source_sha256, digest)
+        if history.count >= MAX_CI_ATTEMPTS:
+            raise PublicationError("CI lane journal exhausted its bounded attempt sequence")
+        if any(item.attempt_number == 0 for item in history.selected.values()):
+            if read_regular(journal / "toolchain-binding.json") != canonical_json(identity):
+                raise PublicationError("legacy CI lane toolchain binding differs from the current toolchain")
+        selected = {identifier: item for identifier, item in history.selected.items() if identifier not in rerun}
+        number = history.count + 1
+        attempt = journal / f"attempt-{number:04d}"
+        attempt.mkdir(mode=0o700)
+        fsync_locked_directory(journal_descriptor, journal)
+        intent = {
+            "document": ATTEMPT_INTENT_KIND, "schema_version": 1, "attempt_number": number,
+            "repository_commit": commit, "release_source_sha256": release_source_sha256,
+            "toolchain_sha256": digest, "toolchain_binding_sha256": sha256_bytes(canonical_json(identity)),
+            "executor_source": executor_source, "only": sorted(only), "rerun": sorted(rerun),
+            "assemble_only": assemble_only,
+            "lane_process_umask": LANE_PROCESS_UMASK,
+            "selected": {identifier: item.reference() for identifier, item in selected.items()},
+        }
+        _write_attempt_file(attempt / "intent.json", canonical_json(intent))
+        _publish_toolchain_binding(attempt, identity)
+        own: dict[str, _LaneSelection] = {}
+        phase = "lanes"
+        reproduction_digest: str | None = None
+        reproduction_observations: list[str] = []
+
+        def close_attempt(outcome: str, document: dict[str, Any] | None = None) -> None:
+            payload = None if document is None else canonical_json(document)
+            if payload is not None:
+                _write_attempt_file(attempt / "document.json", payload)
+            result = {
+                "document": ATTEMPT_RESULT_KIND, "schema_version": 1,
+                "attempt_number": number, "outcome": outcome, "phase": phase,
+                "records": {identifier: item.record_sha256 for identifier, item in own.items()},
+                "selected": {identifier: item.reference() for identifier, item in selected.items()},
+                "document_sha256": None if payload is None else sha256_bytes(payload),
+                "reproduction_sha256": reproduction_digest if document is not None else None,
+                "observed_reproduction_sha256s": list(reproduction_observations),
+            }
+            _write_attempt_file(attempt / "result.json", canonical_json(result))
+            fsync_locked_directory(journal_descriptor, journal)
+
+        try:
+            for lane in LANES:
+                if lane.identifier in selected:
+                    record = selected[lane.identifier].record
+                    report(f"  {lane.identifier}: replayed {record['status']} (exit {record['exit_code']})")
+                    continue
+                if assemble_only or (only and lane.identifier not in only):
+                    report(f"  {lane.identifier}: not recorded")
+                    continue
+                environment = lane_environment(
+                    repository, lane, pins, source, artifact,
+                    attempt / "runner-temp" / lane.identifier, execution_toolchain_root,
+                    release_environment=execution_environment,
                 )
-                continue
-            if assemble_only or (only and lane.identifier not in only):
-                report(f"  {lane.identifier}: not recorded")
-                continue
-            environment = lane_environment(
-                repository,
-                lane,
-                pins,
-                source,
-                artifact,
-                attempt_journal / "runner-temp" / lane.identifier,
-                execution_toolchain_root,
-                release_environment=execution_environment,
-            )
-            report(
-                f"  {lane.identifier}: running (bound to {lane.timeout}s) $ {lane.command}"
-            )
-            started_at = int(time.time())
-            output_bytes, exit_code, timed_out, duration = runner(
-                repository, lane, environment
-            )
-            record = record_lane(
-                lane,
-                commit,
-                release_source_sha256,
-                digest,
-                output_bytes,
-                exit_code,
-                timed_out,
-                duration,
-                started_at,
-            )
-            write_journal_record(attempt_journal, lane, record, output_bytes)
-            pending_lanes.append(lane)
-            records[lane.identifier] = record
-            report(
-                f"  {lane.identifier}: {record['status']} (exit {record['exit_code']}, "
-                f"{record['duration_seconds']}s, log {record['log_sha256'][:12]})"
-            )
+                report(f"  {lane.identifier}: running (bound to {lane.timeout}s) $ {lane.command}")
+                started_at = int(time.time())
+                output_bytes, exit_code, timed_out, duration = runner(repository, lane, environment)
+                record = record_lane(lane, commit, release_source_sha256, digest, output_bytes, exit_code, timed_out, duration, started_at)
+                write_journal_record(attempt, lane, record, output_bytes)
+                selection = _LaneSelection(number, attempt, record, sha256_bytes(canonical_json(record)))
+                own[lane.identifier] = selection
+                selected[lane.identifier] = selection
+                report(f"  {lane.identifier}: {record['status']} (exit {record['exit_code']}, {record['duration_seconds']}s, log {record['log_sha256'][:12]})")
 
-        try:
-            ending_execution_environment = release_tool_environment(
-                repository, pins, execution_environment
-            )
-        except PublicationError as error:
-            raise PublicationError(
-                "release tool environment changed while CI lanes were executing"
-            ) from error
-        if ending_execution_environment != execution_environment:
-            raise PublicationError(
-                "release tool environment changed while CI lanes were executing"
-            )
-
-        try:
-            ending_source_identity = current_identity(
-                repository,
-                require_clean=True,
-                environment=ending_execution_environment,
-            )
-        except (OSError, SourceIdentityError) as error:
-            raise PublicationError(
-                "release source changed or became unreadable while CI lanes were executing"
-            ) from error
-        if ending_source_identity != starting_source_identity:
-            raise PublicationError(
-                "release source changed while CI lanes were executing"
-            )
-
-        ending_digest, ending_identity = derive_toolchain_binding(
-            repository, release_environment=ending_execution_environment
-        )
-        ending_toolchain_root, ending_tree_digests = verified_release_toolchain_trees(
-            repository, pins, environment=ending_execution_environment
-        )
-        if (
-            ending_digest != digest
-            or ending_identity != identity
-            or ending_toolchain_root != execution_toolchain_root
-            or ending_tree_digests != execution_tree_digests
-            or ending_identity.get("release_tree_sha256") != ending_tree_digests
-        ):
-            raise PublicationError(
-                "release toolchain changed while CI lanes were executing"
-            )
-
-        if set(records) == set(REQUIRED_CI_LANES) and all(
-            record["status"] == PASSED for record in records.values()
-        ):
-            reproduction_digest = require_sha256(
-                reproduction_verifier(
-                    repository,
-                    artifact,
-                    pins,
-                    ending_tree_digests,
-                ),
-                "verified Libbox reproduction tree digest",
-            )
-
-        _publish_toolchain_binding(journal, identity)
-        for lane in pending_lanes:
-            staged_record = read_journal_record(
-                attempt_journal, lane, commit, release_source_sha256, digest
-            )
-            if staged_record is None or staged_record != records[lane.identifier]:
+            phase = "environment"
+            try:
+                ending_environment = release_tool_environment(repository, pins, execution_environment)
+            except PublicationError as error:
+                raise PublicationError("release tool environment changed while CI lanes were executing") from error
+            if ending_environment != execution_environment:
+                raise PublicationError("release tool environment changed while CI lanes were executing")
+            phase = "source"
+            try:
+                ending_source_identity = current_identity(repository, require_clean=True, environment=ending_environment)
+            except (OSError, SourceIdentityError) as error:
+                raise PublicationError("release source changed or became unreadable while CI lanes were executing") from error
+            if ending_source_identity != starting_source_identity:
+                raise PublicationError("release source changed while CI lanes were executing")
+            if source_recheck is not None:
+                source_recheck()
+            phase = "toolchain"
+            ending_digest, ending_identity = derive_toolchain_binding(repository, release_environment=ending_environment)
+            ending_root, ending_trees = verified_release_toolchain_trees(repository, pins, environment=ending_environment)
+            if (
+                ending_digest != digest or ending_identity != identity
+                or ending_root != execution_toolchain_root or ending_trees != execution_tree_digests
+                or ending_identity.get("release_tree_sha256") != ending_trees
+            ):
+                raise PublicationError("release toolchain changed while CI lanes were executing")
+            records = {identifier: item.record for identifier, item in selected.items()}
+            phase = "reproduction"
+            if set(records) == set(REQUIRED_CI_LANES) and all(record["status"] == PASSED for record in records.values()):
+                reproduction_digest = require_sha256(reproduction_verifier(repository, artifact, pins, ending_trees), "verified Libbox reproduction tree digest")
+                reproduction_observations.append(reproduction_digest)
+                repeated = require_sha256(reproduction_verifier(repository, artifact, pins, ending_trees), "repeated Libbox reproduction tree digest")
+                reproduction_observations.append(repeated)
+                if repeated != reproduction_digest:
+                    raise PublicationError("Libbox reproduction changed while CI evidence was being published")
+                phase = "source"
+                if current_identity(repository, require_clean=True, environment=ending_environment) != starting_source_identity:
+                    raise PublicationError("release source changed before CI evidence publication")
+            phase = "history"
+            if _read_ci_history(journal, commit, release_source_sha256, digest, active_attempt=attempt) != history:
+                raise PublicationError("CI lane journal changed while lanes were executing")
+            if _read_ci_json(attempt / "intent.json") != intent or read_regular(attempt / "toolchain-binding.json") != canonical_json(identity):
+                raise PublicationError("CI lane attempt inputs changed while lanes were executing")
+            for identifier, selection in own.items():
+                if _stored_lane(attempt, LANE_INDEX[identifier], number) != selection:
+                    raise PublicationError("CI lane attempt record changed before publication")
+            phase = "assembly"
+            if set(records) != set(REQUIRED_CI_LANES):
+                close_attempt("partial")
+                missing = sorted(set(REQUIRED_CI_LANES) - set(records))
+                raise PublicationError(f"unsigned CI lane records are missing: {missing}")
+            document, failures = assemble_document(records, commit, release_source_sha256, digest)
+            if not failures and source_recheck is not None:
+                phase = "source"
+                source_recheck()
+            phase = "complete"
+            close_attempt("completed", document)
+        except BaseException:
+            try:
+                if not os.path.lexists(attempt / "result.json"):
+                    close_attempt("verification-failed")
+            except Exception as journal_error:
                 raise PublicationError(
-                    f"lane {lane.identifier!r} staged journal record changed before publication"
-                )
-            staged_output = _read_journal_output(
-                attempt_journal, lane, staged_record
-            )
-            write_journal_record(journal, lane, staged_record, staged_output)
+                    f"CI lane attempt {number:04d} failed and its terminal evidence could not be made durable"
+                ) from journal_error
+            raise
 
-    if reproduction_digest is not None:
-        repeated_reproduction_digest = require_sha256(
-            reproduction_verifier(
-                repository,
-                artifact,
-                pins,
-                ending_tree_digests,
-            ),
-            "repeated Libbox reproduction tree digest",
-        )
-        if repeated_reproduction_digest != reproduction_digest:
-            raise PublicationError(
-                "Libbox reproduction changed while CI evidence was being published"
-            )
-
-    document, failures = assemble_document(
-        records, commit, release_source_sha256, digest
-    )
-    write_new(output, canonical_json(document))
-    report(f"local deterministic CI lane record written: {output}")
-    report(f"lanes={len(document['lanes'])} failed={failures}")
-    return {
-        "document": document,
-        "failures": failures,
-        "toolchain_sha256": digest,
-        "release_source_sha256": release_source_sha256,
-        "toolchain_identity": identity,
-        "records": records,
-        "output": str(output),
-        "journal": str(journal),
-    }
+        # Reopen the durable result and every selected record before promotion.
+        verified = _read_ci_history(journal, commit, release_source_sha256, digest)
+        if verified.count != number:
+            raise PublicationError("CI lane attempt history changed before promotion")
+        if not failures:
+            admission_phase = "environment"
+            try:
+                admitted_environment = release_tool_environment(repository, pins, execution_environment)
+                if admitted_environment != execution_environment:
+                    raise PublicationError("release tool environment changed before CI publication")
+                admission_phase = "source"
+                if current_identity(repository, require_clean=True, environment=admitted_environment) != starting_source_identity:
+                    raise PublicationError("release source changed before canonical CI publication")
+                admission_phase = "toolchain"
+                admitted_digest, admitted_identity = derive_toolchain_binding(repository, release_environment=admitted_environment)
+                admitted_root, admitted_trees = verified_release_toolchain_trees(repository, pins, environment=admitted_environment)
+                if (
+                    admitted_digest != digest or admitted_identity != identity
+                    or admitted_root != execution_toolchain_root or admitted_trees != execution_tree_digests
+                ):
+                    raise PublicationError("release toolchain changed before canonical CI publication")
+                admission_phase = "executor"
+                if source_recheck is not None:
+                    source_recheck()
+            except BaseException:
+                observation = {
+                    "document": "unsigned-ci-lane-admission-failure-v1", "attempt_number": number,
+                    "document_sha256": sha256_bytes(canonical_json(document)),
+                    "phase": admission_phase, "code": f"{admission_phase}_admission_failed",
+                }
+                _write_attempt_file(attempt / "admission-failure.json", canonical_json(observation))
+                raise
+            payload = read_regular(attempt / "document.json")
+            if payload != canonical_json(document):
+                raise PublicationError("CI lane passing attempt changed before promotion")
+            pending = output.with_name(f".{output.name}.pending")
+            if os.path.lexists(pending):
+                if read_private_pending(pending, len(payload)) != payload:
+                    raise PublicationError("CI lane canonical pending file differs from the passing attempt")
+            else:
+                canonical_ci_evidence_path(output, "CI lane output")
+                write_private_pending(pending, payload)
+            canonical_ci_evidence_path(output, "CI lane output")
+            promote_private_pending(pending, output)
+            if read_regular(output) != payload:
+                raise PublicationError("CI lane canonical output changed while publishing")
+            fsync_directory(output.parent)
+            report(f"local deterministic CI lane record written: {output}")
+        report(f"CI lane attempt retained: {attempt} lanes={len(document['lanes'])} failed={failures}")
+        return {
+            "document": document, "failures": failures, "toolchain_sha256": digest,
+            "release_source_sha256": release_source_sha256, "toolchain_identity": identity,
+            "records": records, "output": str(output) if not failures else None,
+            "attempt": str(attempt), "journal": str(journal),
+        }

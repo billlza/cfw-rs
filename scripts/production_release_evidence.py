@@ -98,11 +98,11 @@ def main() -> None:
         sources = capture_frozen_release_sources(Path(__file__).resolve().parent.parent)
         repository = _repository()
         if arguments.command == "prepackage":
-            manifest = seal_prepackage(repository)
+            manifest = seal_prepackage(repository, executor=sources.executor)
         elif arguments.command == "ga-acceptance":
-            manifest = seal_ga_acceptance(repository)
+            manifest = seal_ga_acceptance(repository, executor=sources.executor)
         elif arguments.command == "publication":
-            manifest = seal_publication(repository)
+            manifest = seal_publication(repository, executor=sources.executor)
         elif arguments.command == "verify":
             manifest = verify_stage(repository, arguments.stage)
         else:

@@ -170,9 +170,9 @@ for fragment in \
   'SERVICE_JOURNAL_INPUT: Final = SERVICE_RELATIVE' \
   'SERVICE_ENVIRONMENT_INPUT: Final = ENVIRONMENT_RELATIVE' \
   'STAGE_SCHEMA_VERSIONS: Final = {' \
-  '"prepackage": 1' \
-  '"ga-acceptance": 2' \
-  '"publication": 2' \
+  '"prepackage": 2' \
+  '"ga-acceptance": 3' \
+  '"publication": 3' \
   'verify_ga_acceptance_journal_export' \
   'def _verified_migration_journals(repository: Path) -> dict[str, Any]:' \
   'verified = verify_ga_acceptance_journal_export(repository)' \
@@ -180,8 +180,8 @@ for fragment in \
   '"migration_journals": {' \
   'validate_ga_runtime_acceptance' \
   'ga_environment_sha256' \
-  'cfm-ga-acceptance-seal-v2' \
-  'cfm-ga-publication-seal-v2' \
+  'cfm-ga-acceptance-seal-v3' \
+  'cfm-ga-publication-seal-v3' \
   'cfm-ga-runtime-acceptance-v2' \
   'build_manifest' \
   'verify_stage'; do

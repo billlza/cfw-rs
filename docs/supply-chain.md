@@ -302,6 +302,20 @@ always blocks. Ambiguous expressions and missing texts therefore remain
 explicit legal-review blockers, including the compound klauspost conclusion
 and the pinned Xcode EULA.
 
+Generating a new template does not invalidate an existing component review.
+An approved conclusion may be retained when the component identity, complete
+license-file set and bytes, metadata, and corresponding-source scope are
+independently rechecked against that approval. Preserve the original review
+unchanged, write a separate reviewed copy using the current paths and source
+evidence, and record the exact comparison. First-party source updates still
+require the current corresponding source to be packaged; they do not by
+themselves change an unchanged GPL license conclusion. A new whole-closure
+record must bind the new closure digest and component set and distinguish the
+retained component decision from the current release authorization. Never copy
+an old closure approval onto a different digest, backdate a new review, or
+carry a conclusion across changed license terms, component identities, or
+source obligations without review.
+
 The generated report records exact component, automatic-license,
 human-license-review, corresponding-source, external-tool, and informational
 `copyright_noassertion_count` totals. License boilerplate is deliberately not
@@ -420,22 +434,27 @@ No later step may repair or replace an input from an earlier step. A failed
 identity, signature, entitlement, notarization, staple, source, or runtime gate
 blocks release.
 
-## Current hard blockers
+## Release and assurance evidence boundaries
 
 The source-built libbox adapter, public packet pump, and role-scoped Global
 Authority transport are linked into the Packet Tunnel and ProxyAgent product
 graph. Their source/unit and unsigned-bundle evidence is not a physical
-data-plane verdict: the exact signed and installed candidate must still prove
-traffic, performance, cancellation, revocation, crash/reboot recovery, and
-fast-user switching on the same physical Mac across both required clean OS
-environments.
+data-plane verdict. Ordinary GA requires the exact signed and installed
+candidate to prove the traffic, rejection, restoration, and protected-CFW
+checks on the single fixed Apple Silicon environment specified in
+[the GA policy](release/ga-assurance-policy-v040.md#ga-required-gates).
+The wider performance, crash/reboot, fast-user-switching, and multiple-OS
+qualification belongs to the separate assurance matrix. Its absence does not
+add an ordinary-GA blocker. A concrete correctness or security defect found by
+any check still blocks the affected release behavior.
 
 The durable Authority journal remains bounded without a crash-safe compaction
 protocol, Quarantined has no product repair workflow, and unattended System
 Proxy restoration after Authorization Services rights expire has not been
-proved. Matching Developer ID profiles now exist for the Host, Proxy Agent, and
-Packet Tunnel bundle identifiers, but no exact current candidate has yet
-completed signing, notarization, staple, Gatekeeper, or publication evidence.
+proved by source checks alone. These runtime boundaries must be assessed from
+the candidate's actual acceptance evidence, not inferred from unit tests.
+Signing, notarization, stapling, Gatekeeper, installation, and publication are
+separate stages whose status comes from the current candidate's receipts.
 The module-only, unfixable `GO-2026-5932` boundary also needs explicit release
 review. Updater
 metadata and its signed artifact contract have project-owned bounds in the

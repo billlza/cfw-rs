@@ -14,6 +14,7 @@ from unittest.mock import patch
 from scripts import ga_acceptance_journal_export as journal_export
 from scripts import production_release_evidence
 from scripts.publication import durable_file
+from scripts.publication import ga_release_contract as contract
 from scripts.publication.common import (
     PublicationError,
     canonical_json,
@@ -21,6 +22,10 @@ from scripts.publication.common import (
     sha256_file,
 )
 from scripts.release_build_identity import RETIRED_GA_WORKSPACE_PATHS
+from scripts.release_executor_source import (
+    ExecutorSource,
+    FrozenReleaseSources,
+)
 from scripts.publication.ga_release_contract import (
     ACCEPTANCE_INPUT_ROOT,
     ASSURANCE_ROOT,
@@ -74,29 +79,44 @@ from scripts.publication.orchestrator import (
 )
 
 
+FIXTURE_EXECUTOR_SOURCE = {
+    "repositoryCommit": "1" * 40,
+    "releaseSourceSha256": "2" * 64,
+}
+
+
 class StageFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.ga_root = self.repository.joinpath(*GA_ROOT.parts)
         self.ga_root.mkdir(parents=True)
+        self.executor = ExecutorSource(
+            self.repository,
+            FIXTURE_EXECUTOR_SOURCE["repositoryCommit"],
+            FIXTURE_EXECUTOR_SOURCE["releaseSourceSha256"],
+        )
+        self.candidate_source = {
+            "release_source_sha256": "d" * 64,
+            "repository_commit": "e" * 40,
+        }
 
     def cleanup(self) -> None:
         self.temporary.cleanup()
 
-    def prepackage_files(self, marker: str = "a") -> dict[str, bytes]:
+    def prepackage_files(
+        self, marker: str = "a", *, executor_source: dict[str, str] = FIXTURE_EXECUTOR_SOURCE
+    ) -> dict[str, bytes]:
         manifest = _stage_manifest(
             "prepackage",
             {
                 "candidate": {"signed_app_tree_sha256": marker * 64},
                 "ci": {"sha256": "b" * 64},
                 "legal_source": {"sha256": "c" * 64},
-                "source": {
-                    "release_source_sha256": "d" * 64,
-                    "repository_commit": "e" * 40,
-                },
+                "source": dict(self.candidate_source),
                 "toolchain": {"toolchainSha256": "f" * 64},
             },
+            executor_source,
         )
         return {
             "hosted-ci.json": canonical_json(
@@ -119,7 +139,10 @@ class StageFixture:
         }
 
     def ga_acceptance_files(
-        self, repository: Path, prepackage: dict[str, object]
+        self,
+        repository: Path,
+        prepackage: dict[str, object],
+        executor_source: dict[str, str],
     ) -> dict[str, bytes]:
         self.assert_repository(repository)
         self.assert_stage(prepackage, "prepackage")
@@ -135,6 +158,7 @@ class StageFixture:
                 ),
                 "runtime_acceptance": {"adapter": {"sha256": "3" * 64}},
             },
+            executor_source,
         )
         return {"manifest.json": canonical_json(manifest)}
 
@@ -143,6 +167,7 @@ class StageFixture:
         repository: Path,
         prepackage: dict[str, object],
         ga_acceptance: dict[str, object],
+        executor_source: dict[str, str],
     ) -> dict[str, bytes]:
         self.assert_repository(repository)
         self.assert_stage(prepackage, "prepackage")
@@ -159,6 +184,7 @@ class StageFixture:
                     self.ga_root / "prepackage/manifest.json"
                 ),
             },
+            executor_source,
         )
         return {
             "legal-review.json": canonical_json({"status": "approved"}),
@@ -254,7 +280,7 @@ class ProductionStageIdentityTests(unittest.TestCase):
 
     def test_stage_status_and_authorization_are_closed(self) -> None:
         for stage in STAGES:
-            manifest = _stage_manifest(stage, {"fixture": stage})
+            manifest = _stage_manifest(stage, {"fixture": stage}, FIXTURE_EXECUTOR_SOURCE)
             validated = _validate_stage_manifest(manifest, stage)
             self.assertEqual(validated["gate_class"], "ga_required")
             self.assertEqual(validated["gate_status"], "passed")
@@ -281,21 +307,24 @@ class ProductionStageIdentityTests(unittest.TestCase):
             "sealed-evidence-manifest-v1",
         ):
             with self.subTest(document=document):
-                value = _stage_manifest("prepackage", {"fixture": True})
+                value = _stage_manifest("prepackage", {"fixture": True}, FIXTURE_EXECUTOR_SOURCE)
                 value["document"] = document
                 with self.assertRaisesRegex(PublicationError, "identity or status"):
                     _validate_stage_manifest(value, "prepackage")
 
         for stage, old_document in (
+            ("prepackage", "cfm-ga-prepackage-seal-v1"),
             ("ga-acceptance", "cfm-ga-acceptance-seal-v1"),
+            ("ga-acceptance", "cfm-ga-acceptance-seal-v2"),
             ("publication", "cfm-ga-publication-seal-v1"),
+            ("publication", "cfm-ga-publication-seal-v2"),
         ):
             for field, old_value in (
                 ("document", old_document),
                 ("schema_version", 1),
             ):
                 with self.subTest(stage=stage, field=field):
-                    value = _stage_manifest(stage, {"fixture": True})
+                    value = _stage_manifest(stage, {"fixture": True}, FIXTURE_EXECUTOR_SOURCE)
                     value[field] = old_value
                     with self.assertRaisesRegex(
                         PublicationError,
@@ -303,13 +332,32 @@ class ProductionStageIdentityTests(unittest.TestCase):
                     ):
                         _validate_stage_manifest(value, stage)
 
+    def test_sealing_executor_is_required_and_has_one_closed_source_identity(self) -> None:
+        malformed = (
+            None,
+            {},
+            {"repositoryCommit": "1" * 40},
+            {"repositoryCommit": "1" * 40, "releaseSourceSha256": "invalid"},
+            {"repositoryCommit": "invalid", "releaseSourceSha256": "2" * 64},
+            {**FIXTURE_EXECUTOR_SOURCE, "repository": "/untrusted"},
+        )
+        for stage in STAGES:
+            manifest = _stage_manifest(stage, {"fixture": True}, FIXTURE_EXECUTOR_SOURCE)
+            del manifest["executor_source"]
+            with self.subTest(stage=stage, field="missing"), self.assertRaises(PublicationError):
+                _validate_stage_manifest(manifest, stage)
+            for identity in malformed:
+                manifest["executor_source"] = identity
+                with self.subTest(stage=stage, identity=identity), self.assertRaises(PublicationError):
+                    _validate_stage_manifest(manifest, stage)
+
     def test_boolean_schema_or_integer_authorization_is_rejected(self) -> None:
         for field, value in (
             ("schema_version", True),
             ("authorization", {"create_packages": 1, "upload": 0}),
         ):
             with self.subTest(field=field):
-                manifest = _stage_manifest("prepackage", {"fixture": True})
+                manifest = _stage_manifest("prepackage", {"fixture": True}, FIXTURE_EXECUTOR_SOURCE)
                 manifest[field] = value
                 with self.assertRaises(PublicationError):
                     _validate_stage_manifest(manifest, "prepackage")
@@ -385,7 +433,7 @@ class DurableStageTransactionTests(unittest.TestCase):
 
     def test_malformed_stage_schema_fails_before_publication(self) -> None:
         files = self.fixture.prepackage_files()
-        manifest = _stage_manifest("prepackage", {"fixture": True})
+        manifest = _stage_manifest("prepackage", {"fixture": True}, FIXTURE_EXECUTOR_SOURCE)
         manifest["document"] = "validated-candidate-v2"
         files["manifest.json"] = canonical_json(manifest)
         with self.assertRaises(PublicationError):
@@ -470,7 +518,7 @@ class DurableStageTransactionTests(unittest.TestCase):
         publication_files = {
             "legal-review.json": canonical_json({"status": "approved"}),
             "manifest.json": canonical_json(
-                _stage_manifest("publication", {"fixture": True})
+                _stage_manifest("publication", {"fixture": True}, FIXTURE_EXECUTOR_SOURCE)
             ),
             "sbom.cyclonedx.json": canonical_json({"bomFormat": "CycloneDX"}),
             "sbom.spdx.json": canonical_json({"spdxVersion": "SPDX-2.3"}),
@@ -498,6 +546,13 @@ class StageOrderTests(unittest.TestCase):
         )
         self.live_hosted_ci = live.start()
         self.addCleanup(live.stop)
+        for source_patch in (
+            patch.object(contract, "_current_stage_executor", return_value=self.fixture.executor),
+            patch.object(contract, "require_executor_unchanged"),
+            patch.object(contract, "identity_at_commit", return_value=self.fixture.executor.identity),
+        ):
+            source_patch.start()
+            self.addCleanup(source_patch.stop)
 
     def test_prepackage_live_checks_once_but_plain_stage_verify_is_offline(self) -> None:
         files = self.fixture.prepackage_files()
@@ -505,7 +560,7 @@ class StageOrderTests(unittest.TestCase):
             "scripts.publication.ga_release_contract._prepackage_files",
             return_value=files,
         ) as compose:
-            sealed = seal_prepackage(self.fixture.repository)
+            sealed = seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
             self.assertEqual(self.live_hosted_ci.call_count, 1)
             self.assertEqual(
                 compose.call_args_list[0].kwargs,
@@ -519,23 +574,23 @@ class StageOrderTests(unittest.TestCase):
         pre, ga, publication = self.fixture.patches()
         with pre, ga, publication:
             with self.assertRaises(PublicationError):
-                seal_ga_acceptance(self.fixture.repository)
+                seal_ga_acceptance(self.fixture.repository, executor=self.fixture.executor)
         self.assertFalse((self.fixture.ga_root / "ga-acceptance").exists())
 
     def test_publication_cannot_skip_ga_acceptance(self) -> None:
         pre, ga, publication = self.fixture.patches()
         with pre, ga, publication:
-            seal_prepackage(self.fixture.repository)
+            seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
             with self.assertRaises(PublicationError):
-                seal_publication(self.fixture.repository)
+                seal_publication(self.fixture.repository, executor=self.fixture.executor)
         self.assertFalse((self.fixture.ga_root / "publication").exists())
 
     def test_three_stages_publish_in_order_and_bind_predecessors(self) -> None:
         pre, ga, publication = self.fixture.patches()
         with pre, ga, publication:
-            prepackage = seal_prepackage(self.fixture.repository)
-            ga_acceptance = seal_ga_acceptance(self.fixture.repository)
-            final = seal_publication(self.fixture.repository)
+            prepackage = seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
+            ga_acceptance = seal_ga_acceptance(self.fixture.repository, executor=self.fixture.executor)
+            final = seal_publication(self.fixture.repository, executor=self.fixture.executor)
             self.assertEqual(verify_stage(self.fixture.repository, "publication"), final)
         self.assertEqual(prepackage["stage"], "prepackage")
         self.assertEqual(ga_acceptance["stage"], "ga-acceptance")
@@ -556,7 +611,7 @@ class StageOrderTests(unittest.TestCase):
             "scripts.publication.ga_release_contract._prepackage_files",
             return_value=original,
         ):
-            seal_prepackage(self.fixture.repository)
+            seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
         with patch(
             "scripts.publication.ga_release_contract._prepackage_files",
             return_value=self.fixture.prepackage_files("9"),
@@ -575,7 +630,7 @@ class StageOrderTests(unittest.TestCase):
                 durable_file.DurabilityOutcomeUnknown,
                 "post-publication input binding is unknown",
             ):
-                seal_prepackage(self.fixture.repository)
+                seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
         self.assertTrue((self.fixture.ga_root / "prepackage/manifest.json").is_file())
         self.assertEqual(
             (self.fixture.ga_root / "prepackage/manifest.json").read_bytes(),
@@ -585,9 +640,9 @@ class StageOrderTests(unittest.TestCase):
     def test_publication_stage_contains_only_publication_legal_copies(self) -> None:
         pre, ga, publication = self.fixture.patches()
         with pre, ga, publication:
-            seal_prepackage(self.fixture.repository)
-            seal_ga_acceptance(self.fixture.repository)
-            manifest = seal_publication(self.fixture.repository)
+            seal_prepackage(self.fixture.repository, executor=self.fixture.executor)
+            seal_ga_acceptance(self.fixture.repository, executor=self.fixture.executor)
+            manifest = seal_publication(self.fixture.repository, executor=self.fixture.executor)
         output = self.fixture.ga_root / "publication"
         self.assertEqual(set(os.listdir(output)), set(STAGE_FILE_NAMES["publication"]))
         encoded = canonical_json(manifest)
@@ -934,6 +989,7 @@ class AdapterContractTests(unittest.TestCase):
                     "repository_commit": "3" * 40,
                 },
             },
+            FIXTURE_EXECUTOR_SOURCE,
         )
         with (
             patch(
@@ -1057,6 +1113,7 @@ class MigrationJournalContractIntegrationTests(unittest.TestCase):
                     "repository_commit": "3" * 40,
                 },
             },
+            FIXTURE_EXECUTOR_SOURCE,
         )
         packages = {
             "dmg": {
@@ -1199,8 +1256,11 @@ class CommandBoundaryTests(unittest.TestCase):
             self.assertEqual((arguments.command, arguments.stage), ("verify", stage))
 
     def test_main_dispatches_exactly_one_stage(self) -> None:
-        manifest = _stage_manifest("prepackage", {"fixture": True})
-        sources = object()
+        manifest = _stage_manifest("prepackage", {"fixture": True}, FIXTURE_EXECUTOR_SOURCE)
+        sources = FrozenReleaseSources(
+            executor=ExecutorSource(Path("/executor"), "1" * 40, "2" * 64),
+            artifact=ExecutorSource(Path("/artifact"), "3" * 40, "4" * 64),
+        )
         with (
             patch.object(sys, "argv", ["production_release_evidence.py", "prepackage"]),
             patch.object(production_release_evidence, "require_closed_release_runtime"),
@@ -1220,7 +1280,9 @@ class CommandBoundaryTests(unittest.TestCase):
             patch("builtins.print"),
         ):
             production_release_evidence.main()
-        prepackage.assert_called_once_with(production_release_evidence._repository())
+        prepackage.assert_called_once_with(
+            production_release_evidence._repository(), executor=sources.executor
+        )
         capture.assert_called_once_with(
             Path(production_release_evidence.__file__).resolve().parent.parent
         )
@@ -1266,7 +1328,7 @@ class CommandBoundaryTests(unittest.TestCase):
         prepackage.assert_not_called()
 
     def test_executor_drift_after_stage_publication_is_explicitly_unknown(self) -> None:
-        manifest = _stage_manifest("prepackage", {"fixture": True})
+        manifest = _stage_manifest("prepackage", {"fixture": True}, FIXTURE_EXECUTOR_SOURCE)
         with (
             patch.object(sys, "argv", ["production_release_evidence.py", "prepackage"]),
             patch.object(production_release_evidence, "require_closed_release_runtime"),

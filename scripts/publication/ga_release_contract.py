@@ -78,6 +78,14 @@ from scripts.release_build_identity import (
     ga_root,
     verify_ga_workspace_path_preconditions,
 )
+from scripts.release_executor_source import (
+    ExecutorSource,
+    capture_executor_source,
+    require_executor_unchanged,
+    require_historical_executor,
+    validate_source_identity,
+)
+from scripts.repository_source_identity import SourceIdentityError, identity_at_commit
 from scripts.verify_notary_log import (
     NotaryLogError,
     validate_files as validate_notary_files,
@@ -136,15 +144,15 @@ NOTARY_RESULT: Final = SIGNED_ROOT / "notarization.json"
 NOTARY_LOG: Final = SIGNED_ROOT / "notarization-log.json"
 GATEKEEPER_EVIDENCE: Final = SIGNED_ROOT / "gatekeeper.json"
 
-PREPACKAGE_DOCUMENT: Final = "cfm-ga-prepackage-seal-v1"
-GA_ACCEPTANCE_DOCUMENT: Final = "cfm-ga-acceptance-seal-v2"
-PUBLICATION_DOCUMENT: Final = "cfm-ga-publication-seal-v2"
+PREPACKAGE_DOCUMENT: Final = "cfm-ga-prepackage-seal-v2"
+GA_ACCEPTANCE_DOCUMENT: Final = "cfm-ga-acceptance-seal-v3"
+PUBLICATION_DOCUMENT: Final = "cfm-ga-publication-seal-v3"
 RUNTIME_ACCEPTANCE_DOCUMENT: Final = "cfm-ga-runtime-acceptance-v2"
 GA_APP_ARTIFACT_KIND: Final = "notarized-ga-candidate-v1"
 STAGE_SCHEMA_VERSIONS: Final = {
-    "prepackage": 1,
-    "ga-acceptance": 2,
-    "publication": 2,
+    "prepackage": 2,
+    "ga-acceptance": 3,
+    "publication": 3,
 }
 
 STAGE_DOCUMENTS: Final = {
@@ -720,9 +728,12 @@ def _verified_prepackage_inputs(
     return binding, normalized_ci, hosted_ci, legal_documents
 
 
-def _stage_manifest(stage: str, bindings: dict[str, Any]) -> dict[str, Any]:
+def _stage_manifest(
+    stage: str, bindings: dict[str, Any], executor_source: dict[str, str]
+) -> dict[str, Any]:
     if stage not in STAGES:
         raise PublicationError(f"unknown GA release stage: {stage}")
+    validate_source_identity(executor_source, "GA sealing executor")
     return {
         "authorization": {
             "create_packages": stage == "prepackage",
@@ -730,6 +741,7 @@ def _stage_manifest(stage: str, bindings: dict[str, Any]) -> dict[str, Any]:
         },
         "bindings": bindings,
         "document": STAGE_DOCUMENTS[stage],
+        "executor_source": dict(executor_source),
         "ga_status": ELIGIBLE if stage == "publication" else BLOCKED,
         "gate_class": GATE_CLASS,
         "gate_status": PASSED,
@@ -746,6 +758,7 @@ def _validate_stage_manifest(value: object, stage: str) -> dict[str, Any]:
             "authorization",
             "bindings",
             "document",
+            "executor_source",
             "ga_status",
             "gate_class",
             "gate_status",
@@ -781,11 +794,15 @@ def _validate_stage_manifest(value: object, stage: str) -> dict[str, Any]:
         or not manifest["bindings"]
     ):
         raise PublicationError(f"{stage} manifest identity or status is invalid")
+    validate_source_identity(manifest["executor_source"], "GA sealing executor")
     return manifest
 
 
 def _prepackage_files(
-    repository: Path, *, expected_live_hosted_ci: dict[str, Any] | None = None
+    repository: Path,
+    executor_source: dict[str, str],
+    *,
+    expected_live_hosted_ci: dict[str, Any] | None = None,
 ) -> dict[str, bytes]:
     bindings, ci_document, hosted_ci, _legal_documents = _verified_prepackage_inputs(
         repository
@@ -794,7 +811,7 @@ def _prepackage_files(
         raise PublicationError(
             "hosted CI receipt changed after live prepackage revalidation"
         )
-    manifest = _stage_manifest("prepackage", bindings)
+    manifest = _stage_manifest("prepackage", bindings, executor_source)
     return {
         "hosted-ci.json": canonical_json(hosted_ci),
         "local-ci-lanes.json": canonical_json(ci_document),
@@ -1091,7 +1108,7 @@ def _verified_runtime_acceptance_adapter(
 
 
 def _ga_acceptance_files(
-    repository: Path, prepackage: dict[str, Any]
+    repository: Path, prepackage: dict[str, Any], executor_source: dict[str, str]
 ) -> dict[str, bytes]:
     packages = _verified_package_sets(repository, prepackage)
     runtime = _verified_acceptance_inputs(repository, prepackage, packages)
@@ -1102,13 +1119,18 @@ def _ga_acceptance_files(
         ),
         "runtime_acceptance": runtime,
     }
-    return {"manifest.json": canonical_json(_stage_manifest("ga-acceptance", bindings))}
+    return {
+        "manifest.json": canonical_json(
+            _stage_manifest("ga-acceptance", bindings, executor_source)
+        )
+    }
 
 
 def _publication_files(
     repository: Path,
     prepackage: dict[str, Any],
     ga_acceptance: dict[str, Any],
+    executor_source: dict[str, str],
 ) -> dict[str, bytes]:
     legal_source, copies = _verified_legal_source_closure(
         repository, _path(repository, SIGNED_APP)
@@ -1125,7 +1147,12 @@ def _publication_files(
             _path(repository, PREPACKAGE_OUTPUT) / "manifest.json"
         ),
     }
-    return {"manifest.json": canonical_json(_stage_manifest("publication", bindings)), **copies}
+    return {
+        "manifest.json": canonical_json(
+            _stage_manifest("publication", bindings, executor_source)
+        ),
+        **copies,
+    }
 
 
 def _read_stage_files(repository: Path, stage: str) -> dict[str, bytes]:
@@ -1150,13 +1177,14 @@ def _manifest_from_files(stage: str, files: dict[str, bytes], path: Path) -> dic
     )
 
 
-def build_expected_stage_files(
+def _compose_stage_files(
     repository: Path,
     stage: str,
+    executor_source: dict[str, str],
     *,
     require_live_hosted_ci: bool = False,
 ) -> dict[str, bytes]:
-    """Compose one stage from current immutable predecessors without writes."""
+    """Reopen product inputs under one already verified sealing identity."""
 
     repository = _canonical_repository(repository)
     if stage not in STAGES:
@@ -1169,25 +1197,75 @@ def build_expected_stage_files(
     if stage == "prepackage":
         return _prepackage_files(
             repository,
+            executor_source,
             expected_live_hosted_ci=live_hosted_ci,
         )
     if stage == "ga-acceptance":
-        prepackage = verify_stage(repository, "prepackage")
-        return _ga_acceptance_files(repository, prepackage)
-    prepackage = verify_stage(repository, "prepackage")
-    ga_acceptance = verify_stage(repository, "ga-acceptance")
-    return _publication_files(repository, prepackage, ga_acceptance)
+        prepackage = _verify_stage(repository, "prepackage")
+        return _ga_acceptance_files(repository, prepackage, executor_source)
+    prepackage = _verify_stage(repository, "prepackage")
+    ga_acceptance = _verify_stage(repository, "ga-acceptance")
+    return _publication_files(repository, prepackage, ga_acceptance, executor_source)
+
+
+def _current_stage_executor(repository: Path) -> ExecutorSource:
+    executor = capture_executor_source(Path(__file__).resolve().parents[2])
+    require_historical_executor(repository, executor)
+    return executor
+
+
+def build_expected_stage_files(
+    repository: Path,
+    stage: str,
+    *,
+    executor: ExecutorSource,
+    require_live_hosted_ci: bool = False,
+) -> dict[str, bytes]:
+    """Compose a new seal with the actual clean executor's source identity."""
+
+    repository = _canonical_repository(repository)
+    if _current_stage_executor(repository) != executor:
+        raise PublicationError("GA sealing executor differs from the running source")
+    expected = _compose_stage_files(
+        repository,
+        stage,
+        executor.identity,
+        require_live_hosted_ci=require_live_hosted_ci,
+    )
+    require_executor_unchanged(executor)
+    return expected
+
+
+def _verify_stage(repository: Path, stage: str) -> dict[str, Any]:
+    if stage not in STAGES:
+        raise PublicationError(f"unknown GA release stage: {stage}")
+    observed = _read_stage_files(repository, stage)
+    manifest = _manifest_from_files(stage, observed, _path(repository, STAGE_OUTPUTS[stage]))
+    executor_source = manifest["executor_source"]
+    try:
+        historical = identity_at_commit(repository, executor_source["repositoryCommit"])
+    except (OSError, SourceIdentityError, ValueError) as error:
+        raise PublicationError("GA sealing executor Git history is unavailable") from error
+    validate_source_identity(historical, "historical GA sealing executor")
+    if historical != executor_source:
+        raise PublicationError("GA sealing executor differs from its historical source")
+    expected = _compose_stage_files(repository, stage, executor_source)
+    if observed != expected:
+        raise PublicationError(f"sealed {stage} stage differs from reopened GA inputs")
+    repeated = _read_stage_files(repository, stage)
+    if repeated != observed:
+        raise PublicationError(f"sealed {stage} stage changed while reopening GA inputs")
+    return manifest
 
 
 def verify_stage(repository: Path, stage: str) -> dict[str, Any]:
     """Purely reopen one stage and every predecessor; never creates evidence."""
 
     repository = _canonical_repository(repository)
-    expected = build_expected_stage_files(repository, stage)
-    observed = _read_stage_files(repository, stage)
-    if observed != expected:
-        raise PublicationError(f"sealed {stage} stage differs from reopened GA inputs")
-    return _manifest_from_files(stage, observed, _path(repository, STAGE_OUTPUTS[stage]))
+    verifier = _current_stage_executor(repository)
+    manifest = _verify_stage(repository, stage)
+    require_executor_unchanged(verifier)
+    return manifest
 
 
 def verify_prepackage_authorization(repository: Path) -> dict[str, Any]:
@@ -1282,7 +1360,7 @@ def self_check(repository: Path) -> None:
         != repository / "target/candidates/0.4.0/ga/40043"
         or STAGES != ("prepackage", "ga-acceptance", "publication")
         or STAGE_SCHEMA_VERSIONS
-        != {"prepackage": 1, "ga-acceptance": 2, "publication": 2}
+        != {"prepackage": 2, "ga-acceptance": 3, "publication": 3}
         or ACCEPTANCE_INPUT_ROOT.parent != STAGE_INPUT_ROOT
         or MIGRATION_JOURNAL_INPUT.parent != ACCEPTANCE_INPUT_ROOT
         or INSTALL_JOURNAL_INPUT.parent != MIGRATION_JOURNAL_INPUT

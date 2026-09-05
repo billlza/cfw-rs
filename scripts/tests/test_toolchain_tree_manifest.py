@@ -1354,9 +1354,9 @@ LIBBOX_VET_PACKAGES=(".")
             "cfm-ga-command-observation-v2",
             "cfm-ga-runtime-collection-intent-v2",
             "cfm-ga-runtime-collection-event-v2",
-            "cfm-ga-prepackage-seal-v1",
-            "cfm-ga-acceptance-seal-v2",
-            "cfm-ga-publication-seal-v2",
+            "cfm-ga-prepackage-seal-v2",
+            "cfm-ga-acceptance-seal-v3",
+            "cfm-ga-publication-seal-v3",
             "Older service/runtime/stage markers cannot be accepted",
         ):
             with self.subTest(required=required):

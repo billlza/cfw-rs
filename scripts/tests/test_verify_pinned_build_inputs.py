@@ -2861,7 +2861,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded_predecessor = 'prepackage = verify_stage(repository, "prepackage")'
+        guarded_predecessor = 'prepackage = _verify_stage(repository, "prepackage")'
         self.assertIn(guarded_predecessor, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded_predecessor,
@@ -3044,12 +3044,14 @@ class PinnedBuildInputsTests(unittest.TestCase):
         source = fixture.extra_artifact_files[path]
         guarded = (
             '        "publication",\n'
+            "        executor=executor,\n"
             "        require_live_hosted_ci=True,\n"
         )
         self.assertEqual(source.count(guarded), 1)
         fixture.extra_artifact_files[path] = source.replace(
             guarded,
             '        "publication",\n'
+            "        executor=executor,\n"
             "        require_live_hosted_ci=False,\n",
             1,
         )
@@ -3077,6 +3079,28 @@ class PinnedBuildInputsTests(unittest.TestCase):
             pinned_verifier._artifact_binding_surface(
                 fixture.extra_artifact_files[path],
                 path,
+            )
+
+    def test_stage_executor_history_cannot_be_replaced_with_its_claim(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = 'historical = identity_at_commit(repository, executor_source["repositoryCommit"])'
+        self.assertEqual(source.count(guarded), 1)
+        with self.assertRaisesRegex(PinnedInputError, "guard calls differ"):
+            pinned_verifier._artifact_binding_surface(
+                source.replace(guarded, "historical = executor_source", 1), path
+            )
+
+    def test_stage_verifier_must_recheck_its_own_source(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        guarded = "    require_executor_unchanged(verifier)\n"
+        self.assertEqual(source.count(guarded), 1)
+        with self.assertRaisesRegex(PinnedInputError, "guard calls differ"):
+            pinned_verifier._artifact_binding_surface(
+                source.replace(guarded, "", 1), path
             )
 
     def test_prepackage_critical_guard_cannot_be_hidden_in_nested_callable(self) -> None:

@@ -67,6 +67,7 @@ if __package__:
         DEFAULT_LIBBOX_OUTPUT,
         DEFAULT_LIBBOX_SOURCE_TEMPLATE,
         LANES,
+        canonical_ci_evidence_path,
         collect_ci_lanes,
         derive_toolchain_binding,
     )
@@ -117,6 +118,7 @@ else:
         DEFAULT_LIBBOX_OUTPUT,
         DEFAULT_LIBBOX_SOURCE_TEMPLATE,
         LANES,
+        canonical_ci_evidence_path,
         collect_ci_lanes,
         derive_toolchain_binding,
     )
@@ -1139,29 +1141,56 @@ def command_collect_ci_lanes(arguments: argparse.Namespace) -> None:
     can be written as ``passed``.
     """
     repository = _repository()
-    source_identity = current_identity(repository)
+    artifact_repository = arguments.artifact_repository
+    executor_source = None
+    source_recheck = None
+    if artifact_repository is not None:
+        if __package__:
+            from .release_executor_source import (
+                capture_frozen_release_sources,
+                require_frozen_sources_unchanged,
+            )
+        else:
+            from release_executor_source import (
+                capture_frozen_release_sources,
+                require_frozen_sources_unchanged,
+            )
+        sources = capture_frozen_release_sources(repository)
+        if artifact_repository != sources.artifact.repository:
+            raise PublicationError("CI lanes require the exact fixed frozen artifact repository")
+        repository = sources.artifact.repository
+        source_identity = sources.artifact.identity
+        executor_source = sources.executor.identity
+        source_recheck = lambda: require_frozen_sources_unchanged(sources)
+    else:
+        source_identity = current_identity(repository)
+    output = arguments.output
+    journal = arguments.journal
+    if artifact_repository is not None:
+        output = _repository_output_path(repository, output, "CI lane output")
+        _require_real_directory_chain(repository, output.parent, "CI lane output parent")
+        if journal is not None:
+            journal = canonical_ci_evidence_path(journal, "CI lane journal")
     result = collect_ci_lanes(
         repository,
         commit=source_identity["repositoryCommit"],
         release_source_sha256=source_identity["releaseSourceSha256"],
-        output=arguments.output,
+        output=output,
         journal=(
-            arguments.output.parent / "ci-lane-journal"
-            if arguments.journal is None
-            else arguments.journal
+            output.parent / "ci-lane-journal" if journal is None else journal
         ),
         only=frozenset(arguments.only or ()),
         rerun=frozenset(arguments.rerun or ()),
         assemble_only=arguments.assemble_only,
         libbox_source=arguments.libbox_source,
         libbox_output=arguments.libbox_output,
+        executor_source=executor_source,
+        source_recheck=source_recheck,
     )
     for lane in result["document"]["lanes"]:
         print(f"  lane {lane['id']}: {lane['status']} (exit {lane['exit_code']})")
-    print(
-        f"local deterministic CI lane record: {Path(result['output']).resolve(strict=True)} "
-        f"toolchain_sha256={result['toolchain_sha256']} failed={result['failures']}"
-    )
+    print(f"local deterministic CI attempt: {result['attempt']} "
+          f"toolchain_sha256={result['toolchain_sha256']} failed={result['failures']}")
     if result["failures"]:
         # The record is written exactly as observed; the gate refuses it.
         raise SystemExit(
@@ -1277,6 +1306,11 @@ def parser() -> argparse.ArgumentParser:
     lanes = commands.add_parser("collect-ci-lanes")
     lanes.add_argument("--output", type=Path, required=True)
     lanes.add_argument("--journal", type=Path, default=None)
+    lanes.add_argument(
+        "--artifact-repository",
+        type=Path,
+        help="run the frozen artifact's lanes from a separate clean evidence executor",
+    )
     lanes.add_argument(
         "--only",
         action="append",

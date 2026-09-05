@@ -110,7 +110,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "f3e816b526f2019b441a4eca43f27b8ff0ddf35bd71af87dc64ed7c5a147383a"
+    "03319837ef9bdc39d4855fd7dfb19e57e29d06099d09fd0a0ab78aca1773482c"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -118,48 +118,35 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "91083b0f724879ba3aa8391802316675a4e4e0a0bfc0b22d14862b583ca12fe5"
+    "85640d5f9e8dd83e99777b5b79d3650e030c84531bf681240d72f5608b3b99d4"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
 # result.  They detect reviewed-function drift; exact Git/hosted-CI identity is
 # still the external trust root and these checks are not authentication.
 GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
-    "_publish_and_confirm_stage": (
-        "ff488d2364ad4d0d2b37bb6d297e9f9ff2df60a4dec9cb83386af2c08302aa75"
-    ),
-    "_require_hosted_ci_source_binding": (
-        "63a05e630f3622bbcd4d5b418ebe8174487d8690ea60b383147bd24e87696f0a"
-    ),
-    "_verified_prepackage_inputs": (
-        "c41fe5eff769b2dc711fceea49a46ec5c5ab153a56b01688fc7216509eb375bc"
-    ),
+    "_publish_and_confirm_stage": "ff488d2364ad4d0d2b37bb6d297e9f9ff2df60a4dec9cb83386af2c08302aa75",
+    "_require_hosted_ci_source_binding": "63a05e630f3622bbcd4d5b418ebe8174487d8690ea60b383147bd24e87696f0a",
+    "_verified_prepackage_inputs": "c41fe5eff769b2dc711fceea49a46ec5c5ab153a56b01688fc7216509eb375bc",
     "_verified_package_sets": "6d530c9583863c1b56baa56554f2c8e576d90f0797c113e3d15dada9f8805b56",
-    "_verified_migration_journals": (
-        "aae37ebedddaa00d345475f26ed45e28d69d1097bee7a9a9997b6dd63b7bcc28"
-    ),
-    "_expected_candidate_from_prepackage": (
-        "6157ac3c2f944787433c9db2ed8bdc95e80d88866729b5a2351fd7c15975e42e"
-    ),
-    "_require_migration_matches_prepackage": (
-        "621ca9a9f33a1290d8a473b96e0b479a1701b6092470755b9d5fb6d4537d127c"
-    ),
-    "_verified_acceptance_inputs": (
-        "099413649138b7298d94930f60dc51fcfa0927a6c7af5d60bd44fc623b53db3f"
-    ),
-    "_verified_runtime_acceptance_adapter": (
-        "e89c9d30ea3c700bd202ce95df6ceae63842ca7145d1c89a5c1c6348977a8f6e"
-    ),
-    "_ga_acceptance_files": "d84444d7a3f250de492754fe285be1c40ee89a8d9f385819810b714e508aa906",
-    "_prepackage_files": "83423102dc58b6f3010f3d80268b9015360036494444f8df4c0091e8a13474a2",
-    "build_expected_stage_files": "ffe33540f9fc5853603daa0141cfe9c1c867d15ab6eef0fe9841cda86beb9b5b",
-    "verify_stage": "c3f0d92eb16c9f7c2e4984c27fd17de55fadcd3c6caf55985274b76171f2d039",
+    "_verified_migration_journals": "aae37ebedddaa00d345475f26ed45e28d69d1097bee7a9a9997b6dd63b7bcc28",
+    "_expected_candidate_from_prepackage": "6157ac3c2f944787433c9db2ed8bdc95e80d88866729b5a2351fd7c15975e42e",
+    "_require_migration_matches_prepackage": "621ca9a9f33a1290d8a473b96e0b479a1701b6092470755b9d5fb6d4537d127c",
+    "_verified_acceptance_inputs": "099413649138b7298d94930f60dc51fcfa0927a6c7af5d60bd44fc623b53db3f",
+    "_verified_runtime_acceptance_adapter": "e89c9d30ea3c700bd202ce95df6ceae63842ca7145d1c89a5c1c6348977a8f6e",
+    "_ga_acceptance_files": "1572b84080b776102885d6f1cd914d172f6689a1865558bd142de64c51868444",
+    "_prepackage_files": "8c2e8dce700bd1e06e7a416d08b9d5f7c45c8eef499419ecab4ede854dc6d690",
+    "build_expected_stage_files": "3d95b22bbb13d933819def3b6c8765d421f3a57ff5ebffeffdb5d68f934bb580",
+    "verify_stage": "dc584562d9a2de621bda8278d2a488a538593161c710b667c6e2fad0545db427",
     "verify_prepackage_authorization": "945770f694ef508fa668af79ee50928f4a3b0c91f527c007bc10ff2a6af7216a",
     "verify_publication_authorization": "181dd93f19fa706c5c25b839bf63b4f0fc4caf61656e87b5f20ff72768767d20",
     "derive_runtime_expectation": "3489567d56cae3ed2622e6f63b5dcfbe93a62e4865162d349c44b9d1371f7c75",
-    "seal_prepackage": "758a9039726ae7d93a048ed4ba6989c2654dd3ae3cedb0c61d0f7a8ad77646e8",
-    "seal_ga_acceptance": "41e8dd61fb7d2779077e5e040b2481a934f00bb19c060eb2329309c86744d0fe",
-    "seal_publication": "edf0ba7d44672ddb7cf23856d59ddb9c4f43f9caaea7f05f62b89c794729ef9a",
+    "seal_prepackage": "a3cca34f6d0643fdcf4c49424b79d83d66d5dbe09f11cef11f635fa826de18cf",
+    "seal_ga_acceptance": "18dc35ad031f77ab9e8ef6354b3006a1f0eb2161d0322ed2f18d1ff5703ad638",
+    "seal_publication": "21da40a41c53882fd796901730cb261fd734974b6f5fc7c63fe46dd1deddfabb",
+    "_compose_stage_files": "2072ccb3f22bf69da5a463a1e7a1f260fb246f7ed635551c3eeffaba4195bb8d",
+    "_current_stage_executor": "4640733086dffe90fffdef7b33fc52163268546e16d404200ee6b18eb9517b55",
+    "_verify_stage": "10a63bfbd1b757f1f122074dee7ea109e4c8b39e9518c1760902d0929e34ada6"
 }
 GA_RELEASE_CLI_MAIN_AST_SHA256 = {
     "scripts/ga_runtime_acceptance_cli.py": "3d791617f96229d5f18be034fbd5a8f2598ab2bf56cbac3092773aba70c075b1",
@@ -173,7 +160,7 @@ PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
     ),
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "16b3c657078aba7e23a0df5a2c7f9f79fe7f13084030d3f89c23db6e78b913ea"
+    "f531d7f2c1aa17b82f073d9283075c2f7c1d68547d517ec6a0f1a6b55424c104"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -1059,7 +1046,12 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
             "MIGRATION_RELATIVE",
             "SERVICE_RELATIVE",
             "build_manifest",
+            "capture_executor_source",
+            "identity_at_commit",
             "live_verify_hosted_ci_receipt",
+            "require_executor_unchanged",
+            "require_historical_executor",
+            "validate_source_identity",
             "validate_candidate_app_manifest",
             "validate_ci_lane_document",
             "validate_gatekeeper_evidence",
@@ -1105,6 +1097,21 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
             None,
         ),
         "build_manifest": ("scripts.hash_artifact", 0, "build_manifest", None),
+        "capture_executor_source": (
+            "scripts.release_executor_source", 0, "capture_executor_source", None
+        ),
+        "identity_at_commit": (
+            "scripts.repository_source_identity", 0, "identity_at_commit", None
+        ),
+        "require_executor_unchanged": (
+            "scripts.release_executor_source", 0, "require_executor_unchanged", None
+        ),
+        "require_historical_executor": (
+            "scripts.release_executor_source", 0, "require_historical_executor", None
+        ),
+        "validate_source_identity": (
+            "scripts.release_executor_source", 0, "validate_source_identity", None
+        ),
         "live_verify_hosted_ci_receipt": (
             "scripts.github_hosted_ci_receipt",
             0,
@@ -1195,7 +1202,10 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
         "_verified_runtime_acceptance_adapter",
         "_ga_acceptance_files",
         "_prepackage_files",
+        "_compose_stage_files",
+        "_current_stage_executor",
         "build_expected_stage_files",
+        "_verify_stage",
         "verify_stage",
         "verify_prepackage_authorization",
         "verify_publication_authorization",
@@ -1306,9 +1316,9 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
         except (ValueError, TypeError):
             stage_schema_versions = None
         if stage_schema_versions != {
-            "prepackage": 1,
-            "ga-acceptance": 2,
-            "publication": 2,
+            "prepackage": 2,
+            "ga-acceptance": 3,
+            "publication": 3,
         }:
             raise PinnedInputError(
                 "production GA contract stage schemas differ from policy"
@@ -1417,10 +1427,20 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
             "verify_stage",
             {
                 "_canonical_repository": [1],
-                "build_expected_stage_files": [2],
-                "_read_stage_files": [3],
-                "_manifest_from_files": [5],
-                "_path": [5],
+                "_current_stage_executor": [2],
+                "_verify_stage": [3],
+                "require_executor_unchanged": [4],
+            },
+        )
+        require_calls(
+            "_verify_stage",
+            {
+                "_read_stage_files": [1, 9],
+                "_manifest_from_files": [2],
+                "_path": [2],
+                "identity_at_commit": [4],
+                "validate_source_identity": [5],
+                "_compose_stage_files": [7],
             },
         )
 
@@ -1467,6 +1487,17 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
         ),
         "_prepackage_files": frozenset(
             {"_verified_prepackage_inputs", "_stage_manifest"}
+        ),
+        "_current_stage_executor": frozenset(
+            {"capture_executor_source", "require_historical_executor"}
+        ),
+        "build_expected_stage_files": frozenset(
+            {
+                "_canonical_repository",
+                "_current_stage_executor",
+                "_compose_stage_files",
+                "require_executor_unchanged",
+            }
         ),
         "verify_prepackage_authorization": frozenset(
             {
@@ -1560,7 +1591,7 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
 
     expected_stage_calls = (
         {
-            "build_expected_stage_files": (
+            "_compose_stage_files": (
                 "prepackage",
                 "prepackage",
                 "ga-acceptance",
@@ -1578,7 +1609,8 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
-                and node.func.id == "verify_stage"
+                and node.func.id
+                == ("_verify_stage" if function_name == "_compose_stage_files" else "verify_stage")
             ):
                 stage = (
                     node.args[1].value

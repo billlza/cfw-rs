@@ -146,6 +146,17 @@ installation, acceptance or publication was produced. Its bytes, receipts and
 lane record must remain unchanged; none may be relabelled, rebuilt, re-signed,
 promoted or used as 40043 evidence.
 
+The 40042 retirement is retained as a historical allocation decision. Its
+test-isolation correction did not establish changed product bytes; it must not
+be used as precedent to retire 40043 for a collector, test, documentation, or
+verifier correction. The existing product-input v1 document hashes the complete
+release source and therefore does not implement the independent product-input
+classification required by the lifecycle policy. Until that boundary exists,
+do not treat a changed source digest as proof of a product change, substitute
+new tests for the frozen source's CI, or silently approve unsupported evidence.
+Supported operator-only verification uses the unchanged frozen candidate and
+records the operator identity separately.
+
 No further build pair may be allocated for a source, CI, documentation, test,
 verifier, or preflight failure that occurs before an application candidate is
 materialized. Such failures use an append-only attempt or CI-run identity.
@@ -329,9 +340,14 @@ transaction uses `cfm-ga-journal-export-intent-v1` and
 `cfm-ga-journal-export-receipt-v1`. GA runtime evidence uses
 `cfm-ga-runtime-acceptance-v2`, `cfm-ga-runtime-check-v2`,
 `cfm-ga-command-observation-v2`, `cfm-ga-runtime-collection-intent-v2`, and
-`cfm-ga-runtime-collection-event-v2`. The prepackage stage remains
-`cfm-ga-prepackage-seal-v1`; the acceptance and publication stages use
-`cfm-ga-acceptance-seal-v2` and `cfm-ga-publication-seal-v2`.
+`cfm-ga-runtime-collection-event-v2`. New prepackage stages use
+`cfm-ga-prepackage-seal-v2`; the acceptance and publication stages use
+`cfm-ga-acceptance-seal-v3` and `cfm-ga-publication-seal-v3`. Each stage records
+its clean sealing executor separately from the frozen candidate's source.
+Verification reopens that original executor identity from shared Git objects;
+running a newer verifier must not change the recorded sealer or immutable seal.
+The current candidate has no old stage seals to migrate. Historical candidates
+retain their original schemas and records unchanged.
 Older service/runtime/stage markers cannot be accepted as compatible evidence.
 
 The mandatory order is service recommission, journal `--export`, journal

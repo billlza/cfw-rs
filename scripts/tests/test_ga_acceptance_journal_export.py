@@ -22,7 +22,12 @@ from scripts.publication.durable_file import (
 )
 
 
-PREVIOUS = install.AppIdentity("0.4.0", "40019", "a" * 64)
+# The recorded predecessor carries its real frozen tree identity; the install
+# journal is only readable against the exact predecessor it names.
+PREVIOUS = install.AppIdentity(
+    "0.4.0", "40019", install.INSTALLED_40019_PREDECESSOR.tree_sha256
+)
+BOUND = install.BoundInstallProfile.recorded(install.GA_INSTALL_PROFILE, PREVIOUS)
 CANDIDATE = install.CandidateIdentity(
     app=install.AppIdentity("0.4.0", "40041", "b" * 64),
     manifest_sha256="c" * 64,
@@ -116,7 +121,7 @@ class JournalExportFixture:
     def _write_service_journal(self) -> None:
         with service.ServiceEventStore(self.service_paths) as store:
             with store.locked():
-                _intent, events = store.create(
+                intent, events = store.create(
                     CANDIDATE,
                     PREVIOUS,
                     guard(),
@@ -126,8 +131,9 @@ class JournalExportFixture:
                     events.append(
                         store.append(
                             events,
+                            intent=intent,
                             phase=service.PHASES[sequence],
-                            action=self.install_paths.profile.service_actions[sequence],
+                            action=BOUND.service_actions[sequence],
                             guard=guard(),
                         )
                     )

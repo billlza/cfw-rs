@@ -88,8 +88,16 @@ PHASES: Final = (
     "proxy_registered",
     "recommissioned",
 )
-ACTIONS: Final = install.GA_INSTALL_PROFILE.service_actions
-if ACTIONS != (
+# Both service vocabularies the shipped application implements, asserted
+# against their exact literals so the fixed transaction stays source-visible.
+# The vocabulary actually spoken is selected from the observed predecessor.
+INSTALLED_40019_ACTIONS: Final = install.BoundInstallProfile(
+    install.GA_INSTALL_PROFILE, install.INSTALLED_40019_PREDECESSOR
+).service_actions
+CURRENT_PREDECESSOR_ACTIONS: Final = install.BoundInstallProfile(
+    install.GA_INSTALL_PROFILE, install.INSTALLED_40041_PREDECESSOR
+).service_actions
+if INSTALLED_40019_ACTIONS != (
     "prepare",
     "unregister-installed-40019-proxy-agent",
     "unregister-installed-40019-global-authority",
@@ -98,11 +106,25 @@ if ACTIONS != (
     "register-proxy-agent",
     "prove-off",
 ):
-    raise RuntimeError("service maintenance profile actions differ from fixed transaction")
+    raise RuntimeError("installed-40019 service actions differ from fixed transaction")
+if CURRENT_PREDECESSOR_ACTIONS != (
+    "prepare",
+    "unregister-proxy-agent",
+    "unregister-global-authority",
+    "verify-dormant",
+    "register-global-authority",
+    "register-proxy-agent",
+    "prove-off",
+):
+    raise RuntimeError("current-predecessor service actions differ from fixed transaction")
 if (
     install.VERSION != ACTIVE_RELEASE_IDENTITY.product_version
     or install.GA_INSTALL_PROFILE.build_number != ACTIVE_RELEASE_IDENTITY.ga_build
-    or install.GA_INSTALL_PROFILE.previous_build_number != "40019"
+    or dict(install.SUPPORTED_PREDECESSORS)
+    != {
+        "40019": install.INSTALLED_40019_PREDECESSOR,
+        "40041": install.INSTALLED_40041_PREDECESSOR,
+    }
 ):
     raise RuntimeError("service maintenance profile differs from active GA identity")
 PROXY_DOMAIN_TEMPLATE: Final = "gui/{uid}/com.bill.clashformac.proxy-agent"
@@ -414,6 +436,7 @@ def validate_authority_recovery_intent(
     *,
     intent: dict[str, Any],
     events: list[dict[str, Any]],
+    bound: install.BoundInstallProfile,
 ) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "action",
@@ -436,13 +459,13 @@ def validate_authority_recovery_intent(
             "Authority recovery intent has no proxy-unregistered boundary",
         )
     guard = install._validate_guard(value["guard"])
+    recovery = bound.authority_recovery_contract()
     if (
         value["document"] != AUTHORITY_RECOVERY_INTENT_DOCUMENT
         or type(value["schema_version"]) is not int
         or value["schema_version"] != AUTHORITY_RECOVERY_INTENT_SCHEMA_VERSION
-        or value["action"] != install.INSTALLED_40019_RECOVERY_ACTION
-        or value["off_proof_profile"]
-        != install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
+        or value["action"] != recovery.action
+        or value["off_proof_profile"] != recovery.off_proof_profile
         or type(value["sequence"]) is not int
         or value["sequence"] != 2
         or value["transaction_id"] != intent["transaction_id"]
@@ -456,6 +479,23 @@ def validate_authority_recovery_intent(
             "Authority recovery intent lineage is invalid",
         )
     return value
+
+
+def _bound_from_intent(
+    profile: install.InstallProfile, intent: dict[str, Any]
+) -> install.BoundInstallProfile:
+    """Bind the profile to the predecessor a service intent recorded.
+
+    The intent is evidence of what was observed at preparation time; the
+    vocabulary used to read the rest of the transaction follows from it.
+    """
+
+    return install.BoundInstallProfile.recorded(
+        profile,
+        install.AppIdentity.from_document(
+            intent["previous"], "service intent previous application"
+        ),
+    )
 
 
 def validate_terminal_snapshot_files(
@@ -492,10 +532,10 @@ def validate_terminal_snapshot_files(
             "terminal service snapshot inventory is invalid",
         )
     intent = validate_intent(_strict_json_bytes(files[INTENT_NAME], "service intent"))
+    bound = _bound_from_intent(profile, intent)
     if (
         intent["candidate"]["build_number"] != profile.build_number
-        or intent["previous"]["build_number"] != profile.previous_build_number
-        or intent["off_proof_profile"] != profile.off_proof_profile
+        or intent["off_proof_profile"] != bound.predecessor.off_proof_profile
     ):
         raise install.InstallError(
             "service_journal_invalid",
@@ -527,7 +567,7 @@ def validate_terminal_snapshot_files(
     baseline_guard: dict[str, Any] | None = None
     events: list[dict[str, Any]] = []
     for sequence, name in enumerate(event_names):
-        allowed_actions, allowed_profiles = profile.service_event_contract(
+        allowed_actions, allowed_profiles = bound.service_event_contract(
             sequence,
             authority_recovery_prepared=authority_recovery_prepared,
         )
@@ -557,6 +597,7 @@ def validate_terminal_snapshot_files(
             ),
             intent=intent,
             events=events,
+            bound=bound,
         )
     return environment, intent, tuple(events)
 
@@ -577,18 +618,20 @@ class ServiceEventStore:
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
         self.close()
 
-    def _require_profile_intent(self, intent: dict[str, Any]) -> None:
+    def _require_profile_intent(
+        self, intent: dict[str, Any]
+    ) -> install.BoundInstallProfile:
         profile = self.paths.install_paths.profile
+        bound = _bound_from_intent(profile, intent)
         if (
             intent["candidate"]["build_number"] != profile.build_number
-            or intent["previous"]["build_number"]
-            != profile.previous_build_number
-            or intent["off_proof_profile"] != profile.off_proof_profile
+            or intent["off_proof_profile"] != bound.predecessor.off_proof_profile
         ):
             raise install.InstallError(
                 "service_journal_invalid",
                 "service intent is not for the fixed GA identity",
             )
+        return bound
 
     def _reject_retired_namespace(self) -> None:
         install.require_retired_service_transaction_names_absent(self.parent_fd)
@@ -921,17 +964,6 @@ class ServiceEventStore:
             ) from error
         install._fsync_directory_fd(self.parent_fd)
 
-    def _event_contract(
-        self,
-        sequence: int,
-        *,
-        authority_recovery_prepared: bool,
-    ) -> tuple[frozenset[str], frozenset[str]]:
-        return self.paths.install_paths.profile.service_event_contract(
-            sequence,
-            authority_recovery_prepared=authority_recovery_prepared,
-        )
-
     def _read_authority_recovery_intent(
         self,
         directory_fd: int,
@@ -940,13 +972,7 @@ class ServiceEventStore:
     ) -> dict[str, Any] | None:
         if AUTHORITY_RECOVERY_INTENT_NAME not in os.listdir(directory_fd):
             return None
-        if self.paths.install_paths.profile.unregister_authority_action != (
-            "unregister-installed-40019-global-authority"
-        ):
-            raise install.InstallError(
-                "service_journal_invalid",
-                "Authority recovery intent is outside the fixed GA install profile",
-            )
+        bound = _bound_from_intent(self.paths.install_paths.profile, intent)
         return validate_authority_recovery_intent(
             _strict_json_bytes(
                 self._read(
@@ -958,6 +984,7 @@ class ServiceEventStore:
             ),
             intent=intent,
             events=events,
+            bound=bound,
         )
 
     def authority_recovery_prepared(
@@ -982,10 +1009,10 @@ class ServiceEventStore:
         events: list[dict[str, Any]],
         guard: dict[str, Any],
     ) -> dict[str, Any]:
+        bound = _bound_from_intent(self.paths.install_paths.profile, intent)
+        recovery = bound.authority_recovery_contract()
         if (
-            self.paths.install_paths.profile.unregister_authority_action
-            != "unregister-installed-40019-global-authority"
-            or len(events) != 2
+            len(events) != 2
             or events[-1]["phase"] != "proxy_unregistered"
             or guard != events[0]["guard_after"]
         ):
@@ -1002,13 +1029,11 @@ class ServiceEventStore:
                 return existing
             value = validate_authority_recovery_intent(
                 {
-                    "action": install.INSTALLED_40019_RECOVERY_ACTION,
+                    "action": recovery.action,
                     "document": AUTHORITY_RECOVERY_INTENT_DOCUMENT,
                     "guard": guard,
                     "intent_sha256": events[0]["intent_sha256"],
-                    "off_proof_profile": (
-                        install.INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
-                    ),
+                    "off_proof_profile": recovery.off_proof_profile,
                     "previous_event_sha256": _sha256(
                         _canonical_json(events[1])
                     ),
@@ -1018,6 +1043,7 @@ class ServiceEventStore:
                 },
                 intent=intent,
                 events=events,
+                bound=bound,
             )
             if (
                 AUTHORITY_RECOVERY_PENDING_INTENT_NAME
@@ -1043,6 +1069,7 @@ class ServiceEventStore:
                 ),
                 intent=intent,
                 events=events,
+                bound=bound,
             )
             self._publish_pending_event(
                 directory_fd,
@@ -1103,14 +1130,18 @@ class ServiceEventStore:
                     "service_environment_invalid",
                     "service transaction GA environment is invalid",
                 ) from error
+            # `previous` is the application observed at admission. Binding it
+            # here re-proves admission and turns the observation into the
+            # recorded intent every later reader binds from.
+            bound = install.BoundInstallProfile.observed(
+                self.paths.install_paths.profile, previous
+            )
             intent = validate_intent(
                 {
                     "candidate": candidate.document(),
                     "document": DOCUMENT,
                     "ga_environment_sha256": environment_sha256,
-                    "off_proof_profile": (
-                        self.paths.install_paths.profile.service_event_proof_profiles[0]
-                    ),
+                    "off_proof_profile": bound.service_event_proof_profiles[0],
                     "previous": previous.document(),
                     "schema_version": SCHEMA_VERSION,
                     "transaction_id": str(uuid.uuid4()),
@@ -1120,6 +1151,9 @@ class ServiceEventStore:
             intent_sha256 = _sha256(_canonical_json(intent))
             self._write_new(pending_fd, ENVIRONMENT_NAME, normalized_environment)
             self._write_new(pending_fd, INTENT_NAME, intent)
+            prepared_actions, prepared_profiles = bound.service_event_contract(
+                0, authority_recovery_prepared=False
+            )
             event = validate_event(
                 {
                     "action": "prepare",
@@ -1127,7 +1161,7 @@ class ServiceEventStore:
                     "guard_after": guard,
                     "guard_before": guard,
                     "intent_sha256": intent_sha256,
-                    "off_proof_profile": self.paths.install_paths.profile.off_proof_profile,
+                    "off_proof_profile": bound.predecessor.off_proof_profile,
                     "phase": "prepared",
                     "previous_event_sha256": None,
                     "schema_version": SCHEMA_VERSION,
@@ -1137,12 +1171,8 @@ class ServiceEventStore:
                 previous_event_sha256=None,
                 expected_guard=guard,
                 intent_sha256=intent_sha256,
-                expected_actions=(
-                    self.paths.install_paths.profile.service_event_allowed_actions[0]
-                ),
-                expected_off_proof_profiles=(
-                    self.paths.install_paths.profile.service_event_allowed_proof_profiles[0]
-                ),
+                expected_actions=prepared_actions,
+                expected_off_proof_profiles=prepared_profiles,
             )
             self._write_new(pending_fd, f"{EVENT_PREFIX}00000000.json", event)
             install._fsync_directory_fd(pending_fd)
@@ -1188,15 +1218,6 @@ class ServiceEventStore:
                 raise install.InstallError(
                     "service_journal_invalid",
                     "published and pending Authority recovery intents coexist",
-                )
-            if (
-                authority_recovery_prepared or authority_recovery_pending
-            ) and self.paths.install_paths.profile.unregister_authority_action != (
-                "unregister-installed-40019-global-authority"
-            ):
-                raise install.InstallError(
-                    "service_journal_invalid",
-                    "Authority recovery intent is forbidden for this install profile",
                 )
             event_names = sorted(
                 entry
@@ -1244,7 +1265,14 @@ class ServiceEventStore:
                     "service intent",
                 )
             )
-            self._require_profile_intent(intent)
+            bound = self._require_profile_intent(intent)
+            if (
+                authority_recovery_prepared or authority_recovery_pending
+            ) and not bound.predecessor.supports_authority_recovery_intent:
+                raise install.InstallError(
+                    "service_journal_invalid",
+                    install.AUTHORITY_RECOVERY_OUTSIDE_CONTRACT,
+                )
             try:
                 environment = ga_environment.validate_environment(
                     _strict_json_bytes(
@@ -1274,7 +1302,7 @@ class ServiceEventStore:
             initial_count = min(2, len(event_names))
             for sequence, event_name in enumerate(event_names[:initial_count]):
                 data = self._read(directory_fd, event_name, "service event")
-                allowed_actions, allowed_profiles = self._event_contract(
+                allowed_actions, allowed_profiles = bound.service_event_contract(
                     sequence,
                     authority_recovery_prepared=False,
                 )
@@ -1308,7 +1336,8 @@ class ServiceEventStore:
                             sync_before_return=True,
                         )
                         validate_authority_recovery_intent(
-                            _strict_json_bytes(
+                            bound=bound,
+                            value=_strict_json_bytes(
                                 pending_recovery_data,
                                 "pending Authority recovery intent",
                             ),
@@ -1352,7 +1381,7 @@ class ServiceEventStore:
                 start=initial_count,
             ):
                 data = self._read(directory_fd, event_name, "service event")
-                allowed_actions, allowed_profiles = self._event_contract(
+                allowed_actions, allowed_profiles = bound.service_event_contract(
                     sequence,
                     authority_recovery_prepared=authority_recovery_prepared,
                 )
@@ -1387,7 +1416,7 @@ class ServiceEventStore:
                         allow_empty=True,
                         sync_before_return=True,
                     )
-                    allowed_actions, allowed_profiles = self._event_contract(
+                    allowed_actions, allowed_profiles = bound.service_event_contract(
                         sequence,
                         authority_recovery_prepared=authority_recovery_prepared,
                     )
@@ -1583,6 +1612,7 @@ class ServiceEventStore:
         self,
         events: list[dict[str, Any]],
         *,
+        intent: dict[str, Any],
         phase: str,
         action: str,
         guard: dict[str, Any],
@@ -1597,13 +1627,21 @@ class ServiceEventStore:
             raise install.InstallError(
                 "service_journal_transition_invalid", "service phase transition is invalid"
             )
+        if events[0]["intent_sha256"] != _sha256(_canonical_json(intent)):
+            raise install.InstallError(
+                "service_journal_invalid",
+                "service event intent does not match the journal",
+            )
+        # The contract is the journal's own: bound from the intent the events
+        # already chain to, never from a caller's claim.
+        bound = self._require_profile_intent(intent)
         directory_fd = self._open_transaction_directory()
         try:
             previous_data = _canonical_json(events[-1])
             authority_recovery_prepared = (
                 AUTHORITY_RECOVERY_INTENT_NAME in os.listdir(directory_fd)
             )
-            allowed_actions, allowed_profiles = self._event_contract(
+            allowed_actions, allowed_profiles = bound.service_event_contract(
                 sequence,
                 authority_recovery_prepared=authority_recovery_prepared,
             )
@@ -1611,9 +1649,7 @@ class ServiceEventStore:
                 (
                     events[-1]["off_proof_profile"]
                     if action == "verify-dormant"
-                    else self.paths.install_paths.profile.service_event_proof_profiles[
-                        sequence
-                    ]
+                    else bound.service_event_proof_profiles[sequence]
                 )
                 if off_proof_profile is None
                 else off_proof_profile
@@ -1961,25 +1997,23 @@ class CurrentServiceTransaction:
         self,
     ) -> tuple[install.CandidateIdentity, install.AppIdentity]:
         candidate = self._candidate()
+        install.require_target_application_present(self.paths.install_paths.target_app)
         previous = install.read_app_identity(self.paths.install_paths.target_app)
         install.verify_dormant_bundle(
             self.paths.install_paths.target_app,
             previous,
             self.runtime.runner,
         )
-        if int(candidate.app.build_number) <= int(previous.build_number):
-            raise install.InstallError(
-                "service_candidate_not_newer", "service candidate is not newer than installed app"
-            )
         profile = self.paths.install_paths.profile
-        if (
-            candidate.app.build_number != profile.build_number
-            or previous.build_number != profile.previous_build_number
-        ):
+        if candidate.app.build_number != profile.build_number:
             raise install.InstallError(
                 "service_identity_mismatch",
-                "candidate and installed application do not match the fixed GA identity",
+                "candidate does not match the fixed GA identity",
             )
+        # Admission of the observed application: version, supported
+        # predecessor, exact tree identity and strict supersession. Readers
+        # bind their vocabulary from the intent they hold.
+        install.resolve_predecessor(previous, profile.build_number)
         return candidate, previous
 
     def preflight(
@@ -2014,7 +2048,9 @@ class CurrentServiceTransaction:
         proof = _service_receipt(
             self.runtime,
             self.paths.install_paths.candidate_executable,
-            self.paths.install_paths.profile.prove_off_action,
+            install.BoundInstallProfile.observed(
+                self.paths.install_paths.profile, previous
+            ).predecessor.prove_off_action,
         )
         _require_pair(proof, proxy={"enabled"}, authority={"enabled"})
         after = self.runtime.capture_guard()
@@ -2063,6 +2099,7 @@ class CurrentServiceTransaction:
         events.append(
             store.append(
                 events,
+                intent=intent,
                 phase=phase,
                 action=action,
                 guard=after,
@@ -2134,6 +2171,7 @@ class CurrentServiceTransaction:
                     candidate, previous = self._identity_pair()
                     self._require_intent_matches(intent, candidate, previous)
                 self._require_environment(intent)
+                bound = _bound_from_intent(self.paths.install_paths.profile, intent)
                 uid = _uid_from_guard(events[-1]["guard_after"])
                 phase = events[-1]["phase"]
                 decommission_proven = False
@@ -2144,9 +2182,7 @@ class CurrentServiceTransaction:
                         events,
                         intent=intent,
                         phase="proxy_unregistered",
-                        action=(
-                            self.paths.install_paths.profile.unregister_proxy_action
-                        ),
+                        action=bound.predecessor.unregister_proxy_action,
                         executable=executable,
                         expected_proxy={"not_registered"},
                         expected_authority={"enabled"},
@@ -2158,10 +2194,8 @@ class CurrentServiceTransaction:
                     )
                     phase = events[-1]["phase"]
                 if phase == "proxy_unregistered":
-                    if (
-                        self.paths.install_paths.profile.unregister_authority_action
-                        == "unregister-installed-40019-global-authority"
-                    ):
+                    recovery = bound.predecessor.authority_recovery
+                    if recovery is not None:
                         recovery_prepared = store.authority_recovery_prepared(
                             intent, events
                         )
@@ -2176,9 +2210,7 @@ class CurrentServiceTransaction:
                             authority={"enabled", "not_registered"},
                         )
                         if recovery_prepared:
-                            authority_action = (
-                                install.INSTALLED_40019_RECOVERY_ACTION
-                            )
+                            authority_action = recovery.action
                         elif status["global_authority"] == "not_registered":
                             recovery_guard = self.runtime.capture_guard()
                             install._assert_guard_unchanged(
@@ -2192,17 +2224,11 @@ class CurrentServiceTransaction:
                             install._assert_guard_unchanged(
                                 recovery_guard, adjacent
                             )
-                            authority_action = (
-                                install.INSTALLED_40019_RECOVERY_ACTION
-                            )
+                            authority_action = recovery.action
                         else:
-                            authority_action = (
-                                self.paths.install_paths.profile.unregister_authority_action
-                            )
+                            authority_action = bound.predecessor.unregister_authority_action
                     else:
-                        authority_action = (
-                            self.paths.install_paths.profile.unregister_authority_action
-                        )
+                        authority_action = bound.predecessor.unregister_authority_action
                     self._step(
                         store,
                         events,
@@ -2225,6 +2251,7 @@ class CurrentServiceTransaction:
                     events.append(
                         store.append(
                             events,
+                            intent=intent,
                             phase="decommissioned",
                             action="verify-dormant",
                             guard=guard,
@@ -2344,6 +2371,7 @@ class CurrentServiceTransaction:
                     events.append(
                         store.append(
                             events,
+                            intent=intent,
                             phase="recommissioned",
                             action="prove-off",
                             guard=after,

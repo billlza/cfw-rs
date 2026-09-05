@@ -192,7 +192,22 @@ AUTHORITY_RECOVERY_PENDING_INTENT_NAME: Final = (
     ".authority-recovery-intent.json.pending"
 )
 AUTHORITY_RECOVERY_INTENT_SCHEMA_VERSION: Final = 1
+AUTHORITY_RECOVERY_OUTSIDE_CONTRACT: Final = (
+    "Authority recovery intent is outside the predecessor's service contract"
+)
 CURRENT_OFF_PROOF_PROFILE: Final = "current_engine_v6_authority_v1_1"
+
+
+@dataclass(frozen=True)
+class AuthorityRecovery:
+    """The Authority recovery capability a predecessor's signed Host implements.
+
+    A capability is always the pair: the recovery action and the distinct
+    off-proof profile its receipt carries. A predecessor has both or neither.
+    """
+
+    action: str
+    off_proof_profile: str
 
 
 @dataclass(frozen=True)
@@ -211,12 +226,11 @@ class PredecessorProfile:
     prove_off_action: str
     unregister_proxy_action: str
     unregister_authority_action: str
-    authority_recovery_action: str | None
-    authority_recovery_off_proof_profile: str | None
+    authority_recovery: AuthorityRecovery | None
 
     @property
     def supports_authority_recovery_intent(self) -> bool:
-        return self.authority_recovery_action is not None
+        return self.authority_recovery is not None
 
 
 # Build 40019 speaks engine v5 / Authority v1.0. Its tree digest is the
@@ -229,8 +243,10 @@ INSTALLED_40019_PREDECESSOR: Final = PredecessorProfile(
     prove_off_action="prove-installed-40019-off",
     unregister_proxy_action="unregister-installed-40019-proxy-agent",
     unregister_authority_action="unregister-installed-40019-global-authority",
-    authority_recovery_action=INSTALLED_40019_RECOVERY_ACTION,
-    authority_recovery_off_proof_profile=INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE,
+    authority_recovery=AuthorityRecovery(
+        action=INSTALLED_40019_RECOVERY_ACTION,
+        off_proof_profile=INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE,
+    ),
 )
 # Build 40041 speaks the current engine v6 / Authority v1.1 vocabulary, so it
 # needs none of the 40019 compatibility actions. Its tree digest is the sealed
@@ -243,8 +259,7 @@ INSTALLED_40041_PREDECESSOR: Final = PredecessorProfile(
     prove_off_action="prove-off",
     unregister_proxy_action="unregister-proxy-agent",
     unregister_authority_action="unregister-global-authority",
-    authority_recovery_action=None,
-    authority_recovery_off_proof_profile=None,
+    authority_recovery=None,
 )
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
@@ -286,9 +301,16 @@ class InstallError(RuntimeError):
 
 @dataclass(frozen=True)
 class InstallProfile:
+    """The fixed GA install identity.
+
+    Deliberately says nothing about which build is being replaced: the
+    predecessor is observed on the machine and bound through
+    `BoundInstallProfile`, so an unbound profile cannot express a predecessor
+    claim at all.
+    """
+
     name: str
     build_number: str
-    previous_build_number: str
     repository_relative: Path
     candidate_relative: Path
     native_products_relative: Path
@@ -298,10 +320,6 @@ class InstallProfile:
     lock_name: str
     staging_prefix: str
     service_transaction_directory: str
-    off_proof_profile: str
-    prove_off_action: str
-    unregister_proxy_action: str
-    unregister_authority_action: str
 
     @property
     def service_pending_directory(self) -> str:
@@ -311,12 +329,43 @@ class InstallProfile:
     def service_lock_name(self) -> str:
         return f"{self.service_transaction_directory}.lock"
 
+
+@dataclass(frozen=True)
+class BoundInstallProfile:
+    """A GA install profile bound to the predecessor actually installed.
+
+    Every predecessor-specific value (the service vocabulary, the off-proof
+    profile, the recovery capability) is read from the bound predecessor. A
+    binding comes from the application observed on the machine (admission) or
+    from the predecessor a journal or intent recorded (evidence); an unbound
+    profile cannot reach any of it.
+    """
+
+    profile: InstallProfile
+    predecessor: PredecessorProfile
+
+    @classmethod
+    def observed(
+        cls, profile: InstallProfile, observed: AppIdentity
+    ) -> "BoundInstallProfile":
+        """Bind to the application observed on the machine (live admission)."""
+
+        return cls(profile, resolve_predecessor(observed, profile.build_number))
+
+    @classmethod
+    def recorded(
+        cls, profile: InstallProfile, previous: AppIdentity
+    ) -> "BoundInstallProfile":
+        """Bind to the predecessor a journal or intent recorded (evidence)."""
+
+        return cls(profile, bind_journal_predecessor(previous))
+
     @property
     def service_actions(self) -> tuple[str, ...]:
         return (
             "prepare",
-            self.unregister_proxy_action,
-            self.unregister_authority_action,
+            self.predecessor.unregister_proxy_action,
+            self.predecessor.unregister_authority_action,
             "verify-dormant",
             "register-global-authority",
             "register-proxy-agent",
@@ -326,50 +375,28 @@ class InstallProfile:
     @property
     def service_event_proof_profiles(self) -> tuple[str, ...]:
         return (
-            self.off_proof_profile,
-            self.off_proof_profile,
-            self.off_proof_profile,
-            self.off_proof_profile,
+            self.predecessor.off_proof_profile,
+            self.predecessor.off_proof_profile,
+            self.predecessor.off_proof_profile,
+            self.predecessor.off_proof_profile,
             CURRENT_OFF_PROOF_PROFILE,
             CURRENT_OFF_PROOF_PROFILE,
             CURRENT_OFF_PROOF_PROFILE,
         )
 
-    @property
-    def service_event_allowed_proof_profiles(self) -> tuple[frozenset[str], ...]:
-        profiles = tuple(
-            frozenset({profile}) for profile in self.service_event_proof_profiles
-        )
-        if self.unregister_authority_action != (
-            "unregister-installed-40019-global-authority"
-        ):
-            return profiles
-        recovery_index = self.service_actions.index(self.unregister_authority_action)
-        mutable = list(profiles)
-        mutable[recovery_index] = frozenset(
-            {
-                INSTALLED_40019_OFF_PROOF_PROFILE,
-                INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE,
-            }
-        )
-        return tuple(mutable)
+    def authority_recovery_contract(self) -> AuthorityRecovery:
+        """The bound predecessor's recovery capability, or the exact rejection.
 
-    @property
-    def service_event_allowed_actions(self) -> tuple[frozenset[str], ...]:
-        actions = tuple(frozenset({action}) for action in self.service_actions)
-        if self.unregister_authority_action != (
-            "unregister-installed-40019-global-authority"
-        ):
-            return actions
-        recovery_index = self.service_actions.index(self.unregister_authority_action)
-        mutable = list(actions)
-        mutable[recovery_index] = frozenset(
-            {
-                self.unregister_authority_action,
-                INSTALLED_40019_RECOVERY_ACTION,
-            }
-        )
-        return tuple(mutable)
+        This is the only place that turns "no capability" into an error, so
+        every reader that meets a recovery intent rejects it identically.
+        """
+
+        recovery = self.predecessor.authority_recovery
+        if recovery is None:
+            raise InstallError(
+                "service_journal_invalid", AUTHORITY_RECOVERY_OUTSIDE_CONTRACT
+            )
+        return recovery
 
     def service_event_contract(
         self,
@@ -377,54 +404,38 @@ class InstallProfile:
         *,
         authority_recovery_prepared: bool,
     ) -> tuple[frozenset[str], frozenset[str]]:
+        """The exact action and off-proof profile admissible at one event.
+
+        Every step admits exactly one action and one profile. A prepared
+        Authority recovery intent changes two steps only: the Authority
+        unregister itself becomes the predecessor's recovery action, and the
+        dormant verification after it is proven under the recovery profile.
+        A predecessor without that capability never admits a recovery intent.
+        """
+
         if not 0 <= sequence < len(self.service_actions):
             raise InstallError(
                 "service_journal_invalid",
                 "service event contract sequence is out of range",
             )
-        actions = self.service_event_allowed_actions[sequence]
-        proof_profiles = self.service_event_allowed_proof_profiles[sequence]
-        if self.unregister_authority_action != (
-            "unregister-installed-40019-global-authority"
-        ):
-            if authority_recovery_prepared:
-                raise InstallError(
-                    "service_journal_invalid",
-                    "Authority recovery intent is forbidden for this install profile",
-                )
+        actions = frozenset({self.service_actions[sequence]})
+        proof_profiles = frozenset({self.service_event_proof_profiles[sequence]})
+        if not authority_recovery_prepared:
             return actions, proof_profiles
-
+        recovery = self.authority_recovery_contract()
         authority_sequence = self.service_actions.index(
-            self.unregister_authority_action
+            self.predecessor.unregister_authority_action
         )
         if sequence == authority_sequence:
-            if authority_recovery_prepared:
-                return (
-                    frozenset({INSTALLED_40019_RECOVERY_ACTION}),
-                    frozenset({INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE}),
-                )
-            return (
-                frozenset({self.unregister_authority_action}),
-                frozenset({INSTALLED_40019_OFF_PROOF_PROFILE}),
-            )
+            return frozenset({recovery.action}), frozenset({recovery.off_proof_profile})
         if sequence == authority_sequence + 1:
-            return (
-                actions,
-                frozenset(
-                    {
-                        INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
-                        if authority_recovery_prepared
-                        else INSTALLED_40019_OFF_PROOF_PROFILE
-                    }
-                ),
-            )
+            return actions, frozenset({recovery.off_proof_profile})
         return actions, proof_profiles
 
 
 GA_INSTALL_PROFILE: Final = InstallProfile(
     name="ga",
     build_number=BUILD_NUMBER,
-    previous_build_number="40019",
     repository_relative=REPOSITORY_RELATIVE,
     candidate_relative=CANDIDATE_RELATIVE,
     native_products_relative=NATIVE_PRODUCTS_RELATIVE,
@@ -434,10 +445,6 @@ GA_INSTALL_PROFILE: Final = InstallProfile(
     lock_name=LOCK_NAME,
     staging_prefix=STAGING_PREFIX,
     service_transaction_directory=".com.bill.clashformac.service-transaction-v3",
-    off_proof_profile=INSTALLED_40019_OFF_PROOF_PROFILE,
-    prove_off_action="prove-installed-40019-off",
-    unregister_proxy_action="unregister-installed-40019-proxy-agent",
-    unregister_authority_action="unregister-installed-40019-global-authority",
 )
 
 
@@ -500,6 +507,15 @@ class AppIdentity:
     version: str
     build_number: str
     tree_sha256: str
+
+    @classmethod
+    def from_document(cls, value: object, label: str) -> "AppIdentity":
+        document = _validate_app_document(value, label)
+        return cls(
+            version=document["version"],
+            build_number=document["build_number"],
+            tree_sha256=document["tree_sha256"],
+        )
 
     def document(self) -> dict[str, str]:
         return {
@@ -719,7 +735,7 @@ def resolve_predecessor(observed: AppIdentity, candidate_build: str) -> Predeces
     if int(candidate_build) <= int(observed.build_number):
         raise InstallError(
             "candidate_not_newer",
-            f"candidate build {candidate_build} does not supersede installed build {observed.build_number}",
+            f"candidate build {candidate_build} is not newer than installed build {observed.build_number}",
         )
     return predecessor
 
@@ -2671,6 +2687,9 @@ def require_decommissioned_service_transaction(
 ) -> dict[str, Any]:
     """Verify the exact append-only service journal before any bundle swap."""
 
+    # `previous` is the application observed at preflight; admission is
+    # re-proven by the binding rather than assumed from the caller.
+    bound = BoundInstallProfile.observed(paths.profile, previous)
     parent_fd = _open_directory(paths.target_parent)
     directory_fd = -1
     directory_name = paths.profile.service_transaction_directory
@@ -2714,6 +2733,14 @@ def require_decommissioned_service_transaction(
         ]
         inventory = set(os.listdir(directory_fd))
         authority_recovery_prepared = AUTHORITY_RECOVERY_INTENT_NAME in inventory
+        if (
+            authority_recovery_prepared
+            and not bound.predecessor.supports_authority_recovery_intent
+        ):
+            raise InstallError(
+                "service_decommission_evidence_invalid",
+                AUTHORITY_RECOVERY_OUTSIDE_CONTRACT,
+            )
         expected_inventory = {
             SERVICE_ENVIRONMENT_NAME,
             "intent.json",
@@ -2786,7 +2813,7 @@ def require_decommissioned_service_transaction(
             or intent["candidate"] != candidate.document()
             or intent["previous"] != previous.document()
             or intent["ga_environment_sha256"] != environment_sha256
-            or intent["off_proof_profile"] != paths.profile.off_proof_profile
+            or intent["off_proof_profile"] != bound.predecessor.off_proof_profile
         ):
             raise InstallError(
                 "service_decommission_evidence_invalid",
@@ -2822,7 +2849,7 @@ def require_decommissioned_service_transaction(
                 )
             before = _validate_guard(event["guard_before"])
             after = _validate_guard(event["guard_after"])
-            allowed_actions, allowed_profiles = paths.profile.service_event_contract(
+            allowed_actions, allowed_profiles = bound.service_event_contract(
                 sequence,
                 authority_recovery_prepared=authority_recovery_prepared,
             )
@@ -2876,13 +2903,13 @@ def require_decommissioned_service_transaction(
                     "Authority recovery intent shape is invalid",
                 )
             recovery_guard = _validate_guard(recovery["guard"])
+            recovery_contract = bound.authority_recovery_contract()
             if (
                 len(validated_events) < 3
-                or recovery["action"] != INSTALLED_40019_RECOVERY_ACTION
+                or recovery["action"] != recovery_contract.action
                 or recovery["document"] != AUTHORITY_RECOVERY_INTENT_DOCUMENT
                 or recovery["intent_sha256"] != intent_sha256
-                or recovery["off_proof_profile"]
-                != INSTALLED_40019_RECOVERY_OFF_PROOF_PROFILE
+                or recovery["off_proof_profile"] != recovery_contract.off_proof_profile
                 or recovery["previous_event_sha256"]
                 != _sha256_bytes(event_documents[1])
                 or type(recovery["schema_version"]) is not int
@@ -3021,14 +3048,15 @@ def validate_journal(
     if not isinstance(candidate["repository_commit"], str) or re.fullmatch(r"[0-9a-f]{40}", candidate["repository_commit"]) is None:
         raise InstallError("journal_invalid", "candidate repository commit is invalid")
     previous_app = _validate_app_document(document["previous"], "previous application")
-    if (
-        candidate_app["build_number"] != profile.build_number
-        or previous_app["build_number"] != profile.previous_build_number
-    ):
+    if candidate_app["build_number"] != profile.build_number:
         raise InstallError(
             "journal_invalid",
             "installation journal is not for the fixed GA identity",
         )
+    # The recorded predecessor must be one this tooling knows how to have
+    # replaced, with its exact tree identity; that is what makes the journal
+    # readable with the vocabulary it was written in.
+    bind_journal_predecessor(AppIdentity.from_document(previous_app, "previous application"))
     if int(candidate_app["build_number"]) <= int(previous_app["build_number"]):
         raise InstallError("journal_invalid", "candidate build is not newer than previous build")
     guards = document["guards"]
@@ -3526,20 +3554,18 @@ class DormantInstallTransaction:
     def preflight(self) -> tuple[CandidateIdentity, AppIdentity]:
         before = self._capture_stable_dormant_guard()
         candidate = self.runtime.admit_candidate(self.paths)
+        require_target_application_present(self.paths.target_app)
         previous = self.runtime.read_identity(self.paths.target_app)
         self.runtime.verify_bundle(self.paths.target_app, previous)
-        if int(candidate.app.build_number) <= int(previous.build_number):
-            raise InstallError(
-                "candidate_not_newer", "candidate build is not newer than installed build"
-            )
-        if (
-            candidate.app.build_number != self.paths.profile.build_number
-            or previous.build_number != self.paths.profile.previous_build_number
-        ):
+        if candidate.app.build_number != self.paths.profile.build_number:
             raise InstallError(
                 "install_identity_mismatch",
-                "candidate and installed application do not match the fixed GA identity",
+                "candidate does not match the fixed GA identity",
             )
+        # Admission of the observed application: version, supported
+        # predecessor, exact tree identity and strict supersession. Later
+        # readers bind their vocabulary from the evidence they hold.
+        resolve_predecessor(previous, self.paths.profile.build_number)
         service_environment = self.runtime.require_service_decommissioned(
             self.paths,
             candidate,

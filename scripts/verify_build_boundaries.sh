@@ -220,6 +220,14 @@ for fragment in \
   'ga_environment_sha256' \
   'exclusive_release_maintenance_lock' \
   'require_decommissioned_service_transaction' \
+  'SUPPORTED_PREDECESSORS' \
+  'resolve_predecessor' \
+  'bind_journal_predecessor' \
+  'require_target_application_present' \
+  'predecessor_unsupported' \
+  'predecessor_identity_mismatch' \
+  'previous_app_absent' \
+  'supports_authority_recovery_intent' \
   'candidate_toolchain_override' \
   '--final is retired'; do
   grep -Fq -- "$fragment" scripts/dormant_app_install.py || {
@@ -238,6 +246,11 @@ for fragment in \
   'prepare_authority_recovery' \
   'unregister-installed-40019-proxy-agent' \
   'unregister-installed-40019-global-authority' \
+  'unregister-proxy-agent' \
+  'unregister-global-authority' \
+  'INSTALLED_40019_ACTIONS' \
+  'CURRENT_PREDECESSOR_ACTIONS' \
+  'SUPPORTED_PREDECESSORS' \
   'register-global-authority' \
   'register-proxy-agent' \
   'verify-dormant' \

@@ -44,6 +44,7 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
             self.app,
             "40043",
             None,
+            freeze_verifier=None,
         )
 
     def test_changed_artifact_is_rejected(self) -> None:

@@ -1036,13 +1036,24 @@ variables, uses a private Cargo home and isolated workspace, and reconstructs
 its vendor tree only from crate archives whose SHA-256 matches the exact
 `Cargo.lock` dependency closure. The declared rustup component file surface is
 independently pinned in both `dependency_pins.env` and
-`pinned_build_inputs.json`. Every updater, distribution, and upload
-verification repeats that isolated build and signature verification, reopens
-the archive, signature, source, dependency, and toolchain inputs, and requires
-the fresh receipt and build binding to equal the stored evidence. The
+`pinned_build_inputs.json`. Independent updater, distribution, and upload
+operations establish their own private verification sessions. Repeated public
+possession-proof checks within one operation share the compiled verifier;
+updater archive checks likewise reuse their operation's verification producer.
+Every replay still reopens the archive, signature, source, dependency, and
+toolchain inputs and requires the fresh receipt and build binding to equal the
+stored evidence. No successful proof, frozen-candidate result, or stage result
+is cached, and no compiled session is passed between processes. Success is
+reported only after the session's final input checks and cleanup complete; a
+failure after publication retains outcome-unknown semantics. The
 packaging verifier requires the authenticated minisign trusted comment to name
 that exact versioned archive; an older valid signature cannot be replayed under
 a newer manifest version or GitHub release path.
+
+Keep DMG and updater packaging sequential. Their outputs and compiler scratch
+directories are separate, but both reopen the same candidate through existing
+nonblocking exclusive locks. Concurrent packaging can fail with a lock conflict;
+session reuse does not change that coordination contract.
 
 The runtime performs only a bounded metadata check against the canonical
 official GitHub release identity and then opens the official DMG release page

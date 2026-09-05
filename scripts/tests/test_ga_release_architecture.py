@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+from contextlib import contextmanager
+from functools import partial
 import inspect
 import io
 import os
@@ -10,6 +12,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+from scripts import candidate_freeze
 from scripts import ga_runtime_acceptance
 from scripts import ga_runtime_acceptance_cli
 from scripts import release_artifact_set
@@ -140,31 +143,63 @@ class GAReleaseCompositionRootTests(unittest.TestCase):
 
     def test_runtime_cli_injects_the_read_only_expectation_deriver(self) -> None:
         arguments = [str(Path(ga_runtime_acceptance_cli.__file__)), "verify"]
+        repository = Path("/fixture/frozen-artifact")
+        events: list[str] = []
+
+        def freeze_verifier(path: Path) -> None:
+            self.assertEqual(path, repository)
+
+        @contextmanager
+        def session(path: Path):
+            self.assertEqual(path, repository)
+            events.append("open")
+            yield freeze_verifier
+            events.append("close")
+
         with patch.object(sys, "argv", arguments), patch(
             "scripts.release_python_runtime.require_closed_release_runtime"
         ) as admission, patch.object(
-            ga_runtime_acceptance, "main"
-        ) as runtime_main:
+            ga_runtime_acceptance, "_repository", return_value=repository
+        ), patch.object(
+            candidate_freeze, "frozen_candidate_verification_session", side_effect=session
+        ) as verifier_session, patch.object(
+            ga_runtime_acceptance, "main", return_value="runtime verified"
+        ) as runtime_main, patch(
+            "builtins.print", side_effect=lambda _message: events.append("print")
+        ) as output:
             ga_runtime_acceptance_cli.main()
         admission.assert_called_once_with()
-        runtime_main.assert_called_once_with(
-            ga_release_contract.derive_runtime_expectation,
-            ga_release_contract.verify_prepackage_authorization,
-        )
+        verifier_session.assert_called_once_with(repository)
+        runtime_main.assert_called_once()
+        expectation, authorization = runtime_main.call_args.args
+        for callback, function in (
+            (expectation, ga_release_contract.derive_runtime_expectation),
+            (authorization, ga_release_contract.verify_prepackage_authorization),
+        ):
+            self.assertIsInstance(callback, partial)
+            self.assertIs(callback.func, function)
+            self.assertEqual(callback.args, ())
+            self.assertEqual(callback.keywords, {"freeze_verifier": freeze_verifier})
+        self.assertEqual(events, ["open", "close", "print"])
+        output.assert_called_once_with("runtime verified")
 
     def test_runtime_cli_self_check_is_exactly_source_only(self) -> None:
         arguments = [str(Path(ga_runtime_acceptance_cli.__file__)), "self-check"]
         with patch.object(sys, "argv", arguments), patch(
             "scripts.release_python_runtime.require_closed_release_runtime"
         ) as admission, patch.object(
-            ga_runtime_acceptance, "main"
-        ) as runtime_main:
+            candidate_freeze, "frozen_candidate_verification_session"
+        ) as verifier_session, patch.object(
+            ga_runtime_acceptance, "main", return_value="source contract verified"
+        ) as runtime_main, patch("builtins.print") as output:
             ga_runtime_acceptance_cli.main()
         admission.assert_not_called()
+        verifier_session.assert_not_called()
         runtime_main.assert_called_once_with(
             ga_release_contract.derive_runtime_expectation,
             ga_release_contract.verify_prepackage_authorization,
         )
+        output.assert_called_once_with("source contract verified")
 
     def test_runtime_cli_production_commands_never_fallback_on_admission(self) -> None:
         for command in ("collect", "recover", "verify"):

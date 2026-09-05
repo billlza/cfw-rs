@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import io
 import os
 from pathlib import Path
@@ -9,10 +9,11 @@ import sys
 import tempfile
 from types import ModuleType
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts import ga_acceptance_journal_export as journal_export
 from scripts import production_release_evidence
+from scripts import candidate_freeze
 from scripts.publication import durable_file
 from scripts.publication import ga_release_contract as contract
 from scripts.publication.common import (
@@ -143,7 +144,10 @@ class StageFixture:
         repository: Path,
         prepackage: dict[str, object],
         executor_source: dict[str, str],
+        *,
+        freeze_verifier: contract.FreezeVerifier | None = None,
     ) -> dict[str, bytes]:
+        del freeze_verifier
         self.assert_repository(repository)
         self.assert_stage(prepackage, "prepackage")
         manifest = _stage_manifest(
@@ -168,7 +172,10 @@ class StageFixture:
         prepackage: dict[str, object],
         ga_acceptance: dict[str, object],
         executor_source: dict[str, str],
+        *,
+        freeze_verifier: contract.FreezeVerifier | None = None,
     ) -> dict[str, bytes]:
+        del freeze_verifier
         self.assert_repository(repository)
         self.assert_stage(prepackage, "prepackage")
         self.assert_stage(ga_acceptance, "ga-acceptance")
@@ -564,7 +571,10 @@ class StageOrderTests(unittest.TestCase):
             self.assertEqual(self.live_hosted_ci.call_count, 1)
             self.assertEqual(
                 compose.call_args_list[0].kwargs,
-                {"expected_live_hosted_ci": {"document": "live-hosted-ci-fixture"}},
+                {
+                    "expected_live_hosted_ci": {"document": "live-hosted-ci-fixture"},
+                    "freeze_verifier": None,
+                },
             )
             self.live_hosted_ci.reset_mock()
             self.assertEqual(verify_stage(self.fixture.repository, "prepackage"), sealed)
@@ -1257,6 +1267,7 @@ class CommandBoundaryTests(unittest.TestCase):
 
     def test_main_dispatches_exactly_one_stage(self) -> None:
         manifest = _stage_manifest("prepackage", {"fixture": True}, FIXTURE_EXECUTOR_SOURCE)
+        freeze_verifier = Mock()
         sources = FrozenReleaseSources(
             executor=ExecutorSource(Path("/executor"), "1" * 40, "2" * 64),
             artifact=ExecutorSource(Path("/artifact"), "3" * 40, "4" * 64),
@@ -1271,6 +1282,10 @@ class CommandBoundaryTests(unittest.TestCase):
             patch.object(
                 production_release_evidence, "require_frozen_sources_unchanged"
             ) as unchanged,
+            patch.object(
+                production_release_evidence, "frozen_candidate_verification_session",
+                return_value=nullcontext(freeze_verifier),
+            ) as verifier_session,
             patch(
                 "scripts.publication.orchestrator.seal_prepackage",
                 return_value=manifest,
@@ -1281,8 +1296,11 @@ class CommandBoundaryTests(unittest.TestCase):
         ):
             production_release_evidence.main()
         prepackage.assert_called_once_with(
-            production_release_evidence._repository(), executor=sources.executor
+            production_release_evidence._repository(),
+            executor=sources.executor,
+            freeze_verifier=freeze_verifier,
         )
+        verifier_session.assert_called_once_with(production_release_evidence._repository())
         capture.assert_called_once_with(
             Path(production_release_evidence.__file__).resolve().parent.parent
         )
@@ -1334,6 +1352,10 @@ class CommandBoundaryTests(unittest.TestCase):
             patch.object(production_release_evidence, "require_closed_release_runtime"),
             patch.object(production_release_evidence, "capture_frozen_release_sources"),
             patch.object(
+                production_release_evidence, "frozen_candidate_verification_session",
+                return_value=nullcontext(Mock()),
+            ),
+            patch.object(
                 production_release_evidence, "require_frozen_sources_unchanged",
                 side_effect=production_release_evidence.ExecutorSourceError("source drift"),
             ),
@@ -1344,6 +1366,45 @@ class CommandBoundaryTests(unittest.TestCase):
         ):
             production_release_evidence.main()
         prepackage.assert_called_once()
+
+    def test_main_reports_primary_and_verifier_cleanup_failures(self) -> None:
+        fixture = StageFixture()
+        self.addCleanup(fixture.cleanup)
+        cause = OSError("source input became unreadable")
+        primary = PublicationError("stage inputs failed")
+
+        @contextmanager
+        def session(_repository: Path):
+            try:
+                yield Mock()
+            finally:
+                raise candidate_freeze.UpdaterKeyPossessionOperationalError("timeout")
+
+        def reject_stage(
+            _repository: Path, *, executor: ExecutorSource, freeze_verifier: contract.FreezeVerifier
+        ):
+            del executor, freeze_verifier
+            raise primary from cause
+
+        with (
+            patch.object(sys, "argv", ["production_release_evidence.py", "prepackage"]),
+            patch.object(production_release_evidence, "require_closed_release_runtime"),
+            patch.object(production_release_evidence, "capture_frozen_release_sources"),
+            patch.object(production_release_evidence, "_repository", return_value=fixture.repository),
+            patch.object(candidate_freeze, "production_embedded_verifier_session", side_effect=session),
+            patch("scripts.publication.orchestrator.seal_prepackage", side_effect=reject_stage),
+            patch("builtins.print") as output,
+            self.assertRaises(SystemExit) as caught,
+        ):
+            production_release_evidence.main()
+
+        self.assertIn("stage inputs failed", str(caught.exception))
+        self.assertIn("secondary frozen candidate verifier cleanup failure", str(caught.exception))
+        self.assertIn("UpdaterKeyPossessionOperationalError", str(caught.exception))
+        self.assertIs(caught.exception.__cause__, primary)
+        self.assertIs(primary.__cause__, cause)
+        self.assertNotIsInstance(primary, durable_file.DurabilityOutcomeUnknown)
+        output.assert_not_called()
 
     def test_main_production_commands_remain_closed_runtime_only(self) -> None:
         commands = (

@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 if __package__:
+    from .candidate_freeze import CandidateFreezeError, frozen_candidate_verification_session
     from .release_python_runtime import (
         ReleasePythonRuntimeError,
         require_closed_release_runtime,
@@ -21,6 +22,7 @@ if __package__:
         require_frozen_sources_unchanged,
     )
 else:
+    from candidate_freeze import CandidateFreezeError, frozen_candidate_verification_session
     from release_python_runtime import (
         ReleasePythonRuntimeError,
         require_closed_release_runtime,
@@ -97,16 +99,41 @@ def main() -> None:
             return
         sources = capture_frozen_release_sources(Path(__file__).resolve().parent.parent)
         repository = _repository()
-        if arguments.command == "prepackage":
-            manifest = seal_prepackage(repository, executor=sources.executor)
-        elif arguments.command == "ga-acceptance":
-            manifest = seal_ga_acceptance(repository, executor=sources.executor)
-        elif arguments.command == "publication":
-            manifest = seal_publication(repository, executor=sources.executor)
-        elif arguments.command == "verify":
-            manifest = verify_stage(repository, arguments.stage)
-        else:
-            raise PublicationError("unknown production GA operation")
+        seal_exists = False
+        try:
+            with frozen_candidate_verification_session(repository) as freeze_verifier:
+                if arguments.command == "prepackage":
+                    manifest = seal_prepackage(
+                        repository, executor=sources.executor, freeze_verifier=freeze_verifier
+                    )
+                    seal_exists = True
+                elif arguments.command == "ga-acceptance":
+                    manifest = seal_ga_acceptance(
+                        repository, executor=sources.executor, freeze_verifier=freeze_verifier
+                    )
+                    seal_exists = True
+                elif arguments.command == "publication":
+                    manifest = seal_publication(
+                        repository, executor=sources.executor, freeze_verifier=freeze_verifier
+                    )
+                    seal_exists = True
+                elif arguments.command == "verify":
+                    manifest = verify_stage(
+                        repository, arguments.stage, freeze_verifier=freeze_verifier
+                    )
+                else:
+                    raise PublicationError("unknown production GA operation")
+        except BaseException as error:
+            if seal_exists:
+                raise DurabilityOutcomeUnknown(
+                    "GA seal exists but its verifier session did not close successfully; "
+                    "inspect the existing stage before retrying"
+                ) from error
+            if isinstance(error, CandidateFreezeError):
+                raise PublicationError(
+                    f"GA candidate verifier session failed ({error.code}): {error}"
+                ) from error
+            raise
         try:
             require_frozen_sources_unchanged(sources)
         except ExecutorSourceError as error:
@@ -117,7 +144,8 @@ def main() -> None:
                 "inspect the existing stage before retrying"
             ) from error
     except (OSError, PublicationError, ValueError) as error:
-        raise SystemExit(f"error: production release evidence: {error}") from error
+        notes = "".join(f"\n{note}" for note in getattr(error, "__notes__", ()))
+        raise SystemExit(f"error: production release evidence: {error}{notes}") from error
     print(
         f"{manifest['stage']} GA seal verified: "
         f"{sha256_bytes(canonical_json(manifest))}"

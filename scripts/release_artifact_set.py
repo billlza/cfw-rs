@@ -440,6 +440,7 @@ PackagedAppManifestReader = Callable[[Path], dict[str, object]]
 PublicationSemanticVerifier = Callable[[Path, Path, Path], None]
 PublicationStageVerifier = Callable[[Path], dict[str, Any]]
 PrepackageStageVerifier = Callable[[Path], dict[str, Any]]
+ArtifactCommandRunner = Callable[[argparse.Namespace], tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -2279,6 +2280,7 @@ def seal_updater_set(
     repository: Path,
     publisher: Publisher = publish_exclusive,
     prepackage_stage_verifier: PrepackageStageVerifier | None = None,
+    updater_verification_producer: UpdaterVerificationProducer | None = None,
 ) -> Path:
     """Seal a complete updater group and publish the directory once."""
     version = _require_active_version(version)
@@ -2301,6 +2303,7 @@ def seal_updater_set(
             version=version,
             expected_source_identity=source_identity,
             prepackage_stage_verifier=prepackage_stage_verifier,
+            updater_verification_producer=updater_verification_producer,
         )
         _confirm_existing_release_set_durable(
             destination, "updater release set"
@@ -2311,6 +2314,7 @@ def seal_updater_set(
             version=version,
             expected_source_identity=source_identity,
             prepackage_stage_verifier=prepackage_stage_verifier,
+            updater_verification_producer=updater_verification_producer,
         )
         return destination
     _require_real_directory(staging, "updater staging directory")
@@ -2320,9 +2324,14 @@ def seal_updater_set(
     signature = staging / signature_name
     archive_before = _artifact_record(archive, MAX_UPDATER_ARCHIVE_BYTES)
     signature_before = _artifact_record(signature, MAX_SIGNATURE_BYTES)
-    verification, release_verifier = _produce_updater_verification(
-        repository, archive, signature
-    )
+    if updater_verification_producer is None:
+        verification, release_verifier = _produce_updater_verification(
+            repository, archive, signature
+        )
+    else:
+        verification, release_verifier = updater_verification_producer(
+            archive, signature
+        )
     if (
         _artifact_record(archive, MAX_UPDATER_ARCHIVE_BYTES) != archive_before
         or _artifact_record(signature, MAX_SIGNATURE_BYTES) != signature_before
@@ -2354,6 +2363,7 @@ def seal_updater_set(
         expected_source_identity=source_identity,
         require_version_directory=False,
         prepackage_stage_verifier=prepackage_stage_verifier,
+        updater_verification_producer=updater_verification_producer,
     )
     _fsync_release_set(staging, "updater release set")
     try:
@@ -2367,6 +2377,7 @@ def seal_updater_set(
                     version=version,
                     expected_source_identity=source_identity,
                     prepackage_stage_verifier=prepackage_stage_verifier,
+                    updater_verification_producer=updater_verification_producer,
                 )
                 _confirm_release_set_durable(
                     staging, destination, "updater release set"
@@ -2377,6 +2388,7 @@ def seal_updater_set(
                     version=version,
                     expected_source_identity=source_identity,
                     prepackage_stage_verifier=prepackage_stage_verifier,
+                    updater_verification_producer=updater_verification_producer,
                 )
             except (ArtifactSetError, OSError, ValueError) as recovery_error:
                 raise ArtifactSetError(
@@ -2393,6 +2405,7 @@ def seal_updater_set(
         version=version,
         expected_source_identity=source_identity,
         prepackage_stage_verifier=prepackage_stage_verifier,
+        updater_verification_producer=updater_verification_producer,
     )
     return destination
 
@@ -2405,6 +2418,7 @@ def verify_updater_set(
     expected_source_identity: dict[str, str] | None = None,
     require_version_directory: bool = True,
     prepackage_stage_verifier: PrepackageStageVerifier | None = None,
+    updater_verification_producer: UpdaterVerificationProducer | None = None,
 ) -> dict[str, Any]:
     version = _require_active_version(version)
     if require_version_directory and directory != _updater_set_root(repository):
@@ -2531,11 +2545,17 @@ def verify_updater_set(
         or seal["tauri_config_sha256"] != verification["tauri_config_sha256"]
     ):
         raise ArtifactSetError("updater verification evidence differs from its seal")
-    fresh_verification, fresh_release_verifier = _produce_updater_verification(
-        repository,
-        directory / archive_name,
-        directory / signature_name,
-    )
+    if updater_verification_producer is None:
+        fresh_verification, fresh_release_verifier = _produce_updater_verification(
+            repository,
+            directory / archive_name,
+            directory / signature_name,
+        )
+    else:
+        fresh_verification, fresh_release_verifier = updater_verification_producer(
+            directory / archive_name,
+            directory / signature_name,
+        )
     if (
         _artifact_record(directory / archive_name, MAX_UPDATER_ARCHIVE_BYTES)
         != archive_record
@@ -4463,10 +4483,78 @@ def self_check() -> None:
     print("release artifact set self-check ok")
 
 
+def _execute_command(
+    arguments: argparse.Namespace,
+    *,
+    prepackage_stage_verifier: PrepackageStageVerifier | None,
+    publication_stage_verifier: PublicationStageVerifier | None,
+    updater_verification_producer: UpdaterVerificationProducer | None = None,
+) -> tuple[str, ...]:
+    """Return diagnostics so the owner can close verification before success."""
+
+    identity = _canonical_source_identity(
+        current_identity(arguments.repository, require_clean=True)
+    )
+    if arguments.command == "seal-updater":
+        destination = seal_updater_set(
+            arguments.staging,
+            arguments.destination,
+            version=arguments.version,
+            source_identity=identity,
+            sealed_at=_utc_now(),
+            repository=arguments.repository,
+            prepackage_stage_verifier=prepackage_stage_verifier,
+            updater_verification_producer=updater_verification_producer,
+        )
+        return (f"updater release set published: {destination}",)
+    if arguments.command == "verify-updater":
+        verify_updater_set(
+            arguments.directory,
+            repository=arguments.repository,
+            version=arguments.version,
+            expected_source_identity=identity,
+            prepackage_stage_verifier=prepackage_stage_verifier,
+            updater_verification_producer=updater_verification_producer,
+        )
+        return (f"updater release set verified: {arguments.directory}",)
+    if arguments.command == "verify-dmg":
+        verify_dmg_set(
+            arguments.directory,
+            repository=arguments.repository,
+            version=arguments.version,
+            expected_source_identity=identity,
+            prepackage_stage_verifier=prepackage_stage_verifier,
+        )
+        return (f"DMG release set verified: {arguments.directory}",)
+    if arguments.command == "seal-release":
+        destination = seal_distribution_set(
+            arguments.repository,
+            version=arguments.version,
+            source_identity=identity,
+            sealed_at=_utc_now(),
+            publication_stage_verifier=publication_stage_verifier,
+            prepackage_stage_verifier=prepackage_stage_verifier,
+        )
+        return (f"distribution release set published: {destination}",)
+    if arguments.command == "verify-release":
+        return tuple(
+            str(path)
+            for path in verify_release_sets(
+                arguments.repository,
+                version=arguments.version,
+                expected_source_identity=identity,
+                publication_stage_verifier=publication_stage_verifier,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+            )
+        )
+    raise ArtifactSetError("unsupported release artifact set command")
+
+
 def main(
     *,
     prepackage_stage_verifier: PrepackageStageVerifier | None = None,
     publication_stage_verifier: PublicationStageVerifier | None = None,
+    command_runner: ArtifactCommandRunner | None = None,
 ) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -4500,71 +4588,15 @@ def main(
     try:
         if arguments.command == "self-check":
             self_check()
-        elif arguments.command == "seal-updater":
-            identity = _canonical_source_identity(
-                current_identity(arguments.repository, require_clean=True)
-            )
-            destination = seal_updater_set(
-                arguments.staging,
-                arguments.destination,
-                version=arguments.version,
-                source_identity=identity,
-                sealed_at=_utc_now(),
-                repository=arguments.repository,
+            return
+        if command_runner is None:
+            messages = _execute_command(
+                arguments,
                 prepackage_stage_verifier=prepackage_stage_verifier,
-            )
-            print(f"updater release set published: {destination}")
-        elif arguments.command == "verify-updater":
-            identity = _canonical_source_identity(
-                current_identity(arguments.repository, require_clean=True)
-            )
-            verify_updater_set(
-                arguments.directory,
-                repository=arguments.repository,
-                version=arguments.version,
-                expected_source_identity=identity,
-                prepackage_stage_verifier=prepackage_stage_verifier,
-            )
-            print(f"updater release set verified: {arguments.directory}")
-        elif arguments.command == "verify-dmg":
-            identity = _canonical_source_identity(
-                current_identity(arguments.repository, require_clean=True)
-            )
-            verify_dmg_set(
-                arguments.directory,
-                repository=arguments.repository,
-                version=arguments.version,
-                expected_source_identity=identity,
-                prepackage_stage_verifier=prepackage_stage_verifier,
-            )
-            print(f"DMG release set verified: {arguments.directory}")
-        elif arguments.command == "seal-release":
-            identity = _canonical_source_identity(
-                current_identity(arguments.repository, require_clean=True)
-            )
-            destination = seal_distribution_set(
-                arguments.repository,
-                version=arguments.version,
-                source_identity=identity,
-                sealed_at=_utc_now(),
                 publication_stage_verifier=publication_stage_verifier,
-                prepackage_stage_verifier=prepackage_stage_verifier,
             )
-            print(f"distribution release set published: {destination}")
-        elif arguments.command == "verify-release":
-            identity = _canonical_source_identity(
-                current_identity(arguments.repository, require_clean=True)
-            )
-            for path in verify_release_sets(
-                arguments.repository,
-                version=arguments.version,
-                expected_source_identity=identity,
-                publication_stage_verifier=publication_stage_verifier,
-                prepackage_stage_verifier=prepackage_stage_verifier,
-            ):
-                print(path)
         else:
-            raise ArtifactSetError("unsupported release artifact set command")
+            messages = command_runner(arguments)
     except (
         ArtifactSetError,
         OSError,
@@ -4572,4 +4604,7 @@ def main(
         SourceIdentityError,
         ValueError,
     ) as error:
-        raise SystemExit(f"error: release artifact set: {error}") from error
+        notes = "".join(f"\n{note}" for note in getattr(error, "__notes__", ()))
+        raise SystemExit(f"error: release artifact set: {error}{notes}") from error
+    for message in messages:
+        print(message)

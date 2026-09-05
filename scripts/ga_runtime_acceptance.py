@@ -3643,13 +3643,14 @@ def _arguments(argv: Iterable[str] | None = None) -> argparse.Namespace:
 def main(
     expectation_deriver: Callable[[Path], dict[str, Any]],
     prepackage_stage_verifier: PrepackageStageVerifier,
-) -> None:
+) -> str:
+    """Return the success diagnostic for the CLI's enclosing verifier lifetime."""
+
     arguments = _arguments()
     try:
         if arguments.command == "self-check":
             self_check()
-            print("GA runtime acceptance source contract verified")
-            return
+            return "GA runtime acceptance source contract verified"
         repository = _repository()
         expected = expectation_deriver(repository)
         if arguments.command == "collect":
@@ -3658,18 +3659,16 @@ def main(
                 expected=expected,
                 prepackage_stage_verifier=prepackage_stage_verifier,
             )
-            print(
+            return (
                 "GA runtime collection sealed: "
                 f"{result['adapter']['sha256']} ({len(CHECKS)} raw-derived checks)"
             )
-            return
         if arguments.command == "recover":
             path = recover_ga_runtime_collection(
                 repository=repository,
                 expected=expected,
             )
-            print(f"GA runtime collection recovered and archived: {path}")
-            return
+            return f"GA runtime collection recovered and archived: {path}"
         acceptance, raw_root = _fixed_paths(repository)
         result = validate_ga_runtime_acceptance(
             repository=repository,
@@ -3680,7 +3679,7 @@ def main(
         )
     except (GARuntimeAcceptanceError, OSError, PublicationError, ValueError) as error:
         raise SystemExit(f"error: GA runtime acceptance: {error}") from error
-    print(
+    return (
         "GA runtime acceptance verified: "
         f"{result['adapter']['sha256']} ({len(CHECKS)} raw-derived checks)"
     )

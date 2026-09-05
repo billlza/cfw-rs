@@ -16,6 +16,7 @@ from .durable_file import (
 )
 from . import ga_release_contract as contract
 from scripts.release_executor_source import ExecutorSource
+from scripts.candidate_freeze import FreezeVerifier
 
 
 def _publish_stage(
@@ -102,10 +103,12 @@ def _publish_and_confirm_stage(
     repository: Path,
     stage: str,
     expected_files: dict[str, bytes],
+    *,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Any]:
     _publish_stage(repository, stage, expected_files)
     try:
-        return contract.verify_stage(repository, stage)
+        return contract.verify_stage(repository, stage, freeze_verifier=freeze_verifier)
     except DurabilityOutcomeUnknown:
         raise
     except (OSError, PublicationError, ValueError) as error:
@@ -114,7 +117,12 @@ def _publish_and_confirm_stage(
         ) from error
 
 
-def seal_prepackage(repository: Path, *, executor: ExecutorSource) -> dict[str, Any]:
+def seal_prepackage(
+    repository: Path,
+    *,
+    executor: ExecutorSource,
+    freeze_verifier: FreezeVerifier | None = None,
+) -> dict[str, Any]:
     """Atomically authorize package creation for the exact GA application."""
 
     expected = contract.build_expected_stage_files(
@@ -122,20 +130,35 @@ def seal_prepackage(repository: Path, *, executor: ExecutorSource) -> dict[str, 
         "prepackage",
         executor=executor,
         require_live_hosted_ci=True,
+        freeze_verifier=freeze_verifier,
     )
-    return _publish_and_confirm_stage(repository, "prepackage", expected)
+    return _publish_and_confirm_stage(
+        repository, "prepackage", expected, freeze_verifier=freeze_verifier
+    )
 
 
-def seal_ga_acceptance(repository: Path, *, executor: ExecutorSource) -> dict[str, Any]:
+def seal_ga_acceptance(
+    repository: Path,
+    *,
+    executor: ExecutorSource,
+    freeze_verifier: FreezeVerifier | None = None,
+) -> dict[str, Any]:
     """Atomically bind exact packages and the completed 40041 -> 40043 run."""
 
     expected = contract.build_expected_stage_files(
-        repository, "ga-acceptance", executor=executor
+        repository, "ga-acceptance", executor=executor, freeze_verifier=freeze_verifier
     )
-    return _publish_and_confirm_stage(repository, "ga-acceptance", expected)
+    return _publish_and_confirm_stage(
+        repository, "ga-acceptance", expected, freeze_verifier=freeze_verifier
+    )
 
 
-def seal_publication(repository: Path, *, executor: ExecutorSource) -> dict[str, Any]:
+def seal_publication(
+    repository: Path,
+    *,
+    executor: ExecutorSource,
+    freeze_verifier: FreezeVerifier | None = None,
+) -> dict[str, Any]:
     """Atomically authorize upload after every GA-required stage reopens."""
 
     expected = contract.build_expected_stage_files(
@@ -143,5 +166,8 @@ def seal_publication(repository: Path, *, executor: ExecutorSource) -> dict[str,
         "publication",
         executor=executor,
         require_live_hosted_ci=True,
+        freeze_verifier=freeze_verifier,
     )
-    return _publish_and_confirm_stage(repository, "publication", expected)
+    return _publish_and_confirm_stage(
+        repository, "publication", expected, freeze_verifier=freeze_verifier
+    )

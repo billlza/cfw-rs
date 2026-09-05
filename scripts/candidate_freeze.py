@@ -15,6 +15,7 @@ promotion.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import ctypes
 from dataclasses import dataclass
 import errno
@@ -25,7 +26,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 import re
 import stat
-from typing import Any, Callable, Final
+from typing import Any, Callable, Final, Iterator
 
 if __package__:
     from .macos_durability import full_fsync
@@ -49,6 +50,7 @@ if __package__:
         UpdaterKeyPossessionError,
         UpdaterKeyPossessionOperationalError,
         VerifiedUpdaterKeyPossession,
+        production_embedded_verifier_session,
         verify_possession_proof,
     )
     from .verify_release_build_allocations import (
@@ -77,6 +79,7 @@ else:
         UpdaterKeyPossessionError,
         UpdaterKeyPossessionOperationalError,
         VerifiedUpdaterKeyPossession,
+        production_embedded_verifier_session,
         verify_possession_proof,
     )
     from verify_release_build_allocations import (
@@ -259,6 +262,9 @@ class FrozenCandidate:
     product_version: str
     build_number: str
     recovered: bool
+
+
+FreezeVerifier = Callable[[Path], FrozenCandidate]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1654,6 +1660,74 @@ def verify_frozen_candidate(
         possession_verifier=possession_verifier,
     )
     return _receipt(final_root, raw, recovered=False)
+
+
+@contextmanager
+def frozen_candidate_verification_session(
+    artifact_repository: Path,
+) -> Iterator[FreezeVerifier]:
+    """Share one private verifier build while fully reopening every freeze.
+
+    The operation is bound to one artifact checkout. The existing embedded
+    verifier owns input revalidation, failure poisoning and final cleanup;
+    no candidate, proof, or stage verification result is retained here.
+    """
+
+    repository = _require_canonical_repository(artifact_repository)
+    active = False
+    primary: BaseException | None = None
+    try:
+        with production_embedded_verifier_session(repository) as embedded_verifier:
+            active = True
+            def possession_verifier(
+                selected_repository: Path, candidate_root: Path
+            ) -> VerifiedUpdaterKeyPossession:
+                return verify_possession_proof(
+                    selected_repository,
+                    candidate_root,
+                    embedded_verifier=embedded_verifier,
+                )
+
+            def freeze_verifier(selected_repository: Path) -> FrozenCandidate:
+                if not active:
+                    raise CandidateFreezeError(
+                        "verifier_session_closed",
+                        "frozen candidate verification session is no longer active",
+                    )
+                if _require_canonical_repository(selected_repository) != repository:
+                    raise CandidateFreezeError(
+                        "verifier_session_repository_mismatch",
+                        "frozen candidate verification session belongs to another artifact repository",
+                    )
+                return verify_frozen_candidate(
+                    repository, possession_verifier=possession_verifier
+                )
+
+            try:
+                yield freeze_verifier
+            except BaseException as error:
+                primary = error
+                raise
+            finally:
+                active = False
+    except BaseException as error:
+        if primary is not None and error is not primary:
+            primary.add_note(
+                "secondary frozen candidate verifier cleanup failure: "
+                f"{type(error).__name__}: {error}"
+            )
+            raise primary
+        if isinstance(error, UpdaterKeyPossessionOperationalError):
+            raise CandidateFreezeError(
+                "updater_verifier_unavailable",
+                "frozen candidate verifier session is operationally unavailable",
+            ) from error
+        if isinstance(error, UpdaterKeyPossessionError):
+            raise CandidateFreezeError(
+                "updater_key_possession_invalid",
+                "frozen candidate verifier session failed its input or lifetime checks",
+            ) from error
+        raise
 
 
 def main() -> None:

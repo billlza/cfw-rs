@@ -14,6 +14,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from functools import partial
 import hashlib
 import json
 import os
@@ -27,15 +28,20 @@ import uuid
 
 if not __package__:
     # Isolated mode deliberately removes the script directory from sys.path.
-    # Re-add only this file's resolved, repository-owned sibling directory so
-    # direct `-I -S` execution can import the reviewed transaction modules
-    # without accepting PYTHONPATH, site packages, or the caller's directory.
+    # Re-add only this file's resolved repository and sibling directory. The
+    # shared freeze callback must use the same scripts.* module identity as
+    # the stage contract; sibling imports retain the existing direct entrypoint.
     _SCRIPT_DIRECTORY = Path(__file__).resolve().parent
     if _SCRIPT_DIRECTORY.name != "scripts":
         raise RuntimeError("DMG transaction is not located in the reviewed scripts directory")
     sys.path.insert(0, str(_SCRIPT_DIRECTORY))
+    sys.path.insert(0, str(_SCRIPT_DIRECTORY.parent))
 
 if __package__:
+    from .candidate_freeze import (
+        CandidateFreezeError,
+        frozen_candidate_verification_session,
+    )
     from .gatekeeper_assessment import (
         GatekeeperEvidenceError,
         capture as capture_gatekeeper,
@@ -89,6 +95,10 @@ if __package__:
     from .release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
     from .verify_notary_log import NotaryLogError, validate_documents
 else:
+    from scripts.candidate_freeze import (
+        CandidateFreezeError,
+        frozen_candidate_verification_session,
+    )
     from gatekeeper_assessment import (
         GatekeeperEvidenceError,
         capture as capture_gatekeeper,
@@ -2027,16 +2037,89 @@ def main() -> None:
         context = _context_from_arguments(
             arguments, initial=arguments.command == "start"
         )
-        if arguments.command == "preflight":
-            preflight_new(context)
-            print("DMG notarization transaction preflight ok")
-            return
-        if arguments.command == "start":
-            destination = execute_transaction(context)
-        else:
-            destination = recover_transaction(context, arguments.submission_id)
+        primary: BaseException | None = None
+        session_error: BaseException | None = None
+        operation_completed = False
+        publication_existed = False
+        if arguments.command in {"start", "recover"}:
+            try:
+                context.final_root.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                publication_existed = True
+        try:
+            with frozen_candidate_verification_session(context.repository) as freeze_verifier:
+                stage_verifier = partial(
+                    verify_prepackage_authorization,
+                    freeze_verifier=freeze_verifier,
+                )
+                try:
+                    if arguments.command == "preflight":
+                        preflight_new(context, stage_verifier)
+                        message = "DMG notarization transaction preflight ok"
+                    elif arguments.command == "start":
+                        destination = execute_transaction(
+                            context, prepackage_stage_verifier=stage_verifier
+                        )
+                        message = f"DMG release set published: {destination}"
+                    else:
+                        destination = recover_transaction(
+                            context,
+                            arguments.submission_id,
+                            prepackage_stage_verifier=stage_verifier,
+                        )
+                        message = f"DMG release set published: {destination}"
+                except BaseException as error:
+                    primary = error
+                else:
+                    operation_completed = True
+        except BaseException as error:
+            session_error = error
+        if primary is not None:
+            if session_error is not None:
+                cleanup_note = (
+                    "secondary DMG verifier session cleanup failure: "
+                    f"{type(session_error).__name__}: {session_error}"
+                )
+                cleanup_note += "".join(
+                    f"\n{note}" for note in getattr(session_error, "__notes__", ())
+                )
+                primary.add_note(cleanup_note)
+                if arguments.command in {"start", "recover"} and not publication_existed:
+                    try:
+                        context.final_root.lstat()
+                    except FileNotFoundError:
+                        pass
+                    except OSError as observation_error:
+                        unknown = TransactionError(
+                            "dmg_verifier_close_outcome_unknown",
+                            "DMG publication and verifier session closure outcomes are unknown",
+                            terminal_state="outcome_unknown",
+                        )
+                        unknown.add_note(cleanup_note)
+                        unknown.add_note(f"publication observation failed: {observation_error}")
+                        raise unknown from primary
+                    else:
+                        unknown = TransactionError(
+                            "dmg_verifier_close_outcome_unknown",
+                            "new DMG set exists but verification and session closure failed",
+                            terminal_state="outcome_unknown",
+                        )
+                        unknown.add_note(cleanup_note)
+                        raise unknown from primary
+            raise primary
+        if session_error is not None:
+            if operation_completed and arguments.command in {"start", "recover"}:
+                raise TransactionError(
+                    "dmg_verifier_close_outcome_unknown",
+                    "published DMG verification session did not close successfully",
+                    terminal_state="outcome_unknown",
+                ) from session_error
+            raise session_error
     except (
         ArtifactSetError,
+        CandidateFreezeError,
         OSError,
         PublicationError,
         SourceIdentityError,
@@ -2044,8 +2127,11 @@ def main() -> None:
         ValueError,
     ) as error:
         code = error.code if isinstance(error, TransactionError) else "artifact_set_error"
-        raise SystemExit(f"error: DMG notarization transaction [{code}]: {error}") from error
-    print(f"DMG release set published: {destination}")
+        notes = "".join(f"\n{note}" for note in getattr(error, "__notes__", ()))
+        raise SystemExit(
+            f"error: DMG notarization transaction [{code}]: {error}{notes}"
+        ) from error
+    print(message)
 
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ from urllib.request import (
 )
 
 if __package__:
-    from .candidate_freeze import CandidateFreezeError, verify_frozen_candidate
+    from .candidate_freeze import CandidateFreezeError, FreezeVerifier, verify_frozen_candidate
     from .publication.common import (
         PublicationError,
         read_regular,
@@ -48,7 +48,7 @@ if __package__:
     )
     from .repository_source_identity import SourceIdentityError, current_identity
 else:
-    from candidate_freeze import CandidateFreezeError, verify_frozen_candidate
+    from candidate_freeze import CandidateFreezeError, FreezeVerifier, verify_frozen_candidate
     from publication.common import (
         PublicationError,
         read_regular,
@@ -809,12 +809,17 @@ def _workflow_source_bytes(repository: Path) -> bytes:
         raise _error("exact local workflow-file source is unavailable") from error
 
 
-def _source_binding(repository: Path) -> dict[str, str]:
+def _source_binding(
+    repository: Path, *, freeze_verifier: FreezeVerifier | None = None
+) -> dict[str, str]:
     repository = repository.absolute()
+    selected_freeze_verifier = (
+        verify_frozen_candidate if freeze_verifier is None else freeze_verifier
+    )
     try:
         if repository.is_symlink() or repository.resolve(strict=True) != repository:
             raise OSError("repository path is not canonical")
-        frozen = verify_frozen_candidate(repository)
+        frozen = selected_freeze_verifier(repository)
         current = current_identity(repository, require_clean=True)
         workflow_bytes = _workflow_source_bytes(repository)
         intent_bytes = read_regular(frozen.intent_path, MAX_RECEIPT_BYTES)
@@ -1134,17 +1139,19 @@ def capture_receipt(repository: Path, run_id: int) -> dict[str, Any]:
     return verified
 
 
-def validate_receipt_offline(repository: Path) -> dict[str, Any]:
+def validate_receipt_offline(
+    repository: Path, *, freeze_verifier: FreezeVerifier | None = None
+) -> dict[str, Any]:
     """Reopen the canonical receipt against the frozen source without networking."""
 
-    source_before = _source_binding(repository)
+    source_before = _source_binding(repository, freeze_verifier=freeze_verifier)
     workflow_before = _workflow_source_bytes(repository)
     retained, raw_before, _run_id = _load_receipt(
         repository,
         source_before,
         workflow_before,
     )
-    source_after = _source_binding(repository)
+    source_after = _source_binding(repository, freeze_verifier=freeze_verifier)
     workflow_after = _workflow_source_bytes(repository)
     if source_after != source_before or workflow_after != workflow_before:
         raise _error("release source changed while hosted CI receipt was being reopened")
@@ -1158,15 +1165,17 @@ def validate_receipt_offline(repository: Path) -> dict[str, Any]:
     return retained
 
 
-def verify_receipt(repository: Path) -> dict[str, Any]:
+def verify_receipt(
+    repository: Path, *, freeze_verifier: FreezeVerifier | None = None
+) -> dict[str, Any]:
     """Reopen one receipt and live-revalidate its run, jobs, and zero-annotation checks."""
 
-    retained = validate_receipt_offline(repository)
+    retained = validate_receipt_offline(repository, freeze_verifier=freeze_verifier)
     source = retained["source"]
     run_id = _positive_int(retained["run"].get("id"), "retained workflow run id")
     workflow_bytes = _workflow_source_bytes(repository)
     live = _live_receipt(source, run_id, workflow_bytes)
-    reopened = validate_receipt_offline(repository)
+    reopened = validate_receipt_offline(repository, freeze_verifier=freeze_verifier)
     if reopened != retained:
         raise _error("hosted CI receipt changed during live verification")
     if retained != live:

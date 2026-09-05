@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from functools import partial
 from pathlib import Path
 import stat
 from typing import Any, Final
@@ -46,6 +47,7 @@ from scripts.candidate_artifact_binding import (
 )
 from scripts.candidate_freeze import (
     CandidateFreezeError,
+    FreezeVerifier,
     verify_frozen_candidate,
 )
 from scripts.gatekeeper_assessment import (
@@ -354,7 +356,7 @@ def _verify_publication_adapter(repository: Path) -> None:
 
 
 def _verified_legal_source_closure(
-    repository: Path, app: Path
+    repository: Path, app: Path, *, freeze_verifier: FreezeVerifier | None = None
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
     try:
         from .verify import verify_evidence as verify_publication_evidence
@@ -366,7 +368,9 @@ def _verified_legal_source_closure(
     _verify_publication_adapter(repository)
     root = _path(repository, PUBLICATION_INPUT_ROOT)
     try:
-        verify_publication_evidence(root, app, False, repository=repository)
+        verify_publication_evidence(
+            root, app, False, repository=repository, freeze_verifier=freeze_verifier
+        )
     except (OSError, PublicationError, ValueError) as error:
         raise PublicationError("GA legal/source/SBOM closure is invalid") from error
     required = (
@@ -479,6 +483,8 @@ def _prepackage_ci_bindings(
 
 def _verified_prepackage_inputs(
     repository: Path,
+    *,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, bytes]]:
     repository = _canonical_repository(repository)
     try:
@@ -487,8 +493,11 @@ def _verified_prepackage_inputs(
         raise PublicationError(str(error)) from error
     if (PRODUCT_VERSION, GA_BUILD) != ("0.4.0", "40043"):
         raise PublicationError("prepackage requires the fixed v0.4.0/40043 identity")
+    selected_freeze_verifier = (
+        verify_frozen_candidate if freeze_verifier is None else freeze_verifier
+    )
     try:
-        frozen = verify_frozen_candidate(repository)
+        frozen = selected_freeze_verifier(repository)
     except CandidateFreezeError as error:
         raise PublicationError(f"candidate-freeze receipt is not reusable: {error}") from error
     expected_intent = _path(repository, CANDIDATE_FREEZE_INTENT)
@@ -582,7 +591,9 @@ def _verified_prepackage_inputs(
         raise PublicationError(
             "local deterministic CI lanes and frozen candidate use different toolchains"
         )
-    hosted_ci = validate_hosted_ci_receipt_offline(repository)
+    hosted_ci = validate_hosted_ci_receipt_offline(
+        repository, freeze_verifier=freeze_verifier
+    )
     _require_hosted_ci_source_binding(
         hosted_ci,
         candidate_freeze_intent_sha256=frozen.intent_sha256,
@@ -644,7 +655,11 @@ def _verified_prepackage_inputs(
         raise PublicationError("GA notarization has no verified retained signing input")
     transformation_path = _path(repository, SIGNING_TRANSFORMATION)
     try:
-        transformation = verify_signing_transformation_receipt(repository, retained_signed_app)
+        transformation = verify_signing_transformation_receipt(
+            repository,
+            retained_signed_app,
+            freeze_verifier=selected_freeze_verifier,
+        )
     except (OSError, SigningTransformationError, ValueError) as error:
         raise PublicationError(
             "GA signing transformation cannot be independently reopened"
@@ -685,7 +700,9 @@ def _verified_prepackage_inputs(
     if gatekeeper["target_signed_app_tree_sha256"] != app_manifest["sha256"]:
         raise PublicationError("Gatekeeper evidence targets different GA app bytes")
 
-    legal_source, legal_documents = _verified_legal_source_closure(repository, app)
+    legal_source, legal_documents = _verified_legal_source_closure(
+        repository, app, freeze_verifier=freeze_verifier
+    )
     try:
         observed_app = build_manifest(app, algorithm=app_manifest["algorithm"])
     except (OSError, ValueError) as error:
@@ -803,9 +820,10 @@ def _prepackage_files(
     executor_source: dict[str, str],
     *,
     expected_live_hosted_ci: dict[str, Any] | None = None,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, bytes]:
     bindings, ci_document, hosted_ci, _legal_documents = _verified_prepackage_inputs(
-        repository
+        repository, freeze_verifier=freeze_verifier
     )
     if expected_live_hosted_ci is not None and hosted_ci != expected_live_hosted_ci:
         raise PublicationError(
@@ -837,7 +855,10 @@ def _require_artifact_set_adapter(repository: Path):
 
 
 def _verified_package_sets(
-    repository: Path, prepackage: dict[str, Any]
+    repository: Path,
+    prepackage: dict[str, Any],
+    *,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Any]:
     artifact_set = _require_artifact_set_adapter(repository)
     source = prepackage["bindings"]["source"]
@@ -851,14 +872,18 @@ def _verified_package_sets(
             repository=repository,
             version=PRODUCT_VERSION,
             expected_source_identity=expected_source,
-            prepackage_stage_verifier=verify_prepackage_authorization,
+            prepackage_stage_verifier=partial(
+                verify_prepackage_authorization, freeze_verifier=freeze_verifier
+            ),
         )
         updater = artifact_set.verify_updater_set(
             _path(repository, UPDATER_SET),
             repository=repository,
             version=PRODUCT_VERSION,
             expected_source_identity=expected_source,
-            prepackage_stage_verifier=verify_prepackage_authorization,
+            prepackage_stage_verifier=partial(
+                verify_prepackage_authorization, freeze_verifier=freeze_verifier
+            ),
         )
     except (OSError, ValueError, artifact_set.ArtifactSetError) as error:
         raise PublicationError("GA DMG or updater set is not exactly sealed") from error
@@ -1016,6 +1041,8 @@ def _verified_acceptance_inputs(
     repository: Path,
     prepackage: dict[str, Any],
     packages: dict[str, Any],
+    *,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Any]:
     migration = _verified_migration_journals(repository)
     _require_migration_matches_prepackage(prepackage, migration)
@@ -1025,6 +1052,7 @@ def _verified_acceptance_inputs(
         ga_environment_sha256=migration["environment"]["sha256"],
         install_journal_sha256=migration["install_journal"]["record"]["sha256"],
         service_journal_tree_sha256=migration["service_journal"]["record"]["sha256"],
+        freeze_verifier=freeze_verifier,
     )
     return {
         "adapter": runtime["adapter"],
@@ -1046,6 +1074,7 @@ def _verified_runtime_acceptance_adapter(
     ga_environment_sha256: str,
     install_journal_sha256: str,
     service_journal_tree_sha256: str,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Any]:
     """Require a real raw-evidence verifier; never trust a local passed summary."""
 
@@ -1079,7 +1108,9 @@ def _verified_runtime_acceptance_adapter(
             acceptance_path=acceptance_path,
             raw_evidence_root=raw_evidence_root,
             expected=expected,
-            prepackage_stage_verifier=verify_prepackage_authorization,
+            prepackage_stage_verifier=partial(
+                verify_prepackage_authorization, freeze_verifier=freeze_verifier
+            ),
         )
     except (OSError, ValueError) as error:
         raise PublicationError("GA runtime raw evidence is invalid") from error
@@ -1108,10 +1139,16 @@ def _verified_runtime_acceptance_adapter(
 
 
 def _ga_acceptance_files(
-    repository: Path, prepackage: dict[str, Any], executor_source: dict[str, str]
+    repository: Path,
+    prepackage: dict[str, Any],
+    executor_source: dict[str, str],
+    *,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, bytes]:
-    packages = _verified_package_sets(repository, prepackage)
-    runtime = _verified_acceptance_inputs(repository, prepackage, packages)
+    packages = _verified_package_sets(repository, prepackage, freeze_verifier=freeze_verifier)
+    runtime = _verified_acceptance_inputs(
+        repository, prepackage, packages, freeze_verifier=freeze_verifier
+    )
     bindings = {
         "package_sets": packages,
         "prepackage_manifest_sha256": sha256_file(
@@ -1131,9 +1168,11 @@ def _publication_files(
     prepackage: dict[str, Any],
     ga_acceptance: dict[str, Any],
     executor_source: dict[str, str],
+    *,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, bytes]:
     legal_source, copies = _verified_legal_source_closure(
-        repository, _path(repository, SIGNED_APP)
+        repository, _path(repository, SIGNED_APP), freeze_verifier=freeze_verifier
     )
     if legal_source != prepackage["bindings"]["legal_source"]:
         raise PublicationError("legal/source/SBOM closure changed after prepackage")
@@ -1183,6 +1222,7 @@ def _compose_stage_files(
     executor_source: dict[str, str],
     *,
     require_live_hosted_ci: bool = False,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, bytes]:
     """Reopen product inputs under one already verified sealing identity."""
 
@@ -1190,7 +1230,7 @@ def _compose_stage_files(
     if stage not in STAGES:
         raise PublicationError(f"unknown GA release stage: {stage}")
     live_hosted_ci = (
-        live_verify_hosted_ci_receipt(repository)
+        live_verify_hosted_ci_receipt(repository, freeze_verifier=freeze_verifier)
         if require_live_hosted_ci
         else None
     )
@@ -1199,13 +1239,18 @@ def _compose_stage_files(
             repository,
             executor_source,
             expected_live_hosted_ci=live_hosted_ci,
+            freeze_verifier=freeze_verifier,
         )
     if stage == "ga-acceptance":
-        prepackage = _verify_stage(repository, "prepackage")
-        return _ga_acceptance_files(repository, prepackage, executor_source)
-    prepackage = _verify_stage(repository, "prepackage")
-    ga_acceptance = _verify_stage(repository, "ga-acceptance")
-    return _publication_files(repository, prepackage, ga_acceptance, executor_source)
+        prepackage = _verify_stage(repository, "prepackage", freeze_verifier=freeze_verifier)
+        return _ga_acceptance_files(
+            repository, prepackage, executor_source, freeze_verifier=freeze_verifier
+        )
+    prepackage = _verify_stage(repository, "prepackage", freeze_verifier=freeze_verifier)
+    ga_acceptance = _verify_stage(repository, "ga-acceptance", freeze_verifier=freeze_verifier)
+    return _publication_files(
+        repository, prepackage, ga_acceptance, executor_source, freeze_verifier=freeze_verifier
+    )
 
 
 def _current_stage_executor(repository: Path) -> ExecutorSource:
@@ -1220,6 +1265,7 @@ def build_expected_stage_files(
     *,
     executor: ExecutorSource,
     require_live_hosted_ci: bool = False,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, bytes]:
     """Compose a new seal with the actual clean executor's source identity."""
 
@@ -1231,12 +1277,15 @@ def build_expected_stage_files(
         stage,
         executor.identity,
         require_live_hosted_ci=require_live_hosted_ci,
+        freeze_verifier=freeze_verifier,
     )
     require_executor_unchanged(executor)
     return expected
 
 
-def _verify_stage(repository: Path, stage: str) -> dict[str, Any]:
+def _verify_stage(
+    repository: Path, stage: str, *, freeze_verifier: FreezeVerifier | None = None
+) -> dict[str, Any]:
     if stage not in STAGES:
         raise PublicationError(f"unknown GA release stage: {stage}")
     observed = _read_stage_files(repository, stage)
@@ -1249,7 +1298,9 @@ def _verify_stage(repository: Path, stage: str) -> dict[str, Any]:
     validate_source_identity(historical, "historical GA sealing executor")
     if historical != executor_source:
         raise PublicationError("GA sealing executor differs from its historical source")
-    expected = _compose_stage_files(repository, stage, executor_source)
+    expected = _compose_stage_files(
+        repository, stage, executor_source, freeze_verifier=freeze_verifier
+    )
     if observed != expected:
         raise PublicationError(f"sealed {stage} stage differs from reopened GA inputs")
     repeated = _read_stage_files(repository, stage)
@@ -1258,17 +1309,21 @@ def _verify_stage(repository: Path, stage: str) -> dict[str, Any]:
     return manifest
 
 
-def verify_stage(repository: Path, stage: str) -> dict[str, Any]:
+def verify_stage(
+    repository: Path, stage: str, *, freeze_verifier: FreezeVerifier | None = None
+) -> dict[str, Any]:
     """Purely reopen one stage and every predecessor; never creates evidence."""
 
     repository = _canonical_repository(repository)
     verifier = _current_stage_executor(repository)
-    manifest = _verify_stage(repository, stage)
+    manifest = _verify_stage(repository, stage, freeze_verifier=freeze_verifier)
     require_executor_unchanged(verifier)
     return manifest
 
 
-def verify_prepackage_authorization(repository: Path) -> dict[str, Any]:
+def verify_prepackage_authorization(
+    repository: Path, *, freeze_verifier: FreezeVerifier | None = None
+) -> dict[str, Any]:
     """Reopen prepackage and return the exact artifact-set binding schema."""
 
     repository = _canonical_repository(repository)
@@ -1279,7 +1334,7 @@ def verify_prepackage_authorization(repository: Path) -> dict[str, Any]:
             manifest_path,
             artifact_set.MAX_PUBLICATION_DOCUMENT_BYTES,
         )
-        verify_stage(repository, "prepackage")
+        verify_stage(repository, "prepackage", freeze_verifier=freeze_verifier)
         after = artifact_set._artifact_record(
             manifest_path,
             artifact_set.MAX_PUBLICATION_DOCUMENT_BYTES,
@@ -1297,13 +1352,15 @@ def verify_prepackage_authorization(repository: Path) -> dict[str, Any]:
     )
 
 
-def verify_publication_authorization(repository: Path) -> dict[str, Any]:
+def verify_publication_authorization(
+    repository: Path, *, freeze_verifier: FreezeVerifier | None = None
+) -> dict[str, Any]:
     """Reopen the complete publication stage in artifact-set binding form."""
 
     repository = _canonical_repository(repository)
     artifact_set = _require_artifact_set_adapter(repository)
-    prepackage = verify_stage(repository, "prepackage")
-    publication = verify_stage(repository, "publication")
+    prepackage = verify_stage(repository, "prepackage", freeze_verifier=freeze_verifier)
+    publication = verify_stage(repository, "publication", freeze_verifier=freeze_verifier)
     try:
         prepackage_legal = prepackage["bindings"]["legal_source"]
         publication_legal = publication["bindings"]["legal_source"]
@@ -1328,12 +1385,14 @@ def verify_publication_authorization(repository: Path) -> dict[str, Any]:
     }
 
 
-def derive_runtime_expectation(repository: Path) -> dict[str, Any]:
+def derive_runtime_expectation(
+    repository: Path, *, freeze_verifier: FreezeVerifier | None = None
+) -> dict[str, Any]:
     """Derive the fixed runtime inputs without reading runtime-produced evidence."""
 
     repository = _canonical_repository(repository)
-    prepackage = verify_stage(repository, "prepackage")
-    packages = _verified_package_sets(repository, prepackage)
+    prepackage = verify_stage(repository, "prepackage", freeze_verifier=freeze_verifier)
+    packages = _verified_package_sets(repository, prepackage, freeze_verifier=freeze_verifier)
     migration = _verified_migration_journals(repository)
     _require_migration_matches_prepackage(prepackage, migration)
     return {

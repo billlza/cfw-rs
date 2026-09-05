@@ -1014,6 +1014,13 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
         from scripts import dmg_notarization_transaction as transaction
 
         self.fixture.prepackage_manifest.unlink()
+        build = create_release_verifier_build(self.fixture.repository)
+
+        @contextmanager
+        def compiled(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            yield build
+
         arguments = [
             str(Path(transaction.__file__).resolve()),
             "preflight",
@@ -1028,7 +1035,9 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
         ]
         with patch.object(sys, "argv", arguments), patch.object(
             transaction, "current_identity", return_value=SOURCE_IDENTITY
-        ):
+        ), patch(
+            "scripts.release_artifact_set._compiled_release_verifier", compiled
+        ), verified_cargo_fixture(build):
             with self.assertRaisesRegex(SystemExit, "prepackage"):
                 transaction.main()
 
@@ -1449,7 +1458,10 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             self.verify(destination)
 
     def test_prepackage_manifest_mutation_during_authorization_is_rejected(self) -> None:
-        def mutate(_repository: Path, _stage: str) -> dict[str, object]:
+        def mutate(
+            _repository: Path, _stage: str, *, freeze_verifier: object | None = None
+        ) -> dict[str, object]:
+            self.assertIsNone(freeze_verifier)
             self.prepackage_manifest.write_text(
                 '{"fixture":"mutated-during-stage-check"}\n', encoding="utf-8"
             )
@@ -1482,7 +1494,9 @@ class UpdaterArtifactSetTests(unittest.TestCase):
             "scripts.release_python_runtime.require_closed_release_runtime"
         ), patch.object(
             artifact_sets, "current_identity", return_value=SOURCE_IDENTITY
-        ):
+        ), patch.object(
+            artifact_sets, "_compiled_release_verifier", self._compiled_verifier
+        ), verified_cargo_fixture(self.verifier_build):
             with self.assertRaisesRegex(SystemExit, "prepackage"):
                 artifact_cli.main()
 

@@ -37,8 +37,10 @@ from .sbom import (
 )
 from .source_archive import verify_source_archive
 if __package__.startswith("scripts."):
+    from scripts.candidate_freeze import FreezeVerifier
     from scripts.release_build_identity import bundle_build_identity
 else:
+    from candidate_freeze import FreezeVerifier
     from release_build_identity import bundle_build_identity
 
 
@@ -103,6 +105,8 @@ def _verify_artifact_inputs(
     artifacts: list[dict[str, Any]],
     app: Path,
     build_number: str,
+    *,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> None:
     from .release_contract import native_products_root
 
@@ -114,6 +118,7 @@ def _verify_artifact_inputs(
         # This argument controls release_git reads. None selects that adapter's
         # fixed minimal environment, never the caller's ambient Git state.
         None,
+        freeze_verifier=freeze_verifier,
     )
     by_kind = {item["kind"]: item for item in artifacts}
     if set(by_kind) != set(expected):
@@ -151,7 +156,12 @@ def _verify_inventory(
 
 
 def verify_evidence(
-    root: Path, app: Path, fixture: bool, *, repository: Path | None = None
+    root: Path,
+    app: Path,
+    fixture: bool,
+    *,
+    repository: Path | None = None,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> None:
     _verify_evidence_manifest(root)
     machine = require_exact_keys(
@@ -224,6 +234,7 @@ def verify_evidence(
             artifacts,
             app,
             identity["build_number"],
+            freeze_verifier=freeze_verifier,
         )
 
     spdx = load_json(root / "sbom.spdx.json")

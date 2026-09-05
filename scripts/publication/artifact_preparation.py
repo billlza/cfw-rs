@@ -30,7 +30,7 @@ if __package__.startswith("scripts."):
         TOOLCHAIN_METADATA_ORDER,
         validate_candidate_app_manifest,
     )
-    from scripts.candidate_freeze import CandidateFreezeError, verify_frozen_candidate
+    from scripts.candidate_freeze import CandidateFreezeError, FreezeVerifier, verify_frozen_candidate
     from scripts.release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
     from scripts.repository_source_identity import SourceIdentityError, current_identity
 else:
@@ -39,7 +39,7 @@ else:
         TOOLCHAIN_METADATA_ORDER,
         validate_candidate_app_manifest,
     )
-    from candidate_freeze import CandidateFreezeError, verify_frozen_candidate
+    from candidate_freeze import CandidateFreezeError, FreezeVerifier, verify_frozen_candidate
     from release_build_identity import ACTIVE_RELEASE_IDENTITY, ga_root
     from repository_source_identity import SourceIdentityError, current_identity
 
@@ -183,6 +183,8 @@ def _artifact_sources(
     app: Path,
     build_number: str,
     release_environment: dict[str, str] | None,
+    *,
+    freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Path]:
     sources = {
         kind: repository / relative
@@ -202,11 +204,14 @@ def _artifact_sources(
     )
     fixed_ga_root = ga_root(repository)
     product_input_path = fixed_ga_root / "product-input.json"
+    selected_freeze_verifier = (
+        verify_frozen_candidate if freeze_verifier is None else freeze_verifier
+    )
     try:
         source_identity = current_identity(
             repository, environment=release_environment
         )
-        frozen = verify_frozen_candidate(repository)
+        frozen = selected_freeze_verifier(repository)
         if (
             build_number != ACTIVE_RELEASE_IDENTITY.ga_build
             or frozen.root != fixed_ga_root

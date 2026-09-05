@@ -2791,7 +2791,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
         path = "scripts/publication/ga_release_contract.py"
         self._verify_fixture(fixture)
         source = fixture.extra_artifact_files[path]
-        guarded = 'prepackage = verify_stage(repository, "prepackage")'
+        guarded = 'prepackage = verify_stage(repository, "prepackage", freeze_verifier=freeze_verifier)'
         self.assertIn(guarded, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded, 'prepackage = {"bindings": {}}', 1
@@ -2861,7 +2861,7 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded_predecessor = 'prepackage = _verify_stage(repository, "prepackage")'
+        guarded_predecessor = 'prepackage = _verify_stage(repository, "prepackage", freeze_verifier=freeze_verifier)'
         self.assertIn(guarded_predecessor, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded_predecessor,
@@ -2879,7 +2879,13 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded = "transformation = verify_signing_transformation_receipt(repository, retained_signed_app)"
+        guarded = (
+            "transformation = verify_signing_transformation_receipt(\n"
+            "            repository,\n"
+            "            retained_signed_app,\n"
+            "            freeze_verifier=selected_freeze_verifier,\n"
+            "        )"
+        )
         self.assertIn(guarded, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded,
@@ -2985,13 +2991,13 @@ class PinnedBuildInputsTests(unittest.TestCase):
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
         ordered = (
-            "    packages = _verified_package_sets(repository, prepackage)\n"
+            "    packages = _verified_package_sets(repository, prepackage, freeze_verifier=freeze_verifier)\n"
             "    migration = _verified_migration_journals(repository)\n"
             "    _require_migration_matches_prepackage(prepackage, migration)"
         )
         self.assertEqual(source.count(ordered), 1)
         reordered = (
-            "    packages = _verified_package_sets(repository, prepackage)\n"
+            "    packages = _verified_package_sets(repository, prepackage, freeze_verifier=freeze_verifier)\n"
             "    _require_migration_matches_prepackage(prepackage, migration)\n"
             "    migration = _verified_migration_journals(repository)"
         )
@@ -3008,7 +3014,11 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded = "hosted_ci = validate_hosted_ci_receipt_offline(repository)"
+        guarded = (
+            "hosted_ci = validate_hosted_ci_receipt_offline(\n"
+            "        repository, freeze_verifier=freeze_verifier\n"
+            "    )"
+        )
         self.assertIn(guarded, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded,
@@ -3025,11 +3035,11 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded = "live_verify_hosted_ci_receipt(repository)"
+        guarded = "live_verify_hosted_ci_receipt(repository, freeze_verifier=freeze_verifier)"
         self.assertEqual(source.count(guarded), 1)
         fixture.extra_artifact_files[path] = source.replace(
             guarded,
-            "validate_hosted_ci_receipt_offline(repository)",
+            "validate_hosted_ci_receipt_offline(repository, freeze_verifier=freeze_verifier)",
             1,
         )
         with self.assertRaisesRegex(PinnedInputError, "guarded function AST"):
@@ -3065,12 +3075,21 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded = "transformation = verify_signing_transformation_receipt(repository, retained_signed_app)"
+        guarded = (
+            "transformation = verify_signing_transformation_receipt(\n"
+            "            repository,\n"
+            "            retained_signed_app,\n"
+            "            freeze_verifier=selected_freeze_verifier,\n"
+            "        )"
+        )
         self.assertIn(guarded, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded,
             "if repository.name:\n"
-            "            transformation = verify_signing_transformation_receipt(repository, retained_signed_app)\n"
+            "            transformation = verify_signing_transformation_receipt(\n"
+            "                repository, retained_signed_app,\n"
+            "                freeze_verifier=selected_freeze_verifier,\n"
+            "            )\n"
             "        else:\n"
             '            transformation = {"signed_app_tree_sha256": "0" * 64}',
             1,
@@ -3107,12 +3126,21 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded = "transformation = verify_signing_transformation_receipt(repository, retained_signed_app)"
+        guarded = (
+            "transformation = verify_signing_transformation_receipt(\n"
+            "            repository,\n"
+            "            retained_signed_app,\n"
+            "            freeze_verifier=selected_freeze_verifier,\n"
+            "        )"
+        )
         self.assertIn(guarded, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded,
             "def delayed_transformation():\n"
-            "            return verify_signing_transformation_receipt(repository, retained_signed_app)\n"
+            "            return verify_signing_transformation_receipt(\n"
+            "                repository, retained_signed_app,\n"
+            "                freeze_verifier=selected_freeze_verifier,\n"
+            "            )\n"
             "        transformation = delayed_transformation()",
             1,
         )
@@ -3126,11 +3154,11 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded = "frozen = verify_frozen_candidate(repository)"
+        guarded = "frozen = selected_freeze_verifier(repository)"
         self.assertIn(guarded, source)
         fixture.extra_artifact_files[path] = source.replace(
             guarded,
-            "frozen = unrelated.verify_frozen_candidate(repository)",
+            "frozen = unrelated.selected_freeze_verifier(repository)",
             1,
         )
         with self.assertRaisesRegex(PinnedInputError, "critical guards differ"):
@@ -3138,6 +3166,24 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 fixture.extra_artifact_files[path],
                 path,
             )
+
+    def test_prepackage_freeze_provider_selection_cannot_be_forged(self) -> None:
+        fixture = Fixture()
+        path = "scripts/publication/ga_release_contract.py"
+        source = fixture.extra_artifact_files[path]
+        selection = "verify_frozen_candidate if freeze_verifier is None else freeze_verifier"
+        call = "        frozen = selected_freeze_verifier(repository)"
+        self.assertEqual(source.count(selection), 1)
+        self.assertEqual(source.count(call), 1)
+        mutations = (
+            source.replace(selection, "unrelated if freeze_verifier is None else freeze_verifier", 1),
+            source.replace(call, "        selected_freeze_verifier = unrelated\n" + call, 1),
+        )
+        for mutated in mutations:
+            with self.assertRaisesRegex(
+                PinnedInputError, "provider selection|rebinds a policy validator"
+            ):
+                pinned_verifier._artifact_binding_surface(mutated, path)
 
     def test_prepackage_critical_guard_cannot_be_skipped_by_early_return(self) -> None:
         fixture = Fixture()
@@ -3280,7 +3326,11 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        guarded = "    hosted_ci = validate_hosted_ci_receipt_offline(repository)\n"
+        guarded = (
+            "    hosted_ci = validate_hosted_ci_receipt_offline(\n"
+            "        repository, freeze_verifier=freeze_verifier\n"
+            "    )\n"
+        )
         self.assertEqual(source.count(guarded), 1)
         replacements = {
             "assert": (
@@ -3316,19 +3366,27 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         path = "scripts/publication/ga_release_contract.py"
         source = fixture.extra_artifact_files[path]
-        hosted = "    hosted_ci = validate_hosted_ci_receipt_offline(repository)\n"
+        hosted = (
+            "    hosted_ci = validate_hosted_ci_receipt_offline(\n"
+            "        repository, freeze_verifier=freeze_verifier\n"
+            "    )\n"
+        )
         dmg = "        dmg = artifact_set.verify_dmg_set(\n"
         self.assertEqual(source.count(hosted), 1)
         self.assertEqual(source.count(dmg), 1)
         mutations = {
             "wrong-argument": source.replace(
                 hosted,
-                "    hosted_ci = validate_hosted_ci_receipt_offline(repository.parent)\n",
+                "    hosted_ci = validate_hosted_ci_receipt_offline(\n"
+                "        repository.parent, freeze_verifier=freeze_verifier\n"
+                "    )\n",
                 1,
             ),
             "forged-result": source.replace(
                 hosted,
-                "    validate_hosted_ci_receipt_offline(repository)\n"
+                "    validate_hosted_ci_receipt_offline(\n"
+                "        repository, freeze_verifier=freeze_verifier\n"
+                "    )\n"
                 '    hosted_ci = {"schema": 1}\n',
                 1,
             ),
@@ -3352,16 +3410,12 @@ class PinnedBuildInputsTests(unittest.TestCase):
         fixture = Fixture()
         mutations = {
             "scripts/release_artifact_set_cli.py": (
-                "prepackage_stage_verifier=verify_prepackage_authorization",
-                "prepackage_stage_verifier=None",
+                "command_runner=_run_verification_command",
+                "command_runner=None",
             ),
             "scripts/ga_runtime_acceptance_cli.py": (
-                "    runtime_main(\n"
-                "        derive_runtime_expectation,\n"
-                "        verify_prepackage_authorization,",
-                "    runtime_main(\n"
-                "        verify_prepackage_authorization,\n"
-                "        derive_runtime_expectation,",
+                "message = _run_runtime_command()",
+                'message = "verified"',
             ),
         }
         for path, (guarded, replacement) in mutations.items():
@@ -3374,6 +3428,29 @@ class PinnedBuildInputsTests(unittest.TestCase):
                 pinned_verifier._artifact_binding_surface(
                     source.replace(guarded, replacement, 1),
                     path,
+                )
+
+    def test_ga_release_cli_session_helpers_remain_bound(self) -> None:
+        fixture = Fixture()
+        mutations = {
+            "scripts/release_artifact_set_cli.py": (
+                "operation_completed = True",
+                "operation_completed = False",
+            ),
+            "scripts/ga_runtime_acceptance_cli.py": (
+                "partial(derive_runtime_expectation, freeze_verifier=freeze_verifier)",
+                "partial(verify_prepackage_authorization, freeze_verifier=freeze_verifier)",
+            ),
+        }
+        for path, (guarded, replacement) in mutations.items():
+            source = fixture.extra_artifact_files[path]
+            self.assertEqual(source.count(guarded), 1)
+            with (
+                self.subTest(path=path),
+                self.assertRaisesRegex(PinnedInputError, "CLI injection AST"),
+            ):
+                pinned_verifier._artifact_binding_surface(
+                    source.replace(guarded, replacement, 1), path
                 )
 
     def test_self_excluded_verifier_still_requires_real_entrypoints(self) -> None:

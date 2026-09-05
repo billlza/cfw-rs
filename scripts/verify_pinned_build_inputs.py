@@ -110,7 +110,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "368531f52ff17ede9a03039ad449784879c086f1b998052057abe275b6aac2cd"
+    "ab2d9a281e00626802890d467965b07ee848896a8746d2546024dedd1ef912ba"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does
@@ -118,49 +118,54 @@ REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
 # excluded to avoid a recursive self-hash.
 ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION = "scripts/verify_pinned_build_inputs.py"
 REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256 = (
-    "de13ec28311bb91c46802628254587d21513ed2e4d6214be2e16273f6c7a7fac"
+    "62724471b54b697b386e00c02fedcc66775b2b752b924ef66afac9d84fbb94aa"
 )
 # Level 1 structural identities for the fixed release-policy functions.  AST
 # identities deliberately omit source locations so formatting cannot alter the
 # result.  They detect reviewed-function drift; exact Git/hosted-CI identity is
 # still the external trust root and these checks are not authentication.
 GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256 = {
-    "_publish_and_confirm_stage": "ff488d2364ad4d0d2b37bb6d297e9f9ff2df60a4dec9cb83386af2c08302aa75",
+    "_publish_and_confirm_stage": "f8647aa681a7e02ca7e38be3f18cfd903fdc2c9cfedf938d0f8313f407dc1c93",
     "_require_hosted_ci_source_binding": "63a05e630f3622bbcd4d5b418ebe8174487d8690ea60b383147bd24e87696f0a",
-    "_verified_prepackage_inputs": "c41fe5eff769b2dc711fceea49a46ec5c5ab153a56b01688fc7216509eb375bc",
-    "_verified_package_sets": "6d530c9583863c1b56baa56554f2c8e576d90f0797c113e3d15dada9f8805b56",
+    "_verified_prepackage_inputs": "c589cf53c023a32ba78e095490d36d2a168433092f6dd572af79e83f26576aa7",
+    "_verified_package_sets": "03322fad12344a0f9dbf70acaf152a78a6fa09778794c52202bc6c804110791d",
     "_verified_migration_journals": "aae37ebedddaa00d345475f26ed45e28d69d1097bee7a9a9997b6dd63b7bcc28",
     "_expected_candidate_from_prepackage": "6157ac3c2f944787433c9db2ed8bdc95e80d88866729b5a2351fd7c15975e42e",
     "_require_migration_matches_prepackage": "621ca9a9f33a1290d8a473b96e0b479a1701b6092470755b9d5fb6d4537d127c",
-    "_verified_acceptance_inputs": "099413649138b7298d94930f60dc51fcfa0927a6c7af5d60bd44fc623b53db3f",
-    "_verified_runtime_acceptance_adapter": "e89c9d30ea3c700bd202ce95df6ceae63842ca7145d1c89a5c1c6348977a8f6e",
-    "_ga_acceptance_files": "1572b84080b776102885d6f1cd914d172f6689a1865558bd142de64c51868444",
-    "_prepackage_files": "8c2e8dce700bd1e06e7a416d08b9d5f7c45c8eef499419ecab4ede854dc6d690",
-    "build_expected_stage_files": "3d95b22bbb13d933819def3b6c8765d421f3a57ff5ebffeffdb5d68f934bb580",
-    "verify_stage": "dc584562d9a2de621bda8278d2a488a538593161c710b667c6e2fad0545db427",
-    "verify_prepackage_authorization": "945770f694ef508fa668af79ee50928f4a3b0c91f527c007bc10ff2a6af7216a",
-    "verify_publication_authorization": "181dd93f19fa706c5c25b839bf63b4f0fc4caf61656e87b5f20ff72768767d20",
-    "derive_runtime_expectation": "3489567d56cae3ed2622e6f63b5dcfbe93a62e4865162d349c44b9d1371f7c75",
-    "seal_prepackage": "a3cca34f6d0643fdcf4c49424b79d83d66d5dbe09f11cef11f635fa826de18cf",
-    "seal_ga_acceptance": "18dc35ad031f77ab9e8ef6354b3006a1f0eb2161d0322ed2f18d1ff5703ad638",
-    "seal_publication": "21da40a41c53882fd796901730cb261fd734974b6f5fc7c63fe46dd1deddfabb",
-    "_compose_stage_files": "2072ccb3f22bf69da5a463a1e7a1f260fb246f7ed635551c3eeffaba4195bb8d",
+    "_verified_acceptance_inputs": "6a326b17cf90c28e4410a5b883676d4c64d79c18c9d87e7b9e6a1717d561e702",
+    "_verified_runtime_acceptance_adapter": "443a7e170b94947c858962921fef61341544dba2c7f01d425a4fd9b799dc9d1e",
+    "_ga_acceptance_files": "d4530d6ef4c092df45eab0dd91f0751872ad82f69c0a8d011f5a0382e3cb9023",
+    "_prepackage_files": "6f93a995b7aa3a8efcee95c6b423e259d153a26b3d0cc7b7c7d33f5c317f5d8c",
+    "build_expected_stage_files": "48ccccf9fffbad3948ac662cffd812856ad39863be5410c15e6d521a2f7fabda",
+    "verify_stage": "9b60090cc53552fe01d9891ec634678b9faa6df7cb5bd40b7ced755b9d8c0dd8",
+    "verify_prepackage_authorization": "0b9ae7f3ec556847e8f65af5a4760c25eb359552d42de8e3cba26cf09629f29a",
+    "verify_publication_authorization": "cdc26323dba3a714add18e1e30394717e3a98eafef0e87adfa460f7a0b67ae61",
+    "derive_runtime_expectation": "0387bf6a3c1685b75e2c2b4af766e03052162dd37bcfc910123fe268594a4154",
+    "seal_prepackage": "3d63970071f5c47783136635b7091ce7f352f91f9cba15019f37f16dd9a5b223",
+    "seal_ga_acceptance": "ec80bc7f5cb0267e51b534a2e17699d17ac3ed5b7e560bd31c1985889ffa3c49",
+    "seal_publication": "808fbaaea13245bb940eecaf1abc047f472211f8e1e95192a34f47e4a71e1f89",
+    "_compose_stage_files": "284e186baba2f7dbb21d02b3fc3fb2380e86ada30464b4ceb81a5df9d459ce8f",
     "_current_stage_executor": "4640733086dffe90fffdef7b33fc52163268546e16d404200ee6b18eb9517b55",
-    "_verify_stage": "10a63bfbd1b757f1f122074dee7ea109e4c8b39e9518c1760902d0929e34ada6"
+    "_verify_stage": "8f6f61fd8a69a137b8bb5cce99fd6a7f1104f7ee5558162d92072213cdfc594f"
 }
-GA_RELEASE_CLI_MAIN_AST_SHA256 = {
-    "scripts/ga_runtime_acceptance_cli.py": "3d791617f96229d5f18be034fbd5a8f2598ab2bf56cbac3092773aba70c075b1",
-    "scripts/release_artifact_set_cli.py": "45af1129991a4802429fedddacc4eb532e6ec8f9455cc6553f2239e0885a7d4e",
+GA_RELEASE_CLI_FUNCTION_AST_SHA256 = {
+    "scripts/ga_runtime_acceptance_cli.py": {
+        "_existing_runtime_outputs": "d37a6c6a3011b0acfa634f7a9f6ff2aadb24eb0750b0f762a182f469d1e74063",
+        "_run_runtime_command": "84b2acfa2fd1f5858b14f688e78d928784ec82713b999dafb30fa7f0df21e3fc",
+        "main": "e5b7736ffa5a8d72160b18c08cb16678f50b78a4d5d1d718498aa27ee096fa68"
+    },
+    "scripts/release_artifact_set_cli.py": {
+        "_run_verification_command": "679c3827128d6ec7fbcbf3e2b3c1bd938a54470efe304a32540bc5cad64fa862",
+        "main": "7144daa7b40662a231b907a366ea1798b234f9306c672cce77258cf5aa26631b"
+    }
 }
 PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256 = {
-    "_artifact_binding_surface": "18b90d7d34036b0a51c55daef674b9edc0d404aaf6d579ce488099de71114890",
+    "_artifact_binding_surface": "fae882ae2244166f36c3a5376b9a3e8777ce2aefc41c0cf852b5fe5bbc2f3e77",
     "_verify_build_scripts": "a8cf93cc988322f742d31a3914338d53eb4e805ceb87422b164ca25da8933910",
-    "_verify_pinned_verifier_structure": (
-        "5d96a84581058e47ab256211dbc97d5c7e4728c770e515a1ab2b72bd2004743c"
-    ),
+    "_verify_pinned_verifier_structure": "3ad60e2d9ef3f43529da3b95b1401fb209502f700ba4c35267d54c43689426da"
 }
 PINNED_VERIFIER_MODULE_AST_SHA256 = (
-    "f531d7f2c1aa17b82f073d9283075c2f7c1d68547d517ec6a0f1a6b55424c104"
+    "03daa67865da9fcf5008e749aa19bdfb4f6a971612348f6d55357190c11d6910"
 )
 NATIVE_LOCK_FIELDS = frozenset(
     {"go", "gomobile", "singBox", "singBoxForAppleReference"}
@@ -881,6 +886,8 @@ def _direct_call_positions(
     call_names: frozenset[str],
     *,
     require_unconditional: bool = False,
+    verified_alias_targets: tuple[ast.Name, ...] = (),
+    protected_provider_names: frozenset[str] = frozenset(),
 ) -> dict[str, list[int]]:
     positions = {name: [] for name in call_names}
 
@@ -896,6 +903,7 @@ def _direct_call_positions(
         return ".".join(reversed(parts))
 
     protected_names = {name for name in call_names if "." not in name}
+    protected_names.update(protected_provider_names)
     forbidden_control_calls = frozenset(
         {
             "builtins.eval",
@@ -932,6 +940,7 @@ def _direct_call_positions(
             isinstance(node, ast.Name)
             and isinstance(node.ctx, (ast.Store, ast.Del))
             and node.id in protected_names
+            and node not in verified_alias_targets
         ) or (
             isinstance(node, ast.arg)
             and node.arg in protected_names
@@ -1444,10 +1453,40 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
             },
         )
 
+    verified_alias_targets: dict[str, tuple[ast.Name, ...]] = {}
+    if relative == contract_relative:
+        freeze_function = functions["_verified_prepackage_inputs"]
+        alias_assignments = [
+            node
+            for node in freeze_function.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "selected_freeze_verifier"
+                for target in node.targets
+            )
+        ]
+        expected_alias = ast.parse(
+            "selected_freeze_verifier = "
+            "verify_frozen_candidate if freeze_verifier is None else freeze_verifier"
+        ).body[0]
+        if (
+            len(alias_assignments) != 1
+            or ast.dump(alias_assignments[0], include_attributes=False)
+            != ast.dump(expected_alias, include_attributes=False)
+        ):
+            raise PinnedInputError("GA frozen verifier provider selection differs from policy")
+        # Admit only this exact, unconditional provider selection. Any later
+        # assignment, deletion, argument shadow or global rebind still fails.
+        target = alias_assignments[0].targets[0]
+        if not isinstance(target, ast.Name):
+            raise PinnedInputError("GA frozen verifier provider target is invalid")
+        verified_alias_targets[freeze_function.name] = (target,)
+
     critical_calls = {
         "_verified_prepackage_inputs": frozenset(
             {
-                "verify_frozen_candidate",
+                "selected_freeze_verifier",
                 "validate_ci_lane_document",
                 "validate_hosted_ci_receipt_offline",
                 "_require_hosted_ci_source_binding",
@@ -1530,6 +1569,12 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
             functions[function_name],
             expected_calls,
             require_unconditional=function_name != "build_expected_stage_files",
+            verified_alias_targets=verified_alias_targets.get(function_name, ()),
+            protected_provider_names=(
+                frozenset({"verify_frozen_candidate"})
+                if function_name == "_verified_prepackage_inputs"
+                else frozenset()
+            ),
         )
         if any(len(observed) != 1 for observed in positions.values()):
             raise PinnedInputError(
@@ -1619,7 +1664,10 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
                     and node.args[0].id == "repository"
                     and isinstance(node.args[1], ast.Constant)
                     and isinstance(node.args[1].value, str)
-                    and not node.keywords
+                    and len(node.keywords) == 1
+                    and node.keywords[0].arg == "freeze_verifier"
+                    and isinstance(node.keywords[0].value, ast.Name)
+                    and node.keywords[0].value.id == "freeze_verifier"
                     else None
                 )
                 observed.append((node.lineno, stage))
@@ -1648,24 +1696,32 @@ def _verify_orchestrator_release_guard(module: ast.Module, relative: str) -> Non
 
 
 def _verify_ga_release_cli_guard(module: ast.Module, relative: str) -> None:
-    expected_sha256 = GA_RELEASE_CLI_MAIN_AST_SHA256.get(relative)
-    if expected_sha256 is None:
+    expected_functions = GA_RELEASE_CLI_FUNCTION_AST_SHA256.get(relative)
+    if expected_functions is None:
         raise PinnedInputError("GA release CLI guard was applied to an unexpected module")
     functions = [
         node
         for node in module.body
-        if isinstance(node, ast.FunctionDef) and node.name == "main"
+        if isinstance(node, ast.FunctionDef)
     ]
-    if len(functions) != 1 or functions[0].decorator_list:
+    if (
+        {node.name for node in functions} != set(expected_functions)
+        or len(functions) != len(expected_functions)
+        or any(node.decorator_list for node in functions)
+        or "main" not in expected_functions
+    ):
         raise PinnedInputError("GA release CLI main entrypoint differs from policy")
-    observed_sha256 = hashlib.sha256(
-        ast.dump(
-            functions[0],
-            annotate_fields=True,
-            include_attributes=False,
-        ).encode("utf-8")
-    ).hexdigest()
-    if observed_sha256 != expected_sha256:
+    observed_functions = {
+        node.name: hashlib.sha256(
+            ast.dump(
+                node,
+                annotate_fields=True,
+                include_attributes=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        for node in functions
+    }
+    if observed_functions != expected_functions:
         raise PinnedInputError("GA release CLI injection AST differs from policy")
     dispatches = [
         statement
@@ -1737,7 +1793,7 @@ def _verify_pinned_verifier_structure(module: ast.Module) -> None:
         "ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION",
         "REQUIRED_ARTIFACT_SOURCE_DIGESTS_SHA256",
         "GA_RELEASE_POLICY_GUARD_FUNCTION_AST_SHA256",
-        "GA_RELEASE_CLI_MAIN_AST_SHA256",
+        "GA_RELEASE_CLI_FUNCTION_AST_SHA256",
         "PINNED_VERIFIER_GUARD_FUNCTION_AST_SHA256",
         "PINNED_VERIFIER_MODULE_AST_SHA256",
         "TAURI_CLI_INSTALLER_RELATIVE_PATH",
@@ -2140,7 +2196,7 @@ def _artifact_binding_surface(source: str, relative: str) -> str:
             "scripts/publication/ga_release_contract.py",
         }:
             _verify_orchestrator_release_guard(module, relative)
-        elif relative in GA_RELEASE_CLI_MAIN_AST_SHA256:
+        elif relative in GA_RELEASE_CLI_FUNCTION_AST_SHA256:
             _verify_ga_release_cli_guard(module, relative)
         elif relative == ARTIFACT_SOURCE_DIGEST_SELF_EXCLUSION:
             _verify_pinned_verifier_structure(module)

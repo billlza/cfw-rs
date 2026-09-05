@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
@@ -13,7 +14,7 @@ import stat
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts import candidate_freeze
 from scripts import release_signing_plan
@@ -949,6 +950,94 @@ class CandidateFreezeTests(unittest.TestCase):
             candidate_freeze.verify_frozen_candidate(self.repository)
         verifier.assert_called_once_with(self.repository, self.final)
         self.assertEqual(caught.exception.code, "updater_verifier_unavailable")
+
+    def test_verification_session_reopens_every_freeze_and_detects_changed_input(self) -> None:
+        frozen = self.freeze()
+        proof = candidate_freeze.verify_possession_proof(self.repository, self.final)
+        embedded = Mock()
+
+        @contextmanager
+        def session(repository: Path):
+            self.assertEqual(repository, self.repository)
+            yield embedded
+
+        def possession(repository: Path, root: Path, *, embedded_verifier):
+            self.assertEqual((repository, root), (self.repository, self.final))
+            self.assertIs(embedded_verifier, embedded)
+            embedded_verifier(repository, root)
+            return proof
+
+        with patch.object(
+            candidate_freeze, "production_embedded_verifier_session", side_effect=session
+        ) as opened, patch.object(
+            candidate_freeze, "verify_possession_proof", side_effect=possession
+        ), candidate_freeze.frozen_candidate_verification_session(self.repository) as verify:
+            self.assertEqual(verify(self.repository), frozen)
+            self.assertEqual(verify(self.repository), frozen)
+            changed = self.final / "pre-sign/Clash for Mac.app/Contents/changed.txt"
+            changed.write_text("changed after verification", encoding="utf-8")
+            with self.assertRaises(candidate_freeze.CandidateFreezeQuarantined):
+                verify(self.repository)
+
+        opened.assert_called_once_with(self.repository)
+        self.assertEqual(embedded.call_count, 3)
+
+    def test_verification_session_rejects_other_artifact_and_closed_use(self) -> None:
+        @contextmanager
+        def session(_repository: Path):
+            yield Mock()
+
+        with patch.object(
+            candidate_freeze, "production_embedded_verifier_session", side_effect=session
+        ), patch.object(candidate_freeze, "verify_frozen_candidate") as reopen:
+            with candidate_freeze.frozen_candidate_verification_session(self.repository) as verify:
+                with tempfile.TemporaryDirectory() as other:
+                    with self.assertRaises(candidate_freeze.CandidateFreezeError) as caught:
+                        verify(Path(other).resolve())
+                    self.assertEqual(caught.exception.code, "verifier_session_repository_mismatch")
+            with self.assertRaises(candidate_freeze.CandidateFreezeError) as caught:
+                verify(self.repository)
+            self.assertEqual(caught.exception.code, "verifier_session_closed")
+        reopen.assert_not_called()
+
+    def test_verification_session_entry_and_cleanup_failures_remain_typed(self) -> None:
+        for failure_at_entry in (True, False):
+            failure = candidate_freeze.UpdaterKeyPossessionOperationalError("timeout")
+
+            @contextmanager
+            def session(_repository: Path):
+                if failure_at_entry:
+                    raise failure
+                yield Mock()
+                raise failure
+
+            with self.subTest(entry=failure_at_entry), patch.object(
+                candidate_freeze, "production_embedded_verifier_session", side_effect=session
+            ), self.assertRaises(candidate_freeze.CandidateFreezeError) as caught:
+                with candidate_freeze.frozen_candidate_verification_session(self.repository):
+                    pass
+            self.assertEqual(caught.exception.code, "updater_verifier_unavailable")
+            self.assertIs(caught.exception.__cause__, failure)
+
+    def test_verification_session_cleanup_preserves_primary_error_and_cause(self) -> None:
+        cause = OSError("original source read failed")
+        primary = candidate_freeze.CandidateFreezeError("source_changed", "original failure")
+
+        @contextmanager
+        def session(_repository: Path):
+            try:
+                yield Mock()
+            finally:
+                raise candidate_freeze.UpdaterKeyPossessionOperationalError("timeout")
+
+        with patch.object(
+            candidate_freeze, "production_embedded_verifier_session", side_effect=session
+        ), self.assertRaises(candidate_freeze.CandidateFreezeError) as caught:
+            with candidate_freeze.frozen_candidate_verification_session(self.repository):
+                raise primary from cause
+        self.assertIs(caught.exception, primary)
+        self.assertIs(caught.exception.__cause__, cause)
+        self.assertIn("secondary frozen candidate verifier cleanup failure", " ".join(primary.__notes__))
 
 
 if __name__ == "__main__":

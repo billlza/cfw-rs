@@ -10,6 +10,8 @@ lane document, and the saved toolchain identity all describe one build.
 from __future__ import annotations
 
 import argparse
+from enum import Enum
+import hashlib
 import json
 import os
 import re
@@ -24,12 +26,13 @@ if __package__:
         derive_toolchain_binding,
         toolchain_sha256,
     )
-    from .publication.common import PublicationError
+    from .publication.common import PublicationError, canonical_json
     from .publication.bounded_process import BoundedProcessError, run_bounded_process
     from .publication.graph_model import load_pins
     from .publication.release_environment import release_tool_environment
     from .publication.sealed_manifest import _ci_lane_document
     from .release_python_runtime import require_closed_release_runtime
+    from .repository_source_identity import SourceIdentityError, current_identity
 else:
     from hash_artifact import SUPPORTED_ALGORITHMS, build_manifest
     from publication.ci_lanes import (
@@ -37,12 +40,13 @@ else:
         derive_toolchain_binding,
         toolchain_sha256,
     )
-    from publication.common import PublicationError
+    from publication.common import PublicationError, canonical_json
     from publication.bounded_process import BoundedProcessError, run_bounded_process
     from publication.graph_model import load_pins
     from publication.release_environment import release_tool_environment
     from publication.sealed_manifest import _ci_lane_document
     from release_python_runtime import require_closed_release_runtime
+    from repository_source_identity import SourceIdentityError, current_identity
 
 
 MAX_BINDING_DOCUMENT_BYTES = 64 * 1024 * 1024
@@ -289,6 +293,48 @@ def derive_artifact_toolchain_metadata(repository: Path) -> dict[str, str]:
     artifact source. Both notarization and dormant installation use this one
     read-only adapter; the fixed nine-field metadata format is unchanged.
     """
+    output_bytes = _run_artifact_toolchain_verifier(repository, _ArtifactToolchainOperation.METADATA)
+    try:
+        output = output_bytes.decode("ascii", errors="strict")
+    except UnicodeDecodeError as error:
+        raise ArtifactToolchainError(
+            "artifact_toolchain_output_invalid",
+            "the frozen source's toolchain verifier returned non-ASCII identities",
+        ) from error
+    values = output.removesuffix("\n").split(" ")
+    if (
+        len(values) != len(TOOLCHAIN_METADATA_ORDER)
+        or output != " ".join(values) + "\n"
+        or any(SHA256_RE.fullmatch(value) is None for value in values)
+    ):
+        raise ArtifactToolchainError(
+            "artifact_toolchain_output_invalid",
+            "the frozen source's toolchain verifier returned malformed identities",
+        )
+    return dict(zip(TOOLCHAIN_METADATA_ORDER, values, strict=True))
+
+
+class _ArtifactToolchainOperation(Enum):
+    METADATA = "metadata"
+    CI_BINDING = "ci-binding"
+
+
+def _artifact_source_identity(repository: Path, environment: dict[str, str]) -> dict[str, str]:
+    try:
+        return current_identity(repository, require_clean=True, environment=environment)
+    except (OSError, SourceIdentityError) as error:
+        raise ArtifactToolchainError(
+            "artifact_toolchain_source_invalid",
+            "the frozen toolchain source is not one clean readable identity",
+        ) from error
+
+
+def _run_artifact_toolchain_verifier(
+    repository: Path,
+    operation: _ArtifactToolchainOperation,
+    release_environment: dict[str, str] | None = None,
+) -> bytes:
+    """Run one of the two fixed read-only operations through the artifact launcher."""
     require_closed_release_runtime()
     try:
         metadata = repository.lstat()
@@ -308,13 +354,25 @@ def derive_artifact_toolchain_metadata(repository: Path) -> dict[str, str]:
             "artifact_toolchain_repository_invalid",
             "artifact toolchain repository is unavailable",
         ) from error
+    if operation is _ArtifactToolchainOperation.METADATA:
+        entry = '"$1/scripts/candidate_artifact_binding.py" --repository "$1"'
+    elif operation is _ArtifactToolchainOperation.CI_BINDING:
+        entry = '"$1/scripts/sealed_evidence_manifest.py" ci-toolchain-binding'
+    else:
+        raise ArtifactToolchainError(
+            "artifact_toolchain_operation_invalid", "unknown artifact toolchain verification operation"
+        )
+    environment = dict(os.environ) if release_environment is None else dict(release_environment)
+    source_identity = (
+        _artifact_source_identity(repository, environment)
+        if operation is _ArtifactToolchainOperation.CI_BINDING else None
+    )
     command = [
         "/bin/bash",
         "-p",
         "-c",
         'set -euo pipefail; source "$1/scripts/release_python_launcher.sh"; '
-        'cfw_run_release_python_script "$1" '
-        '"$1/scripts/candidate_artifact_binding.py" --repository "$1"',
+        'cfw_run_release_python_script "$1" ' + entry,
         "artifact-toolchain-verification",
         str(repository),
     ]
@@ -322,7 +380,7 @@ def derive_artifact_toolchain_metadata(repository: Path) -> dict[str, str]:
         result = run_bounded_process(
             command,
             cwd=repository,
-            environment=dict(os.environ),
+            environment=environment,
             timeout=1800,
             output_limit=4 * 1024 * 1024,
         )
@@ -342,24 +400,71 @@ def derive_artifact_toolchain_metadata(repository: Path) -> dict[str, str]:
             "the frozen source's toolchain verifier failed or emitted diagnostics",
             exit_code=result.returncode,
         )
-    try:
-        output = result.stdout.decode("ascii", errors="strict")
-    except UnicodeDecodeError as error:
+    if source_identity is not None and _artifact_source_identity(repository, environment) != source_identity:
         raise ArtifactToolchainError(
-            "artifact_toolchain_output_invalid",
-            "the frozen source's toolchain verifier returned non-ASCII identities",
-        ) from error
-    values = output.removesuffix("\n").split(" ")
-    if (
-        len(values) != len(TOOLCHAIN_METADATA_ORDER)
-        or output != " ".join(values) + "\n"
-        or any(SHA256_RE.fullmatch(value) is None for value in values)
-    ):
-        raise ArtifactToolchainError(
-            "artifact_toolchain_output_invalid",
-            "the frozen source's toolchain verifier returned malformed identities",
+            "artifact_toolchain_source_changed",
+            "the frozen source changed while its toolchain binding was being derived",
         )
-    return dict(zip(TOOLCHAIN_METADATA_ORDER, values, strict=True))
+    return result.stdout
+
+
+def _binding_string_map(value: object, fields: set[str], label: str) -> None:
+    if type(value) is not dict or set(value) != fields:
+        raise CandidateBindingError(f"{label} has an unexpected field set")
+    if any(
+        type(item) is not str or not item or len(item) > 16 * 1024
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in item)
+        for item in value.values()
+    ):
+        raise CandidateBindingError(f"{label} must contain bounded single-line identities")
+
+
+def derive_artifact_ci_toolchain_binding(
+    repository: Path,
+    release_environment: dict[str, str] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Read the frozen v1 binding without importing the executor's source policy."""
+    output = _run_artifact_toolchain_verifier(
+        repository, _ArtifactToolchainOperation.CI_BINDING, release_environment
+    )
+    try:
+        lines = output.split(b"\n")
+        if len(lines) != 3 or lines[2] != b"" or not lines[1].startswith(b"toolchain_sha256: "):
+            raise CandidateBindingError("artifact CI binding must contain exactly two complete lines")
+        identity = json.loads(lines[0].decode("utf-8"), object_pairs_hook=_strict_object)
+        digest = _sha256(lines[1][len(b"toolchain_sha256: "):].decode("ascii"), "artifact CI toolchain digest")
+        if type(identity) is not dict or canonical_json(identity) != lines[0] + b"\n":
+            raise CandidateBindingError("artifact CI binding is not canonical JSON")
+        if set(identity) != {
+            "document", "pins_path", "pins_sha256", "toolchain_versions", "toolchain_digests",
+            "release_tree_sha256", "apple_toolchain", "resolved",
+        } or identity["pins_path"] != "scripts/dependency_pins.env":
+            raise CandidateBindingError("artifact CI binding has an unexpected schema")
+        _binding_string_map(identity["toolchain_versions"], {
+            "go", "gomobile", "govulncheck", "node", "rust", "sing_box",
+        }, "artifact toolchain versions")
+        _binding_string_map(identity["toolchain_digests"], {
+            "go_darwin_arm64_sha256", "gomobile_module_sum", "govulncheck_module_sum",
+            "node_darwin_arm64_sha256", "rust_release_toolchain_surface_sha256",
+        }, "artifact toolchain digests")
+        _binding_string_map(identity["apple_toolchain"], {
+            "macos_deployment_target", "xcode_build_version", "xcode_version",
+        }, "artifact Apple toolchain")
+        _binding_string_map(identity["resolved"], {
+            "bash", "cargo", "cargo-audit", "cargo-deny", "cargo-tauri", "git", "go",
+            "gomobile", "govulncheck", "node", "npm", "python3", "rust-toolchain-surface",
+            "rustc", "swift", "xcodebuild", "xcodegen", "zsh",
+        }, "artifact resolved toolchains")
+        pins_payload = _read_regular(repository / "scripts/dependency_pins.env", "artifact dependency pins")
+        if identity["pins_sha256"] != hashlib.sha256(pins_payload).hexdigest():
+            raise CandidateBindingError("artifact CI binding names different dependency pins")
+        toolchain_manifest_metadata(digest, identity)
+    except (CandidateBindingError, UnicodeError, json.JSONDecodeError, _DuplicateFieldError) as error:
+        raise ArtifactToolchainError(
+            "artifact_toolchain_output_invalid",
+            f"the frozen source's CI toolchain binding is invalid: {error}",
+        ) from error
+    return digest, identity
 
 
 def main() -> None:

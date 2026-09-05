@@ -766,7 +766,11 @@
       "CI lane journal changed while lanes were executing",
       "LANE_PROCESS_UMASK = 0o022",
       "umask=LANE_PROCESS_UMASK",
-      "admission-failure.json"
+      "admission-failure.json",
+      "binding_reader: ToolchainBindingReader | None = None",
+      "read_binding(repository, release_environment=execution_environment)",
+      "read_binding(repository, release_environment=ending_environment)",
+      "read_binding(repository, release_environment=admitted_environment)"
     ],
     "scripts/publication/release_environment.py": [
       "def release_tool_environment(",
@@ -847,7 +851,10 @@
       "artifact_toolchain_repository_invalid",
       "artifact_toolchain_output_invalid",
       "run_bounded_process(",
-      "release_python_launcher.sh"
+      "release_python_launcher.sh",
+      "derive_artifact_ci_toolchain_binding",
+      "_ArtifactToolchainOperation",
+      "ci-toolchain-binding"
     ],
     "scripts/publication/cargo_collector.py": [
       "release_environment: dict[str, str]",
@@ -2474,7 +2481,8 @@
       "cfw_run_release_python_script",
       "error.reason != \"timeout\"",
       "capture_frozen_release_sources",
-      "--artifact-repository"
+      "--artifact-repository",
+      "binding_reader = _read_artifact_ci_toolchain_binding"
     ],
     "scripts/physical_capture/packet.py": [
       "PACKET_ENDPOINT_TRANSPORT_PORT: Final = 44333",
@@ -3176,11 +3184,11 @@
     "scripts/build_unsigned_candidate.sh": "58c9028c05ef97b3f95fbcae5a5334fb44edba7de41b267ad75a9c0680056bd1",
     "scripts/build_signed_candidate.sh": "d08ceb42d27cc756798a6e4ee1a3e8ec4dc50c4c791ad4d8068e5562947b50cf",
     "scripts/release_tool_environment.sh": "8f28973fb951a1026e4783d1671f7a442c42b89234836417902f9f065b639e65",
-    "scripts/publication/ci_lanes.py": "8671f7d8ebf1ae4e1876aef2d4601a192ca153ebd6ca0432457d5a73810b3bdf",
+    "scripts/publication/ci_lanes.py": "910cc20a03229d3d1398d0c427a420d636db54bb1e6899a7d55f3661c373ea21",
     "scripts/publication/release_environment.py": "42c49db77ca45099349b15e56a9ec560e939de99bafbdf9344ec5ebaa198c231",
     "scripts/publication/release_toolchains.py": "afcb92185b2dac89667c4b2fc4e9f10ed0755bc743d882852b9132104f990084",
     "scripts/publication/graph_model.py": "779440a6ec49dc84e3085a070de2c0612ce93af65e28348da89cc52aa1cfa1ad",
-    "scripts/candidate_artifact_binding.py": "30dbf0a3e7652f8c8551d7bc70cb4e3fe667d6fa1a249317629d8bdaf5c57109",
+    "scripts/candidate_artifact_binding.py": "760ace90555750e40c846ba9438eecda83675904ac202a242303e167c0ffd657",
     "scripts/publication/cargo_collector.py": "06f3a6612d17eb5277e3e21e7fdeb7eacdcce0e12375773a9ebb1d2e9091a74f",
     "scripts/publication/go_collector.py": "4b50df2bce8b509923491d6022f5ff55c64bc147f02dcea5861b90ded5bbbb6a",
     "scripts/publication/native_collector.py": "1c339deaf83c555eaf6c21112a575a30361e296c5ef680701b4592fdc30895b3",
@@ -3278,7 +3286,7 @@
     "scripts/publication/sealed_closure.py": "6fe148e7b10d0243fce0330740febff1766504714539fb84b6d9fd199da6119b",
     "scripts/publication/final_candidate.py": "c755ba8a68fb457768c4d22995dbd6774f657eed457e29cefc382e1f9225bd59",
     "scripts/validated_candidate_evidence.py": "e3cc5f017ee186bba965dbbbe477ad1a46bba2427fc8ebebee249a6c431fec13",
-    "scripts/sealed_evidence_manifest.py": "d6a0a311d1c2958911e786275a3db7d0211ec402e66eb5132ffa9cf1ebc263f3",
+    "scripts/sealed_evidence_manifest.py": "f024d80654bf27fc534fa17215d1fd00e134314182d9a28bdef77827873ec363",
     "scripts/physical_capture/packet.py": "eec2b6cfea3037015ff0a0fc612446b03aeabad5354c10b04b2e3521f03bb580",
     "scripts/verify_release_app.sh": "8e9061bef7c248b054b21dadf448509e59b326f5366d76048ff074a427ed6efb",
     "scripts/candidate_freeze.py": "438a595ea8f8935592beb8733ca03b8d3f702dce63459a217c5841fd9413aa55",
@@ -3297,7 +3305,7 @@
     "scripts/github_hosted_ci_receipt.py": "96abe52adc2838d12f0db4cacde040d0d0ad234ab13053a889ed8d8682e9db96",
     "scripts/ga_acceptance_environment.py": "e5c656e24a3d3f11a196c7620c4ce318fc092fba90bf8f5e295544e242c3e5ea",
     "scripts/ga_acceptance_journal_export.py": "415498ea2557800ac16b68dfec7dd3384a5cceba86c83079ed1effa6d4666cae",
-    "scripts/ga_runtime_acceptance.py": "865ad200146bf6c596f83aff86e37eeab6d95b816d5ff0965366014bb714a780",
+    "scripts/ga_runtime_acceptance.py": "5131c21a1aa180a7adfbcb5643d0f91a682f30c45566be6aece13013b54ff80d",
     "scripts/run_ga_acceptance_journal_export.sh": "09814281ef06e22a2b5c63b56cfc77c7bb9f548ca272b2e0c21dddc3abce1946",
     "scripts/run_ga_runtime_acceptance.sh": "2d1caafb53431e4970f41502e8ae1157d9580cb0c047d6ae9a4930cdb8d2a5be",
     "scripts/publication/release_contract.py": "218677d1a8a24f2fd47251372138dc68523cb3ee2b06bce8cd6d2917157dc2f4",

@@ -1750,6 +1750,96 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 finish_capture=complete,
             )
 
+    def test_collect_observes_extension_after_first_operator_approval(self) -> None:
+        runtime = FakeCollectorRuntime(self.fixture)
+        capture_runtime = self._capture_runtime()
+        run_command = runtime.run
+        capture_fixture_traffic = runtime.capture_traffic
+        extension_enabled = False
+        extension_observations: list[bool] = []
+
+        def observe(argv: list[str], *, timeout: int = 900) -> dict[str, object]:
+            receipt = run_command(argv, timeout=timeout)
+            if argv == ["/usr/bin/systemextensionsctl", "list"]:
+                extension_observations.append(extension_enabled)
+                if not extension_enabled:
+                    receipt["stdout"] = "0 extension(s)\n"
+            return receipt
+
+        def approve_extension(_delay: float) -> None:
+            nonlocal extension_enabled
+            extension_enabled = True
+
+        def transaction(*, case_id, begin_capture, exercise_test, finish_capture):
+            if not extension_enabled:
+                raise PacketHostError("tunnel_unavailable", "Tunnel is not ready")
+            begin_capture(object())
+            exercise_test(object())
+            finish_capture(object())
+            return typed_host_receipt(case_id)
+
+        source_patches = self._patch_evidence_sources()
+        diagnostics = io.StringIO()
+        with source_patches[0], source_patches[1], source_patches[2], patch.object(
+            runtime, "run", side_effect=observe
+        ), patch.object(
+            runtime, "capture_traffic", side_effect=capture_runtime.capture_traffic
+        ), patch.object(
+            capture_runtime, "_capture_traffic_bytes", side_effect=capture_fixture_traffic
+        ), patch(
+            "scripts.ga_runtime_acceptance.run_fixed_host_transaction",
+            side_effect=transaction,
+        ), patch(
+            "scripts.ga_runtime_acceptance.time.sleep", side_effect=approve_extension
+        ) as approval_wait, patch(
+            "scripts.ga_runtime_acceptance.sys.stderr", diagnostics
+        ):
+            result = collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=runtime,
+                challenge_bytes=b"C" * 32,
+                session_id=SESSION_ID,
+            )
+
+        approval_wait.assert_called_once_with(1.0)
+        self.assertIn("waiting for macOS approval", diagnostics.getvalue())
+        self.assertEqual(extension_observations, [True])
+        self.assertEqual(result["adapter"]["path"], ACCEPTANCE_RELATIVE.as_posix())
+        extension = json.loads(
+            (self.fixture.raw_root / "system-extension.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(extension["command"]["stdout"], system_extension_output())
+        self.assertEqual(extension["collection"]["session_id"], SESSION_ID)
+        self.assertEqual(extension["collection"]["challenge"], CHALLENGE)
+
+    def test_collect_rejects_unapproved_extension_after_traffic(self) -> None:
+        runtime = FakeCollectorRuntime(self.fixture)
+        extension_argv = ("/usr/bin/systemextensionsctl", "list")
+        runtime.receipts[extension_argv][0]["stdout"] = system_extension_output().replace(
+            "[activated enabled]", "[activated waiting for user]"
+        )
+        source_patches = self._patch_evidence_sources()
+        with source_patches[0], source_patches[1], source_patches[2], self.assertRaises(
+            GACollectionRecoveryRequired
+        ) as captured:
+            collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=runtime,
+                challenge_bytes=b"C" * 32,
+                session_id=SESSION_ID,
+            )
+
+        self.assertIn(
+            "fixed system extension is not both activated and enabled",
+            str(captured.exception.__cause__),
+        )
+        self.assertFalse(self.fixture.acceptance.exists())
+        self.assertFalse(self.fixture.raw_root.exists())
+
     def test_collect_owns_fixed_commands_tokens_raw_bytes_and_atomic_publication(self) -> None:
         runtime = FakeCollectorRuntime(self.fixture)
         source_patches = self._patch_evidence_sources()

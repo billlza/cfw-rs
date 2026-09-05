@@ -1587,6 +1587,19 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(PublicationError, "toolchain binding changed"):
             self.collect()
 
+    def test_injected_artifact_binding_is_used_at_every_admission_boundary(self) -> None:
+        artifact_identity = {**IDENTITY, "resolved": {"node": "artifact-policy-1"}}
+        artifact_digest = ci_lanes.toolchain_sha256(artifact_identity)
+        self.assertNotEqual(artifact_digest, TOOLCHAIN)
+        reader = Mock(return_value=(artifact_digest, artifact_identity))
+        result = self.collect(binding_reader=reader)
+        self.assertEqual(reader.call_count, 3)
+        self.assertEqual(result["toolchain_sha256"], artifact_digest)
+        self.assertEqual(result["toolchain_identity"], artifact_identity)
+        for call in reader.call_args_list:
+            self.assertEqual(call.args, (self.root,))
+            self.assertEqual(call.kwargs["release_environment"]["PATH"], "/usr/bin:/bin")
+
 
 class CiLaneCliTests(unittest.TestCase):
     def test_plain_collection_remains_independent_of_frozen_source_admission(self) -> None:
@@ -1608,6 +1621,7 @@ class CiLaneCliTests(unittest.TestCase):
         self.assertEqual(collect.call_args.args, (Path("/source"),))
         self.assertEqual(collect.call_args.kwargs["commit"], COMMIT)
         self.assertIsNone(collect.call_args.kwargs["executor_source"])
+        self.assertIsNone(collect.call_args.kwargs["binding_reader"])
 
     def test_frozen_collection_keeps_artifact_commands_and_allows_owned_external_journal(self) -> None:
         from scripts import sealed_evidence_manifest as cli
@@ -1641,7 +1655,19 @@ class CiLaneCliTests(unittest.TestCase):
             self.assertEqual(collect.call_args.kwargs["executor_source"], binding.executor.identity)
             self.assertEqual(collect.call_args.kwargs["output"], artifact / "stage-inputs/lanes.json")
             self.assertEqual(collect.call_args.kwargs["journal"], external)
+            self.assertIs(collect.call_args.kwargs["binding_reader"], cli._read_artifact_ci_toolchain_binding)
             check.assert_called_once_with(binding)
+
+    def test_artifact_query_error_is_translated_with_its_typed_cause(self) -> None:
+        from scripts import sealed_evidence_manifest as cli
+
+        cause = cli.ArtifactToolchainError("artifact_toolchain_verification_failed", "fixed policy failed", exit_code=7)
+        with (
+            patch.object(cli, "derive_artifact_ci_toolchain_binding", side_effect=cause),
+            self.assertRaisesRegex(cli.PublicationError, "artifact_toolchain_verification_failed, exit=7") as raised,
+        ):
+            cli._read_artifact_ci_toolchain_binding(Path("/artifact"), {"PATH": "/usr/bin:/bin"})
+        self.assertIs(raised.exception.__cause__, cause)
 
     def test_frozen_output_rejects_an_ancestor_link_before_collection(self) -> None:
         from scripts import sealed_evidence_manifest as cli

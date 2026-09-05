@@ -63,6 +63,10 @@ if __name__ == "__main__":
             raise SystemExit(f"error: sealed evidence manifest: {error}") from error
 
 if __package__:
+    from .candidate_artifact_binding import (
+        ArtifactToolchainError,
+        derive_artifact_ci_toolchain_binding,
+    )
     from .publication.ci_lanes import (
         DEFAULT_LIBBOX_OUTPUT,
         DEFAULT_LIBBOX_SOURCE_TEMPLATE,
@@ -114,6 +118,10 @@ if __package__:
     )
     from .repository_source_identity import SourceIdentityError, current_identity
 else:
+    from candidate_artifact_binding import (
+        ArtifactToolchainError,
+        derive_artifact_ci_toolchain_binding,
+    )
     from publication.ci_lanes import (
         DEFAULT_LIBBOX_OUTPUT,
         DEFAULT_LIBBOX_SOURCE_TEMPLATE,
@@ -1132,6 +1140,18 @@ def command_ci_toolchain_binding(_arguments: argparse.Namespace) -> None:
     print(f"toolchain_sha256: {digest}")
 
 
+def _read_artifact_ci_toolchain_binding(
+    repository: Path,
+    release_environment: dict[str, str] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    try:
+        return derive_artifact_ci_toolchain_binding(repository, release_environment)
+    except ArtifactToolchainError as error:
+        raise PublicationError(
+            f"artifact CI toolchain binding failed ({error.code}, exit={error.exit_code}): {error}"
+        ) from error
+
+
 def command_collect_ci_lanes(arguments: argparse.Namespace) -> None:
     """Run the required deterministic local lanes and record their exact results.
 
@@ -1144,6 +1164,7 @@ def command_collect_ci_lanes(arguments: argparse.Namespace) -> None:
     artifact_repository = arguments.artifact_repository
     executor_source = None
     source_recheck = None
+    binding_reader = None
     if artifact_repository is not None:
         if __package__:
             from .release_executor_source import (
@@ -1162,6 +1183,7 @@ def command_collect_ci_lanes(arguments: argparse.Namespace) -> None:
         source_identity = sources.artifact.identity
         executor_source = sources.executor.identity
         source_recheck = lambda: require_frozen_sources_unchanged(sources)
+        binding_reader = _read_artifact_ci_toolchain_binding
     else:
         source_identity = current_identity(repository)
     output = arguments.output
@@ -1186,6 +1208,7 @@ def command_collect_ci_lanes(arguments: argparse.Namespace) -> None:
         libbox_output=arguments.libbox_output,
         executor_source=executor_source,
         source_recheck=source_recheck,
+        binding_reader=binding_reader,
     )
     for lane in result["document"]["lanes"]:
         print(f"  lane {lane['id']}: {lane['status']} (exit {lane['exit_code']})")

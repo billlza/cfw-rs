@@ -76,7 +76,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from .common import (
     PublicationError,
@@ -1682,6 +1682,14 @@ LibboxReproductionVerifier = Callable[
 ]
 
 
+class ToolchainBindingReader(Protocol):
+    def __call__(
+        self,
+        repository: Path,
+        release_environment: dict[str, str] | None = None,
+    ) -> tuple[str, dict[str, Any]]: ...
+
+
 def collect_ci_lanes(
     repository: Path,
     *,
@@ -1699,6 +1707,7 @@ def collect_ci_lanes(
     report: Callable[[str], None] = print,
     executor_source: dict[str, str] | None = None,
     source_recheck: Callable[[], None] | None = None,
+    binding_reader: ToolchainBindingReader | None = None,
 ) -> dict[str, Any]:
     """Append one real collection attempt; promote only a fully passing document.
 
@@ -1716,6 +1725,7 @@ def collect_ci_lanes(
     _validate_executor_identity(executor_source)
     if executor_source is not None and source_recheck is None:
         raise PublicationError("CI lane executor identity requires source revalidation")
+    read_binding = derive_toolchain_binding if binding_reader is None else binding_reader
     pins = _pins(repository)
     execution_environment = release_tool_environment(repository, pins)
     expected_source_identity = {"repositoryCommit": commit, "releaseSourceSha256": release_source_sha256}
@@ -1725,7 +1735,7 @@ def collect_ci_lanes(
         raise PublicationError("local deterministic CI lanes require one clean release source identity") from error
     if starting_source_identity != expected_source_identity:
         raise PublicationError("unsigned CI lane inputs differ from the current release source identity")
-    digest, identity = derive_toolchain_binding(repository, release_environment=execution_environment)
+    digest, identity = read_binding(repository, release_environment=execution_environment)
     if sha256_bytes(canonical_json(identity)) != digest:
         raise PublicationError("CI lane toolchain digest differs from its canonical identity")
     execution_toolchain_root, execution_tree_digests = verified_release_toolchain_trees(
@@ -1832,7 +1842,7 @@ def collect_ci_lanes(
             if source_recheck is not None:
                 source_recheck()
             phase = "toolchain"
-            ending_digest, ending_identity = derive_toolchain_binding(repository, release_environment=ending_environment)
+            ending_digest, ending_identity = read_binding(repository, release_environment=ending_environment)
             ending_root, ending_trees = verified_release_toolchain_trees(repository, pins, environment=ending_environment)
             if (
                 ending_digest != digest or ending_identity != identity
@@ -1895,7 +1905,7 @@ def collect_ci_lanes(
                 if current_identity(repository, require_clean=True, environment=admitted_environment) != starting_source_identity:
                     raise PublicationError("release source changed before canonical CI publication")
                 admission_phase = "toolchain"
-                admitted_digest, admitted_identity = derive_toolchain_binding(repository, release_environment=admitted_environment)
+                admitted_digest, admitted_identity = read_binding(repository, release_environment=admitted_environment)
                 admitted_root, admitted_trees = verified_release_toolchain_trees(repository, pins, environment=admitted_environment)
                 if (
                     admitted_digest != digest or admitted_identity != identity

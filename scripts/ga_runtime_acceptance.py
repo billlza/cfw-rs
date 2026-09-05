@@ -2188,13 +2188,13 @@ COLLECTION_SUCCESS_STEPS: Final = (
     "launch-process-observation",
     "proxy-service-observation",
     "authority-service-observation",
-    "system-extension-observation",
     "high-risk-unknown-service-maintenance-action",
     "high-risk-unauthenticated-packet-control",
     "high-risk-extra-packet-control-argument",
     "traffic-dns_traffic",
     "traffic-tcp_traffic",
     "traffic-udp_traffic",
+    "system-extension-observation",
     "network-extension-binding",
     "shutdown-stop-restore",
     "shutdown-request",
@@ -3102,15 +3102,6 @@ def collect_ga_runtime_acceptance(
             argv=["/bin/launchctl", "print", f"system/{AUTHORITY_LABEL}"],
             timeout=60,
         )
-        system_extension = _step_command(
-            repository,
-            collection_path,
-            collection,
-            selected_runtime,
-            step="system-extension-observation",
-            argv=["/usr/bin/systemextensionsctl", "list"],
-            timeout=60,
-        )
         rejections = [
             _step_command(
                 repository,
@@ -3159,13 +3150,6 @@ def collect_ga_runtime_acceptance(
                 "check_id": "service_registration",
                 "collection": collection,
                 "commands": {"global_authority": authority, "proxy_agent": proxy},
-                "document": CHECK_DOCUMENT,
-                "schema_version": SCHEMA_VERSION,
-            },
-            "system-extension.json": {
-                "check_id": "system_extension",
-                "collection": collection,
-                "command": system_extension,
                 "document": CHECK_DOCUMENT,
                 "schema_version": SCHEMA_VERSION,
             },
@@ -3219,6 +3203,25 @@ def collect_ga_runtime_acceptance(
                 "send_commands": traffic["send_commands"],
                 "tokens": tokens,
             }
+        # The traffic transactions wait for the first macOS approval and
+        # prove Tunnel readiness. Observe the enabled extension after that
+        # boundary, while Tunnel is still active and before stop/restore.
+        system_extension = _step_command(
+            repository,
+            collection_path,
+            collection,
+            selected_runtime,
+            step="system-extension-observation",
+            argv=["/usr/bin/systemextensionsctl", "list"],
+            timeout=60,
+        )
+        documents["system-extension.json"] = {
+            "check_id": "system_extension",
+            "collection": collection,
+            "command": system_extension,
+            "document": CHECK_DOCUMENT,
+            "schema_version": SCHEMA_VERSION,
+        }
         _append_collection_event(
             repository,
             collection_path,

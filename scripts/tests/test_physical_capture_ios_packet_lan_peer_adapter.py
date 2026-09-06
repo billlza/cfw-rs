@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stdout
 from dataclasses import replace
+from datetime import datetime, timezone
 import hashlib
+import io
+import json
 from pathlib import Path
+import plistlib
+import shutil
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,6 +23,7 @@ from scripts.harness.packet_evidence import (
 from scripts.harness.raw_artifacts import canonical_json
 from scripts.physical_capture.execution import (
     CommandResult,
+    CommandSpec,
     ProbeExecutionError,
     command_sha256,
 )
@@ -31,6 +40,8 @@ from scripts.physical_capture.ios_packet_lan_peer_adapter import (
     validate_static_source_identity,
 )
 from scripts.physical_capture.ios_transport_peer import (
+    APP_EXECUTABLE,
+    BUNDLE_IDENTIFIER,
     IOSPeerDevice,
     device_identifier_sha256,
     device_inventory_command,
@@ -40,6 +51,41 @@ from scripts.physical_capture.ios_transport_peer import (
 
 DEVICE = "A0D0DA54-90DF-58E3-92B4-146CECE10AC7"
 UDID = "00008110-0012345678901234"
+
+
+@contextmanager
+def _source_checkout() -> Iterator[Path]:
+    repository = ios_packet_lan_peer_adapter.REPOSITORY_ROOT
+    identity_path = ios_packet_lan_peer_adapter.SOURCE_IDENTITY_PATH
+    members = [identity_path.relative_to(repository)]
+    members.extend(
+        Path("tools/physical-transport-peer-ios") / relative
+        for relative in ios_packet_lan_peer_adapter.SOURCE_TREE_PATHS
+    )
+    with tempfile.TemporaryDirectory() as root_text:
+        root = Path(root_text).resolve()
+        for relative in members:
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(repository / relative, destination)
+        with patch.object(
+            ios_packet_lan_peer_adapter, "REPOSITORY_ROOT", root
+        ), patch.object(
+            ios_packet_lan_peer_adapter,
+            "SOURCE_IDENTITY_PATH",
+            root / identity_path.relative_to(repository),
+        ):
+            yield root
+
+
+def _run_environment_source_gate(repository: Path) -> None:
+    script = Path(__file__).resolve().parents[1] / "verify_release_environment.sh"
+    prefix, remainder = script.read_text(encoding="utf-8").split("<<'PY'\n", 1)
+    gate = "\n" * (prefix.count("\n") + 1) + remainder.split("\nPY\n", 1)[0]
+    with patch.object(sys, "argv", ["-", str(repository)]), patch.object(
+        sys, "path", list(sys.path)
+    ):
+        exec(compile(gate, str(script), "exec"), {"__name__": "__main__"})
 
 
 def _build_version() -> dict[str, object]:
@@ -148,6 +194,102 @@ class IOSPacketLanPeerAdapterTests(unittest.TestCase):
             source.identity_sha256,
         )
 
+    def test_source_validation_requires_no_generated_deployment_inputs(self) -> None:
+        with _source_checkout() as root:
+            source = load_source_identity()
+            self.assertFalse((root / "target").exists())
+            observed = ios_packet_lan_peer_adapter.validate_source_identity(source)
+            self.assertEqual(
+                observed,
+                {
+                    "source_identity_file_sha256": source.file_sha256,
+                    "source_identity_sha256": source.identity_sha256,
+                    "source_tree_sha256": source.source_tree_sha256,
+                },
+            )
+            self.assertFalse((root / "target").exists())
+            for path in (
+                source.artifact_path,
+                source.profile_path,
+                source.entitlements_path,
+            ):
+                self.assertFalse(path.exists())
+
+    def test_environment_source_gate_accepts_missing_deployment_inputs(self) -> None:
+        with _source_checkout() as root, redirect_stdout(io.StringIO()) as stdout:
+            _run_environment_source_gate(root)
+            self.assertEqual(
+                stdout.getvalue(),
+                "iPhone Packet LAN source identity and source tree verified\n",
+            )
+            self.assertFalse((root / "target").exists())
+
+    def test_environment_source_gate_rejects_source_drift_without_success(self) -> None:
+        with _source_checkout() as root, redirect_stdout(io.StringIO()) as stdout:
+            source = root / "tools/physical-transport-peer-ios/App/AppDelegate.swift"
+            source.write_bytes(source.read_bytes() + b"\n// changed source\n")
+            with self.assertRaises(IOSPacketLanPeerError) as raised:
+                _run_environment_source_gate(root)
+            self.assertEqual(raised.exception.code, "ios_packet_lan_source_tree_stale")
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertFalse((root / "target").exists())
+
+    def test_source_validation_reopens_source_bytes_and_modes(self) -> None:
+        for mutation in ("content", "mode"):
+            with self.subTest(mutation=mutation), _source_checkout() as root:
+                source = load_source_identity()
+                member = root / "tools/physical-transport-peer-ios/App/AppDelegate.swift"
+                if mutation == "content":
+                    member.write_bytes(member.read_bytes() + b"\n// changed source\n")
+                else:
+                    original_mode = member.stat().st_mode & 0o777
+                    member.chmod(0o600 if original_mode != 0o600 else 0o644)
+                with self.assertRaises(IOSPacketLanPeerError) as raised:
+                    ios_packet_lan_peer_adapter.validate_source_identity(source)
+                self.assertEqual(
+                    raised.exception.code, "ios_packet_lan_source_tree_stale"
+                )
+
+    def test_source_validation_reopens_the_identity_document(self) -> None:
+        with _source_checkout():
+            source = load_source_identity()
+            identity = ios_packet_lan_peer_adapter.SOURCE_IDENTITY_PATH
+            identity.write_bytes(identity.read_bytes() + b"\n")
+            with self.assertRaises(IOSPacketLanPeerError) as raised:
+                ios_packet_lan_peer_adapter.validate_source_identity(source)
+            self.assertEqual(raised.exception.code, "ios_packet_lan_source_invalid")
+
+    def test_source_validation_rejects_a_stale_expected_identity(self) -> None:
+        with _source_checkout():
+            source = replace(load_source_identity(), identity_sha256="0" * 64)
+            with self.assertRaises(IOSPacketLanPeerError) as raised:
+                ios_packet_lan_peer_adapter.validate_source_identity(source)
+            self.assertEqual(raised.exception.code, "ios_packet_lan_source_changed")
+
+    def test_source_validation_rejects_untyped_expected_identity(self) -> None:
+        with self.assertRaises(IOSPacketLanPeerError) as raised:
+            ios_packet_lan_peer_adapter.validate_source_identity(self.source.as_identity())
+        self.assertEqual(raised.exception.code, "ios_packet_lan_source_invalid")
+
+    def test_source_validation_rejects_unsafe_or_missing_source_members(self) -> None:
+        for mutation in ("missing", "writable", "symlink"):
+            with self.subTest(mutation=mutation), _source_checkout() as root:
+                source = load_source_identity()
+                member = root / "tools/physical-transport-peer-ios/App/AppDelegate.swift"
+                if mutation == "missing":
+                    member.unlink()
+                elif mutation == "writable":
+                    member.chmod(0o666)
+                else:
+                    moved = member.with_name("saved-source.swift")
+                    member.rename(moved)
+                    member.symlink_to(moved)
+                with self.assertRaises(IOSPacketLanPeerError) as raised:
+                    ios_packet_lan_peer_adapter.validate_source_identity(source)
+                self.assertEqual(
+                    raised.exception.code, "ios_packet_lan_source_tree_invalid"
+                )
+
     def test_source_path_allows_a_missing_generated_tail(self) -> None:
         with tempfile.TemporaryDirectory() as root_text:
             root = Path(root_text).resolve()
@@ -179,22 +321,107 @@ class IOSPacketLanPeerAdapterTests(unittest.TestCase):
                 )
 
     def test_static_validation_still_requires_the_real_artifact(self) -> None:
-        with tempfile.TemporaryDirectory() as root_text:
-            missing = Path(root_text).resolve() / "missing/Peer.app"
-            source = replace(self.source, artifact_path=missing)
-            with patch.object(
-                ios_packet_lan_peer_adapter,
-                "load_source_identity",
-                return_value=source,
-            ), patch.object(
-                ios_packet_lan_peer_adapter,
-                "_source_tree_sha256",
-                return_value=source.source_tree_sha256,
-            ), self.assertRaisesRegex(
+        with _source_checkout():
+            source = load_source_identity()
+            self.assertFalse(source.artifact_path.exists())
+            with self.assertRaisesRegex(
                 IOSPacketLanPeerError, "signed iOS peer app is invalid"
             ) as raised:
                 validate_static_source_identity(source)
             self.assertEqual(raised.exception.code, "ios_packet_lan_artifact_invalid")
+            self.assertEqual(str(raised.exception.__cause__), "staged app is unavailable")
+
+    def test_admission_rejects_invalid_inputs_before_device_mutation(self) -> None:
+        cases = (
+            ("missing-app", "ios_packet_lan_artifact_invalid"),
+            ("stale-app", "ios_packet_lan_artifact_stale"),
+            ("source-drift", "ios_packet_lan_source_tree_stale"),
+        )
+        for mutation, expected_code in cases:
+            with self.subTest(mutation=mutation), _source_checkout() as root:
+                identity_path = ios_packet_lan_peer_adapter.SOURCE_IDENTITY_PATH
+                document = json.loads(identity_path.read_bytes())
+                device = document["identity"]["device"]
+                device["core_device_identifier_sha256"] = device_identifier_sha256(DEVICE)
+                device["provisioning_udid_sha256"] = provisioning_udid_sha256(UDID)
+                device["product_type"] = "iPhone17,1"
+                device["os_version"] = "26.5"
+                device["os_build"] = "23F77"
+                document["identity_sha256"] = hashlib.sha256(
+                    canonical_json(document["identity"])
+                ).hexdigest()
+                identity_data = canonical_json(document)
+                identity_path.write_bytes(identity_data)
+                with patch.object(
+                    ios_packet_lan_peer_adapter,
+                    "SOURCE_IDENTITY_FILE_SHA256",
+                    hashlib.sha256(identity_data).hexdigest(),
+                ), patch.object(
+                    ios_packet_lan_peer_adapter,
+                    "ADMISSION_LOCK_PATH",
+                    root / "admission.lock",
+                ):
+                    source = load_source_identity()
+                    if mutation == "stale-app":
+                        source.artifact_path.mkdir(mode=0o700, parents=True)
+                        info_path = source.artifact_path / "Info.plist"
+                        info_path.write_bytes(
+                            plistlib.dumps(
+                                {
+                                    "CFBundleExecutable": APP_EXECUTABLE,
+                                    "CFBundleIdentifier": BUNDLE_IDENTIFIER,
+                                }
+                            )
+                        )
+                        info_path.chmod(0o600)
+                        executable = source.artifact_path / APP_EXECUTABLE
+                        executable.write_bytes(b"different peer executable")
+                        executable.chmod(0o700)
+                    elif mutation == "source-drift":
+                        member = (
+                            root / "tools/physical-transport-peer-ios/App/AppDelegate.swift"
+                        )
+                        member.write_bytes(member.read_bytes() + b"\n// changed source\n")
+
+                    class InventoryOnlyRunner:
+                        def __init__(self) -> None:
+                            self.roles: list[str] = []
+                            self.workspace: Path | None = None
+
+                        def run_command(self, spec: CommandSpec) -> CommandResult:
+                            self.roles.append(spec.role)
+                            if spec.role != "ios-peer-device-list":
+                                raise AssertionError("unexpected command after inventory")
+                            output = Path(spec.argv[spec.argv.index("--json-output") + 1])
+                            self.workspace = output.parent.parent
+                            output.write_bytes(
+                                _envelope(spec, source, _device_item(connected=True))
+                            )
+                            output.chmod(0o600)
+                            return CommandResult(
+                                role=spec.role,
+                                argv_sha256=command_sha256(spec.argv),
+                                started_at="2026-08-22T00:00:00.000000Z",
+                                completed_at="2026-08-22T00:00:00.001000Z",
+                                duration_ms=1,
+                                exit_code=0,
+                                stdout=b"",
+                                stderr=b"",
+                            )
+
+                    runner = InventoryOnlyRunner()
+                    with self.assertRaises(IOSPacketLanPeerError) as raised:
+                        ios_packet_lan_peer_adapter.admit_ios_packet_lan_peer(
+                            runner=runner,
+                            tokens=("s" + "a" * 19, "t" + "b" * 19, "e" + "c" * 19),
+                            expected_source=source,
+                            time_source=lambda: datetime(2026, 8, 22, tzinfo=timezone.utc),
+                        )
+                    self.assertEqual(raised.exception.code, expected_code)
+                    self.assertEqual(runner.roles, ["ios-peer-device-list"])
+                    self.assertIsNotNone(runner.workspace)
+                    self.assertFalse(runner.workspace.exists())
+                    self.assertFalse(ios_packet_lan_peer_adapter._SOURCE_LOCK.locked())
 
     def test_workspace_creation_failure_removes_new_owned_directory(self) -> None:
         workspace = Path(

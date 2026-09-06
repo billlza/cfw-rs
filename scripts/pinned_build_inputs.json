@@ -2319,7 +2319,8 @@
       "/usr/bin/xcodebuild -version",
       "from scripts.publication.release_environment import swift_toolchain_identity",
       "swift_toolchain_identity(repository, dict(os.environ), sys.argv[2])",
-      "print(identity.canonical)"
+      "print(identity.canonical)",
+      "adapter.validate_source_identity(adapter.load_source_identity())"
     ],
     "scripts/physical_capture/performance_operator.py": [
       "PerformanceOperatorAdapterError",
@@ -3263,7 +3264,7 @@
     "scripts/release_publication_path_contract.sh": "9cdbe776fcb3d802616fc97083b3fb7c2e14669432ee7156da6197d012a2dbc3",
     "scripts/release_workspace_secret_gate.sh": "4cec57910016a47dbc311a162d9229f9b30ad66d1e20f8fc99d96018e4e72499",
     "scripts/release_secret_material_blocker.py": "218ba0ac853bebbdd9563c709fa702f4f1b45175e45cf6ca6ed8b28bdf2b30b9",
-    "RELEASE.md": "0178f963b414d18f38c831438d54cb5bf0928ab26a54f719fbdc66ca702c479b",
+    "RELEASE.md": "0e48eae01f6d0b27cf53b3dde9bb12f352c3da8a0bc3b08123e5e90be30ba1c4",
     "scripts/updater_signing_launcher.py": "36464710b78d8e279003457368acf99828a38e3cbe5dee197bb63d53e2276a27",
     "scripts/validate_updater_archive.py": "bb731b99dc30d10961db39ee6a39bd1e29d3090907d11d6e1d31eac15416e482",
     "CHANGELOG.md": "293eefc9a9947cf1a8d82d827e9479eb8313ff18f7784cb9e67f531b691f7217",
@@ -3294,7 +3295,7 @@
     "scripts/verify_physical_capture_readiness.py": "4641c4f6cd6cc6086b7e2d3327146a99436dc2731182bd1e0dfcb59db1577c90",
     "scripts/verify_build_boundaries.sh": "dbfbbc9ebe528ee4e130a114fd040ed9825d36fc5644b1a4b5c4113198efb1d6",
     "scripts/verify_release_build_allocations.py": "ee39e372957741b6d8d09e0bc22e3947f8d9de0c9ce221c22bc0e73737c257a5",
-    "scripts/verify_release_environment.sh": "0dd60e1a6b5d78a98a560da932d3060c17f276b10f79bcf670522292678e8068",
+    "scripts/verify_release_environment.sh": "294f910b7d5743a5b2de32594143d1ce4dc2615788863778932ad50a24b1373f",
     "scripts/physical_capture/performance_operator.py": "52cb974c954e4615d52b3d027651f86609578112e68946026221625f56b0137c",
     "scripts/physical_capture/performance.py": "1e65795da092d18c443ea687bfb9384262ffb2a4c067f27978f65a240108a2c4",
     "scripts/physical_capture/performance_profiles/latency-100ms-loss-1pct-10mbps.pf": "259df2641a9a5c8be89df82303af9a25c38b189115de9d391da98ec7ffeccbaa",

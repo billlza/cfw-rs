@@ -116,8 +116,12 @@ be renamed or reused as iOS evidence.
 The repository's test-only iOS transport peer remains outside the product and
 release bundle. The iPhone Packet-LAN mode now replaces the Android peer as the
 active `lan-bypass` evidence source, but no prior pilot or Android receipt is
-reusable: every candidate requires a fresh dynamic ready address, three joint
-Mac/iPhone connection bindings, pcap/Host evidence, and exact cleanup.
+reusable: every assurance capture requires a fresh dynamic ready address, three
+joint Mac/iPhone connection bindings, pcap/Host evidence, and exact cleanup.
+The ordinary macOS environment gate verifies the checked-in iOS peer source
+identity without requiring its generated app, provisioning profile, or signing
+entitlements. The actual assurance admission owns those artifact and device
+checks; missing iPhone infrastructure does not block ordinary macOS GA.
 
 ## Current source composition and release boundary
 
@@ -227,7 +231,7 @@ or hardware-backed workflow. If a workspace copy may have escaped through a
 backup or shared archive, rotate the key and publish an explicit updater trust
 migration before release.
 
-## Release-worktree cache recovery after reboot
+## Release-worktree cache scope and recovery
 
 The path/name-only secret-material gate authenticates nested managed caches
 against their original `cfm-release-worktree-cache-scope-v1.json` receipts in
@@ -265,6 +269,26 @@ record is preserved and fails closed; it must not be deleted or overwritten to
 force success. Further device renumbering requires another explicit recovery.
 Cache recovery does not renew a frozen candidate's release evidence, resolve
 notarization, consume a build number or establish publication readiness.
+
+Before candidate freeze, a source correction may require a new detached HEAD.
+Neither enrollment nor reboot recovery can rebind an existing cache receipt.
+After proving that no candidate freeze or external transaction started, retain
+the complete failed preparation with `git worktree move` in a new private
+history path outside the main workspace. Preserve its source, generated inputs,
+attempt logs and original receipt; the receipt remains in the original main
+Git administrative directory and does not authorize the moved history path.
+Recreate the fixed `target/release-worktrees/40044` path at the verified new
+commit, create an empty `target` with mode `0700`, and run
+`scripts/authorize_release_worktree.sh 40044` from the main checkout before
+copying and revalidating managed dependency inputs. Never edit the old receipt
+or copy it into the new registration. Git may name the new administrative
+directory `400441`; scope identity comes from the reciprocal worktree path and
+receipt, not this suffix. This is another preparation attempt using build
+40044, not candidate retirement or a new build allocation.
+These reversible checkout, enrollment, input-copy and environment-preflight
+steps may run in parallel with hosted CI for the new commit. The signed
+candidate builder, candidate freeze and signing must wait until every required
+source gate and that exact commit's hosted CI have passed.
 
 ## 1. Prepare and seal networked release inputs
 

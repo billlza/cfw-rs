@@ -39,8 +39,8 @@ adapter = importlib.import_module(
     "scripts.physical_capture.ios_packet_lan_peer_adapter"
 )
 
-adapter.validate_static_source_identity(adapter.load_source_identity())
-print("iPhone Packet LAN static source identity verified")
+adapter.validate_source_identity(adapter.load_source_identity())
+print("iPhone Packet LAN source identity and source tree verified")
 PY
 
 macos_major="$(sw_vers -productVersion | cut -d. -f1)"

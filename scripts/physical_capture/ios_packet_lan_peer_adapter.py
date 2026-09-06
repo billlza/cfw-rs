@@ -579,14 +579,14 @@ def load_source_identity() -> IOSPacketLanPeerSourceIdentity:
     )
 
 
-def validate_static_source_identity(
+def validate_source_identity(
     source: IOSPacketLanPeerSourceIdentity,
 ) -> dict[str, str]:
-    """Reopen non-device inputs before a release or physical-run boundary."""
+    """Reopen the checked-in identity and source tree without generated inputs."""
 
     if type(source) is not IOSPacketLanPeerSourceIdentity:
         raise IOSPacketLanPeerError(
-            "ios_packet_lan_source_invalid", "static source identity is not typed"
+            "ios_packet_lan_source_invalid", "source identity is not typed"
         )
     current = load_source_identity()
     if not _same_source_identity(current, source):
@@ -595,6 +595,24 @@ def validate_static_source_identity(
             "iOS Packet LAN source identity changed after import",
         )
     source_tree_sha256 = _source_tree_sha256()
+    if source_tree_sha256 != source.source_tree_sha256:
+        raise IOSPacketLanPeerError(
+            "ios_packet_lan_source_tree_stale",
+            "iOS peer source tree differs from the source identity",
+        )
+    return {
+        "source_identity_file_sha256": source.file_sha256,
+        "source_identity_sha256": source.identity_sha256,
+        "source_tree_sha256": source_tree_sha256,
+    }
+
+
+def validate_static_source_identity(
+    source: IOSPacketLanPeerSourceIdentity,
+) -> dict[str, str]:
+    """Reopen source and generated peer inputs before physical validation."""
+
+    source_identity = validate_source_identity(source)
     try:
         artifact = inspect_ios_peer_artifact(source.artifact_path)
     except IOSPeerLabError as error:
@@ -608,8 +626,7 @@ def validate_static_source_identity(
         source.entitlements_path, maximum=64 * 1024, private=False
     )
     if (
-        source_tree_sha256 != source.source_tree_sha256
-        or artifact.app_tree_sha256 != source.app_tree_sha256
+        artifact.app_tree_sha256 != source.app_tree_sha256
         or artifact.executable_sha256 != source.executable_sha256
         or hashlib.sha256(profile).hexdigest() != source.profile_sha256
         or hashlib.sha256(entitlements).hexdigest() != source.entitlements_sha256
@@ -619,9 +636,7 @@ def validate_static_source_identity(
             "iOS Packet LAN source, app, profile, or entitlements pin differs",
         )
     return {
-        "source_identity_file_sha256": source.file_sha256,
-        "source_identity_sha256": source.identity_sha256,
-        "source_tree_sha256": source_tree_sha256,
+        **source_identity,
         "app_tree_sha256": artifact.app_tree_sha256,
         "executable_sha256": artifact.executable_sha256,
         "profile_sha256": source.profile_sha256,
@@ -2722,5 +2737,6 @@ __all__ = [
     "SOURCE_IDENTITY_PATH",
     "admit_ios_packet_lan_peer",
     "load_source_identity",
+    "validate_source_identity",
     "validate_static_source_identity",
 ]

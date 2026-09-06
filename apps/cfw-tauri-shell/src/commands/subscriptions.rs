@@ -1188,6 +1188,7 @@ mod tests {
         profiles_dir: PathBuf,
         responses: Mutex<VecDeque<Result<CredentialVaultReceipt, CredentialVaultError>>>,
         requests: Mutex<Vec<ProvisionRequestSnapshot>>,
+        garbage_collection_requests: Mutex<usize>,
         provision_entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
         provision_release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     }
@@ -1201,6 +1202,7 @@ mod tests {
                 profiles_dir,
                 responses: Mutex::new(responses.into()),
                 requests: Mutex::new(Vec::new()),
+                garbage_collection_requests: Mutex::new(0),
                 provision_entered: Mutex::new(None),
                 provision_release: Mutex::new(None),
             }
@@ -1221,6 +1223,7 @@ mod tests {
                     profiles_dir,
                     responses: Mutex::new(VecDeque::from([response])),
                     requests: Mutex::new(Vec::new()),
+                    garbage_collection_requests: Mutex::new(0),
                     provision_entered: Mutex::new(Some(entered_sender)),
                     provision_release: Mutex::new(Some(release_receiver)),
                 },
@@ -1231,6 +1234,13 @@ mod tests {
 
         fn requests(&self) -> Vec<ProvisionRequestSnapshot> {
             self.requests.lock().expect("request lock").clone()
+        }
+
+        fn garbage_collection_requests(&self) -> usize {
+            *self
+                .garbage_collection_requests
+                .lock()
+                .expect("garbage collection request lock")
         }
     }
 
@@ -1282,6 +1292,10 @@ mod tests {
             &self,
             _request: CredentialGarbageCollectionRequest,
         ) -> CredentialGarbageCollectionPreviewFuture<'_> {
+            *self
+                .garbage_collection_requests
+                .lock()
+                .expect("garbage collection request lock") += 1;
             Box::pin(async { Err(CredentialVaultError::Internal) })
         }
 
@@ -1289,6 +1303,10 @@ mod tests {
             &self,
             _request: CredentialGarbageCollectionCommitRequest,
         ) -> CredentialGarbageCollectionCommitFuture<'_> {
+            *self
+                .garbage_collection_requests
+                .lock()
+                .expect("garbage collection request lock") += 1;
             Box::pin(async { Err(CredentialVaultError::Internal) })
         }
     }
@@ -1863,16 +1881,39 @@ mod tests {
             &EngineSettings::default(),
         )
         .expect("SOCKS5 source");
-        for responses in [
-            vec![Err(CredentialVaultError::AccessDenied)],
-            vec![
-                Err(CredentialVaultError::OutcomeUnknown),
-                Err(CredentialVaultError::OutcomeUnknown),
-            ],
-            vec![Ok(CredentialVaultReceipt {
-                profile_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
-                profile_digest: imported.profile.digest().into(),
-            })],
+        for (responses, expected_attempts, expected_error) in [
+            (
+                vec![Err(CredentialVaultError::AccessDenied)],
+                1,
+                "access was denied",
+            ),
+            (
+                vec![
+                    Err(CredentialVaultError::OutcomeUnknown),
+                    Err(CredentialVaultError::OutcomeUnknown),
+                ],
+                2,
+                "after one outcome-unknown replay",
+            ),
+            (
+                vec![
+                    Ok(CredentialVaultReceipt {
+                        profile_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+                        profile_digest: imported.profile.digest().into(),
+                    }),
+                    Ok(successful_receipt(TRANSACTION_PROFILE_ID, &imported)),
+                ],
+                1,
+                "different profile audience",
+            ),
+            (
+                vec![
+                    Err(CredentialVaultError::IdentityRejected),
+                    Ok(successful_receipt(TRANSACTION_PROFILE_ID, &imported)),
+                ],
+                1,
+                "the operation result is unconfirmed",
+            ),
         ] {
             let temporary = tempfile::TempDir::new().expect("temporary directory");
             let repository = ProfileRepository::new(temporary.path().join("profiles"));
@@ -1881,7 +1922,6 @@ mod tests {
                 .expect("original profile");
             repository.select(&original.id).expect("select original");
             let before = repository.snapshot().expect("original snapshot");
-            let expected_attempts = responses.len();
             let vault = ScriptedCredentialVault::new(temporary.path().join("profiles"), responses);
             let error = commit_profile_import(
                 &repository,
@@ -1896,9 +1936,12 @@ mod tests {
             .expect_err("unconfirmed credentials must not become visible");
             assert_eq!(repository.snapshot().expect("unchanged snapshot"), before);
             assert_eq!(vault.requests().len(), expected_attempts);
+            assert_eq!(vault.garbage_collection_requests(), 0);
             if expected_attempts == 2 {
                 assert_eq!(vault.requests()[0], vault.requests()[1]);
             }
+            assert!(error.contains(expected_error), "{error}");
+            assert!(!error.contains("data is corrupt"));
             assert!(!error.contains("synthetic-user"));
             assert!(!error.contains("synthetic-secret"));
         }

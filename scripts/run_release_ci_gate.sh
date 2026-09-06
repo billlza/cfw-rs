@@ -2,6 +2,8 @@
 # Execute release-critical hosted CI gates with the same closed tool identity
 # used by local evidence collection. Each gate is explicit and fail closed.
 set -euo pipefail
+# Public CI artifacts use deterministic modes; private producers set their own masks.
+umask 022
 unset CDPATH
 
 repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"

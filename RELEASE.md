@@ -7,7 +7,7 @@ releasable Network Extension product.
 > **v0.4.0 policy calibration:** the executable ordinary-GA versus assurance
 > boundary is recorded in
 > [`docs/release/ga-assurance-policy-v040.md`](docs/release/ga-assurance-policy-v040.md).
-> The release has one candidate identity: build 40043. Build 40030 is retired
+> The release has one candidate identity: build 40044. Build 40030 is retired
 > unbuilt as `retired_unbuilt_policy_superseded`; it must never be rebuilt,
 > signed, installed, or used as a validation companion. Build 40031 is retired
 > after candidate freeze and a failed private signing attempt, before canonical
@@ -67,7 +67,15 @@ releasable Network Extension product.
 > ambient toolchain selection the lane collector exports. It is retired after
 > notarization with its bytes and receipts preserved; see
 > [`docs/release/ga-build-40042-retirement.md`](docs/release/ga-build-40042-retirement.md).
-> A passing policy or source check alone does not consume build 40043. Its
+> Build 40043 completed signing, notarization, packaging and the 40041→40043
+> install. Before GA runtime collection started, importing authenticated
+> profiles exposed a product defect: the native credential receipt encoded an
+> uppercase profile UUID that the Rust consumer correctly rejected. The error
+> was also misclassified as vault corruption. The correction changes shipped
+> application code, so 40043 is retired after install with all original
+> evidence preserved; see
+> [`docs/release/ga-build-40043-retirement.md`](docs/release/ga-build-40043-retirement.md).
+> A passing policy or source check alone does not consume build 40044. Its
 > first durable candidate freeze does, after which only supported recovery may
 > reuse those exact frozen bytes and their append-only transaction identities.
 
@@ -93,7 +101,7 @@ not a recovery mechanism.
 A changed whole-repository commit or release-source checksum does not by itself
 establish a product change. In particular, the test-isolation failure recorded
 for retired 40042 is historical evidence of a workflow limitation, not a rule
-for retiring later candidates. Preserve 40043 while repairing evidence tooling.
+for retiring later candidates. Preserve 40044 while repairing evidence tooling.
 The current frozen product-input v1 document includes the complete source
 identity; its digest cannot alone distinguish product and evidence changes.
 Do not relabel that document or claim that a newer test suite ran at its commit.
@@ -588,8 +596,8 @@ the sealed publication evidence but remains fail closed until that evidence has
 been prepared, legally reviewed, and finalized for the exact signed app. It has
 no success override and accepts only:
 
-- `target/candidates/0.4.0/ga/40043/signed/Clash for Mac.app` as the signed binary root;
-- `target/candidates/0.4.0/ga/40043/stage-inputs/publication` as the final evidence root.
+- `target/candidates/0.4.0/ga/40044/signed/Clash for Mac.app` as the signed binary root;
+- `target/candidates/0.4.0/ga/40044/stage-inputs/publication` as the final evidence root.
 
 It never scans or accepts `target/release`, which retains historical 0.3.5
 signed artifacts containing the old core/helper layout.
@@ -629,20 +637,20 @@ scripts/prepare_publication_evidence.sh review-template \
 # Resolve every item in component-review.json and every source blocker, then:
 scripts/prepare_publication_evidence.sh prepare \
   --libbox-source target/sources/sing-box-v1.13.15-patched \
-  --reviewed-components target/candidates/0.4.0/ga/40043/stage-inputs/component-review.json
+  --reviewed-components target/candidates/0.4.0/ga/40044/stage-inputs/component-review.json
 
 scripts/run_publication_evidence.sh draft \
-  --prepared target/candidates/0.4.0/ga/40043/stage-inputs/publication-prepared \
-  --app "target/candidates/0.4.0/ga/40043/signed/Clash for Mac.app" \
-  --output target/candidates/0.4.0/ga/40043/stage-inputs/machine-closure.draft.json
+  --prepared target/candidates/0.4.0/ga/40044/stage-inputs/publication-prepared \
+  --app "target/candidates/0.4.0/ga/40044/signed/Clash for Mac.app" \
+  --output target/candidates/0.4.0/ga/40044/stage-inputs/machine-closure.draft.json
 
 # A human legal reviewer must approve the exact printed closure digest and
-# component set in target/candidates/0.4.0/ga/40043/stage-inputs/legal-review.json.
+# component set in target/candidates/0.4.0/ga/40044/stage-inputs/legal-review.json.
 scripts/run_publication_evidence.sh finalize \
-  --prepared target/candidates/0.4.0/ga/40043/stage-inputs/publication-prepared \
-  --app "target/candidates/0.4.0/ga/40043/signed/Clash for Mac.app" \
-  --review target/candidates/0.4.0/ga/40043/stage-inputs/legal-review.json \
-  --output target/candidates/0.4.0/ga/40043/stage-inputs/publication
+  --prepared target/candidates/0.4.0/ga/40044/stage-inputs/publication-prepared \
+  --app "target/candidates/0.4.0/ga/40044/signed/Clash for Mac.app" \
+  --review target/candidates/0.4.0/ga/40044/stage-inputs/legal-review.json \
+  --output target/candidates/0.4.0/ga/40044/stage-inputs/publication
 
 scripts/release_publication_gate.sh --seal-prepackage
 ```
@@ -653,7 +661,7 @@ the old approval and record the comparison separately. The current closure
 record must name its own digest and current release authorization; it must not
 pretend that the earlier reviewer saw a subsequently rebuilt source archive.
 
-### Single-GA 40043 release sequence
+### Single-GA 40044 release sequence
 
 The canonical allocation ledger is
 [`docs/release/build-allocations-v040.json`](docs/release/build-allocations-v040.json).
@@ -680,20 +688,26 @@ before GA runtime acceptance: its legacy cutover preflight attributed the live
 Clash for Windows network to the retired installation and could never confirm
 the cutover while acceptance required that network to be preserved. Its signed
 bytes, notarization, package seals, install journal and aborted collection
-remain unchanged, and it is the installed predecessor the successor is
-verified against.
+remain unchanged. Its completed migration to 40043 is retained as historical
+installation evidence.
 Build 40042 is a consumed, canonically signed and notarized lineage retired
 before packaging or installation because the `release-tooling-tests` lane of
 its own frozen source fails under the lane collector's toolchain selection.
 Its signed bytes, notarization and hosted receipt remain unchanged and cannot
 be used as evidence for the corrected candidate.
-Build 40043 is the sole `active_ga` identity.
+Build 40043 completed signing, notarization, both package sets and installation,
+then retired for the credential-receipt product defect before GA runtime
+collection started. Its signed bytes, original hosted CI, prepackage seal,
+package seals and completed 40041→40043 installation journals remain unchanged.
+It is the installed predecessor for the guarded 40043→40044 migration; none of
+its receipts substitute for the new application's acceptance.
+Build 40044 is the sole `active_ga` identity.
 
 Run the sequence below from one clean release commit. Source, CI, preflight, or
 evidence failures before candidate freeze use their own append-only attempt or
 run identity and do not allocate another application build. Once
 `candidate-freeze/intent.json` exists, recovery may only continue an exact
-supported 40043 transaction without changing application or nested-code
+supported 40044 transaction without changing application or nested-code
 signature bytes. A transaction in the explicit post-receipt
 `verification_blocked` state may reopen and verify only its complete exact
 private work and receipt; it must not invoke the signing helper or receipt
@@ -738,7 +752,7 @@ wire proof.
    profile, and updater-key custody configured on the release Mac:
 
    ```bash
-   CFW_BUILD_NUMBER=40043 \
+   CFW_BUILD_NUMBER=40044 \
    NOTARY_PROFILE=clashformac-notary \
    MACOS_SIGN_IDENTITY='Developer ID Application: Zi ang Li (YKUPL7Z869)' \
    HOST_PROVISIONING_PROFILE_PATH=/absolute/path/to/host.provisionprofile \
@@ -787,9 +801,9 @@ wire proof.
    ```bash
    scripts/release_publication_gate.sh --capture-hosted-ci RUN_ID
    scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
-     --artifact-repository /absolute/operator/target/release-worktrees/40043 \
-     --output /absolute/operator/target/release-worktrees/40043/target/candidates/0.4.0/ga/40043/stage-inputs/local-ci-lanes.json \
-     --journal /absolute/private/history/local-ci-40043
+     --artifact-repository /absolute/operator/target/release-worktrees/40044 \
+     --output /absolute/operator/target/release-worktrees/40044/target/candidates/0.4.0/ga/40044/stage-inputs/local-ci-lanes.json \
+     --journal /absolute/private/history/local-ci-40044
    scripts/release_publication_gate.sh --verify-hosted-ci
    ```
 
@@ -827,7 +841,7 @@ wire proof.
    fixed recovery entry:
 
    ```bash
-   CFW_BUILD_NUMBER=40043 NOTARY_PROFILE=clashformac-notary \
+   CFW_BUILD_NUMBER=40044 NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --resume-signing
    ```
 
@@ -841,14 +855,14 @@ wire proof.
    A helper failure, an interruption after signing may have started but before
    one complete receipt-bound output was durably recorded, or any other
    ambiguous signing state requires preserving the attempt, retiring build
-   40043, and allocating a successor. Never create fresh timestamped signature
+   40044, and allocating a successor. Never create fresh timestamped signature
    bytes under the same frozen build.
 
    If an Apple submit reply was lost before its submission ID was persisted,
    recover only with that observed ID:
 
    ```bash
-   CFW_BUILD_NUMBER=40043 NOTARY_PROFILE=clashformac-notary \
+   CFW_BUILD_NUMBER=40044 NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --recover-notarization-id UUID
    ```
 5. regenerate and legally review the fixed publication source/SBOM closure,
@@ -857,7 +871,7 @@ wire proof.
 
    Run post-freeze stage verification, packaging, installation, journal export and
    runtime acceptance from the clean **operator checkout** containing the
-   fixed `target/release-worktrees/40043` artifact checkout. These operations
+   fixed `target/release-worktrees/40044` artifact checkout. These operations
    never fall back to treating the operator checkout as artifact source.
    Publication preparation/draft/finalization remain artifact-source operations;
    keep their already reviewed fixed outputs in the frozen checkout. A corrected
@@ -973,7 +987,7 @@ wire proof.
    environment; it must not overwrite an already published container;
 7. after the atomic journal export verifies, run the fixed GA runtime collector.
    It independently reopens the DMG set, proves the DMG's
-   contained app equals the installed 40043 tree, derives all twelve required
+   contained app equals the installed 40044 tree, derives all twelve required
    checks from bounded command output and packet captures, and proves shutdown
    restored the CFW guard:
 
@@ -1091,7 +1105,7 @@ audit retention described in
 The trust-policy profile is inside the receipt-signed policy digest, so a v4
 aggregate or a receipt issued under the former policy digest cannot be
 relabelled as v5. This does not close the same-machine, two-clean-OS physical gate or authorize
-build 40043. No updater key, Apple notarization key, local private key, or older
+build 40044. No updater key, Apple notarization key, local private key, or older
 RS256 receipt may substitute for this trust root.
 
 On the provisioned release Mac, invoke updater packaging through its executable
@@ -1123,10 +1137,10 @@ Tauri; neither the password nor a caller-selected key/signer path enters argv.
 Release assets do not become uploadable as independent files. The updater
 archive, signature, `latest.json`, and the verifier's embedded-public-key
 receipt are sealed and atomically published as
-`target/candidates/0.4.0/ga/40043/packages/updater/vVERSION/`. The DMG, accepted result,
+`target/candidates/0.4.0/ga/40044/packages/updater/vVERSION/`. The DMG, accepted result,
 normalized log, private Gatekeeper evidence, submission receipt, and artifact
 manifest are sealed and atomically published for release operations as
-`target/candidates/0.4.0/ga/40043/packages/dmg/vVERSION/`. The canonical seals bind exact
+`target/candidates/0.4.0/ga/40044/packages/dmg/vVERSION/`. The canonical seals bind exact
 names, sizes, SHA-256 values, version/build/source identity, official URL, and
 verification result. Each component seal also binds the exact
 `Clash for Mac.app.manifest.json` digest and signed-app tree SHA-256. The
@@ -1151,7 +1165,7 @@ scripts/release_publication_gate.sh --upload-assets 0.4.0
 ```
 
 The atomic
-`ga/40043/packages/distribution/vVERSION/distribution-set.seal.json` joins the
+`ga/40044/packages/distribution/vVERSION/distribution-set.seal.json` joins the
 same signed app and app manifest to both package seals and every DMG/updater
 asset. It also binds the complete publication-evidence tree and records direct
 digests for the sealed outer Evidence Manifest, machine closure, inventory,

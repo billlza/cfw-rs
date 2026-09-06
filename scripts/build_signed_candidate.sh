@@ -327,7 +327,7 @@ import sys
 ) = sys.argv[1:]
 value = {
     "document": "cfm-ga-product-input-v1",
-    "product": {"build_number": "40043", "version": "0.4.0"},
+    "product": {"build_number": "40044", "version": "0.4.0"},
     "schema_version": 1,
     "source": {
         "release_source_sha256": release_source_sha256,
@@ -501,7 +501,7 @@ if set(value) != {"document", "product", "schema_version", "source", "toolchain"
     raise SystemExit("error: frozen product input field set is invalid")
 if value["document"] != "cfm-ga-product-input-v1" or value["schema_version"] != 1:
     raise SystemExit("error: frozen product input identity is invalid")
-if value["product"] != {"build_number": "40043", "version": "0.4.0"}:
+if value["product"] != {"build_number": "40044", "version": "0.4.0"}:
     raise SystemExit("error: frozen product identity is invalid")
 source = value["source"]
 toolchain = value["toolchain"]

@@ -121,6 +121,7 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
   case credentialsUnavailable = "credentials_unavailable"
   case credentialConflict = "credential_conflict"
   case credentialVaultMissing = "credential_vault_missing"
+  case credentialVaultCorrupt = "credential_vault_corrupt"
   case credentialMigrationRequired = "credential_migration_required"
   case credentialGCConflict = "credential_gc_conflict"
   case proxyAgentApprovalRequired = "proxy_agent_approval_required"
@@ -165,6 +166,7 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
     case .credentialsUnavailable: "Required credentials are unavailable."
     case .credentialConflict: "Credential material conflicts with an immutable entry."
     case .credentialVaultMissing: "The credential vault is unavailable."
+    case .credentialVaultCorrupt: "The credential vault data is corrupt."
     case .credentialMigrationRequired:
       "The credential vault uses an unsupported schema and must be cleared and reprovisioned."
     case .credentialGCConflict: "Credential cleanup requires a fresh preview."

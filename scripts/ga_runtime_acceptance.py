@@ -4,7 +4,7 @@
 This module deliberately does not accept a caller-selected evidence path and it
 does not accept a list of boolean outcomes. Collection starts only after the
 existing dormant-install and current-service owners have closed their
-40041 -> 40043 journals. ``collect`` creates a durable CSPRNG challenge intent,
+40043 -> 40044 journals. ``collect`` creates a durable CSPRNG challenge intent,
 owns every runtime command and packet byte, atomically publishes the exact
 raw tree, and seals the adapter. ``recover`` owns only runtime shutdown/restore;
 it never duplicates either installation state machine. ``verify`` reopens
@@ -178,7 +178,7 @@ PrepackageStageVerifier = Callable[[Path], dict[str, Any]]
 
 PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 TO_BUILD: Final = ACTIVE_RELEASE_IDENTITY.ga_build
-FROM_BUILD: Final = "40041"
+FROM_BUILD: Final = "40043"
 TEAM_ID: Final = "YKUPL7Z869"
 APP_BUNDLE_ID: Final = "com.bill.clashformac"
 PACKET_EXTENSION_BUNDLE_ID: Final = "com.bill.clashformac.packet-tunnel"
@@ -420,9 +420,9 @@ def _require_fixed_paths(
 ) -> None:
     expected_acceptance, expected_raw = _fixed_paths(repository)
     if Path(acceptance_path).absolute() != expected_acceptance:
-        raise _error("GA runtime adapter path is not the fixed 40043 path")
+        raise _error("GA runtime adapter path is not the fixed 40044 path")
     if Path(raw_evidence_root).absolute() != expected_raw:
-        raise _error("GA runtime raw-evidence path is not the fixed 40043 path")
+        raise _error("GA runtime raw-evidence path is not the fixed 40044 path")
 
 
 def _strict_json(data: bytes, label: str) -> dict[str, Any]:
@@ -636,7 +636,7 @@ def _validate_expected(value: object) -> dict[str, Any]:
         or expected["from_build"] != FROM_BUILD
         or expected["to_build"] != TO_BUILD
     ):
-        raise _error("GA runtime expected identity or check set differs from 0.4.0/40043")
+        raise _error("GA runtime expected identity or check set differs from 0.4.0/40044")
     for field in (
         "dmg_gatekeeper_sha256",
         "dmg_set_seal_sha256",
@@ -972,11 +972,11 @@ def _installed_candidate_tree(repository: Path, expected: dict[str, Any]) -> str
         or normalized["candidate"]["build_number"] != TO_BUILD
         or normalized["previous"]["build_number"] != FROM_BUILD
     ):
-        raise _error("GA install journal is not the completed 40041 to 40043 install")
+        raise _error("GA install journal is not the completed 40043 to 40044 install")
     try:
         installed = dormant_app_install.read_app_identity(INSTALLED_APP)
     except dormant_app_install.InstallError as error:
-        raise _error("installed 40043 application tree cannot be identified") from error
+        raise _error("installed 40044 application tree cannot be identified") from error
     if installed.document() != normalized["candidate"]:
         raise _error("installed application bytes differ from the closed install journal")
     return installed.tree_sha256
@@ -1100,7 +1100,7 @@ def _validate_exact_dmg_install(
         or document["installed_app_tree_sha256"] != installed_tree
         or dmg_tree != installed_tree
     ):
-        raise _error("DMG-contained app and installed 40043 app are not the same tree")
+        raise _error("DMG-contained app and installed 40044 app are not the same tree")
     commands = require_exact_keys(
         document["commands"],
         {"dmg_gatekeeper", "dmg_set_verify"},
@@ -1154,7 +1154,7 @@ def _running_host_observation(value: object) -> list[dict[str, Any]]:
         item for item in processes if item["path"] == INSTALLED_EXECUTABLE.as_posix()
     ]
     if len(app_processes) != 1:
-        raise _error("raw process table does not contain exactly one installed 40043 Host")
+        raise _error("raw process table does not contain exactly one installed 40044 Host")
     return processes
 
 
@@ -1172,7 +1172,7 @@ def _host_absence_observation(value: object) -> list[dict[str, Any]]:
     if any(
         process["path"] == INSTALLED_EXECUTABLE.as_posix() for process in processes
     ):
-        raise _error("normal shutdown evidence still contains the installed 40043 Host")
+        raise _error("normal shutdown evidence still contains the installed 40044 Host")
     return processes
 
 
@@ -1184,10 +1184,10 @@ def _validate_launch(value: dict[str, Any]) -> None:
         document["launch_command"],
         expected_argv=["/usr/bin/open", "-a", INSTALLED_APP.as_posix()],
         expected_exit=0,
-        label="installed 40043 launch command",
+        label="installed 40044 launch command",
     )
     if launch["stderr"]:
-        raise _error("installed 40043 launch command emitted an error")
+        raise _error("installed 40044 launch command emitted an error")
     _running_host_observation(document["process_observation"])
 
 
@@ -1209,7 +1209,7 @@ def _require_launchctl_running(
     This is the same fixed job contract the release service transaction already
     proves in `current_service_transaction._registered_job_pid`, and it binds
     strictly more than an absolute path: the running executable is the one
-    inside the installed 40043 bundle, registered through ServiceManagement,
+    inside the installed 40044 bundle, registered through ServiceManagement,
     and signed under the fixed team and service identifiers.
     """
 
@@ -1217,7 +1217,7 @@ def _require_launchctl_running(
         relative = program.relative_to(INSTALLED_APP)
     except ValueError as error:
         raise _error(
-            f"fixed {label} executable is outside the installed 40043 bundle"
+            f"fixed {label} executable is outside the installed 40044 bundle"
         ) from error
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     required = (
@@ -1280,7 +1280,7 @@ def _validate_system_extension(value: dict[str, Any]) -> None:
     except dormant_app_install.InstallError as error:
         raise _error("raw systemextensionsctl output is malformed") from error
     if (TEAM_ID, PACKET_EXTENSION_BUNDLE_ID) not in identities:
-        raise _error("raw system extension output lacks the fixed 40043 extension")
+        raise _error("raw system extension output lacks the fixed 40044 extension")
     matching = [
         line
         for line in receipt["stdout"].splitlines()
@@ -2293,7 +2293,7 @@ class ProductionCollectorRuntime:
                 if waiting_for_operator and not announced_operator_boundary:
                     print(
                         "GA runtime collection is waiting for macOS approval and "
-                        "Tunnel mode in the installed 40043 dashboard",
+                        "Tunnel mode in the installed 40044 dashboard",
                         file=sys.stderr,
                         flush=True,
                     )
@@ -3573,7 +3573,7 @@ def self_check() -> None:
     except OSError as error:
         raise _error("GA runtime collector source/build registry is unavailable") from error
     if (
-        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40041", "40043")
+        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40043", "40044")
         or (MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS)
         != (15 * 60, 30 * 60)
         or len(CHECKS) != 12
@@ -3597,22 +3597,22 @@ def self_check() -> None:
         )
         or ACCEPTANCE_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
+            "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
             "runtime-acceptance.json"
         )
         or RAW_ROOT_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
+            "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
             "runtime-evidence"
         )
         or ENVIRONMENT_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
+            "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
             "migration-journals/service-transaction/environment.json"
         )
         or INSTALL_JOURNAL_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
+            "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
             "migration-journals/dormant-install.json"
         )
         or not stat.S_ISREG(runner_metadata.st_mode)

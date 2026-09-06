@@ -73,6 +73,24 @@ private func contractFixture(_ name: String) throws -> Data {
   )
 }
 
+@Test func nativeCredentialReceiptResponseMatchesCrossLanguageFixture() throws {
+  let profileID = try #require(UUID(uuidString: "abcdefab-cdef-4abc-8def-abcdefabcdef"))
+  let requestID = try #require(UUID(uuidString: "11111111-2222-4333-8444-555555555555"))
+  let audience = CredentialAudience(
+    profileID: profileID,
+    profileDigest: try SHA256Digest(hex: String(repeating: "ab", count: 32))
+  )
+  let response = NativeResponseEnvelope(
+    requestID: requestID,
+    result: .credentialReceipt(NativeCredentialReceipt(audience: audience))
+  )
+  let encoded = try NativeBridgeProtocolCodec.encodeResponse(response)
+  let fixture = try contractFixture("credential-receipt-response.json")
+
+  #expect(encoded + Data([0x0A]) == fixture)
+  #expect(try JSONDecoder().decode(NativeResponseEnvelope.self, from: fixture) == response)
+}
+
 @Test func validMinimalQueryRequestIsAccepted() throws {
   let request = try decode(
     """

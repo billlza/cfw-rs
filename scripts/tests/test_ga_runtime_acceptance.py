@@ -283,11 +283,12 @@ def launchctl_output(
     domain_target: str,
     program_identifier: str,
     service_label: str,
-    parent_bundle_version: str = "40043",
+    parent_bundle_version: str = "40044",
 ) -> str:
     """Reproduce the exact `launchctl print` shape for an SMAppService job.
 
-    Captured verbatim from the release Mac for the installed 40043 services.
+    The shape was captured from the release Mac's installed 40043 services;
+    the parent bundle version is an explicit candidate fixture value.
     Both plists declare `BundleProgram`, so launchd resolves the executable
     inside the signed bundle and prints a bundle-relative `program identifier`
     line with resolution `mode: 2`. It never prints the absolute `program =`
@@ -324,7 +325,7 @@ def system_extension_output() -> str:
         "--- com.apple.system_extension.network_extension\n"
         "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]\n"
         "*\t*\tYKUPL7Z869\tcom.bill.clashformac.packet-tunnel "
-        "(0.4.0/40043)\tCFWPacketTunnel\t[activated enabled]\n"
+        "(0.4.0/40044)\tCFWPacketTunnel\t[activated enabled]\n"
     )
 
 
@@ -536,7 +537,7 @@ class RuntimeFixture:
                         "context:primary-signature",
                         "-vv",
                         (
-                            "target/candidates/0.4.0/ga/40043/packages/dmg/v0.4.0/"
+                            "target/candidates/0.4.0/ga/40044/packages/dmg/v0.4.0/"
                             "Clash.for.Mac_0.4.0_arm64.dmg"
                         ),
                     ],
@@ -936,7 +937,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_contract_has_fixed_paths_and_twelve_raw_derived_checks(self) -> None:
         self_check()
-        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40041", "40043"))
+        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40043", "40044"))
         self.assertEqual(
             (ga_runtime.MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS),
             (15 * 60, 30 * 60),
@@ -964,31 +965,47 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             ACCEPTANCE_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
                 "runtime-acceptance.json"
             ),
         )
         self.assertEqual(
             RAW_ROOT_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
                 "runtime-evidence"
             ),
         )
         self.assertEqual(
             ENVIRONMENT_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
                 "migration-journals/service-transaction/environment.json"
             ),
         )
         self.assertEqual(
             INSTALL_JOURNAL_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40043/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
                 "migration-journals/dormant-install.json"
             ),
         )
+
+    def test_historical_migration_bindings_cannot_seal_the_active_candidate(self) -> None:
+        for from_build, to_build in (
+            ("40041", "40043"),
+            ("40041", "40044"),
+            ("40043", "40043"),
+        ):
+            with self.subTest(from_build=from_build, to_build=to_build):
+                self.fixture.expected["from_build"] = from_build
+                self.fixture.expected["to_build"] = to_build
+                with self.assertRaisesRegex(
+                    GARuntimeAcceptanceError,
+                    "expected identity or check set differs",
+                ):
+                    self.fixture.seal()
+                self.assertFalse(self.fixture.acceptance.exists())
 
     def test_runtime_json_recursion_is_a_stable_domain_error(self) -> None:
         deeply_nested = (
@@ -1064,7 +1081,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             GARuntimeAcceptanceError,
-            "installed 40043 launch command command identity, exit, or duration is invalid",
+            "installed 40044 launch command command identity, exit, or duration is invalid",
         ):
             self.fixture.seal()
 
@@ -1278,17 +1295,21 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self.fixture.write_all()
 
     def test_service_registration_rejects_a_different_parent_bundle_build(self) -> None:
-        self._set_service_stdout(
-            "proxy_agent",
-            self._service_stdout("proxy_agent").replace(
-                "parent bundle version = 40043",
-                "parent bundle version = 40041",
-            ),
-        )
-        with self.assertRaisesRegex(
-            Exception, "does not show the fixed running ProxyAgent"
-        ):
-            self.fixture.seal()
+        original = self._service_stdout("proxy_agent")
+        for build in ("40041", "40043"):
+            with self.subTest(build=build):
+                self._set_service_stdout(
+                    "proxy_agent",
+                    original.replace(
+                        "parent bundle version = 40044",
+                        f"parent bundle version = {build}",
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    GARuntimeAcceptanceError,
+                    "does not show the fixed running ProxyAgent",
+                ):
+                    self.fixture.seal()
 
     def test_service_registration_rejects_a_foreign_program_identifier(self) -> None:
         self._set_service_stdout(

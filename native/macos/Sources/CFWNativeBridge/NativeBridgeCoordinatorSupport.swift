@@ -333,7 +333,7 @@ extension NativeBridgeCoordinator {
           "Credential cleanup confirmation expired; preview again without deleting anything."
         )
       case .corrupt:
-        return .failure(.identityRejected, "Credential vault data is corrupt.")
+        return .failure(.credentialVaultCorrupt, "Credential vault data is corrupt.")
       case .unsupportedSchemaVersion:
         return .failure(
           .credentialMigrationRequired,

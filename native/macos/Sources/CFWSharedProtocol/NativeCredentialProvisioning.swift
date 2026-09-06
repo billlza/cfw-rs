@@ -182,9 +182,12 @@ public struct NativeCredentialReceipt: Codable, Equatable, Sendable {
     profileDigest = audience.profileDigest
   }
 
-  private enum CodingKeys: String, CodingKey {
-    case profileID = "profile_id"
-    case profileDigest = "profile_digest"
+  public init(from decoder: Decoder) throws {
+    self.init(audience: try CredentialAudience(from: decoder))
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    try CredentialAudience(profileID: profileID, profileDigest: profileDigest).encode(to: encoder)
   }
 }
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fail-closed tests for the unsigned-CI lane collector (Task 12.3 input).
 
-These tests never run a real lane: the collector's process runner is injected, so
-the tests exercise exactly the recording, journal, and assembly rules that keep
+Collector tests inject the process runner; bounded subprocess tests also exercise
+the real lane launcher and standalone CI wrapper with fixture tools. They verify
+the recording, journal, dispatch, and assembly rules that keep
 the unsigned-CI gate honest - a nonzero exit can never be recorded as a pass, a
 wall-clock overrun is recorded as ``timeout``, a stale or hand-edited journal
 record is refused, and the assembled document is validated by the gate's own
@@ -17,6 +18,8 @@ import json
 import os
 from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
+import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -72,6 +75,72 @@ def _runner(results):
 
 
 class CiLaneTableTests(unittest.TestCase):
+    def test_standalone_gate_fixes_child_modes_and_preserves_parent_log_and_exit(self) -> None:
+        wrapper_source = (
+            Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
+        ).read_bytes()
+        for child_exit in (0, 17):
+            with self.subTest(child_exit=child_exit), tempfile.TemporaryDirectory() as temporary:
+                repository = Path(temporary).resolve() / "standalone gate"
+                scripts = repository / "scripts"
+                scripts.mkdir(parents=True)
+                wrapper = scripts / "run_release_ci_gate.sh"
+                wrapper.write_bytes(wrapper_source)
+                wrapper.chmod(0o755)
+                (scripts / "dependency_pins.env").write_text(
+                    "MACOS_DEPLOYMENT_TARGET=15.0\n", encoding="utf-8"
+                )
+                # Substitute only external tool admission and the leaf driver;
+                # the reviewed wrapper's shell, dispatch, and umask run intact.
+                (scripts / "release_tool_environment.sh").write_text(
+                    'cfw_seal_release_tool_environment() { [[ "$1" == production ]]; }\n'
+                    'cfw_select_release_apple_toolchain() { :; }\n'
+                    'cfw_run_release_python_script() {\n'
+                    '  [[ $# -eq 2 && "$2" == "$1/scripts/release_apple_toolchain.py" ]] || return 97\n'
+                    f'  {shlex.quote(sys.executable)} -I -S -B -W error "$2"\n'
+                    '}\n',
+                    encoding="utf-8",
+                )
+                (scripts / "release_policy_tool_directory.sh").write_text(
+                    "", encoding="utf-8"
+                )
+                (scripts / "release_apple_toolchain.py").write_text(
+                    "from pathlib import Path\n"
+                    "Path('ordinary.txt').write_text('public artifact\\n')\n"
+                    "Path('ordinary-directory').mkdir()\n"
+                    "print('gate probe completed')\n"
+                    f"raise SystemExit({child_exit})\n",
+                    encoding="utf-8",
+                )
+                private_log = repository / "private.log"
+                previous_umask = os.umask(0o077)
+                try:
+                    with private_log.open("xb") as output:
+                        result = subprocess.run(
+                            ["/bin/bash", "-p", str(wrapper), "apple-toolchain"],
+                            cwd=repository,
+                            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                            stdout=output,
+                            stderr=subprocess.PIPE,
+                            timeout=5,
+                            check=False,
+                        )
+                    observed_parent_umask = os.umask(0o077)
+                    self.assertEqual(result.returncode, child_exit, result.stderr)
+                    self.assertEqual(result.stderr, b"")
+                    self.assertEqual(observed_parent_umask, 0o077)
+                    self.assertEqual(private_log.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(private_log.read_bytes(), b"gate probe completed\n")
+                    self.assertEqual(
+                        (
+                            (repository / "ordinary.txt").stat().st_mode & 0o777,
+                            (repository / "ordinary-directory").stat().st_mode & 0o777,
+                        ),
+                        (0o644, 0o755),
+                    )
+                finally:
+                    os.umask(previous_umask)
+
     def test_lane_umask_is_deterministic_without_changing_the_parent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary).resolve()

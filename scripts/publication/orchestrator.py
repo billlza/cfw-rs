@@ -143,7 +143,7 @@ def seal_ga_acceptance(
     executor: ExecutorSource,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, Any]:
-    """Atomically bind exact packages and the completed 40041 -> 40043 run."""
+    """Atomically bind exact packages and the completed 40043 -> 40044 run."""
 
     expected = contract.build_expected_stage_files(
         repository, "ga-acceptance", executor=executor, freeze_verifier=freeze_verifier

@@ -130,6 +130,11 @@ RETIRED_GA_ALLOCATIONS: Final = (
         "ga",
         "retired_after_notarization_before_install_lane_test_not_hermetic",
     ),
+    (
+        "40043",
+        "ga",
+        "retired_product_change_after_install_before_ga_runtime_acceptance",
+    ),
 )
 
 

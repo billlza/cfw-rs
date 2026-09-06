@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run and recover append-only Developer ID signing attempts for GA build 40043.
+"""Run and recover append-only Developer ID signing attempts for GA build 40044.
 
 The frozen candidate is never copied into a canonical signing path until one
 private attempt has passed signing, full app verification, and transformation

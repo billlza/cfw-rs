@@ -10,6 +10,7 @@ use cfw_platform::{
 use super::cutover_plan::LegacyProxyAbsence;
 use super::gui_handoff::LegacyGuiHandoff;
 use super::journal::{CutoverJournal, CutoverJournalStore, CutoverPhase};
+use super::migration::require_retired_managed_paths_absent;
 use super::network_fingerprint::LegacyNetworkFingerprint;
 use super::process_cleanup::{
     managed_processes, validate_unique_root_managed_process, verify_privileged_artifacts_are_gone,
@@ -94,11 +95,11 @@ pub(super) fn verify_legacy_network_intact(
             {
                 return Err("dormant legacy service/job state changed".into());
             }
-            verify_inactive_runtime_absence(store)?;
+            verify_inactive_runtime_absence(store, journal.runtime_kind)?;
         }
         LegacyRuntimePlanKind::OfflineUpgrade | LegacyRuntimePlanKind::FreshInstall => {
             verify_unregistered_service()?;
-            verify_inactive_runtime_absence(store)?;
+            verify_inactive_runtime_absence(store, journal.runtime_kind)?;
         }
     }
 
@@ -108,8 +109,14 @@ pub(super) fn verify_legacy_network_intact(
         LegacyNetworkFingerprint::verify_absent()?;
     }
     if journal.legacy_proxy_services.is_empty() {
-        LegacyProxyAbsence::resolve(store)?
-            .verify("the retired installation's system proxy is still applied")?;
+        if journal.runtime_kind != LegacyRuntimePlanKind::FreshInstall {
+            // FreshInstall completed the mandatory inactive-resource proof
+            // above and has no recorded proxy endpoint to verify again.
+            LegacyProxyAbsence::resolve(store, journal.runtime_kind)?.verify(
+                store,
+                "the retired installation's system proxy is still applied",
+            )?;
+        }
     } else {
         MacOsPlatformService
             .verify_legacy_proxy_still_applied(&proxy_plan(journal)?)
@@ -162,7 +169,9 @@ pub(super) async fn finish_network_retirement(
         }
         LegacyRuntimePlanKind::DormantRegistered { .. }
         | LegacyRuntimePlanKind::OfflineUpgrade
-        | LegacyRuntimePlanKind::FreshInstall => verify_inactive_runtime_absence(store)?,
+        | LegacyRuntimePlanKind::FreshInstall => {
+            verify_inactive_runtime_absence(store, journal.runtime_kind)?;
+        }
     }
 
     if let Some(tunnel) = &journal.legacy_tunnel {
@@ -221,9 +230,15 @@ pub(super) fn verify_network_retirement_completed_with_active_replacement(
         LegacyNetworkFingerprint::for_recovery(tunnel.clone())?.verify_removed()?;
     }
     LegacyNetworkFingerprint::verify_absent()?;
-    verify_active_replacement_proxy_postcondition(journal.target, || {
-        LegacyProxyAbsence::resolve(store)?.verify("legacy proxy retirement is incomplete")
-    })?;
+    verify_active_replacement_proxy_postcondition(
+        journal.target,
+        journal.runtime_kind,
+        || require_retired_managed_paths_absent(store),
+        || {
+            LegacyProxyAbsence::resolve(store, journal.runtime_kind)?
+                .verify(store, "legacy proxy retirement is incomplete")
+        },
+    )?;
     verify_network_retiring_gui_terminated(journal)
 }
 
@@ -273,14 +288,18 @@ fn verify_unregistered_service() -> Result<(), String> {
     Ok(())
 }
 
-fn verify_inactive_runtime_absence(store: &SettingsStore) -> Result<(), String> {
+fn verify_inactive_runtime_absence(
+    store: &SettingsStore,
+    runtime_kind: LegacyRuntimePlanKind,
+) -> Result<(), String> {
     if LegacyControlSession::exists().map_err(|error| error.to_string())?
         || !managed_processes(store.paths().legacy_cores_dir.as_path())?.is_empty()
     {
         return Err("a legacy session or managed core exists in an inactive upgrade plan".into());
     }
     LegacyNetworkFingerprint::verify_absent()?;
-    LegacyProxyAbsence::resolve(store)?.verify("a legacy proxy remains in an inactive upgrade plan")
+    LegacyProxyAbsence::resolve(store, runtime_kind)?
+        .verify(store, "a legacy proxy remains in an inactive upgrade plan")
 }
 
 fn verify_pre_service_retirement_absence(
@@ -298,8 +317,8 @@ fn verify_pre_service_retirement_absence(
     }
     LegacyNetworkFingerprint::verify_absent()?;
     if require_proxy_absence {
-        LegacyProxyAbsence::resolve(store)?
-            .verify("legacy proxy remains before helper unregister")?;
+        LegacyProxyAbsence::resolve(store, journal.runtime_kind)?
+            .verify(store, "legacy proxy remains before helper unregister")?;
     }
     ensure_network_retiring_gui_terminated(journal)
 }
@@ -309,20 +328,28 @@ fn verify_post_unregister_absence(
     store: &SettingsStore,
     require_proxy_absence: bool,
 ) -> Result<(), String> {
-    verify_privileged_artifacts_are_gone(store.paths().legacy_cores_dir.as_path())?;
+    // Fresh proxy-absence verification below already checks privileged resources.
+    if journal.runtime_kind != LegacyRuntimePlanKind::FreshInstall || !require_proxy_absence {
+        verify_privileged_artifacts_are_gone(store.paths().legacy_cores_dir.as_path())?;
+    }
     verify_pre_service_retirement_absence(journal, store, require_proxy_absence)
 }
 
 fn verify_active_replacement_proxy_postcondition(
     target: EngineMode,
+    runtime_kind: LegacyRuntimePlanKind,
+    verify_fresh_resources_absent: impl FnOnce() -> Result<(), String>,
     verify_legacy_proxy_absent: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    match target {
-        EngineMode::SystemProxy => Ok(()),
-        EngineMode::Tunnel => verify_legacy_proxy_absent(),
-        EngineMode::Off => {
+    match (target, runtime_kind) {
+        (EngineMode::Off, _) => {
             Err("an Off target cannot own an Active replacement retirement proof".into())
         }
+        (EngineMode::SystemProxy | EngineMode::Tunnel, LegacyRuntimePlanKind::FreshInstall) => {
+            verify_fresh_resources_absent()
+        }
+        (EngineMode::SystemProxy, _) => Ok(()),
+        (EngineMode::Tunnel, _) => verify_legacy_proxy_absent(),
     }
 }
 
@@ -389,16 +416,24 @@ async fn wait_for_network_fingerprint_removal(
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::fs;
+
+    use cfw_core::MacOsAppPaths;
 
     use super::*;
 
     #[test]
     fn active_system_proxy_never_replays_the_legacy_proxy_postcondition() {
         let legacy_proxy_calls = Cell::new(0);
-        verify_active_replacement_proxy_postcondition(EngineMode::SystemProxy, || {
-            legacy_proxy_calls.set(legacy_proxy_calls.get() + 1);
-            Err("legacy proxy mutation or absence check must not run".into())
-        })
+        verify_active_replacement_proxy_postcondition(
+            EngineMode::SystemProxy,
+            LegacyRuntimePlanKind::OfflineUpgrade,
+            || Err("an upgrade must not use fresh-install evidence".into()),
+            || {
+                legacy_proxy_calls.set(legacy_proxy_calls.get() + 1);
+                Err("legacy proxy mutation or absence check must not run".into())
+            },
+        )
         .expect("replacement System Proxy remains authoritative");
         assert_eq!(legacy_proxy_calls.get(), 0);
     }
@@ -406,12 +441,98 @@ mod tests {
     #[test]
     fn active_non_proxy_replacements_require_legacy_proxy_absence() {
         let legacy_proxy_calls = Cell::new(0);
-        verify_active_replacement_proxy_postcondition(EngineMode::Tunnel, || {
-            legacy_proxy_calls.set(legacy_proxy_calls.get() + 1);
-            Ok(())
-        })
+        verify_active_replacement_proxy_postcondition(
+            EngineMode::Tunnel,
+            LegacyRuntimePlanKind::OfflineUpgrade,
+            || Err("an upgrade must not use fresh-install evidence".into()),
+            || {
+                legacy_proxy_calls.set(legacy_proxy_calls.get() + 1);
+                Ok(())
+            },
+        )
         .expect("Tunnel requires proxy absence");
         assert_eq!(legacy_proxy_calls.get(), 1);
-        assert!(verify_active_replacement_proxy_postcondition(EngineMode::Off, || Ok(())).is_err());
+        assert!(
+            verify_active_replacement_proxy_postcondition(
+                EngineMode::Off,
+                LegacyRuntimePlanKind::OfflineUpgrade,
+                || panic!("Off must not inspect fresh resources"),
+                || panic!("Off must not inspect legacy proxies"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn active_fresh_replacements_verify_real_resources_without_proxy_queries() {
+        let temporary = tempfile::tempdir().expect("fresh recovery fixture");
+        let store = SettingsStore::new(MacOsAppPaths::from_app_home(temporary.path().join("app")));
+        store.ensure_layout().expect("new settings layout");
+        store
+            .commit_legacy_retirement()
+            .expect("late recovery marker");
+        for target in [EngineMode::SystemProxy, EngineMode::Tunnel] {
+            let fresh_calls = Cell::new(0);
+            let legacy_proxy_calls = Cell::new(0);
+            verify_active_replacement_proxy_postcondition(
+                target,
+                LegacyRuntimePlanKind::FreshInstall,
+                || {
+                    fresh_calls.set(fresh_calls.get() + 1);
+                    require_retired_managed_paths_absent(&store)
+                },
+                || {
+                    legacy_proxy_calls.set(legacy_proxy_calls.get() + 1);
+                    Err("replacement or foreign proxy must not be inspected".into())
+                },
+            )
+            .expect("fresh absence does not depend on an unrecorded endpoint");
+            assert_eq!(fresh_calls.get(), 1);
+            assert_eq!(legacy_proxy_calls.get(), 0);
+        }
+    }
+
+    #[test]
+    fn active_fresh_system_proxy_cannot_skip_new_legacy_resources() {
+        let temporary = tempfile::tempdir().expect("fresh recovery fixture");
+        let store = SettingsStore::new(MacOsAppPaths::from_app_home(temporary.path().join("app")));
+        store.ensure_layout().expect("new settings layout");
+        for path in [
+            store.paths().legacy_settings_file.clone(),
+            store.paths().app_home.join("proxy.pac"),
+        ] {
+            fs::write(&path, b"late legacy resource").expect("reappeared legacy resource");
+            let fresh_calls = Cell::new(0);
+            let error = verify_active_replacement_proxy_postcondition(
+                EngineMode::SystemProxy,
+                LegacyRuntimePlanKind::FreshInstall,
+                || {
+                    fresh_calls.set(fresh_calls.get() + 1);
+                    require_retired_managed_paths_absent(&store)
+                },
+                || panic!("the active replacement's proxy must remain untouched"),
+            )
+            .expect_err("fresh resource absence must run outside the legacy proxy closure");
+            assert!(error.contains("remains at"), "{error}");
+            assert_eq!(fresh_calls.get(), 1);
+            fs::remove_file(path).expect("remove fixture resource");
+        }
+    }
+
+    #[test]
+    fn off_never_acquires_fresh_or_recorded_proxy_postconditions() {
+        for kind in [
+            LegacyRuntimePlanKind::FreshInstall,
+            LegacyRuntimePlanKind::OfflineUpgrade,
+        ] {
+            let error = verify_active_replacement_proxy_postcondition(
+                EngineMode::Off,
+                kind,
+                || panic!("Off must not inspect fresh resources"),
+                || panic!("Off must not inspect legacy proxies"),
+            )
+            .expect_err("Off is never an active replacement");
+            assert!(error.contains("an Off target"), "{error}");
+        }
     }
 }

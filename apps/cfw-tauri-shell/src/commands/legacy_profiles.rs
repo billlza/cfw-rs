@@ -630,7 +630,7 @@ async fn provision_migrated_credentials(
             ))
         }
         Err(ImportedCredentialProvisionError::Rejected(error)) => Err(format!(
-            "credential vault rejected the migration batch before repository commit; no new migration profile was committed ({})",
+            "credential provisioning was not confirmed before repository commit; no new migration profile was committed ({})",
             migration_provision_attempt_error(&error)
         )),
     }
@@ -678,6 +678,7 @@ mod tests {
     struct ScriptedCredentialVault {
         responses: Mutex<VecDeque<Result<CredentialVaultReceipt, CredentialVaultError>>>,
         requests: Mutex<Vec<ProvisionRequestSnapshot>>,
+        garbage_collection_requests: Mutex<usize>,
     }
 
     impl ScriptedCredentialVault {
@@ -685,11 +686,19 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into()),
                 requests: Mutex::new(Vec::new()),
+                garbage_collection_requests: Mutex::new(0),
             }
         }
 
         fn requests(&self) -> Vec<ProvisionRequestSnapshot> {
             self.requests.lock().expect("request lock").clone()
+        }
+
+        fn garbage_collection_requests(&self) -> usize {
+            *self
+                .garbage_collection_requests
+                .lock()
+                .expect("garbage collection request lock")
         }
     }
 
@@ -734,6 +743,10 @@ mod tests {
             &self,
             _request: CredentialGarbageCollectionRequest,
         ) -> CredentialGarbageCollectionPreviewFuture<'_> {
+            *self
+                .garbage_collection_requests
+                .lock()
+                .expect("garbage collection request lock") += 1;
             Box::pin(async { Err(CredentialVaultError::Internal) })
         }
 
@@ -741,6 +754,10 @@ mod tests {
             &self,
             _request: CredentialGarbageCollectionCommitRequest,
         ) -> CredentialGarbageCollectionCommitFuture<'_> {
+            *self
+                .garbage_collection_requests
+                .lock()
+                .expect("garbage collection request lock") += 1;
             Box::pin(async { Err(CredentialVaultError::Internal) })
         }
     }
@@ -1011,6 +1028,48 @@ mod tests {
                 .profiles
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn migration_identity_rejection_preserves_profiles_without_replay_or_cleanup() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let repository = ProfileRepository::new(temporary.path().join("profiles"));
+        let original = repository
+            .import(Some("Original"), &ValidatedSingBoxProfile::direct())
+            .expect("original profile");
+        repository.select(&original.id).expect("select original");
+        let before = repository.snapshot().expect("original snapshot");
+        let imported = imported_profile(true);
+        let vault = ScriptedCredentialVault::new(vec![
+            Err(CredentialVaultError::IdentityRejected),
+            Ok(CredentialVaultReceipt {
+                profile_id: PROFILE_ID.into(),
+                profile_digest: imported.profile.digest().to_owned(),
+            }),
+        ]);
+
+        let error = commit_migrated_profile(
+            &repository,
+            &vault,
+            PROFILE_ID,
+            "Migrated",
+            "https://subscription.example/profile",
+            &imported,
+        )
+        .await
+        .expect_err("an unconfirmed native write must not commit the profile");
+
+        assert_eq!(repository.snapshot().expect("unchanged snapshot"), before);
+        assert_eq!(vault.requests().len(), 1);
+        assert_eq!(vault.garbage_collection_requests(), 0);
+        assert!(
+            error.contains("credential provisioning was not confirmed before repository commit")
+        );
+        assert!(error.contains("no new migration profile was committed"));
+        assert!(error.contains("the operation result is unconfirmed"));
+        assert!(!error.contains("vault rejected the migration batch"));
+        assert!(!error.contains("data is corrupt"));
+        assert!(!error.contains(PROFILE_SECRET));
     }
 
     #[tokio::test]

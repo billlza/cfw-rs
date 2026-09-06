@@ -22,15 +22,14 @@ from scripts.publication.durable_file import (
 )
 
 
-# The recorded predecessor is the installed 40041 with its real frozen tree
+# The recorded predecessor is the installed 40043 with its real frozen tree
 # identity; the install journal is only readable against the exact predecessor
 # it names, and that predecessor selects the current service vocabulary.
 PREVIOUS = install.AppIdentity(
-    "0.4.0", "40041", install.INSTALLED_40041_PREDECESSOR.tree_sha256
+    "0.4.0", "40043", install.INSTALLED_40043_PREDECESSOR.tree_sha256
 )
-BOUND = install.BoundInstallProfile.recorded(install.GA_INSTALL_PROFILE, PREVIOUS)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40043", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40044", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
@@ -82,8 +81,9 @@ def guard() -> dict[str, object]:
 
 
 class JournalExportFixture:
-    def __init__(self) -> None:
+    def __init__(self, *, previous: install.AppIdentity = PREVIOUS) -> None:
         self.temporary = tempfile.TemporaryDirectory()
+        self.previous = previous
         root = Path(self.temporary.name).resolve(strict=True)
         self.repository = root / "repository"
         self.source_parent = root / "Applications"
@@ -124,9 +124,12 @@ class JournalExportFixture:
             with store.locked():
                 intent, events = store.create(
                     CANDIDATE,
-                    PREVIOUS,
+                    self.previous,
                     guard(),
                     ENVIRONMENT,
+                )
+                bound = install.BoundInstallProfile.recorded(
+                    install.GA_INSTALL_PROFILE, self.previous
                 )
                 for sequence in range(1, len(service.PHASES)):
                     events.append(
@@ -134,7 +137,7 @@ class JournalExportFixture:
                             events,
                             intent=intent,
                             phase=service.PHASES[sequence],
-                            action=BOUND.service_actions[sequence],
+                            action=bound.service_actions[sequence],
                             guard=guard(),
                         )
                     )
@@ -150,7 +153,7 @@ class JournalExportFixture:
                 {"after": guard(), "before": guard(), "operation": "install"}
             ],
             "phase": "installed",
-            "previous": PREVIOUS.document(),
+            "previous": self.previous.document(),
             "schema_version": install.SCHEMA_VERSION,
             "sequence": 4,
             "staging_name": f"{install.STAGING_PREFIX}{TRANSACTION_ID}",
@@ -236,6 +239,39 @@ class GAAcceptanceJournalExportTests(unittest.TestCase):
         self.assertNotIn(b"io_platform_uuid", corpus)
         self.assertNotIn(b"volume_group_uuid", corpus)
         self.assertNotIn(b"boot_session", corpus)
+
+    def test_historical_predecessors_cannot_authorize_the_current_ga_migration(self) -> None:
+        for predecessor in (
+            install.INSTALLED_40019_PREDECESSOR,
+            install.INSTALLED_40041_PREDECESSOR,
+        ):
+            with self.subTest(previous=predecessor.build_number):
+                fixture = JournalExportFixture(
+                    previous=install.AppIdentity(
+                        "0.4.0", predecessor.build_number, predecessor.tree_sha256
+                    )
+                )
+                self.addCleanup(fixture.cleanup)
+                before = {
+                    path.relative_to(fixture.source_parent): path.read_bytes()
+                    for path in fixture.source_parent.rglob("*")
+                    if path.is_file()
+                }
+                with self.assertRaisesRegex(
+                    journal_export.GAAcceptanceJournalExportError,
+                    "different GA migrations",
+                ):
+                    fixture.export()
+                self.assertFalse(fixture.paths.external_intent.exists())
+                self.assertFalse(fixture.paths.migration_root.exists())
+                self.assertEqual(
+                    {
+                        path.relative_to(fixture.source_parent): path.read_bytes()
+                        for path in fixture.source_parent.rglob("*")
+                        if path.is_file()
+                    },
+                    before,
+                )
 
     def test_boolean_schema_aliases_are_rejected_end_to_end(self) -> None:
         self.fixture.export()
@@ -846,6 +882,14 @@ class GAAcceptanceJournalExportTests(unittest.TestCase):
 class JournalExportSourceContractTests(unittest.TestCase):
     def test_source_contract_and_fixed_layout(self) -> None:
         journal_export.self_check()
+        self.assertEqual(
+            (
+                journal_export.PRODUCT_VERSION,
+                journal_export.PREVIOUS_BUILD,
+                journal_export.GA_BUILD,
+            ),
+            ("0.4.0", "40043", "40044"),
+        )
         self.assertEqual(
             journal_export.ENVIRONMENT_RELATIVE,
             journal_export.SERVICE_RELATIVE / service.ENVIRONMENT_NAME,

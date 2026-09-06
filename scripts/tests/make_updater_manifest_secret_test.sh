@@ -174,8 +174,8 @@ fi
 }
 
 fixture_repo="$temporary_root/repository"
-fixture_artifact_repository="$fixture_repo/target/release-worktrees/40043"
-ga_root="$fixture_artifact_repository/target/candidates/0.4.0/ga/40043"
+fixture_artifact_repository="$fixture_repo/target/release-worktrees/40044"
+ga_root="$fixture_artifact_repository/target/candidates/0.4.0/ga/40044"
 app_path="$ga_root/signed/Clash for Mac.app"
 native_products="$ga_root/signing-output/signed-native-products"
 mkdir -p "$fixture_repo/scripts" "$fixture_artifact_repository/scripts" "$native_products" \
@@ -212,12 +212,12 @@ cfw_run_release_python_script() {
 }
 
 release_native_products_root_for_app() {
-  [[ "\$1" == "\$publication_artifact_repository/target/candidates/0.4.0/ga/40043/signed/Clash for Mac.app" ]]
-  printf '%s\n' "\$publication_artifact_repository/target/candidates/0.4.0/ga/40043/signing-output/signed-native-products"
+  [[ "\$1" == "\$publication_artifact_repository/target/candidates/0.4.0/ga/40044/signed/Clash for Mac.app" ]]
+  printf '%s\n' "\$publication_artifact_repository/target/candidates/0.4.0/ga/40044/signing-output/signed-native-products"
 }
 
 verify_release_prepackage_evidence() {
-  [[ "\$#" -eq 1 && "\$1" == "\$publication_artifact_repository/target/candidates/0.4.0/ga/40043/signed/Clash for Mac.app" ]]
+  [[ "\$#" -eq 1 && "\$1" == "\$publication_artifact_repository/target/candidates/0.4.0/ga/40044/signed/Clash for Mac.app" ]]
   [[ "\$(declare -p LANG)" == 'declare -rx LANG="C"' ]]
   [[ "\$(declare -p LC_ALL)" == 'declare -rx LC_ALL="C"' ]]
 }
@@ -228,8 +228,8 @@ cat >"$fixture_artifact_repository/scripts/verify_release_app.sh" <<'SH'
 set -euo pipefail
 repo_root="${BASH_SOURCE[0]%/scripts/verify_release_app.sh}"
 [[ "$#" -eq 4 ]]
-[[ "$1" == "$repo_root/target/candidates/0.4.0/ga/40043/signed/Clash for Mac.app" ]]
-[[ "$2" == "$repo_root/target/candidates/0.4.0/ga/40043/signing-output/signed-native-products" ]]
+[[ "$1" == "$repo_root/target/candidates/0.4.0/ga/40044/signed/Clash for Mac.app" ]]
+[[ "$2" == "$repo_root/target/candidates/0.4.0/ga/40044/signing-output/signed-native-products" ]]
 [[ "$3" == "--context" ]]
 [[ "$4" == "canonical-native-content" ]]
 SH
@@ -304,7 +304,7 @@ if not arguments or arguments[0] != "seal-updater":
 staging = Path(arguments[arguments.index("--staging") + 1])
 destination = Path(arguments[arguments.index("--destination") + 1])
 repository = Path(arguments[arguments.index("--repository") + 1])
-expected_repository = Path(__file__).resolve().parents[1] / "target/release-worktrees/40043"
+expected_repository = Path(__file__).resolve().parents[1] / "target/release-worktrees/40044"
 if repository != expected_repository:
     raise SystemExit("release-set sealer received executor source instead of artifact source")
 shutil.copytree(staging, destination)
@@ -319,7 +319,7 @@ cat >"$app_path/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key>
   <string>0.4.0</string>
   <key>CFBundleVersion</key>
-  <string>40043</string>
+  <string>40044</string>
 </dict>
 </plist>
 PLIST

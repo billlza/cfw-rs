@@ -717,7 +717,7 @@ class FinalCandidateEnvironmentStatusTests(_CleanWorkspaceMixin):
     def test_default_inputs_are_confined_to_the_active_ga_stage_root(self) -> None:
         self.assertEqual(
             DEFAULT_EVIDENCE_DIRECTORY,
-            "target/candidates/0.4.0/ga/40043/stage-inputs/final-candidate",
+            "target/candidates/0.4.0/ga/40044/stage-inputs/final-candidate",
         )
 
     def test_absent_inputs_report_not_run_and_block(self) -> None:

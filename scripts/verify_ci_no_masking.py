@@ -144,7 +144,7 @@ REQUIRED_SWIFT_TARGET_INFO_PROBE = (
 # Level 1 integrity identity for the complete dispatch program. This detects
 # unreviewed control-flow drift; it is not an authentication mechanism.
 REQUIRED_RELEASE_CI_GATE_SHA256 = (
-    "64e77b03b9eaad53baf47c0201dc4d44f489fd5de177a0b59cfb9e2ab92cc4ad"
+    "e10113e967081dcc4bbd4b6eeff5d6d1e5a739b1eabfd773584f9b9e95bacc41"
 )
 REQUIRED_WORKFLOW_SHA256 = (
     "b0881faa331b4072b1d0e9d957fe5db99920aef0e7ee8d6284accb6531d3a724"
@@ -952,6 +952,13 @@ def _check_release_ci_boundary(text: str, pins: dict[str, str]) -> list[str]:
     gate_source = _without_full_line_comments(raw_gate_source)
     if not raw_gate_source.startswith("#!/bin/bash -p\n"):
         findings.append("closed release CI gate lacks the privileged-mode Bash shebang")
+    entry_commands = tuple(
+        line.strip() for line in gate_source.splitlines() if line.strip()
+    )
+    if entry_commands[:2] != ("set -euo pipefail", "umask 022"):
+        findings.append(
+            "closed release CI gate must set umask 022 before loading helpers or dispatching"
+        )
     required_implementation = (
         "cfw_seal_release_tool_environment tool-bootstrap",
         'cfw_seal_release_tool_environment "$ci_release_role"',

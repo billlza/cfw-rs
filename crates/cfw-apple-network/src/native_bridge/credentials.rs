@@ -165,13 +165,14 @@ fn map_vault_error(error: NativeBridgeError) -> CredentialVaultError {
         NativeBridgeErrorCode::PermissionDenied => CredentialVaultError::AccessDenied,
         NativeBridgeErrorCode::CredentialConflict => CredentialVaultError::ImmutableConflict,
         NativeBridgeErrorCode::CredentialVaultMissing => CredentialVaultError::MissingVault,
+        NativeBridgeErrorCode::CredentialVaultCorrupt => CredentialVaultError::Corrupt,
         NativeBridgeErrorCode::CredentialMigrationRequired => {
             CredentialVaultError::MigrationRequired
         }
         NativeBridgeErrorCode::CredentialGcConflict => CredentialVaultError::ConcurrentModification,
         NativeBridgeErrorCode::ResourceExhausted => CredentialVaultError::CapacityExceeded,
         NativeBridgeErrorCode::ConfigurationRejected => CredentialVaultError::InvalidMaterial,
-        NativeBridgeErrorCode::IdentityRejected => CredentialVaultError::Corrupt,
+        NativeBridgeErrorCode::IdentityRejected => CredentialVaultError::IdentityRejected,
         NativeBridgeErrorCode::Busy
         | NativeBridgeErrorCode::JournalCapacityExhausted
         | NativeBridgeErrorCode::ApprovalDenied
@@ -212,6 +213,59 @@ mod tests {
     use cfw_engine_api::{
         CredentialKind, CredentialProvision, CredentialSecret, ValidatedSingBoxProfile,
     };
+
+    #[test]
+    fn identity_rejection_is_not_storage_corruption() {
+        let rejected = map_vault_error(NativeBridgeError::new(
+            NativeBridgeErrorCode::IdentityRejected,
+            "native bridge response contains a non-canonical identity",
+        ));
+        assert_eq!(rejected, CredentialVaultError::IdentityRejected);
+        assert!(
+            rejected
+                .to_string()
+                .contains("operation result is unconfirmed")
+        );
+    }
+
+    #[test]
+    fn dedicated_corruption_code_preserves_storage_failure() {
+        let wire: cfw_engine_api::BackendErrorKind =
+            serde_json::from_str(r#""credential_vault_corrupt""#).expect("typed corruption code");
+        assert_eq!(
+            wire,
+            cfw_engine_api::BackendErrorKind::CredentialVaultCorrupt
+        );
+        assert_eq!(
+            wire.retry_directive(),
+            cfw_engine_api::RetryDirective::Never
+        );
+        let bridge = NativeBridgeErrorCode::from(wire);
+        assert_eq!(cfw_engine_api::BackendErrorKind::from(bridge), wire);
+        assert_eq!(
+            map_vault_error(NativeBridgeError::new(bridge, "ignored untrusted detail")),
+            CredentialVaultError::Corrupt
+        );
+        for message in [
+            "Credential vault data is corrupt.",
+            "private secret must not escape",
+        ] {
+            assert_eq!(
+                map_vault_error(NativeBridgeError::new(
+                    NativeBridgeErrorCode::IdentityRejected,
+                    message,
+                )),
+                CredentialVaultError::IdentityRejected
+            );
+            assert_eq!(
+                map_vault_error(NativeBridgeError::new(
+                    NativeBridgeErrorCode::CredentialVaultCorrupt,
+                    message,
+                )),
+                CredentialVaultError::Corrupt
+            );
+        }
+    }
 
     #[test]
     fn only_an_admitted_bridge_timeout_has_an_unknown_vault_outcome() {

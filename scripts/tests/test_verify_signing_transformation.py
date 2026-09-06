@@ -123,7 +123,7 @@ class SigningTransformationFixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name).resolve()
         self.root = (
-            self.repository / "target/candidates/0.4.0/ga/40043"
+            self.repository / "target/candidates/0.4.0/ga/40044"
         )
         self.pre_sign_app = self.root / transformation.PRE_SIGN_APP_RELATIVE
         self.signing_output = (
@@ -182,7 +182,7 @@ class SigningTransformationFixture:
     def _write_pre_sign_manifest(self) -> None:
         metadata = {
             "artifactKind": "pre-sign-application-v1",
-            "buildNumber": "40043",
+            "buildNumber": "40044",
             "version": "0.4.0",
         }
         value = build_manifest(
@@ -232,7 +232,7 @@ class SigningTransformationFixture:
 
     def _write_intent(self) -> None:
         value = {
-            "build_number": "40043",
+            "build_number": "40044",
             "consumption_state": "candidate_frozen_consumed",
             "document": "cfm-candidate-freeze-intent-v3",
             "pre_sign_app_tree_sha256": "a" * 64,
@@ -251,7 +251,7 @@ class SigningTransformationFixture:
             intent_path=self.intent_path,
             intent_sha256=hashlib.sha256(self.intent_path.read_bytes()).hexdigest(),
             product_version="0.4.0",
-            build_number="40043",
+            build_number="40044",
             recovered=False,
         )
 

@@ -25,7 +25,7 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
 
     def invoke(self) -> None:
         verify._verify_artifact_inputs(
-            self.repository, self.root, self.artifacts, self.app, "40043"
+            self.repository, self.root, self.artifacts, self.app, "40044"
         )
 
     def test_artifact_reader_receives_explicit_closed_git_environment(self) -> None:
@@ -40,9 +40,9 @@ class PublicationArtifactVerificationTests(unittest.TestCase):
             self.invoke()
         reader.assert_called_once_with(
             self.repository,
-            native_products_root(self.repository, "40043"),
+            native_products_root(self.repository, "40044"),
             self.app,
-            "40043",
+            "40044",
             None,
             freeze_verifier=None,
         )

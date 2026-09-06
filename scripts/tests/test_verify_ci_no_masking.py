@@ -158,6 +158,30 @@ class VerifyCiNoMaskingTests(unittest.TestCase):
         # The real, checked-in workflow must satisfy the policy.
         audit_workflow(DEFAULT_WORKFLOW, DEFAULT_PINS)
 
+    def test_standalone_gate_requires_an_early_unconditional_public_umask(self) -> None:
+        source_gate = Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
+        source = source_gate.read_text(encoding="utf-8")
+        self.assertEqual(source.count("\numask 022\n"), 1)
+        variants = (
+            ("removed", ""),
+            ("commented", "# umask 022\n"),
+            ("private-default", "umask 077\n"),
+            ("unreachable", "if false; then\n  umask 022\nfi\n"),
+        )
+        for name, replacement in variants:
+            with self.subTest(variant=name), tempfile.TemporaryDirectory() as temporary:
+                drifted_gate = Path(temporary) / "run_release_ci_gate.sh"
+                drifted_gate.write_text(
+                    source.replace("umask 022\n", replacement, 1),
+                    encoding="utf-8",
+                )
+                with patch(
+                    "scripts.verify_ci_no_masking.RELEASE_CI_GATE", drifted_gate
+                ), self.assertRaisesRegex(
+                    CiPolicyError, "must set umask 022 before loading helpers or dispatching"
+                ):
+                    audit_workflow(DEFAULT_WORKFLOW, DEFAULT_PINS)
+
     def test_rust_test_gate_cannot_drop_all_features(self) -> None:
         source_gate = Path(__file__).resolve().parents[1] / "run_release_ci_gate.sh"
         source = source_gate.read_text(encoding="utf-8")

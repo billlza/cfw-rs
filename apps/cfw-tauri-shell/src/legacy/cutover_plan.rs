@@ -36,46 +36,87 @@ pub(super) struct LegacyCutoverPlan {
     proxy_absence: LegacyProxyAbsence,
 }
 
-/// The endpoint the retired installation recorded as its own, resolved once so
-/// every absence proof asks the same question. A proxy on any other endpoint
-/// belongs to a different product and is not evidence about this one.
-#[derive(Debug, Clone)]
-pub(super) struct LegacyProxyAbsence {
-    owned_ports: Vec<u16>,
-    pac_present: bool,
+/// The existing runtime classification selects the absence question. A fresh
+/// installation must keep proving that no legacy resources exist; an upgrade
+/// must prove absence at the endpoint its own settings recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LegacyProxyAbsence {
+    FreshInstall,
+    RecordedEndpoint { owned_port: u16, pac_present: bool },
 }
 
 impl LegacyProxyAbsence {
-    /// Reads the endpoint straight from the retired installation's own settings.
-    /// Fail closed: an unreadable store, or one that never recorded its mixed
-    /// port, leaves nothing to prove absence against.
-    pub(super) fn resolve(store: &SettingsStore) -> Result<Self, String> {
-        let network = LegacySettingsMigration::read(store.paths())
-            .map_err(|error| {
-                format!(
-                    "legacy settings are unreadable; legacy proxy absence cannot be proven: {error}"
-                )
-            })?
-            .map(|migration| migration.network.clone())
-            .unwrap_or_default();
-        Self::from_network(&network, store)
+    /// The plan or journal owns the runtime kind. Missing settings never turn an
+    /// upgrade into a fresh installation, and unreadable settings remain errors.
+    pub(super) fn resolve(
+        store: &SettingsStore,
+        runtime_kind: LegacyRuntimePlanKind,
+    ) -> Result<Self, String> {
+        let legacy_settings = LegacySettingsMigration::read(store.paths()).map_err(|error| {
+            format!(
+                "legacy settings are unreadable; legacy proxy absence cannot be proven: {error}"
+            )
+        })?;
+        Self::from_network(
+            legacy_settings.as_ref().map(|migration| &migration.network),
+            store,
+            runtime_kind,
+        )
     }
 
-    fn from_network(network: &LegacyNetworkState, store: &SettingsStore) -> Result<Self, String> {
-        let owned_port = network.mixed_port.ok_or_else(|| {
+    fn from_network(
+        network: Option<&LegacyNetworkState>,
+        store: &SettingsStore,
+        runtime_kind: LegacyRuntimePlanKind,
+    ) -> Result<Self, String> {
+        if runtime_kind == LegacyRuntimePlanKind::FreshInstall {
+            if network.is_some() {
+                return Err(
+                    "legacy settings appeared in a fresh installation; the existing network was not changed"
+                        .into(),
+                );
+            }
+            return Ok(Self::FreshInstall);
+        }
+        let owned_port = network.and_then(|network| network.mixed_port).ok_or_else(|| {
             "legacy settings do not record the retired mixed port, so legacy proxy absence cannot be proven; the existing proxy was not changed"
                 .to_owned()
         })?;
-        Ok(Self {
-            owned_ports: vec![owned_port],
+        Ok(Self::RecordedEndpoint {
+            owned_port,
             pac_present: store.paths().app_home.join("proxy.pac").exists(),
         })
     }
 
-    pub(super) fn verify(&self, context: &str) -> Result<(), String> {
-        MacOsPlatformService
-            .verify_no_legacy_owned_proxy(&self.owned_ports, self.pac_present)
-            .map_err(|error| format!("{context}: {error}"))
+    pub(super) fn verify(&self, store: &SettingsStore, context: &str) -> Result<(), String> {
+        self.verify_with(
+            store,
+            context,
+            || verify_privileged_artifacts_are_gone(store.paths().legacy_cores_dir.as_path()),
+            |owned_port, pac_present| {
+                MacOsPlatformService
+                    .verify_no_legacy_owned_proxy(&[owned_port], pac_present)
+                    .map_err(|error| error.to_string())
+            },
+        )
+    }
+
+    fn verify_with(
+        &self,
+        store: &SettingsStore,
+        context: &str,
+        verify_privileged_absence: impl FnOnce() -> Result<(), String>,
+        verify_recorded_proxy_absence: impl FnOnce(u16, bool) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let result = match self {
+            Self::FreshInstall => verify_privileged_absence()
+                .and_then(|()| require_retired_managed_paths_absent(store)),
+            Self::RecordedEndpoint {
+                owned_port,
+                pac_present,
+            } => verify_recorded_proxy_absence(*owned_port, *pac_present),
+        };
+        result.map_err(|error| format!("{context}: {error}"))
     }
 }
 
@@ -180,7 +221,11 @@ impl LegacyCutoverPlan {
             }
         };
 
-        let proxy_absence = LegacyProxyAbsence::from_network(&network, &store)?;
+        let proxy_absence = LegacyProxyAbsence::from_network(
+            legacy_settings.as_ref().map(|migration| &migration.network),
+            &store,
+            runtime_kind,
+        )?;
         let proxy = if matches!(runtime_kind, LegacyRuntimePlanKind::LiveOwned { .. })
             && network.system_proxy
         {
@@ -205,15 +250,11 @@ impl LegacyCutoverPlan {
             // the address range and the loopback host are shared across the whole
             // tool family. Fail closed when the recorded endpoint is unknown.
             proxy_absence.verify(
+                &store,
                 "the retired installation's system proxy is still applied; it must be off before cutover",
             )?;
             None
         };
-
-        if runtime_kind == LegacyRuntimePlanKind::FreshInstall {
-            verify_privileged_artifacts_are_gone(store.paths().legacy_cores_dir.as_path())?;
-            require_retired_managed_paths_absent(&store)?;
-        }
 
         Ok(Self {
             store,
@@ -412,21 +453,17 @@ impl LegacyCutoverPlan {
                     return Err("an unregistered legacy launchd job appeared".into());
                 }
                 self.verify_inactive_runtime_absence()?;
-                if self.runtime_kind == LegacyRuntimePlanKind::FreshInstall {
-                    verify_privileged_artifacts_are_gone(
-                        self.store.paths().legacy_cores_dir.as_path(),
-                    )?;
-                    require_retired_managed_paths_absent(&self.store)?;
-                }
             }
         }
         if let Some(proxy) = &self.proxy {
             MacOsPlatformService
                 .verify_legacy_proxy_still_applied(proxy)
                 .map_err(|error| error.to_string())?;
-        } else {
+        } else if self.runtime_kind != LegacyRuntimePlanKind::FreshInstall {
+            // The inactive FreshInstall branch above already proved its full
+            // resource absence; it has no recorded proxy endpoint to recheck.
             self.proxy_absence
-                .verify("an unplanned legacy proxy appeared")?;
+                .verify(&self.store, "an unplanned legacy proxy appeared")?;
         }
         if let Some(tunnel) = &self.tunnel {
             tunnel.verify_still_present()?;
@@ -443,11 +480,14 @@ impl LegacyCutoverPlan {
             return Err("a legacy control session or managed core appeared".into());
         }
         LegacyNetworkFingerprint::verify_absent()?;
-        self.proxy_absence.verify("a legacy proxy appeared")
+        self.proxy_absence
+            .verify(&self.store, "a legacy proxy appeared")
     }
 
     fn verify_post_retirement_absence(&self) -> Result<(), String> {
-        verify_privileged_artifacts_are_gone(self.store.paths().legacy_cores_dir.as_path())?;
+        if self.runtime_kind != LegacyRuntimePlanKind::FreshInstall {
+            verify_privileged_artifacts_are_gone(self.store.paths().legacy_cores_dir.as_path())?;
+        }
         self.verify_pre_service_retirement_absence()
     }
 
@@ -459,6 +499,255 @@ impl LegacyCutoverPlan {
         }
         LegacyNetworkFingerprint::verify_absent()?;
         self.proxy_absence
-            .verify("legacy proxy retirement is incomplete")
+            .verify(&self.store, "legacy proxy retirement is incomplete")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::fs;
+
+    use cfw_core::MacOsAppPaths;
+    use cfw_platform::LegacyServiceJobProgram;
+
+    use super::*;
+
+    const LEGACY_WRITER_BASE: &str = "retain_window_bounds: true\nlaunch_at_login: false\nsilent_start: false\nsystem_proxy: false\n";
+
+    fn fresh_store() -> (tempfile::TempDir, SettingsStore) {
+        let temporary = tempfile::tempdir().expect("fresh installation fixture");
+        let store = SettingsStore::new(MacOsAppPaths::from_app_home(temporary.path().join("app")));
+        store.ensure_layout().expect("new settings layout");
+        (temporary, store)
+    }
+
+    fn upgrade_kinds() -> [LegacyRuntimePlanKind; 3] {
+        [
+            LegacyRuntimePlanKind::OfflineUpgrade,
+            LegacyRuntimePlanKind::DormantRegistered {
+                service_job: LegacyServiceJobObservation::LoadedInactive {
+                    program: LegacyServiceJobProgram::RetirementTombstone,
+                },
+            },
+            LegacyRuntimePlanKind::LiveOwned {
+                service_job: LegacyServiceJobObservation::LoadedActive {
+                    program: LegacyServiceJobProgram::LegacyHelper,
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn fresh_install_without_legacy_settings_has_no_recorded_proxy_endpoint() {
+        let (_temporary, store) = fresh_store();
+        assert!(
+            LegacySettingsMigration::read(store.paths())
+                .expect("read absent legacy settings")
+                .is_none()
+        );
+        let runtime_kind = classify_legacy_runtime(LegacyRuntimeEvidence {
+            retirement_completed: false,
+            legacy_settings_present: false,
+            service_status: ServiceModeStatus::NotRegistered,
+            service_job: LegacyServiceJobObservation::Unloaded,
+            control_session_present: false,
+            managed_process_count: 0,
+        })
+        .expect("authoritatively absent legacy runtime");
+        assert_eq!(runtime_kind, LegacyRuntimePlanKind::FreshInstall);
+
+        let absence = LegacyProxyAbsence::resolve(&store, runtime_kind)
+            .expect("a fresh installation never recorded a legacy proxy endpoint");
+        assert_eq!(absence, LegacyProxyAbsence::FreshInstall);
+        let privileged_calls = Cell::new(0);
+        for _ in 0..2 {
+            absence
+                .verify_with(
+                    &store,
+                    "fresh installation",
+                    || {
+                        privileged_calls.set(privileged_calls.get() + 1);
+                        Ok(())
+                    },
+                    |_, _| panic!("fresh installation must not inspect or clear foreign proxies"),
+                )
+                .expect("current legacy resources remain absent");
+        }
+        assert_eq!(
+            privileged_calls.get(),
+            2,
+            "absence results are never cached"
+        );
+    }
+
+    #[test]
+    fn fresh_install_rechecks_real_managed_paths_after_resolution() {
+        let (_temporary, store) = fresh_store();
+        let absence = LegacyProxyAbsence::resolve(&store, LegacyRuntimePlanKind::FreshInstall)
+            .expect("fresh strategy");
+        for path in [
+            store.paths().legacy_settings_file.clone(),
+            store.paths().legacy_config_file.clone(),
+            store.paths().legacy_cores_dir.clone(),
+            store.paths().legacy_helpers_dir.clone(),
+            store.paths().legacy_profiles_dir.clone(),
+            store.paths().app_home.join("proxy.pac"),
+        ] {
+            fs::write(&path, b"late legacy resource").expect("create late resource");
+            let error = absence
+                .verify_with(
+                    &store,
+                    "fresh installation recheck",
+                    || Ok(()),
+                    |_, _| panic!("fresh failure must not inspect foreign proxies"),
+                )
+                .expect_err("a previously selected fresh strategy is not an absence receipt");
+            assert!(error.contains("remains at"), "{error}");
+            fs::remove_file(path).expect("remove fixture resource");
+        }
+        let pac = store.paths().app_home.join("proxy.pac");
+        std::os::unix::fs::symlink("missing-pac-target", &pac).expect("broken PAC symlink");
+        let error = absence
+            .verify_with(&store, "fresh recheck", || Ok(()), |_, _| unreachable!())
+            .expect_err("a broken symlink is still a legacy resource");
+        assert!(error.contains("remains at"), "{error}");
+    }
+
+    #[test]
+    fn fresh_install_requires_each_privileged_absence_observation() {
+        let (_temporary, store) = fresh_store();
+        let absence = LegacyProxyAbsence::resolve(&store, LegacyRuntimePlanKind::FreshInstall)
+            .expect("fresh strategy");
+        for failure in [
+            "legacy helper remains",
+            "legacy service observation is unavailable",
+            "legacy control session remains",
+            "legacy managed process appeared",
+        ] {
+            let error = absence
+                .verify_with(
+                    &store,
+                    "fresh recheck",
+                    || Err(failure.to_owned()),
+                    |_, _| panic!("failed absence must not fall back to proxy inspection"),
+                )
+                .expect_err("unverified runtime absence must fail");
+            assert_eq!(error, format!("fresh recheck: {failure}"));
+        }
+    }
+
+    #[test]
+    fn upgrade_kinds_never_become_fresh_when_settings_or_the_port_are_missing() {
+        let (_temporary, store) = fresh_store();
+        for kind in upgrade_kinds() {
+            let error = LegacyProxyAbsence::resolve(&store, kind)
+                .expect_err("missing settings do not change the journal's runtime kind");
+            assert!(
+                error.contains("do not record the retired mixed port"),
+                "{error}"
+            );
+        }
+        fs::write(&store.paths().legacy_settings_file, LEGACY_WRITER_BASE)
+            .expect("valid legacy settings without a port");
+        for kind in upgrade_kinds() {
+            let error = LegacyProxyAbsence::resolve(&store, kind)
+                .expect_err("a recorded installation must identify its owned endpoint");
+            assert!(
+                error.contains("do not record the retired mixed port"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_install_rejects_settings_with_or_without_a_recorded_port() {
+        let (_temporary, store) = fresh_store();
+        for port_field in ["", "mixed_port: 7902\n"] {
+            fs::write(
+                &store.paths().legacy_settings_file,
+                format!("{LEGACY_WRITER_BASE}{port_field}"),
+            )
+            .expect("legacy settings");
+            let error = LegacyProxyAbsence::resolve(&store, LegacyRuntimePlanKind::FreshInstall)
+                .expect_err("new legacy settings must not select a different absence strategy");
+            assert!(
+                error.contains("settings appeared in a fresh installation"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_legacy_settings_never_become_fresh_absence() {
+        let (_temporary, store) = fresh_store();
+        fs::write(&store.paths().legacy_settings_file, [0xff]).expect("invalid UTF-8 settings");
+        let error = LegacyProxyAbsence::resolve(&store, LegacyRuntimePlanKind::FreshInstall)
+            .expect_err("invalid content is not missing content");
+        assert!(error.contains("legacy settings are unreadable"), "{error}");
+        fs::remove_file(&store.paths().legacy_settings_file).expect("remove invalid fixture");
+        std::os::unix::fs::symlink(
+            "missing-settings-target",
+            &store.paths().legacy_settings_file,
+        )
+        .expect("broken settings symlink");
+        let error = LegacyProxyAbsence::resolve(&store, LegacyRuntimePlanKind::FreshInstall)
+            .expect_err("an unreadable settings path is not absent");
+        assert!(error.contains("legacy settings are unreadable"), "{error}");
+    }
+
+    #[test]
+    fn recorded_endpoint_keeps_its_exact_proxy_boundary() {
+        let (_temporary, store) = fresh_store();
+        fs::write(
+            &store.paths().legacy_settings_file,
+            format!("{LEGACY_WRITER_BASE}mixed_port: 7902\n"),
+        )
+        .expect("recorded legacy port");
+        fs::write(store.paths().app_home.join("proxy.pac"), b"fixture PAC")
+            .expect("recorded PAC presence");
+        let absence = LegacyProxyAbsence::resolve(&store, LegacyRuntimePlanKind::OfflineUpgrade)
+            .expect("recorded strategy");
+        assert_eq!(
+            absence,
+            LegacyProxyAbsence::RecordedEndpoint {
+                owned_port: 7902,
+                pac_present: true
+            }
+        );
+        let proxy_calls = Cell::new(0);
+        let error = absence
+            .verify_with(
+                &store,
+                "recorded endpoint",
+                || panic!("an upgrade must not acquire fresh-install absence"),
+                |port, pac_present| {
+                    proxy_calls.set(proxy_calls.get() + 1);
+                    assert_eq!(port, 7902);
+                    assert!(pac_present);
+                    Err("recorded proxy remains".into())
+                },
+            )
+            .expect_err("recorded proxy failure remains explicit");
+        assert_eq!(proxy_calls.get(), 1);
+        assert_eq!(error, "recorded endpoint: recorded proxy remains");
+    }
+
+    #[test]
+    fn fresh_absence_remains_valid_after_the_completion_marker() {
+        let (_temporary, store) = fresh_store();
+        store
+            .commit_legacy_retirement()
+            .expect("completed data retirement marker");
+        let absence = LegacyProxyAbsence::resolve(&store, LegacyRuntimePlanKind::FreshInstall)
+            .expect("recovery preserves the original journal kind");
+        absence
+            .verify_with(
+                &store,
+                "completed fresh installation",
+                || Ok(()),
+                |_, _| panic!("completed fresh installation has no retired proxy endpoint"),
+            )
+            .expect("the marker does not invalidate current absence");
     }
 }

@@ -262,7 +262,7 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
         arguments = [
             str(Path(dmg.__file__)), command,
             "--repository", str(self.repository),
-            "--version", "0.4.0", "--build-number", "40043",
+            "--version", "0.4.0", "--build-number", "40044",
             "--notary-profile", NOTARY_PROFILE,
         ]
         if command == "start":
@@ -374,7 +374,7 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
 
     def test_dmg_preexisting_output_does_not_relabel_primary_failure(self) -> None:
         context = dmg.DmgContext(
-            repository=self.repository, version="0.4.0", build_number="40043",
+            repository=self.repository, version="0.4.0", build_number="40044",
             notary_profile=NOTARY_PROFILE, source_identity=SOURCE_IDENTITY,
         )
         context.final_root.mkdir(parents=True)
@@ -387,7 +387,7 @@ class ReleaseVerifierCommandSessionTests(unittest.TestCase):
 
     def test_dmg_unreadable_new_publication_state_preserves_unknown(self) -> None:
         context = dmg.DmgContext(
-            repository=self.repository, version="0.4.0", build_number="40043",
+            repository=self.repository, version="0.4.0", build_number="40044",
             notary_profile=NOTARY_PROFILE, source_identity=SOURCE_IDENTITY,
         )
         primary = artifacts.ArtifactSetError("post-publication verification failed")

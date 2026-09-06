@@ -119,9 +119,20 @@
   signed and notarized, but its frozen source's own local lane reproduction
   failed on one release-tooling test that read the lane's ambient toolchain
   selection; that test is now isolated, and 40042 is retired after
-  notarization with its bytes and receipts unchanged. Build 40043 is the only
-  active GA successor; source and CI
-  retries before freeze do not consume additional builds.
+  notarization with its bytes and receipts unchanged. Build 40043 then completed
+  signing, notarization, packaging and the 40041→40043 install. Authenticated
+  profile import exposed a native receipt that encoded the profile UUID in
+  uppercase, which the strict Rust consumer rejected and misclassified as vault
+  corruption. Receipt encoding and decoding now share the canonical audience
+  contract, and vault corruption has a distinct typed error. Build 40043 is
+  retired after install before GA runtime collection, with its original bytes,
+  seals and journals retained. Build 40044 is the only active GA successor;
+  source and CI retries before freeze do not consume additional builds.
+- Let a confirmed fresh installation proceed without an old proxy port that
+  never existed. Preparation and recovery recheck that legacy settings,
+  managed files, privileged services and network state remain absent. Upgrade
+  journals retain their original runtime kind and still require the recorded
+  endpoint; missing or unreadable old settings cannot select the fresh path.
 - Authenticate nested release-worktree managed caches through bounded,
   descriptor-relative Git administrative control files plus an explicit
   empty-target lifecycle receipt before excluding them from the path/name-only

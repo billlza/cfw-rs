@@ -75,6 +75,65 @@ private func modernProtocolStartRequest(
   )
 }
 
+@Test func nativeCredentialReceiptUsesCanonicalAudienceWire() throws {
+  let profileID = try #require(UUID(uuidString: "abcdefab-cdef-4abc-8def-abcdefabcdef"))
+  let digest = String(repeating: "ab", count: 32)
+  let audience = CredentialAudience(
+    profileID: profileID,
+    profileDigest: try SHA256Digest(hex: digest)
+  )
+  let receipt = NativeCredentialReceipt(audience: audience)
+  let encoder = JSONEncoder()
+  encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+  let encoded = try encoder.encode(receipt)
+  let expected = Data(
+    """
+    {"profile_digest":"\(digest)","profile_id":"abcdefab-cdef-4abc-8def-abcdefabcdef"}
+    """.utf8
+  )
+
+  #expect(encoded == expected)
+  #expect(receipt.profileID == profileID)
+  #expect(receipt.profileDigest.hex == digest)
+  #expect(try JSONDecoder().decode(NativeCredentialReceipt.self, from: expected) == receipt)
+  #expect(try JSONDecoder().decode(NativeCredentialReceipt.self, from: encoded) == receipt)
+}
+
+@Test(arguments: [
+  "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF",
+  "abcdefabcdef4abc8defabcdefabcdef",
+  "{abcdefab-cdef-4abc-8def-abcdefabcdef}",
+  "not-a-profile-uuid",
+])
+func nativeCredentialReceiptRejectsNoncanonicalProfileIDs(_ profileID: String) throws {
+  let payload = Data(
+    """
+    {"profile_digest":"\(String(repeating: "ab", count: 32))","profile_id":"\(profileID)"}
+    """.utf8
+  )
+
+  #expect(throws: NativeBridgeProtocolError.invalidContext) {
+    try JSONDecoder().decode(NativeCredentialReceipt.self, from: payload)
+  }
+}
+
+@Test(arguments: [
+  String(repeating: "AB", count: 32),
+  String(repeating: "ab", count: 31),
+  String(repeating: "ag", count: 32),
+])
+func nativeCredentialReceiptRejectsInvalidProfileDigests(_ digest: String) throws {
+  let payload = Data(
+    """
+    {"profile_digest":"\(digest)","profile_id":"abcdefab-cdef-4abc-8def-abcdefabcdef"}
+    """.utf8
+  )
+
+  #expect(throws: ProtocolValidationError.invalidDigest) {
+    try JSONDecoder().decode(NativeCredentialReceipt.self, from: payload)
+  }
+}
+
 @Test func credentialProvisionWireRequiresCanonicalReferenceOrder() throws {
   let request = try CredentialProvisionRequest(
     audience: try testCredentialAudience(),

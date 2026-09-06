@@ -675,6 +675,10 @@ pub enum CredentialVaultError {
     InvalidMaterial,
     #[error("credential vault data is corrupt")]
     Corrupt,
+    #[error(
+        "credential vault identity or response was rejected; the operation result is unconfirmed"
+    )]
+    IdentityRejected,
     #[error("credential vault does not exist")]
     MissingVault,
     #[error("credential vault schema requires explicit migration")]
@@ -903,6 +907,7 @@ pub enum BackendErrorKind {
     CredentialsUnavailable,
     CredentialConflict,
     CredentialVaultMissing,
+    CredentialVaultCorrupt,
     CredentialMigrationRequired,
     CredentialGcConflict,
     ProxyAgentApprovalRequired,
@@ -1012,6 +1017,7 @@ impl BackendErrorKind {
             | Self::CredentialsUnavailable
             | Self::CredentialConflict
             | Self::CredentialVaultMissing
+            | Self::CredentialVaultCorrupt
             | Self::CredentialGcConflict
             | Self::GlobalAuthorityIdentityRejected
             | Self::TicketInvalid
@@ -1042,6 +1048,7 @@ impl BackendErrorKind {
             Self::CredentialsUnavailable => "Required credentials are unavailable.",
             Self::CredentialConflict => "Credential material conflicts with an immutable entry.",
             Self::CredentialVaultMissing => "The credential vault is unavailable.",
+            Self::CredentialVaultCorrupt => "The credential vault data is corrupt.",
             Self::CredentialMigrationRequired => {
                 "The credential vault uses an unsupported schema and must be cleared and reprovisioned."
             }

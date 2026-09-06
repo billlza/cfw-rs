@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import Callable, NoReturn, Sequence
+from typing import Callable, Literal, NoReturn, Sequence
 from unittest import mock
 
 from scripts import updater_signing_launcher as launcher
@@ -32,6 +32,9 @@ UNSIGNED_VALIDATION_ENVIRONMENT_NAMES = (
     "CFW_RELEASE_PYTHON_EXECUTABLE",
     "CFW_RELEASE_PYTHON_RUNTIME",
     "CFW_RELEASE_PYTHON_STDLIB",
+    "CFW_RELEASE_RUST_TOOLCHAIN",
+    "CFW_RELEASE_RUSTC_EXECUTABLE",
+    "CFW_RELEASE_CARGO_EXECUTABLE",
     "CFW_RELEASE_POLICY_TOOL_ROOT",
     "CFW_RELEASE_CARGO_INPUT_ROOT",
     "CFW_RELEASE_CARGO_VENDOR_ROOT",
@@ -1165,6 +1168,20 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
             if os.environ.get("CFW_REQUIRE_PINNED_SIGNER_INTEGRATION") == "1":
                 self.fail("pinned Tauri signer is required by this integration lane")
             self.skipTest("pinned Tauri signer is not installed")
+        roles: tuple[Literal["production", "unsigned-validation"], ...] = (
+            ("unsigned-validation",)
+            if "CFW_UNSIGNED_VALIDATION_PYTHON" in os.environ
+            else ("production", "unsigned-validation")
+        )
+        for role in roles:
+            with self.subTest(role=role):
+                self._assert_real_pinned_signer_reads_temporary_key(signer, role)
+
+    def _assert_real_pinned_signer_reads_temporary_key(
+        self,
+        signer: Path,
+        role: Literal["production", "unsigned-validation"],
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = SigningHome(Path(temporary))
             password_text = "synthetic-test-password"
@@ -1194,11 +1211,6 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
             fixture.key.chmod(0o600)
             before = hashlib.sha256(fixture.key.read_bytes()).hexdigest()
             password = password_text.encode("utf-8")
-            role = (
-                "unsigned-validation"
-                if "CFW_UNSIGNED_VALIDATION_PYTHON" in os.environ
-                else "production"
-            )
             child_environment = {
                 "PATH": launcher.SYSTEM_PATH,
                 "PYTHONDONTWRITEBYTECODE": "1",
@@ -1206,10 +1218,17 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
                 "LANG": "C",
             }
             if role == "unsigned-validation":
+                source_environment = dict(os.environ)
+                if "CFW_UNSIGNED_VALIDATION_PYTHON" not in source_environment:
+                    # Exercise the CI role with this process's actual closed
+                    # runtime even when the parent is a production launcher.
+                    source_environment["CFW_UNSIGNED_VALIDATION_PYTHON"] = (
+                        source_environment["CFW_RELEASE_PYTHON_EXECUTABLE"]
+                    )
                 missing = [
                     name
                     for name in UNSIGNED_VALIDATION_ENVIRONMENT_NAMES
-                    if not os.environ.get(name)
+                    if not source_environment.get(name)
                 ]
                 self.assertEqual(
                     missing,
@@ -1217,22 +1236,53 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
                     "closed unsigned-validation environment is incomplete",
                 )
                 child_environment = {
-                    name: os.environ[name]
+                    name: source_environment[name]
                     for name in UNSIGNED_VALIDATION_ENVIRONMENT_NAMES
                 }
+            child_command = [
+                sys.executable,
+                "-I",
+                "-S",
+                "-B",
+                "-W",
+                "error",
+                str(INTEGRATION_CHILD),
+                str(fixture.home),
+                str(fixture.archive),
+                role,
+            ]
+            signature = fixture.archive.with_name(f"{fixture.archive.name}.sig")
+            if role == "unsigned-validation":
+                for name in (
+                    "CFW_RELEASE_RUST_TOOLCHAIN",
+                    "CFW_RELEASE_RUSTC_EXECUTABLE",
+                    "CFW_RELEASE_CARGO_EXECUTABLE",
+                ):
+                    with self.subTest(missing_closed_input=name):
+                        incomplete_environment = dict(child_environment)
+                        del incomplete_environment[name]
+                        rejected = subprocess.run(
+                            child_command,
+                            input=b"",
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            check=False,
+                            timeout=60,
+                            env=incomplete_environment,
+                        )
+                        self.assertEqual(rejected.returncode, 1)
+                        self.assertEqual(rejected.stdout, b"")
+                        self.assertEqual(
+                            rejected.stderr,
+                            b"error: updater signer integration failed closed: "
+                            b"unsigned-validation Python did not pass closed runtime admission\n",
+                        )
+                        self.assertFalse(signature.exists())
+                        self.assertEqual(
+                            hashlib.sha256(fixture.key.read_bytes()).hexdigest(), before
+                        )
             completed = subprocess.run(
-                [
-                    sys.executable,
-                    "-I",
-                    "-S",
-                    "-B",
-                    "-W",
-                    "error",
-                    str(INTEGRATION_CHILD),
-                    str(fixture.home),
-                    str(fixture.archive),
-                    role,
-                ],
+                child_command,
                 input=password,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1249,7 +1299,6 @@ class PinnedSignerIntegrationTests(unittest.TestCase):
                 completed.stderr.decode("utf-8", errors="replace"),
             )
             self.assertEqual(completed.stderr, b"")
-            signature = fixture.archive.with_name(f"{fixture.archive.name}.sig")
             self.assertTrue(signature.is_file())
             self.assertGreater(signature.stat().st_size, 0)
             output_lines = completed.stdout.decode(

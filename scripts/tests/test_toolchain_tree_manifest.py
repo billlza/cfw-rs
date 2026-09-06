@@ -524,7 +524,10 @@ class ReleaseConsumerContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         for fragment in (
-            'rust_toolchain_root="$release_home/.rustup/toolchains/$RUST_VERSION-aarch64-apple-darwin"',
+            'local rust_toolchain_selection="${CFW_RELEASE_RUST_TOOLCHAIN-global}"',
+            '"$release_repository/scripts/release_rust_toolchain.py" verify-selected',
+            '--selection "$rust_toolchain_selection"',
+            'export CFW_RELEASE_RUST_TOOLCHAIN="$rust_toolchain_selection"',
             'policy_tool_root="$release_home/.cfm-release-tooling/policy-$CARGO_AUDIT_VERSION-$CARGO_DENY_VERSION"',
             'cargo_aux_bin="$policy_tool_root/bin"',
             'python_root="/opt/homebrew/Cellar/python@$python_series/$PYTHON_VERSION/',
@@ -604,6 +607,9 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                     "TOOLCHAINS": "untrusted",
                     "SDKROOT": str(Path(temporary) / "sdk"),
                     "SWIFT_EXEC": str(fake_bin / "swift"),
+                    "RUSTUP_HOME": str(Path(temporary) / "untrusted-rustup"),
+                    "RUSTUP_TOOLCHAIN": "untrusted-channel",
+                    "RUSTC": str(fake_bin / "rustc"),
                 }
             )
             role = (
@@ -622,7 +628,11 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                     'export DYLD_INSERT_LIBRARIES="$2"; '
                     'cfw_seal_release_tool_environment "$3"; '
                     "cfw_select_release_apple_toolchain; "
-                    'printf "%s\\n%s\\n" "$PATH" "$DEVELOPER_DIR"',
+                    'printf "%s\\n" "$PATH" "$DEVELOPER_DIR" '
+                    '"$CFW_RELEASE_RUST_TOOLCHAIN" "$CFW_RELEASE_RUSTC_EXECUTABLE" '
+                    '"$CFW_RELEASE_CARGO_EXECUTABLE"; '
+                    '[[ -z "${RUSTUP_HOME+x}" && -z "${RUSTUP_TOOLCHAIN+x}" '
+                    '&& -z "${RUSTC+x}" ]]',
                     "release-tool-environment-test",
                     str(REPOSITORY),
                     str(Path(temporary) / "inject.dylib"),
@@ -635,6 +645,7 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            self.assertEqual(completed.stderr, b"")
             self.assertFalse(marker.exists())
             lines = completed.stdout.decode().splitlines()
             release_home = Path.home().resolve()
@@ -646,14 +657,50 @@ class ReleaseConsumerContractTests(unittest.TestCase):
                     f"{_pins()['CARGO_DENY_VERSION']}"
                 )
             )
+            selection = environment.get("CFW_RELEASE_RUST_TOOLCHAIN", "global")
+            rust_parent = {
+                "global": ".rustup/toolchains",
+                "private": ".cfm-release-tooling/rust-toolchains",
+            }[selection]
+            rust_bin = (
+                release_home / rust_parent
+                / f"{_pins()['RUST_VERSION']}-aarch64-apple-darwin/bin"
+            )
             self.assertEqual(
                 lines[0],
                 "/usr/bin:/bin:/usr/sbin:/sbin:"
-                f"{release_home}/.rustup/toolchains/"
-                f"{_pins()['RUST_VERSION']}-aarch64-apple-darwin/bin:"
-                f"{policy_root}/bin",
+                f"{rust_bin}:{policy_root}/bin",
             )
             self.assertTrue(lines[1].endswith("/Contents/Developer"))
+            self.assertEqual(
+                lines[2:], [selection, str(rust_bin / "rustc"), str(rust_bin / "cargo")],
+            )
+
+    def test_closed_shell_rejects_invalid_rust_selection_without_fallback(self) -> None:
+        for selection in ("", "auto", "/tmp/private", "PRIVATE"):
+            with self.subTest(selection=selection):
+                environment = dict(os.environ)
+                environment["CFW_RELEASE_RUST_TOOLCHAIN"] = selection
+                role = (
+                    "unsigned-validation"
+                    if "CFW_UNSIGNED_VALIDATION_PYTHON" in environment
+                    else "production"
+                )
+                completed = subprocess.run(
+                    [
+                        "/bin/bash", "-p", "-c",
+                        'set -euo pipefail; source "$1/scripts/dependency_pins.env"; '
+                        'source "$1/scripts/release_tool_environment.sh"; '
+                        'cfw_seal_release_tool_environment "$2"; '
+                        "printf 'unexpected SDK fallback\\n'",
+                        "rust-selection-test", str(REPOSITORY), role,
+                    ],
+                    cwd=REPOSITORY, env=environment, capture_output=True,
+                    check=False, timeout=30,
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(completed.stdout, b"")
+                self.assertIn(b"--selection: invalid choice:", completed.stderr)
 
     def test_candidate_builds_use_the_warning_free_unsigned_host_contract(self) -> None:
         contract = (SCRIPTS / "tauri_host_skeleton.sh").read_text(encoding="utf-8")
@@ -1795,6 +1842,12 @@ LIBBOX_VET_PACKAGES=(".")
         expected_bin = root / f"node-{pins['NODE_VERSION']}" / "bin"
         self.assertEqual(environment["CFW_TOOLCHAIN_ROOT"], str(root))
         self.assertEqual(environment["PATH"].split(":", 1)[0], str(expected_bin))
+        for name in (
+            "CFW_RELEASE_RUST_TOOLCHAIN", "CFW_RELEASE_RUSTC_EXECUTABLE",
+            "CFW_RELEASE_CARGO_EXECUTABLE",
+        ):
+            self.assertEqual(environment[name], closed_environment[name])
+        self.assertEqual(environment["PATH"].split(":", 1)[1], closed_environment["PATH"])
 
 
 class PublicationToolchainBindingTests(unittest.TestCase):

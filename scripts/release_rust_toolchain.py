@@ -86,6 +86,27 @@ def _canonical_root(root: Path) -> Path:
     return root
 
 
+def selected_toolchain_root(account_home: Path, channel: str, selection: str) -> Path:
+    """Select one fixed deployment location without admitting its SDK contents."""
+
+    if selection not in {"global", "private"}:
+        raise ReleaseRustToolchainError("Rust toolchain selection must be global or private")
+    if VERSION_RE.fullmatch(channel) is None:
+        raise ReleaseRustToolchainError("Rust toolchain selection has an invalid channel")
+    try:
+        resolved_home = account_home.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ReleaseRustToolchainError("release account home is unavailable") from error
+    if not account_home.is_absolute() or resolved_home != account_home:
+        raise ReleaseRustToolchainError("release account home is not canonical")
+    _require_real_directory(account_home, "release account home")
+    if selection == "global":
+        parent = account_home / ".rustup/toolchains"
+    else:
+        parent = account_home / ".cfm-release-tooling/rust-toolchains"
+    return parent / f"{channel}-{TARGET}"
+
+
 def _member(root: Path, relative: str, *, directory: bool) -> Path:
     candidate = PurePosixPath(relative)
     if (
@@ -522,9 +543,21 @@ def main() -> None:
     verify = commands.add_parser("verify")
     verify.add_argument("--repository", type=Path, required=True)
     verify.add_argument("--toolchain-root", type=Path, required=True)
+    verify_selected = commands.add_parser("verify-selected")
+    verify_selected.add_argument("--repository", type=Path, required=True)
+    verify_selected.add_argument("--release-home", type=Path, required=True)
+    verify_selected.add_argument("--selection", choices=("global", "private"), required=True)
     arguments = parser.parse_args()
     try:
-        verify_pinned_toolchain(arguments.repository, arguments.toolchain_root)
+        if arguments.command == "verify":
+            verify_pinned_toolchain(arguments.repository, arguments.toolchain_root)
+        else:
+            channel, _expected_digest = pinned_toolchain_contract(arguments.repository)
+            root = selected_toolchain_root(
+                arguments.release_home, channel, arguments.selection
+            )
+            verified = verify_pinned_toolchain(arguments.repository, root)
+            print(verified.root)
     except (OSError, ReleaseRustToolchainError) as error:
         raise SystemExit(f"error: Rust release toolchain: {error}") from error
 
@@ -541,6 +574,7 @@ __all__ = [
     "VerifiedRustToolchain",
     "build_toolchain_surface",
     "pinned_toolchain_contract",
+    "selected_toolchain_root",
     "validate_recorded_surface",
     "verify_pinned_toolchain",
 ]

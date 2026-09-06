@@ -19,11 +19,19 @@ if __package__ and __package__.startswith("scripts."):
         verify_workspace_cargo_inputs,
         workspace_input_root,
     )
+    from scripts.release_rust_toolchain import (
+        ReleaseRustToolchainError,
+        selected_toolchain_root as selected_rust_toolchain_root,
+    )
 else:
     from release_cargo_inputs import (
         ReleaseCargoInputsError,
         verify_workspace_cargo_inputs,
         workspace_input_root,
+    )
+    from release_rust_toolchain import (
+        ReleaseRustToolchainError,
+        selected_toolchain_root as selected_rust_toolchain_root,
     )
 
 
@@ -52,6 +60,7 @@ cfw_select_release_apple_toolchain
 '''
 
 _REQUIRED_ENVIRONMENT = {
+    "CFW_RELEASE_RUST_TOOLCHAIN",
     "DEVELOPER_DIR",
     "HOME",
     "LANG",
@@ -66,6 +75,7 @@ _OPERATIONAL_ENVIRONMENT = {
     "CFW_GO_TOOLS_TREE_SHA256",
     "CFW_NATIVE_DERIVED_DATA",
     "CFW_NATIVE_PRODUCTS_OUTPUT",
+    "CFW_RELEASE_RUST_TOOLCHAIN",
     "CFW_RELEASE_SOURCE_SHA256",
     "CFW_REPOSITORY_COMMIT",
     "CFW_TOOLCHAIN_ROOT",
@@ -449,6 +459,12 @@ def release_tool_environment(
     home_value = environment.get("HOME")
     if not home_value or not Path(home_value).is_absolute():
         raise PublicationError("release tool environment has no absolute HOME")
+    if "CFW_RELEASE_RUST_TOOLCHAIN" not in environment:
+        raise PublicationError("release tool environment omitted its Rust toolchain selection")
+    if environment["CFW_RELEASE_RUST_TOOLCHAIN"] != source.get(
+        "CFW_RELEASE_RUST_TOOLCHAIN", "global"
+    ):
+        raise PublicationError("release Rust toolchain selection changed while sealing")
     python_version = pins.get("PYTHON_VERSION")
     if not isinstance(python_version, str) or not re.fullmatch(
         r"3[.][0-9]+[.][0-9]+", python_version
@@ -457,11 +473,8 @@ def release_tool_environment(
     try:
         account_home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve(strict=True)
         release_home = Path(home_value).resolve(strict=True)
-        rust_root = (
-            release_home
-            / ".rustup"
-            / "toolchains"
-            / f"{pins['RUST_VERSION']}-aarch64-apple-darwin"
+        rust_root = selected_rust_toolchain_root(
+            account_home, pins["RUST_VERSION"], environment["CFW_RELEASE_RUST_TOOLCHAIN"]
         )
         rust_bin = rust_root / "bin"
         policy_tool_root = (
@@ -502,6 +515,8 @@ def release_tool_environment(
         python_bin = python_bin_dir / "python3"
         python_bin_resolved = python_bin.resolve(strict=True)
         developer_dir = Path(environment["DEVELOPER_DIR"]).resolve(strict=True)
+    except ReleaseRustToolchainError as error:
+        raise PublicationError("release Rust toolchain selection is invalid") from error
     except (KeyError, OSError) as error:
         raise PublicationError("release tool environment paths are invalid") from error
     expected_path = ":".join((*SYSTEM_PATH, str(rust_bin), str(cargo_aux_bin)))

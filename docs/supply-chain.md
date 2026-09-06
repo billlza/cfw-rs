@@ -12,7 +12,7 @@ The machine-readable values live in
 
 | Input | Pin | Verification |
 |---|---|---|
-| Rust | `1.97.1` | `rust-toolchain.toml` and `rustc --version` |
+| Rust | `1.97.1` | `rust-toolchain.toml`, exact five-component `rustup-component-file-tree-v2` surface, and compiler/version identity |
 | Node.js | `24.18.0` LTS | official darwin-arm64 archive SHA-256 |
 | Go | `1.26.6` | official darwin-arm64 archive SHA-256 |
 | XcodeGen | `2.46.0` (`8445e778451c7e44237b90281bde622d764b0084`) | official source and `Package.resolved` SHA-256 values, digest-pinned installed-resource patch, isolated resolved-only SwiftPM build, resource-generation probe, temporary-path rejection, and complete installed-tree manifest |
@@ -48,6 +48,26 @@ application build, and immediately before final artifact sealing, with the same
 `HEAD` and source digest at every observation.
 
 ## Networked preparation versus offline build
+
+Rust SDK deployment is an explicit prerequisite to consuming the closed release
+environment. Release-Mac operations set `CFW_RELEASE_RUST_TOOLCHAIN=private` and
+use the effective account's
+`~/.cfm-release-tooling/rust-toolchains/1.97.1-aarch64-apple-darwin`;
+`global` preserves the existing CI location under `~/.rustup/toolchains`.
+The selector controls deployment independently of the production or unsigned
+validation role. Only an unset bootstrap input defaults to `global`; sealed
+environments require the explicit selection. Consumers neither provision the
+SDK nor fall back between roots.
+
+Both locations must pass the unchanged `rustup-component-file-tree-v2` contract:
+Cargo, Clippy, rustc, arm64 standard libraries and rustfmt, their component
+manifests, metadata, modes and complete file inventory remain bound to
+`472d78d9340576ca15b8f17f2eb4fe5fb709c0aae3a428e8c4dfd2cd65e5b6ae`.
+Additional components in the user's shared SDK are not silently excluded from
+that hash; private selection keeps them outside the selected release SDK.
+Frozen 40043 source still admits only its original global launcher layout;
+its recorded surface and evidence are preserved rather than rewritten for
+the new selector.
 
 Network access is isolated to explicit preparation:
 

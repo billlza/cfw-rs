@@ -285,6 +285,12 @@
 
 - Move the workspace to GPL-3.0-or-later and pin the arm64 macOS 15 release
   toolchain and source-built libbox inputs.
+- Separate the release Mac's Rust SDK from the user's extensible rustup SDK
+  with explicit `CFW_RELEASE_RUST_TOOLCHAIN=private`; existing CI retains the
+  `global` selection. Both use the same exact five-component v2 surface and
+  original digest. SDK preparation occurs before environment consumption,
+  with no automatic installation or fallback. Frozen 40043 launchers and
+  historical evidence remain unchanged.
 - Upgrade the pinned sing-box/libbox source from v1.13.14 to v1.13.15 and
   regenerate all four downstream patches and source digests while retaining
   the upstream DNS-cancellation, UDP-ownership, rule-set descriptor, and

@@ -268,7 +268,16 @@ notarization, consume a build number or establish publication readiness.
 
 ## 1. Prepare and seal networked release inputs
 
+Before invoking a closed release entrypoint, separately prepare the fixed Rust
+SDK at the effective account's
+`~/.cfm-release-tooling/rust-toolchains/1.97.1-aarch64-apple-darwin`.
+This deployment/bootstrap step precedes environment consumption; release
+commands verify an existing SDK and never create, install, repair, or replace
+it automatically. On the release Mac, explicitly select `private` for input
+preparation, signing, evidence collection, packaging, and publication:
+
 ```sh
+export CFW_RELEASE_RUST_TOOLCHAIN=private
 ./scripts/run_release_ci_gate.sh prepare-cargo-workspace-inputs
 ./scripts/run_release_ci_gate.sh bootstrap-policy-tools
 ./scripts/run_release_ci_gate.sh bootstrap-release-toolchain
@@ -285,6 +294,21 @@ TMPDIR="$tauri_install_tmp" ./scripts/run_release_ci_gate.sh install-tauri-cli
 ./scripts/run_release_ci_gate.sh prepare-libbox-modules \
   /absolute/path/to/patched-sing-box
 ```
+
+`CFW_RELEASE_RUST_TOOLCHAIN=global` retains the existing CI SDK location,
+`~/.rustup/toolchains/1.97.1-aarch64-apple-darwin`. Only an unset bootstrap
+selection defaults to `global`; the sealed environment always records an
+explicit `global` or `private` selection. Neither selection accepts arbitrary
+paths or falls back to the other SDK on failure. Both require the same exact
+five-component `rustup-component-file-tree-v2` surface and unchanged
+`RUST_RELEASE_TOOLCHAIN_BUILD_SURFACE_SHA256` pin. `CFW_TOOLCHAIN_ROOT` selects
+the other managed tool trees and does not select Rust.
+
+Frozen build 40043 retains its original global-only launcher. Its low-level
+Rust surface contract can verify an identical SDK at another canonical root,
+but the new selector does not change that old launcher's path admission or
+make a complete historical replay portable. Its source and receipts remain
+unchanged.
 
 The Tauri installer requires its explicit `TMPDIR` to be a canonical,
 current-user-owned directory that is not writable by group or other users.
@@ -329,7 +353,7 @@ Preparation is explicit and networked; the release build is offline:
 Release-critical shell entrypoints rebuild one closed execution environment
 from the effective macOS account rather than caller `HOME` or `PATH`.
 Production signing, publication, and physical-evidence entrypoints accept only
-the exact pinned Rust root and Python 3.14.6 Cellar path. The build-40000
+the exact Rust SDK selected above and Python 3.14.6 Cellar path. The build-40000
 unsigned CI entrypoint alone may accept the absolute Python executable emitted
 by the SHA-pinned `setup-python` action; it verifies the same exact version and
 real executable/runtime identities and includes their content digests in the
@@ -752,6 +776,7 @@ wire proof.
    profile, and updater-key custody configured on the release Mac:
 
    ```bash
+   CFW_RELEASE_RUST_TOOLCHAIN=private \
    CFW_BUILD_NUMBER=40044 \
    NOTARY_PROFILE=clashformac-notary \
    MACOS_SIGN_IDENTITY='Developer ID Application: Zi ang Li (YKUPL7Z869)' \

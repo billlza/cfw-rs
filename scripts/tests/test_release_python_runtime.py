@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -7,14 +8,59 @@ import subprocess
 import tempfile
 import unittest
 from unittest import mock
+from typing import Iterator
 
 from scripts.publication import release_environment
 from scripts.publication.bounded_process import BoundedProcessError
 from scripts.publication.graph_model import load_pins
-from scripts.release_python_runtime import require_closed_release_runtime
+from scripts.release_python_runtime import (
+    ReleasePythonRuntimeError,
+    require_closed_release_runtime,
+)
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+
+
+def _environment_with_rust_selection(
+    environment: dict[str, str], selection: str, version: str,
+) -> dict[str, str]:
+    """Describe both fixed layouts when testing the sealed-output boundary."""
+    result = dict(environment)
+    parents = {
+        "global": ".rustup/toolchains",
+        "private": ".cfm-release-tooling/rust-toolchains",
+    }
+    rust_bin = (
+        Path(result["HOME"]) / parents[selection]
+        / f"{version}-aarch64-apple-darwin/bin"
+    )
+    result["CFW_RELEASE_RUST_TOOLCHAIN"] = selection
+    result["CFW_RELEASE_RUSTC_EXECUTABLE"] = str(rust_bin / "rustc")
+    result["CFW_RELEASE_CARGO_EXECUTABLE"] = str(rust_bin / "cargo")
+    path_entries = result["PATH"].split(":")
+    if len(path_entries) != 6:
+        raise AssertionError("the baseline must have the complete sealed PATH")
+    path_entries[4] = str(rust_bin)
+    result["PATH"] = ":".join(path_entries)
+    return result
+
+
+@contextmanager
+def _available_rust_layout(environment: dict[str, str]) -> Iterator[None]:
+    """Supply only SDK file availability while exercising the real output parser."""
+    rust_bin = Path(environment["CFW_RELEASE_RUSTC_EXECUTABLE"]).parent
+    rust_executables = {rust_bin / "rustc", rust_bin / "cargo"}
+    is_directory = Path.is_dir
+    is_executable = release_environment._is_real_executable
+    with mock.patch.object(
+        Path, "is_dir", autospec=True,
+        side_effect=lambda path: path == rust_bin.parent or is_directory(path),
+    ), mock.patch.object(
+        release_environment, "_is_real_executable",
+        side_effect=lambda path: path in rust_executables or is_executable(path),
+    ):
+        yield
 
 
 def _swift_target_info(
@@ -61,6 +107,10 @@ class ReleaseEnvironmentBootstrapTests(unittest.TestCase):
             "DYLD_INSERT_LIBRARIES": "/tmp/untrusted.dylib",
             "DYLD_LIBRARY_PATH": "/tmp/untrusted-library",
             "LD_PRELOAD": "/tmp/untrusted-preload.dylib",
+            "RUSTUP_HOME": "/tmp/untrusted-rustup",
+            "RUSTUP_TOOLCHAIN": "untrusted-channel",
+            "RUSTC": "/tmp/untrusted-rustc",
+            "CFW_RELEASE_RUST_TOOLCHAIN": "private",
             "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
             "CFW_BUILD_NUMBER": "40043",
             "CFW_UNSIGNED_VALIDATION_PYTHON": "/opt/release/bin/python3",
@@ -77,10 +127,41 @@ class ReleaseEnvironmentBootstrapTests(unittest.TestCase):
                 "LC_ALL": "C",
                 "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
                 "CFW_BUILD_NUMBER": "40043",
+                "CFW_RELEASE_RUST_TOOLCHAIN": "private",
                 "CFW_UNSIGNED_VALIDATION_PYTHON": "/opt/release/bin/python3",
                 "NOTARY_PROFILE": "release-profile",
             },
         )
+
+    def test_explicit_rust_selection_reaches_each_source_role(self) -> None:
+        pins = load_pins(REPOSITORY / "scripts/dependency_pins.env")
+        for selection in ("global", "private"):
+            for role in ("production", "unsigned-validation", "tool-bootstrap"):
+                with self.subTest(selection=selection, role=role):
+                    failure = subprocess.CompletedProcess(
+                        ["release-environment-fixture"], 23, b"",
+                        b"selected Rust SDK unavailable",
+                    )
+                    with mock.patch.object(
+                        release_environment, "run_bounded_process", return_value=failure,
+                    ) as runner, self.assertRaisesRegex(
+                        release_environment.PublicationError,
+                        "selected Rust SDK unavailable",
+                    ):
+                        release_environment.release_tool_environment(
+                            REPOSITORY, pins,
+                            {"CFW_RELEASE_RUST_TOOLCHAIN": selection,
+                             "RUSTUP_HOME": "/tmp/untrusted-rustup"},
+                            role=role,
+                        )
+                    runner.assert_called_once()
+                    self.assertEqual(runner.call_args.args[0][-1], role)
+                    self.assertEqual(
+                        runner.call_args.kwargs["environment"],
+                        {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                         "LANG": "C", "LC_ALL": "C",
+                         "CFW_RELEASE_RUST_TOOLCHAIN": selection},
+                    )
 
     def test_exported_shell_functions_are_rejected_before_bootstrap(self) -> None:
         with self.assertRaisesRegex(
@@ -124,7 +205,9 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
             for name, value in environment.items()
         )
 
-    def call_with_output(self, output: bytes) -> dict[str, str]:
+    def call_with_output(
+        self, output: bytes, source: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         completed = subprocess.CompletedProcess(
             args=["release-environment-fixture"],
             returncode=0,
@@ -156,10 +239,75 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
             result = release_environment.release_tool_environment(
                 REPOSITORY,
                 self.pins,
+                source,
                 role=self.role,
             )
         self.last_environment_process_call = process_runner.call_args
         return result
+
+    def test_sealed_rust_selection_binds_both_executables_and_path(self) -> None:
+        for selection in ("global", "private"):
+            with self.subTest(selection=selection):
+                environment = _environment_with_rust_selection(
+                    self.baseline, selection, self.pins["RUST_VERSION"],
+                )
+                with _available_rust_layout(environment):
+                    result = self.call_with_output(
+                        self.encoded(environment), environment,
+                    )
+                self.assertEqual(result, environment)
+                self.assertEqual(
+                    self.last_environment_process_call.kwargs["environment"][
+                        "CFW_RELEASE_RUST_TOOLCHAIN"
+                    ], selection,
+                )
+
+    def test_sealing_cannot_switch_the_requested_rust_selection(self) -> None:
+        for selection in ("global", "private"):
+            alternate = "private" if selection == "global" else "global"
+            environment = _environment_with_rust_selection(
+                self.baseline, alternate, self.pins["RUST_VERSION"],
+            )
+            with self.subTest(selection=selection), self.assertRaisesRegex(
+                release_environment.PublicationError, "selection changed while sealing",
+            ):
+                self.call_with_output(
+                    self.encoded(environment),
+                    dict(self.baseline, CFW_RELEASE_RUST_TOOLCHAIN=selection),
+                )
+
+    def test_sealed_environment_rejects_missing_and_invalid_rust_selection(self) -> None:
+        for selection in (None, "", "auto", "/tmp/private", "PRIVATE"):
+            with self.subTest(selection=selection):
+                environment = dict(self.baseline)
+                if selection is None:
+                    environment.pop("CFW_RELEASE_RUST_TOOLCHAIN")
+                else:
+                    environment["CFW_RELEASE_RUST_TOOLCHAIN"] = selection
+                with self.assertRaisesRegex(
+                    release_environment.PublicationError, "Rust toolchain selection",
+                ):
+                    self.call_with_output(self.encoded(environment), environment)
+
+    def test_sealed_environment_rejects_mixed_rust_locations(self) -> None:
+        for selection in ("global", "private"):
+            expected = _environment_with_rust_selection(
+                self.baseline, selection, self.pins["RUST_VERSION"],
+            )
+            alternate = _environment_with_rust_selection(
+                self.baseline, "private" if selection == "global" else "global",
+                self.pins["RUST_VERSION"],
+            )
+            for field in ("PATH", "CFW_RELEASE_CARGO_EXECUTABLE", "CFW_RELEASE_RUSTC_EXECUTABLE"):
+                with self.subTest(selection=selection, field=field):
+                    mixed = dict(expected)
+                    mixed[field] = alternate[field]
+                    with _available_rust_layout(expected), self.assertRaisesRegex(
+                        release_environment.PublicationError, "closed contract",
+                    ):
+                        self.call_with_output(
+                            self.encoded(mixed), expected,
+                        )
 
     def test_environment_construction_has_its_own_bounded_timeout(self) -> None:
         self.call_with_output(self.encoded(self.baseline))
@@ -480,7 +628,7 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
         for index, name in enumerate(
             sorted(release_environment._OPERATIONAL_ENVIRONMENT)
         ):
-            if name == "CFW_UNSIGNED_VALIDATION_PYTHON":
+            if name in {"CFW_UNSIGNED_VALIDATION_PYTHON", "CFW_RELEASE_RUST_TOOLCHAIN"}:
                 continue
             value = f"fixture {index}=alpha=beta gamma"
             if name == "CFW_TOOLCHAIN_ROOT":
@@ -517,6 +665,53 @@ class ReleaseEnvironmentRoundTripTests(unittest.TestCase):
 class ReleaseRuntimeAdmissionTests(unittest.TestCase):
     def test_current_closed_runner_is_admitted(self) -> None:
         require_closed_release_runtime(allow_unsigned_validation=True)
+
+    def test_runtime_requires_an_explicit_rust_selection(self) -> None:
+        for selection in (None, "", "auto", "/tmp/private", "PRIVATE"):
+            with self.subTest(selection=selection):
+                environment = dict(os.environ)
+                if selection is None:
+                    environment.pop("CFW_RELEASE_RUST_TOOLCHAIN")
+                else:
+                    environment["CFW_RELEASE_RUST_TOOLCHAIN"] = selection
+                with mock.patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(
+                        ReleasePythonRuntimeError, "Rust toolchain selection",
+                    ):
+                        require_closed_release_runtime(allow_unsigned_validation=True)
+
+    def test_runtime_binds_rust_selection_path_and_both_executables(self) -> None:
+        version = load_pins(REPOSITORY / "scripts/dependency_pins.env")["RUST_VERSION"]
+        for selection in ("global", "private"):
+            expected = _environment_with_rust_selection(dict(os.environ), selection, version)
+            alternate = _environment_with_rust_selection(
+                dict(os.environ), "private" if selection == "global" else "global", version,
+            )
+            with self.subTest(selection=selection), mock.patch.dict(
+                os.environ, expected, clear=True,
+            ):
+                require_closed_release_runtime(allow_unsigned_validation=True)
+            for field in ("PATH", "CFW_RELEASE_CARGO_EXECUTABLE", "CFW_RELEASE_RUSTC_EXECUTABLE"):
+                mixed = dict(expected)
+                mixed[field] = alternate[field]
+                with self.subTest(selection=selection, field=field), mock.patch.dict(
+                    os.environ, mixed, clear=True,
+                ):
+                    with self.assertRaisesRegex(
+                        ReleasePythonRuntimeError, "closed isolated launcher",
+                    ):
+                        require_closed_release_runtime(allow_unsigned_validation=True)
+
+    def test_runtime_rejects_rustup_overrides_after_sealing(self) -> None:
+        for name, value in (
+            ("RUSTUP_HOME", "/tmp/untrusted-rustup"),
+            ("RUSTUP_TOOLCHAIN", "untrusted-channel"),
+        ):
+            with self.subTest(name=name), mock.patch.dict(os.environ, {name: value}):
+                with self.assertRaisesRegex(
+                    ReleasePythonRuntimeError, f"refuses ambient {name}",
+                ):
+                    require_closed_release_runtime(allow_unsigned_validation=True)
 
     def test_unsigned_validation_is_not_production_admission(self) -> None:
         if "CFW_UNSIGNED_VALIDATION_PYTHON" in os.environ:

@@ -153,6 +153,21 @@ def require_closed_release_runtime(*, allow_unsigned_validation: bool = False) -
     version, rust_version, cargo_audit_version, cargo_deny_version = (
         _pinned_versions(repository)
     )
+    if sys.version_info[:3] != tuple(int(part) for part in version.split(".")):
+        raise ReleasePythonRuntimeError(
+            "production release Python requires the closed isolated launcher"
+        )
+    # Import toolchain parsers only after the selected Python version is admitted.
+    if __package__:
+        from .release_rust_toolchain import (
+            ReleaseRustToolchainError,
+            selected_toolchain_root,
+        )
+    else:
+        from release_rust_toolchain import (
+            ReleaseRustToolchainError,
+            selected_toolchain_root,
+        )
     series = version.rsplit(".", 1)[0]
     try:
         account_home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve(strict=True)
@@ -186,11 +201,14 @@ def require_closed_release_runtime(*, allow_unsigned_validation: bool = False) -
         expected_executable = expected_root / "bin" / f"python{series}"
     expected_runtime = expected_root / "Python"
     expected_stdlib = expected_root / "lib" / f"python{series}"
-    expected_rust_bin = (
-        account_home
-        / ".rustup/toolchains"
-        / f"{rust_version}-aarch64-apple-darwin/bin"
-    )
+    try:
+        expected_rust_bin = selected_toolchain_root(
+            account_home, rust_version, os.environ["CFW_RELEASE_RUST_TOOLCHAIN"]
+        ) / "bin"
+    except (KeyError, ReleaseRustToolchainError) as error:
+        raise ReleasePythonRuntimeError(
+            "production release Rust toolchain selection is missing or invalid"
+        ) from error
     policy_bin = (
         account_home
         / ".cfm-release-tooling"
@@ -229,6 +247,8 @@ def require_closed_release_runtime(*, allow_unsigned_validation: bool = False) -
         or os.environ.get("PYTHONDONTWRITEBYTECODE") != "1"
         or os.environ.get("HOME") != str(account_home)
         or os.environ.get("PATH") != expected_path
+        or os.environ.get("CFW_RELEASE_RUSTC_EXECUTABLE") != str(expected_rust_bin / "rustc")
+        or os.environ.get("CFW_RELEASE_CARGO_EXECUTABLE") != str(expected_rust_bin / "cargo")
         or os.environ.get("LANG") != "C"
         or os.environ.get("LC_ALL") != "C"
         or os.environ.get("CFW_RELEASE_PYTHON_EXECUTABLE")
@@ -244,7 +264,6 @@ def require_closed_release_runtime(*, allow_unsigned_validation: bool = False) -
             os.environ.get("CFW_RELEASE_CARGO_VENDOR_SHA256", "")
         )
         is None
-        or sys.version_info[:3] != tuple(int(part) for part in version.split("."))
     ):
         raise ReleasePythonRuntimeError(
             "production release Python requires the closed isolated launcher"

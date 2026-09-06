@@ -370,6 +370,9 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
                     "SWIFT_EXEC": str(fake_bin / "swift"),
                     "BASH_ENV": str(Path(temporary) / "bash-env"),
                     "PYTHONPATH": str(Path(temporary) / "python"),
+                    "RUSTUP_HOME": str(Path(temporary) / "untrusted-rustup"),
+                    "RUSTUP_TOOLCHAIN": "untrusted-channel",
+                    "RUSTC": str(fake_bin / "rustc"),
                     "RUSTC_WRAPPER": str(fake_bin / "rustc"),
                     "RUSTFLAGS": "--cfg injected",
                     "DYLD_INSERT_LIBRARIES": str(Path(temporary) / "inject.dylib"),
@@ -398,7 +401,10 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
                 *ci_lanes.SYSTEM_PATH,
                 str(
                     release_home
-                    / ".rustup/toolchains"
+                    / {
+                        "global": ".rustup/toolchains",
+                        "private": ".cfm-release-tooling/rust-toolchains",
+                    }[environment["CFW_RELEASE_RUST_TOOLCHAIN"]]
                     / f"{self.pins['RUST_VERSION']}-aarch64-apple-darwin/bin"
                 ),
                 str(
@@ -413,6 +419,13 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
             )
         )
         self.assertEqual(environment["PATH"], expected_path)
+        self.assertEqual(
+            environment["CFW_RELEASE_RUST_TOOLCHAIN"],
+            source.get("CFW_RELEASE_RUST_TOOLCHAIN", "global"),
+        )
+        rust_bin = Path(expected_path.split(":")[4])
+        self.assertEqual(environment["CFW_RELEASE_RUSTC_EXECUTABLE"], str(rust_bin / "rustc"))
+        self.assertEqual(environment["CFW_RELEASE_CARGO_EXECUTABLE"], str(rust_bin / "cargo"))
         self.assertEqual(
             Path(environment["CFW_RELEASE_PYTHON_EXECUTABLE"]),
             (python_bin / f"python{python_series}").resolve(strict=True),
@@ -432,6 +445,9 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
             "BASH_ENV",
             "PYTHONPATH",
             "RUSTC_WRAPPER",
+            "RUSTUP_HOME",
+            "RUSTUP_TOOLCHAIN",
+            "RUSTC",
             "RUSTFLAGS",
             "DYLD_INSERT_LIBRARIES",
         ):
@@ -447,6 +463,8 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
                 "SDKROOT": "/tmp/untrusted-sdk",
                 "SWIFT_EXEC": "/tmp/untrusted-swift",
                 "RUSTFLAGS": "--cfg untrusted",
+                "RUSTUP_HOME": "/tmp/untrusted-rustup",
+                "RUSTUP_TOOLCHAIN": "untrusted-channel",
                 "DYLD_LIBRARY_PATH": "/tmp/untrusted-library",
                 "HOME": "/tmp/untrusted-home",
                 "XCODE_XCCONFIG_FILE": "/tmp/untrusted.xcconfig",
@@ -462,6 +480,69 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
             self.repository, self.pins, poisoned_source
         )
         self.assertEqual(baseline, poisoned)
+
+    def test_explicit_rust_selection_and_executables_survive_lane_execution(self) -> None:
+        for selection in ("global", "private"):
+            for pinned_node in (False, True):
+                with self.subTest(selection=selection, pinned_node=pinned_node):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        repository = Path(temporary).resolve()
+                        rust_parent = {
+                            "global": ".rustup/toolchains",
+                            "private": ".cfm-release-tooling/rust-toolchains",
+                        }[selection]
+                        rust_bin = (
+                            repository / rust_parent
+                            / f"{self.pins['RUST_VERSION']}-aarch64-apple-darwin/bin"
+                        )
+                        rust_bin.mkdir(parents=True)
+                        for name in ("rustc", "cargo"):
+                            executable = rust_bin / name
+                            executable.write_text(
+                                f"#!/bin/sh\nprintf '%s\\n' '{selection}-{name}'\n",
+                                encoding="utf-8",
+                            )
+                            executable.chmod(0o755)
+                        # This fixture explicitly owns its selection; a private
+                        # test runner must not alter the global fixture case.
+                        sealed = {
+                            "PATH": f"{rust_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+                            "LANG": "C", "LC_ALL": "C",
+                            "CFW_RELEASE_RUST_TOOLCHAIN": selection,
+                            "CFW_RELEASE_RUSTC_EXECUTABLE": str(rust_bin / "rustc"),
+                            "CFW_RELEASE_CARGO_EXECUTABLE": str(rust_bin / "cargo"),
+                        }
+                        snapshot = dict(sealed)
+                        lane = ci_lanes.Lane(
+                            "rust-location-fixture",
+                            'printf "%s\\n" "$CFW_RELEASE_RUST_TOOLCHAIN" '
+                            '"$(command -v rustc)" "$(command -v cargo)"; '
+                            '"$CFW_RELEASE_RUSTC_EXECUTABLE" --version; '
+                            '"$CFW_RELEASE_CARGO_EXECUTABLE" --version',
+                            pinned_node=pinned_node, timeout=5,
+                        )
+                        with patch.dict(os.environ, {
+                            "CFW_RELEASE_RUST_TOOLCHAIN": "private",
+                            "RUSTUP_HOME": "/tmp/untrusted-rustup",
+                            "RUSTUP_TOOLCHAIN": "untrusted-channel",
+                        }):
+                            environment = ci_lanes.lane_environment(
+                                repository, lane, self.pins,
+                                repository / "source", repository / "output",
+                                repository / "runner", repository / "toolchains",
+                                release_environment=sealed,
+                            )
+                            output, exit_code, timed_out, _duration = ci_lanes.execute_lane(
+                                repository, lane, environment,
+                            )
+                        self.assertEqual(sealed, snapshot)
+                        self.assertEqual((exit_code, timed_out), (0, False), output)
+                        self.assertEqual(output.decode().splitlines(), [
+                            selection, str(rust_bin / "rustc"), str(rust_bin / "cargo"),
+                            f"{selection}-rustc", f"{selection}-cargo",
+                        ])
+                        self.assertNotIn("RUSTUP_HOME", environment)
+                        self.assertNotIn("RUSTUP_TOOLCHAIN", environment)
 
     def test_unsigned_validation_python_is_explicit_and_production_rejects_it(
         self,
@@ -496,6 +577,11 @@ class ReleaseToolEnvironmentTests(unittest.TestCase):
             unsigned["CFW_RELEASE_PYTHON_EXECUTABLE"],
             current["CFW_RELEASE_PYTHON_EXECUTABLE"],
         )
+        for name in (
+            "CFW_RELEASE_RUST_TOOLCHAIN", "CFW_RELEASE_RUSTC_EXECUTABLE",
+            "CFW_RELEASE_CARGO_EXECUTABLE", "PATH",
+        ):
+            self.assertEqual(unsigned[name], current[name])
 
     def test_invalid_explicit_developer_dir_fails_without_fallback(self) -> None:
         source = dict(os.environ)

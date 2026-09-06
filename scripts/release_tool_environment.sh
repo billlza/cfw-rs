@@ -12,6 +12,7 @@ unset release_environment_directory
 cfw_seal_release_tool_environment() {
   local release_role="${1:-production}"
   local validation_python_input="${CFW_UNSIGNED_VALIDATION_PYTHON:-}"
+  local rust_toolchain_selection="${CFW_RELEASE_RUST_TOOLCHAIN-global}"
   local use_validation_python=0
   if [[ $# -gt 1 || \
     "$release_role" != "production" && \
@@ -102,16 +103,6 @@ cfw_seal_release_tool_environment() {
   local cargo_input_identity cargo_input_root cargo_vendor_root
   local cargo_lock_sha256 cargo_vendor_sha256 unexpected_cargo_input
   local validation_python_dir validation_python_launcher validation_python_executable
-  rust_toolchain_root="$release_home/.rustup/toolchains/$RUST_VERSION-aarch64-apple-darwin"
-  if [[ ! -d "$rust_toolchain_root" || -L "$rust_toolchain_root" ]]; then
-    echo "error: the pinned Rust toolchain root is unavailable or is a symlink" >&2
-    return 1
-  fi
-  rust_toolchain_root="$(cd "$rust_toolchain_root" && /bin/pwd -P)" || {
-    echo "error: cannot resolve the pinned Rust toolchain root" >&2
-    return 1
-  }
-  rust_bin="$rust_toolchain_root/bin"
   policy_tool_root="$release_home/.cfm-release-tooling/policy-$CARGO_AUDIT_VERSION-$CARGO_DENY_VERSION"
   cargo_aux_bin="$policy_tool_root/bin"
   python_series="${PYTHON_VERSION%.*}"
@@ -177,6 +168,23 @@ cfw_seal_release_tool_environment() {
       return 1
     fi
   fi
+  release_repository="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)" || {
+    echo "error: cannot resolve the release repository from the environment contract" >&2
+    return 1
+  }
+  rust_toolchain_root="$(
+    "$python_bin" -I -S -B -W error \
+      "$release_repository/scripts/release_rust_toolchain.py" verify-selected \
+      --repository "$release_repository" \
+      --release-home "$release_home" \
+      --selection "$rust_toolchain_selection"
+  )" || return 1
+  if [[ "$rust_toolchain_root" != /* || \
+    "$rust_toolchain_root" == *$'\n'* || "$rust_toolchain_root" == *$'\r'* ]]; then
+    echo "error: verified Rust toolchain root output is malformed" >&2
+    return 1
+  fi
+  rust_bin="$rust_toolchain_root/bin"
   for tool_path in \
     "$rust_bin/rustc" \
     "$rust_bin/cargo" \
@@ -214,10 +222,6 @@ cfw_seal_release_tool_environment() {
       fi
     done
   fi
-  release_repository="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)" || {
-    echo "error: cannot resolve the release repository from the environment contract" >&2
-    return 1
-  }
   if [[ "$release_role" == "tool-bootstrap" ]]; then
     CFW_RELEASE_PYTHON_EXECUTABLE="$python_executable" \
       cfw_run_release_python_script \
@@ -242,10 +246,6 @@ cfw_seal_release_tool_environment() {
       return 1
     fi
   fi
-  "$python_bin" -I -S -B -W error \
-    "$release_repository/scripts/release_rust_toolchain.py" verify \
-    --repository "$release_repository" \
-    --toolchain-root "$rust_toolchain_root" || return 1
   local variable_name
   while IFS='=' read -r -d '' variable_name _; do
     case "$variable_name" in
@@ -263,7 +263,7 @@ cfw_seal_release_tool_environment() {
         CFW_RELEASE_POLICY_TOOL_ROOT | \
         CFW_RELEASE_PYTHON_EXECUTABLE | CFW_RELEASE_PYTHON_RUNTIME | \
         CFW_RELEASE_PYTHON_STDLIB | \
-        CFW_RELEASE_RUSTC_EXECUTABLE | \
+        CFW_RELEASE_RUSTC_EXECUTABLE | CFW_RELEASE_RUST_TOOLCHAIN | \
         CFW_RELEASE_SOURCE_SHA256 | CFW_REPOSITORY_COMMIT | CFW_TOOLCHAIN_ROOT | \
         CFW_UNSIGNED_VALIDATION_PYTHON | \
         HOST_PROVISIONING_PROFILE_PATH | MACOS_SIGN_IDENTITY | NOTARY_PROFILE | \
@@ -314,6 +314,7 @@ cfw_seal_release_tool_environment() {
   fi
   export HOME="$release_home"
   export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$rust_bin:$cargo_aux_bin"
+  export CFW_RELEASE_RUST_TOOLCHAIN="$rust_toolchain_selection"
   export CFW_RELEASE_RUSTC_EXECUTABLE="$rust_bin/rustc"
   export CFW_RELEASE_CARGO_EXECUTABLE="$rust_bin/cargo"
   export CFW_RELEASE_POLICY_TOOL_ROOT="$policy_tool_root"

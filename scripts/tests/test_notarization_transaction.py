@@ -8383,73 +8383,141 @@ run_isolated_python_script() {{
 
 
 class ShellCleanupContractTests(unittest.TestCase):
-    @staticmethod
-    def _cleanup_source() -> str:
-        shell = (
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.preflight = self.root / "ga-preflight/40044"
+        self.preflight.mkdir(parents=True, mode=0o700)
+        self.frozen = self.root / "ga/40044"
+        self.cargo_runtime = self.root / "cargo-runtime"
+        self.cargo_runtime.mkdir(mode=0o700)
+        (self.cargo_runtime / "config.toml").write_bytes(b"owned runtime fixture")
+        self.cleanup_calls = self.root / "cargo-cleanup-calls"
+        self.source = (
             Path(__file__).resolve().parents[2] / "scripts/build_signed_candidate.sh"
         ).read_text(encoding="utf-8")
-        return shell[shell.index("cleanup() {") : shell.index("trap cleanup EXIT")]
+        self.inputs = {
+            "product-input.json": b"original product inputs",
+            "profiles/signing-preflight.json": b"original profile admission",
+            "native-products/native.manifest.json": b"original native manifest",
+            "pre-sign/app.manifest.json": b"original pre-sign manifest",
+        }
+        for name, data in self.inputs.items():
+            path = self.preflight / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
 
-    def _run_cleanup(
-        self,
-        *,
-        freeze_intent_exists: bool = False,
-        frozen_exists: bool = False,
-    ) -> tuple[bool, bool]:
-        with tempfile.TemporaryDirectory() as temporary:
-            candidate = Path(temporary) / "target/candidates/0.4.0"
-            preflight = candidate / "ga-preflight/40044"
-            frozen = candidate / "ga/40044"
-            preflight.mkdir(parents=True)
-            if freeze_intent_exists:
-                intent = preflight / "candidate-freeze/intent.json"
-                intent.parent.mkdir(mode=0o700)
-                intent.write_text("{}\n", encoding="utf-8")
-            if frozen_exists:
-                frozen.mkdir(parents=True)
-            script = (
-                "set -euo pipefail\n"
-                'preflight_root="$PREFLIGHT_ROOT"\n'
-                'frozen_root="$FROZEN_ROOT"\n'
-                'candidate_cargo_home=""\n'
-                "completed=0\n"
-                f"{self._cleanup_source()}\n"
-                "cleanup\n"
-                '[[ -d "$preflight_root" ]] && preflight_state=present || preflight_state=absent\n'
-                '[[ -d "$frozen_root" ]] && frozen_state=present || frozen_state=absent\n'
-                'printf "%s %s\n" "$preflight_state" "$frozen_state"\n'
-            )
-            completed = subprocess.run(
-                ["/bin/bash", "-c", script],
-                check=True,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="strict",
-                env={
-                    **os.environ,
-                    "PREFLIGHT_ROOT": str(preflight),
-                    "FROZEN_ROOT": str(frozen),
-                },
-            )
-            states = completed.stdout.split()
-            self.assertEqual(len(states), 2)
-            return tuple(state == "present" for state in states)
-
-    def test_unconsumed_preflight_failure_cleans_rebuildable_tree(self) -> None:
-        self.assertEqual(self._run_cleanup(), (False, False))
-
-    def test_freeze_intent_preserves_consumed_preflight_tree(self) -> None:
-        self.assertEqual(
-            self._run_cleanup(freeze_intent_exists=True),
-            (True, False),
+    def run_cleanup(
+        self, *, body_exit: int, cleanup_exit: int = 0
+    ) -> subprocess.CompletedProcess[str]:
+        start = self.source.index('candidate_cargo_home=""\ncompleted=0\ncleanup() {')
+        end = self.source.index('\ncandidate_cargo_home="$(cfw_create_release_cargo_runtime', start)
+        script = (
+            "set -euo pipefail\n"
+            'preflight_root="$1"\nfrozen_root="$2"\n'
+            'cleanup_calls="$4"\ncleanup_result="$6"\n'
+            "cfw_remove_release_cargo_runtime() {\n"
+            '  printf "%s\\n" "$1" >"$cleanup_calls"\n'
+            '  if [[ "$cleanup_result" -ne 0 ]]; then\n'
+            '    printf "fixture Cargo cleanup failure\\n" >&2\n'
+            '    return "$cleanup_result"\n'
+            "  fi\n"
+            '  /bin/rm -r "$1"\n'
+            "}\n"
+            + self.source[start:end]
+            + '\ncandidate_cargo_home="$3"\n'
+            + 'if [[ "$5" -ne 0 ]]; then printf "fixture build failure\\n" >&2; fi\n'
+            + 'exit "$5"\n'
+        )
+        return subprocess.run(
+            [
+                "/bin/bash", "-p", "-c", script, "signed-builder-cleanup",
+                str(self.preflight), str(self.frozen), str(self.cargo_runtime),
+                str(self.cleanup_calls), str(body_exit), str(cleanup_exit),
+            ],
+            env={"PATH": "/usr/bin:/bin"},
+            timeout=30,
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
-    def test_existing_frozen_root_is_never_cleaned(self) -> None:
-        self.assertEqual(
-            self._run_cleanup(frozen_exists=True),
-            (True, True),
+    def assert_inputs_retained(self, root: Path) -> None:
+        for name, data in self.inputs.items():
+            self.assertEqual((root / name).read_bytes(), data)
+        self.assertEqual(self.cleanup_calls.read_text(), str(self.cargo_runtime) + "\n")
+
+    def test_failed_build_retains_raw_inputs_and_original_exit(self) -> None:
+        result = self.run_cleanup(body_exit=17)
+        self.assertEqual(result.returncode, 17)
+        self.assertIn("fixture build failure", result.stderr)
+        self.assertIn(str(self.preflight), result.stderr)
+        self.assert_inputs_retained(self.preflight)
+        self.assertFalse(self.cargo_runtime.exists())
+
+    def test_primary_and_cleanup_failures_remain_visible_without_overwriting_exit(self) -> None:
+        result = self.run_cleanup(body_exit=17, cleanup_exit=23)
+        self.assertEqual(result.returncode, 17)
+        self.assertIn("fixture build failure", result.stderr)
+        self.assertIn("fixture Cargo cleanup failure", result.stderr)
+        self.assertIn("23", result.stderr)
+        self.assertIn(str(self.preflight), result.stderr)
+        self.assert_inputs_retained(self.preflight)
+        self.assertTrue(self.cargo_runtime.exists())
+
+    def test_cleanup_failure_turns_success_exit_into_failure(self) -> None:
+        result = self.run_cleanup(body_exit=0, cleanup_exit=23)
+        self.assertEqual(result.returncode, 23)
+        self.assertIn("fixture Cargo cleanup failure", result.stderr)
+        self.assertIn(str(self.preflight), result.stderr)
+        self.assert_inputs_retained(self.preflight)
+
+    def test_existing_freeze_intent_is_retained_with_its_inputs(self) -> None:
+        intent = self.preflight / "candidate-freeze/intent.json"
+        intent.parent.mkdir()
+        intent.write_bytes(b"original durable freeze intent")
+        result = self.run_cleanup(body_exit=17)
+        self.assertEqual(result.returncode, 17)
+        self.assertEqual(intent.read_bytes(), b"original durable freeze intent")
+        self.assert_inputs_retained(self.preflight)
+        self.assertIn(str(self.preflight), result.stderr)
+
+    def test_promoted_frozen_root_is_retained_and_reported(self) -> None:
+        self.frozen.parent.mkdir()
+        self.preflight.rename(self.frozen)
+        result = self.run_cleanup(body_exit=17)
+        self.assertEqual(result.returncode, 17)
+        self.assert_inputs_retained(self.frozen)
+        self.assertIn(str(self.frozen), result.stderr)
+
+    def test_existing_preflight_is_refused_without_overwriting_raw_inputs(self) -> None:
+        start = self.source.index('[[ ! -e "$frozen_root" && ! -L "$frozen_root" ]]')
+        end = self.source.index('\ncandidate_cargo_home="$(cfw_create_release_cargo_runtime', start)
+        die_start = self.source.index("die() {\n")
+        die_end = self.source.index("\n}\n", die_start) + len("\n}\n")
+        script = (
+            "set -euo pipefail\n"
+            'preflight_root="$1"\nfrozen_root="$2"\nCFW_BUILD_NUMBER=40044\n'
+            'profiles_root="$preflight_root/profiles"\n'
+            'entitlements_root="$preflight_root/entitlements"\n'
+            'pre_sign_root="$preflight_root/pre-sign"\n'
+            + self.source[die_start:die_end]
+            + self.source[start:end]
         )
+        result = subprocess.run(
+            ["/bin/bash", "-p", "-c", script, "signed-builder-preflight", str(self.preflight), str(self.frozen)],
+            env={"PATH": "/usr/bin:/bin"},
+            timeout=30,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("GA preflight already exists; inspect it instead of replacing it", result.stderr)
+        for name, data in self.inputs.items():
+            self.assertEqual((self.preflight / name).read_bytes(), data)
+        self.assertFalse(self.cleanup_calls.exists())
 
 
 class AttemptConcurrencyTests(unittest.TestCase):

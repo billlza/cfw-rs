@@ -675,6 +675,16 @@ be substituted after a crash. Final publication fsyncs the sealed destination
 tree and both rename parents; a `publication_deferred` attempt is recoverable
 only by closing that durability boundary and re-verifying the exact final set.
 
+Explicit recovery has no cumulative attempt-count limit. The journal remains
+bounded to 64 events: a full recovery reserves nine events, reconciliation of
+an already published set reserves one, and re-verifying a completed transaction
+needs none. Capacity is checked before pending-event repair, temporary-output
+cleanup or Apple queries. Insufficient capacity preserves the existing journal
+and outputs and blocks that evidence operation; it does not retire the app.
+If a recovery is interrupted after recording its start, another explicit
+recovery records a new start and observes the same submission ID. The previous
+start remains in the journal; the DMG is never resubmitted.
+
 Run the publication phases after the exact app has been signed, notarized, and
 stapled:
 
@@ -753,7 +763,12 @@ Build 40044 is the sole `active_ga` identity.
 
 Run the sequence below from one clean release commit. Source, CI, preflight, or
 evidence failures before candidate freeze use their own append-only attempt or
-run identity and do not allocate another application build. Once
+run identity and do not allocate another application build. A failed builder
+retains its preflight inputs and partial products and reports their path; only
+its temporary Cargo runtime is cleaned up. Before another pre-freeze attempt,
+confirm that no freeze intent or signing mutation exists, then preserve the
+old preflight tree under a unique private history path. The builder refuses to
+overwrite an existing preflight root. Once
 `candidate-freeze/intent.json` exists, recovery may only continue an exact
 supported 40044 transaction without changing application or nested-code
 signature bytes. A transaction in the explicit post-receipt

@@ -143,7 +143,7 @@ not silently accept both spellings for the same schema field.
 | --- | --- | --- |
 | Source, dependency, lint, unit, build-script, documentation, or verifier failure before freeze | No | Append a source/CI attempt; keep the same active unconsumed build |
 | Tool bootstrap or read-only environment/preflight failure before freeze | No | Append a preflight attempt; fix the boundary; do not allocate a companion build |
-| Incomplete or failed temporary app construction before durable freeze | No | Remove only owned scratch output; retain the attempt record |
+| Incomplete or failed temporary app construction before durable freeze | No | Retain preflight inputs and partial products; clean only the owned temporary Cargo runtime; preserve the failed tree before starting another attempt |
 | Durable candidate-freeze intent commits | Yes | Bind the build permanently to the recorded product inputs and pre-sign tree |
 | First signing mutation may have started without a proven freeze | Yes | Quarantine or recover the exact lineage; never reuse the number for different bytes |
 | Notarization wait, info, log, or ticket query for a known submission | Already consumed; no new build | Recover the same submission ID and exact archive |
@@ -185,6 +185,11 @@ The decision is then mechanical:
   allocate one successor.
 - If an external outcome is ambiguous, quarantine and reconcile it. A build
   bump is not a recovery mechanism.
+
+An evidence journal's capacity is an operation resource bound, not a candidate
+retirement condition. Recovery must reserve enough space for its complete
+success or failure path before changing retained evidence. An exhausted journal
+remains readable; it must not append a record that invalidates its own history.
 
 The allocation ledger reserves numbers and prevents reuse. Runtime consumption
 belongs in a candidate directory outside the source tree as an exclusive,

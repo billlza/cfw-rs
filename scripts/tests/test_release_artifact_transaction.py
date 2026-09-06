@@ -29,6 +29,7 @@ from scripts.hash_artifact import build_manifest
 from scripts.notarization_transaction import (
     CommandResult,
     CommandRole,
+    EventJournal,
     NOTARY_PROFILE,
     TransactionError,
 )
@@ -1308,6 +1309,305 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
             ArtifactSetError, "manifest differs from the application tree"
         ):
             self.fixture.verify(destination)
+
+
+class DmgRecoveryCapacityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = DmgFixture()
+        self.addCleanup(self.fixture.close)
+
+    def journal(self) -> EventJournal:
+        intent = self.fixture.context.attempt_root / "intent.json"
+        return EventJournal.load_existing(
+            intent.parent / "events",
+            hashlib.sha256(intent.read_bytes()).hexdigest(),
+            lambda: CLOCK,
+        )
+
+    def retain_recovery_history(self, event_count: int) -> None:
+        if event_count % 2:
+            self.fixture.runner.wait_status = "In Progress"
+            with self.assertRaises(TransactionError):
+                self.fixture.execute()
+        else:
+            self.fixture.runner.crash_role = CommandRole.WAIT
+            with self.assertRaises(SimulatedCrash):
+                self.fixture.execute()
+        journal = self.journal()
+        while journal.sequence < event_count:
+            journal.append("recovering", submission_id=SUBMISSION_ID)
+            journal.append(
+                "recovery_deferred",
+                submission_id=SUBMISSION_ID,
+                failure_code="notary_recovery_incomplete",
+            )
+        self.assertEqual(journal.sequence, event_count)
+
+    def evidence_snapshot(self) -> dict[str, bytes]:
+        root = self.fixture.context.attempt_root
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    def retain_stapling_work(self) -> None:
+        root = self.fixture.context.attempt_root
+        for name in ("staple-pending", "final-set"):
+            directory = root / name
+            directory.mkdir(mode=0o700)
+            (directory / self.fixture.context.dmg_name).write_bytes(b"retained partial output")
+        (root / "gatekeeper.json").write_bytes(b"retained gatekeeper observation")
+
+    def test_eight_retained_recoveries_remain_readable_and_ninth_can_publish(self) -> None:
+        self.retain_recovery_history(21)
+        before = self.evidence_snapshot()
+        self.assertEqual(dmg_transaction._validate_journal(self.journal()), "recovery_deferred")
+        runner = FakeRunner(self.fixture.context.dmg_name)
+
+        destination = self.fixture.recover(runner=runner)
+
+        self.assertEqual(self.fixture.verify(destination)["submission_id"], SUBMISSION_ID)
+        for name, data in before.items():
+            self.assertEqual((self.fixture.context.attempt_root / name).read_bytes(), data)
+        self.assertEqual(sum(event["state"] == "recovering" for event in self.journal().documents), 9)
+        self.assertNotIn(CommandRole.SUBMIT, runner.calls)
+
+    def test_ninth_recovery_failure_is_retained_and_can_be_reopened(self) -> None:
+        self.retain_recovery_history(21)
+        runner = FakeRunner(self.fixture.context.dmg_name)
+        runner.info_status = "In Progress"
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover(runner=runner)
+
+        self.assertEqual(raised.exception.code, "notary_recovery_incomplete")
+        journal = self.journal()
+        self.assertEqual(dmg_transaction._validate_journal(journal), "recovery_deferred")
+        self.assertEqual(journal.sequence, 23)
+        self.assertEqual(runner.calls, [CommandRole.INFO])
+        self.assertFalse(self.fixture.context.final_root.exists())
+
+    def test_interrupted_recovery_can_observe_the_same_submission_again(self) -> None:
+        for pending_event in (False, True):
+            with self.subTest(pending_event=pending_event):
+                fixture = DmgFixture()
+                self.addCleanup(fixture.close)
+                self.fixture = fixture
+                fixture.runner.crash_role = CommandRole.WAIT
+                with self.assertRaises(SimulatedCrash):
+                    fixture.execute()
+                interrupted = FakeRunner(fixture.context.dmg_name)
+                interrupted.crash_role = CommandRole.INFO
+                with self.assertRaises(SimulatedCrash):
+                    fixture.recover(runner=interrupted)
+                self.assertEqual(self.journal().documents[-1]["state"], "recovering")
+                if pending_event:
+                    event = fixture.context.attempt_root / "events/00000005.json"
+                    event.rename(event.with_suffix(".pending"))
+                before = self.evidence_snapshot()
+                resumed = FakeRunner(fixture.context.dmg_name)
+
+                destination = fixture.recover(runner=resumed)
+
+                self.assertEqual(fixture.verify(destination)["submission_id"], SUBMISSION_ID)
+                for name, data in before.items():
+                    retained = Path(name)
+                    if retained.suffix == ".pending":
+                        retained = retained.with_suffix(".json")
+                    self.assertEqual((fixture.context.attempt_root / retained).read_bytes(), data)
+                self.assertEqual(
+                    sum(event["state"] == "recovering" for event in self.journal().documents),
+                    2,
+                )
+                self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
+                self.assertNotIn(CommandRole.SUBMIT, interrupted.calls)
+                self.assertNotIn(CommandRole.SUBMIT, resumed.calls)
+
+    def test_exact_nine_event_capacity_can_publish_and_reopen_a_full_journal(self) -> None:
+        self.retain_recovery_history(55)
+        destination = self.fixture.recover(runner=FakeRunner(self.fixture.context.dmg_name))
+        self.assertEqual(self.journal().sequence, 64)
+        before = self.evidence_snapshot()
+        runner = FakeRunner(self.fixture.context.dmg_name)
+
+        self.assertEqual(self.fixture.recover(runner=runner), destination)
+
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.evidence_snapshot(), before)
+
+    def test_exact_capacity_repairs_complete_or_partial_pending_before_publication(self) -> None:
+        for pending_kind in ("complete", "partial"):
+            with self.subTest(pending=pending_kind):
+                fixture = DmgFixture()
+                self.addCleanup(fixture.close)
+                self.fixture = fixture
+                self.retain_recovery_history(55)
+                events = fixture.context.attempt_root / "events"
+                if pending_kind == "complete":
+                    pending = events / "00000055.pending"
+                    (events / "00000055.json").rename(pending)
+                else:
+                    pending = events / "00000056.pending"
+                    pending.write_bytes(b'{"schema_version":')
+                    pending.chmod(0o600)
+
+                destination = fixture.recover(runner=FakeRunner(fixture.context.dmg_name))
+
+                self.assertEqual(fixture.verify(destination)["submission_id"], SUBMISSION_ID)
+                self.assertEqual(self.journal().sequence, 64)
+                self.assertFalse(pending.exists())
+
+    def test_exact_capacity_retains_publish_failure_and_refuses_reconciliation_when_full(self) -> None:
+        self.retain_recovery_history(55)
+
+        def lose_publish_reply(source: Path, destination: Path) -> None:
+            publisher(source, destination)
+            raise OSError("fixture publish reply lost")
+
+        with patch.object(
+            dmg_transaction,
+            "confirm_published_tree_durable",
+            side_effect=TransactionError("publish_durability_unknown", "fixture durability failure"),
+        ):
+            with self.assertRaises(TransactionError):
+                self.fixture.recover(
+                    runner=FakeRunner(self.fixture.context.dmg_name),
+                    publisher=lose_publish_reply,
+                )
+        journal = self.journal()
+        self.assertEqual(journal.sequence, 64)
+        self.assertEqual(dmg_transaction._validate_journal(journal), "publication_deferred")
+        before = self.evidence_snapshot()
+        runner = FakeRunner(self.fixture.context.dmg_name)
+        with patch.object(dmg_transaction, "confirm_published_tree_durable") as confirm:
+            with self.assertRaises(TransactionError) as raised:
+                self.fixture.recover(runner=runner)
+        self.assertEqual(raised.exception.code, "event_journal_capacity_exceeded")
+        self.assertEqual(runner.calls, [])
+        confirm.assert_not_called()
+        self.assertEqual(self.evidence_snapshot(), before)
+
+    def test_one_remaining_event_allows_existing_final_set_reconciliation(self) -> None:
+        self.retain_recovery_history(54)
+
+        def crash_after_publish(source: Path, destination: Path) -> None:
+            publisher(source, destination)
+            raise SimulatedCrash("fixture reply lost after rename")
+
+        with self.assertRaises(SimulatedCrash):
+            self.fixture.recover(
+                runner=FakeRunner(self.fixture.context.dmg_name),
+                publisher=crash_after_publish,
+            )
+        self.assertEqual(self.journal().sequence, 62)
+        journal = self.journal()
+        journal.append("publication_deferred", submission_id=SUBMISSION_ID, failure_code="atomic_publish_failed")
+        runner = FakeRunner(self.fixture.context.dmg_name)
+
+        self.fixture.recover(runner=runner)
+
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.journal().sequence, 64)
+        self.assertEqual(dmg_transaction._validate_journal(self.journal()), "published")
+
+    def test_eight_remaining_events_refuse_before_reset_pending_recovery_or_remote_io(self) -> None:
+        for pending_kind in ("none", "complete", "partial"):
+            with self.subTest(pending=pending_kind):
+                fixture = DmgFixture()
+                self.addCleanup(fixture.close)
+                self.fixture = fixture
+                self.retain_recovery_history(56)
+                self.retain_stapling_work()
+                events = self.fixture.context.attempt_root / "events"
+                if pending_kind == "complete":
+                    (events / "00000056.json").rename(events / "00000056.pending")
+                elif pending_kind == "partial":
+                    pending = events / "00000057.pending"
+                    pending.write_bytes(b'{"schema_version":')
+                    pending.chmod(0o600)
+                before = self.evidence_snapshot()
+                runner = FakeRunner(self.fixture.context.dmg_name)
+
+                with self.assertRaises(TransactionError) as raised:
+                    self.fixture.recover(runner=runner)
+
+                self.assertEqual(raised.exception.code, "event_journal_capacity_exceeded")
+                self.assertEqual(runner.calls, [])
+                self.assertEqual(self.evidence_snapshot(), before)
+
+    def test_ninth_recovery_still_rejects_a_different_submission(self) -> None:
+        self.retain_recovery_history(21)
+        before = self.evidence_snapshot()
+        runner = FakeRunner(self.fixture.context.dmg_name)
+
+        with self.assertRaises(TransactionError) as raised:
+            self.fixture.recover("99999999-2222-3333-4444-555555555555", runner=runner)
+
+        self.assertEqual(raised.exception.code, "submission_id_mismatch")
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.evidence_snapshot(), before)
+
+    def test_pending_admission_rejection_preserves_complete_and_partial_bytes(self) -> None:
+        for pending_kind in ("complete", "partial"):
+            with self.subTest(pending=pending_kind):
+                fixture = DmgFixture()
+                self.addCleanup(fixture.close)
+                self.fixture = fixture
+                self.retain_recovery_history(21)
+                root = self.fixture.context.attempt_root
+                events = root / "events"
+                if pending_kind == "complete":
+                    (events / "00000021.json").rename(events / "00000021.pending")
+                else:
+                    pending = events / "00000022.pending"
+                    pending.write_bytes(b'{"schema_version":')
+                    pending.chmod(0o600)
+                before = self.evidence_snapshot()
+                observed: list[int] = []
+
+                def refuse(journal: EventJournal) -> None:
+                    observed.append(journal.sequence)
+                    self.assertEqual(self.evidence_snapshot(), before)
+                    raise TransactionError("fixture_admission_denied", "fixture admission refusal")
+
+                with self.assertRaises(TransactionError) as raised:
+                    EventJournal.load_existing(
+                        events,
+                        hashlib.sha256((root / "intent.json").read_bytes()).hexdigest(),
+                        lambda: CLOCK,
+                        admission=refuse,
+                    )
+
+                self.assertEqual(raised.exception.code, "fixture_admission_denied")
+                self.assertEqual(observed, [21])
+                self.assertEqual(self.evidence_snapshot(), before)
+
+    def test_pending_time_chain_drift_is_rejected_before_admission_or_rename(self) -> None:
+        self.retain_recovery_history(21)
+        root = self.fixture.context.attempt_root
+        event = root / "events/00000021.json"
+        value = json.loads(event.read_bytes())
+        value["recorded_at"] = "2026-07-27T04:02:00Z"
+        event.write_text(dmg_transaction._canonical_json(value), encoding="utf-8")
+        event.rename(event.with_suffix(".pending"))
+        before = self.evidence_snapshot()
+        observed: list[int] = []
+
+        def admit(journal: EventJournal) -> None:
+            observed.append(journal.sequence)
+
+        with self.assertRaises(TransactionError) as raised:
+            EventJournal.load_existing(
+                root / "events",
+                hashlib.sha256((root / "intent.json").read_bytes()).hexdigest(),
+                lambda: CLOCK,
+                admission=admit,
+            )
+
+        self.assertEqual(raised.exception.code, "event_journal_identity_drift")
+        self.assertEqual(observed, [])
+        self.assertEqual(self.evidence_snapshot(), before)
 
 
 class UpdaterArtifactSetTests(unittest.TestCase):

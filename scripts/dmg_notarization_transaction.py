@@ -158,7 +158,8 @@ _XCRUN = "/usr/bin/xcrun"
 INTENT_DOCUMENT = "cfw-dmg-notarization-intent-v3"
 OBSERVATION_DOCUMENT = "cfw-dmg-notarization-submission-observation-v1"
 MAX_DMG_EVENTS = 64
-MAX_RECOVERY_RUNS = 8
+# Recovering through published, or the failure event replacing its final step.
+RECOVERY_EVENT_RESERVE = 9
 MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
 STAPLE_PENDING_DIRECTORY = "staple-pending"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -236,7 +237,8 @@ TRANSITIONS = {
     "recovery_deferred": {"recovering"},
     "finalization_deferred": {"recovering"},
     "publication_deferred": {"published", "recovering"},
-    "recovering": {"accepted", "recovery_deferred", "rejected"},
+    # A new explicit, locked observation may follow an interrupted recovery.
+    "recovering": {"accepted", "recovering", "recovery_deferred", "rejected"},
     "accepted": {"finalization_deferred", "log_verified", "recovering"},
     "log_verified": {"finalization_deferred", "recovering", "stapling"},
     "stapling": {"finalization_deferred", "recovering", "stapled"},
@@ -839,7 +841,6 @@ def _validate_journal(journal: EventJournal) -> str:
             "event_journal_capacity_exceeded", "DMG event journal is empty or oversized"
         )
     previous: str | None = None
-    recovery_count = 0
     known_submission_id: str | None = None
     for event in journal.documents:
         state = event["state"]
@@ -856,17 +857,35 @@ def _validate_journal(journal: EventJournal) -> str:
                 raise TransactionError(
                     "submission_id_mismatch", "DMG event journal contains multiple submission IDs"
                 )
-        if state == "recovering":
-            recovery_count += 1
         previous = state
-    if recovery_count > MAX_RECOVERY_RUNS:
-        raise TransactionError(
-            "recovery_quota_exceeded", "DMG recovery run quota is exhausted"
-        )
     return previous or ""
 
 
-def _load_attempt(context: DmgContext, *, clock: Clock) -> DmgAttempt:
+def _require_event_capacity(journal: EventJournal, required_events: int) -> None:
+    if journal.sequence + required_events > MAX_DMG_EVENTS:
+        raise TransactionError(
+            "event_journal_capacity_exceeded",
+            "DMG journal lacks capacity for complete recovery finalization",
+        )
+
+
+def _require_recovery_capacity(journal: EventJournal, *, context: DmgContext) -> None:
+    state = _validate_journal(journal)
+    if state == "published":
+        required_events = 0
+    elif os.path.lexists(context.final_root):
+        required_events = 1
+    else:
+        required_events = RECOVERY_EVENT_RESERVE
+    _require_event_capacity(journal, required_events)
+
+
+def _load_attempt(
+    context: DmgContext,
+    *,
+    clock: Clock,
+    journal_admission: Callable[[EventJournal], None] | None = None,
+) -> DmgAttempt:
     _validate_context(context, initial=False)
     _require_real_directory(context.transaction_root, private=True)
     _require_real_directory(context.attempt_root, private=True)
@@ -906,7 +925,8 @@ def _load_attempt(context: DmgContext, *, clock: Clock) -> DmgAttempt:
     intent, intent_sha256 = _load_json(context.attempt_root / "intent.json", "DMG intent")
     intent = _validate_intent(context, intent)
     journal = EventJournal.load_existing(
-        context.attempt_root / "events", intent_sha256, clock
+        context.attempt_root / "events", intent_sha256, clock,
+        admission=journal_admission,
     )
     _validate_journal(journal)
     observation: dict[str, Any] | None = None
@@ -1833,7 +1853,11 @@ def recover_transaction(
     _validate_context(context, initial=False)
     _require_source_identity(context, source_identity_reader)
     with _exclusive_attempt_recovery_lock(context):
-        attempt = _load_attempt(context, clock=clock)
+        attempt = _load_attempt(
+            context,
+            clock=clock,
+            journal_admission=partial(_require_recovery_capacity, context=context),
+        )
         _require_prepackage_stage(
             context,
             prepackage_stage_verifier,
@@ -1882,6 +1906,7 @@ def recover_transaction(
                     "published_set_without_seal_event",
                     "a public DMG set exists without the durable sealed boundary",
                 )
+            _require_event_capacity(attempt.journal, 1)
             seal = verify_dmg_set(
                 context.final_root,
                 repository=context.repository,
@@ -1917,6 +1942,7 @@ def recover_transaction(
             "log_verified",
             "outcome_unknown",
             "publication_deferred",
+            "recovering",
             "recovery_deferred",
             "sealed",
             "stapled",
@@ -1928,6 +1954,7 @@ def recover_transaction(
             raise TransactionError(
                 "recovery_state_unsupported", "DMG transaction is not at a recoverable boundary"
             )
+        _require_event_capacity(attempt.journal, RECOVERY_EVENT_RESERVE)
         _reset_unpublished_stapling(attempt)
         _append(attempt, "recovering", submission_id=submission_id)
         try:
@@ -1975,7 +2002,7 @@ def recover_transaction(
 
 
 def self_check() -> None:
-    if MAX_DMG_EVENTS != 64 or MAX_RECOVERY_RUNS != 8:
+    if MAX_DMG_EVENTS != 64 or RECOVERY_EVENT_RESERVE != 9:
         raise TransactionError("self_check_failed", "DMG transaction quota drifted")
     if TRANSITIONS["submitting"] != {
         "outcome_unknown",

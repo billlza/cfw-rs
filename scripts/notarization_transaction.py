@@ -2092,7 +2092,10 @@ class EventJournal:
         directory: Path,
         intent_sha256: str,
         clock: Clock,
+        *,
+        admission: Callable[[EventJournal], None] | None = None,
     ) -> EventJournal:
+        """Admit a validated event projection before reconciling pending writes."""
         _require_real_directory(directory, private=True)
         try:
             names = sorted(path.name for path in directory.iterdir())
@@ -2135,6 +2138,9 @@ class EventJournal:
             journal.sequence = sequence
             journal.previous_event_sha256 = previous_sha256
             journal.documents.append(value)
+        pending_path: Path | None = None
+        pending_data: bytes | None = None
+        pending_complete = False
         if pending_names:
             pending_name = pending_names[0]
             match = EVENT_PENDING_RE.fullmatch(pending_name)
@@ -2154,7 +2160,8 @@ class EventJournal:
             try:
                 pending_value = _decode_json_bytes(pending_data, pending_path)
             except TransactionError:
-                _discard_partial_pending(pending_path)
+                # An interrupted JSON write is removed only after admission.
+                pending_complete = False
             else:
                 pending_value = _validate_event_document(
                     pending_value,
@@ -2163,7 +2170,22 @@ class EventJournal:
                     previous_sha256=previous_sha256,
                     intent_sha256=intent_sha256,
                 )
-                destination = directory / f"{pending_sequence:08d}.json"
+                previous_sha256 = hashlib.sha256(pending_data).hexdigest()
+                journal.sequence = pending_sequence
+                journal.previous_event_sha256 = previous_sha256
+                journal.documents.append(pending_value)
+                pending_complete = True
+        if admission is not None:
+            journal._verify_projection(pending_path=pending_path)
+            admission(journal)
+        if pending_path is not None:
+            if _read_private_pending_bytes(pending_path) != pending_data:
+                raise TransactionError(
+                    "event_journal_identity_drift",
+                    "pending notarization event changed during admission",
+                )
+            if pending_complete:
+                destination = pending_path.with_suffix(".json")
                 _rename_exclusive_no_follow(pending_path, destination)
                 try:
                     _fsync_directory(directory)
@@ -2173,10 +2195,8 @@ class EventJournal:
                         "event was renamed but journal durability is unknown",
                         terminal_state="outcome_unknown",
                     ) from error
-                previous_sha256 = hashlib.sha256(pending_data).hexdigest()
-                journal.sequence = pending_sequence
-                journal.previous_event_sha256 = previous_sha256
-                journal.documents.append(pending_value)
+            else:
+                _discard_partial_pending(pending_path)
         journal.verify()
         return journal
 
@@ -2240,10 +2260,27 @@ class EventJournal:
         self.documents.append(document)
 
     def verify(self) -> str:
+        return self._verify_projection(pending_path=None)
+
+    def _verify_projection(self, *, pending_path: Path | None) -> str:
         expected_names = {
             f"{sequence:08d}.json"
             for sequence in range(1, len(self.documents) + 1)
         }
+        if pending_path is not None:
+            if pending_path.parent != self.directory:
+                raise TransactionError(
+                    "event_journal_identity_drift",
+                    "pending event is outside the notarization journal",
+                )
+            if pending_path.name == f"{len(self.documents):08d}.pending":
+                expected_names.remove(f"{len(self.documents):08d}.json")
+            elif pending_path.name != f"{len(self.documents) + 1:08d}.pending":
+                raise TransactionError(
+                    "event_journal_identity_drift",
+                    "pending event differs from the notarization journal head",
+                )
+            expected_names.add(pending_path.name)
         try:
             observed_names = {path.name for path in self.directory.iterdir()}
         except OSError as error:
@@ -2277,8 +2314,11 @@ class EventJournal:
                     "event_journal_identity_drift",
                     "in-memory notarization event chain is inconsistent",
                 )
+            event_path = self.directory / f"{sequence:08d}.json"
+            if pending_path is not None and pending_path.name == f"{sequence:08d}.pending":
+                event_path = pending_path
             _, event_sha256 = _read_exact_json_document(
-                self.directory / f"{sequence:08d}.json",
+                event_path,
                 expected,
                 drift_code="event_journal_identity_drift",
                 drift_message="notarization event journal changed",

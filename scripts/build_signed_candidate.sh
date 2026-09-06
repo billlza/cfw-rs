@@ -156,14 +156,30 @@ mkdir -m 0700 "$profiles_root" "$entitlements_root" "$pre_sign_root"
 candidate_cargo_home=""
 completed=0
 cleanup() {
+  local exit_status=$?
+  local cleanup_status=0
+  local attempt_root
+  trap - EXIT
   if [[ -n "${candidate_cargo_home:-}" ]]; then
-    cfw_remove_release_cargo_runtime "$candidate_cargo_home"
+    if cfw_remove_release_cargo_runtime "$candidate_cargo_home"; then
+      candidate_cargo_home=""
+    else
+      cleanup_status=$?
+      printf 'error: candidate Cargo runtime cleanup failed (exit %s): %s\n' \
+        "$cleanup_status" "$candidate_cargo_home" >&2
+    fi
   fi
-  if [[ $completed -ne 1 && ! -e "$frozen_root" && ! -L "$frozen_root" && \
-    -d "$preflight_root" && ! -L "$preflight_root" && \
-    ! -e "$preflight_root/candidate-freeze/intent.json" ]]; then
-    /bin/rm -r "$preflight_root"
+  if [[ $completed -ne 1 ]]; then
+    for attempt_root in "$preflight_root" "$frozen_root"; do
+      if [[ -e "$attempt_root" || -L "$attempt_root" ]]; then
+        printf 'candidate build incomplete; retained attempt: %s\n' "$attempt_root" >&2
+      fi
+    done
   fi
+  if [[ $exit_status -eq 0 && $cleanup_status -ne 0 ]]; then
+    exit_status=$cleanup_status
+  fi
+  exit "$exit_status"
 }
 trap cleanup EXIT
 

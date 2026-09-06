@@ -65,9 +65,6 @@ def _prepackage_evidence_sources(fixed_ga_root: Path) -> dict[str, Path]:
             fixed_ga_root / "signing-output/signing-transformation.json"
         ),
         "hosted-ci-receipt": fixed_ga_root / "stage-inputs/hosted-ci.json",
-        "local-deterministic-ci-lanes": (
-            fixed_ga_root / "stage-inputs/local-ci-lanes.json"
-        ),
     }
 
 

@@ -58,8 +58,8 @@ run_hosted_ci_receipt() {
     return 1
   }
   cfw_run_release_python_script \
-    "$publication_artifact_repository" \
-    "$publication_artifact_repository/scripts/github_hosted_ci_receipt.py" \
+    "$publication_repo_root" \
+    "$publication_repo_root/scripts/github_hosted_ci_receipt.py" \
     "$@"
 }
 

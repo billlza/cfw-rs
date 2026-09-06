@@ -280,7 +280,7 @@ class GAReleaseCompositionRootTests(unittest.TestCase):
             "SERVICE_JOURNAL_INPUT: Final = SERVICE_RELATIVE",
             "SERVICE_ENVIRONMENT_INPUT: Final = ENVIRONMENT_RELATIVE",
             "STAGE_SCHEMA_VERSIONS: Final = {",
-            '"prepackage": 2',
+            '"prepackage": 3',
             '"ga-acceptance": 3',
             '"publication": 3',
             "def _verified_migration_journals(repository: Path) -> dict[str, Any]:",

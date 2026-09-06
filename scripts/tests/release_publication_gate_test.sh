@@ -59,6 +59,15 @@ cfw_run_release_python_script() {
       [[ ! -e "$1/scripts/fail-prepackage" ]] || return 1
       printf '%s\n' "fixed prepackage stage reopened"
       ;;
+    "$1/scripts/github_hosted_ci_receipt.py")
+      [[ "$1" != */target/release-worktrees/40044 ]] || return 1
+      if [[ "$3" == "capture" ]]; then
+        [[ "$#" -eq 5 && "$4" == "--run-id" && "$5" == "90012345678" ]] || return 1
+      else
+        [[ "$#" -eq 3 && "$3" == "verify" ]] || return 1
+      fi
+      printf '%s\n' "current hosted CI executor invoked"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -83,6 +92,18 @@ SH
 [[ ! -s "$fixture_root/readonly-caller.stderr" ]]
 grep -Fxq "fixed prepackage stage reopened" "$fixture_root/readonly-caller.stdout"
 grep -Fxq "fixed application verifier invoked" "$fixture_root/readonly-caller.stdout"
+
+for hosted_command in --capture-hosted-ci --verify-hosted-ci; do
+  hosted_arguments=("$hosted_command")
+  if [[ "$hosted_command" == "--capture-hosted-ci" ]]; then
+    hosted_arguments+=(90012345678)
+  fi
+  /bin/bash -p "$gate_fixture/scripts/release_publication_gate.sh" \
+    "${hosted_arguments[@]}" \
+    >"$fixture_root/hosted-ci.stdout" 2>"$fixture_root/hosted-ci.stderr"
+  [[ ! -s "$fixture_root/hosted-ci.stderr" ]]
+  grep -Fxq "current hosted CI executor invoked" "$fixture_root/hosted-ci.stdout"
+done
 
 touch "$gate_fixture/scripts/fail-prepackage"
 if (

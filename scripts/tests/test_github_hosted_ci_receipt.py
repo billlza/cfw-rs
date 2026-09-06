@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import base64
 import copy
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from scripts import candidate_freeze
 from scripts import github_hosted_ci_receipt as hosted
 from scripts.publication.common import PublicationError
+from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
 
 RUN_ID = 90_012_345_678
@@ -865,6 +868,134 @@ class HostedCIReceiptTests(unittest.TestCase):
                 self.assertRaises(SystemExit),
             ):
                 hosted._arguments(arguments)
+
+
+class HostedCICommandSessionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.executor = Path(temporary.name).resolve()
+        self.repository = self.executor / "target/release-worktrees/40044"
+        workflow_path = self.repository / hosted.WORKFLOW_PATH
+        workflow_path.parent.mkdir(parents=True)
+        workflow_path.write_bytes(WORKFLOW_BYTES)
+        self.output_path = self.repository / hosted.RECEIPT_RELATIVE
+        self.output_path.parent.mkdir(parents=True, mode=0o700)
+        self.output_path.parent.chmod(0o700)
+        self.output_path.parent.parent.chmod(0o700)
+        self.sources = FrozenReleaseSources(
+            executor=ExecutorSource(self.executor, "d" * 40, "e" * 64),
+            artifact=ExecutorSource(self.repository, HEAD_SHA, SOURCE["release_source_sha256"]),
+        )
+        self.output = io.StringIO()
+        self.events: list[str] = []
+        self.callbacks: list[candidate_freeze.FreezeVerifier] = []
+        self.close_error: OSError | None = None
+        self.source_error: PublicationError | None = None
+        self.replay_repository = self.repository
+
+    @contextmanager
+    def embedded_session(self, repository: Path):
+        self.assertEqual(repository, self.repository)
+        self.events.append("session-open")
+        try:
+            yield Mock(name="embedded_proof_verifier")
+        finally:
+            self.assertEqual(self.output.getvalue(), "")
+            self.events.append("session-close")
+            if self.close_error is not None:
+                raise self.close_error
+
+    def source_binding(self, repository: Path, *, freeze_verifier=None):
+        self.assertEqual(repository, self.repository)
+        self.assertIsNotNone(freeze_verifier)
+        self.callbacks.append(freeze_verifier)
+        freeze_verifier(self.replay_repository)
+        self.events.append("reopen")
+        return dict(SOURCE)
+
+    def unchanged(self, sources: FrozenReleaseSources) -> None:
+        self.assertEqual(sources, self.sources)
+        self.assertEqual(self.output.getvalue(), "")
+        self.events.append("sources-unchanged")
+        if self.source_error is not None:
+            raise self.source_error
+
+    @contextmanager
+    def command(self, command: str):
+        arguments = [str(self.executor / "scripts/github_hosted_ci_receipt.py"), command]
+        if command == "capture":
+            arguments.extend(("--run-id", str(RUN_ID)))
+        with (
+            patch.object(sys, "argv", arguments),
+            patch.object(hosted, "__file__", arguments[0]),
+            patch("scripts.release_python_runtime.require_closed_release_runtime"),
+            patch.object(hosted, "capture_frozen_release_sources", return_value=self.sources) as capture,
+            patch.object(hosted, "require_frozen_sources_unchanged", side_effect=self.unchanged),
+            patch.object(candidate_freeze, "production_embedded_verifier_session", self.embedded_session),
+            patch.object(candidate_freeze, "verify_frozen_candidate") as freeze,
+            patch.object(hosted, "_source_binding", side_effect=self.source_binding),
+            patch.object(hosted, "_fetch_api_json", side_effect=StableAPI()),
+            redirect_stdout(self.output),
+        ):
+            yield freeze
+        capture.assert_called_once_with(self.executor)
+
+    def test_capture_and_verify_each_replay_four_times_in_one_closed_artifact_session(self) -> None:
+        previous_callback = None
+        for command in ("capture", "verify"):
+            self.output.truncate(0)
+            self.output.seek(0)
+            self.events.clear()
+            self.callbacks.clear()
+            with self.subTest(command=command), self.command(command) as freeze:
+                hosted.main()
+                self.assertEqual(freeze.call_count, 4)
+                self.assertEqual(
+                    [call.args for call in freeze.call_args_list],
+                    [(self.repository,)] * 4,
+                )
+            self.assertEqual(
+                self.events,
+                ["session-open", *(["reopen"] * 4), "session-close", "sources-unchanged"],
+            )
+            self.assertTrue(all(callback is self.callbacks[0] for callback in self.callbacks))
+            self.assertIsNot(self.callbacks[0], previous_callback)
+            previous_callback = self.callbacks[0]
+            with self.assertRaises(candidate_freeze.CandidateFreezeError) as closed:
+                previous_callback(self.repository)
+            self.assertEqual(closed.exception.code, "verifier_session_closed")
+            self.assertIn(f"run={RUN_ID}", self.output.getvalue())
+        self.assertTrue(self.output_path.is_file())
+        self.assertFalse((self.executor / hosted.RECEIPT_RELATIVE).exists())
+
+    def test_foreign_artifact_path_is_rejected_before_freeze_or_publication(self) -> None:
+        self.replay_repository = self.executor
+        with self.command("capture") as freeze, self.assertRaises(SystemExit) as rejected:
+            hosted.main()
+        self.assertIsInstance(rejected.exception.__cause__, candidate_freeze.CandidateFreezeError)
+        self.assertEqual(rejected.exception.__cause__.code, "verifier_session_repository_mismatch")
+        freeze.assert_not_called()
+        self.assertFalse(self.output_path.exists())
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_session_close_failure_preserves_receipt_without_success(self) -> None:
+        self.close_error = OSError("private verifier cleanup failed")
+        with self.command("capture"), self.assertRaises(SystemExit) as rejected:
+            hosted.main()
+        self.assertIs(rejected.exception.__cause__, self.close_error)
+        self.assertTrue(self.output_path.is_file())
+        self.assertEqual(self.events[-1], "session-close")
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_source_drift_after_session_close_preserves_receipt_without_success(self) -> None:
+        self.source_error = PublicationError("executor source changed")
+        with self.command("capture"), self.assertRaises(SystemExit) as rejected:
+            hosted.main()
+        self.assertIs(rejected.exception.__cause__, self.source_error)
+        self.assertTrue(self.output_path.is_file())
+        self.assertEqual(self.events[-2:], ["session-close", "sources-unchanged"])
+        self.assertEqual(self.output.getvalue(), "")
 
 
 if __name__ == "__main__":

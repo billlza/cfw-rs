@@ -4,25 +4,46 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from release_python_runtime import (
-    ReleasePythonRuntimeError,
-    require_closed_release_runtime,
-)
-
-try:
-    require_closed_release_runtime()
-except ReleasePythonRuntimeError as error:
-    raise SystemExit(f"error: publication preparation: {error}") from error
-
-from publication.common import PublicationError
-from publication.preparer import (
-    expected_blocker_report,
-    expected_prepared_root,
-    expected_review_template,
-    expected_signed_app,
-    prepare,
-    write_review_template,
-)
+if __package__:
+    from .release_python_runtime import (
+        ReleasePythonRuntimeError,
+        require_closed_release_runtime,
+    )
+    from .release_executor_source import (
+        ExecutorSourceError,
+        capture_frozen_release_sources,
+        require_frozen_sources_unchanged,
+    )
+    from .publication.common import PublicationError
+    from .publication.durable_file import DurabilityOutcomeUnknown
+    from .publication.preparer import (
+        expected_blocker_report,
+        expected_prepared_root,
+        expected_review_template,
+        expected_signed_app,
+        prepare,
+        write_review_template,
+    )
+else:
+    from release_python_runtime import (
+        ReleasePythonRuntimeError,
+        require_closed_release_runtime,
+    )
+    from release_executor_source import (
+        ExecutorSourceError,
+        capture_frozen_release_sources,
+        require_frozen_sources_unchanged,
+    )
+    from publication.common import PublicationError
+    from publication.durable_file import DurabilityOutcomeUnknown
+    from publication.preparer import (
+        expected_blocker_report,
+        expected_prepared_root,
+        expected_review_template,
+        expected_signed_app,
+        prepare,
+        write_review_template,
+    )
 
 
 def parser() -> argparse.ArgumentParser:
@@ -39,9 +60,11 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    repository = Path(__file__).resolve().parent.parent
     arguments = parser().parse_args()
     try:
+        require_closed_release_runtime()
+        sources = capture_frozen_release_sources(Path(__file__).resolve().parent.parent)
+        repository = sources.artifact.repository
         if arguments.command == "review-template":
             output = write_review_template(
                 repository=repository,
@@ -56,7 +79,14 @@ def main() -> None:
                 reviewed_components=arguments.reviewed_components,
                 output=expected_prepared_root(repository),
             )
-    except (PublicationError, OSError) as error:
+        try:
+            require_frozen_sources_unchanged(sources)
+        except ExecutorSourceError as error:
+            raise DurabilityOutcomeUnknown(
+                "publication preparation output exists but its source recheck failed; "
+                "inspect the retained output before retrying"
+            ) from error
+    except (PublicationError, ReleasePythonRuntimeError, OSError) as error:
         raise SystemExit(f"error: publication preparation: {error}") from error
     print(f"publication preparation output: {output}")
     if arguments.command == "review-template":

@@ -89,7 +89,6 @@ class PublicationClosureTests(unittest.TestCase):
                 "candidate-freeze-intent",
                 "ga-product-input",
                 "hosted-ci-receipt",
-                "local-deterministic-ci-lanes",
                 "signing-transformation",
             },
         )
@@ -100,7 +99,7 @@ class PublicationClosureTests(unittest.TestCase):
         self.assertNotIn("prepackage-manifest", REQUIRED_ARTIFACT_KINDS)
         self.assertNotIn("ga-acceptance-manifest", REQUIRED_ARTIFACT_KINDS)
         self.assertIn("hosted-ci-receipt", REQUIRED_ARTIFACT_KINDS)
-        self.assertIn("local-deterministic-ci-lanes", REQUIRED_ARTIFACT_KINDS)
+        self.assertNotIn("local-deterministic-ci-lanes", REQUIRED_ARTIFACT_KINDS)
 
 
 if __name__ == "__main__":

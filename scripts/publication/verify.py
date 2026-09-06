@@ -163,6 +163,8 @@ def verify_evidence(
     repository: Path | None = None,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> None:
+    if not fixture and repository is None:
+        raise PublicationError("production verification requires an explicit artifact repository")
     _verify_evidence_manifest(root)
     machine = require_exact_keys(
         load_json(root / "machine-closure.json"),
@@ -226,8 +228,6 @@ def verify_evidence(
             if sha256_file(path) != item["sha256"]:
                 raise PublicationError(f"{collection_name} evidence differs from its binding")
     if not fixture:
-        if repository is None:
-            repository = Path(__file__).resolve().parent.parent.parent
         _verify_artifact_inputs(
             repository,
             root,
@@ -277,11 +277,13 @@ def verify_evidence(
 def verify(
     root: Path, app: Path, fixture: bool, *, repository: Path | None = None
 ) -> None:
-    root = root.resolve(strict=True)
-    app = app.resolve(strict=True)
     if not fixture:
         if repository is None:
-            repository = Path(__file__).resolve().parent.parent.parent
-        require_fixed_path(root, evidence_root(repository), "publication evidence")
-        require_fixed_path(app, signed_app(repository), "signed app")
+            raise PublicationError("production verification requires an explicit artifact repository")
+        require_fixed_path(
+            root, evidence_root(repository), "publication evidence", repository=repository
+        )
+        require_fixed_path(app, signed_app(repository), "signed app", repository=repository)
+    root = root.resolve(strict=True)
+    app = app.resolve(strict=True)
     verify_evidence(root, app, fixture, repository=repository)

@@ -3,54 +3,61 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import sys
+if __package__:
+    from .release_python_runtime import (
+        ReleasePythonRuntimeError,
+        require_closed_release_runtime,
+    )
+    from .publication.common import PublicationError
+    from .publication.draft import draft
+    from .publication.durable_file import DurabilityOutcomeUnknown
+    from .publication.finalize import finalize
+    from .publication.verify import verify
+    from .release_executor_source import (
+        ExecutorSourceError,
+        capture_frozen_release_sources,
+        require_frozen_sources_unchanged,
+    )
+else:
+    from release_python_runtime import (
+        ReleasePythonRuntimeError,
+        require_closed_release_runtime,
+    )
+    from publication.common import PublicationError
+    from publication.draft import draft
+    from publication.durable_file import DurabilityOutcomeUnknown
+    from publication.finalize import finalize
+    from publication.verify import verify
+    from release_executor_source import (
+        ExecutorSourceError,
+        capture_frozen_release_sources,
+        require_frozen_sources_unchanged,
+    )
 
-from release_python_runtime import (
-    ReleasePythonRuntimeError,
-    require_closed_release_runtime,
-)
 
-if "--fixture" not in sys.argv[1:]:
-    try:
-        require_closed_release_runtime()
-    except ReleasePythonRuntimeError as error:
-        raise SystemExit(f"error: publication evidence: {error}") from error
-
-from publication.common import PublicationError
-from publication.draft import draft
-from publication.finalize import finalize
-from publication.verify import verify
-from release_executor_source import (
-    capture_frozen_release_sources,
-    require_frozen_sources_unchanged,
-)
+def command_draft(arguments: argparse.Namespace, *, repository: Path | None) -> str:
+    return draft(
+        arguments.prepared, arguments.app, arguments.output, arguments.fixture,
+        repository=repository,
+    )
 
 
-def command_draft(arguments: argparse.Namespace) -> None:
-    print(draft(arguments.prepared, arguments.app, arguments.output, arguments.fixture))
-
-
-def command_finalize(arguments: argparse.Namespace) -> None:
+def command_finalize(arguments: argparse.Namespace, *, repository: Path | None) -> None:
     finalize(
         arguments.prepared,
         arguments.app,
         arguments.review,
         arguments.output,
         arguments.fixture,
+        repository=repository,
     )
 
 
-def command_verify(arguments: argparse.Namespace) -> None:
-    if arguments.fixture:
-        verify(arguments.evidence, arguments.app, True)
-    else:
-        sources = capture_frozen_release_sources(Path(__file__).resolve().parent.parent)
-        verify(
-            arguments.evidence, arguments.app, False,
-            repository=sources.artifact.repository,
-        )
-        require_frozen_sources_unchanged(sources)
-    print(f"publication evidence verified: {arguments.evidence.resolve(strict=True)}")
+def command_verify(arguments: argparse.Namespace, *, repository: Path | None) -> str:
+    verify(
+        arguments.evidence, arguments.app, arguments.fixture, repository=repository
+    )
+    return f"publication evidence verified: {arguments.evidence.resolve(strict=True)}"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -80,9 +87,28 @@ def parser() -> argparse.ArgumentParser:
 def main() -> None:
     arguments = parser().parse_args()
     try:
-        arguments.handler(arguments)
-    except (PublicationError, OSError) as error:
+        sources = None
+        if not arguments.fixture:
+            require_closed_release_runtime()
+            sources = capture_frozen_release_sources(Path(__file__).resolve().parent.parent)
+        message = arguments.handler(
+            arguments,
+            repository=None if sources is None else sources.artifact.repository,
+        )
+        if sources is not None:
+            try:
+                require_frozen_sources_unchanged(sources)
+            except ExecutorSourceError as error:
+                if arguments.command == "verify":
+                    raise
+                raise DurabilityOutcomeUnknown(
+                    "publication output exists but its source recheck failed; "
+                    "inspect the retained output before retrying"
+                ) from error
+    except (PublicationError, ReleasePythonRuntimeError, OSError) as error:
         raise SystemExit(f"error: publication evidence: {error}") from error
+    if message is not None:
+        print(message)
 
 
 if __name__ == "__main__":

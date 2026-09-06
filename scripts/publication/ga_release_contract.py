@@ -40,7 +40,6 @@ from .durable_file import (
 from .graph_model import load_pins
 from .release_app_verifier import verify_release_app
 from .release_environment import release_tool_environment
-from .sealed_manifest import validate_ci_lane_document
 from scripts.candidate_artifact_binding import (
     CandidateBindingError,
     validate_candidate_app_manifest,
@@ -121,7 +120,6 @@ CANDIDATE_FREEZE_INTENT: Final = GA_ROOT / "candidate-freeze/intent.json"
 PRODUCT_INPUT: Final = GA_ROOT / "product-input.json"
 
 STAGE_INPUT_ROOT: Final = GA_ROOT / "stage-inputs"
-LOCAL_CI_INPUT: Final = STAGE_INPUT_ROOT / "local-ci-lanes.json"
 HOSTED_CI_INPUT: Final = STAGE_INPUT_ROOT / "hosted-ci.json"
 PUBLICATION_INPUT_ROOT: Final = STAGE_INPUT_ROOT / "publication"
 ACCEPTANCE_INPUT_ROOT: Final = ACCEPTANCE_ROOT_RELATIVE
@@ -146,13 +144,13 @@ NOTARY_RESULT: Final = SIGNED_ROOT / "notarization.json"
 NOTARY_LOG: Final = SIGNED_ROOT / "notarization-log.json"
 GATEKEEPER_EVIDENCE: Final = SIGNED_ROOT / "gatekeeper.json"
 
-PREPACKAGE_DOCUMENT: Final = "cfm-ga-prepackage-seal-v2"
+PREPACKAGE_DOCUMENT: Final = "cfm-ga-prepackage-seal-v3"
 GA_ACCEPTANCE_DOCUMENT: Final = "cfm-ga-acceptance-seal-v3"
 PUBLICATION_DOCUMENT: Final = "cfm-ga-publication-seal-v3"
 RUNTIME_ACCEPTANCE_DOCUMENT: Final = "cfm-ga-runtime-acceptance-v2"
 GA_APP_ARTIFACT_KIND: Final = "notarized-ga-candidate-v1"
 STAGE_SCHEMA_VERSIONS: Final = {
-    "prepackage": 2,
+    "prepackage": 3,
     "ga-acceptance": 3,
     "publication": 3,
 }
@@ -169,7 +167,7 @@ STAGE_OUTPUTS: Final = {
 }
 STAGE_FILE_NAMES: Final = {
     "prepackage": frozenset(
-        {"hosted-ci.json", "local-ci-lanes.json", "manifest.json"}
+        {"hosted-ci.json", "manifest.json"}
     ),
     "ga-acceptance": frozenset({"manifest.json"}),
     "publication": frozenset(
@@ -457,7 +455,6 @@ def _require_hosted_ci_source_binding(
 
 def _prepackage_ci_bindings(
     repository: Path,
-    normalized_ci: dict[str, Any],
     hosted_ci: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -471,13 +468,6 @@ def _prepackage_ci_bindings(
             "sha256": sha256_bytes(canonical_json(hosted_ci)),
             "workflow_id": hosted_ci["workflow"]["id"],
         },
-        "local_deterministic": {
-            "path": _repo_relative(
-                repository, _path(repository, PREPACKAGE_OUTPUT / "local-ci-lanes.json")
-            ),
-            "sha256": sha256_bytes(canonical_json(normalized_ci)),
-            "toolchain_sha256": normalized_ci["toolchain_sha256"],
-        },
     }
 
 
@@ -485,7 +475,7 @@ def _verified_prepackage_inputs(
     repository: Path,
     *,
     freeze_verifier: FreezeVerifier | None = None,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, bytes]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     repository = _canonical_repository(repository)
     try:
         verify_ga_workspace_path_preconditions(repository)
@@ -576,21 +566,6 @@ def _verified_prepackage_inputs(
     for name, digest in toolchain.items():
         require_sha256(digest, f"frozen toolchain {name}")
 
-    ci_path = _path(repository, LOCAL_CI_INPUT)
-    ci_value = _load_strict_json(ci_path)
-    normalized_ci, failures = validate_ci_lane_document(
-        ci_value,
-        intent["repository_commit"],
-        intent["release_source_sha256"],
-    )
-    if failures:
-        raise PublicationError(
-            f"local deterministic CI lanes are not all passing: {failures}"
-        )
-    if normalized_ci["toolchain_sha256"] != toolchain["toolchainSha256"]:
-        raise PublicationError(
-            "local deterministic CI lanes and frozen candidate use different toolchains"
-        )
     hosted_ci = validate_hosted_ci_receipt_offline(
         repository, freeze_verifier=freeze_verifier
     )
@@ -726,7 +701,7 @@ def _verified_prepackage_inputs(
                 "tree_sha256": app_manifest["sha256"],
             },
         },
-        "ci": _prepackage_ci_bindings(repository, normalized_ci, hosted_ci),
+        "ci": _prepackage_ci_bindings(repository, hosted_ci),
         "legal_source": legal_source,
         "notarization": {
             "archive": _record(repository, _path(repository, NOTARY_ARCHIVE)),
@@ -742,7 +717,7 @@ def _verified_prepackage_inputs(
         },
         "toolchain": toolchain,
     }
-    return binding, normalized_ci, hosted_ci, legal_documents
+    return binding, hosted_ci, legal_documents
 
 
 def _stage_manifest(
@@ -822,7 +797,7 @@ def _prepackage_files(
     expected_live_hosted_ci: dict[str, Any] | None = None,
     freeze_verifier: FreezeVerifier | None = None,
 ) -> dict[str, bytes]:
-    bindings, ci_document, hosted_ci, _legal_documents = _verified_prepackage_inputs(
+    bindings, hosted_ci, _legal_documents = _verified_prepackage_inputs(
         repository, freeze_verifier=freeze_verifier
     )
     if expected_live_hosted_ci is not None and hosted_ci != expected_live_hosted_ci:
@@ -832,7 +807,6 @@ def _prepackage_files(
     manifest = _stage_manifest("prepackage", bindings, executor_source)
     return {
         "hosted-ci.json": canonical_json(hosted_ci),
-        "local-ci-lanes.json": canonical_json(ci_document),
         "manifest.json": canonical_json(manifest),
     }
 
@@ -1419,7 +1393,7 @@ def self_check(repository: Path) -> None:
         != repository / "target/candidates/0.4.0/ga/40044"
         or STAGES != ("prepackage", "ga-acceptance", "publication")
         or STAGE_SCHEMA_VERSIONS
-        != {"prepackage": 2, "ga-acceptance": 3, "publication": 3}
+        != {"prepackage": 3, "ga-acceptance": 3, "publication": 3}
         or ACCEPTANCE_INPUT_ROOT.parent != STAGE_INPUT_ROOT
         or MIGRATION_JOURNAL_INPUT.parent != ACCEPTANCE_INPUT_ROOT
         or INSTALL_JOURNAL_INPUT.parent != MIGRATION_JOURNAL_INPUT
@@ -1435,7 +1409,6 @@ def self_check(repository: Path) -> None:
         str(path)
         for path in (
             HOSTED_CI_INPUT,
-            LOCAL_CI_INPUT,
             PUBLICATION_INPUT_ROOT,
             ACCEPTANCE_INPUT_ROOT,
             DMG_SET,

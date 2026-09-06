@@ -685,30 +685,36 @@ If a recovery is interrupted after recording its start, another explicit
 recovery records a new start and observes the same submission ID. The previous
 start remains in the journal; the DMG is never resubmitted.
 
-Run the publication phases after the exact app has been signed, notarized, and
-stapled:
+Run these commands from the clean operator checkout after the exact app has
+been signed, notarized, and stapled. Tools use the fixed frozen checkout for
+all product inputs and outputs:
 
 ```bash
+publication_artifact_repository="$PWD/target/release-worktrees/40044"
+publication_ga="$publication_artifact_repository/target/candidates/0.4.0/ga/40044"
+publication_inputs="$publication_ga/stage-inputs"
+publication_libbox="$publication_artifact_repository/target/sources/sing-box-v1.13.15-patched"
+
 scripts/prepare_publication_evidence.sh review-template \
-  --libbox-source target/sources/sing-box-v1.13.15-patched
+  --libbox-source "$publication_libbox"
 
 # Resolve every item in component-review.json and every source blocker, then:
 scripts/prepare_publication_evidence.sh prepare \
-  --libbox-source target/sources/sing-box-v1.13.15-patched \
-  --reviewed-components target/candidates/0.4.0/ga/40044/stage-inputs/component-review.json
+  --libbox-source "$publication_libbox" \
+  --reviewed-components "$publication_inputs/component-review.json"
 
 scripts/run_publication_evidence.sh draft \
-  --prepared target/candidates/0.4.0/ga/40044/stage-inputs/publication-prepared \
-  --app "target/candidates/0.4.0/ga/40044/signed/Clash for Mac.app" \
-  --output target/candidates/0.4.0/ga/40044/stage-inputs/machine-closure.draft.json
+  --prepared "$publication_inputs/publication-prepared" \
+  --app "$publication_ga/signed/Clash for Mac.app" \
+  --output "$publication_inputs/machine-closure.draft.json"
 
 # A human legal reviewer must approve the exact printed closure digest and
-# component set in target/candidates/0.4.0/ga/40044/stage-inputs/legal-review.json.
+# component set in "$publication_inputs/legal-review.json".
 scripts/run_publication_evidence.sh finalize \
-  --prepared target/candidates/0.4.0/ga/40044/stage-inputs/publication-prepared \
-  --app "target/candidates/0.4.0/ga/40044/signed/Clash for Mac.app" \
-  --review target/candidates/0.4.0/ga/40044/stage-inputs/legal-review.json \
-  --output target/candidates/0.4.0/ga/40044/stage-inputs/publication
+  --prepared "$publication_inputs/publication-prepared" \
+  --app "$publication_ga/signed/Clash for Mac.app" \
+  --review "$publication_inputs/legal-review.json" \
+  --output "$publication_inputs/publication"
 
 scripts/release_publication_gate.sh --seal-prepackage
 ```
@@ -855,20 +861,27 @@ wire proof.
    An existing app-notary attempt must use its explicit recovery protocol;
    never use this entry to retry an unknown submission or rerun the builder;
 3. capture the hosted run through the fixed public GitHub API after freeze.
-   Run deterministic local checks before consumption where their inputs are
-   available, so test and environment defects remain pre-candidate failures.
-   The candidate-bound local lane reproduction still requires its own complete
-   record; source or hosted checks cannot substitute for it. The capture command
-   creates the private `stage-inputs` directory and writes only
-   `hosted-ci.json`; the local record is distinct:
+   One complete successful hosted run for the frozen product commit satisfies
+   ordinary GA's deterministic CI requirement. It runs the same 27 lane
+   commands. A second full local reproduction is optional assurance evidence,
+   not a prepackage or corresponding-source prerequisite. The signed product
+   still binds its actual build toolchain; installed-app and network acceptance
+   remain mandatory. The capture command creates the private `stage-inputs`
+   directory and writes `hosted-ci.json`:
 
    ```bash
    scripts/release_publication_gate.sh --capture-hosted-ci RUN_ID
+   scripts/release_publication_gate.sh --verify-hosted-ci
+   ```
+
+   Optional local reproduction uses its own explicit journal and produces only
+   a local record; it cannot substitute for hosted CI or runtime acceptance:
+
+   ```bash
    scripts/run_sealed_evidence_manifest.sh collect-ci-lanes \
      --artifact-repository /absolute/operator/target/release-worktrees/40044 \
      --output /absolute/operator/target/release-worktrees/40044/target/candidates/0.4.0/ga/40044/stage-inputs/local-ci-lanes.json \
      --journal /absolute/private/history/local-ci-40044
-   scripts/release_publication_gate.sh --verify-hosted-ci
    ```
 
    Run this entry from the clean operator checkout. The explicit artifact path
@@ -877,8 +890,10 @@ wire proof.
    artifact source with its original toolchain. Each invocation retains an
    immutable attempt; `--rerun` selects fresh lane executions without deleting
    previous logs, failures, or toolchain bindings. Only a complete passing
-   attempt may create the fixed local lane record. A failed or interrupted
-   attempt stays in the journal and cannot authorize packaging.
+   attempt may create the fixed local lane record. Failed or interrupted
+   attempts stay in the journal and are never described as passing. A concrete
+   product defect found in any optional check still requires resolution; moving
+   the duplicate suite out of the gate does not dismiss its findings.
 
    Lane subprocesses use the fixed public-file producer `umask 022`; the
    operator's private log or journal permissions do not change test inputs.

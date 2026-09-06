@@ -65,7 +65,6 @@ REQUIRED_ARTIFACT_KINDS = {
     "signed-app-manifest",
     "signing-transformation",
     "hosted-ci-receipt",
-    "local-deterministic-ci-lanes",
 }
 ALLOWED_CODE_PATHS = {
     "Contents/MacOS/clash-for-mac",
@@ -248,11 +247,16 @@ def scan_app_code(app: Path, fixture: bool) -> None:
         raise PublicationError(f"signed app code closure is incomplete: {sorted(ALLOWED_CODE_PATHS - observed)}")
 
 
-def build_machine_closure(prepared: Path, app: Path, fixture: bool) -> dict[str, Any]:
+def build_machine_closure(
+    prepared: Path, app: Path, fixture: bool, *, repository: Path | None = None
+) -> dict[str, Any]:
     if not fixture:
-        repository = Path(__file__).resolve().parent.parent.parent
-        require_fixed_path(prepared, prepared_root(repository), "prepared evidence")
-        require_fixed_path(app, signed_app(repository), "signed app")
+        if repository is None:
+            raise PublicationError("production closure requires an explicit artifact repository")
+        require_fixed_path(
+            prepared, prepared_root(repository), "prepared evidence", repository=repository
+        )
+        require_fixed_path(app, signed_app(repository), "signed app", repository=repository)
     specification = require_exact_keys(
         load_json(prepared / "closure-components.json"),
         {

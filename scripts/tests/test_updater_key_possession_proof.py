@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from copy import deepcopy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -554,6 +555,130 @@ class UpdaterKeyPossessionTests(unittest.TestCase):
             "source-pinned embedded updater-key verification failed",
         ):
             escaped_verifier(self.fixture.repository, challenge, signature)
+
+    def test_create_cli_compiles_once_and_replays_after_publication_before_close(
+        self,
+    ) -> None:
+        build = create_release_verifier_build(self.fixture.repository)
+        output = io.StringIO()
+        events: list[str] = []
+
+        @contextmanager
+        def compiled(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            events.append("compile")
+            try:
+                yield build
+            finally:
+                self.assertEqual(output.getvalue(), "")
+                events.append("close")
+
+        def sign(repository: Path, challenge: Path, **_arguments: object) -> None:
+            self.assertEqual(repository, self.fixture.repository)
+            self.fixture.assert_private_signer_input(challenge)
+            signature = challenge.with_name(possession.SIGNATURE_NAME)
+            signature.write_bytes(b"fixture-signature\n")
+            signature.chmod(0o600)
+
+        with (
+            patch.object(possession, "__file__", str(self.fixture.repository / "scripts/proof.py")),
+            patch.object(possession, "current_identity", return_value=dict(SOURCE_IDENTITY)),
+            patch.object(possession, "_run_production_signer", side_effect=sign) as signer,
+            patch.object(release_artifact_set, "_compiled_release_verifier", compiled),
+            patch.object(
+                release_artifact_set,
+                "_invoke_release_verifier",
+                wraps=release_artifact_set._invoke_release_verifier,
+            ) as replay,
+            verified_cargo_fixture(build),
+            redirect_stdout(output),
+        ):
+            result = possession.main(["create"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(events, ["compile", "close"])
+        signer.assert_called_once()
+        self.assertEqual(replay.call_count, 2)
+        first_challenge = replay.call_args_list[0].args[2]
+        reopened_challenge = replay.call_args_list[1].args[2]
+        self.assertNotEqual(first_challenge, reopened_challenge)
+        self.assertEqual(reopened_challenge, self.fixture.proof_root / possession.CHALLENGE_NAME)
+        self.assertTrue((self.fixture.proof_root / possession.PROOF_NAME).is_file())
+        self.assertIn("updater key possession proof verified:", output.getvalue())
+
+    def test_create_cli_session_close_failure_cannot_report_published_proof_success(
+        self,
+    ) -> None:
+        output = io.StringIO()
+        diagnostics = io.StringIO()
+        create = possession.create_possession_proof
+
+        @contextmanager
+        def session(repository: Path):
+            self.assertEqual(repository, self.fixture.repository)
+            yield self.fixture.embedded_verifier
+            self.assertEqual(output.getvalue(), "")
+            raise possession.UpdaterKeyPossessionError("verifier cleanup failed")
+
+        def create_with_fixture(repository: Path, *, embedded_verifier):
+            return create(
+                repository,
+                source_identity_reader=self.fixture.source_reader,
+                embedded_verifier=embedded_verifier,
+                process_runner=self.fixture.signer,
+            )
+
+        with (
+            patch.object(possession, "__file__", str(self.fixture.repository / "scripts/proof.py")),
+            patch.object(possession, "production_embedded_verifier_session", session),
+            patch.object(possession, "create_possession_proof", side_effect=create_with_fixture),
+            redirect_stdout(output),
+            redirect_stderr(diagnostics),
+        ):
+            result = possession.main(["create"])
+
+        self.assertEqual(result, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("verifier cleanup failed", diagnostics.getvalue())
+        self.assertEqual(len(self.fixture.verifier_calls), 2)
+        self.assertTrue((self.fixture.proof_root / possession.PROOF_NAME).is_file())
+
+    def test_verify_cli_reopens_each_fixed_root_in_its_own_session(self) -> None:
+        self.fixture.create()
+        self.fixture.verifier_calls.clear()
+        sessions: list[Path] = []
+
+        @contextmanager
+        def session(repository: Path):
+            sessions.append(repository)
+            yield self.fixture.embedded_verifier
+
+        for command in ("verify-preflight", "verify-frozen"):
+            if command == "verify-frozen":
+                frozen_root = possession.ga_root(self.fixture.repository)
+                frozen_root.parent.mkdir(parents=True)
+                self.fixture.preflight_root.rename(frozen_root)
+            with (
+                self.subTest(command=command),
+                patch.object(possession, "__file__", str(self.fixture.repository / "scripts/proof.py")),
+                patch.object(possession, "current_identity", return_value=dict(SOURCE_IDENTITY)),
+                patch.object(possession, "production_embedded_verifier_session", session),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(possession.main([command]), 0)
+
+        self.assertEqual(sessions, [self.fixture.repository] * 2)
+        self.assertEqual(len(self.fixture.verifier_calls), 2)
+        self.assertEqual(
+            [call[1] for call in self.fixture.verifier_calls],
+            [
+                root / possession.PROOF_RELATIVE / possession.CHALLENGE_NAME
+                for root in (
+                    self.fixture.preflight_root,
+                    possession.ga_root(self.fixture.repository),
+                )
+            ],
+        )
 
     def test_failed_session_replay_is_not_retried_and_cleans_build_scope(
         self,

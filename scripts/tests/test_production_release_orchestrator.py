@@ -127,15 +127,6 @@ class StageFixture:
                     "schema_version": 3,
                 }
             ),
-            "local-ci-lanes.json": canonical_json(
-                {
-                    "document": "unsigned-ci-lanes-v2",
-                    "lanes": [],
-                    "release_source_sha256": "d" * 64,
-                    "schema_version": 2,
-                    "toolchain_sha256": "f" * 64,
-                }
-            ),
             "manifest.json": canonical_json(manifest),
         }
 
@@ -666,7 +657,6 @@ class AdapterContractTests(unittest.TestCase):
         self.addCleanup(self.fixture.cleanup)
 
     def test_prepackage_ci_records_use_fixed_repository_relative_output_paths(self) -> None:
-        normalized_ci = {"toolchain_sha256": "a" * 64}
         hosted_ci = {
             "repository": {"id": 12},
             "run": {"id": 34, "run_attempt": 2},
@@ -681,11 +671,6 @@ class AdapterContractTests(unittest.TestCase):
                 "sha256": sha256_bytes(canonical_json(hosted_ci)),
                 "workflow_id": 56,
             },
-            "local_deterministic": {
-                "path": (PREPACKAGE_OUTPUT / "local-ci-lanes.json").as_posix(),
-                "sha256": sha256_bytes(canonical_json(normalized_ci)),
-                "toolchain_sha256": "a" * 64,
-            },
         }
         for repository in (
             self.fixture.repository,
@@ -693,10 +678,44 @@ class AdapterContractTests(unittest.TestCase):
         ):
             with self.subTest(repository=repository):
                 self.assertEqual(
-                    _prepackage_ci_bindings(repository, normalized_ci, hosted_ci),
+                    _prepackage_ci_bindings(repository, hosted_ci),
                     expected,
                 )
         self.assertFalse((self.fixture.ga_root / "prepackage").exists())
+
+    def test_prepackage_has_no_duplicate_local_ci_output(self) -> None:
+        hosted_ci = {"run": {"id": 34, "run_attempt": 2}}
+        bindings = {"ci": {"hosted": {"run_id": 34}}}
+        with patch.object(
+            contract, "_verified_prepackage_inputs",
+            return_value=(bindings, hosted_ci, {}),
+        ):
+            files = contract._prepackage_files(
+                self.fixture.repository,
+                FIXTURE_EXECUTOR_SOURCE,
+                expected_live_hosted_ci=hosted_ci,
+            )
+            self.assertEqual(set(files), {"hosted-ci.json", "manifest.json"})
+            self.assertEqual(files["hosted-ci.json"], canonical_json(hosted_ci))
+            with self.assertRaisesRegex(PublicationError, "changed after live"):
+                contract._prepackage_files(
+                    self.fixture.repository,
+                    FIXTURE_EXECUTOR_SOURCE,
+                    expected_live_hosted_ci={"run": {"id": 35, "run_attempt": 2}},
+                )
+
+    def test_prepackage_rejects_previous_schema_without_rewriting_it(self) -> None:
+        manifest = _stage_manifest(
+            "prepackage", {"ci": {"hosted": {"run_id": 34}}},
+            FIXTURE_EXECUTOR_SOURCE,
+        )
+        self.assertEqual(manifest["schema_version"], 3)
+        self.assertEqual(manifest["document"], "cfm-ga-prepackage-seal-v3")
+        manifest.update(schema_version=2, document="cfm-ga-prepackage-seal-v2")
+        original = canonical_json(manifest)
+        with self.assertRaisesRegex(PublicationError, "identity or status"):
+            _validate_stage_manifest(manifest, "prepackage")
+        self.assertEqual(canonical_json(manifest), original)
 
     def test_evidence_path_boundary_rejects_relative_and_foreign_paths(self) -> None:
         repository = self.fixture.repository

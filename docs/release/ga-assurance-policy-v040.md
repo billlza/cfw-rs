@@ -354,7 +354,7 @@ transaction uses `cfm-ga-journal-export-intent-v1` and
 `cfm-ga-runtime-acceptance-v2`, `cfm-ga-runtime-check-v2`,
 `cfm-ga-command-observation-v2`, `cfm-ga-runtime-collection-intent-v2`, and
 `cfm-ga-runtime-collection-event-v2`. New prepackage stages use
-`cfm-ga-prepackage-seal-v2`; the acceptance and publication stages use
+`cfm-ga-prepackage-seal-v3`; the acceptance and publication stages use
 `cfm-ga-acceptance-seal-v3` and `cfm-ga-publication-seal-v3`. Each stage records
 its clean sealing executor separately from the frozen candidate's source.
 Verification reopens that original executor identity from shared Git objects;
@@ -362,6 +362,16 @@ running a newer verifier must not change the recorded sealer or immutable seal.
 The current candidate has no old stage seals to migrate. Historical candidates
 retain their original schemas and records unchanged.
 Older service/runtime/stage markers cannot be accepted as compatible evidence.
+
+Prepackage v3 requires the complete successful hosted CI receipt for the frozen
+product commit. The 27-command local CI reproduction is optional assurance and
+is excluded from the prepackage file set, CI binding, and mandatory publication
+artifact closure. Hosted validation uses the pinned validation Python entry;
+the product's actual release toolchain remains independently bound by its frozen
+product input and signing evidence. Installation and core network acceptance
+remain mandatory. Local records and failed attempts retain their own truthful
+status. Any concrete defect they expose must still be resolved. No prior seal
+or retired candidate is rewritten by this policy change.
 
 The mandatory order is service recommission, journal `--export`, journal
 `--verify`, runtime `collect`, runtime `verify`, and GA-acceptance sealing.
@@ -380,6 +390,7 @@ different snapshots.
 
 The following evidence remains valuable but will not block an ordinary GA:
 
+- a second complete local reproduction of the 27 deterministic CI commands;
 - a second full clean-OS environment on the same physical machine;
 - the complete dual-OS lifecycle, packet, performance, and adversarial matrix;
 - three hours of observed soak per OS and the fixed 72, 265, and related raw

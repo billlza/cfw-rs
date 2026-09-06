@@ -67,7 +67,7 @@ def require_fixed_signed_app(repository: Path, app: Path) -> Path:
     expected = signed_app(repository)
     if app.is_symlink() or not app.is_dir():
         raise PublicationError("0.4.0 signed app is absent or is a symlink")
-    require_fixed_path(app, expected, "signed app")
+    require_fixed_path(app, expected, "signed app", repository=repository)
     return app.resolve(strict=True)
 
 
@@ -233,14 +233,13 @@ def prepare(
     reviewed_components: Path,
     output: Path,
 ) -> Path:
-    repository = repository.resolve(strict=True)
-    pins = load_pins(repository / "scripts/dependency_pins.env")
-    release_environment = release_tool_environment(repository, pins)
     app = require_fixed_signed_app(repository, app)
     fixed_output = prepared_root(repository)
-    require_fixed_path(output, fixed_output, "prepared evidence")
+    require_fixed_path(output, fixed_output, "prepared evidence", repository=repository)
     if output.exists() or output.is_symlink():
         raise PublicationError(f"refusing to replace prepared publication evidence: {output}")
+    pins = load_pins(repository / "scripts/dependency_pins.env")
+    release_environment = release_tool_environment(repository, pins)
     verify_release_app(
         repository=repository,
         environment=release_environment,
@@ -550,14 +549,14 @@ def _blocker_document(
 
 
 def write_review_template(repository: Path, libbox_source: Path, output: Path) -> Path:
-    repository = repository.resolve(strict=True)
-    pins = load_pins(repository / "scripts/dependency_pins.env")
-    release_environment = release_tool_environment(repository, pins)
     fixed_output = review_template(repository)
-    require_fixed_path(output, fixed_output, "review template")
+    require_fixed_path(output, fixed_output, "review template", repository=repository)
     blocker_path = blocker_report(repository)
+    require_fixed_path(blocker_path, blocker_path, "blocker report", repository=repository)
     if output.exists() or output.is_symlink() or blocker_path.exists() or blocker_path.is_symlink():
         raise PublicationError("refusing to replace an existing component review or blocker report")
+    pins = load_pins(repository / "scripts/dependency_pins.env")
+    release_environment = release_tool_environment(repository, pins)
     collected = _complete_collected_graphs(
         repository,
         libbox_source.resolve(strict=True),

@@ -64,12 +64,26 @@ def blocker_report(repository: Path) -> Path:
     return _stage_inputs(repository) / "publication-blockers.json"
 
 
-def require_fixed_path(actual: Path, expected: Path, label: str) -> None:
+def require_fixed_path(
+    actual: Path, expected: Path, label: str, *, repository: Path
+) -> None:
+    try:
+        metadata = repository.lstat()
+        canonical = repository.resolve(strict=True)
+    except OSError as error:
+        raise PublicationError("publication artifact repository is unavailable") from error
+    if (
+        not repository.is_absolute()
+        or canonical != repository
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
+        raise PublicationError("publication artifact repository is not one canonical directory")
+    if ".." in actual.parts or ".." in expected.parts:
+        raise PublicationError(f"production {label} contains parent traversal")
     actual_absolute = Path(os.path.abspath(actual))
     expected_absolute = Path(os.path.abspath(expected))
     if actual_absolute != expected_absolute:
         raise PublicationError(f"production {label} must use the fixed 0.4.0 path: {expected}")
-    repository = Path(__file__).resolve().parent.parent.parent
     try:
         relative = expected_absolute.relative_to(repository)
     except ValueError as error:
@@ -77,8 +91,11 @@ def require_fixed_path(actual: Path, expected: Path, label: str) -> None:
     current = repository
     for part in relative.parts[:-1]:
         current /= part
-        if not current.exists() and not current.is_symlink():
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
             continue
-        metadata = current.lstat()
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise PublicationError(f"production {label} has an unsafe path ancestor: {current}")
+    if actual_absolute.is_symlink():
+        raise PublicationError(f"production {label} is a symlink: {actual_absolute}")

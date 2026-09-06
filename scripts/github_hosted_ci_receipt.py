@@ -33,7 +33,12 @@ from urllib.request import (
 )
 
 if __package__:
-    from .candidate_freeze import CandidateFreezeError, FreezeVerifier, verify_frozen_candidate
+    from .candidate_freeze import (
+        CandidateFreezeError,
+        FreezeVerifier,
+        frozen_candidate_verification_session,
+        verify_frozen_candidate,
+    )
     from .publication.common import (
         PublicationError,
         read_regular,
@@ -47,8 +52,17 @@ if __package__:
         write_private_pending_locked,
     )
     from .repository_source_identity import SourceIdentityError, current_identity
+    from .release_executor_source import (
+        capture_frozen_release_sources,
+        require_frozen_sources_unchanged,
+    )
 else:
-    from candidate_freeze import CandidateFreezeError, FreezeVerifier, verify_frozen_candidate
+    from candidate_freeze import (
+        CandidateFreezeError,
+        FreezeVerifier,
+        frozen_candidate_verification_session,
+        verify_frozen_candidate,
+    )
     from publication.common import (
         PublicationError,
         read_regular,
@@ -62,6 +76,10 @@ else:
         write_private_pending_locked,
     )
     from repository_source_identity import SourceIdentityError, current_identity
+    from release_executor_source import (
+        capture_frozen_release_sources,
+        require_frozen_sources_unchanged,
+    )
 
 
 class HostedCIReceiptError(PublicationError):
@@ -1119,21 +1137,26 @@ def _publish_receipt(repository: Path, data: bytes) -> None:
         )
 
 
-def capture_receipt(repository: Path, run_id: int) -> dict[str, Any]:
+def capture_receipt(
+    repository: Path,
+    run_id: int,
+    *,
+    freeze_verifier: FreezeVerifier | None = None,
+) -> dict[str, Any]:
     """Capture one fixed hosted run and durably create the canonical receipt."""
 
     run_id = _positive_int(run_id, "workflow run id")
-    source_before = _source_binding(repository)
+    source_before = _source_binding(repository, freeze_verifier=freeze_verifier)
     workflow_before = _workflow_source_bytes(repository)
     if source_before.get("workflow_sha256") != sha256_bytes(workflow_before):
         raise _error("release workflow changed before hosted CI capture")
     receipt = _live_receipt(source_before, run_id, workflow_before)
-    source_after = _source_binding(repository)
+    source_after = _source_binding(repository, freeze_verifier=freeze_verifier)
     workflow_after = _workflow_source_bytes(repository)
     if source_after != source_before or workflow_after != workflow_before:
         raise _error("release source changed while hosted CI was being captured")
     _publish_receipt(repository, _canonical_json(receipt))
-    verified = validate_receipt_offline(repository)
+    verified = validate_receipt_offline(repository, freeze_verifier=freeze_verifier)
     if verified != receipt:
         raise _error("hosted CI receipt changed after durable publication")
     return verified
@@ -1212,13 +1235,18 @@ def main() -> None:
     except ReleasePythonRuntimeError as error:
         raise SystemExit(f"error: hosted CI receipt: {error}") from error
     arguments = _arguments()
-    repository = Path(__file__).resolve().parent.parent
     try:
-        if arguments.command == "capture":
-            receipt = capture_receipt(repository, int(arguments.run_id, 10))
-        else:
-            receipt = verify_receipt(repository)
-    except (HostedCIReceiptError, PublicationError, OSError, ValueError) as error:
+        sources = capture_frozen_release_sources(Path(__file__).resolve().parent.parent)
+        repository = sources.artifact.repository
+        with frozen_candidate_verification_session(repository) as freeze_verifier:
+            if arguments.command == "capture":
+                receipt = capture_receipt(
+                    repository, int(arguments.run_id, 10), freeze_verifier=freeze_verifier
+                )
+            else:
+                receipt = verify_receipt(repository, freeze_verifier=freeze_verifier)
+        require_frozen_sources_unchanged(sources)
+    except (CandidateFreezeError, PublicationError, OSError, ValueError) as error:
         raise SystemExit(f"error: hosted CI receipt: {error}") from error
     print(
         "hosted CI receipt verified: "

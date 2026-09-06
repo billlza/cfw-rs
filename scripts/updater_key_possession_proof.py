@@ -959,14 +959,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     repository = Path(__file__).resolve().parent.parent
     try:
-        if arguments.command == "create":
-            result = create_possession_proof(repository)
-        elif arguments.command == "verify-preflight":
-            result = verify_possession_proof(
-                repository, ga_preflight_root(repository)
-            )
-        else:
-            result = verify_possession_proof(repository, ga_root(repository))
+        with production_embedded_verifier_session(repository) as embedded_verifier:
+            if arguments.command == "create":
+                result = create_possession_proof(
+                    repository, embedded_verifier=embedded_verifier
+                )
+            else:
+                root = (
+                    ga_preflight_root(repository)
+                    if arguments.command == "verify-preflight"
+                    else ga_root(repository)
+                )
+                result = verify_possession_proof(
+                    repository, root, embedded_verifier=embedded_verifier
+                )
     except (OSError, UpdaterKeyPossessionError, ValueError) as error:
         print(f"error: updater key possession proof: {error}", file=sys.stderr)
         return 1

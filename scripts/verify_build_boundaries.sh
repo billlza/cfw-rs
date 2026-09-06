@@ -161,7 +161,6 @@ for fragment in \
   'verify_signing_transformation_receipt' \
   'validate_published_transaction_receipt' \
   '_validate_signing_notarization_binding' \
-  'validate_ci_lane_document' \
   'validate_hosted_ci_receipt_offline' \
   'live_verify_hosted_ci_receipt' \
   'ACCEPTANCE_INPUT_ROOT: Final = ACCEPTANCE_ROOT_RELATIVE' \
@@ -170,7 +169,7 @@ for fragment in \
   'SERVICE_JOURNAL_INPUT: Final = SERVICE_RELATIVE' \
   'SERVICE_ENVIRONMENT_INPUT: Final = ENVIRONMENT_RELATIVE' \
   'STAGE_SCHEMA_VERSIONS: Final = {' \
-  '"prepackage": 2' \
+  '"prepackage": 3' \
   '"ga-acceptance": 3' \
   '"publication": 3' \
   'verify_ga_acceptance_journal_export' \

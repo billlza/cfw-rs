@@ -102,7 +102,7 @@ LEVEL_REPORT_POLICY: dict[str, tuple[tuple[str, str, str], ...]] = {
         (
             "deterministic-ci",
             "deterministic_test",
-            f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/prepackage/local-ci-lanes.json",
+            f"target/candidates/{PRODUCT_VERSION}/ga/{GA_BUILD}/stage-inputs/local-ci-lanes.json",
         ),
     ),
     "Signed_Installed_Verified": (

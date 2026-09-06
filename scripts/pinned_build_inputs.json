@@ -3280,7 +3280,7 @@
     "scripts/verify_candidate_bundle.sh": "67323fbd170c6131a0a2aac37655d38c210c48a3ace3b62d98197b5528d4eb8c",
     "scripts/verify_artifact_manifest.py": "084eae16e377a84ff766d8379804709685b2ee9bf16fe38ffc2ae0f9124abe59",
     "scripts/release_capability_inventory.json": "6c0d0de66d2cd7658accbb0b8189b21ca8c4550c6aaf2efb6bef6dd52ae2d171",
-    "scripts/release_capability_inventory.py": "9cf5b2f3d53330a512711b363cba675ce45204507fe0be2af039e0e34b74d3ce",
+    "scripts/release_capability_inventory.py": "3092a7c3425e71d066f3ba75495197b53fef6aeff76a8861390cc47f32e25b5b",
     "scripts/harness/physical_collector_trust_policy.json": "e95c2710371b3ba6f6899cb24fcbdc42038869934b1c89ddca651bd910601355",
     "scripts/harness/raw_artifacts.py": "29de039437f262daa3e0e8b5766f94766e0f518f189e663dda8f85aea581e8ef",
     "scripts/harness/physical_machine_identity.py": "03d15a92abe4e1e89e6343f3418e2e8d0cda20d21bcda19660066f581fb8fbf7",

@@ -129,6 +129,28 @@ class ReleaseCapabilityInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(PublicationError, "report policy drifted"):
             require_fixed_evidence_mapping(value)
 
+    def test_optional_local_ci_uses_the_collector_output_without_prepackage(self) -> None:
+        value = {
+            "reports": [dict(contract) for contract in expected_report_contracts()],
+            "capabilities": [
+                {"id": capability, "levels": expected_capability_levels(capability)}
+                for capability in CAPABILITY_IDS
+            ],
+        }
+        reports = [
+            report for report in value["reports"]
+            if report["kind"] == "deterministic_test"
+        ]
+        self.assertEqual(len(reports), len(CAPABILITY_IDS))
+        self.assertEqual(
+            {report["path"] for report in reports},
+            {"target/candidates/0.4.0/ga/40044/stage-inputs/local-ci-lanes.json"},
+        )
+        require_fixed_evidence_mapping(value)
+        reports[0]["path"] = "target/candidates/0.4.0/ga/40044/prepackage/local-ci-lanes.json"
+        with self.assertRaisesRegex(PublicationError, "report policy drifted"):
+            require_fixed_evidence_mapping(value)
+
 
 if __name__ == "__main__":
     unittest.main()

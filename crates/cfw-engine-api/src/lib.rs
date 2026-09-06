@@ -11,14 +11,15 @@ use thiserror::Error;
 pub mod authority_v1;
 
 pub use cfw_singbox_config::{
-    AuthenticatedDnsServer, CredentialKind, CredentialRef, CredentialSecret, CredentialSlot,
-    CredentialTarget, EngineSettings, MAX_CREDENTIAL_SLOTS, ValidatedSingBoxProfile,
+    AuthenticatedDnsServer, CredentialAudience, CredentialBinding, CredentialKind, CredentialRef,
+    CredentialSecret, CredentialSlot, CredentialTarget, DirectIpv4HostRoutes, EngineSettings,
+    MAX_CREDENTIAL_SLOTS, ValidatedSingBoxProfile,
 };
 
-// Version 3 adds the closed credential-slot contract. A version 2 native
-// bridge would ignore those slots and could otherwise attempt to start libbox
-// with the deliberately empty credential placeholders.
-pub const ENGINE_PROTOCOL_VERSION: u16 = 3;
+// Version 8 adds the closed installed-40019 migration actions and proof
+// profiles. Older native bridges cannot express the exact legacy/current
+// service boundary, so the complete Host/native graph advances together.
+pub const ENGINE_PROTOCOL_VERSION: u16 = 8;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -180,8 +181,12 @@ impl EngineEvent {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineStartRequest {
     pub context: EngineCommandContext,
+    /// Exact validated profile identity authorized to resolve every credential
+    /// slot in this request. It is included in `config_digest`.
+    pub credential_audience: CredentialAudience,
     pub config_json: String,
-    /// SHA-256 of config_json, used to verify persisted configuration bytes.
+    /// SHA-256 of config_json, used to verify exact in-memory runtime bytes at
+    /// every native owner boundary.
     pub config_content_digest: String,
     /// Identity digest covering configuration content and mode-specific OS
     /// network options. Runtime readiness and idempotence bind to this value.
@@ -198,6 +203,7 @@ impl fmt::Debug for EngineStartRequest {
         formatter
             .debug_struct("EngineStartRequest")
             .field("context", &self.context)
+            .field("credential_audience", &self.credential_audience)
             .field("config_json", &"[REDACTED CONFIG TEMPLATE]")
             .field("config_content_digest", &self.config_content_digest)
             .field("config_digest", &self.config_digest)
@@ -252,7 +258,7 @@ impl fmt::Debug for CredentialProvision<'_> {
 /// omitted reference only when the immutable vault already contains it with
 /// the same kind; every missing reference must be supplied in this batch.
 pub struct CredentialProvisionRequest<'a> {
-    profile_id: String,
+    audience: CredentialAudience,
     required_references: Vec<CredentialRef>,
     entries: Vec<CredentialProvision<'a>>,
 }
@@ -261,14 +267,10 @@ impl<'a> CredentialProvisionRequest<'a> {
     pub fn new(
         profile_id: impl Into<String>,
         profile: &ValidatedSingBoxProfile,
-        entries: Vec<CredentialProvision<'a>>,
+        mut entries: Vec<CredentialProvision<'a>>,
     ) -> Result<Self, CredentialProvisionRequestError> {
-        let profile_id = profile_id.into();
-        let parsed = uuid::Uuid::parse_str(&profile_id)
-            .map_err(|_| CredentialProvisionRequestError::InvalidProfileId)?;
-        if parsed.hyphenated().to_string() != profile_id {
-            return Err(CredentialProvisionRequestError::InvalidProfileId);
-        }
+        let audience = CredentialAudience::new(profile_id, profile.digest())
+            .map_err(|_| CredentialProvisionRequestError::InvalidAudience)?;
         if entries.len() > MAX_CREDENTIAL_SLOTS {
             return Err(CredentialProvisionRequestError::TooManyEntries);
         }
@@ -278,6 +280,10 @@ impl<'a> CredentialProvisionRequest<'a> {
             .into_iter()
             .collect::<BTreeSet<_>>();
         for entry in &entries {
+            entry
+                .secret
+                .validate_for_kind(entry.reference.kind())
+                .map_err(|_| CredentialProvisionRequestError::InvalidSecret)?;
             if !ids.insert(entry.reference.id()) {
                 return Err(CredentialProvisionRequestError::DuplicateReference);
             }
@@ -285,15 +291,20 @@ impl<'a> CredentialProvisionRequest<'a> {
                 return Err(CredentialProvisionRequestError::UnexpectedReference);
             }
         }
+        entries.sort_by(|left, right| left.reference.cmp(right.reference));
         Ok(Self {
-            profile_id,
+            audience,
             required_references: required.into_iter().collect(),
             entries,
         })
     }
 
     pub fn profile_id(&self) -> &str {
-        &self.profile_id
+        self.audience.profile_id()
+    }
+
+    pub fn audience(&self) -> &CredentialAudience {
+        &self.audience
     }
 
     pub fn entries(&self) -> &[CredentialProvision<'a>] {
@@ -309,7 +320,7 @@ impl fmt::Debug for CredentialProvisionRequest<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CredentialProvisionRequest")
-            .field("profile_id", &self.profile_id)
+            .field("audience", &self.audience)
             .field("required_references", &self.required_references)
             .field("entries", &self.entries)
             .finish()
@@ -318,19 +329,22 @@ impl fmt::Debug for CredentialProvisionRequest<'_> {
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum CredentialProvisionRequestError {
-    #[error("credential provisioning profile id must be a canonical UUID")]
-    InvalidProfileId,
+    #[error("credential request audience must contain a canonical profile UUID and digest")]
+    InvalidAudience,
     #[error("credential provisioning request exceeds the entry limit")]
     TooManyEntries,
     #[error("credential provisioning request contains a duplicate reference")]
     DuplicateReference,
     #[error("credential provisioning request contains a reference absent from the profile")]
     UnexpectedReference,
+    #[error("credential provisioning request contains material invalid for its credential kind")]
+    InvalidSecret,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialVaultReceipt {
     pub profile_id: String,
+    pub profile_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,32 +355,70 @@ pub struct CredentialPresence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialPresenceRequest {
-    profile_id: String,
+    audience: CredentialAudience,
     references: Vec<CredentialRef>,
 }
 
-/// Maximum number of immutable entries admitted by the native credential
-/// vault. Garbage-collection snapshots are bounded to the same value so a
-/// caller cannot turn maintenance into an unbounded bridge allocation.
-pub const MAX_CREDENTIAL_VAULT_REFERENCES: usize = 512;
+/// Maximum number of exact audience/reference bindings admitted by the native
+/// credential vault. Reusing one UUID in two profiles consumes two entries.
+pub const MAX_CREDENTIAL_VAULT_BINDINGS: usize = 512;
+/// Mirrors the bounded profile repository catalog. Profiles without
+/// credentials remain in the catalog so its digest describes the complete
+/// canonical repository rather than only the currently interesting subset.
+pub const MAX_CREDENTIAL_CATALOG_PROFILES: usize = 4_096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialProfileCatalogEntry {
+    audience: CredentialAudience,
+    references: Vec<CredentialRef>,
+}
+
+impl CredentialProfileCatalogEntry {
+    pub fn new(
+        audience: CredentialAudience,
+        mut references: Vec<CredentialRef>,
+    ) -> Result<Self, CredentialGarbageCollectionRequestError> {
+        validate_and_sort_profile_references(&mut references)?;
+        Ok(Self {
+            audience,
+            references,
+        })
+    }
+
+    pub fn audience(&self) -> &CredentialAudience {
+        &self.audience
+    }
+
+    pub fn references(&self) -> &[CredentialRef] {
+        &self.references
+    }
+
+    pub fn bindings(&self) -> impl Iterator<Item = CredentialBinding> + '_ {
+        self.references
+            .iter()
+            .cloned()
+            .map(|reference| CredentialBinding::new(self.audience.clone(), reference))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialGarbageCollectionRequest {
     snapshot_digest: String,
-    live_references: Vec<CredentialRef>,
+    catalog: Vec<CredentialProfileCatalogEntry>,
 }
 
 impl CredentialGarbageCollectionRequest {
     pub fn new(
         snapshot_digest: impl Into<String>,
-        mut live_references: Vec<CredentialRef>,
+        mut catalog: Vec<CredentialProfileCatalogEntry>,
     ) -> Result<Self, CredentialGarbageCollectionRequestError> {
         let snapshot_digest = snapshot_digest.into();
         validate_snapshot_digest(&snapshot_digest)?;
-        validate_and_sort_references(&mut live_references)?;
+        validate_and_sort_catalog(&mut catalog)?;
         Ok(Self {
             snapshot_digest,
-            live_references,
+            catalog,
         })
     }
 
@@ -374,8 +426,8 @@ impl CredentialGarbageCollectionRequest {
         &self.snapshot_digest
     }
 
-    pub fn live_references(&self) -> &[CredentialRef] {
-        &self.live_references
+    pub fn catalog(&self) -> &[CredentialProfileCatalogEntry] {
+        &self.catalog
     }
 }
 
@@ -383,7 +435,7 @@ impl CredentialGarbageCollectionRequest {
 pub struct CredentialGarbageCollectionPreview {
     pub snapshot_digest: String,
     pub vault_revision: String,
-    pub orphan_references: Vec<CredentialRef>,
+    pub orphan_bindings: Vec<CredentialBinding>,
     pub orphan_count: u32,
 }
 
@@ -393,9 +445,9 @@ impl CredentialGarbageCollectionPreview {
         if !is_canonical_uuid(&self.vault_revision) {
             return Err(CredentialGarbageCollectionRequestError::InvalidVaultRevision);
         }
-        let mut canonical = self.orphan_references.clone();
-        validate_and_sort_references(&mut canonical)?;
-        if canonical != self.orphan_references
+        let mut canonical = self.orphan_bindings.clone();
+        validate_and_sort_bindings(&mut canonical)?;
+        if canonical != self.orphan_bindings
             || usize::try_from(self.orphan_count).ok() != Some(canonical.len())
         {
             return Err(CredentialGarbageCollectionRequestError::InvalidPreview);
@@ -407,9 +459,9 @@ impl CredentialGarbageCollectionPreview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialGarbageCollectionCommitRequest {
     snapshot_digest: String,
-    live_references: Vec<CredentialRef>,
+    catalog: Vec<CredentialProfileCatalogEntry>,
     expected_vault_revision: String,
-    expected_orphan_references: Vec<CredentialRef>,
+    expected_orphan_bindings: Vec<CredentialBinding>,
 }
 
 impl CredentialGarbageCollectionCommitRequest {
@@ -425,18 +477,18 @@ impl CredentialGarbageCollectionCommitRequest {
         if !is_canonical_uuid(&preview.vault_revision) {
             return Err(CredentialGarbageCollectionRequestError::InvalidVaultRevision);
         }
-        let mut expected_orphan_references = preview.orphan_references.clone();
-        validate_and_sort_references(&mut expected_orphan_references)?;
-        if expected_orphan_references != preview.orphan_references
-            || usize::try_from(preview.orphan_count).ok() != Some(expected_orphan_references.len())
+        let mut expected_orphan_bindings = preview.orphan_bindings.clone();
+        validate_and_sort_bindings(&mut expected_orphan_bindings)?;
+        if expected_orphan_bindings != preview.orphan_bindings
+            || usize::try_from(preview.orphan_count).ok() != Some(expected_orphan_bindings.len())
         {
             return Err(CredentialGarbageCollectionRequestError::InvalidPreview);
         }
         Ok(Self {
             snapshot_digest: repository.snapshot_digest,
-            live_references: repository.live_references,
+            catalog: repository.catalog,
             expected_vault_revision: preview.vault_revision.clone(),
-            expected_orphan_references,
+            expected_orphan_bindings,
         })
     }
 
@@ -444,16 +496,16 @@ impl CredentialGarbageCollectionCommitRequest {
         &self.snapshot_digest
     }
 
-    pub fn live_references(&self) -> &[CredentialRef] {
-        &self.live_references
+    pub fn catalog(&self) -> &[CredentialProfileCatalogEntry] {
+        &self.catalog
     }
 
     pub fn expected_vault_revision(&self) -> &str {
         &self.expected_vault_revision
     }
 
-    pub fn expected_orphan_references(&self) -> &[CredentialRef] {
-        &self.expected_orphan_references
+    pub fn expected_orphan_bindings(&self) -> &[CredentialBinding] {
+        &self.expected_orphan_bindings
     }
 }
 
@@ -477,10 +529,16 @@ impl CredentialGarbageCollectionReceipt {
 pub enum CredentialGarbageCollectionRequestError {
     #[error("credential repository snapshot digest must be lowercase SHA-256")]
     InvalidSnapshotDigest,
-    #[error("credential garbage-collection reference set exceeds the vault limit")]
-    TooManyReferences,
-    #[error("credential garbage-collection reference set contains a duplicate UUID")]
+    #[error("credential garbage-collection catalog exceeds the profile limit")]
+    TooManyProfiles,
+    #[error("credential garbage-collection catalog exceeds the vault binding limit")]
+    TooManyBindings,
+    #[error("credential garbage-collection catalog contains a duplicate profile id")]
+    DuplicateProfile,
+    #[error("one profile catalog entry contains a duplicate credential UUID")]
     DuplicateReference,
+    #[error("credential garbage-collection binding set contains a duplicate entry")]
+    DuplicateBinding,
     #[error("credential garbage-collection preview contains an invalid vault revision")]
     InvalidVaultRevision,
     #[error("credential garbage-collection preview is not canonical")]
@@ -505,11 +563,11 @@ fn is_canonical_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
 }
 
-fn validate_and_sort_references(
+fn validate_and_sort_profile_references(
     references: &mut [CredentialRef],
 ) -> Result<(), CredentialGarbageCollectionRequestError> {
-    if references.len() > MAX_CREDENTIAL_VAULT_REFERENCES {
-        return Err(CredentialGarbageCollectionRequestError::TooManyReferences);
+    if references.len() > MAX_CREDENTIAL_SLOTS {
+        return Err(CredentialGarbageCollectionRequestError::TooManyBindings);
     }
     references.sort();
     let mut ids = BTreeSet::new();
@@ -522,17 +580,57 @@ fn validate_and_sort_references(
     Ok(())
 }
 
+fn validate_and_sort_catalog(
+    catalog: &mut [CredentialProfileCatalogEntry],
+) -> Result<(), CredentialGarbageCollectionRequestError> {
+    if catalog.len() > MAX_CREDENTIAL_CATALOG_PROFILES {
+        return Err(CredentialGarbageCollectionRequestError::TooManyProfiles);
+    }
+    catalog.sort_by(|left, right| left.audience.cmp(&right.audience));
+    let mut profile_ids = BTreeSet::new();
+    let mut binding_count = 0_usize;
+    for entry in catalog {
+        if !profile_ids.insert(entry.audience.profile_id()) {
+            return Err(CredentialGarbageCollectionRequestError::DuplicateProfile);
+        }
+        validate_and_sort_profile_references(&mut entry.references)?;
+        binding_count = binding_count
+            .checked_add(entry.references.len())
+            .ok_or(CredentialGarbageCollectionRequestError::TooManyBindings)?;
+        if binding_count > MAX_CREDENTIAL_VAULT_BINDINGS {
+            return Err(CredentialGarbageCollectionRequestError::TooManyBindings);
+        }
+    }
+    Ok(())
+}
+
+fn validate_and_sort_bindings(
+    bindings: &mut [CredentialBinding],
+) -> Result<(), CredentialGarbageCollectionRequestError> {
+    if bindings.len() > MAX_CREDENTIAL_VAULT_BINDINGS {
+        return Err(CredentialGarbageCollectionRequestError::TooManyBindings);
+    }
+    bindings.sort();
+    if bindings.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(CredentialGarbageCollectionRequestError::DuplicateBinding);
+    }
+    Ok(())
+}
+
+fn validate_and_sort_references(
+    references: &mut [CredentialRef],
+) -> Result<(), CredentialGarbageCollectionRequestError> {
+    validate_and_sort_profile_references(references)
+}
+
 impl CredentialPresenceRequest {
     pub fn new(
         profile_id: impl Into<String>,
-        references: Vec<CredentialRef>,
+        profile: &ValidatedSingBoxProfile,
     ) -> Result<Self, CredentialProvisionRequestError> {
-        let profile_id = profile_id.into();
-        let parsed = uuid::Uuid::parse_str(&profile_id)
-            .map_err(|_| CredentialProvisionRequestError::InvalidProfileId)?;
-        if parsed.hyphenated().to_string() != profile_id {
-            return Err(CredentialProvisionRequestError::InvalidProfileId);
-        }
+        let audience = CredentialAudience::new(profile_id, profile.digest())
+            .map_err(|_| CredentialProvisionRequestError::InvalidAudience)?;
+        let references = profile.credential_references();
         if references.len() > MAX_CREDENTIAL_SLOTS {
             return Err(CredentialProvisionRequestError::TooManyEntries);
         }
@@ -543,13 +641,17 @@ impl CredentialPresenceRequest {
             }
         }
         Ok(Self {
-            profile_id,
+            audience,
             references,
         })
     }
 
     pub fn profile_id(&self) -> &str {
-        &self.profile_id
+        self.audience.profile_id()
+    }
+
+    pub fn audience(&self) -> &CredentialAudience {
+        &self.audience
     }
 
     pub fn references(&self) -> &[CredentialRef] {
@@ -559,18 +661,28 @@ impl CredentialPresenceRequest {
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum CredentialVaultError {
+    #[error("credential vault outcome is unknown after a boundary timeout")]
+    OutcomeUnknown,
     #[error("credential vault is unavailable")]
     Unavailable,
     #[error("credential vault access was denied")]
     AccessDenied,
+    #[error("credential vault capacity is exhausted")]
+    CapacityExceeded,
     #[error("credential UUID already exists with different immutable material")]
     ImmutableConflict,
     #[error("credential vault rejected invalid material")]
     InvalidMaterial,
     #[error("credential vault data is corrupt")]
     Corrupt,
+    #[error(
+        "credential vault identity or response was rejected; the operation result is unconfirmed"
+    )]
+    IdentityRejected,
     #[error("credential vault does not exist")]
     MissingVault,
+    #[error("credential vault schema requires explicit migration")]
+    MigrationRequired,
     #[error("credential vault changed after maintenance preview")]
     ConcurrentModification,
     #[error("credential vault failed internally")]
@@ -626,6 +738,7 @@ pub trait CredentialVaultProvisioner: Send + Sync + 'static {
 pub struct TunnelNetworkOptions {
     pub ipv6_enabled: bool,
     pub bypass_private_networks: bool,
+    pub direct_ipv4_hosts: DirectIpv4HostRoutes,
     pub mtu: u16,
 }
 
@@ -654,6 +767,9 @@ impl CutoverPreflightRequest {
             || system_proxy_request.context.generation == 0
         {
             return Err(CutoverPreflightRequestError::InvalidContext);
+        }
+        if system_proxy_request.credential_audience != tunnel_request.credential_audience {
+            return Err(CutoverPreflightRequestError::CredentialAudienceMismatch);
         }
         let system_references = system_proxy_request
             .credential_slots
@@ -709,6 +825,8 @@ pub enum CutoverPreflightRequestError {
     InvalidContext,
     #[error("cutover preflight projections do not reference the same credentials")]
     CredentialReferenceMismatch,
+    #[error("cutover preflight projections do not have the same credential audience")]
+    CredentialAudienceMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -718,6 +836,7 @@ pub struct CutoverPreflightAttestation {
     pub context: EngineCommandContext,
     pub system_proxy_config_digest: String,
     pub tunnel_config_digest: String,
+    pub credential_audience: CredentialAudience,
     pub credential_references: Vec<CredentialRef>,
     pub valid_for_millis: u32,
 }
@@ -751,6 +870,7 @@ pub enum CutoverPreflightOutcome {
         context: EngineCommandContext,
         system_proxy_config_digest: String,
         tunnel_config_digest: String,
+        credential_audience: CredentialAudience,
     },
     Ready {
         attestation: CutoverPreflightAttestation,
@@ -780,13 +900,17 @@ pub enum TunnelInstallOutcome {
 pub enum BackendErrorKind {
     Busy,
     ResourceExhausted,
+    JournalCapacityExhausted,
     PermissionDenied,
     ApprovalDenied,
     ConfigurationRejected,
     CredentialsUnavailable,
     CredentialConflict,
     CredentialVaultMissing,
+    CredentialVaultCorrupt,
+    CredentialMigrationRequired,
     CredentialGcConflict,
+    ProxyAgentApprovalRequired,
     GlobalAuthorityUnavailable,
     GlobalAuthorityRegistrationRequired,
     GlobalAuthorityApprovalRequired,
@@ -812,6 +936,8 @@ pub enum BackendErrorKind {
     IdentityRejected,
     Timeout,
     Unavailable,
+    MixedEndpointInUse,
+    ControllerEndpointInUse,
     #[serde(other)]
     Internal,
 }
@@ -827,10 +953,11 @@ pub enum RetryDirective {
     FreshContext,
     FreshGenerationAfterOff,
     ExplicitReconciliation,
+    MaintenanceRequired,
 }
 
 impl BackendErrorKind {
-    pub const AUTHORITY_KINDS: [Self; 24] = [
+    pub const AUTHORITY_KINDS: [Self; 25] = [
         Self::GlobalAuthorityUnavailable,
         Self::GlobalAuthorityRegistrationRequired,
         Self::GlobalAuthorityApprovalRequired,
@@ -841,6 +968,7 @@ impl BackendErrorKind {
         Self::GlobalAuthorityInterrupted,
         Self::Busy,
         Self::ResourceExhausted,
+        Self::JournalCapacityExhausted,
         Self::GlobalLeaseConflict,
         Self::ReplayRejected,
         Self::StaleOperation,
@@ -865,7 +993,10 @@ impl BackendErrorKind {
             | Self::GlobalAuthorityInterrupted
             | Self::Timeout
             | Self::Unavailable => RetryDirective::IdempotentReadOnly,
-            Self::GlobalAuthorityUnavailable
+            Self::JournalCapacityExhausted => RetryDirective::MaintenanceRequired,
+            Self::CredentialMigrationRequired => RetryDirective::Never,
+            Self::ProxyAgentApprovalRequired
+            | Self::GlobalAuthorityUnavailable
             | Self::GlobalAuthorityRegistrationRequired
             | Self::GlobalAuthorityApprovalRequired => RetryDirective::RegistrationStatusChange,
             Self::GlobalAuthorityProtocolMismatch => RetryDirective::CompatibleSoftwareUpdate,
@@ -886,11 +1017,14 @@ impl BackendErrorKind {
             | Self::CredentialsUnavailable
             | Self::CredentialConflict
             | Self::CredentialVaultMissing
+            | Self::CredentialVaultCorrupt
             | Self::CredentialGcConflict
             | Self::GlobalAuthorityIdentityRejected
             | Self::TicketInvalid
             | Self::InvalidMessage
             | Self::SecretBoundsExceeded
+            | Self::MixedEndpointInUse
+            | Self::ControllerEndpointInUse
             | Self::IdentityRejected
             | Self::Internal => RetryDirective::Never,
         }
@@ -905,13 +1039,23 @@ impl BackendErrorKind {
         match self {
             Self::Busy => "Global Authority mutation is busy.",
             Self::ResourceExhausted => "Global Authority read capacity is exhausted.",
+            Self::JournalCapacityExhausted => {
+                "The Global Authority journal reached its fixed capacity and requires maintenance."
+            }
             Self::PermissionDenied => "The native operation was denied.",
             Self::ApprovalDenied => "Required operating-system approval was denied.",
             Self::ConfigurationRejected => "The native configuration was rejected.",
             Self::CredentialsUnavailable => "Required credentials are unavailable.",
             Self::CredentialConflict => "Credential material conflicts with an immutable entry.",
             Self::CredentialVaultMissing => "The credential vault is unavailable.",
+            Self::CredentialVaultCorrupt => "The credential vault data is corrupt.",
+            Self::CredentialMigrationRequired => {
+                "The credential vault uses an unsupported schema and must be cleared and reprovisioned."
+            }
             Self::CredentialGcConflict => "Credential cleanup requires a fresh preview.",
+            Self::ProxyAgentApprovalRequired => {
+                "ProxyAgent approval is required in System Settings."
+            }
             Self::GlobalAuthorityUnavailable => "Global Authority is unavailable.",
             Self::GlobalAuthorityRegistrationRequired => {
                 "Global Authority registration is required."
@@ -941,6 +1085,8 @@ impl BackendErrorKind {
             Self::IdentityRejected => "The native peer identity was rejected.",
             Self::Timeout => "The native operation timed out.",
             Self::Unavailable => "The native operation is unavailable.",
+            Self::MixedEndpointInUse => "The mixed listener endpoint is already in use.",
+            Self::ControllerEndpointInUse => "The controller endpoint is already in use.",
             Self::Internal => "The native bridge failed at a stable internal boundary.",
         }
     }
@@ -1003,10 +1149,143 @@ pub trait EngineBackend: Send + Sync + 'static {
 /// This is the only product-level native wire command. Swift maps it onto the
 /// already-versioned ProxyAgent and Packet Tunnel command envelopes; it does
 /// not expose an independent product state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeServiceMaintenanceAction {
+    Status,
+    ProveOff,
+    #[serde(rename = "prove_installed_40019_off")]
+    ProveInstalled40019Off,
+    UnregisterProxyAgent,
+    #[serde(rename = "unregister_installed_40019_proxy_agent")]
+    UnregisterInstalled40019ProxyAgent,
+    UnregisterGlobalAuthority,
+    #[serde(rename = "unregister_installed_40019_global_authority")]
+    UnregisterInstalled40019GlobalAuthority,
+    #[serde(rename = "recover_installed_40019_global_authority")]
+    RecoverInstalled40019GlobalAuthority,
+    RegisterGlobalAuthority,
+    RegisterProxyAgent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeServiceOffProofProfile {
+    #[serde(rename = "installed_40019_engine_v5_authority_v1_0")]
+    Installed40019EngineV5AuthorityV1_0,
+    #[serde(rename = "installed_40019_recovery_current_authority_v1_1")]
+    Installed40019RecoveryCurrentAuthorityV1_1,
+    #[serde(rename = "current_engine_v6_authority_v1_1")]
+    CurrentEngineV6AuthorityV1_1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeServiceRegistrationStatus {
+    Enabled,
+    RequiresApproval,
+    NotRegistered,
+    NotFound,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeServiceEngineStatus {
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeServiceMaintenanceResult {
+    pub action: NativeServiceMaintenanceAction,
+    pub engine_status: Option<NativeServiceEngineStatus>,
+    pub global_authority: NativeServiceRegistrationStatus,
+    pub off_proof_profile: Option<NativeServiceOffProofProfile>,
+    pub proxy_agent: NativeServiceRegistrationStatus,
+}
+
+impl NativeServiceMaintenanceResult {
+    pub fn validate(&self) -> bool {
+        use NativeServiceMaintenanceAction as Action;
+        use NativeServiceRegistrationStatus as Status;
+
+        match self.action {
+            Action::Status => self.engine_status.is_none() && self.off_proof_profile.is_none(),
+            Action::ProveOff => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
+                    && self.proxy_agent == Status::Enabled
+                    && self.global_authority == Status::Enabled
+            }
+            Action::ProveInstalled40019Off => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0)
+                    && self.proxy_agent == Status::Enabled
+                    && self.global_authority == Status::Enabled
+            }
+            Action::UnregisterProxyAgent => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::Enabled
+            }
+            Action::UnregisterInstalled40019ProxyAgent => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0)
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::Enabled
+            }
+            Action::UnregisterGlobalAuthority => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::NotRegistered
+            }
+            Action::UnregisterInstalled40019GlobalAuthority => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0)
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::NotRegistered
+            }
+            Action::RecoverInstalled40019GlobalAuthority => self.engine_status
+                == Some(NativeServiceEngineStatus::Off)
+                && self.off_proof_profile
+                    == Some(
+                        NativeServiceOffProofProfile::Installed40019RecoveryCurrentAuthorityV1_1,
+                    )
+                && self.proxy_agent == Status::NotRegistered
+                && self.global_authority == Status::NotRegistered,
+            Action::RegisterGlobalAuthority => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
+                    && self.proxy_agent == Status::NotRegistered
+                    && self.global_authority == Status::Enabled
+            }
+            Action::RegisterProxyAgent => {
+                self.engine_status == Some(NativeServiceEngineStatus::Off)
+                    && self.off_proof_profile
+                        == Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1)
+                    && self.proxy_agent == Status::Enabled
+                    && self.global_authority == Status::Enabled
+            }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "opcode", content = "payload", rename_all = "snake_case")]
 pub enum NativeBridgeCommand {
     QueryStatus,
+    MaintainCurrentServices {
+        action: NativeServiceMaintenanceAction,
+    },
     StartSystemProxy {
         request: EngineStartRequest,
     },
@@ -1043,6 +1322,10 @@ impl fmt::Debug for NativeBridgeCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::QueryStatus => formatter.write_str("QueryStatus"),
+            Self::MaintainCurrentServices { action } => formatter
+                .debug_struct("MaintainCurrentServices")
+                .field("action", action)
+                .finish(),
             Self::StartSystemProxy { request } => formatter
                 .debug_struct("StartSystemProxy")
                 .field("request", request)
@@ -1116,18 +1399,19 @@ pub enum NativeBridgeResult {
     CredentialGarbageCollectionPreview(CredentialGarbageCollectionPreview),
     CredentialGarbageCollectionReceipt(CredentialGarbageCollectionReceipt),
     CutoverPreflight(CutoverPreflightOutcome),
+    ServiceMaintenance(NativeServiceMaintenanceResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialPresenceWireRequest {
-    pub profile_id: String,
+    pub audience: CredentialAudience,
     pub references: Vec<CredentialRef>,
 }
 
 impl From<CredentialPresenceRequest> for CredentialPresenceWireRequest {
     fn from(request: CredentialPresenceRequest) -> Self {
         Self {
-            profile_id: request.profile_id,
+            audience: request.audience,
             references: request.references,
         }
     }
@@ -1162,6 +1446,8 @@ mod tests {
                 config_epoch: 1,
                 generation: 2,
             },
+            credential_audience: CredentialAudience::new(PROFILE_ID, "03".repeat(32))
+                .expect("audience"),
             config_json: "never-print-this-config".into(),
             config_content_digest: "01".repeat(32),
             config_digest: "02".repeat(32),
@@ -1233,16 +1519,154 @@ mod tests {
     }
 
     #[test]
-    fn native_bridge_v3_contract_fixtures_decode_in_rust() {
+    fn credential_provisioning_rejects_invalid_tuic_uuid_before_vault_io() {
+        const TUIC_UUID_REFERENCE_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const TUIC_PASSWORD_REFERENCE_ID: &str = "22222222-2222-4222-8222-222222222222";
+        let uuid_reference = CredentialRef::new(TUIC_UUID_REFERENCE_ID, CredentialKind::TuicUuid)
+            .expect("canonical TUIC UUID reference");
+        let profile = ValidatedSingBoxProfile::parse(&format!(
+            r#"{{"outbounds":[{{"type":"tuic","tag":"tuic","server":"tuic.example.com","server_port":443,"uuid_credential_ref":{{"id":"{TUIC_UUID_REFERENCE_ID}","kind":"tuic_uuid"}},"password_credential_ref":{{"id":"{TUIC_PASSWORD_REFERENCE_ID}","kind":"tuic_password"}},"tls":{{"enabled":true,"server_name":"tuic.example.com"}}}}]}}"#
+        ))
+        .expect("typed TUIC profile");
+
+        let invalid = CredentialSecret::new("not-a-uuid").expect("bounded invalid UUID");
+        assert!(matches!(
+            CredentialProvisionRequest::new(
+                PROFILE_ID,
+                &profile,
+                vec![CredentialProvision::new(&uuid_reference, invalid)],
+            ),
+            Err(CredentialProvisionRequestError::InvalidSecret)
+        ));
+
+        let valid = CredentialSecret::new("33333333-3333-4333-8333-333333333333")
+            .expect("bounded canonical UUID");
+        CredentialProvisionRequest::new(
+            PROFILE_ID,
+            &profile,
+            vec![CredentialProvision::new(&uuid_reference, valid)],
+        )
+        .expect("canonical TUIC UUID request");
+    }
+
+    #[test]
+    fn credential_provisioning_request_canonicalizes_entry_order() {
+        const FIRST_CREDENTIAL_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const SECOND_CREDENTIAL_ID: &str = "22222222-2222-4222-8222-222222222222";
+        let first_reference =
+            CredentialRef::new(FIRST_CREDENTIAL_ID, CredentialKind::TrojanPassword)
+                .expect("canonical first reference");
+        let second_reference =
+            CredentialRef::new(SECOND_CREDENTIAL_ID, CredentialKind::TrojanPassword)
+                .expect("canonical second reference");
+        let profile = ValidatedSingBoxProfile::parse(&format!(
+            r#"{{"outbounds":[{{"type":"trojan","tag":"first","server":"first.example.com","server_port":443,"credential_ref":{{"id":"{FIRST_CREDENTIAL_ID}","kind":"trojan_password"}},"tls":{{"enabled":true,"server_name":"first.example.com"}}}},{{"type":"trojan","tag":"second","server":"second.example.com","server_port":443,"credential_ref":{{"id":"{SECOND_CREDENTIAL_ID}","kind":"trojan_password"}},"tls":{{"enabled":true,"server_name":"second.example.com"}}}}]}}"#
+        ))
+        .expect("typed multi-credential profile");
+        let request = CredentialProvisionRequest::new(
+            PROFILE_ID,
+            &profile,
+            vec![
+                CredentialProvision::new(
+                    &second_reference,
+                    CredentialSecret::new("second-secret").expect("bounded second secret"),
+                ),
+                CredentialProvision::new(
+                    &first_reference,
+                    CredentialSecret::new("first-secret").expect("bounded first secret"),
+                ),
+            ],
+        )
+        .expect("canonical provision request");
+
+        assert_eq!(
+            request
+                .entries()
+                .iter()
+                .map(|entry| entry.reference().id())
+                .collect::<Vec<_>>(),
+            vec![FIRST_CREDENTIAL_ID, SECOND_CREDENTIAL_ID]
+        );
+        assert_eq!(
+            request.required_references(),
+            &[first_reference.clone(), second_reference.clone()]
+        );
+        assert_eq!(
+            request.entries()[0].secret().expose_to_vault(),
+            "first-secret"
+        );
+        assert_eq!(
+            request.entries()[1].secret().expose_to_vault(),
+            "second-secret"
+        );
+    }
+
+    #[test]
+    fn native_bridge_v8_contract_fixtures_decode_in_rust() {
         let query: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v3/query-request.json"
+            "../../../contracts/native-bridge-v8/query-request.json"
         ))
         .expect("query fixture");
         assert_eq!(query.schema_version, ENGINE_PROTOCOL_VERSION);
         assert!(matches!(query.command, NativeBridgeCommand::QueryStatus));
 
+        let maintenance: NativeRequestEnvelope = serde_json::from_str(include_str!(
+            "../../../contracts/native-bridge-v8/maintenance-request.json"
+        ))
+        .expect("maintenance request fixture");
+        assert!(matches!(
+            maintenance.command,
+            NativeBridgeCommand::MaintainCurrentServices {
+                action: NativeServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent
+            }
+        ));
+
+        let maintenance_response: NativeResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../contracts/native-bridge-v8/maintenance-response.json"
+        ))
+        .expect("maintenance response fixture");
+        let Some(NativeBridgeResult::ServiceMaintenance(maintenance_result)) =
+            maintenance_response.result
+        else {
+            panic!("maintenance fixture response kind");
+        };
+        assert!(maintenance_result.validate());
+        assert_eq!(
+            maintenance_result.action,
+            NativeServiceMaintenanceAction::UnregisterInstalled40019ProxyAgent
+        );
+
+        let recovery: NativeRequestEnvelope = serde_json::from_str(include_str!(
+            "../../../contracts/native-bridge-v8/recovery-maintenance-request.json"
+        ))
+        .expect("recovery maintenance request fixture");
+        assert!(matches!(
+            recovery.command,
+            NativeBridgeCommand::MaintainCurrentServices {
+                action: NativeServiceMaintenanceAction::RecoverInstalled40019GlobalAuthority
+            }
+        ));
+        let recovery_response: NativeResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../contracts/native-bridge-v8/recovery-maintenance-response.json"
+        ))
+        .expect("recovery maintenance response fixture");
+        let Some(NativeBridgeResult::ServiceMaintenance(recovery_result)) =
+            recovery_response.result
+        else {
+            panic!("recovery maintenance fixture response kind");
+        };
+        assert!(recovery_result.validate());
+        assert_eq!(
+            recovery_result.action,
+            NativeServiceMaintenanceAction::RecoverInstalled40019GlobalAuthority
+        );
+        assert_eq!(
+            recovery_result.off_proof_profile,
+            Some(NativeServiceOffProofProfile::Installed40019RecoveryCurrentAuthorityV1_1)
+        );
+
         let preview: NativeRequestEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v3/gc-preview-request.json"
+            "../../../contracts/native-bridge-v8/gc-preview-request.json"
         ))
         .expect("GC preview fixture");
         let NativeBridgeCommand::PreviewCredentialGarbageCollection { request } = preview.command
@@ -1250,10 +1674,22 @@ mod tests {
             panic!("fixture command kind");
         };
         assert_eq!(request.snapshot_digest(), "ab".repeat(32));
-        assert_eq!(request.live_references().len(), 1);
+        assert_eq!(request.catalog().len(), 1);
+        assert_eq!(
+            request.catalog()[0]
+                .references()
+                .iter()
+                .map(|reference| reference.kind())
+                .collect::<Vec<_>>(),
+            [
+                CredentialKind::AnyTlsPassword,
+                CredentialKind::TuicUuid,
+                CredentialKind::TuicPassword,
+            ]
+        );
 
         let response: NativeResponseEnvelope = serde_json::from_str(include_str!(
-            "../../../contracts/native-bridge-v3/gc-preview-response.json"
+            "../../../contracts/native-bridge-v8/gc-preview-response.json"
         ))
         .expect("GC preview response fixture");
         let Some(NativeBridgeResult::CredentialGarbageCollectionPreview(preview)) = response.result
@@ -1265,6 +1701,134 @@ mod tests {
             preview.vault_revision,
             "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
         );
+
+        let conflict: NativeResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../contracts/native-bridge-v8/endpoint-conflict-response.json"
+        ))
+        .expect("endpoint conflict response fixture");
+        assert!(conflict.result.is_none());
+        assert_eq!(
+            conflict.failure.expect("endpoint failure").code,
+            BackendErrorKind::ControllerEndpointInUse
+        );
+    }
+
+    #[test]
+    fn native_service_maintenance_result_contract_is_closed() {
+        use NativeServiceMaintenanceAction as Action;
+        use NativeServiceRegistrationStatus as Status;
+
+        let valid = [
+            NativeServiceMaintenanceResult {
+                action: Action::Status,
+                engine_status: None,
+                global_authority: Status::Unknown,
+                off_proof_profile: None,
+                proxy_agent: Status::NotFound,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::ProveOff,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
+                proxy_agent: Status::Enabled,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::ProveInstalled40019Off,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                off_proof_profile: Some(
+                    NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0,
+                ),
+                proxy_agent: Status::Enabled,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::UnregisterProxyAgent,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::UnregisterInstalled40019ProxyAgent,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                off_proof_profile: Some(
+                    NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0,
+                ),
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::UnregisterGlobalAuthority,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::NotRegistered,
+                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::UnregisterInstalled40019GlobalAuthority,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::NotRegistered,
+                off_proof_profile: Some(
+                    NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0,
+                ),
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::RecoverInstalled40019GlobalAuthority,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::NotRegistered,
+                off_proof_profile: Some(
+                    NativeServiceOffProofProfile::Installed40019RecoveryCurrentAuthorityV1_1,
+                ),
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::RegisterGlobalAuthority,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
+                proxy_agent: Status::NotRegistered,
+            },
+            NativeServiceMaintenanceResult {
+                action: Action::RegisterProxyAgent,
+                engine_status: Some(NativeServiceEngineStatus::Off),
+                global_authority: Status::Enabled,
+                off_proof_profile: Some(NativeServiceOffProofProfile::CurrentEngineV6AuthorityV1_1),
+                proxy_agent: Status::Enabled,
+            },
+        ];
+        assert!(valid.iter().all(NativeServiceMaintenanceResult::validate));
+
+        for (action, off_proof_profile) in [
+            (
+                Action::UnregisterInstalled40019GlobalAuthority,
+                NativeServiceOffProofProfile::Installed40019RecoveryCurrentAuthorityV1_1,
+            ),
+            (
+                Action::RecoverInstalled40019GlobalAuthority,
+                NativeServiceOffProofProfile::Installed40019EngineV5AuthorityV1_0,
+            ),
+        ] {
+            assert!(
+                !NativeServiceMaintenanceResult {
+                    action,
+                    engine_status: Some(NativeServiceEngineStatus::Off),
+                    global_authority: Status::NotRegistered,
+                    off_proof_profile: Some(off_proof_profile),
+                    proxy_agent: Status::NotRegistered,
+                }
+                .validate()
+            );
+        }
+
+        for mut result in valid {
+            result.engine_status = match result.engine_status {
+                Some(_) => None,
+                None => Some(NativeServiceEngineStatus::Off),
+            };
+            assert!(!result.validate());
+        }
     }
 
     #[derive(Deserialize)]
@@ -1323,8 +1887,37 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_conflicts_are_not_part_of_the_generic_retry_policy() {
+        for kind in [
+            BackendErrorKind::MixedEndpointInUse,
+            BackendErrorKind::ControllerEndpointInUse,
+        ] {
+            assert_eq!(kind.retry_directive(), RetryDirective::Never);
+            assert!(!kind.allows_automatic_retry(true));
+        }
+    }
+
+    #[test]
+    fn proxy_agent_approval_has_a_typed_registration_retry_contract() {
+        let kind = BackendErrorKind::ProxyAgentApprovalRequired;
+        assert_eq!(
+            serde_json::to_value(kind).expect("wire code"),
+            serde_json::Value::String("proxy_agent_approval_required".into())
+        );
+        assert_eq!(
+            kind.retry_directive(),
+            RetryDirective::RegistrationStatusChange
+        );
+        assert!(!kind.allows_automatic_retry(true));
+        assert_eq!(
+            kind.stable_message(),
+            "ProxyAgent approval is required in System Settings."
+        );
+    }
+
+    #[test]
     fn native_public_query_json_contract_is_unchanged() {
-        let bytes = include_bytes!("../../../contracts/native-bridge-v3/query-request.json");
+        let bytes = include_bytes!("../../../contracts/native-bridge-v8/query-request.json");
         let request: NativeRequestEnvelope =
             serde_json::from_slice(bytes).expect("public query request fixture");
         assert_eq!(
@@ -1337,19 +1930,22 @@ mod tests {
     fn garbage_collection_commit_is_bound_to_the_exact_preview_snapshot() {
         let live = CredentialRef::new(CREDENTIAL_ID, CredentialKind::TrojanPassword)
             .expect("canonical reference");
-        let repository =
-            CredentialGarbageCollectionRequest::new("ab".repeat(32), vec![live.clone()])
-                .expect("repository snapshot");
+        let audience = CredentialAudience::new(PROFILE_ID, "ef".repeat(32)).expect("audience");
+        let catalog = CredentialProfileCatalogEntry::new(audience.clone(), vec![live.clone()])
+            .expect("catalog entry");
+        let repository = CredentialGarbageCollectionRequest::new("ab".repeat(32), vec![catalog])
+            .expect("repository snapshot");
         let preview = CredentialGarbageCollectionPreview {
             snapshot_digest: "ab".repeat(32),
             vault_revision: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into(),
-            orphan_references: Vec::new(),
+            orphan_bindings: Vec::new(),
             orphan_count: 0,
         };
         let commit = CredentialGarbageCollectionCommitRequest::new(repository, &preview)
             .expect("bound commit");
         assert_eq!(commit.snapshot_digest(), preview.snapshot_digest);
-        assert_eq!(commit.live_references(), &[live]);
+        assert_eq!(commit.catalog()[0].audience(), &audience);
+        assert_eq!(commit.catalog()[0].references(), &[live]);
 
         let changed = CredentialGarbageCollectionRequest::new("cd".repeat(32), Vec::new())
             .expect("changed repository snapshot");

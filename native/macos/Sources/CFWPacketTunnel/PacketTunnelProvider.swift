@@ -18,6 +18,7 @@ public enum PacketTunnelProviderError: Error, Equatable, Sendable {
   case packetPumpSetup(String)
   case packetPump(PacketPumpError)
   case engineStart(String)
+  case controllerEndpointConflict(port: UInt16)
   case engineStop(String)
   case networkSettings(String)
 }
@@ -49,6 +50,8 @@ extension PacketTunnelProviderError: LocalizedError {
       return "Packet pump failed: \(error)"
     case .engineStart:
       return "Packet tunnel engine start failed."
+    case .controllerEndpointConflict(let port):
+      return "The Packet Tunnel controller endpoint could not bind to port \(port)."
     case .engineStop:
       return "Packet tunnel engine stop failed."
     case .networkSettings:
@@ -133,6 +136,12 @@ extension PacketTunnelProviderError {
           "Packet tunnel engine startup failed.",
           true
         )
+      case .controllerEndpointConflict(let port):
+        (
+          "controller-endpoint-in-use",
+          "The Packet Tunnel controller endpoint could not bind to port \(port).",
+          false
+        )
       case .engineStop:
         (
           "tunnel-engine-stop-failed",
@@ -190,14 +199,29 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       self?.cancelTunnelWithError(error)
     }
     sessionLifecycle = lifecycle
-    // Production ships without an authenticated Provider owner XPC channel yet, so
-    // the default owner client fails closed. Real redemption is wired by the Host
-    // and Authority integration tasks; the ticket-only start path here never falls
-    // back to a direct configuration/credential payload.
+    // The Provider redeems the opaque ticket only through the authenticated,
+    // bounded Global Authority channel. No configuration/credential fallback
+    // exists in the provider process.
+    let revocation = TunnelRevocationChannel()
+    let authorityRemote = NSXPCGlobalAuthorityRemote(
+      role: .provider,
+      onEvent: { event in
+        switch event {
+        case .revoke, .stop: revocation.revoke()
+        case .snapshot: break
+        }
+      },
+      onDisconnect: { revocation.revoke() })
     startCoordinator = TunnelTicketStartCoordinator(
-      authority: FailClosedEngineOwnerAuthorityClient(),
-      sessionLifecycle: lifecycle
-    )
+      authority: BoundedAuthorityXPCClient(remote: authorityRemote),
+      sessionLifecycle: lifecycle,
+      revocation: revocation,
+      reportRevocationFailure: { [weak self] error in
+        self?.cancelTunnelWithError(error.providerError)
+      },
+      completeRevocation: { [weak self] in
+        self?.cancelTunnelWithError(nil)
+      })
   }
 
   /// Extracts the single bounded, opaque 32-byte start ticket from the tunnel start
@@ -222,12 +246,6 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     options: [String: NSObject]?,
     completionHandler: @escaping @Sendable (Error?) -> Void
   ) {
-    do {
-      try GlobalAuthorityReleaseGate.requireStartAuthorization()
-    } catch {
-      completionHandler(PacketTunnelProviderError.globalAuthorityUnavailable)
-      return
-    }
     guard let startCoordinator else {
       completionHandler(PacketTunnelProviderError.providerUnavailable)
       return
@@ -253,10 +271,28 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     completionHandler: @escaping @Sendable () -> Void
   ) {
     guard let startCoordinator else {
-      sessionLifecycle?.stop(completionHandler: completionHandler)
+      guard let sessionLifecycle else {
+        cancelTunnelWithError(PacketTunnelProviderError.providerUnavailable)
+        completionHandler()
+        return
+      }
+      sessionLifecycle.stop { [weak self] result in
+        if case .failure(let error) = result {
+          // NetworkExtension has a void stop completion. Preserve its required
+          // callback while reporting the typed failure through the platform's
+          // explicit provider-error channel.
+          self?.cancelTunnelWithError(error.providerError)
+        }
+        completionHandler()
+      }
       return
     }
-    startCoordinator.stop(completion: completionHandler)
+    startCoordinator.stop { [weak self] result in
+      if case .failure(let error) = result {
+        self?.cancelTunnelWithError(error.providerError)
+      }
+      completionHandler()
+    }
   }
 
   public override func handleAppMessage(
@@ -375,6 +411,11 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       let tunnelOptions = try decodeTunnelOptions(values, slot: slot),
       let installationIDValue = values["installationID"] as? String,
       let installationID = UUID(uuidString: installationIDValue),
+      installationIDValue == installationID.uuidString.lowercased(),
+      let credentialProfileIDValue = values["credentialProfileID"] as? String,
+      let credentialProfileID = UUID(uuidString: credentialProfileIDValue),
+      credentialProfileIDValue == credentialProfileID.uuidString.lowercased(),
+      let credentialProfileDigestValue = values["credentialProfileDigest"] as? String,
       let epochValue = values["epoch"] as? String,
       let epoch = UInt64(epochValue),
       let generationValue = values["generation"] as? String,
@@ -395,6 +436,10 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       return try ConfigurationDescriptor(
         slot: slot,
         tunnelOptions: tunnelOptions,
+        credentialAudience: CredentialAudience(
+          profileID: credentialProfileID,
+          profileDigest: try SHA256Digest(hex: credentialProfileDigestValue)
+        ),
         installationID: installationID,
         epoch: epoch,
         generation: generation,
@@ -415,6 +460,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     guard slot == .tunnel,
       let ipv6Value = values["ipv6Enabled"] as? String,
       let bypassPrivateNetworksValue = values["bypassPrivateNetworks"] as? String,
+      let directIPv4Hosts = values["directIPv4Hosts"] as? [String],
       let mtuValue = values["mtu"] as? String,
       let mtu = UInt16(mtuValue)
     else {
@@ -441,6 +487,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
     return try TunnelNetworkOptions(
       ipv6Enabled: ipv6Enabled,
       bypassPrivateNetworks: bypassPrivateNetworks,
+      directIPv4Hosts: directIPv4Hosts,
       mtu: mtu
     )
   }
@@ -458,8 +505,9 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
       subnetMasks: [TunnelAddressPlan.ipv4SubnetMask]
     )
     ipv4.includedRoutes = [.default()]
+    var excludedIPv4Routes: [NEIPv4Route] = []
     if tunnelOptions.bypassPrivateNetworks {
-      ipv4.excludedRoutes = [
+      excludedIPv4Routes = [
         NEIPv4Route(destinationAddress: "127.0.0.0", subnetMask: "255.0.0.0"),
         NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0"),
         NEIPv4Route(destinationAddress: "172.16.0.0", subnetMask: "255.240.0.0"),
@@ -468,6 +516,14 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Send
         NEIPv4Route(destinationAddress: "224.0.0.0", subnetMask: "240.0.0.0"),
         NEIPv4Route(destinationAddress: "255.255.255.255", subnetMask: "255.255.255.255"),
       ]
+    }
+    excludedIPv4Routes.append(
+      contentsOf: tunnelOptions.directIPv4Hosts.map {
+        NEIPv4Route(destinationAddress: $0, subnetMask: "255.255.255.255")
+      }
+    )
+    if !excludedIPv4Routes.isEmpty {
+      ipv4.excludedRoutes = excludedIPv4Routes
     }
     settings.ipv4Settings = ipv4
 

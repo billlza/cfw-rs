@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "node ../../scripts/build_ui.mjs",
-    "test": "node --test ui/tests/*.test.mjs"
+    "test": "node ../../scripts/build_ui.mjs && node --test ui/tests/*.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1"

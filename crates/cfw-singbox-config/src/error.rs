@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{CredentialKind, CredentialSlotError};
+use crate::{CredentialKind, CredentialSlotError, InvalidCredentialAudience};
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ConfigError {
@@ -30,18 +30,26 @@ pub enum ConfigError {
     ConflictingCredentialReference { id: String },
     #[error("credential slot contract is invalid: {0}")]
     InvalidCredentialSlot(#[from] CredentialSlotError),
+    #[error("credential audience is invalid: {0}")]
+    InvalidCredentialAudience(#[from] InvalidCredentialAudience),
     #[error("unsupported credential-free policy shape at {path}: {reason}")]
     UnsupportedPolicyShape { path: String, reason: String },
     #[error("sing-box profile structure exceeds {maximum} JSON nodes")]
     TooComplex { maximum: usize },
     #[error("mixed proxy port must be between 1 and 65535")]
     InvalidMixedPort,
+    #[error("controller port {0} must be at least 1024 and must not reuse the mixed proxy port")]
+    InvalidControllerPort(u16),
     #[error("tunnel MTU must be between 1280 and 9000, got {0}")]
     InvalidTunnelMtu(u16),
     #[error("tunnel bootstrap DNS servers are invalid: {0}")]
     InvalidBootstrapDnsServers(String),
     #[error("tunnel authenticated DNS servers are invalid: {0}")]
     InvalidAuthenticatedDnsServers(String),
+    #[error("release DNS evidence projection requires Tunnel mode with IPv6 enabled")]
+    InvalidReleaseDnsEvidenceMode,
+    #[error("release Packet evidence projection requires Tunnel mode")]
+    InvalidReleasePacketEvidenceMode,
 }
 
 impl From<serde_json::Error> for ConfigError {

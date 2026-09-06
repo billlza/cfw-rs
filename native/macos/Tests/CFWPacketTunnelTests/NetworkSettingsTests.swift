@@ -50,21 +50,40 @@ private func prefixContains(_ prefix: [UInt8], length: UInt8, address: [UInt8]) 
 
 private func descriptor(
   ipv6Enabled: Bool,
-  bypassPrivateNetworks: Bool = true
+  bypassPrivateNetworks: Bool = true,
+  directIPv4Hosts: [String] = []
 ) throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(
       ipv6Enabled: ipv6Enabled,
       bypassPrivateNetworks: bypassPrivateNetworks,
+      directIPv4Hosts: directIPv4Hosts,
       mtu: 1_500
     ),
+    credentialAudience: CredentialAudience(
+      profileID: UUID(),
+      profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
     installationID: UUID(),
     epoch: 1,
     generation: 1,
     byteCount: 2,
     sha256: SHA256Digest(hex: String(repeating: "00", count: 32))
   )
+}
+
+@Test func sourceOwnedDirectIPv4HostBecomesAnExact32ExcludedRoute() throws {
+  let settings = PacketTunnelProvider.networkSettings(
+    descriptor: try descriptor(
+      ipv6Enabled: true,
+      bypassPrivateNetworks: false,
+      directIPv4Hosts: [TunnelNetworkOptions.releasePacketTransportIPv4]
+    )
+  )
+  let routes = settings.ipv4Settings?.excludedRoutes?.map {
+    "\($0.destinationAddress)/\($0.destinationSubnetMask)"
+  }
+  #expect(routes == ["35.194.216.98/255.255.255.255"])
 }
 
 @Test func privateNetworkBypassIsBoundToNetworkSettings() throws {

@@ -43,6 +43,16 @@ private final class FakeAuthorityClient: AuthorityClient, @unchecked Sendable {
     throw AuthorityDomainError(code: .invalidMessage)
   }
 
+  func completeStop(_ request: CompleteStopRequest) async throws {
+    throw AuthorityDomainError(code: .invalidMessage)
+  }
+
+  func reconcileOff(
+    _ request: ReconcileOffRequest
+  ) async throws -> ReconcileOffReceipt {
+    throw AuthorityDomainError(code: .invalidMessage)
+  }
+
   func snapshot() async throws -> AuthoritySnapshot {
     lock.withLock { snapshotCountValue += 1 }
     return try snapshotResult.get()
@@ -107,6 +117,7 @@ private func tunnelDescriptor(
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+    credentialAudience: try appleCredentialAudience(),
     installationID: installationID,
     epoch: 1, generation: 1, byteCount: 2,
     sha256: SHA256Digest(hex: sha),
@@ -260,21 +271,6 @@ struct AuthorityBackedTunnelStartPreparerTests {
         HostTunnelStartPreparation(
           descriptor: descriptor, configuration: Data("{}".utf8), credentialPayload: nil))
     }
-    #expect(client.prepareCount == 0)
-  }
-
-  @Test func productionFactoryStaysFailClosedWithoutAProvenSignedChannel() async throws {
-    let descriptor = try tunnelDescriptor(installationID: installationA)
-    let client = FakeAuthorityClient(snapshot: try offSnapshot(installationID: installationA))
-    let preparer = HostTunnelStartPreparerFactory.production(authority: client)
-
-    await #expect(throws: AppleNetworkError.globalAuthorityUnavailable) {
-      try await preparer.prepareTunnelStart(
-        HostTunnelStartPreparation(
-          descriptor: descriptor, configuration: Data("{}".utf8), credentialPayload: nil))
-    }
-    // The fail-closed default never contacts the Authority.
-    #expect(client.snapshotCount == 0)
     #expect(client.prepareCount == 0)
   }
 

@@ -13,10 +13,25 @@ extension GlobalAuthorityReducer {
   ) throws -> GlobalAuthorityReducer {
     guard let state = recovery.committedState, let head = recovery.head else {
       switch recovery.posture {
+      case .recovering(.restoreAnchorAccess):
+        return try GlobalAuthorityReducer(state: .recovering, revision: 1)
       case .recovering:
         return try .unEnrolledOff()
       case .quarantined:
         return try GlobalAuthorityReducer(state: .quarantined, revision: 1)
+      }
+    }
+    if state.transition == .enrollOff {
+      switch recovery.posture {
+      case .recovering:
+        return try .enrolledOff(
+          installationID: state.installationID,
+          revision: state.revision)
+      case .quarantined:
+        return try GlobalAuthorityReducer(
+          state: .quarantined,
+          revision: state.revision,
+          enrolledInstallationID: state.installationID)
       }
     }
     let cursor = try ReplayCursor(
@@ -61,6 +76,7 @@ public struct AuthorityGracePeriod: Equatable, Sendable {
 /// The action the liveness supervisor took on a single evaluation tick.
 public enum AuthorityLivenessAction: Equatable, Sendable {
   case none
+  case expiredPreparation
   case forcedStop(AuthorityLivenessTrigger)
   case quarantinedForUnprovenCleanup
 }
@@ -84,7 +100,8 @@ public final class AuthorityLivenessSupervisor: @unchecked Sendable {
 
   private let lock = NSLock()
   private var lastHeartbeatMonotonic: UInt64?
-  private var stopOrderedMonotonic: UInt64?
+  private var stopDeadlineMonotonic: UInt64?
+  private var stopOrderedRevision: UInt64?
 
   public init(
     core: GlobalAuthorityServiceCore,
@@ -119,6 +136,14 @@ public final class AuthorityLivenessSupervisor: @unchecked Sendable {
     return .forcedStop(.consoleUserChange)
   }
 
+  /// Called from the public SystemConfiguration ConsoleUser notification. A
+  /// GUI session transition revokes the old lease even when logout/login reuses
+  /// the same numeric UID; screen locking does not change this key.
+  @discardableResult
+  public func observeConsoleSessionChange() throws -> AuthorityLivenessAction {
+    try forceStop(.consoleUserChange)
+  }
+
   /// Forces a stop for connection loss, owner identity drift, or logout.
   @discardableResult
   public func forceStop(
@@ -136,7 +161,10 @@ public final class AuthorityLivenessSupervisor: @unchecked Sendable {
   public func evaluate() throws -> AuthorityLivenessAction {
     let now = clock.nowMilliseconds()
     switch core.authorityState {
-    case .preparing, .starting, .active:
+    case .preparing:
+      return try core.expireUnboundPreparationIfNeeded()
+        ? .expiredPreparation : .none
+    case .starting, .active:
       let stale = lock.withLock { () -> Bool in
         guard let last = lastHeartbeatMonotonic else { return false }
         return now >= last && now - last >= heartbeatTimeoutMilliseconds
@@ -145,36 +173,54 @@ public final class AuthorityLivenessSupervisor: @unchecked Sendable {
       guard let outcome = try core.forceStop(trigger: .missedHeartbeat) else {
         return .none
       }
-      lock.withLock { stopOrderedMonotonic = now }
       deliver(outcome)
       return .forcedStop(.missedHeartbeat)
     case .stopping:
       let elapsed = lock.withLock { () -> Bool in
-        guard let ordered = stopOrderedMonotonic else { return false }
-        return now >= ordered
-          && now - ordered >= AuthorityV1Limits.stopAttestationTimeoutMilliseconds
+        guard let deadline = stopDeadlineMonotonic else { return false }
+        return now >= deadline
       }
       guard elapsed, !core.ownerHasAttestedStopped else { return .none }
       _ = try core.resolveOff(Self.unprovenCleanupProof)
-      lock.withLock { stopOrderedMonotonic = nil }
+      lock.withLock {
+        stopDeadlineMonotonic = nil
+        stopOrderedRevision = nil
+      }
       return .quarantinedForUnprovenCleanup
     case .off, .recovering, .quarantined:
       return .none
     }
   }
 
-  /// Marks that a stop was ordered at the current time so a subsequent `evaluate`
-  /// can enforce the five-second owner stop/reattest timeout.
-  public func noteStopOrdered() {
-    lock.withLock { stopOrderedMonotonic = clock.nowMilliseconds() }
+  /// Records the exact durable directive deadline. Replays of the same stop
+  /// revision cannot move it forward.
+  public func noteStopOrdered(
+    revision: UInt64,
+    deadlineMonotonic: UInt64
+  ) {
+    recordStopOrder(
+      revision: revision,
+      deadlineMonotonic: deadlineMonotonic)
   }
 
   private func deliver(_ outcome: AuthorityForcedStopOutcome) {
-    lock.withLock { stopOrderedMonotonic = clock.nowMilliseconds() }
-    guard let directive = outcome.directive, let peerID = outcome.ownerPeerID else {
-      return
-    }
+    guard let directive = outcome.directive else { return }
+    recordStopOrder(
+      revision: outcome.revision,
+      deadlineMonotonic: directive.deadlineMonotonic)
+    guard let peerID = outcome.ownerPeerID else { return }
     events.send(.revoke(directive), to: peerID)
+  }
+
+  private func recordStopOrder(
+    revision: UInt64,
+    deadlineMonotonic: UInt64
+  ) {
+    lock.withLock {
+      guard stopOrderedRevision != revision else { return }
+      stopOrderedRevision = revision
+      stopDeadlineMonotonic = deadlineMonotonic
+    }
   }
 
   /// An unproven cleanup proof: unknown owner/OS observation. `applyOffProof` retains

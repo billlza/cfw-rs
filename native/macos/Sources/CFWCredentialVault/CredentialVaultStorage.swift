@@ -4,7 +4,7 @@ import Foundation
 import Security
 
 public enum CredentialVaultConstants {
-  public static let schemaVersion: UInt16 = 1
+  public static let schemaVersion: UInt16 = 2
   public static let maximumEntries = 512
   public static let maximumDocumentBytes = 1_048_576
 }
@@ -12,12 +12,14 @@ public enum CredentialVaultConstants {
 public enum CredentialVaultError: Error, Equatable, Sendable {
   case invalidAccessGroup
   case invalidProfileIdentifier
+  case invalidProfileDigest
   case immutableConflict(UUID)
   case missingCredential(UUID)
   case kindMismatch(UUID)
   case duplicateReference(UUID)
   case unexpectedCredential(UUID)
   case corrupt
+  case unsupportedSchemaVersion(UInt16)
   case missingVault
   case capacityExceeded
   case compareAndSwapConflict
@@ -37,9 +39,11 @@ public struct CredentialPresence: Codable, Equatable, Sendable {
 
 public struct CredentialVaultReceipt: Codable, Equatable, Sendable {
   public let profileID: UUID
+  public let profileDigest: SHA256Digest
 
-  public init(profileID: UUID) {
-    self.profileID = profileID
+  public init(audience: CredentialAudience) {
+    profileID = audience.profileID
+    profileDigest = audience.profileDigest
   }
 }
 
@@ -155,6 +159,7 @@ struct CredentialVaultDocument: Codable, Equatable {
 }
 
 struct CredentialVaultEntry: Codable, Equatable {
+  let audience: CredentialAudience
   let reference: CredentialReference
   var secret: Data
 

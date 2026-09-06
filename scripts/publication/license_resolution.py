@@ -8,7 +8,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .common import PublicationError, read_regular, require_sha256, sha256_file
+from .common import PublicationError, bounded_text, read_regular, require_sha256, sha256_file
 from .graph_model import ComponentSeed
 
 
@@ -18,8 +18,44 @@ LICENSE_NAME_RE = re.compile(
 )
 SPDX_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]*")
 SPDX_LEXER_RE = re.compile(r"\(|\)|AND\b|OR\b|WITH\b|[A-Za-z0-9][A-Za-z0-9.+-]*")
+SPDX_LICENSE_REF_RE = re.compile(r"LicenseRef-[A-Za-z0-9][A-Za-z0-9.-]*\Z")
 OPERATORS = {"AND", "OR", "WITH"}
 MAX_SPDX_BRANCHES = 128
+
+# Deliberately bounded, fail-closed subset of the SPDX License List 3.28.0
+# (2026-02-20) used by the fixed 0.4.0 closure and supported by _supports.
+# Source: https://github.com/spdx/license-list-data/tree/v3.28.0/json
+# licenses.json SHA-256:
+# f728c534d8bd1044fc515a2ddb2292be99559021d830bfa3281be0bcd36302ee
+# Adding another SPDX identifier requires adding deterministic text recognition
+# and regression evidence in the same change; syntactically plausible names are
+# never treated as official identifiers.
+REVIEWED_SPDX_LICENSE_IDS = frozenset(
+    {
+        "0BSD",
+        "Apache-2.0",
+        "BSD-2-Clause",
+        "BSD-3-Clause",
+        "BSL-1.0",
+        "CC0-1.0",
+        "GPL-2.0-only",
+        "GPL-3.0-or-later",
+        "ISC",
+        "MIT",
+        "MIT-0",
+        "MPL-2.0",
+        "NCSA",
+        "Unicode-3.0",
+        "Unlicense",
+        "Zlib",
+    }
+)
+
+# Same fixed source, exceptions.json SHA-256:
+# bd145bb558f44432fcd6f0d7e956ed0124dff72af7641a7cfcb1b557dc390a5b
+# Only the exception used by the release graph is admitted. WITH is parsed
+# separately so an exception can never be used as a license operand.
+REVIEWED_SPDX_EXCEPTION_IDS = frozenset({"LLVM-exception"})
 _CARGO_LICENSE_DONORS = {
     "BSD-3-Clause": (
         "alloc-no-stdlib-2.0.4/LICENSE",
@@ -36,7 +72,17 @@ _CARGO_LICENSE_DONORS = {
 }
 
 
+def _is_license_operand(token: str) -> bool:
+    if SPDX_LICENSE_REF_RE.fullmatch(token):
+        return True
+    if token.endswith("+"):
+        token = token[:-1]
+    return token in REVIEWED_SPDX_LICENSE_IDS
+
+
 def canonical_spdx_expression(value: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 1024:
+        raise PublicationError("declared license expression is not bounded text")
     expression = value.strip()
     expression = re.sub(r"\s*/\s*", " OR ", expression)
     expression = re.sub(r"\s+", " ", expression)
@@ -53,7 +99,7 @@ def canonical_spdx_expression(value: str) -> str:
         raise PublicationError("declared license expression contains unsupported syntax")
     position = 0
 
-    def primary() -> None:
+    def primary() -> str | None:
         nonlocal position
         if position >= len(tokens):
             raise PublicationError("declared license expression is incomplete")
@@ -63,18 +109,32 @@ def canonical_spdx_expression(value: str) -> str:
             if position >= len(tokens) or tokens[position] != ")":
                 raise PublicationError("declared license expression has unbalanced parentheses")
             position += 1
-            return
-        if tokens[position] in {"AND", "OR", "WITH", ")"}:
-            raise PublicationError("declared license expression has an invalid operand")
+            return None
+        if tokens[position] in {"AND", "OR", "WITH", ")"} or not _is_license_operand(
+            tokens[position]
+        ):
+            raise PublicationError(
+                "declared license expression has an unknown or invalid license operand"
+            )
+        operand = tokens[position]
         position += 1
+        return operand
 
     def with_exception() -> None:
         nonlocal position
-        primary()
+        operand = primary()
         if position < len(tokens) and tokens[position] == "WITH":
+            if operand is None or operand not in REVIEWED_SPDX_LICENSE_IDS:
+                raise PublicationError(
+                    "declared license exception must follow a reviewed SPDX license identifier"
+                )
             position += 1
-            if position >= len(tokens) or tokens[position] in {"AND", "OR", "WITH", "(", ")"}:
-                raise PublicationError("declared license exception is invalid")
+            if (
+                position >= len(tokens)
+                or tokens[position] in {"AND", "OR", "WITH", "(", ")"}
+                or tokens[position] not in REVIEWED_SPDX_EXCEPTION_IDS
+            ):
+                raise PublicationError("declared license exception is unknown or invalid")
             position += 1
 
     def conjunction() -> None:
@@ -98,6 +158,8 @@ def canonical_spdx_expression(value: str) -> str:
 
 
 def _license_ids(expression: str) -> set[str]:
+    # Exception identifiers are intentionally included: a manual conclusion
+    # must bind the exception text as well as every license text.
     return {token for token in SPDX_TOKEN_RE.findall(expression) if token.upper() not in OPERATORS}
 
 
@@ -201,7 +263,10 @@ def _candidate_files(root: Path | None, maximum_depth: int = 3) -> list[Path]:
         directories[:] = sorted(
             name
             for name in directories
-            if name not in excluded and not (current_path / name).is_symlink() and depth < maximum_depth
+            if name not in excluded
+            and not name.startswith(".")
+            and not (current_path / name).is_symlink()
+            and depth < maximum_depth
         )
         for name in sorted(files):
             path = current_path / name
@@ -221,7 +286,14 @@ def _candidate_files(root: Path | None, maximum_depth: int = 3) -> list[Path]:
             if metadata.st_size <= 0 or metadata.st_size > MAX_LICENSE_BYTES:
                 continue
             candidates.append(path.resolve(strict=True))
-    return sorted(set(candidates), key=lambda value: str(value))
+    resolved_root = root.resolve(strict=True)
+    return sorted(
+        set(candidates),
+        key=lambda value: (
+            len(value.relative_to(resolved_root).parts),
+            value.relative_to(resolved_root).as_posix(),
+        ),
+    )
 
 
 def _supports(identifier: str, text: str, filename: str) -> bool:
@@ -356,7 +428,15 @@ def resolve_license(seed: ComponentSeed) -> dict[str, Any]:
             supporting = [
                 path for path, text in decoded.items() if _supports(identifier, text, path.name)
             ]
-            supporting.sort(key=lambda path: (_required_notice(path), str(path)))
+            if supporting:
+                license_root = seed.license_root.resolve(strict=True)
+                supporting.sort(
+                    key=lambda path: (
+                        _required_notice(path),
+                        len(path.relative_to(license_root).parts),
+                        path.relative_to(license_root).as_posix(),
+                    )
+                )
             donor = donors.get(identifier)
             if donor is not None and donor not in supporting:
                 supporting.append(donor)
@@ -469,12 +549,26 @@ def validate_automatic_resolution(seed: ComponentSeed, value: object) -> dict[st
     if set(value) != required or value.get("method") != "human-legal-review":
         raise PublicationError(f"manual license review is not explicit: {seed.identifier}")
     expression = canonical_spdx_expression(value.get("expression", ""))
+    if seed.declared_license is not None:
+        declared = canonical_spdx_expression(seed.declared_license)
+        if expression != declared:
+            raise PublicationError(
+                f"manual license review changed declared license expression: {seed.identifier}"
+            )
     expression_ids = _license_ids(expression)
-    if not isinstance(value.get("reason"), str) or not value["reason"].strip():
-        raise PublicationError(f"manual license review has no rationale: {seed.identifier}")
+    bounded_text(
+        value.get("reason"), f"manual license review rationale for {seed.identifier}", 4096
+    )
     files = value.get("files")
     if not isinstance(files, list) or not files:
         raise PublicationError(f"manual license review has no source text: {seed.identifier}")
+    expected_file_bindings = {
+        (item["path"], item["sha256"])
+        for item in expected["files"]
+        if isinstance(item, dict) and set(item) == {"path", "sha256", "supports"}
+    }
+    supported_ids: set[str] = set()
+    seen_paths: set[str] = set()
     for item in files:
         if not isinstance(item, dict) or set(item) != {"path", "sha256", "supports"}:
             raise PublicationError(f"manual license evidence is malformed: {seed.identifier}")
@@ -485,14 +579,26 @@ def validate_automatic_resolution(seed: ComponentSeed, value: object) -> dict[st
             or not path_value.startswith("/")
             or not isinstance(supports, list)
             or not supports
+            or not all(isinstance(identifier, str) for identifier in supports)
             or supports != sorted(set(supports))
             or not set(supports).issubset(expression_ids)
+            or path_value in seen_paths
         ):
             raise PublicationError(f"manual license evidence binding is invalid: {seed.identifier}")
+        seen_paths.add(path_value)
+        supported_ids.update(supports)
         path = Path(path_value)
         digest = require_sha256(item["sha256"], f"manual license digest for {seed.identifier}")
+        if (path_value, digest) not in expected_file_bindings:
+            raise PublicationError(
+                f"manual license evidence is outside the recomputed candidate set: {seed.identifier}"
+            )
         if path.is_symlink() or sha256_file(path) != digest:
             raise PublicationError(f"manual license evidence changed: {seed.identifier}")
+    if supported_ids != expression_ids:
+        raise PublicationError(
+            f"manual license evidence does not cover the exact expression: {seed.identifier}"
+        )
     metadata = value.get("metadata")
     expected_metadata = _metadata_identity(seed)
     if expected_metadata is not None and metadata != expected_metadata:

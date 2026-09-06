@@ -11,6 +11,22 @@ private enum FixtureError: Error { case forced }
 
 // MARK: - Fakes
 
+private final class BlockingCallGate: @unchecked Sendable {
+  private let entered = DispatchSemaphore(value: 0)
+  private let released = DispatchSemaphore(value: 0)
+
+  func block() {
+    entered.signal()
+    _ = released.wait(timeout: .now() + 2)
+  }
+
+  func waitUntilEntered() -> Bool {
+    entered.wait(timeout: .now() + 2) == .success
+  }
+
+  func release() { released.signal() }
+}
+
 private final class FakeMonotonicClock: ProviderMonotonicClock, @unchecked Sendable {
   let value: UInt64
   init(value: UInt64) { self.value = value }
@@ -20,24 +36,49 @@ private final class FakeMonotonicClock: ProviderMonotonicClock, @unchecked Senda
 private final class FakeOwnerAuthorityClient: EngineOwnerAuthorityClient, @unchecked Sendable {
   private let lock = NSLock()
   private let makeRedeemed: @Sendable () throws -> RedeemedTunnelStart
+  private let onRedeem: @Sendable () -> Void
+  private let redeemGate: BlockingCallGate?
   private var redeemCountValue = 0
   private var readyValue: [ReadyAttestation] = []
   private var stoppedValue: [StoppedAttestation] = []
   private var readyThrows: Bool
+  private let readyGate: BlockingCallGate?
+  private var stoppedFailuresRemaining: Int
+  private var stoppedAttemptCountValue = 0
+  private let stoppedGate: BlockingCallGate?
+  private let stoppedSignal = DispatchSemaphore(value: 0)
 
   init(
     readyThrows: Bool = false,
+    readyGate: BlockingCallGate? = nil,
+    stoppedFailures: Int = 0,
+    stoppedGate: BlockingCallGate? = nil,
+    redeemGate: BlockingCallGate? = nil,
+    onRedeem: @escaping @Sendable () -> Void = {},
     makeRedeemed: @escaping @Sendable () throws -> RedeemedTunnelStart
   ) {
     self.readyThrows = readyThrows
+    self.readyGate = readyGate
+    self.stoppedFailuresRemaining = stoppedFailures
+    self.stoppedGate = stoppedGate
+    self.redeemGate = redeemGate
+    self.onRedeem = onRedeem
     self.makeRedeemed = makeRedeemed
   }
 
   var redeemCount: Int { lock.withLock { redeemCountValue } }
   var readyAttestations: [ReadyAttestation] { lock.withLock { readyValue } }
   var stoppedAttestations: [StoppedAttestation] { lock.withLock { stoppedValue } }
+  var stoppedAttemptCount: Int { lock.withLock { stoppedAttemptCountValue } }
+  func waitForStoppedAttempt() -> Bool {
+    stoppedSignal.wait(timeout: .now() + 2) == .success
+  }
 
-  func bind(_ capability: OwnerCapability) async throws -> LeaseView {
+  func bind(
+    _ capability: OwnerCapability,
+    context: ProxyOwnerContext
+  ) async throws -> LeaseView {
+    _ = context
     capability.erase()
     throw AuthorityDomainError(code: .globalAuthorityUnavailable)
   }
@@ -52,16 +93,32 @@ private final class FakeOwnerAuthorityClient: EngineOwnerAuthorityClient, @unche
       // A single ticket must never be redeemed twice.
       throw AuthorityDomainError(code: .ticketAlreadyRedeemed)
     }
+    onRedeem()
+    redeemGate?.block()
     return try makeRedeemed()
   }
 
   func attestReady(_ attestation: ReadyAttestation) async throws {
     lock.withLock { readyValue.append(attestation) }
+    readyGate?.block()
     if readyThrows { throw AuthorityDomainError(code: .globalAuthorityUnavailable) }
   }
 
   func attestStopped(_ attestation: StoppedAttestation) async throws {
-    lock.withLock { stoppedValue.append(attestation) }
+    let shouldFail = lock.withLock { () -> Bool in
+      stoppedAttemptCountValue += 1
+      if stoppedFailuresRemaining > 0 {
+        stoppedFailuresRemaining -= 1
+        return true
+      }
+      stoppedValue.append(attestation)
+      return false
+    }
+    stoppedSignal.signal()
+    stoppedGate?.block()
+    if shouldFail {
+      throw AuthorityDomainError(code: .globalAuthorityUnavailable)
+    }
   }
 }
 
@@ -74,7 +131,11 @@ private final class FailingRedeemAuthorityClient: EngineOwnerAuthorityClient, @u
 
   var redeemCount: Int { lock.withLock { redeemCountValue } }
 
-  func bind(_ capability: OwnerCapability) async throws -> LeaseView {
+  func bind(
+    _ capability: OwnerCapability,
+    context: ProxyOwnerContext
+  ) async throws -> LeaseView {
+    _ = context
     capability.erase()
     throw error
   }
@@ -94,9 +155,14 @@ private final class FakeEngine: PacketEngine, @unchecked Sendable {
   private var ownedDescriptor: Int32 = -1
   private var startCountValue = 0
   private var stopCountValue = 0
+  private var stopFailuresRemaining = 0
 
   var startCount: Int { lock.withLock { startCountValue } }
   var stopCount: Int { lock.withLock { stopCountValue } }
+
+  func failNextStop() {
+    lock.withLock { stopFailuresRemaining += 1 }
+  }
 
   deinit { closeOwned() }
 
@@ -108,8 +174,12 @@ private final class FakeEngine: PacketEngine, @unchecked Sendable {
   }
 
   func stop() throws {
-    lock.withLock {
+    try lock.withLock {
       stopCountValue += 1
+      if stopFailuresRemaining > 0 {
+        stopFailuresRemaining -= 1
+        throw FixtureError.forced
+      }
       closeOwnedLocked()
     }
   }
@@ -168,10 +238,46 @@ private final class CompletionRecorder: @unchecked Sendable {
   var values: [PacketTunnelProviderError?] { lock.withLock { recorded } }
 }
 
-private final class VoidRecorder: @unchecked Sendable {
+private final class StopResultRecorder: @unchecked Sendable {
+  private let lock = NSLock()
   private let semaphore = DispatchSemaphore(value: 0)
-  func record() { semaphore.signal() }
+  private var results: [Result<Void, PacketTunnelStopError>] = []
+
+  func record(_ result: Result<Void, PacketTunnelStopError>) {
+    lock.withLock { results.append(result) }
+    semaphore.signal()
+  }
+
   func wait() -> Bool { semaphore.wait(timeout: .now() + 2) == .success }
+  var values: [Result<Void, PacketTunnelStopError>] { lock.withLock { results } }
+}
+
+private final class StopFailureRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private let semaphore = DispatchSemaphore(value: 0)
+  private var errorsValue: [PacketTunnelStopError] = []
+
+  func record(_ error: PacketTunnelStopError) {
+    lock.withLock { errorsValue.append(error) }
+    semaphore.signal()
+  }
+
+  func wait() -> Bool { semaphore.wait(timeout: .now() + 2) == .success }
+  var errors: [PacketTunnelStopError] { lock.withLock { errorsValue } }
+}
+
+private final class CompletionSignal: @unchecked Sendable {
+  private let lock = NSLock()
+  private let semaphore = DispatchSemaphore(value: 0)
+  private var countValue = 0
+
+  func record() {
+    lock.withLock { countValue += 1 }
+    semaphore.signal()
+  }
+
+  func wait() -> Bool { semaphore.wait(timeout: .now() + 2) == .success }
+  var count: Int { lock.withLock { countValue } }
 }
 
 // MARK: - Builders
@@ -180,7 +286,10 @@ private func tunnelDescriptor() throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
-    installationID: UUID(),
+    credentialAudience: CredentialAudience(
+      profileID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+      profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
+    installationID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
     epoch: 1,
     generation: 1,
     byteCount: 2,
@@ -218,7 +327,7 @@ private func makeRedeemedFixture(
   let operation = try operationContext(matching: descriptor)
   let leaseID = AuthorityIdentifier(UUID())
   let lease = try LeaseView(
-    leaseID: leaseID, operation: operation, state: .active, expiryMonotonic: 10_000)
+    leaseID: leaseID, operation: operation, state: .starting, expiryMonotonic: 10_000)
   let configuration = try SensitiveBytes(
     copying: Data("{}".utf8), maximumCount: AuthorityV1Limits.maximumConfigurationBytes)
   let slots: [AuthoritySecretSlot] =
@@ -240,18 +349,26 @@ private struct CoordinatorFixture {
   let descriptor: ConfigurationDescriptor
   let engine: FakeEngine
   let pump: FakePump
+  let revocation: TunnelRevocationChannel
+  let revocationFailures: StopFailureRecorder
+  let revocationCompletions: CompletionSignal
 }
 
 private func makeCoordinator(
   authority: any EngineOwnerAuthorityClient,
-  clockValue: UInt64 = 12_345
+  clockValue: UInt64 = 12_345,
+  revocation: TunnelRevocationChannel = TunnelRevocationChannel(),
+  failPreparation: Bool = false
 ) throws -> CoordinatorFixture {
   let descriptor = try tunnelDescriptor()
   let engine = FakeEngine()
   let pump = FakePump()
+  let revocationFailures = StopFailureRecorder()
+  let revocationCompletions = CompletionSignal()
   let dependencies = PacketTunnelSessionDependencies(
     prepareConfiguration: { receivedDescriptor, configuration, _ in
-      PreparedTunnelConfiguration(
+      if failPreparation { throw FixtureError.forced }
+      return PreparedTunnelConfiguration(
         descriptor: receivedDescriptor,
         configuration: configuration,
         lease: UnleasedEngineOwnership())
@@ -267,19 +384,119 @@ private func makeCoordinator(
   let coordinator = TunnelTicketStartCoordinator(
     authority: authority,
     sessionLifecycle: lifecycle,
-    clock: FakeMonotonicClock(value: clockValue))
+    revocation: revocation,
+    clock: FakeMonotonicClock(value: clockValue),
+    reportRevocationFailure: { revocationFailures.record($0) },
+    completeRevocation: { revocationCompletions.record() })
   return CoordinatorFixture(
-    coordinator: coordinator, descriptor: descriptor, engine: engine, pump: pump)
+    coordinator: coordinator, descriptor: descriptor, engine: engine, pump: pump,
+    revocation: revocation, revocationFailures: revocationFailures,
+    revocationCompletions: revocationCompletions)
 }
 
 private func makeTicket() throws -> StartTicket {
   try StartTicket(copying: Data(repeating: 0x7a, count: AuthorityV1Limits.ticketBytes))
 }
 
+private func stopSucceeded(
+  _ result: Result<Void, PacketTunnelStopError>?
+) -> Bool {
+  guard let result else { return false }
+  if case .success = result { return true }
+  return false
+}
+
+private func isLocalEngineStopFailure(
+  _ result: Result<Void, PacketTunnelStopError>?
+) -> Bool {
+  guard let result else { return false }
+  if case .failure(.localRuntime(.engineStop(_))) = result { return true }
+  return false
+}
+
+private func isAttestationStopFailure(
+  _ result: Result<Void, PacketTunnelStopError>?
+) -> Bool {
+  guard let result else { return false }
+  if case .failure(.authorityAttestation(.globalAuthorityUnavailable)) = result {
+    return true
+  }
+  return false
+}
+
 // MARK: - Tests
 
 @Suite(.serialized)
 struct TicketOnlyStartupTests {
+  @Test func revocationLatchedAfterRedeemPreventsTunnelDataPlaneStart() throws {
+    let descriptor = try tunnelDescriptor()
+    let redeemedFixture = try makeRedeemedFixture(
+      descriptor: descriptor, withSecretSlot: false)
+    let revocation = TunnelRevocationChannel()
+    let authority = FakeOwnerAuthorityClient(
+      onRedeem: { revocation.revoke() },
+      makeRedeemed: { redeemedFixture.redeemed })
+    let fixture = try makeCoordinator(
+      authority: authority, revocation: revocation)
+    let start = CompletionRecorder()
+
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+
+    #expect(start.wait())
+    #expect(start.values.count == 1)
+    #expect(start.values[0] == .globalAuthorityUnavailable)
+    #expect(authority.redeemCount == 1)
+    #expect(fixture.engine.startCount == 0)
+    #expect(fixture.pump.startCount == 0)
+    #expect(authority.readyAttestations.isEmpty)
+    #expect(authority.stoppedAttestations.count == 1)
+    #expect(fixture.revocationCompletions.wait())
+    #expect(fixture.revocationCompletions.count == 1)
+  }
+
+  @Test func explicitStopDuringRedeemCancelsStartAndWaitsForStoppedAttestation() throws {
+    let redeemGate = BlockingCallGate()
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient(
+      redeemGate: redeemGate
+    ) { fixtureData.redeemed }
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+    #expect(redeemGate.waitUntilEntered())
+
+    let stop = StopResultRecorder()
+    fixture.coordinator.stop { stop.record($0) }
+    #expect(stop.values.isEmpty)
+    redeemGate.release()
+
+    #expect(stop.wait())
+    #expect(stopSucceeded(stop.values.first))
+    #expect(start.wait())
+    #expect(start.values == [.startupCancelled])
+    #expect(fixture.engine.startCount == 0)
+    #expect(fixture.pump.startCount == 0)
+    #expect(authority.stoppedAttemptCount == 1)
+    #expect(authority.stoppedAttestations.first?.operation == fixtureData.redeemed.operation)
+    #expect(fixture.revocationCompletions.count == 0)
+
+    // The cancelled attempt converged back to idle. A new ticket reaches Authority
+    // (and is rejected as already redeemed by this one-shot fake) rather than being
+    // masked by a leaked coordinator lifecycle conflict.
+    let next = CompletionRecorder()
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { next.record($0) }
+    #expect(next.wait())
+    #expect(next.values == [.invalidStartTicket])
+    #expect(authority.redeemCount == 2)
+  }
+
   @Test func ticketOnlyStartupInjectsRedeemedMaterialAndAttestsReady() throws {
     let fixtureData = try makeRedeemedFixture(
       descriptor: try tunnelDescriptor(), withSecretSlot: false)
@@ -387,6 +604,9 @@ struct TicketOnlyStartupTests {
     let otherDescriptor = try ConfigurationDescriptor(
       slot: .tunnel,
       tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+      credentialAudience: CredentialAudience(
+        profileID: UUID(),
+        profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
       installationID: UUID(),
       epoch: 1,
       generation: 1,
@@ -409,6 +629,64 @@ struct TicketOnlyStartupTests {
     #expect(mismatched.configuration.isErased)
     let mismatchSecretsErased = mismatched.secrets.slots.allSatisfy { $0.isErased }
     #expect(mismatchSecretsErased)
+    #expect(authority.stoppedAttemptCount == 1)
+    #expect(authority.stoppedAttestations.count == 1)
+    #expect(authority.stoppedAttestations.first?.operation == mismatched.redeemed.operation)
+    #expect(authority.stoppedAttestations.first?.leaseID == mismatched.redeemed.lease.leaseID)
+  }
+
+  @Test func postRedeemSessionStartFailureStopsAndAttestsBeforeCompleting() throws {
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient { fixtureData.redeemed }
+    let fixture = try makeCoordinator(authority: authority, failPreparation: true)
+    let start = CompletionRecorder()
+
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+
+    #expect(start.wait())
+    guard case .configuration = start.values[0] else {
+      Issue.record("Expected the injected configuration preparation failure")
+      return
+    }
+    #expect(fixture.engine.startCount == 0)
+    #expect(fixture.pump.startCount == 0)
+    #expect(authority.stoppedAttemptCount == 1)
+    #expect(authority.stoppedAttestations.count == 1)
+    #expect(authority.stoppedAttestations.first?.operation == fixtureData.redeemed.operation)
+  }
+
+  @Test func explicitStopDuringReadyAttestationCannotReportAStoppedTunnelReady() throws {
+    let readyGate = BlockingCallGate()
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient(
+      readyGate: readyGate
+    ) { fixtureData.redeemed }
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+    #expect(readyGate.waitUntilEntered())
+
+    let stop = StopResultRecorder()
+    fixture.coordinator.stop { stop.record($0) }
+    #expect(stop.wait())
+    #expect(stopSucceeded(stop.values.first))
+    #expect(start.values.isEmpty)
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.pump.stopCount == 1)
+    #expect(authority.stoppedAttemptCount == 1)
+
+    readyGate.release()
+    #expect(start.wait())
+    #expect(start.values == [.startupCancelled])
+    #expect(authority.readyAttestations.count == 1)
+    #expect(authority.stoppedAttestations.count == 1)
   }
 
   @Test func readyAttestationFailureTearsDownAndFailsClosed() throws {
@@ -427,9 +705,46 @@ struct TicketOnlyStartupTests {
     // libbox was started for injection, then torn down when readiness could not be attested.
     #expect(fixture.engine.startCount == 1)
     #expect(fixture.engine.stopCount == 1)
+    #expect(authority.stoppedAttemptCount == 1)
+    #expect(authority.stoppedAttestations.count == 1)
     #expect(fixtureData.configuration.isErased)
     let readySecretsErased = fixtureData.secrets.slots.allSatisfy { $0.isErased }
     #expect(readySecretsErased)
+  }
+
+  @Test func readyFailureWithStoppedAttestationFailureRetainsExactContext() throws {
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient(
+      readyThrows: true,
+      stoppedFailures: 1
+    ) { fixtureData.redeemed }
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+    #expect(start.wait())
+    #expect(start.values == [.globalAuthorityUnavailable])
+    #expect(authority.stoppedAttemptCount == 1)
+    #expect(authority.stoppedAttestations.isEmpty)
+
+    let blocked = CompletionRecorder()
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { blocked.record($0) }
+    #expect(blocked.wait())
+    #expect(blocked.values == [.lifecycleConflict])
+    #expect(authority.redeemCount == 1)
+
+    let retry = StopResultRecorder()
+    fixture.coordinator.stop { retry.record($0) }
+    #expect(retry.wait())
+    #expect(stopSucceeded(retry.values.first))
+    #expect(fixture.engine.stopCount == 1)
+    #expect(authority.stoppedAttemptCount == 2)
+    #expect(authority.stoppedAttestations.first?.operation == fixtureData.redeemed.operation)
   }
 
   @Test func stopAttestsStoppedExactlyWithBoundContext() throws {
@@ -445,9 +760,10 @@ struct TicketOnlyStartupTests {
     #expect(start.wait())
     #expect(start.values == [nil])
 
-    let stop = VoidRecorder()
-    fixture.coordinator.stop { stop.record() }
+    let stop = StopResultRecorder()
+    fixture.coordinator.stop { stop.record($0) }
     #expect(stop.wait())
+    #expect(stopSucceeded(stop.values.first))
 
     let stopped = authority.stoppedAttestations
     #expect(stopped.count == 1)
@@ -457,6 +773,173 @@ struct TicketOnlyStartupTests {
     #expect(stopped.first?.monotonicTimestamp == 999)
     #expect(stopped.first?.operation == fixtureData.redeemed.operation)
     #expect(fixture.engine.stopCount == 1)
+  }
+
+  @Test func engineStopFailureDoesNotAttestOrReleaseTheActiveContext() throws {
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient { fixtureData.redeemed }
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+    #expect(start.wait())
+    #expect(start.values == [nil])
+
+    fixture.engine.failNextStop()
+    let failedStop = StopResultRecorder()
+    fixture.coordinator.stop { failedStop.record($0) }
+    #expect(failedStop.wait())
+    #expect(isLocalEngineStopFailure(failedStop.values.first))
+    #expect(authority.stoppedAttemptCount == 0)
+    #expect(authority.stoppedAttestations.isEmpty)
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.pump.stopCount == 1)
+
+    let blockedStart = CompletionRecorder()
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { blockedStart.record($0) }
+    #expect(blockedStart.wait())
+    #expect(blockedStart.values == [.lifecycleConflict])
+    #expect(authority.redeemCount == 1)
+
+    let retry = StopResultRecorder()
+    fixture.coordinator.stop { retry.record($0) }
+    #expect(retry.wait())
+    #expect(stopSucceeded(retry.values.first))
+    #expect(authority.stoppedAttestations.count == 1)
+    #expect(fixture.engine.stopCount == 2)
+    #expect(fixture.pump.stopCount == 1)
+  }
+
+  @Test func stoppedAttestationFailureKeepsContextForAnExactRetry() throws {
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient(stoppedFailures: 1) { fixtureData.redeemed }
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+    #expect(start.wait())
+
+    let failedStop = StopResultRecorder()
+    fixture.coordinator.stop { failedStop.record($0) }
+    #expect(failedStop.wait())
+    #expect(isAttestationStopFailure(failedStop.values.first))
+    #expect(authority.stoppedAttemptCount == 1)
+    #expect(authority.stoppedAttestations.isEmpty)
+    #expect(fixture.engine.stopCount == 1)
+
+    let blockedStart = CompletionRecorder()
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { blockedStart.record($0) }
+    #expect(blockedStart.wait())
+    #expect(blockedStart.values == [.lifecycleConflict])
+    #expect(authority.redeemCount == 1)
+
+    let retry = StopResultRecorder()
+    fixture.coordinator.stop { retry.record($0) }
+    #expect(retry.wait())
+    #expect(stopSucceeded(retry.values.first))
+    #expect(authority.stoppedAttemptCount == 2)
+    #expect(authority.stoppedAttestations.count == 1)
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.pump.stopCount == 1)
+  }
+
+  @Test func revocationStopFailureIsReportedAndRetainedForRetry() throws {
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient { fixtureData.redeemed }
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+    #expect(start.wait())
+    fixture.engine.failNextStop()
+
+    fixture.revocation.revoke()
+    #expect(fixture.revocationFailures.wait())
+    #expect(fixture.revocationFailures.errors.count == 1)
+    if let failure = fixture.revocationFailures.errors.first {
+      #expect(isLocalEngineStopFailure(.failure(failure)))
+    }
+    #expect(authority.stoppedAttemptCount == 0)
+    #expect(authority.stoppedAttestations.isEmpty)
+
+    let blockedStart = CompletionRecorder()
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { blockedStart.record($0) }
+    #expect(blockedStart.wait())
+    #expect(blockedStart.values == [.lifecycleConflict])
+
+    let retry = StopResultRecorder()
+    fixture.coordinator.stop { retry.record($0) }
+    #expect(retry.wait())
+    #expect(stopSucceeded(retry.values.first))
+    #expect(authority.stoppedAttestations.count == 1)
+  }
+
+  @Test func successfulRevocationStopsAuthorityAndCompletesTheOSSession() throws {
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient { fixtureData.redeemed }
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+    #expect(start.wait())
+    fixture.revocation.revoke()
+
+    #expect(fixture.revocationCompletions.wait())
+    #expect(fixture.revocationCompletions.count == 1)
+    #expect(fixture.revocationFailures.errors.isEmpty)
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.pump.stopCount == 1)
+    #expect(authority.stoppedAttemptCount == 1)
+    #expect(authority.stoppedAttestations.count == 1)
+  }
+
+  @Test func concurrentExplicitStopAndRevocationShareOneStopTransaction() throws {
+    let stoppedGate = BlockingCallGate()
+    let fixtureData = try makeRedeemedFixture(
+      descriptor: try tunnelDescriptor(), withSecretSlot: false)
+    let authority = FakeOwnerAuthorityClient(
+      stoppedGate: stoppedGate
+    ) { fixtureData.redeemed }
+    let fixture = try makeCoordinator(authority: authority)
+    let start = CompletionRecorder()
+
+    fixture.coordinator.start(
+      ticket: try makeTicket(), descriptor: fixture.descriptor
+    ) { start.record($0) }
+    #expect(start.wait())
+
+    let stop = StopResultRecorder()
+    fixture.coordinator.stop { stop.record($0) }
+    #expect(stoppedGate.waitUntilEntered())
+    fixture.revocation.revoke()
+    stoppedGate.release()
+
+    #expect(stop.wait())
+    #expect(stopSucceeded(stop.values.first))
+    #expect(fixture.revocationCompletions.wait())
+    #expect(fixture.revocationCompletions.count == 1)
+    #expect(fixture.engine.stopCount == 1)
+    #expect(fixture.pump.stopCount == 1)
+    #expect(authority.stoppedAttemptCount == 1)
+    #expect(authority.stoppedAttestations.count == 1)
   }
 
   @Test func concurrentSecondStartIsRejectedSoTicketIsRedeemedOnce() throws {

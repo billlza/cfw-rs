@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .common import MAX_JSON_BYTES, PublicationError, canonical_json
+from .bounded_process import BoundedProcessError, run_bounded_process
 
 
 RELEASE_VERSION = "0.4.0"
@@ -58,33 +58,37 @@ def load_pins(path: Path) -> dict[str, str]:
     return pins
 
 
-def run(command: list[str], cwd: Path, environment: dict[str, str] | None = None) -> bytes:
+def run(command: list[str], cwd: Path, environment: dict[str, str]) -> bytes:
     try:
-        completed = subprocess.run(
+        completed = run_bounded_process(
             command,
             cwd=cwd,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
+            environment=environment,
             timeout=COMMAND_TIMEOUT_SECONDS,
+            output_limit=MAX_COMMAND_BYTES,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise PublicationError(f"cannot collect build graph with {command[0]}: {error}") from error
+    except BoundedProcessError as error:
+        if error.reason == "output-limit":
+            message = f"build graph output exceeded its fixed bound: {command[0]}"
+        elif error.reason == "timeout":
+            message = f"build graph command timed out: {command[0]}"
+        else:
+            message = f"cannot collect build graph with {command[0]}: {error}"
+        raise PublicationError(message) from error
     if completed.returncode != 0:
         detail = completed.stderr[-8192:].decode("utf-8", errors="replace").strip()
         raise PublicationError(
             f"build graph command failed ({command[0]}, exit {completed.returncode}): {detail}"
         )
-    if len(completed.stdout) > MAX_COMMAND_BYTES:
-        raise PublicationError(f"build graph output exceeded its fixed bound: {command[0]}")
+    if completed.stderr:
+        detail = completed.stderr[-8192:].decode("utf-8", errors="replace").strip()
+        raise PublicationError(
+            f"build graph command emitted diagnostics ({command[0]}): {detail}"
+        )
     return completed.stdout
 
 
-def run_json(
-    command: list[str], cwd: Path, environment: dict[str, str] | None = None
-) -> Any:
+def run_json(command: list[str], cwd: Path, environment: dict[str, str]) -> Any:
     payload = run(command, cwd, environment)
     try:
         return json.loads(payload)

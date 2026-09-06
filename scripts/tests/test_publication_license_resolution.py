@@ -7,6 +7,7 @@ from pathlib import Path
 from scripts.publication.common import PublicationError
 from scripts.publication.graph_model import ComponentSeed
 from scripts.publication.license_resolution import (
+    canonical_spdx_expression,
     resolve_license,
     validate_automatic_resolution,
 )
@@ -70,6 +71,23 @@ class LicenseResolutionTests(unittest.TestCase):
             self.assertEqual(resolution["expression"], "MIT")
             self.assertEqual(validate_automatic_resolution(seed, resolution), resolution)
 
+    def test_repository_license_does_not_escape_into_hidden_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            license_path = root / "LICENSE"
+            license_path.write_text(MIT_TEXT, encoding="utf-8")
+            hidden_worktree = root / ".kilo/worktrees/stale"
+            hidden_worktree.mkdir(parents=True)
+            (hidden_worktree / "LICENSE").write_text(MIT_TEXT, encoding="utf-8")
+
+            resolution = resolve_license(self.seed(root))
+
+            self.assertEqual(resolution["status"], "automatic")
+            self.assertEqual(
+                [item["path"] for item in resolution["files"]],
+                [str(license_path.resolve(strict=True))],
+            )
+
     def test_automatic_evidence_tampering_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -121,6 +139,70 @@ class LicenseResolutionTests(unittest.TestCase):
             resolution = resolve_license(seed)
             self.assertEqual(resolution["status"], "automatic")
             self.assertEqual(resolution["files"][0]["supports"], ["ISC"])
+
+    def test_spdx_identifiers_exceptions_and_local_license_refs_are_validated(self) -> None:
+        self.assertEqual(
+            canonical_spdx_expression("Apache-2.0 WITH LLVM-exception"),
+            "Apache-2.0 WITH LLVM-exception",
+        )
+        self.assertEqual(
+            canonical_spdx_expression("LicenseRef-Apple-Xcode-EULA-26.6"),
+            "LicenseRef-Apple-Xcode-EULA-26.6",
+        )
+        for invalid in (
+            "MadeUp-1.0",
+            "Apache-2.0 WITH MadeUp-exception",
+            "(Apache-2.0 OR MIT) WITH LLVM-exception",
+            "LicenseRef-Xcode WITH LLVM-exception",
+            "LLVM-exception",
+            "LicenseRef-",
+            "LicenseRef-Xcode+",
+            "DocumentRef-vendor:LicenseRef-Xcode",
+            "NOASSERTION",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(PublicationError):
+                canonical_spdx_expression(invalid)
+
+    def test_manual_review_preserves_compound_expression_and_full_file_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed = self.seed(root, ecosystem="go", declared_license=None)
+            license_files = {
+                "LICENSE-APACHE": "reviewed Apache terms",
+                "LICENSE-BSD": "reviewed BSD terms",
+                "LICENSE-MIT": "reviewed MIT terms",
+            }
+            for name, text in license_files.items():
+                (root / name).write_text(text, encoding="utf-8")
+            required = resolve_license(seed)
+            self.assertEqual(required["status"], "manual-required")
+            supports = {
+                "LICENSE-APACHE": ["Apache-2.0"],
+                "LICENSE-BSD": ["BSD-3-Clause"],
+                "LICENSE-MIT": ["MIT"],
+            }
+            reviewed = {
+                **required,
+                "status": "manual-reviewed",
+                "expression": "BSD-3-Clause AND Apache-2.0 AND MIT",
+                "method": "human-legal-review",
+                "reason": "The three independently bound license texts all apply.",
+                "files": [
+                    {**item, "supports": supports[Path(item["path"]).name]}
+                    for item in required["files"]
+                ],
+            }
+            validated = validate_automatic_resolution(seed, reviewed)
+            self.assertEqual(
+                validated["expression"], "BSD-3-Clause AND Apache-2.0 AND MIT"
+            )
+
+            incomplete = {
+                **reviewed,
+                "files": [item for item in reviewed["files"] if item["supports"] != ["MIT"]],
+            }
+            with self.assertRaisesRegex(PublicationError, "exact expression"):
+                validate_automatic_resolution(seed, incomplete)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ use objc2_system_configuration::{
 };
 
 use crate::legacy_proxy::{LegacyProxyCutoverPlan, LegacyProxyServiceIdentity};
+use crate::network_observation::{NetworkProxyProtocolObservation, NetworkServiceObservation};
 
 const PREFS_NAME: &str = "com.bill.clashformac.legacy-cutover";
 const MAX_SERVICES: usize = 64;
@@ -272,6 +273,91 @@ fn read_observation(service: &SCNetworkService) -> Result<ProxyObservation> {
     })
 }
 
+/// Read-only diagnostics view of the current network set.
+///
+/// Unlike [`read_observation`], a service that carries no Proxies protocol or no
+/// proxy configuration is reported as "nothing enabled" instead of failing, so a
+/// single unusual service cannot make diagnostics unavailable. Nothing here
+/// writes, commits, or applies preferences.
+pub(crate) fn observe_network_services() -> Result<Vec<NetworkServiceObservation>> {
+    let session = PreferencesSession::open()?;
+    let services = current_services(&session.preferences)?;
+    let mut observations = Vec::with_capacity(services.len());
+    for (order, service) in services.iter().enumerate() {
+        let id = service_id(service)?;
+        let display_name = service_name(service, &id)?;
+        let configuration = service
+            .protocol(unsafe { kSCNetworkProtocolTypeProxies })
+            .and_then(|protocol| protocol.configuration());
+        let Some(configuration) = configuration else {
+            observations.push(NetworkServiceObservation {
+                service_id: id,
+                display_name,
+                order,
+                web: NetworkProxyProtocolObservation::default(),
+                secure_web: NetworkProxyProtocolObservation::default(),
+                socks: NetworkProxyProtocolObservation::default(),
+                pac_enabled: false,
+                wpad_enabled: false,
+            });
+            continue;
+        };
+        let configuration = as_config_dict(&configuration);
+        observations.push(NetworkServiceObservation {
+            service_id: id,
+            display_name,
+            order,
+            web: observe_protocol(
+                configuration,
+                unsafe { kSCPropNetProxiesHTTPEnable },
+                unsafe { kSCPropNetProxiesHTTPProxy },
+                unsafe { kSCPropNetProxiesHTTPPort },
+                "HTTP proxy",
+            )?,
+            secure_web: observe_protocol(
+                configuration,
+                unsafe { kSCPropNetProxiesHTTPSEnable },
+                unsafe { kSCPropNetProxiesHTTPSProxy },
+                unsafe { kSCPropNetProxiesHTTPSPort },
+                "HTTPS proxy",
+            )?,
+            socks: observe_protocol(
+                configuration,
+                unsafe { kSCPropNetProxiesSOCKSEnable },
+                unsafe { kSCPropNetProxiesSOCKSProxy },
+                unsafe { kSCPropNetProxiesSOCKSPort },
+                "SOCKS proxy",
+            )?,
+            pac_enabled: enabled_flag(
+                configuration,
+                unsafe { kSCPropNetProxiesProxyAutoConfigEnable },
+                "PAC proxy configuration",
+            )?,
+            wpad_enabled: enabled_flag(
+                configuration,
+                unsafe { kSCPropNetProxiesProxyAutoDiscoveryEnable },
+                "proxy auto-discovery",
+            )?,
+        });
+    }
+    Ok(observations)
+}
+
+fn observe_protocol(
+    dict: &ConfigDict,
+    enable: &CFString,
+    host: &CFString,
+    port: &CFString,
+    label: &str,
+) -> Result<NetworkProxyProtocolObservation> {
+    let state = read_protocol(dict, enable, host, port, label)?;
+    Ok(NetworkProxyProtocolObservation {
+        enabled: state.enabled,
+        server: state.server,
+        port: state.port,
+    })
+}
+
 fn protocol_matches_product(protocol: &ProxyProtocolState, expected_port: u16) -> bool {
     protocol.enabled
         && protocol.server.as_deref() == Some("127.0.0.1")
@@ -489,9 +575,16 @@ fn validate_enabled_flag_value(label: &str, value: i32) -> Result<bool> {
     }
 }
 
-fn verify_service_disabled(service: &SCNetworkService) -> Result<()> {
+fn service_carries_legacy_proxy(
+    service: &SCNetworkService,
+    owned_ports: &[u16],
+    legacy_pac_present: bool,
+) -> Result<()> {
     let id = service_id(service)?;
     let name = service_name(service, &id)?;
+    // A service with no Proxies protocol or no configuration dictionary carries
+    // no proxy at all. This is the same tolerance the previous machine-wide
+    // check applied; it is not an ownership claim.
     let Some(protocol) = service.protocol(unsafe { kSCNetworkProtocolTypeProxies }) else {
         return Ok(());
     };
@@ -499,44 +592,74 @@ fn verify_service_disabled(service: &SCNetworkService) -> Result<()> {
         return Ok(());
     };
     let configuration = as_config_dict(&configuration);
-    for (label, setting_name, key) in unsafe {
+    // Per protocol, not the all-three conjunction: a partially torn down legacy
+    // proxy must still block. Requiring all three would fail open on exactly the
+    // residue this check exists to catch.
+    for (label, setting_name, enable, host, port) in unsafe {
         [
             (
                 "HTTP proxy",
                 "Web Proxy (HTTP)",
                 kSCPropNetProxiesHTTPEnable,
+                kSCPropNetProxiesHTTPProxy,
+                kSCPropNetProxiesHTTPPort,
             ),
             (
                 "HTTPS proxy",
                 "Secure Web Proxy (HTTPS)",
                 kSCPropNetProxiesHTTPSEnable,
-            ),
-            ("SOCKS proxy", "SOCKS Proxy", kSCPropNetProxiesSOCKSEnable),
-            (
-                "PAC proxy configuration",
-                "Automatic Proxy Configuration",
-                kSCPropNetProxiesProxyAutoConfigEnable,
+                kSCPropNetProxiesHTTPSProxy,
+                kSCPropNetProxiesHTTPSPort,
             ),
             (
-                "proxy auto-discovery (WPAD)",
-                "Auto Proxy Discovery",
-                kSCPropNetProxiesProxyAutoDiscoveryEnable,
+                "SOCKS proxy",
+                "SOCKS Proxy",
+                kSCPropNetProxiesSOCKSEnable,
+                kSCPropNetProxiesSOCKSProxy,
+                kSCPropNetProxiesSOCKSPort,
             ),
         ]
     } {
-        if enabled_flag(configuration, key, label)? {
+        let state = read_protocol(configuration, enable, host, port, label)?;
+        if owned_ports
+            .iter()
+            .any(|owned| protocol_matches_product(&state, *owned))
+        {
+            let owned_port = state.port.unwrap_or_default();
             bail!(
-                "network service {name} still has {label} enabled; turn off \"{setting_name}\" in System Settings > Network > Details > Proxies before confirming legacy cleanup"
+                "network service {name} still has {label} enabled on the retired 127.0.0.1:{owned_port} endpoint; turn off \"{setting_name}\" in System Settings > Network > Details > Proxies before confirming legacy cleanup"
             )
         }
+    }
+    // PAC carries no port, so it is only attributable to this product when the
+    // retired installation's own PAC artifact is still on disk.
+    if legacy_pac_present
+        && enabled_flag(
+            configuration,
+            unsafe { kSCPropNetProxiesProxyAutoConfigEnable },
+            "PAC proxy configuration",
+        )?
+    {
+        bail!(
+            "network service {name} still has PAC proxy configuration enabled while the retired installation's proxy.pac remains; turn off \"Automatic Proxy Configuration\" in System Settings > Network > Details > Proxies before confirming legacy cleanup"
+        )
     }
     Ok(())
 }
 
-pub(crate) fn verify_proxies_disabled() -> Result<()> {
+pub(crate) fn verify_no_legacy_owned_proxy(
+    owned_ports: &[u16],
+    legacy_pac_present: bool,
+) -> Result<()> {
+    // Never a vacuous pass: absence is only provable against a known endpoint.
+    if owned_ports.is_empty() || owned_ports.contains(&0) {
+        bail!(
+            "the retired installation's owned proxy port is unknown; legacy proxy absence cannot be proven"
+        )
+    }
     let session = PreferencesSession::open()?;
     for service in current_services(&session.preferences)? {
-        verify_service_disabled(&service)?;
+        service_carries_legacy_proxy(&service, owned_ports, legacy_pac_present)?;
     }
     Ok(())
 }
@@ -571,6 +694,56 @@ mod tests {
         assert!(validate_enabled_flag_value("proxy", 1).expect("one"));
         assert!(validate_enabled_flag_value("proxy", -1).is_err());
         assert!(validate_enabled_flag_value("proxy", 2).is_err());
+    }
+
+    #[test]
+    fn legacy_absence_refuses_to_prove_anything_without_a_recorded_endpoint() {
+        // Absence is only provable against a known endpoint. An empty or zero
+        // port list must never be a vacuous pass; both return before any
+        // SCPreferences session is opened.
+        for ports in [vec![], vec![0u16], vec![0u16, 7902]] {
+            let error = verify_no_legacy_owned_proxy(&ports, false)
+                .expect_err("an unknown retired endpoint cannot prove absence");
+            assert!(
+                error.to_string().contains("owned proxy port is unknown"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_foreign_endpoint_is_not_the_retired_installations_proxy() {
+        // Clash for Windows on 127.0.0.1:7890 while the retired installation
+        // recorded 7902. Same host, same loopback, different product.
+        let foreign = protocol(true, Some("127.0.0.1"), Some(7890));
+        assert!(!protocol_matches_product(&foreign, 7902));
+        assert!(protocol_matches_product(&foreign, 7890));
+    }
+
+    #[test]
+    fn a_partially_torn_down_legacy_proxy_is_still_owned_per_protocol() {
+        // Only SOCKS remains on the retired endpoint. The all-three conjunction
+        // would call this "not ours" and fail open on exactly the residue the
+        // absence proof exists to catch; per-protocol matching still sees it.
+        let cleared = protocol(false, None, None);
+        let remaining = protocol(true, Some("127.0.0.1"), Some(7902));
+        let partial = ProxyObservation {
+            service_id: "service-id".into(),
+            display_name: "Wi-Fi".into(),
+            web: cleared.clone(),
+            secure_web: cleared,
+            socks: remaining.clone(),
+            pac_enabled: false,
+            wpad_enabled: false,
+        };
+
+        assert!(!observation_matches_product(&partial, 7902));
+        assert!(
+            [&partial.web, &partial.secure_web, &partial.socks]
+                .into_iter()
+                .any(|state| protocol_matches_product(state, 7902))
+        );
+        assert!(protocol_matches_product(&remaining, 7902));
     }
 
     #[test]

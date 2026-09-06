@@ -1,5 +1,8 @@
 use std::fs;
 use std::os::unix::fs::symlink;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use cfw_core::{LegacyNetworkState, MacOsAppPaths};
 use cfw_engine_api::{
@@ -9,14 +12,61 @@ use cfw_platform::ServiceModeStatus;
 use cfw_profiles::ProfileRepository;
 
 use super::migration::{
-    launch_preflight_with, remove_managed_path, require_enabled_login_item, restore_legacy_dns,
+    LaunchRecoveryFailureCategory, bounded_diagnostic_cause, classify_replacement_active_proof,
+    launch_preflight_with, remove_managed_path, require_enabled_login_item,
+    require_pre_network_launch_recovery, restore_legacy_dns,
 };
 use super::process_cleanup::{
     ProcessRecord, parse_loopback_listener_owners, parse_managed_process, require_path_absent,
     validate_unique_root_managed_process,
 };
 use super::state_gate::{LegacyCleanupAction, LegacyRetirementGate, LegacyRetirementStatus};
-use super::{require_explicit_cutover_confirmation, require_replacement_active};
+use super::{
+    require_explicit_cutover_confirmation, require_replacement_active, spawn_supervised_app_result,
+};
+
+#[tokio::test]
+async fn renderer_response_cancellation_cannot_cancel_the_app_owned_task() {
+    let (release, released) = tokio::sync::oneshot::channel();
+    let completed = Arc::new(AtomicBool::new(false));
+    let after_response = Arc::new(AtomicBool::new(false));
+    let operation_completed = completed.clone();
+    let response_completed = after_response.clone();
+    let receiver = spawn_supervised_app_result(
+        async move {
+            released.await.expect("release app task");
+            operation_completed.store(true, Ordering::Release);
+        },
+        |operation| operation,
+        move || response_completed.store(true, Ordering::Release),
+    );
+    drop(receiver);
+    release.send(()).expect("release sender");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !completed.load(Ordering::Acquire) || !after_response.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached task must reach terminal side effects");
+}
+
+#[tokio::test]
+async fn supervised_app_task_turns_worker_panic_into_a_terminal_error() {
+    let receiver = spawn_supervised_app_result(
+        async move {
+            panic!("injected migration worker panic");
+        },
+        |operation| operation,
+        || {},
+    );
+    let error = receiver
+        .await
+        .expect("supervisor response")
+        .expect_err("worker panic must fail");
+    assert_eq!(error, "migration handoff application task panicked");
+}
 
 #[test]
 fn legacy_retirement_gate_serializes_attempts_and_preserves_post_cutover_access() {
@@ -82,6 +132,82 @@ fn launch_preflight_is_read_only_and_distinguishes_network_from_data_cleanup() {
         launch_preflight_with(|| Ok(true), || Ok(()), || Ok(())),
         LegacyRetirementStatus::Cleared
     );
+}
+
+#[test]
+fn launch_recovery_classifies_a_non_handoff_process_before_other_checks() {
+    let failure = require_pre_network_launch_recovery(
+        false,
+        || panic!("role rejection must precede admission"),
+        || panic!("role rejection must precede recovery"),
+    )
+    .expect_err("dashboard process must fail closed");
+
+    assert_eq!(failure.category(), LaunchRecoveryFailureCategory::Role);
+    assert!(failure.user_message().contains("Open Recovery"));
+    assert!(failure.user_message().len() <= 512);
+}
+
+#[test]
+fn launch_recovery_classifies_canonical_admission_without_exposing_its_cause() {
+    let failure = require_pre_network_launch_recovery(
+        true,
+        || Err("private admission detail: /Users/alice/secret".into()),
+        || panic!("recovery must not run after failed admission"),
+    )
+    .expect_err("untrusted install must fail closed");
+
+    assert_eq!(failure.category(), LaunchRecoveryFailureCategory::Admission);
+    assert!(failure.user_message().contains("/Applications"));
+    assert!(!failure.user_message().contains("alice"));
+    assert!(failure.user_message().len() <= 512);
+}
+
+#[test]
+fn launch_recovery_classifies_pre_network_recovery_without_exposing_its_cause() {
+    let failure = require_pre_network_launch_recovery(
+        true,
+        || Ok(()),
+        || Err("private recovery detail: token=secret".into()),
+    )
+    .expect_err("unproven legacy identity must fail closed");
+
+    assert_eq!(failure.category(), LaunchRecoveryFailureCategory::Recovery);
+    assert!(
+        failure
+            .user_message()
+            .contains("durably seal NetworkRetiring")
+    );
+    assert!(!failure.user_message().contains("secret"));
+    assert!(failure.user_message().len() <= 512);
+}
+
+#[test]
+fn launch_recovery_classifies_replacement_active_proof_without_exposing_its_cause() {
+    let failure =
+        classify_replacement_active_proof(Err("private runtime detail: digest=secret".into()))
+            .expect_err("unproven ReplacementActive must fail closed");
+
+    assert_eq!(
+        failure.category(),
+        LaunchRecoveryFailureCategory::ActiveProof
+    );
+    assert!(failure.user_message().contains("owner, context, digest"));
+    assert!(!failure.user_message().contains("secret"));
+    assert!(failure.user_message().len() <= 512);
+}
+
+#[test]
+fn launch_recovery_cause_is_redacted_by_debug_and_bounded_at_the_diagnostic_boundary() {
+    let failure = classify_replacement_active_proof(Err("token=private\nline two".into()))
+        .expect_err("injected proof failure");
+    let debug = format!("{failure:?}");
+    assert!(!debug.contains("private"));
+
+    let diagnostic = bounded_diagnostic_cause(&format!("first line\n{}", "x".repeat(4096)));
+    assert!(!diagnostic.contains('\n'));
+    assert!(diagnostic.len() <= 2 * 1024);
+    assert!(diagnostic.ends_with(" [truncated]"));
 }
 
 #[test]

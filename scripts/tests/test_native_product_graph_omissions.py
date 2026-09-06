@@ -6,8 +6,8 @@ does not exercise the XcodeGen spec, the SwiftPM manifest, the candidate native
 build script, the Packet Tunnel ``Info.plist``, or the per-product entitlements.
 
 This file adds the genuinely missing scenarios required by task 9.13: a Release
-product that omits a signed target, drops the ``CFW_GLOBAL_AUTHORITY_REQUIRED=1``
-gate, loses the Packet Tunnel Mach-service/provider declaration, or ships
+product that omits a signed target, loses the Packet Tunnel
+Mach-service/provider declaration, or ships
 entitlements that grant a data plane (or drop a required grant) must fail closed.
 
 Each positive test binds the shipped tracked file so the real product graph is
@@ -25,9 +25,9 @@ import unittest
 from pathlib import Path
 
 from scripts.verify_native_product_graph import (
-    MACH_SERVICE,
     NativeProductGraphError,
     verify_entitlements,
+    verify_global_authority_info,
     verify_native_build_script,
     verify_packet_tunnel_info,
     verify_swiftpm_manifest,
@@ -42,7 +42,7 @@ def _read(relative: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# XcodeGen spec: target and Release-gate omissions.
+# XcodeGen spec: target and product omissions.
 # ---------------------------------------------------------------------------
 class XcodeGenSpecTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -50,11 +50,6 @@ class XcodeGenSpecTests(unittest.TestCase):
 
     def test_shipped_spec_passes(self) -> None:
         verify_xcodegen_spec(self.project)
-
-    def test_missing_release_authority_gate_fails_closed(self) -> None:
-        mutated = self.project.replace("CFW_GLOBAL_AUTHORITY_REQUIRED=1", "CFW_UNRELATED=1")
-        with self.assertRaisesRegex(NativeProductGraphError, "Release configuration"):
-            verify_xcodegen_spec(mutated)
 
     def test_missing_proxy_agent_target_fails_closed(self) -> None:
         mutated = self.project.replace("CFWProxyAgent:", "CFWRemovedAgent:")
@@ -74,14 +69,62 @@ class XcodeGenSpecTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeProductGraphError, "signed target settings"):
             verify_xcodegen_spec(mutated)
 
+    def test_missing_target_local_profile_setting_fails_closed(self) -> None:
+        mutated = self.project.replace(
+            "PROVISIONING_PROFILE_SPECIFIER: $(CFW_PROXY_AGENT_PROVISIONING_PROFILE_SPECIFIER)",
+            "PROVISIONING_PROFILE_SPECIFIER: $(UNSCOPED_PROFILE_SPECIFIER)",
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "target-local provisioning"):
+            verify_xcodegen_spec(mutated)
+
     def test_missing_deployment_target_fails_closed(self) -> None:
         mutated = self.project.replace('macOS: "15.0"', 'macOS: "14.0"')
         with self.assertRaisesRegex(NativeProductGraphError, "deployment target"):
             verify_xcodegen_spec(mutated)
 
+    def test_generated_objc_header_install_phase_fails_closed(self) -> None:
+        mutated = self.project.replace(
+            "SWIFT_INSTALL_OBJC_HEADER: false",
+            "SWIFT_INSTALL_OBJC_HEADER: true",
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "header boundary"):
+            verify_xcodegen_spec(mutated)
+
+    def test_missing_swift_package_access_identity_fails_closed(self) -> None:
+        mutated = self.project.replace(
+            "SWIFT_PACKAGE_NAME: macos",
+            "SWIFT_PACKAGE_NAME: wrong-package",
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "package-access identity"):
+            verify_xcodegen_spec(mutated)
+
+    def test_development_base_entitlement_injection_fails_closed(self) -> None:
+        mutated = self.project.replace(
+            "CODE_SIGN_INJECT_BASE_ENTITLEMENTS: false",
+            "CODE_SIGN_INJECT_BASE_ENTITLEMENTS: true",
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "injection boundary"):
+            verify_xcodegen_spec(mutated)
+
+    def test_app_intents_diagnostics_are_not_filtered(self) -> None:
+        mutated = self.project.replace(
+            "LM_FORCE_LINK_GENERATION: true",
+            "LM_FORCE_LINK_GENERATION: true\n    LM_FILTER_WARNINGS: true",
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "diagnostics"):
+            verify_xcodegen_spec(mutated)
+
+    def test_missing_authority_embedded_info_plist_fails_closed(self) -> None:
+        mutated = self.project.replace(
+            "path: Config/GlobalAuthority-Info.plist",
+            "path: Config/Removed-Info.plist",
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "embedded Info.plist"):
+            verify_xcodegen_spec(mutated)
+
 
 # ---------------------------------------------------------------------------
-# SwiftPM manifest: platform and Release-gate omissions.
+# SwiftPM manifest: platform and product omissions.
 # ---------------------------------------------------------------------------
 class SwiftPMManifestTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -93,14 +136,6 @@ class SwiftPMManifestTests(unittest.TestCase):
     def test_missing_macos_15_platform_fails_closed(self) -> None:
         mutated = self.package.replace(".macOS(.v15)", ".macOS(.v14)")
         with self.assertRaisesRegex(NativeProductGraphError, "platform"):
-            verify_swiftpm_manifest(mutated)
-
-    def test_missing_release_gate_define_fails_closed(self) -> None:
-        mutated = self.package.replace(
-            '.define("CFW_GLOBAL_AUTHORITY_REQUIRED", .when(configuration: .release))',
-            '.define("CFW_UNRELATED", .when(configuration: .release))',
-        )
-        with self.assertRaisesRegex(NativeProductGraphError, "Release configuration"):
             verify_swiftpm_manifest(mutated)
 
     def test_missing_authority_daemon_product_fails_closed(self) -> None:
@@ -121,21 +156,41 @@ class NativeBuildScriptTests(unittest.TestCase):
     def test_shipped_build_script_passes(self) -> None:
         verify_native_build_script(self.build)
 
-    def test_missing_release_gate_fails_closed(self) -> None:
-        mutated = self.build.replace("CFW_GLOBAL_AUTHORITY_REQUIRED=1", "CFW_UNRELATED=1")
-        with self.assertRaisesRegex(NativeProductGraphError, "candidate native build"):
+    def test_missing_ga_pre_sign_mode_fails_closed(self) -> None:
+        mutated = self.build.replace(
+            'signing_mode="pre-sign"', 'signing_mode="removed"'
+        )
+        with self.assertRaisesRegex(NativeProductGraphError, "pre-sign contract"):
             verify_native_build_script(mutated)
 
-    def test_missing_packet_tunnel_provisioning_fails_closed(self) -> None:
+    def test_missing_product_graph_gate_fails_closed(self) -> None:
+        gate = '"$repo_root/scripts/verify_native_product_graph.py"'
+        self.assertEqual(self.build.count(gate), 1)
         mutated = self.build.replace(
-            "PACKET_TUNNEL_PROVISIONING_PROFILE_SPECIFIER", "REMOVED_SPECIFIER"
+            gate,
+            '"$repo_root/scripts/removed_native_product_graph.py"',
+            1,
         )
-        with self.assertRaisesRegex(NativeProductGraphError, "provisioning"):
+        with self.assertRaisesRegex(NativeProductGraphError, "product-graph gate"):
             verify_native_build_script(mutated)
 
     def test_missing_arm64_architecture_fails_closed(self) -> None:
         mutated = self.build.replace("ARCHS=arm64", "ARCHS=x86_64")
         with self.assertRaisesRegex(NativeProductGraphError, "architecture"):
+            verify_native_build_script(mutated)
+
+    def test_pre_freeze_profile_setting_fails_closed(self) -> None:
+        mutated = self.build + '\nPROVISIONING_PROFILE_SPECIFIER="forbidden"\n'
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "pre-freeze signing operations"
+        ):
+            verify_native_build_script(mutated)
+
+    def test_pre_freeze_codesign_fails_closed(self) -> None:
+        mutated = self.build + '\n/usr/bin/codesign --sign forbidden product\n'
+        with self.assertRaisesRegex(
+            NativeProductGraphError, "pre-freeze signing operations"
+        ):
             verify_native_build_script(mutated)
 
 
@@ -144,6 +199,7 @@ class NativeBuildScriptTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 def _valid_packet_info() -> dict[str, object]:
     return {
+        "CFBundleExecutable": "$(EXECUTABLE_NAME)",
         "NetworkExtension": {
             "NEMachServiceName": "$(TeamIdentifierPrefix)com.bill.clashformac.packet-tunnel",
             "NEProviderClasses": {
@@ -159,7 +215,12 @@ class PacketTunnelInfoTests(unittest.TestCase):
 
     def test_missing_network_extension_dict_fails_closed(self) -> None:
         with self.assertRaisesRegex(NativeProductGraphError, "NetworkExtension"):
-            verify_packet_tunnel_info({"CFBundleIdentifier": "x"})
+            verify_packet_tunnel_info(
+                {
+                    "CFBundleExecutable": "$(EXECUTABLE_NAME)",
+                    "CFBundleIdentifier": "x",
+                }
+            )
 
     def test_wrong_mach_service_fails_closed(self) -> None:
         info = _valid_packet_info()
@@ -174,6 +235,32 @@ class PacketTunnelInfoTests(unittest.TestCase):
             verify_packet_tunnel_info(info)
 
 
+class GlobalAuthorityInfoTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.info = {
+            "CFBundleDevelopmentRegion": "$(DEVELOPMENT_LANGUAGE)",
+            "CFBundleExecutable": "$(EXECUTABLE_NAME)",
+            "CFBundleIdentifier": "$(PRODUCT_BUNDLE_IDENTIFIER)",
+            "CFBundleInfoDictionaryVersion": "6.0",
+            "CFBundleName": "$(PRODUCT_NAME)",
+            "CFBundleShortVersionString": "$(MARKETING_VERSION)",
+            "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
+            "LSMinimumSystemVersion": "$(MACOSX_DEPLOYMENT_TARGET)",
+        }
+
+    def test_exact_embedded_info_plist_passes(self) -> None:
+        verify_global_authority_info(self.info)
+
+    def test_wrong_signing_identifier_source_fails_closed(self) -> None:
+        self.info["CFBundleIdentifier"] = "com.example.wrong"
+        with self.assertRaisesRegex(NativeProductGraphError, "exact fixed identity"):
+            verify_global_authority_info(self.info)
+
+    def test_unreviewed_embedded_metadata_fails_closed(self) -> None:
+        self.info["Unexpected"] = True
+        with self.assertRaisesRegex(NativeProductGraphError, "exact fixed identity"):
+            verify_global_authority_info(self.info)
+
 # ---------------------------------------------------------------------------
 # Entitlements: data-plane grant and required-grant omissions.
 # ---------------------------------------------------------------------------
@@ -187,17 +274,25 @@ def _valid_entitlements() -> dict[str, dict[str, object]]:
         "PacketTunnel.entitlements": {
             "com.apple.developer.networking.networkextension": list(_NE_ROLE),
             "com.apple.security.app-sandbox": True,
+            "com.apple.security.application-groups": list(_APP_GROUP),
             "com.apple.security.network.client": True,
             "com.apple.security.network.server": True,
         },
         "ProxyAgent.entitlements": {
             "com.apple.security.application-groups": list(_APP_GROUP),
-            "keychain-access-groups": ["$(AppIdentifierPrefix)com.bill.clashformac.proxy-agent"],
+            "keychain-access-groups": [
+                "$(AppIdentifierPrefix)com.bill.clashformac.proxy-agent",
+                "$(AppIdentifierPrefix)com.bill.clashformac.credentials",
+            ],
         },
         "Host.entitlements": {
             "com.apple.developer.system-extension.install": True,
             "com.apple.developer.networking.networkextension": list(_NE_ROLE),
             "com.apple.security.application-groups": list(_APP_GROUP),
+            "keychain-access-groups": [
+                "$(AppIdentifierPrefix)com.bill.clashformac",
+                "$(AppIdentifierPrefix)com.bill.clashformac.credentials",
+            ],
         },
     }
 
@@ -238,30 +333,56 @@ class EntitlementTests(unittest.TestCase):
         del entitlements["PacketTunnel.entitlements"][
             "com.apple.developer.networking.networkextension"
         ]
-        self._assert_fails(entitlements, "packet-tunnel-provider-systemextension")
+        self._assert_fails(
+            entitlements, "com.apple.developer.networking.networkextension"
+        )
+
+    def test_custom_authority_entitlements_fail_closed(self) -> None:
+        for component, key, value in (
+            (
+                "PacketTunnel.entitlements",
+                "com.bill.clashformac.global-authority.engine-owner",
+                "provider-v1",
+            ),
+            (
+                "ProxyAgent.entitlements",
+                "com.bill.clashformac.global-authority.engine-owner",
+                "proxy-agent-v1",
+            ),
+            (
+                "Host.entitlements",
+                "com.bill.clashformac.global-authority.client",
+                "host-v1",
+            ),
+        ):
+            with self.subTest(component=component):
+                entitlements = _valid_entitlements()
+                entitlements[component][key] = value
+                self._assert_fails(entitlements, "unexpected")
 
     def test_packet_tunnel_without_sandbox_fails_closed(self) -> None:
         entitlements = _valid_entitlements()
         entitlements["PacketTunnel.entitlements"]["com.apple.security.app-sandbox"] = False
         self._assert_fails(entitlements, "app-sandbox")
 
-    def test_packet_tunnel_claiming_app_group_fails_closed(self) -> None:
-        # The sandboxed Provider must not resolve a shared App Group container.
+    def test_packet_tunnel_missing_authority_app_group_fails_closed(self) -> None:
         entitlements = _valid_entitlements()
-        entitlements["PacketTunnel.entitlements"][
+        del entitlements["PacketTunnel.entitlements"][
             "com.apple.security.application-groups"
-        ] = list(_APP_GROUP)
-        self._assert_fails(entitlements, "must not claim an App Group")
+        ]
+        self._assert_fails(entitlements, "com.apple.security.application-groups")
 
     def test_proxy_agent_missing_app_group_fails_closed(self) -> None:
         entitlements = _valid_entitlements()
         del entitlements["ProxyAgent.entitlements"]["com.apple.security.application-groups"]
-        self._assert_fails(entitlements, "shared App Group")
+        self._assert_fails(entitlements, "com.apple.security.application-groups")
 
     def test_host_missing_system_extension_install_fails_closed(self) -> None:
         entitlements = _valid_entitlements()
         del entitlements["Host.entitlements"]["com.apple.developer.system-extension.install"]
-        self._assert_fails(entitlements, "System Extension installation")
+        self._assert_fails(
+            entitlements, "com.apple.developer.system-extension.install"
+        )
 
 
 if __name__ == "__main__":

@@ -75,7 +75,7 @@ struct LegacyRetirementGateState {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct LegacyRetirementGate {
+pub struct LegacyRetirementGate {
     state: Arc<Mutex<LegacyRetirementGateState>>,
 }
 

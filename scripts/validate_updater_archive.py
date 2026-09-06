@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import io
+import json
 import posixpath
 import tarfile
 from pathlib import PurePosixPath
+import zlib
 
 MAX_ENTRY_COUNT = 50_000
 MAX_SINGLE_FILE_BYTES = 512 * 1024 * 1024
@@ -45,6 +48,80 @@ class BoundedReader(io.RawIOBase):
         return count
 
 
+class StrictSingleMemberGzipReader(io.RawIOBase):
+    """Stream one bounded gzip member and reject every compressed suffix.
+
+    ``gzip.GzipFile`` intentionally accepts concatenated members.  Release
+    archives need a stronger contract: one member, one tar stream, and no
+    bytes after that member.  This reader also limits decompression before a
+    caller starts interpreting tar headers.
+    """
+
+    def __init__(self, source: io.BufferedReader, maximum: int) -> None:
+        if maximum <= 0:
+            raise ArchiveContractError("gzip stream limit must be positive")
+        self._source = source
+        self._decoder = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
+        self._compressed_pending = b""
+        self._decompressed_pending = bytearray()
+        self._remaining = maximum
+        self._finished = False
+
+    def readable(self) -> bool:
+        return True
+
+    def _fill(self, requested: int) -> None:
+        while not self._decompressed_pending and not self._finished:
+            if self._decoder.eof:
+                if self._decoder.unused_data or self._compressed_pending:
+                    raise ArchiveContractError(
+                        "gzip archive contains a concatenated member or trailing bytes"
+                    )
+                if self._source.read(1):
+                    raise ArchiveContractError(
+                        "gzip archive contains a concatenated member or trailing bytes"
+                    )
+                self._finished = True
+                return
+
+            compressed = self._compressed_pending
+            self._compressed_pending = b""
+            if not compressed:
+                compressed = self._source.read(64 * 1024)
+                if not compressed:
+                    raise ArchiveContractError("gzip archive is truncated")
+
+            maximum_output = min(
+                max(requested, 64 * 1024), self._remaining + 1
+            )
+            try:
+                decompressed = self._decoder.decompress(
+                    compressed, maximum_output
+                )
+            except zlib.error as error:
+                raise ArchiveContractError("gzip archive is malformed") from error
+            self._compressed_pending = self._decoder.unconsumed_tail
+            if self._decoder.unused_data:
+                raise ArchiveContractError(
+                    "gzip archive contains a concatenated member or trailing bytes"
+                )
+            if len(decompressed) > self._remaining:
+                raise ArchiveContractError(
+                    "decompressed tar stream exceeds its fixed limit"
+                )
+            self._remaining -= len(decompressed)
+            self._decompressed_pending.extend(decompressed)
+
+    def readinto(self, buffer: bytearray) -> int:
+        if not buffer:
+            return 0
+        self._fill(len(buffer))
+        count = min(len(buffer), len(self._decompressed_pending))
+        buffer[:count] = self._decompressed_pending[:count]
+        del self._decompressed_pending[:count]
+        return count
+
+
 def _read_exact(
     source: io.BufferedReader, size: int, *, allow_initial_eof: bool = False
 ) -> bytes | None:
@@ -70,8 +147,24 @@ def _discard_exact(source: io.BufferedReader, size: int) -> None:
         remaining -= len(chunk)
 
 
-def _validate_raw_metadata(path: str, maximum_stream: int) -> None:
-    maximum_entries = MAX_ENTRY_COUNT * RAW_ENTRY_MULTIPLIER
+def validate_strict_tar_gzip_stream(
+    path: str,
+    *,
+    maximum_stream: int,
+    maximum_entries: int,
+    maximum_extension_entry_bytes: int = MAX_EXTENSION_ENTRY_BYTES,
+    maximum_total_extension_bytes: int = MAX_TOTAL_EXTENSION_BYTES,
+) -> None:
+    """Validate raw tar framing and consume the exact single gzip member.
+
+    Tar readers stop at the first two zero blocks.  We deliberately keep
+    consuming after that logical EOF and accept only zero padding until the
+    gzip member itself ends.  A second member, compressed suffix, second tar,
+    or any other non-zero decompressed payload is therefore rejected rather
+    than remaining outside the semantic tree manifest.
+    """
+    if maximum_entries <= 0:
+        raise ArchiveContractError("raw archive entry limit must be positive")
     extension_types = {
         tarfile.XHDTYPE,
         tarfile.XGLTYPE,
@@ -81,39 +174,62 @@ def _validate_raw_metadata(path: str, maximum_stream: int) -> None:
     entry_count = 0
     extension_bytes = 0
     zero_blocks = 0
+    terminated = False
     with open(path, "rb") as compressed:
-        decoder = gzip.GzipFile(fileobj=compressed, mode="rb")
-        source = io.BufferedReader(BoundedReader(decoder, maximum_stream))
-        while True:
-            header = _read_exact(source, TAR_BLOCK_BYTES, allow_initial_eof=True)
-            if header is None:
-                break
-            if header == bytes(TAR_BLOCK_BYTES):
-                zero_blocks += 1
-                if zero_blocks == 2:
+        strict_decoder = StrictSingleMemberGzipReader(compressed, maximum_stream)
+        with io.BufferedReader(strict_decoder) as source:
+            while True:
+                header = _read_exact(
+                    source, TAR_BLOCK_BYTES, allow_initial_eof=True
+                )
+                if header is None:
                     break
-                continue
-            zero_blocks = 0
-            entry_count += 1
-            if entry_count > maximum_entries:
-                raise ArchiveContractError("archive contains too many raw entries")
-            member = tarfile.TarInfo.frombuf(
-                header, encoding="utf-8", errors="surrogateescape"
-            )
-            if member.type in extension_types:
-                if member.size > MAX_EXTENSION_ENTRY_BYTES:
+                if header == bytes(TAR_BLOCK_BYTES):
+                    zero_blocks += 1
+                    if zero_blocks == 2:
+                        terminated = True
+                        break
+                    continue
+                zero_blocks = 0
+                entry_count += 1
+                if entry_count > maximum_entries:
                     raise ArchiveContractError(
-                        "archive extension metadata entry exceeds its fixed limit"
+                        "archive contains too many raw entries"
                     )
-                extension_bytes += member.size
-                if extension_bytes > MAX_TOTAL_EXTENSION_BYTES:
+                member = tarfile.TarInfo.frombuf(
+                    header, encoding="utf-8", errors="surrogateescape"
+                )
+                if member.type in extension_types:
+                    if member.size > maximum_extension_entry_bytes:
+                        raise ArchiveContractError(
+                            "archive extension metadata entry exceeds its fixed limit"
+                        )
+                    extension_bytes += member.size
+                    if extension_bytes > maximum_total_extension_bytes:
+                        raise ArchiveContractError(
+                            "archive extension metadata exceeds its aggregate limit"
+                        )
+                padded_size = (
+                    (member.size + TAR_BLOCK_BYTES - 1) // TAR_BLOCK_BYTES
+                ) * TAR_BLOCK_BYTES
+                _discard_exact(source, padded_size)
+            if not terminated:
+                raise ArchiveContractError(
+                    "tar archive omits its two zero termination blocks"
+                )
+            while trailing := source.read(64 * 1024):
+                if any(trailing):
                     raise ArchiveContractError(
-                        "archive extension metadata exceeds its aggregate limit"
+                        "tar archive contains non-zero data after its termination blocks"
                     )
-            padded_size = (
-                (member.size + TAR_BLOCK_BYTES - 1) // TAR_BLOCK_BYTES
-            ) * TAR_BLOCK_BYTES
-            _discard_exact(source, padded_size)
+
+
+def _validate_raw_metadata(path: str, maximum_stream: int) -> None:
+    validate_strict_tar_gzip_stream(
+        path,
+        maximum_stream=maximum_stream,
+        maximum_entries=MAX_ENTRY_COUNT * RAW_ENTRY_MULTIPLIER,
+    )
 
 
 def _canonical_name(member: tarfile.TarInfo, expected_root: str) -> str:
@@ -164,9 +280,33 @@ def _validate_symlink(relative: str, target: str) -> None:
             resolved.append(component)
 
 
-def validate_archive(path: str, expected_root: str) -> tuple[int, int]:
+def _tree_sha256(root_mode: str, entries: list[dict[str, object]]) -> str:
+    digest = hashlib.sha256()
+    root_record = {
+        "mode": root_mode,
+        "path": ".",
+        "type": "directory",
+    }
+    for entry in [root_record, *entries]:
+        digest.update(
+            json.dumps(
+                entry,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _inspect_archive(
+    path: str, expected_root: str
+) -> tuple[int, int, dict[str, object]]:
     paths: dict[str, str] = {}
     required_directories: set[str] = set()
+    manifest_entries: list[dict[str, object]] = []
+    root_mode: str | None = None
     expanded = 0
     count = 0
 
@@ -184,6 +324,10 @@ def validate_archive(path: str, expected_root: str) -> tuple[int, int]:
             count += 1
             if count > MAX_ENTRY_COUNT:
                 raise ArchiveContractError("archive contains too many entries")
+            if not set(member.pax_headers).issubset({"path", "linkpath"}):
+                raise ArchiveContractError(
+                    "archive contains unbound extended metadata"
+                )
             relative = _canonical_name(member, expected_root)
             if relative in paths:
                 raise ArchiveContractError("archive contains a duplicate path")
@@ -224,6 +368,37 @@ def validate_archive(path: str, expected_root: str) -> tuple[int, int]:
             if kind != "directory" and relative in required_directories:
                 raise ArchiveContractError("archive path conflicts with an existing descendant")
             paths[relative] = kind
+            rendered_mode = f"{mode:04o}"
+            if not relative:
+                if kind != "directory":
+                    raise ArchiveContractError("application root is not a directory")
+                root_mode = rendered_mode
+                continue
+            manifest_entry: dict[str, object] = {
+                "mode": rendered_mode,
+                "path": relative,
+                "type": kind,
+            }
+            if kind == "file":
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise ArchiveContractError("archive file entry cannot be read")
+                digest = hashlib.sha256()
+                remaining = member.size
+                while remaining:
+                    chunk = extracted.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ArchiveContractError("archive file entry is truncated")
+                    remaining -= len(chunk)
+                    digest.update(chunk)
+                if extracted.read(1):
+                    raise ArchiveContractError("archive file entry exceeds its header size")
+                manifest_entry.update(
+                    {"sha256": digest.hexdigest(), "size": member.size}
+                )
+            elif kind == "symlink":
+                manifest_entry["target"] = member.linkname
+            manifest_entries.append(manifest_entry)
         archive.close()
 
     if count == 0:
@@ -239,7 +414,28 @@ def validate_archive(path: str, expected_root: str) -> tuple[int, int]:
         raise ArchiveContractError("archive omits the canonical app bundle layout")
     if any(paths.get(name) != "directory" for name in required_directories):
         raise ArchiveContractError("archive omits an explicit parent directory")
+    if root_mode is None:
+        raise ArchiveContractError("archive omits the explicit application root")
+    manifest_entries.sort(key=lambda entry: str(entry["path"]))
+    manifest = {
+        "algorithm": "sha256-tree-v2",
+        "entries": manifest_entries,
+        "root": expected_root,
+        "rootMode": root_mode,
+        "sha256": _tree_sha256(root_mode, manifest_entries),
+    }
+    return count, expanded, manifest
+
+
+def validate_archive(path: str, expected_root: str) -> tuple[int, int]:
+    count, expanded, _manifest = _inspect_archive(path, expected_root)
     return count, expanded
+
+
+def build_archive_app_manifest(path: str, expected_root: str) -> dict[str, object]:
+    """Return the exact v2 app-tree identity reconstructed from archive bytes."""
+    _count, _expanded, manifest = _inspect_archive(path, expected_root)
+    return manifest
 
 
 def main() -> int:

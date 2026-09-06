@@ -10,10 +10,11 @@ use tokio::sync::oneshot;
 
 use crate::{NativeBridgeError, NativeBridgeErrorCode};
 
-use super::{BridgeState, Execute, LoadedABI};
+use super::{BridgeState, Cancel, Execute, LoadedABI};
 
 const MAXIMUM_RESPONSE_BYTES: usize = 1_048_576;
 const EXECUTE_SYMBOL: &CStr = c"cfw_native_bridge_execute_v1";
+const CANCEL_SYMBOL: &CStr = c"cfw_native_bridge_cancel_v1";
 
 pub(super) fn parse_response(
     request_id: uuid::Uuid,
@@ -97,11 +98,15 @@ fn validate_result(result: &NativeBridgeResult) -> Result<(), NativeBridgeError>
         NativeBridgeResult::CutoverPreflight(CutoverPreflightOutcome::Ready { attestation }) => {
             attestation.validate().then_some(()).ok_or_else(rejected)
         }
+        NativeBridgeResult::ServiceMaintenance(result) => {
+            result.validate().then_some(()).ok_or_else(rejected)
+        }
         NativeBridgeResult::CutoverPreflight(CutoverPreflightOutcome::AwaitingApproval {
             target,
             context,
             system_proxy_config_digest,
             tunnel_config_digest,
+            ..
         }) => (*target != EngineMode::Off
             && canonical_uuid(&context.installation_id)
             && context.config_epoch > 0
@@ -148,11 +153,20 @@ impl LoadedABI {
     pub(super) fn load() -> Result<Self, String> {
         // SAFETY: RTLD_DEFAULT is a process-global pseudo-handle valid for
         // dlsym. The symbol is copied into a typed function pointer below.
-        let default_symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, EXECUTE_SYMBOL.as_ptr()) };
-        if !default_symbol.is_null() {
+        let default_execute = unsafe { libc::dlsym(libc::RTLD_DEFAULT, EXECUTE_SYMBOL.as_ptr()) };
+        // SAFETY: RTLD_DEFAULT is valid for both symbols in the same image.
+        let default_cancel = unsafe { libc::dlsym(libc::RTLD_DEFAULT, CANCEL_SYMBOL.as_ptr()) };
+        if !default_execute.is_null() || !default_cancel.is_null() {
+            if default_execute.is_null() || default_cancel.is_null() {
+                return Err(
+                    "linked native bridge exports only part of the required ABI v1 pair".to_owned(),
+                );
+            }
             return Ok(Self {
                 // SAFETY: the versioned symbol's C header fixes this signature.
-                execute: unsafe { std::mem::transmute::<*mut c_void, Execute>(default_symbol) },
+                execute: unsafe { std::mem::transmute::<*mut c_void, Execute>(default_execute) },
+                // SAFETY: the versioned cancel symbol's C header fixes this signature.
+                cancel: unsafe { std::mem::transmute::<*mut c_void, Cancel>(default_cancel) },
                 library_handle: None,
             });
         }
@@ -171,10 +185,12 @@ impl LoadedABI {
             ));
         }
         // SAFETY: handle is a live dlopen handle and symbol is NUL terminated.
-        let symbol = unsafe { libc::dlsym(handle, EXECUTE_SYMBOL.as_ptr()) };
-        if symbol.is_null() {
+        let execute_symbol = unsafe { libc::dlsym(handle, EXECUTE_SYMBOL.as_ptr()) };
+        // SAFETY: handle remains live and the cancel symbol is NUL terminated.
+        let cancel_symbol = unsafe { libc::dlsym(handle, CANCEL_SYMBOL.as_ptr()) };
+        if execute_symbol.is_null() || cancel_symbol.is_null() {
             let message = format!(
-                "signed native bridge framework does not export ABI v1: {}",
+                "signed native bridge framework does not export the complete ABI v1 pair: {}",
                 dl_error()
             );
             // SAFETY: no symbol call can be in flight before construction.
@@ -185,7 +201,9 @@ impl LoadedABI {
         }
         Ok(Self {
             // SAFETY: the exported v1 C header fixes this exact signature.
-            execute: unsafe { std::mem::transmute::<*mut c_void, Execute>(symbol) },
+            execute: unsafe { std::mem::transmute::<*mut c_void, Execute>(execute_symbol) },
+            // SAFETY: the exported cancel v1 C header fixes this exact signature.
+            cancel: unsafe { std::mem::transmute::<*mut c_void, Cancel>(cancel_symbol) },
             library_handle: Some(handle),
         })
     }
@@ -281,7 +299,8 @@ mod tests {
         let request_id =
             uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("request UUID");
         let response = format!(
-            "{{\"schema_version\":3,\"request_id\":\"{request_id}\",\"result\":null,\"failure\":{{\"code\":\"future_authority_code\",\"message\":\"/private/path secret identity\"}}}}"
+            "{{\"schema_version\":{},\"request_id\":\"{request_id}\",\"result\":null,\"failure\":{{\"code\":\"future_authority_code\",\"message\":\"/private/path secret identity\"}}}}",
+            cfw_engine_api::ENGINE_PROTOCOL_VERSION
         );
         let error = parse_response(request_id, response.as_bytes()).expect_err("unknown code");
         assert_eq!(error.code, NativeBridgeErrorCode::Internal);
@@ -311,12 +330,43 @@ mod tests {
     }
 
     #[test]
+    fn vault_failure_preserves_typed_corruption_and_discards_wire_text() {
+        let request_id =
+            uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555").expect("request UUID");
+        for (code, expected) in [
+            (
+                "credential_vault_corrupt",
+                NativeBridgeErrorCode::CredentialVaultCorrupt,
+            ),
+            ("identity_rejected", NativeBridgeErrorCode::IdentityRejected),
+        ] {
+            let response = serde_json::json!({
+                "schema_version": cfw_engine_api::ENGINE_PROTOCOL_VERSION,
+                "request_id": request_id,
+                "failure": {"code": code, "message": "/private/secret localized diagnostic"},
+            });
+            let error = parse_response(
+                request_id,
+                &serde_json::to_vec(&response).expect("failure response"),
+            )
+            .expect_err("typed native failure");
+            assert_eq!(error.code, expected);
+            assert_eq!(
+                error.message,
+                BackendErrorKind::from(expected).stable_message()
+            );
+            assert!(!error.message.contains("private"));
+            assert!(!error.message.contains("secret"));
+        }
+    }
+
+    #[test]
     fn cross_language_preview_response_is_validated() {
         let request_id =
             uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("request UUID");
         let result = parse_response(
             request_id,
-            include_bytes!("../../../../contracts/native-bridge-v3/gc-preview-response.json"),
+            include_bytes!("../../../../contracts/native-bridge-v8/gc-preview-response.json"),
         )
         .expect("cross-language response");
         let NativeBridgeResult::CredentialGarbageCollectionPreview(preview) = result else {
@@ -326,12 +376,53 @@ mod tests {
     }
 
     #[test]
+    fn cross_language_credential_receipt_is_validated() {
+        let request_id =
+            uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555").expect("request UUID");
+        let result = parse_response(
+            request_id,
+            include_bytes!(
+                "../../../../contracts/native-bridge-v8/credential-receipt-response.json"
+            ),
+        )
+        .expect("Swift producer credential receipt");
+        let NativeBridgeResult::CredentialReceipt(receipt) = result else {
+            panic!("unexpected response kind");
+        };
+        assert_eq!(receipt.profile_id, "abcdefab-cdef-4abc-8def-abcdefabcdef");
+        assert_eq!(receipt.profile_digest, "ab".repeat(32));
+    }
+
+    #[test]
+    fn credential_receipt_rejects_noncanonical_profile_identity() {
+        let request_id =
+            uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555").expect("request UUID");
+        let mut response: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../../contracts/native-bridge-v8/credential-receipt-response.json"
+        ))
+        .expect("shared receipt fixture");
+        for profile_id in [
+            "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF",
+            "abcdefabcdef4abc8defabcdefabcdef",
+            "not-a-profile-uuid",
+        ] {
+            response["result"]["value"]["profile_id"] = profile_id.into();
+            let error = parse_response(
+                request_id,
+                &serde_json::to_vec(&response).expect("mutated response"),
+            )
+            .expect_err("noncanonical receipt must fail");
+            assert_eq!(error.code, NativeBridgeErrorCode::IdentityRejected);
+        }
+    }
+
+    #[test]
     fn response_identity_mismatch_fails_closed() {
         let expected =
             uuid::Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee").expect("request UUID");
         let error = parse_response(
             expected,
-            include_bytes!("../../../../contracts/native-bridge-v3/gc-preview-response.json"),
+            include_bytes!("../../../../contracts/native-bridge-v8/gc-preview-response.json"),
         )
         .expect_err("mismatched response must fail");
         assert_eq!(error.code, NativeBridgeErrorCode::IdentityRejected);

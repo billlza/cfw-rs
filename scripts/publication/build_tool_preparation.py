@@ -8,7 +8,7 @@ from typing import Any
 
 from .common import PublicationError, require_sha256
 from .graph_model import ComponentSeed
-from .license_resolution import canonical_spdx_expression
+from .license_resolution import canonical_spdx_expression, validate_automatic_resolution
 from .source_preparation import source_input_evidence
 
 
@@ -85,6 +85,7 @@ def build_tool_specs(
     repository: Path,
     seeds: dict[str, ComponentSeed],
     reviews: dict[str, dict[str, Any]],
+    release_environment: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     output = []
     for identifier in sorted(seeds):
@@ -92,9 +93,12 @@ def build_tool_specs(
         if not seed.external_build_tool:
             continue
         review = reviews[identifier]
-        expected_source = source_input_evidence(repository, seed, seed.source_root)
+        expected_source = source_input_evidence(
+            repository, seed, seed.source_root, release_environment
+        )
         if review["source_evidence"] != expected_source:
             raise PublicationError(f"external build-tool evidence drifted: {identifier}")
+        resolution = validate_automatic_resolution(seed, review["license_resolution"])
         executables = []
         for index, path in enumerate(seed.provenance_paths):
             size, digest = _external_file_identity(path)
@@ -116,7 +120,7 @@ def build_tool_specs(
                 "scope": seed.scope,
                 "purl": seed.purl,
                 "distribution": "external-build-tool-not-distributed",
-                **_license_provenance(seed, review["license_resolution"]),
+                **_license_provenance(seed, resolution),
                 "executables": executables,
             }
         )

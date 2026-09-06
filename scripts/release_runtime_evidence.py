@@ -133,7 +133,7 @@ def validate_runtime_evidence(value: Any) -> dict[str, Any]:
         },
         "runtime evidence",
     )
-    if document["schema_version"] != 1:
+    if type(document["schema_version"]) is not int or document["schema_version"] != 1:
         raise RuntimeEvidenceError("runtime evidence schema_version must be 1")
     product = _exact(document["product"], {"version", "build_number"}, "product")
     if product["version"] != "0.4.0":

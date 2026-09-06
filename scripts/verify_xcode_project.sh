@@ -6,24 +6,18 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_toolchain_contract.sh
+source "$repo_root/scripts/release_toolchain_contract.sh"
 toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 xcodegen_root="$toolchain_root/xcodegen-$XCODEGEN_VERSION"
 xcodegen="$xcodegen_root/bin/xcodegen"
-xcodegen_manifest="$toolchain_root/xcodegen-$XCODEGEN_VERSION.manifest.json"
 native_root="$repo_root/native/macos"
 
+cfw_verify_xcodegen_toolchain_tree "$repo_root" "$toolchain_root"
 [[ "$("$xcodegen" --version)" == "Version: $XCODEGEN_VERSION" ]] || {
   echo "error: pinned XcodeGen $XCODEGEN_VERSION is unavailable" >&2
   exit 1
 }
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
-  "$xcodegen_root" \
-  "$xcodegen_manifest" \
-  --metadata "sourceArchiveSha256=$XCODEGEN_SOURCE_SHA256" \
-  --metadata "sourceCommit=$XCODEGEN_COMMIT" \
-  --metadata "version=$XCODEGEN_VERSION" \
-  --metadata "xcodeBuild=$XCODE_BUILD_VERSION" \
-  --metadata "xcodeVersion=$XCODE_VERSION"
 
 staging="$(mktemp -d "$repo_root/target/xcode-project-check.XXXXXX")"
 cleanup() {
@@ -33,13 +27,24 @@ cleanup() {
 }
 trap cleanup EXIT
 staged_native="$staging/native/macos"
-mkdir -p "$staged_native"
+isolated_home="$staging/home"
+isolated_tmp="$staging/tmp"
+mkdir -p "$staged_native" "$isolated_home" "$isolated_tmp"
 for input in Config Headers Sources SystemExtension Tests; do
   /usr/bin/ditto --noqtn "$native_root/$input" "$staged_native/$input"
 done
 /usr/bin/ditto --noqtn "$native_root/project.yml" "$staged_native/project.yml"
 
-"$xcodegen" generate \
+/usr/bin/env -i \
+  HOME="$isolated_home" \
+  TMPDIR="$isolated_tmp" \
+  USER=cfw-release \
+  LOGNAME=cfw-release \
+  LANG=C \
+  LC_ALL=C \
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+  DEVELOPER_DIR="${DEVELOPER_DIR:?}" \
+  "$xcodegen" generate \
   --spec "$staged_native/project.yml" \
   --project "$staged_native" \
   --project-root "$staged_native" \
@@ -48,5 +53,6 @@ done
 
 /usr/bin/diff -ruN "$native_root/CFWNative.xcodeproj" "$staged_native/CFWNative.xcodeproj"
 /usr/bin/diff -qr "$native_root/Config" "$staged_native/Config"
+cfw_verify_xcodegen_toolchain_tree "$repo_root" "$toolchain_root"
 
 echo "tracked Xcode project verified: XcodeGen $XCODEGEN_VERSION ($XCODEGEN_COMMIT)"

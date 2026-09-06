@@ -54,7 +54,10 @@ private final class RecordingPreparer: TunnelStartPreparing, @unchecked Sendable
     lock.withLock { preparationsValue.append(preparation) }
     let ticket = try StartTicket(
       copying: Data(repeating: ticketByte, count: AuthorityV1Limits.ticketBytes))
-    return HostPreparedTunnelStart(ticket: ticket, descriptor: preparation.descriptor)
+    return HostPreparedTunnelStart(
+      ticket: ticket,
+      descriptor: preparation.descriptor,
+      operationID: UUID())
   }
 }
 
@@ -72,7 +75,10 @@ private final class RecordingManagedTunnel: ManagedTunnelOperating, @unchecked S
   var events: [Event] { lock.withLock { log } }
   var startedTicket: Data? { lock.withLock { startedTicketValue } }
 
-  func saveDescriptorOnly(_ descriptor: ConfigurationDescriptor) async throws {
+  func saveDescriptorOnly(
+    _ descriptor: ConfigurationDescriptor,
+    operationID: UUID
+  ) async throws {
     lock.withLock {
       log.append(.save)
       savedDescriptor = descriptor
@@ -100,6 +106,7 @@ private func tunnelDescriptor() throws -> ConfigurationDescriptor {
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+    credentialAudience: try appleCredentialAudience(),
     installationID: UUID(),
     epoch: 1,
     generation: 1,

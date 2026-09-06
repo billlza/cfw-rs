@@ -11,6 +11,16 @@ private func authorityFixture(_ name: String) throws -> Data {
   return try Data(contentsOf: root.appendingPathComponent("fixtures/authority-v1/\(name)"))
 }
 
+private func installed40019AuthorityFixture(_ name: String) throws -> Data {
+  let root = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .appendingPathComponent("../../../..")
+    .standardizedFileURL
+  return try Data(
+    contentsOf: root.appendingPathComponent(
+      "fixtures/installed-40019-authority-v1-0/\(name)"))
+}
+
 private func verifyFixture<T: AuthorityV1WireModel>(
   _ type: T.Type, _ name: String
 ) throws {
@@ -45,7 +55,7 @@ private func verifyFixture<T: AuthorityV1WireModel>(
   #expect(AuthorityV1Limits.maximumEnvelopeBytes == 1_048_576)
   #expect(AuthorityV1Limits.maximumConfigurationBytes == 768 * 1_024)
   #expect(AuthorityV1Limits.maximumTotalSecretBytes == 256 * 1_024)
-  #expect(AuthorityV1Limits.maximumCredentialSlots == 128)
+  #expect(AuthorityV1Limits.maximumCredentialSlots == 256)
   #expect(AuthorityV1Limits.maximumIndividualSecretBytes == 16 * 1_024)
   #expect(AuthorityV1Limits.maximumReadOnlyRequests == 64)
   #expect(AuthorityV1Limits.maximumMutatingTransactions == 1)
@@ -56,18 +66,84 @@ private func verifyFixture<T: AuthorityV1WireModel>(
   #expect(AuthorityV1Codec.maximumNestingDepth == 32)
 }
 
+@Test func installed40019AuthorityCompatibilityIsReadOnlyExactAndClosed() throws {
+  let handshakeID = AuthorityIdentifier(
+    try #require(UUID(uuidString: "44444444-4444-4444-8444-444444444444")))
+  let snapshotID = AuthorityIdentifier(
+    try #require(UUID(uuidString: "55555555-5555-4555-8555-555555555555")))
+  #expect(
+    try Installed40019AuthorityOffCodec.handshakeRequest(requestID: handshakeID)
+      == installed40019AuthorityFixture("handshake-request.json"))
+  try Installed40019AuthorityOffCodec.validateHandshakeResponse(
+    installed40019AuthorityFixture("handshake-response.json"),
+    requestID: handshakeID)
+  #expect(
+    try Installed40019AuthorityOffCodec.snapshotRequest(requestID: snapshotID)
+      == installed40019AuthorityFixture("snapshot-request.json"))
+  try Installed40019AuthorityOffCodec.validateOffSnapshotResponse(
+    installed40019AuthorityFixture("off-snapshot-response.json"),
+    requestID: snapshotID)
+
+  let handshakeResponseText = try #require(
+    String(
+      data: installed40019AuthorityFixture("handshake-response.json"),
+      encoding: .utf8))
+  let inventedNullOperation = handshakeResponseText.replacingOccurrences(
+    of: "\"minor\":0,\"request_id\"",
+    with: "\"minor\":0,\"operation_id\":null,\"request_id\"")
+  #expect(throws: (any Error).self) {
+    try Installed40019AuthorityOffCodec.validateHandshakeResponse(
+      Data(inventedNullOperation.utf8), requestID: handshakeID)
+  }
+
+  let offSnapshotText = try #require(
+    String(
+      data: installed40019AuthorityFixture("off-snapshot-response.json"),
+      encoding: .utf8))
+  let currentProtocol = offSnapshotText.replacingOccurrences(
+    of: "\"minimum_minor\":0,\"minor\":0",
+    with: "\"minimum_minor\":1,\"minor\":1")
+  #expect(throws: (any Error).self) {
+    try Installed40019AuthorityOffCodec.validateOffSnapshotResponse(
+      Data(currentProtocol.utf8), requestID: snapshotID)
+  }
+
+  let active = offSnapshotText.replacingOccurrences(
+    of: "\"state\":\"off\"", with: "\"state\":\"active\"")
+  #expect(throws: Installed40019AuthorityOffValidationError.notOff) {
+    try Installed40019AuthorityOffCodec.validateOffSnapshotResponse(
+      Data(active.utf8), requestID: snapshotID)
+  }
+
+  #expect(throws: (any Error).self) {
+    try Installed40019AuthorityOffCodec.validateOffSnapshotResponse(
+      installed40019AuthorityFixture("off-snapshot-response.json"),
+      requestID: handshakeID)
+  }
+
+  let inventedNullLease = offSnapshotText.replacingOccurrences(
+    of: "\"console_uid\":501,\"protocol_version\"",
+    with: "\"console_uid\":501,\"lease_view\":null,\"protocol_version\"")
+  #expect(throws: (any Error).self) {
+    try Installed40019AuthorityOffCodec.validateOffSnapshotResponse(
+      Data(inventedNullLease.utf8), requestID: snapshotID)
+  }
+}
+
 @Test func authorityV1ConfigurationAndSecretBoundsAreInclusive() throws {
   let digest = try SHA256Digest(hex: String(repeating: "a", count: 64))
   let identity = try SHA256Digest(hex: String(repeating: "b", count: 64))
   let maximum = try AuthorityConfigurationDescriptor(
     byteCount: UInt32(AuthorityV1Limits.maximumConfigurationBytes),
     configSHA256: digest, identitySHA256: identity,
+    credentialAudience: try testCredentialAudience(),
     credentialSlots: [], tunnelOptions: nil)
   #expect(maximum.byteCount == UInt32(768 * 1_024))
   #expect(throws: AuthorityV1ValidationError.boundViolation) {
     try AuthorityConfigurationDescriptor(
       byteCount: UInt32(AuthorityV1Limits.maximumConfigurationBytes + 1),
       configSHA256: digest, identitySHA256: identity,
+      credentialAudience: try testCredentialAudience(),
       credentialSlots: [], tunnelOptions: nil)
   }
 
@@ -85,10 +161,10 @@ private func verifyFixture<T: AuthorityV1WireModel>(
   let slots = try (0..<AuthorityV1Limits.maximumCredentialSlots).map { _ in
     try AuthoritySecretSlot(
       reference: CredentialReference(id: UUID(), kind: .trojanPassword),
-      copying: Data(repeating: 1, count: 2 * 1_024))
+      copying: Data(repeating: 1, count: 1_024))
   }
   let material = try AuthoritySecretMaterial(slots: slots)
-  #expect(material.slots.count == 128)
+  #expect(material.slots.count == 256)
   #expect(material.totalByteCount == 256 * 1_024)
 
   let overflowSlot = try AuthoritySecretSlot(
@@ -158,9 +234,9 @@ private func verifyFixture<T: AuthorityV1WireModel>(
     try AuthorityV1Codec.decodeRequest(Data(unsupportedMajor.utf8))
   }
   let unsupportedMinor = text.replacingOccurrences(
-    of: "\"minor\":0", with: "\"minor\":1",
-    options: [], range: text.range(of: "\"minor\":0"))
-  #expect(throws: AuthorityV1ValidationError.unsupportedMinor(1)) {
+    of: "\"minor\":1", with: "\"minor\":0",
+    options: [], range: text.range(of: "\"minor\":1"))
+  #expect(throws: AuthorityV1ValidationError.unsupportedMinor(0)) {
     try AuthorityV1Codec.decodeRequest(Data(unsupportedMinor.utf8))
   }
   let unsupportedFeature = text.replacingOccurrences(

@@ -1,9 +1,13 @@
 import CFWSharedProtocol
 import CoreFoundation
 import Foundation
+import Security
 import SystemConfiguration
 
 enum SystemProxyPreferencesError: Error, Equatable, Sendable {
+  case authorizationCreationFailed(OSStatus)
+  case authorizationReferenceUnavailable
+  case authorizationReleaseFailed(code: OSStatus, originalError: String?)
   case preferencesUnavailable
   case preferencesLockFailed(Int32)
   case preferencesUnlockFailed(code: Int32, originalError: String?)
@@ -25,6 +29,14 @@ enum SystemProxyPreferencesError: Error, Equatable, Sendable {
 extension SystemProxyPreferencesError: LocalizedError {
   var errorDescription: String? {
     switch self {
+    case .authorizationCreationFailed(let status):
+      return "Creating the System Configuration authorization session failed with status \(status)."
+    case .authorizationReferenceUnavailable:
+      return "Authorization Services returned success without an authorization reference."
+    case .authorizationReleaseFailed(let status, let originalError):
+      let context = originalError.map { " Original error: \($0)" } ?? ""
+      return
+        "Releasing the System Configuration authorization failed with status \(status).\(context)"
     case .preferencesUnavailable:
       return "System proxy preferences are unavailable."
     case .preferencesLockFailed(let code):
@@ -112,6 +124,34 @@ struct SCPreferencesOperations: @unchecked Sendable {
   )
 }
 
+/// Authorization Services is the public privilege boundary used by
+/// `SCPreferencesCreateWithAuthorization`. The ProxyAgent is a per-user
+/// `SMAppService.agent`, not the root Global Authority daemon, so each
+/// preferences transaction owns a distinct authorization reference and
+/// destroys any acquired rights when the transaction ends.
+struct SCPreferencesAuthorizationOperations: @unchecked Sendable {
+  let createAuthorization: () -> (status: OSStatus, reference: AuthorizationRef?)
+  let createPreferences: (AuthorizationRef) -> SCPreferences?
+  let freeAuthorization: (AuthorizationRef, AuthorizationFlags) -> OSStatus
+
+  static let live = SCPreferencesAuthorizationOperations(
+    createAuthorization: {
+      var reference: AuthorizationRef?
+      let status = AuthorizationCreate(nil, nil, [], &reference)
+      return (status, reference)
+    },
+    createPreferences: { authorization in
+      SCPreferencesCreateWithAuthorization(
+        nil,
+        "Clash for Mac ProxyAgent" as CFString,
+        nil,
+        authorization
+      )
+    },
+    freeAuthorization: { AuthorizationFree($0, $1) }
+  )
+}
+
 struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   private struct ServiceRecord {
     let serviceID: String
@@ -120,9 +160,14 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
   }
 
   private let operations: SCPreferencesOperations
+  private let authorizationOperations: SCPreferencesAuthorizationOperations
 
-  init(operations: SCPreferencesOperations = .live) {
+  init(
+    operations: SCPreferencesOperations = .live,
+    authorizationOperations: SCPreferencesAuthorizationOperations = .live
+  ) {
     self.operations = operations
+    self.authorizationOperations = authorizationOperations
   }
 
   func prepareOwnership(
@@ -130,38 +175,39 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
     endpoint: MixedListenerEndpoint
   ) throws -> ProxyOwnershipJournal {
     let appliedValues = Self.appliedValues(endpoint: endpoint)
-    let preferences = try makePreferences()
-    let records = try loadServiceRecords(
-      preferences: preferences,
-      enabledOnly: true
-    )
-    guard !records.isEmpty else {
-      throw SystemProxyPreferencesError.noEligibleNetworkServices
-    }
-    let services = try records.map { record in
-      try SystemProxyServiceOwnership(
-        serviceID: record.serviceID,
-        fields: try SystemProxyField.allCases.map { field in
-          guard let appliedValue = appliedValues[field] else {
-            throw SystemProxyPreferencesError.missingAppliedValue(field)
+    return try withAuthorizedPreferences { preferences in
+      let records = try loadServiceRecords(
+        preferences: preferences,
+        enabledOnly: true
+      )
+      guard !records.isEmpty else {
+        throw SystemProxyPreferencesError.noEligibleNetworkServices
+      }
+      let services = try records.map { record in
+        try SystemProxyServiceOwnership(
+          serviceID: record.serviceID,
+          fields: try SystemProxyField.allCases.map { field in
+            guard let appliedValue = appliedValues[field] else {
+              throw SystemProxyPreferencesError.missingAppliedValue(field)
+            }
+            return OwnedSystemProxyField(
+              field: field,
+              originalValue: try Self.value(
+                record.configuration[field.rawValue],
+                serviceID: record.serviceID,
+                field: field
+              ),
+              appliedValue: appliedValue
+            )
           }
-          return OwnedSystemProxyField(
-            field: field,
-            originalValue: try Self.value(
-              record.configuration[field.rawValue],
-              serviceID: record.serviceID,
-              field: field
-            ),
-            appliedValue: appliedValue
-          )
-        }
+        )
+      }
+      return try ProxyOwnershipJournal(
+        phase: .prepared,
+        configuration: configuration,
+        services: services
       )
     }
-    return try ProxyOwnershipJournal(
-      phase: .prepared,
-      configuration: configuration,
-      services: services
-    )
   }
 
   func apply(_ journal: ProxyOwnershipJournal) throws {
@@ -370,27 +416,31 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
     return outcome.result
   }
 
-  private func makePreferences() throws -> SCPreferences {
-    guard
-      let preferences = SCPreferencesCreate(
-        nil,
-        "Clash for Mac ProxyAgent" as CFString,
-        nil
-      )
-    else {
-      throw SystemProxyPreferencesError.preferencesUnavailable
-    }
-    operations.synchronize(preferences)
-    return preferences
-  }
-
-  private func withLockedPreferences<T>(
+  func withAuthorizedPreferences<T>(
     _ operation: (SCPreferences) throws -> T
   ) throws -> T {
-    let preferences = try makePreferences()
-    guard SCPreferencesLock(preferences, false) else {
-      throw SystemProxyPreferencesError.preferencesLockFailed(SCError())
+    let creation = authorizationOperations.createAuthorization()
+    guard creation.status == errAuthorizationSuccess else {
+      throw SystemProxyPreferencesError.authorizationCreationFailed(creation.status)
     }
+    guard let authorization = creation.reference else {
+      throw SystemProxyPreferencesError.authorizationReferenceUnavailable
+    }
+    guard let preferences = authorizationOperations.createPreferences(authorization) else {
+      let originalError = SystemProxyPreferencesError.preferencesUnavailable
+      let releaseStatus = authorizationOperations.freeAuthorization(
+        authorization,
+        [.destroyRights]
+      )
+      guard releaseStatus == errAuthorizationSuccess else {
+        throw SystemProxyPreferencesError.authorizationReleaseFailed(
+          code: releaseStatus,
+          originalError: String(describing: originalError)
+        )
+      }
+      throw originalError
+    }
+
     operations.synchronize(preferences)
     let operationResult: Result<T, Error>
     do {
@@ -398,24 +448,63 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
     } catch {
       operationResult = .failure(error)
     }
-    let didUnlock = SCPreferencesUnlock(preferences)
+    let releaseStatus = authorizationOperations.freeAuthorization(
+      authorization,
+      [.destroyRights]
+    )
     switch operationResult {
     case .success(let result):
-      guard didUnlock else {
-        throw SystemProxyPreferencesError.preferencesUnlockFailed(
-          code: SCError(),
+      guard releaseStatus == errAuthorizationSuccess else {
+        throw SystemProxyPreferencesError.authorizationReleaseFailed(
+          code: releaseStatus,
           originalError: nil
         )
       }
       return result
     case .failure(let originalError):
-      guard didUnlock else {
-        throw SystemProxyPreferencesError.preferencesUnlockFailed(
-          code: SCError(),
+      guard releaseStatus == errAuthorizationSuccess else {
+        throw SystemProxyPreferencesError.authorizationReleaseFailed(
+          code: releaseStatus,
           originalError: String(describing: originalError)
         )
       }
       throw originalError
+    }
+  }
+
+  private func withLockedPreferences<T>(
+    _ operation: (SCPreferences) throws -> T
+  ) throws -> T {
+    try withAuthorizedPreferences { preferences in
+      guard SCPreferencesLock(preferences, false) else {
+        throw SystemProxyPreferencesError.preferencesLockFailed(SCError())
+      }
+      operations.synchronize(preferences)
+      let operationResult: Result<T, Error>
+      do {
+        operationResult = .success(try operation(preferences))
+      } catch {
+        operationResult = .failure(error)
+      }
+      let didUnlock = SCPreferencesUnlock(preferences)
+      switch operationResult {
+      case .success(let result):
+        guard didUnlock else {
+          throw SystemProxyPreferencesError.preferencesUnlockFailed(
+            code: SCError(),
+            originalError: nil
+          )
+        }
+        return result
+      case .failure(let originalError):
+        guard didUnlock else {
+          throw SystemProxyPreferencesError.preferencesUnlockFailed(
+            code: SCError(),
+            originalError: String(describing: originalError)
+          )
+        }
+        throw originalError
+      }
     }
   }
 
@@ -496,14 +585,31 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
 
   func verifyEffectiveRestoredValues(_ journal: ProxyOwnershipJournal) throws {
     guard let primaryServiceID = operations.primaryServiceID() else {
-      return
+      throw SystemProxyPreferencesError.effectiveProxyStateUnavailable
     }
     guard let service = journal.services.first(where: { $0.serviceID == primaryServiceID }) else {
-      return
+      throw SystemProxyPreferencesError.effectiveProxyStateUnavailable
     }
     try verifyEffectiveValues(
       service.fields.map { ($0.field, $0.originalValue) }
     )
+  }
+
+  func observeEffectiveAppliedValues(
+    descriptor: ConfigurationDescriptor,
+    journalStore: any ProxyOwnershipJournalStoring
+  ) throws -> EffectiveSystemProxyObservation {
+    guard let journal = try journalStore.load(),
+      journal.phase == .applied,
+      journal.configuration == descriptor
+    else {
+      throw SystemProxyPreferencesError.effectiveProxyStateUnavailable
+    }
+    try verifyEffectiveAppliedValues(journal)
+    return EffectiveSystemProxyObservation(
+      httpApplied: true,
+      httpsApplied: true,
+      socksApplied: true)
   }
 
   private func verifyEffectiveValues(

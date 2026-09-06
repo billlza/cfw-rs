@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import os
+import stat
 import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -15,11 +16,11 @@ from .common import (
     require_exact_keys,
     require_sha256,
     safe_relative,
-    sha256_file,
     tree_digest,
 )
 
 
+MAX_SOURCE_ARCHIVE_BYTES = 1280 * 1024 * 1024
 MAX_SOURCE_FILES = 100_000
 MAX_SOURCE_FILE_BYTES = 256 * 1024 * 1024
 MAX_SOURCE_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
@@ -135,6 +136,41 @@ class _DigestingReader:
         return data
 
 
+def _open_file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _sha256_opened_archive(stream: Any, opened: os.stat_result) -> str:
+    digest = hashlib.sha256()
+    bytes_read = 0
+    while chunk := stream.read(1024 * 1024):
+        bytes_read += len(chunk)
+        if bytes_read > opened.st_size:
+            raise PublicationError(
+                "corresponding-source archive grew while it was hashed"
+            )
+        digest.update(chunk)
+    after = os.fstat(stream.fileno())
+    if (
+        bytes_read != opened.st_size
+        or _open_file_identity(after) != _open_file_identity(opened)
+    ):
+        raise PublicationError(
+            "corresponding-source archive changed while it was hashed"
+        )
+    stream.seek(0)
+    return digest.hexdigest()
+
+
 def verify_source_archive(
     archive_path: Path, manifest: object, expected_archive_sha256: object
 ) -> None:
@@ -144,15 +180,16 @@ def verify_source_archive(
         "corresponding-source manifest",
     )
     if (
-        expected["schema_version"] != 1
+        type(expected["schema_version"]) is not int
+        or expected["schema_version"] != 1
         or expected["algorithm"] != "sha256-tree-v1"
         or expected["root"] != "corresponding-source"
     ):
         raise PublicationError("unsupported corresponding-source manifest")
     require_sha256(expected["sha256"], "corresponding-source tree digest")
-    archive_digest = require_sha256(expected_archive_sha256, "corresponding-source archive digest")
-    if sha256_file(archive_path) != archive_digest:
-        raise PublicationError("corresponding-source archive digest mismatch")
+    archive_digest = require_sha256(
+        expected_archive_sha256, "corresponding-source archive digest"
+    )
     entries = expected["entries"]
     if not isinstance(entries, list) or len(entries) > MAX_SOURCE_FILES * 2:
         raise PublicationError("corresponding-source manifest has an invalid entry count")
@@ -191,54 +228,109 @@ def verify_source_archive(
         raise PublicationError("corresponding-source manifest total differs from its entries")
     if tree_digest(entries) != expected["sha256"]:
         raise PublicationError("corresponding-source manifest tree digest mismatch")
+
+    stream, opened = open_regular(archive_path)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or opened.st_size <= 0
+        or opened.st_size > MAX_SOURCE_ARCHIVE_BYTES
+    ):
+        stream.close()
+        raise PublicationError(
+            "corresponding-source archive size is outside "
+            f"1..={MAX_SOURCE_ARCHIVE_BYTES}"
+        )
     total = 0
     observed: set[str] = set()
-    with tarfile.open(archive_path, mode="r|gz") as archive:
-        member_count = 0
-        for member in archive:
-            member_count += 1
-            if member_count > MAX_SOURCE_FILES * 2:
-                raise PublicationError("corresponding-source archive has too many entries")
-            path = safe_relative(member.name, "source archive path")
-            if not path.parts or path.parts[0] != "corresponding-source" or len(path.parts) < 2:
-                raise PublicationError("source archive entry is outside its canonical root")
-            relative = PurePosixPath(*path.parts[1:])
-            _reject_component_reverse_path(relative)
-            key = relative.as_posix()
-            if key in observed:
-                raise PublicationError("source archive repeats an entry")
-            observed.add(key)
-            expected_entry = expected_by_path.get(key)
-            if expected_entry is None:
-                raise PublicationError("source archive contains an unmanifested entry")
-            if member.issym() or member.islnk() or member.isdev() or member.isfifo():
-                raise PublicationError("source archive contains an unsafe entry type")
-            if member.isdir():
-                if expected_entry != {"path": key, "type": "directory"}:
-                    raise PublicationError("source archive directory differs from its manifest")
-                continue
-            if not member.isfile() or expected_entry.get("type") != "file":
-                raise PublicationError("source archive entry type differs from its manifest")
-            if member.size < 0 or member.size > MAX_SOURCE_FILE_BYTES:
-                raise PublicationError("source archive file exceeds its bound")
-            total += member.size
-            if total > MAX_SOURCE_TOTAL_BYTES:
-                raise PublicationError("source archive exceeds its total bound")
-            extracted = archive.extractfile(member)
-            if extracted is None:
-                raise PublicationError("source archive regular file is unreadable")
-            digest = hashlib.sha256()
-            read = 0
-            while chunk := extracted.read(1024 * 1024):
-                read += len(chunk)
-                if read > member.size:
-                    raise PublicationError("source archive file exceeded its declared size")
-                digest.update(chunk)
-            if (
-                read != member.size
-                or expected_entry.get("size") != member.size
-                or expected_entry.get("sha256") != digest.hexdigest()
-            ):
-                raise PublicationError("source archive file differs from its manifest")
+    try:
+        with stream:
+            if _sha256_opened_archive(stream, opened) != archive_digest:
+                raise PublicationError("corresponding-source archive digest mismatch")
+            with tarfile.open(fileobj=stream, mode="r|gz") as archive:
+                member_count = 0
+                for member in archive:
+                    member_count += 1
+                    if member_count > MAX_SOURCE_FILES * 2:
+                        raise PublicationError(
+                            "corresponding-source archive has too many entries"
+                        )
+                    path = safe_relative(member.name, "source archive path")
+                    if (
+                        not path.parts
+                        or path.parts[0] != "corresponding-source"
+                        or len(path.parts) < 2
+                    ):
+                        raise PublicationError(
+                            "source archive entry is outside its canonical root"
+                        )
+                    relative = PurePosixPath(*path.parts[1:])
+                    _reject_component_reverse_path(relative)
+                    key = relative.as_posix()
+                    if key in observed:
+                        raise PublicationError("source archive repeats an entry")
+                    observed.add(key)
+                    expected_entry = expected_by_path.get(key)
+                    if expected_entry is None:
+                        raise PublicationError(
+                            "source archive contains an unmanifested entry"
+                        )
+                    if (
+                        member.issym()
+                        or member.islnk()
+                        or member.isdev()
+                        or member.isfifo()
+                    ):
+                        raise PublicationError(
+                            "source archive contains an unsafe entry type"
+                        )
+                    if member.isdir():
+                        if expected_entry != {"path": key, "type": "directory"}:
+                            raise PublicationError(
+                                "source archive directory differs from its manifest"
+                            )
+                        continue
+                    if not member.isfile() or expected_entry.get("type") != "file":
+                        raise PublicationError(
+                            "source archive entry type differs from its manifest"
+                        )
+                    if member.size < 0 or member.size > MAX_SOURCE_FILE_BYTES:
+                        raise PublicationError("source archive file exceeds its bound")
+                    total += member.size
+                    if total > MAX_SOURCE_TOTAL_BYTES:
+                        raise PublicationError(
+                            "source archive exceeds its total bound"
+                        )
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        raise PublicationError(
+                            "source archive regular file is unreadable"
+                        )
+                    digest = hashlib.sha256()
+                    read = 0
+                    while chunk := extracted.read(1024 * 1024):
+                        read += len(chunk)
+                        if read > member.size:
+                            raise PublicationError(
+                                "source archive file exceeded its declared size"
+                            )
+                        digest.update(chunk)
+                    if (
+                        read != member.size
+                        or expected_entry.get("size") != member.size
+                        or expected_entry.get("sha256") != digest.hexdigest()
+                    ):
+                        raise PublicationError(
+                            "source archive file differs from its manifest"
+                        )
+            after = os.fstat(stream.fileno())
+            if _open_file_identity(after) != _open_file_identity(opened):
+                raise PublicationError(
+                    "corresponding-source archive changed while it was parsed"
+                )
+    except (OSError, tarfile.TarError) as error:
+        raise PublicationError(
+            "corresponding-source archive cannot be parsed"
+        ) from error
     if observed != set(expected_by_path) or total != expected["total_file_bytes"]:
         raise PublicationError("source archive closure differs from its manifest")

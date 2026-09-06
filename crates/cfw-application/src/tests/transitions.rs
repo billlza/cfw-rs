@@ -4,7 +4,10 @@ use cfw_engine_api::{
     BackendError, BackendErrorKind, EngineMode, EngineOwner, EngineSnapshot, EngineState,
     NativeEngineStatus,
 };
-use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
+use cfw_singbox_config::{
+    EngineSettings, RELEASE_PACKET_TRANSPORT_IPV4, ReleasePacketEvidenceCase,
+    ValidatedSingBoxProfile,
+};
 
 use crate::{CoordinatorOptions, EngineCoordinatorError, EngineModeCoordinator, EngineOperation};
 
@@ -35,6 +38,7 @@ async fn starts_proxy_only_after_publishing_starting_state() {
     let snapshot = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -52,6 +56,7 @@ async fn periodic_reconciliation_detects_proxy_crash_and_retains_exact_stop_owne
     let active = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -75,6 +80,7 @@ async fn periodic_reconciliation_detects_proxy_crash_and_retains_exact_stop_owne
     coordinator
         .set_mode(
             EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -90,6 +96,7 @@ async fn periodic_reconciliation_detects_tunnel_crash_and_retains_exact_stop_own
     let active = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -113,6 +120,7 @@ async fn periodic_reconciliation_detects_tunnel_crash_and_retains_exact_stop_own
     coordinator
         .set_mode(
             EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -128,6 +136,7 @@ async fn periodic_query_failure_invalidates_active_snapshot_without_releasing_ow
     let active = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -150,6 +159,7 @@ async fn periodic_query_failure_invalidates_active_snapshot_without_releasing_ow
     coordinator
         .set_mode(
             EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -174,6 +184,7 @@ async fn same_digest_request_reconciles_immediately_before_idempotent_success() 
     coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -185,6 +196,7 @@ async fn same_digest_request_reconciles_immediately_before_idempotent_success() 
     let error = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -207,6 +219,7 @@ async fn same_digest_request_reconciles_immediately_before_idempotent_success() 
     coordinator
         .set_mode(
             EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -221,6 +234,7 @@ async fn late_tunnel_identity_drift_fails_and_stops_the_original_context() {
     let active = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -241,6 +255,7 @@ async fn late_tunnel_identity_drift_fails_and_stops_the_original_context() {
     coordinator
         .set_mode(
             EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -260,6 +275,7 @@ async fn approval_wait_is_not_misclassified_as_an_active_runtime_crash() {
     let awaiting = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -292,6 +308,7 @@ async fn reconciliation_skips_missed_ticks_and_resumes_after_suspension() {
     coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -328,6 +345,7 @@ async fn proxy_to_tunnel_always_stops_before_installing() {
     coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -336,6 +354,7 @@ async fn proxy_to_tunnel_always_stops_before_installing() {
     let snapshot = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -365,6 +384,7 @@ async fn runtime_identity_mismatch_fails_closed_and_stops_proxy() {
     let error = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -390,6 +410,7 @@ async fn wrong_owner_is_cleaned_up_using_the_attempted_proxy_mode() {
     coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -408,6 +429,7 @@ async fn failed_cleanup_blocks_all_subsequent_starts() {
     let first_error = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -422,6 +444,7 @@ async fn failed_cleanup_blocks_all_subsequent_starts() {
     let second_error = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -457,6 +480,7 @@ async fn backend_timeout_is_explicit_and_cleanup_is_attempted() {
     let error = coordinator
         .set_mode(
             EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -484,6 +508,7 @@ async fn approved_system_extension_retry_cancels_old_wait_before_starting_new_ge
     let snapshot = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -500,6 +525,7 @@ async fn approved_system_extension_retry_cancels_old_wait_before_starting_new_ge
     let activated = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -551,6 +577,7 @@ async fn tunnel_mtu_and_private_bypass_changes_restart_with_new_identity() {
     let initial = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings::default(),
         )
@@ -560,6 +587,7 @@ async fn tunnel_mtu_and_private_bypass_changes_restart_with_new_identity() {
     let mtu_changed = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings {
                 tunnel_mtu: 1_400,
@@ -571,6 +599,7 @@ async fn tunnel_mtu_and_private_bypass_changes_restart_with_new_identity() {
     let bypass_changed = coordinator
         .set_mode(
             EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
             ValidatedSingBoxProfile::direct(),
             EngineSettings {
                 tunnel_mtu: 1_400,
@@ -616,5 +645,56 @@ async fn tunnel_mtu_and_private_bypass_changes_restart_with_new_identity() {
             "install_tunnel",
             "start_tunnel",
         ]
+    );
+}
+
+#[tokio::test]
+async fn release_excluded_route_restarts_with_the_exact_identity_bound_native_option() {
+    let backend = Arc::new(FakeBackend::default());
+    let coordinator = coordinator(backend.clone());
+    let ordinary = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            ValidatedSingBoxProfile::direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect("ordinary tunnel");
+    let excluded = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            ValidatedSingBoxProfile::release_packet_evidence(
+                ReleasePacketEvidenceCase::ExcludedRoutes,
+            ),
+            EngineSettings::default(),
+        )
+        .await
+        .expect("excluded-route tunnel");
+
+    assert_eq!(excluded.generation, ordinary.generation + 1);
+    let requests = backend.tunnel_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].config_json, requests[1].config_json);
+    assert_eq!(
+        requests[0].config_content_digest,
+        requests[1].config_content_digest
+    );
+    assert_ne!(requests[0].config_digest, requests[1].config_digest);
+    assert!(
+        requests[0]
+            .tunnel_options
+            .expect("ordinary options")
+            .direct_ipv4_hosts
+            .is_empty()
+    );
+    assert_eq!(
+        requests[1]
+            .tunnel_options
+            .expect("release options")
+            .direct_ipv4_hosts
+            .as_slice(),
+        &[RELEASE_PACKET_TRANSPORT_IPV4]
     );
 }

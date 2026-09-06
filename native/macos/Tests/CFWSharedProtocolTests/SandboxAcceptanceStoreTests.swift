@@ -10,6 +10,7 @@ private func sandboxDescriptor(
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true),
+    credentialAudience: try testCredentialAudience(),
     installationID: installationID,
     epoch: 1,
     generation: generation,

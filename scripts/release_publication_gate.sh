@@ -1,64 +1,201 @@
-#!/usr/bin/env bash
-# Verify the sealed, legally reviewed publication evidence for the exact signed
-# 0.4.0 application. This gate has no success override and performs no network
-# access; evidence preparation is an explicit earlier release phase.
+#!/bin/bash -p
+# Closed shell boundary for the single-GA three-stage release transaction.
 set -euo pipefail
+unset CDPATH
 
-publication_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-publication_signed_app="$publication_repo_root/target/candidates/0.4.0/signed/Clash for Mac.app"
-publication_evidence_root="$publication_repo_root/target/candidates/0.4.0/release/publication"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-}" in
+    --seal-assets | --prepare-physical-candidate-manifest | --validation | --final)
+      echo "error: retired publication command is forbidden: ${1}" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+publication_repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && /bin/pwd -P)"
+# shellcheck source=scripts/dependency_pins.env
+source "$publication_repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_tool_environment.sh
+source "$publication_repo_root/scripts/release_tool_environment.sh"
+cfw_seal_release_tool_environment production
+cfw_select_release_apple_toolchain
+# shellcheck source=scripts/release_publication_path_contract.sh
+source "$publication_repo_root/scripts/release_publication_path_contract.sh"
+
+publication_artifact_repository="$(cfw_run_release_python_script \
+  "$publication_repo_root" \
+  "$publication_repo_root/scripts/release_executor_source.py" \
+  --print-frozen-artifact-repository)"
+readonly publication_artifact_repository
+readonly publication_ga_root="$publication_artifact_repository/target/candidates/0.4.0/ga/40044"
+readonly publication_native_products="$publication_ga_root/signing-output/signed-native-products"
+
+run_production_ga_stage() {
+  [[ $# -ge 1 ]] || {
+    echo "error: GA stage command is required" >&2
+    return 1
+  }
+  cfw_run_release_python_script \
+    "$publication_repo_root" \
+    "$publication_repo_root/scripts/production_release_evidence.py" \
+    "$@"
+}
+
+run_release_artifact_set() {
+  [[ $# -ge 1 ]] || {
+    echo "error: release artifact-set command is required" >&2
+    return 1
+  }
+  cfw_run_release_python_script \
+    "$publication_repo_root" \
+    "$publication_repo_root/scripts/release_artifact_set_cli.py" \
+    "$@"
+}
+
+run_hosted_ci_receipt() {
+  [[ $# -ge 1 ]] || {
+    echo "error: hosted CI receipt command is required" >&2
+    return 1
+  }
+  cfw_run_release_python_script \
+    "$publication_repo_root" \
+    "$publication_repo_root/scripts/github_hosted_ci_receipt.py" \
+    "$@"
+}
 
 release_native_products_root_for_app() {
-  local app_path="${1:-}"
-  local build_number
-  build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
-    "$app_path/Contents/Info.plist" 2>/dev/null)" || {
-    echo "error: cannot read release CFBundleVersion" >&2
+  [[ $# -eq 1 ]] || {
+    echo "error: signed-native-products admission requires the fixed GA app" >&2
     return 1
   }
-  [[ "$build_number" =~ ^[1-9][0-9]*$ ]] || {
-    echo "error: release CFBundleVersion is not one canonical positive integer" >&2
+  cfw_require_fixed_publication_app_path "$publication_artifact_repository" "$1" ||
+    return 1
+  if [[ ! -d "$publication_native_products" || -L "$publication_native_products" ]]; then
+    echo "error: fixed GA signed-native-products root is unavailable: $publication_native_products" >&2
+    return 1
+  fi
+  printf '%s\n' "$publication_native_products"
+}
+
+verify_release_prepackage_evidence() {
+  [[ $# -eq 1 ]] || {
+    echo "error: prepackage verification requires the fixed signed app" >&2
     return 1
   }
-  printf '%s\n' \
-    "$publication_repo_root/target/candidates/0.4.0/release-build/$build_number/native-products"
+  cfw_require_fixed_publication_app_path "$publication_artifact_repository" "$1" ||
+    return 1
+  run_production_ga_stage verify prepackage || return 1
+  /bin/bash -p \
+    "$publication_artifact_repository/scripts/verify_release_app.sh" \
+    "$1" \
+    "$publication_native_products" \
+    --context canonical-native-content
+}
+
+verify_release_ga_acceptance_evidence() {
+  [[ $# -eq 0 ]] || {
+    echo "error: ga-acceptance verification has no caller-selected inputs" >&2
+    return 1
+  }
+  run_production_ga_stage verify ga-acceptance
 }
 
 verify_release_publication_evidence() {
-  local app_path="${1:-}"
-  if [[ -z "$app_path" || "$app_path" != /* ]]; then
-    echo "error: publication gate requires the absolute signed app path" >&2
+  [[ $# -eq 0 ]] || {
+    echo "error: publication verification has no legacy signed-app argument" >&2
     return 1
-  fi
-  if [[ ! -d "$app_path" || -L "$app_path" ]]; then
-    echo "error: publication gate signed app is unavailable or is a symlink" >&2
+  }
+  run_production_ga_stage verify publication
+}
+
+verify_release_upload_artifacts() {
+  [[ $# -eq 1 && "$1" == "0.4.0" ]] || {
+    echo "error: upload authorization is fixed to version 0.4.0" >&2
     return 1
-  fi
-  local canonical_app
-  canonical_app="$(cd "$app_path" && pwd -P)"
-  if [[ "$canonical_app" != "$publication_signed_app" ]]; then
-    echo "error: publication gate accepts only the fixed 0.4.0 signed app: $publication_signed_app" >&2
-    return 1
-  fi
-  if [[ ! -d "$publication_evidence_root" || -L "$publication_evidence_root" ]]; then
-    echo "error: publication evidence directory is missing or is a symlink: $publication_evidence_root" >&2
-    return 1
-  fi
-  # Publication artifacts may only be created once the immutable sealed outer
-  # Evidence Manifest authorizes publication: P0 source implementation, unsigned
-  # CI, signed-installed evidence, sealed closure, the final-candidate binding,
-  # and updater-key custody must all pass. A missing, blocked, or hand-edited
-  # manifest refuses publication; there is no override and no fallback.
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
-    "$publication_repo_root/scripts/sealed_evidence_manifest.py" publication-gate
-  local native_products_root
-  native_products_root="$(release_native_products_root_for_app "$app_path")" || return 1
-  "$publication_repo_root/scripts/verify_release_app.sh" "$app_path" "$native_products_root"
-  /usr/bin/python3 "$publication_repo_root/scripts/publication_evidence.py" verify \
-    --evidence "$publication_evidence_root" \
-    --app "$app_path"
+  }
+  run_hosted_ci_receipt verify
+  verify_release_publication_evidence "${@:2}"
+  run_release_artifact_set \
+    verify-release \
+    --repository "$publication_artifact_repository" \
+    --version "0.4.0"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  verify_release_publication_evidence "${1:-}"
+  case "${1:-}" in
+    --capture-hosted-ci)
+      [[ $# -eq 2 ]] || {
+        echo "error: usage: release_publication_gate.sh --capture-hosted-ci RUN_ID" >&2
+        exit 2
+      }
+      run_hosted_ci_receipt capture --run-id "$2"
+      ;;
+    --verify-hosted-ci)
+      [[ $# -eq 1 ]] || {
+        echo "error: usage: release_publication_gate.sh --verify-hosted-ci" >&2
+        exit 2
+      }
+      run_hosted_ci_receipt verify
+      ;;
+    --seal-prepackage)
+      [[ $# -eq 1 ]] || {
+        echo "error: usage: release_publication_gate.sh --seal-prepackage" >&2
+        exit 2
+      }
+      run_production_ga_stage prepackage
+      ;;
+    --seal-ga-acceptance)
+      [[ $# -eq 1 ]] || {
+        echo "error: usage: release_publication_gate.sh --seal-ga-acceptance" >&2
+        exit 2
+      }
+      run_production_ga_stage ga-acceptance
+      ;;
+    --seal-publication)
+      [[ $# -eq 1 ]] || {
+        echo "error: usage: release_publication_gate.sh --seal-publication" >&2
+        exit 2
+      }
+      run_production_ga_stage publication
+      run_production_ga_stage verify publication
+      run_release_artifact_set \
+        seal-release \
+        --repository "$publication_artifact_repository" \
+        --version "0.4.0"
+      ;;
+    --verify-prepackage)
+      [[ $# -eq 2 ]] || {
+        echo "error: usage: release_publication_gate.sh --verify-prepackage SIGNED_APP" >&2
+        exit 2
+      }
+      verify_release_prepackage_evidence "$2"
+      ;;
+    --verify-ga-acceptance)
+      [[ $# -eq 1 ]] || {
+        echo "error: usage: release_publication_gate.sh --verify-ga-acceptance" >&2
+        exit 2
+      }
+      shift
+      verify_release_ga_acceptance_evidence "$@"
+      ;;
+    --verify-publication)
+      [[ $# -eq 1 ]] || {
+        echo "error: usage: release_publication_gate.sh --verify-publication" >&2
+        exit 2
+      }
+      shift
+      verify_release_publication_evidence "$@"
+      ;;
+    --upload-assets)
+      [[ $# -eq 2 ]] || {
+        echo "error: usage: release_publication_gate.sh --upload-assets 0.4.0" >&2
+        exit 2
+      }
+      verify_release_upload_artifacts "$2"
+      ;;
+    *)
+      echo "error: choose one of --capture-hosted-ci, --verify-hosted-ci, --seal-prepackage, --seal-ga-acceptance, --seal-publication, --verify-prepackage, --verify-ga-acceptance, --verify-publication, or --upload-assets" >&2
+      exit 2
+      ;;
+  esac
 fi

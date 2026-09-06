@@ -40,27 +40,6 @@ public struct GlobalOffProof: Equatable, Sendable {
   }
 }
 
-public enum AuthorityOSReadyState: Equatable, Sendable {
-  case systemProxyEffective
-  case managedTunnelConnected
-  case notReady
-  case unknown
-}
-public struct AuthorityOSReadyObservation: Equatable, Sendable {
-  public let operation: OperationContext
-  public let configSHA256: SHA256Digest
-  public let state: AuthorityOSReadyState
-
-  public init(
-    operation: OperationContext, configSHA256: SHA256Digest,
-    state: AuthorityOSReadyState
-  ) {
-    self.operation = operation
-    self.configSHA256 = configSHA256
-    self.state = state
-  }
-}
-
 public struct AuthorityOwnerBinding: Equatable, Sendable {
   public let operation: OperationContext
   public let leaseID: AuthorityIdentifier
@@ -124,7 +103,7 @@ public enum AuthorityPendingMutation: Equatable, Sendable {
 }
 
 public enum AuthorityDurableMutationKind: String, Equatable, Sendable {
-  case enrollAndPrepare = "enroll_and_prepare"
+  case enrollOff = "enroll_off"
   case prepare
   case bindOwner = "bind_owner"
   case ready
@@ -146,6 +125,7 @@ public enum AuthorityOffResolution: Equatable, Sendable {
 public struct GlobalAuthorityReducer: Equatable, Sendable {
   public private(set) var state: AuthorityState
   public private(set) var revision: UInt64
+  public private(set) var enrolledInstallationID: AuthorityIdentifier?
   public private(set) var replayCursor: ReplayCursor?
   public private(set) var lease: GlobalLease?
   public private(set) var ownerBinding: AuthorityOwnerBinding?
@@ -154,11 +134,15 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
   public private(set) var retainsSecretBuffer: Bool
   public private(set) var ownerStopped: Bool
   public private(set) var lastMutation: AuthorityDurableMutationKind?
+  private var acceptedReadyAttestation: ReadyAttestation?
 
-  public var installationID: AuthorityIdentifier? { replayCursor?.installationID }
+  public var installationID: AuthorityIdentifier? {
+    replayCursor?.installationID ?? enrolledInstallationID
+  }
 
   public init(
     state: AuthorityState = .recovering, revision: UInt64,
+    enrolledInstallationID: AuthorityIdentifier? = nil,
     replayCursor: ReplayCursor? = nil, lease: GlobalLease? = nil,
     ownerBinding: AuthorityOwnerBinding? = nil,
     retainsCapabilityOrTicket: Bool = false,
@@ -186,8 +170,15 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
           >= (lease.operation.root.epoch, lease.operation.root.generation)
       else { throw AuthorityDomainError(code: .journalCorrupt) }
     }
+    if let cursor = replayCursor, let enrolledInstallationID {
+      guard cursor.installationID == enrolledInstallationID else {
+        throw AuthorityDomainError(code: .journalCorrupt)
+      }
+    }
     self.state = state
     self.revision = revision
+    self.enrolledInstallationID =
+      enrolledInstallationID ?? replayCursor?.installationID
     self.replayCursor = replayCursor
     self.lease = lease
     self.ownerBinding = ownerBinding
@@ -196,14 +187,25 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     self.retainsSecretBuffer = retainsSecretBuffer
     self.ownerStopped = ownerStopped
     lastMutation = nil
+    acceptedReadyAttestation = nil
   }
 
   public static func unEnrolledOff(revision: UInt64 = 1) throws -> Self {
     try Self(state: .off, revision: revision)
   }
 
+  public static func enrolledOff(
+    installationID: AuthorityIdentifier, revision: UInt64 = 1
+  ) throws -> Self {
+    try Self(
+      state: .off, revision: revision,
+      enrolledInstallationID: installationID)
+  }
+
   public static func recovering(
-    revision: UInt64, replayCursor: ReplayCursor?, lease: GlobalLease? = nil,
+    revision: UInt64, replayCursor: ReplayCursor?,
+    enrolledInstallationID: AuthorityIdentifier? = nil,
+    lease: GlobalLease? = nil,
     ownerBinding: AuthorityOwnerBinding? = nil,
     retainsCapabilityOrTicket: Bool = false, retainsSecretBuffer: Bool = false
   ) throws -> Self {
@@ -211,11 +213,27 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     // It is retained only while the owner and OS are reconciled.
     try Self(
       state: .recovering,
-      revision: revision, replayCursor: replayCursor, lease: lease,
+      revision: revision,
+      enrolledInstallationID: enrolledInstallationID,
+      replayCursor: replayCursor, lease: lease,
       ownerBinding: ownerBinding,
       retainsCapabilityOrTicket: retainsCapabilityOrTicket,
       retainsSecretBuffer: retainsSecretBuffer)
   }
+
+  /// Persists installation enrollment as an Off genesis record before any
+  /// prepare can retain a lease, capability, ticket, configuration, or secret.
+  /// The in-memory bootstrap revision is the first durable revision, so this
+  /// transition deliberately does not increment it.
+  public mutating func enrollOff(_ installationID: AuthorityIdentifier) throws {
+    guard state == .off, replayCursor == nil, enrolledInstallationID == nil,
+      lease == nil, ownerBinding == nil, !retainsCapabilityOrTicket,
+      !retainsSecretBuffer, pendingMutation == nil
+    else { throw AuthorityDomainError(code: .journalCorrupt) }
+    enrolledInstallationID = installationID
+    lastMutation = .enrollOff
+  }
+
   @discardableResult
   public mutating func prepare(
     _ input: AuthorityPrepareInput
@@ -234,6 +252,11 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     else { throw failure(.globalLeaseConflict, operation) }
 
     let root = operation.root
+    if let enrolledInstallationID,
+      enrolledInstallationID != root.installationID
+    {
+      throw failure(.replayRejected, operation)
+    }
     if let cursor = replayCursor {
       guard cursor.installationID == root.installationID else {
         throw failure(.replayRejected, operation)
@@ -250,7 +273,6 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
       operation.mode == .tunnel || !input.retainsSecretBuffer
     else { throw failure(.invalidMessage, operation) }
 
-    let isEnrollment = replayCursor == nil
     let committedRevision = try incrementedRevision()
     let previousDigest: SHA256Digest
     if let existingDigest = replayCursor?.previousRecordSHA256 {
@@ -269,6 +291,7 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
       ownerConnectionNonce: input.ownerConnectionNonce)
 
     pendingMutation = .prepare(operation.operationID)
+    enrolledInstallationID = root.installationID
     replayCursor = newCursor
     lease = newLease
     ownerBinding = nil
@@ -277,12 +300,27 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     ownerStopped = false
     state = .preparing
     revision = committedRevision
-    lastMutation = isEnrollment ? .enrollAndPrepare : .prepare
+    lastMutation = .prepare
+    acceptedReadyAttestation = nil
     pendingMutation = nil
     return AuthorityPrepareAuthorization(
       leaseID: input.leaseID, operation: operation,
       command: operation.mode == .tunnel ? .issueTunnelTicket : .issueProxyCapability,
       committedRevision: committedRevision)
+  }
+
+  /// Synchronizes the public replay cursor with the exact record hash returned
+  /// by the durable store. Call only after the record and trusted anchor commit.
+  public mutating func recordPersistedHead(
+    _ head: AuthorityJournalHead
+  ) throws {
+    guard let cursor = replayCursor, cursor.revision == revision else { return }
+    replayCursor = try ReplayCursor(
+      installationID: cursor.installationID,
+      acceptedEpoch: cursor.acceptedEpoch,
+      acceptedGeneration: cursor.acceptedGeneration,
+      revision: cursor.revision,
+      previousRecordSHA256: head.recordSHA256)
   }
 
   @discardableResult
@@ -311,11 +349,14 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
   }
   @discardableResult
   public mutating func attestReady(
-    _ attestation: ReadyAttestation, osObservation: AuthorityOSReadyObservation,
+    _ attestation: ReadyAttestation,
     ownerUID: UInt32, connectionNonce: SHA256Digest
   ) throws -> UInt64 {
     guard pendingMutation == nil else { throw failure(.busy, attestation.operation) }
-    guard state == .starting, let current = lease, let binding = ownerBinding else {
+    guard state == .starting || state == .active,
+      let current = lease,
+      let binding = ownerBinding
+    else {
       throw failure(.staleOperation, attestation.operation)
     }
     try requireExactLease(
@@ -323,11 +364,18 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
       ownerUID: ownerUID, connectionNonce: connectionNonce)
     guard binding.role == attestation.ownerRole,
       binding.operation == attestation.operation,
-      osObservation.operation == attestation.operation,
-      osObservation.configSHA256 == attestation.operation.configSHA256,
-      osObservation.configSHA256 == current.operation.configSHA256,
-      readyStateMatchesMode(osObservation.state, mode: current.operation.mode)
+      attestation.runtimeDigest == attestation.operation.identitySHA256,
+      attestation.readyFlags == .all
     else { throw failure(.staleOperation, attestation.operation, role: attestation.ownerRole) }
+    if state == .active {
+      guard current.state == .active,
+        lastMutation == .ready,
+        acceptedReadyAttestation == attestation
+      else {
+        throw failure(.staleOperation, attestation.operation)
+      }
+      return revision
+    }
 
     let next = try incrementedRevision()
     pendingMutation = .transition(attestation.operation.operationID)
@@ -335,6 +383,7 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     state = .active
     revision = next
     lastMutation = .ready
+    acceptedReadyAttestation = attestation
     pendingMutation = nil
     return next
   }
@@ -359,17 +408,27 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     state = .stopping
     revision = next
     lastMutation = .abortPrepared
+    acceptedReadyAttestation = nil
     pendingMutation = nil
     return next
   }
 
   @discardableResult
   public mutating func beginStop(_ request: BeginStopRequest) throws -> UInt64 {
-    try requireExpectedRevision(request.expectedRevision, operation: request.operation)
     guard pendingMutation == nil else { throw failure(.busy, request.operation) }
     guard let current = lease else { throw failure(.staleOperation, request.operation) }
     try requireExactLease(operation: request.operation, leaseID: request.leaseID)
-    if state == .stopping { return revision }
+    if state == .stopping {
+      if request.expectedRevision == revision { return revision }
+      let (replayedRevision, overflow) =
+        request.expectedRevision.addingReportingOverflow(1)
+      guard !overflow,
+        replayedRevision == revision,
+        lastMutation == .beginStop
+      else { throw failure(.staleOperation, request.operation) }
+      return revision
+    }
+    try requireExpectedRevision(request.expectedRevision, operation: request.operation)
     guard state == .preparing || state == .starting || state == .active else {
       throw failure(.staleOperation, request.operation)
     }
@@ -383,6 +442,7 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     state = .stopping
     revision = next
     lastMutation = .beginStop
+    acceptedReadyAttestation = nil
     pendingMutation = nil
     return next
   }
@@ -411,6 +471,7 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     state = .stopping
     revision = next
     lastMutation = .revokeForConsoleChange
+    acceptedReadyAttestation = nil
     pendingMutation = nil
     return next
   }
@@ -438,6 +499,7 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     state = .stopping
     revision = next
     lastMutation = .revokeForTimeout
+    acceptedReadyAttestation = nil
     pendingMutation = nil
     return next
   }
@@ -447,7 +509,8 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     _ attestation: StoppedAttestation, ownerUID: UInt32,
     connectionNonce: SHA256Digest
   ) throws -> UInt64 {
-    guard state == .stopping, lease != nil else {
+    guard pendingMutation == nil else { throw failure(.busy, attestation.operation) }
+    guard state == .starting || state == .stopping, let current = lease else {
       throw failure(.staleOperation, attestation.operation)
     }
     try requireExactLease(
@@ -455,9 +518,18 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
       ownerUID: ownerUID, connectionNonce: connectionNonce)
     guard !ownerStopped else { return revision }
     let next = try incrementedRevision()
+    if state == .starting {
+      pendingMutation = .transition(current.operation.operationID)
+      lease = try replacingLeaseState(.stopping, current)
+      retainsCapabilityOrTicket = false
+      retainsSecretBuffer = false
+      state = .stopping
+    }
     ownerStopped = true
     revision = next
     lastMutation = .ownerStopped
+    acceptedReadyAttestation = nil
+    pendingMutation = nil
     return next
   }
 
@@ -489,6 +561,7 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
       lastMutation =
         priorState == .quarantined || priorState == .recovering
         ? .reconcileOff : .globalOff
+      acceptedReadyAttestation = nil
       pendingMutation = nil
       return .off(revision: next)
     }
@@ -499,6 +572,7 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
     if let current = lease { lease = try replacingLeaseState(.revoked, current) }
     state = .quarantined
     lastMutation = .reconcileOff
+    acceptedReadyAttestation = nil
     pendingMutation = nil
     return .quarantined(revision: next)
   }
@@ -551,15 +625,6 @@ public struct GlobalAuthorityReducer: Equatable, Sendable {
       expiryMonotonic: lease.expiryMonotonic,
       ownerConnectionNonce: lease.ownerConnectionNonce)
   }
-  private func readyStateMatchesMode(
-    _ ready: AuthorityOSReadyState, mode: AuthorityMode
-  ) -> Bool {
-    switch (mode, ready) {
-    case (.systemProxy, .systemProxyEffective), (.tunnel, .managedTunnelConnected): true
-    default: false
-    }
-  }
-
   private func proofIsExact(_ proof: GlobalOffProof) -> Bool {
     guard proof.leaseReleased, proof.capabilityOrTicketCleared,
       proof.secretBufferCleared, proof.ownerEndpointCleared,

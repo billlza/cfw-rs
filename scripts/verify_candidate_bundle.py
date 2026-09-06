@@ -17,17 +17,35 @@ from typing import Any
 
 if __package__:
     from .hash_artifact import build_manifest
-    from .release_build_identity import bundle_build_identity
+    from .hash_native_build_inputs import build_digest as native_build_digest
+    from .release_build_identity import (
+        CandidateBundleContext,
+        candidate_bundle_verification_paths,
+    )
+    from .repository_source_identity import (
+        SourceIdentityError,
+        current_identity as repository_source_identity,
+    )
 else:
     from hash_artifact import build_manifest
-    from release_build_identity import bundle_build_identity
+    from hash_native_build_inputs import build_digest as native_build_digest
+    from release_build_identity import (
+        CandidateBundleContext,
+        candidate_bundle_verification_paths,
+    )
+    from repository_source_identity import (
+        SourceIdentityError,
+        current_identity as repository_source_identity,
+    )
 
 
-EXPECTED_APP_NAME = "Clash for Mac.app"
 EXPECTED_VERSION = "0.4.0"
 EXPECTED_APP_ID = "com.bill.clashformac"
 EXPECTED_AGENT_ID = "com.bill.clashformac.proxy-agent"
 EXPECTED_EXTENSION_ID = "com.bill.clashformac.packet-tunnel"
+EXPECTED_EXTENSION_WRAPPER = f"{EXPECTED_EXTENSION_ID}.systemextension"
+EXPECTED_EXTENSION_EXECUTABLE = "CFWPacketTunnel"
+EXPECTED_AUTHORITY_ID = "com.bill.clashformac.global-authority"
 EXPECTED_TEAM_ID = "YKUPL7Z869"
 EXPECTED_AGENT_KEYCHAIN_GROUP = f"{EXPECTED_TEAM_ID}.{EXPECTED_AGENT_ID}"
 EXPECTED_CREDENTIAL_KEYCHAIN_GROUP = f"{EXPECTED_TEAM_ID}.{EXPECTED_APP_ID}.credentials"
@@ -79,8 +97,54 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def current_native_build_metadata(repository: Path) -> dict[str, str]:
+    manifest_path = (
+        repository / "target/native-dependencies/Libbox.xcframework.manifest.json"
+    )
+    require_regular_file(manifest_path)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CandidateError(f"cannot parse current Libbox manifest: {error}") from error
+    tree_digest = manifest.get("sha256")
+    if (
+        manifest.get("algorithm") != "sha256-tree-v1"
+        or not isinstance(tree_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", tree_digest)
+    ):
+        raise CandidateError("current Libbox manifest has no valid tree identity")
+    try:
+        source_identity = repository_source_identity(repository)
+    except SourceIdentityError as error:
+        raise CandidateError(f"cannot derive current release source identity: {error}") from error
+    return {
+        "libboxManifestSha256": sha256(manifest_path),
+        "libboxTreeSha256": tree_digest,
+        "nativeSourceSha256": native_build_digest(repository),
+        **source_identity,
+    }
+
+
+def verify_native_manifest_metadata(
+    metadata: Any,
+    manifest_path: Path,
+    expected_build_number: str,
+    current_metadata: dict[str, str],
+) -> None:
+    if not isinstance(metadata, dict) or metadata.get("buildNumber") != expected_build_number:
+        raise CandidateError(f"artifact manifest build number mismatch: {manifest_path}")
+    for key, expected in current_metadata.items():
+        if metadata.get(key) != expected:
+            raise CandidateError(
+                f"artifact manifest {key} is not bound to current inputs: {manifest_path}"
+            )
+
+
 def verify_embedded_tree(
-    embedded: Path, manifest_path: Path, expected_build_number: str
+    embedded: Path,
+    manifest_path: Path,
+    expected_build_number: str,
+    current_metadata: dict[str, str] | None = None,
 ) -> None:
     require_real_directory(embedded)
     require_regular_file(manifest_path)
@@ -91,8 +155,13 @@ def verify_embedded_tree(
     if not isinstance(expected, dict) or expected.get("algorithm") != "sha256-tree-v1":
         raise CandidateError(f"unsupported artifact manifest: {manifest_path}")
     metadata = expected.get("metadata")
-    if not isinstance(metadata, dict) or metadata.get("buildNumber") != expected_build_number:
-        raise CandidateError(f"artifact manifest build number mismatch: {manifest_path}")
+    if current_metadata is None:
+        if not isinstance(metadata, dict) or metadata.get("buildNumber") != expected_build_number:
+            raise CandidateError(f"artifact manifest build number mismatch: {manifest_path}")
+    else:
+        verify_native_manifest_metadata(
+            metadata, manifest_path, expected_build_number, current_metadata
+        )
     actual = build_manifest(embedded)
     if expected.get("root") != embedded.name:
         raise CandidateError(f"artifact manifest root differs from {embedded.name}")
@@ -100,6 +169,45 @@ def verify_embedded_tree(
         raise CandidateError(f"embedded artifact tree digest mismatch: {embedded}")
     if expected.get("entries") != actual.get("entries"):
         raise CandidateError(f"embedded artifact entries differ from manifest: {embedded}")
+
+
+def verify_embedded_file(
+    embedded: Path,
+    manifest_path: Path,
+    expected_build_number: str,
+    current_metadata: dict[str, str] | None = None,
+) -> None:
+    require_regular_file(embedded)
+    require_regular_file(manifest_path)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CandidateError(f"cannot parse artifact manifest {manifest_path}: {error}") from error
+    metadata = manifest.get("metadata")
+    if current_metadata is None:
+        if not isinstance(metadata, dict) or metadata.get("buildNumber") != expected_build_number:
+            raise CandidateError(f"artifact manifest build number mismatch: {manifest_path}")
+    else:
+        verify_native_manifest_metadata(
+            metadata, manifest_path, expected_build_number, current_metadata
+        )
+    expected_entry = {
+        "path": embedded.name,
+        "sha256": sha256(embedded),
+        "size": embedded.stat().st_size,
+        "type": "file",
+    }
+    encoded = json.dumps(
+        expected_entry, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ) + "\n"
+    expected_tree = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    if (
+        manifest.get("algorithm") != "sha256-tree-v1"
+        or manifest.get("root") != embedded.name
+        or manifest.get("sha256") != expected_tree
+        or manifest.get("entries") != [expected_entry]
+    ):
+        raise CandidateError(f"embedded file differs from artifact manifest: {embedded}")
 
 
 def command_output(arguments: list[str]) -> str:
@@ -112,7 +220,128 @@ def command_output(arguments: list[str]) -> str:
     return result.stdout
 
 
+def verify_unsigned_host_skeleton(app: Path) -> None:
+    """Prove that Tauri did not apply an outer application signature."""
+
+    outer_signature = app / "Contents/_CodeSignature"
+    if os.path.lexists(outer_signature):
+        raise CandidateError(
+            f"unsigned Host skeleton contains an outer code-resource seal: {outer_signature}"
+        )
+
+    codesign_environment = dict(os.environ)
+    codesign_environment.update({"LANG": "C", "LC_ALL": "C"})
+    display = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--verbose=4", str(app)],
+        check=False,
+        capture_output=True,
+        env=codesign_environment,
+        text=True,
+    )
+    if display.returncode != 0:
+        raise CandidateError(
+            "cannot inspect the unsigned Host linker signature: "
+            f"{display.stderr.strip()}"
+        )
+    if display.stdout:
+        raise CandidateError("codesign display unexpectedly wrote Host details to stdout")
+    details = display.stderr
+    detail_lines = details.splitlines()
+    if any(line.lower().startswith("warning:") for line in detail_lines):
+        raise CandidateError("codesign emitted a warning while inspecting the Host signature")
+    lines = set(detail_lines)
+    required_lines = {
+        "Signature=adhoc",
+        "TeamIdentifier=not set",
+        "Info.plist=not bound",
+        "Sealed Resources=none",
+    }
+    missing_lines = sorted(required_lines - lines)
+    if missing_lines:
+        raise CandidateError(
+            "unsigned Host linker signature is incomplete: " + ", ".join(missing_lines)
+        )
+    flag_lines = [line for line in detail_lines if line.startswith("CodeDirectory ")]
+    if len(flag_lines) != 1:
+        raise CandidateError("unsigned Host must expose exactly one CodeDirectory description")
+    flag_match = re.search(r"\bflags=0x[0-9a-fA-F]+\(([^)]*)\)", flag_lines[0])
+    if flag_match is None or set(flag_match.group(1).split(",")) != {
+        "adhoc",
+        "linker-signed",
+    }:
+        raise CandidateError("Host skeleton is not exclusively linker ad-hoc signed")
+    if any(line.startswith(("Authority=", "Timestamp=")) for line in lines):
+        raise CandidateError("unsigned Host skeleton contains distribution signature metadata")
+
+    entitlements = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", str(app)],
+        check=False,
+        capture_output=True,
+        env=codesign_environment,
+        text=True,
+    )
+    if entitlements.returncode != 0:
+        raise CandidateError(
+            "cannot inspect unsigned Host entitlements: "
+            f"{entitlements.stderr.strip()}"
+        )
+    if entitlements.stdout:
+        raise CandidateError("unsigned Host linker signature unexpectedly contains entitlements")
+    if "warning:" in entitlements.stderr.lower():
+        raise CandidateError(
+            f"codesign emitted a warning while inspecting Host entitlements: {entitlements.stderr.strip()}"
+        )
+
+    linker_verification = subprocess.run(
+        [
+            "/usr/bin/codesign",
+            "--verify",
+            "--strict",
+            "--ignore-resources",
+            str(app),
+        ],
+        check=False,
+        capture_output=True,
+        env=codesign_environment,
+        text=True,
+    )
+    if linker_verification.returncode != 0:
+        raise CandidateError(
+            "unsigned Host linker CodeDirectory is invalid: "
+            f"{linker_verification.stderr.strip()}"
+        )
+    if linker_verification.stdout or linker_verification.stderr:
+        raise CandidateError(
+            "codesign emitted an unexpected diagnostic while verifying the Host linker signature"
+        )
+
+    verification = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", str(app)],
+        check=False,
+        capture_output=True,
+        env=codesign_environment,
+        text=True,
+    )
+    expected_unsealed_error = (
+        f"{app}: code has no resources but signature indicates they must be present"
+    )
+    if (
+        verification.returncode != 1
+        or verification.stdout
+        or verification.stderr.strip() != expected_unsealed_error
+    ):
+        raise CandidateError(
+            "unsigned Host does not have the exact unsealed linker-signature state: "
+            f"{verification.stderr.strip()}"
+        )
+
+
 def verify_macho(path: Path) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode != 0o755:
+        raise CandidateError(
+            f"Mach-O mode must be 0755 for distribution: {path} ({mode:04o})"
+        )
     architectures = command_output(["lipo", "-archs", str(path)]).strip()
     if architectures != "arm64":
         raise CandidateError(f"Mach-O must be thin arm64: {path} ({architectures})")
@@ -140,6 +369,11 @@ def enumerate_bundle(root: Path) -> list[Path]:
 
     for directory, names, filenames in os.walk(root, followlinks=False, onerror=walk_error):
         directory_path = Path(directory)
+        directory_mode = stat.S_IMODE(directory_path.lstat().st_mode)
+        if directory_mode != 0o755:
+            raise CandidateError(
+                f"bundle directory mode must be 0755: {directory_path} ({directory_mode:04o})"
+            )
         for name in names + filenames:
             path = directory_path / name
             metadata = path.lstat()
@@ -152,6 +386,11 @@ def enumerate_bundle(root: Path) -> list[Path]:
             elif stat.S_ISREG(metadata.st_mode):
                 if metadata.st_nlink != 1:
                     raise CandidateError(f"bundle file has multiple hard links: {path}")
+                file_mode = stat.S_IMODE(metadata.st_mode)
+                if file_mode not in {0o644, 0o755}:
+                    raise CandidateError(
+                        f"bundle file mode must be 0644 or 0755: {path} ({file_mode:04o})"
+                    )
                 files.append(path)
             elif not stat.S_ISDIR(metadata.st_mode):
                 raise CandidateError(f"unsupported special file in bundle: {path}")
@@ -166,24 +405,26 @@ def classify_binary(path: Path) -> bool:
     return macho
 
 
-def verify_candidate(repository: Path, app: Path, native_products: Path) -> None:
-    if not app.is_absolute():
-        raise CandidateError("application path must be absolute")
-    require_real_directory(app)
-    if app.name != EXPECTED_APP_NAME:
-        raise CandidateError(f"unexpected application name: {app.name}")
-    app = app.resolve(strict=True)
-    if not native_products.is_absolute():
-        raise CandidateError("native products root must be absolute")
-    require_real_directory(native_products)
-    native_products = native_products.resolve(strict=True)
-    candidate_root = (repository / "target/candidates/0.4.0").resolve(strict=True)
+def verify_candidate(
+    repository: Path,
+    app: str | Path,
+    native_products: str | Path,
+    *,
+    context: CandidateBundleContext,
+) -> None:
     try:
-        relative_native = native_products.relative_to(candidate_root)
+        verification_paths = candidate_bundle_verification_paths(
+            repository,
+            str(app),
+            str(native_products),
+            context,
+        )
     except ValueError as error:
-        raise CandidateError("native products root is not candidate-specific") from error
-    if native_products.name != "native-products" or len(relative_native.parts) < 2:
-        raise CandidateError("native products root has an invalid candidate layout")
+        raise CandidateError(str(error)) from error
+    app = verification_paths.app
+    native_products = verification_paths.native_products
+    build_identity = verification_paths.build_identity
+    native_metadata = current_native_build_metadata(repository)
 
     tauri = json.loads(
         (repository / "apps/cfw-tauri-shell/tauri.conf.json").read_text(encoding="utf-8")
@@ -193,27 +434,57 @@ def verify_candidate(repository: Path, app: Path, native_products: Path) -> None
 
     contents = app / "Contents"
     info_path = contents / "Info.plist"
-    extension = contents / "Library/SystemExtensions/CFWPacketTunnel.systemextension"
+    extension = contents / f"Library/SystemExtensions/{EXPECTED_EXTENSION_WRAPPER}"
     agent = contents / "Library/LoginItems/CFWProxyAgent.app"
     bridge = contents / "Frameworks/CFWNativeBridge.framework"
+    authority = contents / "Library/HelperTools/CFWGlobalAuthority"
     tombstone = contents / "Library/HelperTools/cfw-helper-tombstone"
+    authority_plist = (
+        contents / "Library/LaunchDaemons/com.bill.clashformac.global-authority.plist"
+    )
     tombstone_plist = contents / "Library/LaunchDaemons/com.bill.clashformac.helper.plist"
     proxy_agent_plist = contents / "Library/LaunchAgents/com.bill.clashformac.proxy-agent.plist"
     main_binary = contents / "MacOS/clash-for-mac"
+    extension_binary = extension / f"Contents/MacOS/{EXPECTED_EXTENSION_EXECUTABLE}"
     for directory in (contents, extension, agent, bridge):
         require_real_directory(directory)
-    for file_path in (info_path, tombstone, tombstone_plist, proxy_agent_plist, main_binary):
+    for file_path in (
+        info_path,
+        authority,
+        tombstone,
+        authority_plist,
+        tombstone_plist,
+        proxy_agent_plist,
+        main_binary,
+        extension_binary,
+    ):
         require_regular_file(file_path)
+    if context is CandidateBundleContext.UNSIGNED_HOST:
+        verify_unsigned_host_skeleton(app)
+
+    system_extensions_root = contents / "Library/SystemExtensions"
+    require_real_directory(system_extensions_root)
+    system_extension_names = {path.name for path in system_extensions_root.iterdir()}
+    if system_extension_names != {EXPECTED_EXTENSION_WRAPPER}:
+        raise CandidateError(
+            "SystemExtensions does not contain exactly the bundle-identifier-named Packet Tunnel wrapper"
+        )
+
+    helper_names = {path.name for path in (contents / "Library/HelperTools").iterdir()}
+    if helper_names != {"CFWGlobalAuthority", "cfw-helper-tombstone"}:
+        raise CandidateError("HelperTools does not match the closed release layout")
+    daemon_names = {path.name for path in (contents / "Library/LaunchDaemons").iterdir()}
+    if daemon_names != {
+        "com.bill.clashformac.global-authority.plist",
+        "com.bill.clashformac.helper.plist",
+    }:
+        raise CandidateError("LaunchDaemons does not match the closed release layout")
 
     app_info = read_plist(info_path)
     extension_info_path = extension / "Contents/Info.plist"
     agent_info_path = agent / "Contents/Info.plist"
     extension_info = read_plist(extension_info_path)
     agent_info = read_plist(agent_info_path)
-    try:
-        build_identity = bundle_build_identity(app)
-    except ValueError as error:
-        raise CandidateError(str(error)) from error
     for plist, path, identifier, package_type in (
         (app_info, info_path, EXPECTED_APP_ID, "APPL"),
         (extension_info, extension_info_path, EXPECTED_EXTENSION_ID, "SYSX"),
@@ -231,6 +502,12 @@ def verify_candidate(repository: Path, app: Path, native_products: Path) -> None
         network_extension,
         "NEMachServiceName",
         f"{EXPECTED_TEAM_ID}.{EXPECTED_EXTENSION_ID}",
+        extension_info_path,
+    )
+    require_plist_value(
+        extension_info,
+        "CFBundleExecutable",
+        EXPECTED_EXTENSION_EXECUTABLE,
         extension_info_path,
     )
     provider_classes = network_extension.get("NEProviderClasses")
@@ -260,13 +537,20 @@ def verify_candidate(repository: Path, app: Path, native_products: Path) -> None
     for embedded, staged_name in (
         (bridge, "CFWNativeBridge.framework"),
         (agent, "CFWProxyAgent.app"),
-        (extension, "CFWPacketTunnel.systemextension"),
+        (extension, EXPECTED_EXTENSION_WRAPPER),
     ):
         verify_embedded_tree(
             embedded,
             native_products / f"{staged_name}.manifest.json",
             build_identity.build_version,
+            native_metadata,
         )
+    verify_embedded_file(
+        authority,
+        native_products / "CFWGlobalAuthority.manifest.json",
+        build_identity.build_version,
+        native_metadata,
+    )
     staged_tombstone = native_products / "CFWLegacyTombstone/cfw-helper-tombstone"
     require_regular_file(staged_tombstone)
     if sha256(tombstone) != sha256(staged_tombstone):
@@ -284,6 +568,34 @@ def verify_candidate(repository: Path, app: Path, native_products: Path) -> None
     require_regular_file(reviewed_plist)
     if tombstone_plist.read_bytes() != reviewed_plist.read_bytes():
         raise CandidateError("embedded tombstone launchd plist differs from reviewed source")
+    reviewed_authority_plist = (
+        repository / "native/macos/Config/com.bill.clashformac.global-authority.plist"
+    )
+    require_regular_file(reviewed_authority_plist)
+    if authority_plist.read_bytes() != reviewed_authority_plist.read_bytes():
+        raise CandidateError("embedded Global Authority plist differs from reviewed source")
+    authority_launchd = read_plist(authority_plist)
+    require_plist_value(authority_launchd, "Label", EXPECTED_AUTHORITY_ID, authority_plist)
+    require_plist_value(
+        authority_launchd,
+        "BundleProgram",
+        "Contents/Library/HelperTools/CFWGlobalAuthority",
+        authority_plist,
+    )
+    require_plist_value(authority_launchd, "UserName", "root", authority_plist)
+    require_plist_value(
+        authority_launchd,
+        "AssociatedBundleIdentifiers",
+        [EXPECTED_APP_ID],
+        authority_plist,
+    )
+    expected_authority_services = {
+        f"{EXPECTED_TEAM_ID}.group.com.bill.clashformac.global-authority.host": True,
+        f"{EXPECTED_TEAM_ID}.group.com.bill.clashformac.global-authority.proxy-agent": True,
+        f"{EXPECTED_TEAM_ID}.group.com.bill.clashformac.global-authority.provider": True,
+    }
+    if authority_launchd.get("MachServices") != expected_authority_services:
+        raise CandidateError("Global Authority launchd MachServices contract mismatch")
     reviewed_agent_plist = (
         repository / "native/macos/Config/com.bill.clashformac.proxy-agent.plist"
     )
@@ -333,12 +645,22 @@ def verify_candidate(repository: Path, app: Path, native_products: Path) -> None
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("app", type=Path)
-    parser.add_argument("--native-products-root", required=True, type=Path)
+    parser.add_argument("app")
+    parser.add_argument("--native-products-root", required=True)
+    parser.add_argument(
+        "--context",
+        required=True,
+        choices=tuple(context.value for context in CandidateBundleContext),
+    )
     arguments = parser.parse_args()
     repository = Path(__file__).resolve().parent.parent
     try:
-        verify_candidate(repository, arguments.app, arguments.native_products_root)
+        verify_candidate(
+            repository,
+            arguments.app,
+            arguments.native_products_root,
+            context=CandidateBundleContext(arguments.context),
+        )
     except (CandidateError, FileNotFoundError, json.JSONDecodeError, OSError) as error:
         raise SystemExit(f"error: candidate bundle verification failed: {error}") from error
 

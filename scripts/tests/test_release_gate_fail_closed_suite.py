@@ -3,7 +3,8 @@
 This module consumes the shipped release verifiers as black boxes and drives
 them, as a single integrated suite, over hermetic fixtures. It intentionally
 does not re-cover the per-verifier unit tests (``test_verify_*.py``,
-``test_evidence_manifest.py``, ``test_updater_key_release_blocker.py``); instead
+``test_evidence_manifest.py``, ``test_release_secret_material_blocker.py``);
+instead
 it fills the integration/example gaps this task names:
 
 * migration/build-boundary scans reject a legacy root data plane, a direct
@@ -35,8 +36,7 @@ Validates: Requirements 1.2, 4.1, 5.1, 6.5, 7.3, 7.5, 8.1
 from __future__ import annotations
 
 import builtins
-import copy
-import hashlib
+import json
 import shutil
 import tempfile
 import unittest
@@ -46,13 +46,16 @@ from scripts.evidence_manifest import (
     EvidenceManifestError,
     validate_evidence_manifest,
 )
-from scripts.updater_key_release_blocker import (
-    UpdaterKeyReleaseBlock,
+from scripts.release_secret_material_blocker import (
+    SecretMaterialReleaseBlock,
     evaluate_workspace,
     format_response,
 )
 from scripts.verify_ci_no_masking import CiPolicyError, audit_workflow
-from scripts.verify_pinned_build_inputs import PinnedInputError, verify as verify_pinned
+from scripts.verify_pinned_build_inputs import (
+    PinnedInputError,
+    verify_source_contract as verify_pinned,
+)
 from scripts.verify_production_boundary_removal import (
     ProductionBoundaryViolation,
     scan_source,
@@ -78,7 +81,7 @@ LEGACY_CONSTRUCTS: dict[str, str] = {
     "provider-local lease authority": "let s = CrossProcessEngineLeaseStore(productionPort: 49_373)\n",
     "insecure authority override": "if allowInsecureAuthority { engine.start() }\n",
     "authority-error data-plane fallback": (
-        "do { GlobalAuthorityReleaseGate.requireStartAuthorization() } "
+        "do { authority.redeem(ticket) } "
         "catch { engine.start() }\n"
     ),
 }
@@ -136,10 +139,14 @@ _AUTHORITY_GATE_INPUTS = (
     "native/macos/Package.swift",
     "native/macos/CFWNative.xcodeproj/project.pbxproj",
     "scripts/build_native_products.sh",
+    "native/macos/Sources/CFWNativeBridge/NativeBridgeABI.swift",
     "native/macos/Sources/CFWNativeBridge/NativeEngineOperations.swift",
     "native/macos/Sources/CFWAppleNetwork/HostBridge.swift",
+    "native/macos/Sources/CFWProxyAgent/ProxyAgentExecutable.swift",
+    "native/macos/Sources/CFWProxyAgent/ProxyAuthorityOwnership.swift",
     "native/macos/Sources/CFWProxyAgent/ProxyAgentService.swift",
     "native/macos/Sources/CFWPacketTunnel/PacketTunnelProvider.swift",
+    "native/macos/Sources/CFWPacketTunnel/TunnelTicketStartCoordinator.swift",
     "native/macos/Sources/CFWSharedProtocol/GlobalAuthorityReleaseGate.swift",
     "apps/cfw-tauri-shell/build.rs",
 )
@@ -166,7 +173,7 @@ class AuthorityGateWholeTreeIntegration(unittest.TestCase):
             provider.write_text(
                 provider.read_text(encoding="utf-8")
                 + "\nfunc cfwInjectedFallback() {\n"
-                "  do { GlobalAuthorityReleaseGate.requireStartAuthorization() }\n"
+                "  do { authority.redeem(ticket) }\n"
                 "  catch { engine.start() }\n"
                 "}\n",
                 encoding="utf-8",
@@ -195,18 +202,170 @@ _PINNED_INPUTS = (
     "scripts/dependency_pins.env",
     "native/macos/Dependencies.lock.json",
     "scripts/build_libbox.sh",
+    "scripts/libbox_source_contract.sh",
+    "scripts/libbox_module_cache_contract.bash",
     "scripts/build_native_products.sh",
     "scripts/build_unsigned_candidate.sh",
-    "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch",
-    "native/macos/patches/sing-box-v1.13.14-raw-packet-tun.patch",
-    "native/macos/patches/sing-box-v1.13.14-dns-failover.patch",
+    "scripts/build_signed_candidate.sh",
+    "scripts/gatekeeper_assessment.py",
+    "scripts/notarization_transaction.py",
+    "scripts/dmg_notarization_transaction.py",
+    "scripts/release_artifact_set.py",
+    "scripts/repository_source_identity.py",
+    "scripts/evidence_manifest.py",
+    "scripts/harness/physical_collector_trust_policy.json",
+    "scripts/harness/physical_evidence_aggregator.py",
+    "scripts/harness/physical_machine_identity.py",
+    "scripts/harness/physical_collector_request.py",
+    "scripts/harness/raw_artifacts.py",
+    "scripts/production_release_evidence.py",
+    "scripts/publication/final_candidate.py",
+    "scripts/publication/orchestrator.py",
+    "scripts/publication/sealed_closure.py",
+    "scripts/publication/sealed_manifest.py",
+    "scripts/release_capability_inventory.json",
+    "scripts/release_capability_inventory.py",
+    "scripts/sealed_evidence_manifest.py",
+    "scripts/validated_candidate_evidence.py",
+    "scripts/verify_remote_release.py",
+    "scripts/make_dmg.sh",
+    "scripts/make_updater_manifest.sh",
+    "scripts/release_publication_gate.sh",
+    "scripts/release_workspace_secret_gate.sh",
+    "scripts/release_secret_material_blocker.py",
+    "scripts/release_toolchain_contract.sh",
+    "scripts/updater_signing_launcher.py",
+    "scripts/validate_updater_archive.py",
+    "CHANGELOG.md",
+    "scripts/validate_notary_archive.py",
+    "scripts/tauri_host_skeleton.sh",
+    "scripts/verify_artifact_manifest.py",
+    "scripts/verify_candidate_bundle.py",
+    "scripts/verify_candidate_bundle.sh",
+    "scripts/verify_release_app.sh",
+    "scripts/bootstrap_release_toolchain.sh",
+    "scripts/install_pinned_tauri_cli.sh",
+    "scripts/tauri_cargo_cache_contract.py",
+    "scripts/tauri-cli-2.11.4-spin-0.9.9.patch",
+    "scripts/xcodegen-2.46.0-installed-resources.patch",
+    "crates/cfw-release-verifier/src/main.rs",
+    ".github/workflows/ci.yml",
+    "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch",
+    "native/macos/patches/sing-box-v1.13.15-raw-packet-tun.patch",
+    "native/macos/patches/sing-box-v1.13.15-dns-failover.patch",
+    "native/macos/patches/sing-box-v1.13.15-endpoint-conflict.patch",
+    # Sources the pinned libbox build tags are bound to: the controller block and
+    # the projection that injects it require `with_clash_api` in the artifact.
+    "crates/cfw-singbox-config/src/controller.rs",
+    "crates/cfw-singbox-config/src/projection.rs",
 )
-_SECURITY_PATCH = "native/macos/patches/sing-box-v1.13.14-security-dependencies.patch"
+_SECURITY_PATCH = "native/macos/patches/sing-box-v1.13.15-security-dependencies.patch"
 _PINS_ENV = "scripts/dependency_pins.env"
 
 
 def _copy_pinned_tree(destination: Path) -> Path:
-    for relative in _PINNED_INPUTS:
+    manifest = json.loads(
+        (REPO_ROOT / "scripts/pinned_build_inputs.json").read_text(encoding="utf-8")
+    )
+    lan_peer = manifest.get("packetLanPeer")
+    if not isinstance(lan_peer, dict):
+        raise AssertionError("shipped packet LAN peer closure is unavailable")
+    lan_artifact = lan_peer.get("artifact")
+    lan_artifact_path = (
+        lan_artifact.get("path") if isinstance(lan_artifact, dict) else None
+    )
+    if not isinstance(lan_artifact_path, str):
+        raise AssertionError("shipped packet LAN peer artifact path is malformed")
+    artifact_bindings = manifest.get("artifactBindings")
+    if not isinstance(artifact_bindings, dict):
+        raise AssertionError("shipped artifact-binding closure is unavailable")
+    fixture_inputs = tuple(
+        relative
+        for relative in dict.fromkeys((*_PINNED_INPUTS, *sorted(artifact_bindings)))
+        if relative != lan_artifact_path
+    )
+    for relative in fixture_inputs:
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise AssertionError("shipped artifact-binding path is not repository-relative")
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    runtime_tools = manifest.get("runtimeTools")
+    if not isinstance(runtime_tools, dict):
+        raise AssertionError("shipped runtime-tool source closure is unavailable")
+    for tool_name, tool in runtime_tools.items():
+        if not isinstance(tool_name, str) or not isinstance(tool, dict):
+            raise AssertionError("shipped runtime-tool entry is malformed")
+        source_binding = tool.get("sourceBinding")
+        if not isinstance(source_binding, dict):
+            raise AssertionError(f"shipped runtime-tool {tool_name} source binding is malformed")
+        relative = source_binding.get("path")
+        if not isinstance(relative, str):
+            raise AssertionError(f"shipped runtime-tool {tool_name} source path is malformed")
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+    lan_source = lan_peer.get("source")
+    if not isinstance(lan_source, dict):
+        raise AssertionError("shipped packet LAN peer source closure is malformed")
+    lan_root = lan_source.get("root")
+    lan_files = lan_source.get("files")
+    if not isinstance(lan_root, str) or not isinstance(lan_files, list):
+        raise AssertionError("shipped packet LAN peer source members are malformed")
+    lan_paths: set[str] = set()
+    for entry in lan_files:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            raise AssertionError("shipped packet LAN peer source entry is malformed")
+        lan_paths.add(f"{lan_root}/{entry['path']}")
+    for contract_name in ("buildScript", "verifyScript"):
+        contract = lan_peer.get(contract_name)
+        if not isinstance(contract, dict) or not isinstance(contract.get("path"), str):
+            raise AssertionError(f"shipped packet LAN peer {contract_name} is malformed")
+        lan_paths.add(contract["path"])
+    for relative in sorted(lan_paths):
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+    endpoint = manifest.get("packetEvidenceEndpoint")
+    source_files = endpoint.get("sourceFiles") if isinstance(endpoint, dict) else None
+    if not isinstance(source_files, list) or not source_files:
+        raise AssertionError("shipped packet endpoint source closure is unavailable")
+    for entry in source_files:
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+            raise AssertionError("shipped packet endpoint source entry is malformed")
+        relative = entry["path"]
+        if not isinstance(relative, str):
+            raise AssertionError("shipped packet endpoint source path is malformed")
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    collector = manifest.get("physicalCollectorModule")
+    if not isinstance(collector, dict):
+        raise AssertionError("shipped physical collector module binding is unavailable")
+    for key in ("goModPath", "goSumPath"):
+        relative = collector.get(key)
+        if not isinstance(relative, str):
+            raise AssertionError(f"shipped physical collector {key} is malformed")
+        source = REPO_ROOT / relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    manifest_paths: set[str] = set()
+    for section in ("buildScripts", "artifactBindings"):
+        entries = manifest.get(section)
+        if not isinstance(entries, dict):
+            raise AssertionError(f"shipped pinned-input {section} is malformed")
+        if any(not isinstance(relative, str) for relative in entries):
+            raise AssertionError(f"shipped pinned-input {section} path is malformed")
+        manifest_paths.update(entries)
+    for relative in sorted(manifest_paths):
         source = REPO_ROOT / relative
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -215,9 +374,11 @@ def _copy_pinned_tree(destination: Path) -> Path:
 
 
 class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
-    def test_copied_shipped_pins_pass(self) -> None:
+    def test_copied_shipped_source_pins_pass_without_generated_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            verify_pinned(_copy_pinned_tree(Path(tmp)))
+            root = _copy_pinned_tree(Path(tmp))
+            self.assertFalse((root / "target/packet-lan-peer-linux-arm64").exists())
+            verify_pinned(root)
 
     def test_drifted_toolchain_version_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -225,7 +386,7 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
             env_path = root / _PINS_ENV
             env_path.write_text(
                 env_path.read_text(encoding="utf-8").replace(
-                    "GO_VERSION=1.26.5", "GO_VERSION=1.26.4"
+                    "GO_VERSION=1.26.6", "GO_VERSION=1.26.4"
                 ),
                 encoding="utf-8",
             )
@@ -244,7 +405,26 @@ class PinnedToolchainAndPatchMismatchRejected(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = _copy_pinned_tree(Path(tmp))
             (root / _SECURITY_PATCH).unlink()
-            with self.assertRaisesRegex(PinnedInputError, "missing or not regular"):
+            with self.assertRaisesRegex(
+                PinnedInputError, "missing, a symlink, or has an unsafe path"
+            ):
+                verify_pinned(root)
+
+    def test_dropped_engine_start_path_build_tag_fails_closed(self) -> None:
+        # An artifact built without `with_clash_api` cannot start the engine at
+        # all: the patched tree enables the clash API whenever a platform log
+        # writer is installed and the daemon always installs one, so the stub
+        # constructor fails every `box.New`. Dropping the tag from the shipped
+        # pins must therefore be rejected statically.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _copy_pinned_tree(Path(tmp))
+            for relative in (_PINS_ENV, "scripts/pinned_build_inputs.json"):
+                path = root / relative
+                path.write_text(
+                    path.read_text(encoding="utf-8").replace(",with_clash_api", ""),
+                    encoding="utf-8",
+                )
+            with self.assertRaisesRegex(PinnedInputError, "with_clash_api"):
                 verify_pinned(root)
 
 
@@ -358,9 +538,11 @@ jobs:
 _PINS = "\n".join(
     [
         "RUST_VERSION=1.97.1",
+        "PYTHON_VERSION=3.14.6",
         "NODE_VERSION=24.18.0",
         "XCODE_VERSION=26.6",
         "XCODE_BUILD_VERSION=17F113",
+        "MACOS_DEPLOYMENT_TARGET=15.0",
     ]
 )
 
@@ -451,7 +633,7 @@ class UpdaterKeyPathNameOnlyBlocking(unittest.TestCase):
                 self.assertEqual(evaluate_workspace(root), [])
 
     def test_unavailable_workspace_root_fails_closed(self) -> None:
-        with self.assertRaises(UpdaterKeyReleaseBlock):
+        with self.assertRaises(SecretMaterialReleaseBlock):
             evaluate_workspace("/nonexistent/release/workspace/root")
 
 

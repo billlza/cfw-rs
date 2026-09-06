@@ -16,6 +16,135 @@
   gone and legacy System Proxy and DNS state has been explicitly verified.
   Ambiguous proxy or DNS ownership requires user review instead of an
   automatic overwrite.
+- Add a release-only, signed-Host maintenance transaction that proves global
+  Off, unregisters ProxyAgent before GlobalAuthority, preserves the inactive
+  one-way legacy tombstone, atomically installs the fixed candidate, and then
+  registers GlobalAuthority before ProxyAgent. Append-only recovery events bind
+  every step to an unchanged Clash for Windows process and network projection.
+  One inode-bound outer lock serializes service and bundle mutations, and
+  independent fixed journals cover historical validation migrations and the
+  40019→40041 and 40041→40043 GA installations without overwriting earlier
+  evidence. The
+  canonical allocation ledger prevents a retired validation build or its
+  reserved final companion from being reused by a later source closure. The
+  validation-only compatibility island can prove the already-installed 40019
+  ProxyAgent schema 5 and GlobalAuthority v1.0 Off without weakening the
+  current schema 6 / Authority v1.1 runtime path. A lost unregister receipt is
+  recovered only after an atomically published, fsynced current-only intent;
+  its distinct proof profile records the exact switch from installed-service
+  absence to a current Authority v1.1 Off proof and survives interruption after
+  the current Authority is registered.
+- Retire notarized validation build 40026 and its unbuilt companion 40027 after
+  installation admission exposed an ambient Swift/toolchain binding mismatch.
+  Tool identity and actual lane execution now share one closed environment:
+  the effective account selects a fixed Rust root, Python is exact-version
+  pinned, Apple tools come from one validated Developer directory, and the
+  Python/Rust/cargo helper/system shell executables are content-bound. New lane
+  journals remain isolated until the start/end tool identities agree, and lane
+  output is terminated at its fixed streaming bound. Hosted build-40000 CI may
+  select only the exact SHA-pinned setup-python executable; production paths
+  reject that unsigned-only input. Publication source enumeration uses fixed
+  system Git with user/system configuration, unsafe local excludes, fsmonitor,
+  and untracked-cache influence removed. Build 40028 and its unbuilt companion
+  40029 were then retired before candidate construction because the P0
+  source-gate v2 layout could not preserve retries while identifying one
+  authoritative success without ambiguity or overwriting failure evidence.
+  The corrected append-only source-gate contract initially selected 40030/40031.
+  Policy retired 40030 unbuilt. Build 40031 then completed candidate freeze but
+  was retired after its private signing attempt failed before canonical signed
+  output. Build 40032 then completed candidate freeze and signed five nested
+  products in one private attempt, but a split verifier path contract rejected
+  the transaction root before Host signing and canonical output. Build 40032
+  is also retired. Build 40033 then completed candidate freeze and signed the
+  same five nested product roles, but the private helper's process-wide umask
+  made `codesign` create non-distributable `0600` resource envelopes. The
+  verifier rejected those bytes before Host signing or canonical output, so
+  build 40033 is retired as well. Bundle-writing codesign now uses one scoped
+  distribution-mode subprocess while the attempt remains private, and a
+  signing failure or ambiguous signing output can no longer allocate a fresh
+  timestamped signature attempt under the same frozen build. Build 40034 then
+  completed candidate freeze and correctly signed the five nested roles plus
+  the outer Host, but a post-sign Tombstone verifier omitted the two mandatory
+  pre-sign lineage fields from its exact metadata schema. The fail-closed
+  verifier rejected the private attempt before canonical output or
+  notarization. Build 40034 is retired. One shared validator now re-derives the
+  promoted Tombstone manifest from its frozen artifact and manifest, binds it
+  to the current source and lockfile, and runs before outer Host signing as
+  well as during downstream release verification. Build 40035 then completed
+  candidate freeze and entered its single private signing attempt, but the
+  attempt terminated during complete private signed-output verification before
+  canonical output or notarization. Its durable journal does not identify a
+  narrower failing substage, so build 40035 is retired without inferring one.
+  Build 40036 then completed freeze, canonical signing, Apple notarization,
+  stapling, and Gatekeeper verification. Publication preparation exposed a
+  successful-`codesign` stderr contract mismatch and an omitted signed
+  GlobalAuthority closure entry. Correcting those tracked release inputs changes
+  the frozen product-input identity, so build 40036 is retired before install.
+  Build 40037 then completed candidate freeze and one private signing attempt.
+  The signing helper returned success and durably wrote a complete
+  transformation receipt, but a later mandatory read-only replay failed before
+  publish-ready or canonical output. Later replays passed without recovering
+  the historical nested cause, and the frozen state machine made the recorded
+  failure terminal, so build 40037 is retired before notarization. Future
+  signing transactions compile the updater verifier once per operation while
+  preserving every independent replay, and may resume only an explicitly
+  blocked post-receipt verification of the exact private work without invoking
+  the signing helper or receipt creator again.
+  Build 40038 then completed candidate freeze and one private signing attempt.
+  The helper returned success and produced a validly Developer ID-signed Host
+  plus five nested code objects, but a mandatory public-verifier replay failed
+  before the transformation receipt was written. Its journal is terminal, so
+  build 40038 is retired before canonical output or notarization. New signing
+  transactions arm one monotonic retry budget only after exact helper success:
+  a typed operational failure closes the poisoned verifier session and replays
+  the same public proof once through one fresh source-pinned session. Cleanup,
+  startup, semantic, or second operational failure remains terminal; the
+  helper, attempt, and receipt creator are never rerun. Build 40039 completed
+  freeze and canonical signing, but its original notarization outcome remains
+  unknown. Adding SOCKS5 changes the frozen product inputs, so build 40039 is
+  retired with all old bytes and receipts preserved and its Apple transaction
+  quarantined. Build 40040 then completed freeze and canonical signing, but
+  newly published `GO-2026-6354` and `GO-2026-6355` require updating
+  `golang.org/x/crypto` to `v0.56.0`. It is retired before notarization with
+  its bytes, receipts and source unchanged. The module's minimum Go version
+  is now `1.26.0`; Go `1.26.6`, Rust `1.97.1` and all other selected
+  dependencies remain unchanged. Build 40041 then completed notarization,
+  packaging and the 40019→40041 install, but GA runtime acceptance aborted
+  before any mutation: the legacy cutover preflight attributed the live Clash
+  for Windows network to the retired installation, while acceptance requires
+  that network to be preserved. The preflight now attributes legacy absence to
+  the retired installation only, and the install binds its service vocabulary
+  to the observed predecessor. Build 40041 is retired after install with its
+  bytes, receipts, seals and journals unchanged. Build 40042 was then frozen,
+  signed and notarized, but its frozen source's own local lane reproduction
+  failed on one release-tooling test that read the lane's ambient toolchain
+  selection; that test is now isolated, and 40042 is retired after
+  notarization with its bytes and receipts unchanged. Build 40043 then completed
+  signing, notarization, packaging and the 40041→40043 install. Authenticated
+  profile import exposed a native receipt that encoded the profile UUID in
+  uppercase, which the strict Rust consumer rejected and misclassified as vault
+  corruption. Receipt encoding and decoding now share the canonical audience
+  contract, and vault corruption has a distinct typed error. Build 40043 is
+  retired after install before GA runtime collection, with its original bytes,
+  seals and journals retained. Build 40044 is the only active GA successor;
+  source and CI retries before freeze do not consume additional builds.
+- Let a confirmed fresh installation proceed without an old proxy port that
+  never existed. Preparation and recovery recheck that legacy settings,
+  managed files, privileged services and network state remain absent. Upgrade
+  journals retain their original runtime kind and still require the recorded
+  endpoint; missing or unreadable old settings cannot select the fresh path.
+- Authenticate nested release-worktree managed caches through bounded,
+  descriptor-relative Git administrative control files plus an explicit
+  empty-target lifecycle receipt before excluding them from the path/name-only
+  secret scan. Stale Git records cannot be replayed by recreating a target
+  path. Release-worktree source and generated candidate roots remain scanned,
+  aliases into excluded caches fail closed, and candidate or secret bytes are
+  never opened.
+- Recover an explicitly authorized post-reboot device-number reassignment
+  through a separate immutable cache-scope receipt. The original receipt,
+  detached source, directory inodes and historical candidates remain unchanged;
+  replacement directories, inconsistent remapping and partial records fail
+  closed.
 
 ### Network architecture
 
@@ -23,27 +152,68 @@
   Apple-network adapter crates with Off-mediated Proxy/Tunnel switching.
 - Add the macOS 15+, arm64 Swift protocol, ProxyAgent, Packet Tunnel System
   Extension, and bounded public `NEPacketTunnelFlow` packet-pump foundation.
-- Keep the missing libbox factories and missing Rust-to-Swift production bridge
-  fail-closed. Packet Tunnel also fails explicitly until authenticated
-  global-context state transport replaces the invalid user App Group and Data
-  Protection Keychain assumptions. The old helper, a downloaded core, and
-  private packet-flow APIs are not fallbacks.
+- Wire the production Rust `NativeFrameworkBridge`, source-built libbox
+  factories in ProxyAgent and Packet Tunnel, and root-context Global Authority
+  through exact role-scoped XPC admission. Missing identity, capability,
+  ticket, profile, or readiness evidence fails closed; the old helper, a
+  downloaded core, private packet-flow APIs, user App Group state, and Data
+  Protection Keychain access from the System Extension are not fallbacks.
+- Compact the bounded Authority journal before a prepare consumes its
+  seven-record finish reserve. Compaction commits a hash-chained checkpoint to
+  the next anchored generation, retains only active and previous generations,
+  detects rollback, and is fault-tested at every commit and cleanup boundary.
 
 ### Configuration and interface
 
 - Replace Clash YAML/REST/WebSocket configuration with a closed app profile
   schema that projects deterministically to native sing-box JSON.
-- Add closed typed profile schemas for `direct`, `block`, Shadowsocks, VMess,
-  VLESS/Reality, Trojan, and Hysteria2, plus optional `route.final`. Persistent
-  profiles contain canonical `credential_ref` values only; raw credentials,
+- Add closed typed profile schemas for `direct`, `block`, SOCKS5, Shadowsocks, VMess,
+  VLESS/Reality, Trojan, Hysteria2, AnyTLS, and TUIC v5, plus optional
+  `route.final`. Persistent profiles contain canonical credential references
+  only, including separate TUIC UUID and password references; raw credentials,
   subscriptions/remote resources, scripts, executable paths, and unknown
   fields are rejected. Runtime projection produces empty secret placeholders
   and closed native injection slots. References are immutable: retries must be
   byte-identical and secret rotation requires a new UUID and profile update.
+- Add anonymous and authenticated SOCKS5 with IPv4/IPv6/domain endpoints and
+  TCP/UDP policy preservation. Import `socks://`/`socks5://` links (plain or
+  base64 userinfo), Clash `socks5` nodes, and sing-box SOCKS v5 nodes through one
+  adapter. Username and password use separate native vault references and
+  RFC 1929 byte bounds. SOCKS4/4a, SOCKS-over-TLS and UDP-over-TCP remain explicit
+  unsupported errors; ordinary SOCKS5 does not encrypt transport.
+- Unify local file, pasted node link, and remote subscription conversion with
+  the same vault-first commit boundary. Add YAML/text file and drag-drop
+  admission, strict UTF-8 decoding, and the bounded 512 KiB source limit while
+  retaining the independent canonical-profile limit and local reference-only
+  manual provisioning. The profile editor still edits only the closed schema.
 - Add missing-only credential entry backed by an atomic shared-Keychain vault.
   Renderer and bridge buffers are redacted and zeroized, present references are
   never re-prompted, and explicit two-phase garbage collection deletes only
   revision-bound orphans after repository revalidation.
+- Enforce a product-owned TLS 1.2-or-newer policy for enabled proxy TLS,
+  authenticated DoH, subscription downloads, and update metadata. Normal
+  negotiation prefers TLS 1.3, QUIC requires TLS 1.3, HTTP stays forbidden,
+  and no retry-based protocol fallback is used. TUIC 0-RTT is explicitly
+  disabled.
+- Import restricted upstream sing-box node-list JSON in addition to Clash Meta
+  YAML and URI bundles, extracting every inline secret into the Keychain-backed
+  vault. Preserve typed VMess/VLESS packet encoding plus HTTP/H2,
+  HTTPUpgrade, and V2Ray QUIC transports, including the bounded Mihomo HTTP
+  method/path/Host subset; reject unknown semantics and full sing-box
+  configurations. Reject V2Ray QUIC without standard enabled TLS and reject
+  Vision combined with transport streams or non-XUDP packet framing.
+- Make subscription refresh references stable for unchanged documents, rotate
+  them only after an explicit immutable-secret conflict, and run exact
+  revision-bound orphan cleanup before and after updates. A post-commit cleanup
+  failure is returned as an explicit pending state instead of a false rollback.
+  Validate the stored profile under the repository lock before any vault write,
+  and enforce reference UUID immutability across profile audiences.
+- Request `Accept-Encoding: identity`, disable reqwest automatic decompression,
+  and reject non-identity response codings while retaining the streamed 512 KiB
+  bound.
+- Keep Global, Rule, and Direct visible while the engine is Off (disabled),
+  preserve the mode switch for valid zero-group snapshots, and display an
+  engine-observed Direct fallback as a read-only route rather than a selector.
 - Add a private, versioned, digest-bound selected-profile record. Proxy and
   Tunnel starts require that selected profile and fail on missing or stale
   selection instead of silently using DIRECT; Off remains independently
@@ -56,27 +226,132 @@
   path. The pinned source patch permits one bounded retry for transport failure
   or rejected response, never on cancellation; duplicate, loopback,
   link-local, documentation, and virtual-tunnel endpoints are rejected.
-- Split the Tauri composition root, UI JavaScript, CSS, platform adapters, and
-  profile repository into bounded modules; remove the parallel tracked UI
-  bundle.
+- Split the Tauri composition root, platform adapters, and profile repository
+  into bounded modules; remove the parallel tracked UI bundle.
+- Keep the 0.3.5 dashboard: the same status bar, sidebar, nine pages, liquid-glass
+  menus and dialogs, rebuilt against the 0.4.0 command surface instead of being
+  replaced. Every entry point whose command is retired is gone with the row,
+  button, or menu item around it — Service Mode and the privileged helper,
+  starting/stopping and installing cores, the kernel benchmark, the tray-script
+  and child-process runners, and the IPv6 switch. Controls the product cannot
+  honour are disabled and state the backend's own reason instead of appearing to
+  work: LAN exposure, bind address, engine log level, profile mixin, GeoIP
+  download, and host DNS restore. Values the 0.4.0 payloads no longer carry are
+  reported as unavailable rather than invented, profile mutations are offered
+  only while the engine is Off, and an active data plane is claimed only after the
+  engine snapshot's runtime identity, generation, digest, and readiness agree.
+- Restore the controller-backed read, query, and stream commands (proxy, rule,
+  provider, connection, log, DNS, and version surfaces) as a bounded command
+  module. Their client is built only from the running engine's app-owned
+  loopback controller, never from settings or a profile; the per-run secret is
+  redacted out of every returned error, event payload, and `Debug` rendering.
+  With no ready engine they fail closed with the unreachable-controller error
+  instead of probing an unknown listener.
+- Restore the profile-text, subscription, runtime-configuration, engine-switch,
+  and shell command surfaces as four bounded command modules. Subscriptions are
+  fetched over bounded HTTPS only, validated into the closed profile schema, and
+  projected for both modes before they can be stored; the subscription URL lives
+  inside the integrity-checked profile envelope and never appears in a profile
+  listing. Subscription import converts restricted upstream sing-box
+  `outbounds` JSON, Clash Meta YAML `proxies` lists, and node-URI bundles
+  (`ss://`, `vmess://`, `vless://` including Reality,
+  `trojan://`, `hysteria2://`, `anytls://`, `tuic://`) into that schema at the
+  boundary with bounded, alias-rejecting parsers; extracted secrets go to the
+  credential vault, never into the stored profile, and import errors identify
+  positions and keys instead of echoing document content. Hysteria2/TUIC QUIC
+  TLS rejects uTLS and Reality, while AnyTLS retains the standard TLS options.
+  The subscription request advertises a
+  Clash Meta client so panels serve the modern protocol set. Requests the
+  schema cannot honour — unsupported proxy types, disabled certificate
+  verification, plugins, chaining, port hopping — fail the import instead of
+  being dropped. The runtime-configuration preview redacts the app-owned
+  controller secret and fails closed if it survives redaction.
+- Express the System Proxy and TUN switches as engine-mode transitions through
+  the single Authority-mediated transition path, so neither switch can write a
+  system proxy, a DNS server, a route, or a network preference, and neither can
+  stop the other mode's data plane. Switches that the projection cannot honour
+  (LAN exposure, non-loopback bind address, engine log level, profile mixin) and
+  requests to write host DNS or fetch a GeoIP database now fail closed with an
+  explicit reason instead of being accepted and ignored. Legacy on-disk Clash
+  for Windows profiles are reported, never bulk-converted; their subscriptions
+  are re-imported from the live URL instead.
+- Restore tray proxy-group switching, window, deep-link, and diagnostics
+  helpers. Tray labels and menu ids are bounded and generated, so a controller
+  response cannot inject a menu entry, and diagnostics reads
+  SystemConfiguration only: the fields the retired `networksetup`, `scutil`, and
+  `route` invocations supplied are reported as explicitly unavailable.
 
 ### Supply chain and release status
 
 - Move the workspace to GPL-3.0-or-later and pin the arm64 macOS 15 release
   toolchain and source-built libbox inputs.
+- Separate the release Mac's Rust SDK from the user's extensible rustup SDK
+  with explicit `CFW_RELEASE_RUST_TOOLCHAIN=private`; existing CI retains the
+  `global` selection. Both use the same exact five-component v2 surface and
+  original digest. SDK preparation occurs before environment consumption,
+  with no automatic installation or fallback. Frozen 40043 launchers and
+  historical evidence remain unchanged.
+- Upgrade the pinned sing-box/libbox source from v1.13.14 to v1.13.15 and
+  regenerate all four downstream patches and source digests while retaining
+  the upstream DNS-cancellation, UDP-ownership, rule-set descriptor, and
+  QUIC/HTTP-upgrade lifecycle fixes.
+- Refresh the pinned libbox `golang.org/x/*` closure after `GO-2026-6179` and
+  `GO-2026-6180` were reported against `x/mod`. The exact tested closure uses
+  `x/mod v0.40.0` with its required `x/crypto`, `x/net`, `x/sync`, `x/sys`,
+  `x/term`, `x/text`, and `x/tools` updates; the sealed module cache and
+  XCFramework are rebuilt from that closure without a vulnerability ignore.
+- Add structured mixed-listener and controller bind-conflict reporting so the
+  application can retry only after cleanup and a proven global Off state.
+- Build libbox with `with_clash_api`. The patched tree enables the clash API
+  whenever a platform log writer is installed and the daemon always installs
+  one, so the previous artifact failed every engine start in the stub
+  constructor. The pinned tag list is now itself a verified build input: the
+  pinned-input gate fails closed when a tag the engine start path requires is
+  missing.
+- Seal Tauri CLI's complete offline Cargo registry before and after compilation
+  while excluding only three validated Cargo runtime tracking/lock files from
+  the private snapshot. The exact normalization helper is digest-bound into the
+  build-input and final toolchain manifests, and fetch/install warnings block
+  the bootstrap.
 - Add fail-closed release documentation for nested signing, provisioning,
   notarization, SBOM/license evidence, real packet evidence, weak-network
   recovery, resource limits, and physical-device testing.
-- Replace the generic updater runtime with a project-owned, bounded metadata,
-  signed-download, descriptor-relative archive admission, and atomic macOS
-  swap path. Update commit now owns an exclusive engine-Off maintenance lease,
-  and its cancellation boundary is linearized before any network stop.
-- Release remains blocked until libbox linkage, the production Host Bridge,
-  installed-identity proof for shared-Keychain provisioning and authenticated
-  in-memory Tunnel injection, the pinned resolver-failover patch is present in
-  the source-built libbox and verified by physical packet capture, exact
-  Developer ID/provisioning, signed physical-device data-plane tests, and the
-  complete publication evidence set have passed.
+- Upgrade physical evidence to aggregate schema v5, receipt schema v3, proof
+  schema v3, and trust-policy schema v3. The signed policy digest now binds the
+  exact single-machine profile, preventing old receipts from being relabelled
+  under the new aggregate marker. The only accepted collector signature
+  is PS256 with a source-pinned RSA-PSS-3072 Cloud KMS HSM key version; every
+  harness report and receipt binds that identity and the recomputed final
+  artifact-hash manifest. Final-candidate schema v3 derives the binding from the
+  reopened aggregate and rejects the former caller-only evidence declaration.
+  The two fixed clean-OS runs now share one automatically observed physical-
+  machine identity, use distinct sealed boot-environment digests, and retain
+  independent nonces, receipts, reports, and raw archives. The blocking soak is
+  an operator-observed three-hour interval with no reported crash per OS for
+  this limited internal distribution; it is not a remote-liveness or public-GA
+  endurance claim.
+- Build XcodeGen from checksum-bound source with a digest-pinned
+  installed-resource patch, isolated resolved-only SwiftPM state, a real project
+  generation probe, debug-path stripping, and a complete tree-v2 manifest.
+- Replace the generic updater runtime with a project-owned bounded metadata
+  check and one-use authorization. Before use, it revalidates the exact
+  canonical GitHub identity and opens the official DMG release page. The app
+  no longer downloads, extracts, or swaps its own installed bundle, and does
+  not replace that bundle in process.
+- Rotate the updater artifact trust root for 0.4.0 after the 0.3.5 private key
+  became unavailable. Existing 0.3.5 installations cannot authenticate the
+  new release archive and must install 0.4.0 from its signed, notarized DMG;
+  there is no unsigned or alternate-key fallback. The replacement public key
+  is embedded in 0.4.0 and its private half remains outside the repository.
+- Keep in-process replacement intentionally absent because the required
+  verified `SMAppService` maintenance transaction is release-operator-only and
+  unavailable to the renderer/updater; metadata or a browser handoff is never
+  reported as installation.
+- Release remains blocked until installed-identity proof for shared-Keychain
+  provisioning and authenticated in-memory Tunnel injection, physical packet
+  capture of the pinned resolver-failover behavior, exact Developer ID and
+  provisioning, signed physical-device data-plane and recovery tests, and the
+  complete legal/publication evidence set have passed.
 
 ## 0.3.5 — 2026-07-21
 

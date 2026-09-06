@@ -1,14 +1,89 @@
 use cfw_core::{SettingsSnapshot, SettingsStore, UiPreferences};
 use cfw_platform::{MacOsPlatformService, ServiceModeStatus};
+use serde::Serialize;
+use tauri::{AppHandle, State};
 
 use crate::settings_store;
+use crate::window_state::WindowBoundsManager;
 
-pub(crate) type UiSettingsSnapshot = SettingsSnapshot;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UiLoginItemLiveStatus {
+    NotRegistered,
+    Enabled,
+    RequiresApproval,
+    NotFound,
+    Unknown,
+}
+
+impl From<ServiceModeStatus> for UiLoginItemLiveStatus {
+    fn from(status: ServiceModeStatus) -> Self {
+        match status {
+            ServiceModeStatus::NotRegistered => Self::NotRegistered,
+            ServiceModeStatus::Enabled => Self::Enabled,
+            ServiceModeStatus::RequiresApproval => Self::RequiresApproval,
+            ServiceModeStatus::NotFound => Self::NotFound,
+            ServiceModeStatus::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UiLaunchAtLoginState {
+    persisted_intent: bool,
+    live_status: UiLoginItemLiveStatus,
+    matches_persisted_intent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UiSettingsSnapshot {
+    settings: UiPreferences,
+    persisted: bool,
+    launch_at_login: UiLaunchAtLoginState,
+}
+
+fn launch_at_login_state(
+    persisted_intent: bool,
+    status: ServiceModeStatus,
+) -> UiLaunchAtLoginState {
+    let matches_persisted_intent = match status {
+        ServiceModeStatus::Enabled => persisted_intent,
+        ServiceModeStatus::NotRegistered | ServiceModeStatus::NotFound => !persisted_intent,
+        ServiceModeStatus::RequiresApproval | ServiceModeStatus::Unknown => false,
+    };
+    UiLaunchAtLoginState {
+        persisted_intent,
+        live_status: status.into(),
+        matches_persisted_intent,
+    }
+}
+
+fn with_login_item_status(
+    snapshot: SettingsSnapshot,
+    status: ServiceModeStatus,
+) -> UiSettingsSnapshot {
+    let launch_at_login = launch_at_login_state(snapshot.settings.launch_at_login, status);
+    UiSettingsSnapshot {
+        settings: snapshot.settings,
+        persisted: snapshot.persisted,
+        launch_at_login,
+    }
+}
+
+pub(crate) fn settings_snapshot_with_live_status(
+    store: &SettingsStore,
+) -> Result<UiSettingsSnapshot, String> {
+    let snapshot = store.snapshot().map_err(|error| error.to_string())?;
+    Ok(with_login_item_status(
+        snapshot,
+        MacOsPlatformService.login_item_status(),
+    ))
+}
 
 fn write_preferences(
     store: &SettingsStore,
     preferences: UiPreferences,
-) -> Result<UiSettingsSnapshot, String> {
+) -> Result<SettingsSnapshot, String> {
     store
         .write(&preferences)
         .map_err(|error| error.to_string())?;
@@ -18,7 +93,7 @@ fn write_preferences(
 fn write_renderer_preferences(
     store: &SettingsStore,
     preferences: UiPreferences,
-) -> Result<UiSettingsSnapshot, String> {
+) -> Result<SettingsSnapshot, String> {
     let current = store.read_or_default().map_err(|error| error.to_string())?;
     if preferences.launch_at_login != current.launch_at_login {
         return Err(
@@ -44,7 +119,11 @@ pub(crate) fn sanitize_legacy_preferences(
     store: &SettingsStore,
     preferences: UiPreferences,
 ) -> Result<UiSettingsSnapshot, String> {
-    write_preferences(store, preferences)
+    let snapshot = write_preferences(store, preferences)?;
+    Ok(with_login_item_status(
+        snapshot,
+        MacOsPlatformService.login_item_status(),
+    ))
 }
 
 pub(crate) fn silent_start_enabled() -> Result<bool, String> {
@@ -54,27 +133,27 @@ pub(crate) fn silent_start_enabled() -> Result<bool, String> {
         .map_err(|error| error.to_string())
 }
 
-pub(crate) fn automatic_updates_enabled() -> Result<bool, String> {
-    settings_store()?
-        .read_or_default()
-        .map(|preferences| preferences.check_for_updates)
-        .map_err(|error| error.to_string())
-}
-
 #[tauri::command]
 pub(crate) fn read_settings_snapshot() -> Result<UiSettingsSnapshot, String> {
-    settings_store()?
-        .snapshot()
-        .map_err(|error| error.to_string())
+    settings_snapshot_with_live_status(&settings_store()?)
 }
 
 #[tauri::command]
 pub(crate) fn write_settings_snapshot(
+    app: AppHandle,
+    window_bounds: State<'_, WindowBoundsManager>,
     settings: UiPreferences,
 ) -> Result<UiSettingsSnapshot, String> {
     let store = settings_store()?;
     require_completed_migration(&store)?;
-    write_renderer_preferences(&store, settings)
+    let retain_window_bounds = settings.retain_window_bounds;
+    window_bounds.commit_retention(&app, retain_window_bounds, || {
+        let snapshot = write_renderer_preferences(&store, settings)?;
+        Ok(with_login_item_status(
+            snapshot,
+            MacOsPlatformService.login_item_status(),
+        ))
+    })
 }
 
 #[tauri::command]
@@ -126,7 +205,10 @@ pub(crate) fn set_launch_at_login_enabled(enabled: bool) -> Result<UiSettingsSna
     }
     preferences.launch_at_login = enabled;
     match write_preferences(&store, preferences) {
-        Ok(snapshot) => Ok(snapshot),
+        Ok(snapshot) => Ok(with_login_item_status(
+            snapshot,
+            platform.login_item_status(),
+        )),
         Err(persist_error) => match restore_login_item_status(&platform, original_status) {
             Ok(()) => Err(format!(
                 "failed to persist the Login Item preference; restored the previous macOS state: {persist_error}"
@@ -260,6 +342,91 @@ mod tests {
             ServiceModeStatus::Unknown,
             ServiceModeStatus::Unknown
         ));
+    }
+
+    #[test]
+    fn login_item_snapshot_keeps_persisted_intent_and_live_status_distinct() {
+        let cases = [
+            (
+                false,
+                ServiceModeStatus::NotRegistered,
+                UiLoginItemLiveStatus::NotRegistered,
+                true,
+            ),
+            (
+                true,
+                ServiceModeStatus::NotFound,
+                UiLoginItemLiveStatus::NotFound,
+                false,
+            ),
+            (
+                false,
+                ServiceModeStatus::Enabled,
+                UiLoginItemLiveStatus::Enabled,
+                false,
+            ),
+            (
+                true,
+                ServiceModeStatus::Enabled,
+                UiLoginItemLiveStatus::Enabled,
+                true,
+            ),
+            (
+                true,
+                ServiceModeStatus::RequiresApproval,
+                UiLoginItemLiveStatus::RequiresApproval,
+                false,
+            ),
+            (
+                false,
+                ServiceModeStatus::Unknown,
+                UiLoginItemLiveStatus::Unknown,
+                false,
+            ),
+        ];
+        for (intent, status, live_status, matches_persisted_intent) in cases {
+            assert_eq!(
+                launch_at_login_state(intent, status),
+                UiLaunchAtLoginState {
+                    persisted_intent: intent,
+                    live_status,
+                    matches_persisted_intent,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn login_item_snapshot_has_a_stable_typed_wire_shape() {
+        let snapshot = with_login_item_status(
+            SettingsSnapshot {
+                settings: UiPreferences {
+                    launch_at_login: true,
+                    ..UiPreferences::default()
+                },
+                persisted: true,
+            },
+            ServiceModeStatus::RequiresApproval,
+        );
+        assert_eq!(
+            serde_json::to_value(snapshot).expect("serialize settings snapshot"),
+            serde_json::json!({
+                "settings": {
+                    "theme": "system",
+                    "font_family": "",
+                    "retain_window_bounds": true,
+                    "launch_at_login": true,
+                    "silent_start": false,
+                    "check_for_updates": false
+                },
+                "persisted": true,
+                "launch_at_login": {
+                    "persisted_intent": true,
+                    "live_status": "requires_approval",
+                    "matches_persisted_intent": false
+                }
+            })
+        );
     }
 
     #[test]

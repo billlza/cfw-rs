@@ -23,6 +23,8 @@ private final class FakeAuthorityDaemonService: GlobalAuthorityDaemonServicing,
     registerCalls += 1
     if let registerError { throw registerError }
   }
+
+  func unregister() throws {}
 }
 
 private enum FakeRegistrationError: Error { case denied }
@@ -35,6 +37,14 @@ private enum FakeRegistrationError: Error { case denied }
 
 @Test func authorityRegistrationUsesDaemonServiceAndRequiresEnabledResult() throws {
   let service = FakeAuthorityDaemonService([.notRegistered, .enabled])
+  let controller = SMGlobalAuthorityServiceController(service: service)
+  try controller.ensureRegistered()
+  #expect(service.registerCalls == 1)
+  #expect(controller.registrationStatus() == .enabled)
+}
+
+@Test func authorityRegistrationRepairsNotFoundServiceRecord() throws {
+  let service = FakeAuthorityDaemonService([.notFound, .enabled])
   let controller = SMGlobalAuthorityServiceController(service: service)
   try controller.ensureRegistered()
   #expect(service.registerCalls == 1)

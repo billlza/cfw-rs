@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
-import re
-import shutil
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
@@ -11,6 +10,25 @@ from urllib.parse import quote
 from .cargo_collector import CollectorResult
 from .common import PublicationError
 from .graph_model import ComponentSeed, RELEASE_VERSION, run, run_json, seed
+from .release_environment import swift_toolchain_identity
+from .release_toolchains import verified_release_toolchain_trees
+if __package__ and __package__.startswith("scripts."):
+    from scripts.release_rust_toolchain import (
+        ReleaseRustToolchainError,
+        verify_pinned_toolchain,
+    )
+else:
+    from release_rust_toolchain import (
+        ReleaseRustToolchainError,
+        verify_pinned_toolchain,
+    )
+
+
+@dataclass(frozen=True)
+class _CheckedToolchainObservation:
+    versions: tuple[tuple[str, str], ...]
+    toolchain_root: Path
+    swift_identity: str
 
 
 def _normalize_native_graph(value: Any, native_root: Path, path: str = "$") -> Any:
@@ -47,10 +65,69 @@ def _normalize_native_graph(value: Any, native_root: Path, path: str = "$") -> A
     return value
 
 
-def collect_native(repository: Path, pins: dict[str, str]) -> CollectorResult:
+def _apple_tool_identity(
+    repository: Path,
+    pins: dict[str, str],
+    release_environment: dict[str, str],
+) -> tuple[str, str, str, str]:
+    xcode = run(
+        ["/usr/bin/xcodebuild", "-version"], repository, release_environment
+    ).decode("utf-8").strip()
+    expected_xcode = (
+        f"Xcode {pins['XCODE_VERSION']}\n"
+        f"Build version {pins['XCODE_BUILD_VERSION']}"
+    )
+    if xcode != expected_xcode:
+        raise PublicationError("Xcode toolchain does not match the release pin")
+    swift = swift_toolchain_identity(
+        repository,
+        release_environment,
+        pins["MACOS_DEPLOYMENT_TARGET"],
+    ).canonical
+    try:
+        developer_dir = Path(release_environment["DEVELOPER_DIR"]).resolve(strict=True)
+        swift_path = Path(
+            run(
+                ["/usr/bin/xcrun", "--find", "swift"],
+                repository,
+                release_environment,
+            )
+            .decode("utf-8")
+            .strip()
+        ).resolve(strict=True)
+        xcodebuild_path = Path(
+            run(
+                ["/usr/bin/xcrun", "--find", "xcodebuild"],
+                repository,
+                release_environment,
+            )
+            .decode("utf-8")
+            .strip()
+        ).resolve(strict=True)
+    except (KeyError, OSError, UnicodeDecodeError) as error:
+        raise PublicationError("cannot resolve the selected Apple toolchain") from error
+    if not swift_path.is_relative_to(developer_dir) or not xcodebuild_path.is_relative_to(
+        developer_dir
+    ):
+        raise PublicationError("selected Apple build tool escaped DEVELOPER_DIR")
+    return xcode, swift, str(swift_path), str(xcodebuild_path)
+
+
+def collect_native(
+    repository: Path,
+    pins: dict[str, str],
+    release_environment: dict[str, str],
+) -> CollectorResult:
     native_root = repository / "native/macos"
+    apple_identity_start = _apple_tool_identity(
+        repository, pins, release_environment
+    )
     swift_graph = _normalize_native_graph(
-        run_json(["/usr/bin/swift", "package", "describe", "--type", "json"], native_root),
+        run_json(
+            ["/usr/bin/swift", "package", "describe", "--type", "json"],
+            native_root,
+            release_environment,
+        ),
         native_root.resolve(strict=True),
     )
     xcode_graph = _normalize_native_graph(
@@ -64,9 +141,13 @@ def collect_native(repository: Path, pins: dict[str, str]) -> CollectorResult:
                 "-json",
             ],
             native_root,
+            release_environment,
         ),
         native_root.resolve(strict=True),
     )
+    apple_identity_end = _apple_tool_identity(repository, pins, release_environment)
+    if apple_identity_end != apple_identity_start:
+        raise PublicationError("Apple toolchain changed while collecting native graphs")
     swift_seed = seed(
         "CFWNative",
         RELEASE_VERSION,
@@ -101,28 +182,71 @@ def collect_native(repository: Path, pins: dict[str, str]) -> CollectorResult:
     )
 
 
-def _checked_versions(repository: Path, pins: dict[str, str]) -> tuple[dict[str, str], Path]:
-    toolchain_root = Path(os.environ.get("CFW_TOOLCHAIN_ROOT", repository / "target/toolchains"))
+def _checked_versions(
+    repository: Path,
+    pins: dict[str, str],
+    release_environment: dict[str, str],
+) -> _CheckedToolchainObservation:
+    toolchain_root, _tree_digests = verified_release_toolchain_trees(
+        repository, pins, release_environment
+    )
     node_bin = toolchain_root / f"node-{pins['NODE_VERSION']}" / "bin/node"
     go_bin = toolchain_root / f"go-{pins['GO_VERSION']}" / "bin/go"
     xcodegen_bin = toolchain_root / f"xcodegen-{pins['XCODEGEN_VERSION']}" / "bin/xcodegen"
     gomobile_bin = toolchain_root / "go-workspace/bin/gomobile"
+    tauri_bin = toolchain_root / f"tauri-cli-{pins['TAURI_CLI_VERSION']}" / "bin/cargo-tauri"
     for path, label in (
         (node_bin, "Node.js"),
         (go_bin, "Go"),
         (xcodegen_bin, "XcodeGen"),
         (gomobile_bin, "gomobile"),
+        (tauri_bin, "tauri-cli"),
     ):
         if not path.is_file() or path.is_symlink() or not os.access(path, os.X_OK):
             raise PublicationError(f"pinned {label} tool is unavailable: {path}")
+    try:
+        rustc_bin = Path(release_environment["CFW_RELEASE_RUSTC_EXECUTABLE"])
+    except KeyError as error:
+        raise PublicationError("release environment omitted its Rust compiler") from error
+    try:
+        rust_toolchain_start = verify_pinned_toolchain(
+            repository, rustc_bin.parent.parent.resolve(strict=True)
+        )
+    except (OSError, ReleaseRustToolchainError) as error:
+        raise PublicationError("Rust release toolchain surface is invalid") from error
+    if not rustc_bin.exists() or not os.access(rustc_bin, os.X_OK):
+        raise PublicationError("trusted Rust compiler is unavailable")
+    swift_identity = swift_toolchain_identity(
+        repository,
+        release_environment,
+        pins["MACOS_DEPLOYMENT_TARGET"],
+    )
     actual = {
-        "rust": run(["rustc", "--version"], repository).decode().strip(),
-        "swift": run(["/usr/bin/swift", "--version"], repository).decode().strip(),
-        "xcode": run(["/usr/bin/xcodebuild", "-version"], repository).decode().strip(),
-        "node": run([str(node_bin), "--version"], repository).decode().strip(),
-        "go": run([str(go_bin), "version"], repository).decode().strip(),
-        "xcodegen": run([str(xcodegen_bin), "--version"], repository).decode().strip(),
-        "tauri-cli": run(["cargo", "tauri", "--version"], repository).decode().strip(),
+        "rust": run([str(rustc_bin), "--version"], repository, release_environment)
+        .decode()
+        .strip(),
+        "swift": swift_identity.canonical,
+        "xcode": run(
+            ["/usr/bin/xcodebuild", "-version"], repository, release_environment
+        )
+        .decode()
+        .strip(),
+        "node": run([str(node_bin), "--version"], repository, release_environment)
+        .decode()
+        .strip(),
+        "go": run([str(go_bin), "version"], repository, release_environment)
+        .decode()
+        .strip(),
+        "xcodegen": run(
+            [str(xcodegen_bin), "--version"], repository, release_environment
+        )
+        .decode()
+        .strip(),
+        "tauri-cli": run(
+            [str(tauri_bin), "--version"], repository, release_environment
+        )
+        .decode()
+        .strip(),
     }
     expected = {
         "rust": f"rustc {pins['RUST_VERSION']} ",
@@ -137,10 +261,11 @@ def _checked_versions(repository: Path, pins: dict[str, str]) -> tuple[dict[str,
     for name in ("xcode", "node", "go", "xcodegen", "tauri-cli"):
         if actual[name] != expected[name]:
             raise PublicationError(f"{name} toolchain does not match the release pin")
-    swift_match = re.search(r"Swift version ([0-9][^ )]*)", actual["swift"])
-    if swift_match is None or not swift_match.group(1).startswith("6."):
-        raise PublicationError("Swift toolchain is not Swift 6")
-    gomobile_identity = run([str(go_bin), "version", "-m", str(gomobile_bin)], repository).decode()
+    gomobile_identity = run(
+        [str(go_bin), "version", "-m", str(gomobile_bin)],
+        repository,
+        release_environment,
+    ).decode()
     expected_module = (
         f"mod\tgithub.com/sagernet/gomobile\t{pins['GOMOBILE_VERSION']}\t"
         f"{pins['GOMOBILE_MODULE_SUM']}"
@@ -152,23 +277,63 @@ def _checked_versions(repository: Path, pins: dict[str, str]) -> tuple[dict[str,
         "node": pins["NODE_VERSION"],
         "go": pins["GO_VERSION"],
         "gomobile": pins["GOMOBILE_VERSION"],
-        "swift": swift_match.group(1),
+        "swift": swift_identity.version,
         "xcode": pins["XCODE_VERSION"],
         "xcodegen": pins["XCODEGEN_VERSION"],
         "tauri-cli": pins["TAURI_CLI_VERSION"],
     }
-    return versions, toolchain_root
+    verified_release_toolchain_trees(repository, pins, release_environment)
+    try:
+        rust_toolchain_end = verify_pinned_toolchain(
+            repository, rustc_bin.parent.parent.resolve(strict=True)
+        )
+    except (OSError, ReleaseRustToolchainError) as error:
+        raise PublicationError("Rust release toolchain surface cannot be rechecked") from error
+    if rust_toolchain_end.surface != rust_toolchain_start.surface:
+        raise PublicationError("Rust release toolchain changed during collection")
+    return _CheckedToolchainObservation(
+        versions=tuple(sorted(versions.items())),
+        toolchain_root=toolchain_root,
+        swift_identity=swift_identity.canonical,
+    )
+
+
+def _require_unchanged_toolchains(
+    initial: _CheckedToolchainObservation,
+    ending: _CheckedToolchainObservation,
+) -> None:
+    if ending != initial:
+        raise PublicationError(
+            "release toolchain changed while collecting publication metadata"
+        )
 
 
 def collect_toolchains(
-    repository: Path, pins: dict[str, str]
+    repository: Path,
+    pins: dict[str, str],
+    release_environment: dict[str, str],
 ) -> tuple[dict[str, ComponentSeed], set[tuple[str, str, str]]]:
-    versions, toolchain_root = _checked_versions(repository, pins)
-    rust_sysroot = Path(run(["rustc", "--print", "sysroot"], repository).decode().strip()).resolve(
-        strict=True
+    toolchain_start = _checked_versions(
+        repository, pins, release_environment
     )
+    versions = dict(toolchain_start.versions)
+    toolchain_root = toolchain_start.toolchain_root
+    try:
+        rustc_bin = Path(release_environment["CFW_RELEASE_RUSTC_EXECUTABLE"])
+    except KeyError as error:
+        raise PublicationError("release environment omitted its Rust compiler") from error
+    rust_sysroot = Path(
+        run(
+            [str(rustc_bin), "--print", "sysroot"],
+            repository,
+            release_environment,
+        )
+        .decode()
+        .strip()
+    ).resolve(strict=True)
     node_root = toolchain_root / f"node-{pins['NODE_VERSION']}"
     go_root = toolchain_root / f"go-{pins['GO_VERSION']}"
+    tauri_root = toolchain_root / f"tauri-cli-{pins['TAURI_CLI_VERSION']}"
     node_bin = (node_root / "bin/node").resolve(strict=True)
     go_bin = (go_root / "bin/go").resolve(strict=True)
     gomobile_bin = (toolchain_root / "go-workspace/bin/gomobile").resolve(strict=True)
@@ -184,15 +349,29 @@ def collect_toolchains(
         toolchain_root / f"xcodegen-{pins['XCODEGEN_VERSION']}" / "source"
     ).resolve(strict=True)
     swift_binary = Path(
-        run(["/usr/bin/xcrun", "--find", "swiftc"], repository).decode().strip()
+        run(
+            ["/usr/bin/xcrun", "--find", "swiftc"],
+            repository,
+            release_environment,
+        )
+        .decode()
+        .strip()
     ).resolve(strict=True)
     xcode_binary = Path(
-        "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        run(
+            ["/usr/bin/xcrun", "--find", "xcodebuild"],
+            repository,
+            release_environment,
+        )
+        .decode()
+        .strip()
     ).resolve(strict=True)
-    tauri_binary_value = shutil.which("cargo-tauri")
-    if tauri_binary_value is None:
-        raise PublicationError("pinned tauri-cli executable is unavailable")
-    tauri_binary = Path(tauri_binary_value).resolve(strict=True)
+    developer_resources = (
+        Path(release_environment["DEVELOPER_DIR"]).resolve(strict=True).parent
+        / "Resources"
+    )
+    tauri_binary = (tauri_root / "bin/cargo-tauri").resolve(strict=True)
+    tauri_source = (tauri_root / "source").resolve(strict=True)
     details: dict[str, tuple[Path | None, Path | None, str | None]] = {
         "rust": (
             None,
@@ -208,12 +387,12 @@ def collect_toolchains(
         "gomobile": (gomobile_source, gomobile_source, "BSD-3-Clause"),
         "swift": (
             None,
-            Path("/Applications/Xcode.app/Contents/Resources"),
+            developer_resources,
             f"LicenseRef-Apple-Xcode-EULA-{pins['XCODE_VERSION']}",
         ),
         "xcode": (
             None,
-            Path("/Applications/Xcode.app/Contents/Resources"),
+            developer_resources,
             f"LicenseRef-Apple-Xcode-EULA-{pins['XCODE_VERSION']}",
         ),
         # Upstream contains a source symlink; publication requires a separately
@@ -221,7 +400,7 @@ def collect_toolchains(
         "xcodegen": (None, xcodegen_source, "MIT"),
         "tauri-cli": (
             None,
-            repository / "apps/cfw-tauri-shell/node_modules/esbuild",
+            tauri_source,
             "Apache-2.0 OR MIT",
         ),
     }
@@ -247,10 +426,18 @@ def collect_toolchains(
             purl,
             source_root,
             license_root=license_root,
-            metadata_path=repository / "scripts/dependency_pins.env",
+            metadata_path=(
+                tauri_source / "Cargo.toml"
+                if name == "tauri-cli"
+                else repository / "scripts/dependency_pins.env"
+            ),
             declared_license=declared_license,
             external_build_tool=True,
             provenance_paths=provenance_paths[name],
         )
         components[candidate.identifier] = candidate
+    toolchain_end = _checked_versions(
+        repository, pins, release_environment
+    )
+    _require_unchanged_toolchains(toolchain_start, toolchain_end)
     return components, set()

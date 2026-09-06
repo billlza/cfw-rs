@@ -14,22 +14,33 @@ This module also provides the deterministic fixtures reused by
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stderr
 import hashlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.evidence_manifest import LEVEL_ORDER, REQUIRED_BINDINGS, REQUIRED_KINDS
-from scripts.publication.common import PublicationError, canonical_json, tree_digest
+from scripts.evidence_manifest import KIND_LEVEL, LEVEL_ORDER, REQUIRED_BINDINGS
+from scripts.publication.common import PublicationError, canonical_json
 from scripts.publication.final_candidate import (
     REQUIRED_NESTED_CODE,
     TEAM_ID,
-    build_final_candidate_binding,
+    build_final_candidate_binding as _build_final_candidate_binding,
 )
 from scripts.publication.sealed_closure import build_sealed_closure, derive_supply_chain
+from scripts.repository_source_identity import repository_commit
+from scripts.release_capability_inventory import (
+    CAPABILITY_IDS,
+    expected_capability_levels,
+    expected_report_contracts,
+)
 from scripts.publication.sealed_manifest import (
     BLOCKED,
+    DEFAULT_EVIDENCE_DIRECTORY,
+    DEFAULT_MANIFEST_PATH,
     DOCUMENT_KIND,
     FAILED,
     GATE_ORDER,
@@ -40,34 +51,70 @@ from scripts.publication.sealed_manifest import (
     REQUIRED_SOURCE_GATES,
     SEALED,
     SEALED_LEVEL,
+    SOURCE_GATE_DOCUMENT,
+    SOURCE_GATE_SCHEMA_VERSION,
     _documents,
-    authorize_publication_artifacts,
-    build_sealed_evidence_manifest,
+    authorize_publication_artifacts as _authorize_publication_artifacts,
+    build_sealed_evidence_manifest as _build_sealed_evidence_manifest,
     environment_status,
     load_sealed_manifest,
     seal_manifest,
     self_check,
-    validate_sealed_evidence_manifest,
+    validate_sealed_evidence_manifest as _validate_sealed_evidence_manifest,
 )
 from scripts.tests.test_physical_evidence_aggregator import (
     APP_MANIFEST,
     BUILD_NUMBER,
     BUILT_AT,
+    PHYSICAL_EVIDENCE_ROOT,
+    PHYSICAL_TRUST_POLICY,
     SIGNED_TREE,
     fixture as physical_fixture,
 )
+from scripts.tests.physical_evidence_fixture import (
+    XCFRAMEWORK_MANIFEST_SHA,
+    XCFRAMEWORK_SHA,
+    final_artifact_hash_manifest,
+    fixture_packet_policy,
+)
+from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
 from scripts.tests.test_sealed_closure import _request as _closure_request
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
 
-COMMIT = "3" * 40
+COMMIT = repository_commit(REPOSITORY)
 TOOLCHAIN = "4" * 64
-XCFRAMEWORK_SHA = "1" * 64
-XCFRAMEWORK_MANIFEST_SHA = "2" * 64
+RELEASE_SOURCE = "5" * 64
 CAPTURED_AT = "2026-07-22T00:00:00Z"
 OBSERVED_AT = "2026-08-01T00:00:00Z"
 PINNED = derive_supply_chain(REPOSITORY)["patched_source"]
-CAPABILITIES = ("global-authority", "ticket-only-tunnel")
+CAPABILITIES = CAPABILITY_IDS
+
+
+def build_final_candidate_binding(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    with fixture_packet_policy():
+        return _build_final_candidate_binding(*args, **kwargs)
+
+
+def build_sealed_evidence_manifest(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    with fixture_packet_policy():
+        return _build_sealed_evidence_manifest(*args, **kwargs)
+
+
+def validate_sealed_evidence_manifest(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    with fixture_packet_policy():
+        return _validate_sealed_evidence_manifest(*args, **kwargs)
+
+
+def authorize_publication_artifacts(*args, **kwargs):
+    with fixture_packet_policy():
+        return _authorize_publication_artifacts(*args, **kwargs)
 
 
 def digest(label: str) -> str:
@@ -94,24 +141,21 @@ def inner_manifest(
         "toolchain_sha256": toolchain,
         "signed_app_sha256": signed_app,
     }
+    highest = LEVEL_ORDER[depth]
     reports: list[dict] = []
-    levels: dict[str, dict] = {}
-    for level in LEVEL_ORDER[: depth + 1]:
-        report_ids: list[str] = []
-        for kind in sorted(REQUIRED_KINDS[level]):
-            report_id = f"{level.replace('_', '-').lower()}-{kind.replace('_', '-')}"
-            reports.append(
-                {
-                    "id": report_id,
-                    "kind": kind,
-                    "path": f"reports/{report_id}.json",
-                    "sha256": digest(f"{salt}{report_id}"),
-                    "status": "passed",
-                    "bindings": {field: identity[field] for field in REQUIRED_BINDINGS[level]},
-                }
-            )
-            report_ids.append(report_id)
-        levels[level] = {"report_ids": report_ids}
+    selected = tuple(capabilities)
+    for contract in expected_report_contracts(highest, capabilities=selected):
+        level = KIND_LEVEL[contract["kind"]]
+        reports.append(
+            {
+                **contract,
+                "sha256": digest(f"{salt}{contract['id']}"),
+                "status": "passed",
+                "bindings": {
+                    field: identity[field] for field in REQUIRED_BINDINGS[level]
+                },
+            }
+        )
     return {
         "schema_version": 1,
         "manifest_version": "evidence-manifest-v1",
@@ -120,16 +164,27 @@ def inner_manifest(
         "capabilities": [
             {
                 "id": capability,
-                "highest_level": LEVEL_ORDER[depth],
-                "levels": copy.deepcopy(levels),
+                "highest_level": highest,
+                "levels": expected_capability_levels(capability, highest),
             }
             for capability in capabilities
         ],
     }
 
 
-def source_gates(*, commit: str = COMMIT) -> dict:
+def source_gates(
+    *,
+    commit: str = COMMIT,
+    release_source: str = RELEASE_SOURCE,
+) -> dict:
     return {
+        "schema_version": SOURCE_GATE_SCHEMA_VERSION,
+        "document": SOURCE_GATE_DOCUMENT,
+        "attempt_number": 1,
+        "attempt_outcome": "completed",
+        "prior_attempt_sha256s": [],
+        "repository_commit": commit,
+        "release_source_sha256": release_source,
         "gates": [
             {
                 "id": identifier,
@@ -138,14 +193,23 @@ def source_gates(*, commit: str = COMMIT) -> dict:
                 "exit_code": 0,
                 "log_sha256": digest(f"source-gate-log-{identifier}"),
                 "commit": commit,
+                "release_source_sha256": release_source,
             }
             for identifier, script in sorted(REQUIRED_SOURCE_GATES.items())
         ]
     }
 
 
-def ci_lanes(*, commit: str = COMMIT, toolchain: str = TOOLCHAIN) -> dict:
+def ci_lanes(
+    *,
+    commit: str = COMMIT,
+    release_source: str = RELEASE_SOURCE,
+    toolchain: str = TOOLCHAIN,
+) -> dict:
     return {
+        "schema_version": 2,
+        "document": "unsigned-ci-lanes-v2",
+        "release_source_sha256": release_source,
         "toolchain_sha256": toolchain,
         "lanes": [
             {
@@ -155,6 +219,7 @@ def ci_lanes(*, commit: str = COMMIT, toolchain: str = TOOLCHAIN) -> dict:
                 "exit_code": 0,
                 "log_sha256": digest(f"ci-lane-log-{lane}"),
                 "commit": commit,
+                "release_source_sha256": release_source,
                 "toolchain_sha256": toolchain,
             }
             for lane in REQUIRED_CI_LANES
@@ -173,19 +238,7 @@ def sealed_closure_document(*, commit: str = COMMIT, signed_app: str = SIGNED_TR
 
 
 def _artifact_hash_manifest() -> dict:
-    entries = sorted(
-        (
-            {"path": "artifacts/Clash-for-Mac.app.tree.json", "sha256": SIGNED_TREE},
-            {"path": "artifacts/app-manifest.json", "sha256": APP_MANIFEST},
-            {"path": "artifacts/Libbox.xcframework.tree.json", "sha256": XCFRAMEWORK_SHA},
-            {
-                "path": "artifacts/Libbox.xcframework.manifest.json",
-                "sha256": XCFRAMEWORK_MANIFEST_SHA,
-            },
-        ),
-        key=lambda entry: entry["path"],
-    )
-    return {"entries": entries, "sha256": tree_digest(entries)}
+    return copy.deepcopy(final_artifact_hash_manifest())
 
 
 def final_candidate_document(
@@ -222,10 +275,6 @@ def final_candidate_document(
             }
             for role, bundle_id in sorted(REQUIRED_NESTED_CODE.items())
         ],
-        "evidence_binding": {
-            "artifact_hash_manifest_sha256": manifest["sha256"],
-            "superseded_report_hashes": [],
-        },
         "notarization": {
             "status": "Accepted",
             "id": "notary-12-3",
@@ -238,12 +287,7 @@ def final_candidate_document(
             "target_signed_app_tree_sha256": SIGNED_TREE,
             "captured_at": CAPTURED_AT,
         },
-        "gatekeeper": {
-            "assessment": "accepted",
-            "source": "spctl",
-            "target_signed_app_tree_sha256": SIGNED_TREE,
-            "captured_at": CAPTURED_AT,
-        },
+        "gatekeeper": gatekeeper_fixture(SIGNED_TREE, CAPTURED_AT),
         "physical_evidence": physical_fixture() if aggregate is None else aggregate,
         "post_verification": {"app_tree_sha256": SIGNED_TREE, "observed_at": OBSERVED_AT},
     }
@@ -310,9 +354,10 @@ class _CleanWorkspace(unittest.TestCase):
 
 
 class SealedManifestRoundTripTests(_CleanWorkspace):
-    def test_full_closure_seals_and_authorizes_publication(self) -> None:
+    def test_full_fixture_closure_seals_but_cannot_authorize_publication(self) -> None:
         manifest = self.build(request(3, self.workspace))
         self.assertEqual(manifest["document"], DOCUMENT_KIND)
+        self.assertEqual(manifest["visibility"], "private-release-operations")
         self.assertEqual(manifest["status"], SEALED)
         self.assertEqual(manifest["blocked_inputs"], [])
         for gate in GATE_ORDER:
@@ -321,12 +366,45 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
             [capability["highest_level"] for capability in manifest["capabilities"]],
             [SEALED_LEVEL] * len(CAPABILITIES),
         )
-        self.assertTrue(manifest["publication"]["artifacts_permitted"])
-        self.assertEqual(manifest["publication"]["refusals"], [])
+        self.assertFalse(manifest["publication"]["allowed"])
+        self.assertFalse(manifest["publication"]["artifacts_permitted"])
+        self.assertEqual(manifest["publication"]["refusals"], ["fixture-mode"])
         self.validate(manifest, require_sealed=True)
-        authorize_publication_artifacts(
-            REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
+        with self.assertRaisesRegex(PublicationError, "fixture evidence"):
+            authorize_publication_artifacts(
+                REPOSITORY, manifest, workspace_root=self.workspace
+            )
+
+    def test_omitted_release_capability_is_rejected(self) -> None:
+        payload = request(3, self.workspace)
+        removed = payload["evidence_manifest"]["capabilities"].pop()["id"]
+        payload["evidence_manifest"]["reports"] = [
+            report
+            for report in payload["evidence_manifest"]["reports"]
+            if not report["id"].startswith(f"{removed}-")
+        ]
+        with self.assertRaisesRegex(PublicationError, "inventory is incomplete"):
+            self.build(payload)
+
+    def test_unknown_release_capability_is_rejected(self) -> None:
+        payload = request(3, self.workspace)
+        payload["evidence_manifest"]["capabilities"][-1]["id"] = (
+            "unknown-release-surface"
         )
+        with self.assertRaisesRegex(PublicationError, "inventory is incomplete or unknown"):
+            self.build(payload)
+
+    def test_fixture_validation_reopens_the_private_aggregate(self) -> None:
+        payload = request(3, self.workspace)
+        manifest = self.build(payload)
+        aggregate_path = REPOSITORY / payload["signed_installed"]["path"]
+        original = aggregate_path.read_bytes()
+        try:
+            aggregate_path.write_bytes(original + b"drift")
+            with self.assertRaisesRegex(PublicationError, "size does not match"):
+                self.validate(manifest)
+        finally:
+            aggregate_path.write_bytes(original)
 
     def test_every_level_binds_its_own_gates(self) -> None:
         for depth, level in enumerate(LEVEL_ORDER):
@@ -358,15 +436,58 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
         self.validate(manifest)
         with self.assertRaisesRegex(PublicationError, "environment-gated"):
             self.validate(manifest, require_sealed=True)
-        with self.assertRaisesRegex(PublicationError, "environment-gated"):
+        with self.assertRaisesRegex(PublicationError, "fixture evidence"):
             authorize_publication_artifacts(
-                REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
+                REPOSITORY, manifest, workspace_root=self.workspace
+            )
+
+    def test_production_authorizer_has_no_fixture_or_policy_injection_api(self) -> None:
+        manifest = self.build(request(3, self.workspace))
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'fixture'"):
+            authorize_publication_artifacts(
+                REPOSITORY,
+                manifest,
+                fixture=True,
+                workspace_root=self.workspace,
+            )
+        with self.assertRaisesRegex(
+            TypeError, "unexpected keyword argument 'physical_trust_policy'"
+        ):
+            authorize_publication_artifacts(
+                REPOSITORY,
+                manifest,
+                physical_trust_policy=PHYSICAL_TRUST_POLICY,
+                workspace_root=self.workspace,
+            )
+
+    def test_publication_gate_cli_has_no_fixture_option(self) -> None:
+        from scripts.sealed_evidence_manifest import parser
+
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            parser().parse_args(["publication-gate", "--fixture"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_production_authorizer_rejects_fixture_evidence_under_configured_policy(
+        self,
+    ) -> None:
+        manifest = self.build(request(3, self.workspace))
+        manifest["fixture"] = False
+        with patch(
+            "scripts.publication.sealed_manifest.current_identity",
+            return_value={
+                "repositoryCommit": COMMIT,
+                "releaseSourceSha256": RELEASE_SOURCE,
+            },
+        ), self.assertRaisesRegex(PublicationError, "source-pinned policy"):
+            authorize_publication_artifacts(
+                REPOSITORY, manifest, workspace_root=self.workspace
             )
 
     def test_bindings_carry_every_required_digest(self) -> None:
         manifest = self.build(request(3, self.workspace))
         bindings = manifest["bindings"]
         self.assertEqual(bindings["commit"], COMMIT)
+        self.assertEqual(bindings["release_source_sha256"], RELEASE_SOURCE)
         self.assertEqual(bindings["product"], {"version": "0.4.0", "build_number": BUILD_NUMBER})
         self.assertEqual(bindings["signed_app_tree_sha256"], SIGNED_TREE)
         self.assertEqual(bindings["app_manifest_sha256"], APP_MANIFEST)
@@ -378,6 +499,16 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
             bindings["final_candidate_sha256"], manifest["final_candidate"]["binding_sha256"]
         )
         self.assertEqual(sorted(bindings["installed_runs"]), ["current-macos", "macos15"])
+        self.assertEqual(
+            bindings["physical_aggregate_sha256"],
+            manifest["signed_installed"]["sha256"],
+        )
+        self.assertEqual(
+            bindings["physical_private_archive_sha256"],
+            manifest["gates"]["signed_installed"]["evidence"]["private_archive"][
+                "binding_sha256"
+            ],
+        )
         # Every feature document and publication document is bound by digest.
         identifiers = {entry["id"] for entry in manifest["documents"]}
         self.assertTrue(set(REQUIRED_DOCUMENTS).issubset(identifiers))
@@ -385,12 +516,43 @@ class SealedManifestRoundTripTests(_CleanWorkspace):
         self.assertIn("cyclonedx-sbom", identifiers)
         self.assertIn("corresponding-source-archive", identifiers)
 
+    def test_required_feature_documents_use_neutral_current_contracts(self) -> None:
+        self.assertEqual(
+            REQUIRED_DOCUMENTS,
+            {
+                "requirements": "docs/release/macos15-network-extension-migration/requirements.md",
+                "design": "docs/release/macos15-network-extension-migration/design.md",
+                "tasks": "docs/release/macos15-network-extension-migration/tasks.md",
+                "capability-inventory": "scripts/release_capability_inventory.json",
+            },
+        )
+        stale_claims = (
+            "current source does not include the mandatory Global Authority",
+            "Global Authority is below level 1",
+        )
+        for relative in REQUIRED_DOCUMENTS.values():
+            with self.subTest(document=relative):
+                if relative != "scripts/release_capability_inventory.json":
+                    self.assertEqual(Path(relative).parts[:2], ("docs", "release"))
+                contents = (REPOSITORY / relative).read_text(encoding="utf-8")
+                for claim in stale_claims:
+                    self.assertNotIn(claim, contents)
+
     def test_fixture_mode_mismatch_is_rejected(self) -> None:
         manifest = self.build(request(0, self.workspace))
         with self.assertRaisesRegex(PublicationError, "fixture mode mismatch"):
             validate_sealed_evidence_manifest(
                 REPOSITORY, manifest, fixture=False, workspace_root=self.workspace
             )
+
+    def test_schema_version_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                manifest = self.build(request(0, self.workspace))
+                manifest["schema_version"] = invalid
+                reseal(manifest)
+                with self.assertRaisesRegex(PublicationError, "unsupported schema/document"):
+                    self.validate(manifest)
 
 
 class SealedManifestCapabilityTests(_CleanWorkspace):
@@ -475,26 +637,124 @@ class SealedManifestCapabilityTests(_CleanWorkspace):
         self.assertEqual(manifest["status"], SEALED)
         self.assertFalse(manifest["publication"]["allowed"])
         self.assertIn(
-            f"capability:global-authority={LEVEL_ORDER[2]}",
+            f"capability:global-authority-peer-authentication={LEVEL_ORDER[2]}",
             manifest["publication"]["refusals"],
         )
-        with self.assertRaisesRegex(PublicationError, "publication artifacts are refused"):
+        self.validate(manifest)
+        with self.assertRaisesRegex(PublicationError, "fixture evidence"):
             authorize_publication_artifacts(
-                REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
+                REPOSITORY, manifest, workspace_root=self.workspace
             )
 
 
 class SealedManifestBindingTests(_CleanWorkspace):
+    def test_source_gate_schema_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                payload = request(0, self.workspace)
+                payload["p0_source"]["schema_version"] = invalid
+                with self.assertRaisesRegex(PublicationError, "unsupported schema"):
+                    self.build(payload)
+
+    def test_source_gate_attempt_outcome_rejects_non_string_values(self) -> None:
+        for invalid in (None, False, [], {}):
+            with self.subTest(invalid=invalid):
+                payload = request(0, self.workspace)
+                payload["p0_source"]["attempt_outcome"] = invalid
+                with self.assertRaisesRegex(PublicationError, "outcome is unsupported"):
+                    self.build(payload)
+
+    def test_inner_manifest_schema_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                payload = request(0, self.workspace)
+                payload["evidence_manifest"]["schema_version"] = invalid
+                with self.assertRaisesRegex(PublicationError, "schema_version"):
+                    self.build(payload)
+
     def test_stale_source_gate_commit_is_rejected(self) -> None:
         payload = request(0, self.workspace)
         payload["p0_source"]["gates"][0]["commit"] = "b" * 40
         with self.assertRaisesRegex(PublicationError, "different commit"):
             self.build(payload)
 
+    def test_stale_source_gate_release_source_is_rejected(self) -> None:
+        payload = request(1, self.workspace)
+        payload["p0_source"]["release_source_sha256"] = "e" * 64
+        for gate in payload["p0_source"]["gates"]:
+            gate["release_source_sha256"] = "e" * 64
+        with self.assertRaisesRegex(PublicationError, "different release sources"):
+            self.build(payload)
+
+    def test_non_fixture_seal_rechecks_current_clean_release_source(self) -> None:
+        payload = request(0, self.workspace)
+        with patch(
+            "scripts.publication.sealed_manifest.current_identity",
+            return_value={
+                "repositoryCommit": COMMIT,
+                "releaseSourceSha256": RELEASE_SOURCE,
+            },
+        ) as identity, patch(
+            "scripts.publication.sealed_manifest._inner_manifest",
+            return_value=({}, [], []),
+        ):
+            manifest = build_sealed_evidence_manifest(
+                REPOSITORY,
+                payload,
+                fixture=False,
+                workspace_root=self.workspace,
+            )
+        identity.assert_called_once_with(REPOSITORY, require_clean=True)
+        self.assertEqual(manifest["bindings"]["release_source_sha256"], RELEASE_SOURCE)
+
+        with patch(
+            "scripts.publication.sealed_manifest.current_identity",
+            return_value={
+                "repositoryCommit": COMMIT,
+                "releaseSourceSha256": "e" * 64,
+            },
+        ), patch(
+            "scripts.publication.sealed_manifest._inner_manifest",
+            return_value=({}, [], []),
+        ), self.assertRaisesRegex(PublicationError, "different release source"):
+            build_sealed_evidence_manifest(
+                REPOSITORY,
+                payload,
+                fixture=False,
+                workspace_root=self.workspace,
+            )
+
+    def test_legacy_source_gate_schema_without_source_binding_is_rejected(self) -> None:
+        payload = request(0, self.workspace)
+        payload["p0_source"]["schema_version"] = 1
+        payload["p0_source"]["document"] = "p0-source-gates-v1"
+        payload["p0_source"].pop("repository_commit")
+        payload["p0_source"].pop("release_source_sha256")
+        for gate in payload["p0_source"]["gates"]:
+            gate.pop("release_source_sha256")
+        with self.assertRaisesRegex(PublicationError, "field set|schema"):
+            self.build(payload)
+
     def test_stale_ci_toolchain_is_rejected(self) -> None:
         payload = request(1, self.workspace)
         payload["unsigned_ci"]["lanes"][0]["toolchain_sha256"] = "e" * 64
         with self.assertRaisesRegex(PublicationError, "different toolchain"):
+            self.build(payload)
+
+    def test_stale_ci_release_source_is_rejected(self) -> None:
+        payload = request(1, self.workspace)
+        payload["unsigned_ci"]["lanes"][0]["release_source_sha256"] = "e" * 64
+        with self.assertRaisesRegex(PublicationError, "release source"):
+            self.build(payload)
+
+    def test_legacy_ci_schema_without_source_binding_is_rejected(self) -> None:
+        payload = request(1, self.workspace)
+        payload["unsigned_ci"]["schema_version"] = 1
+        payload["unsigned_ci"]["document"] = "unsigned-ci-lanes-v1"
+        payload["unsigned_ci"].pop("release_source_sha256")
+        for lane in payload["unsigned_ci"]["lanes"]:
+            lane.pop("release_source_sha256")
+        with self.assertRaisesRegex(PublicationError, "field set|schema"):
             self.build(payload)
 
     def test_inner_manifest_toolchain_must_match_ci(self) -> None:
@@ -521,12 +781,16 @@ class SealedManifestBindingTests(_CleanWorkspace):
         with self.assertRaisesRegex(PublicationError, "different signed app trees"):
             self.build(payload)
 
-    def test_final_candidate_must_embed_the_bound_aggregate(self) -> None:
+    def test_final_candidate_must_bind_the_same_aggregate_artifact(self) -> None:
         payload = request(3, self.workspace)
         substituted = copy.deepcopy(payload["signed_installed"])
-        substituted["runs"][0]["captured_at"] = "2026-07-23T00:00:00Z"
+        source = REPOSITORY / substituted["path"]
+        target = source.with_name("aggregate-substituted.json")
+        target.write_bytes(source.read_bytes())
+        self.addCleanup(target.unlink, missing_ok=True)
+        substituted["path"] = target.relative_to(REPOSITORY).as_posix()
         payload["signed_installed"] = substituted
-        with self.assertRaisesRegex(PublicationError, "different physical evidence aggregate"):
+        with self.assertRaisesRegex(PublicationError, "different physical aggregate artifact"):
             self.build(payload)
 
     def test_lane_may_not_mask_a_nonzero_exit(self) -> None:
@@ -662,18 +926,18 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
             manifest = build_sealed_evidence_manifest(
                 REPOSITORY, payload, fixture=True, workspace_root=workspace
             )
-            self.assertEqual(manifest["gates"]["updater_key_custody"]["status"], FAILED)
+            self.assertEqual(manifest["gates"]["release_secret_custody"]["status"], FAILED)
             self.assertEqual(manifest["status"], BLOCKED)
-            self.assertIn("updater_key_custody", manifest["blocked_inputs"])
-            blocks = manifest["gates"]["updater_key_custody"]["evidence"]["blocks"]
+            self.assertIn("release_secret_custody", manifest["blocked_inputs"])
+            blocks = manifest["gates"]["release_secret_custody"]["evidence"]["blocks"]
             self.assertEqual(len(blocks), 1)
             self.assertEqual(blocks[0]["name"], "cfw-rs.key")
             # Path/name only: no content is ever recorded.
             self.assertNotIn("contents", json.dumps(blocks))
             self.assertFalse(manifest["publication"]["allowed"])
-            with self.assertRaisesRegex(PublicationError, "environment-gated"):
+            with self.assertRaisesRegex(PublicationError, "fixture evidence"):
                 authorize_publication_artifacts(
-                    REPOSITORY, manifest, fixture=True, workspace_root=workspace
+                    REPOSITORY, manifest, workspace_root=workspace
                 )
 
     def test_updater_key_presence_refuses_a_sealed_claim(self) -> None:
@@ -697,9 +961,9 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
             manifest = build_sealed_evidence_manifest(
                 REPOSITORY, downgraded, fixture=True, workspace_root=workspace
             )
-            self.assertEqual(manifest["gates"]["updater_key_custody"]["status"], FAILED)
+            self.assertEqual(manifest["gates"]["release_secret_custody"]["status"], FAILED)
             self.assertEqual(manifest["gates"]["final_candidate"]["status"], BLOCKED)
-            self.assertIn("updater_key_custody", manifest["blocked_inputs"])
+            self.assertIn("release_secret_custody", manifest["blocked_inputs"])
             self.assertFalse(manifest["publication"]["allowed"])
 
     def test_real_workspace_status_reports_the_live_custody_gate(self) -> None:
@@ -710,24 +974,24 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
         # path/name only, and a passing custody gate promotes nothing.
         from scripts.publication.sealed_manifest import (
             COMPOSED_INPUTS,
-            UPDATER_KEY_GATE,
+            RELEASE_SECRET_GATE,
             publication_decision,
         )
-        from scripts.updater_key_release_blocker import evaluate_workspace
+        from scripts.release_secret_material_blocker import evaluate_workspace
 
         # Independent path/name-only oracle for what the workspace holds now.
         live = evaluate_workspace(REPOSITORY)
         report = environment_status(REPOSITORY)
 
         self.assertEqual(
-            [block["path"] for block in report["updater_key_blocks"]],
+            [block["path"] for block in report["workspace_secret_blocks"]],
             [response.detected_path for response in live],
         )
         self.assertEqual(
-            UPDATER_KEY_GATE in report["blocked_inputs"],
-            bool(report["updater_key_blocks"]),
+            RELEASE_SECRET_GATE in report["blocked_inputs"],
+            bool(report["workspace_secret_blocks"]),
         )
-        for block in report["updater_key_blocks"]:
+        for block in report["workspace_secret_blocks"]:
             # Path/name and response flags only; no key bytes are ever carried.
             self.assertEqual(
                 set(block),
@@ -737,12 +1001,19 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
                     "relocation_target",
                     "exposure_plausible",
                     "rotation_required",
-                    "trust_migration_required",
+                    "credential_kind",
+                    "required_trust_action",
+                    "updater_trust_migration_required",
+                    "notary_profile_reprovision_required",
+                    "trust_domain_identification_required",
                 },
             )
             self.assertTrue(block["path"].endswith(block["name"]))
-            self.assertIn(Path(block["name"]).suffix.lower(), {".key", ".pem"})
-        self.assertNotIn("contents", json.dumps(report["updater_key_blocks"]))
+            self.assertIn(
+                Path(block["name"]).suffix.lower(),
+                {".key", ".p8", ".pem"},
+            )
+        self.assertNotIn("contents", json.dumps(report["workspace_secret_blocks"]))
         self.assertEqual(
             report["status"], BLOCKED if report["blocked_inputs"] else "inputs-present"
         )
@@ -763,11 +1034,11 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
         self.assertEqual(gated["manifest_state"], NOT_RUN)
         # ...and a custody gate that passes on its own never allows publication.
         gates = {name: {"status": NOT_RUN, "evidence": None} for name in GATE_ORDER}
-        gates[UPDATER_KEY_GATE] = {"status": PASSED, "evidence": {"blocks": []}}
+        gates[RELEASE_SECRET_GATE] = {"status": PASSED, "evidence": {"blocks": []}}
         decision = publication_decision(gates, [])
         self.assertFalse(decision["allowed"])
         self.assertFalse(decision["artifacts_permitted"])
-        self.assertNotIn(f"gate:{UPDATER_KEY_GATE}=not-run", decision["refusals"])
+        self.assertNotIn(f"gate:{RELEASE_SECRET_GATE}=not-run", decision["refusals"])
 
         # The scan still fails closed: an unavailable root is never "no key".
         with self.assertRaises(PublicationError):
@@ -775,6 +1046,16 @@ class SealedManifestUpdaterKeyTests(_CleanWorkspace):
 
 
 class SealedManifestContractTests(unittest.TestCase):
+    def test_default_state_is_confined_to_the_active_ga_stage_root(self) -> None:
+        self.assertEqual(
+            DEFAULT_EVIDENCE_DIRECTORY,
+            "target/candidates/0.4.0/ga/40044/stage-inputs/sealed-manifest",
+        )
+        self.assertEqual(
+            DEFAULT_MANIFEST_PATH,
+            f"{DEFAULT_EVIDENCE_DIRECTORY}/sealed-evidence-manifest.json",
+        )
+
     def test_self_check_passes(self) -> None:
         self_check()
 
@@ -787,7 +1068,7 @@ class SealedManifestContractTests(unittest.TestCase):
                 "signed_installed",
                 "sealed_closure",
                 "final_candidate",
-                "updater_key_custody",
+                "release_secret_custody",
             ),
         )
 

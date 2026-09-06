@@ -9,6 +9,7 @@ use crate::settings_storage::{FilePolicy, SecureDirectory};
 
 pub const APP_HOME_DIR_NAME: &str = PRODUCT_NAME;
 pub const PREFERENCES_FILE_NAME: &str = "cfw-preferences.json";
+pub const WINDOW_STATE_FILE_NAME: &str = "cfw-window-state.json";
 pub const LEGACY_SETTINGS_FILE_NAME: &str = "cfw-settings.yaml";
 pub const LEGACY_CONFIG_FILE_NAME: &str = "config.yaml";
 /// 0.4 native profiles live outside the historical Clash-managed directory so
@@ -21,6 +22,10 @@ pub const LEGACY_HELPERS_DIR_NAME: &str = "helpers";
 
 const PREFERENCES_SCHEMA_VERSION: u16 = 1;
 const MAX_PREFERENCES_BYTES: usize = 16 * 1024;
+const WINDOW_STATE_SCHEMA_VERSION: u16 = 1;
+const MAX_WINDOW_STATE_BYTES: usize = 1024;
+const MAX_WINDOW_DIMENSION: u32 = 65_535;
+const MAX_WINDOW_COORDINATE_MAGNITUDE: i32 = 1_000_000;
 const RETIREMENT_MARKER_FILE_NAME: &str = ".legacy-network-retired-v1.json";
 const RETIREMENT_MARKER_BYTES: &[u8] = b"{\"schema_version\":1,\"completed\":true}";
 
@@ -54,6 +59,8 @@ pub enum SettingsStoreError {
     InvalidLegacySettings { line: usize, message: String },
     #[error("legacy settings contain duplicate or aliased values for {key}")]
     AmbiguousLegacySetting { key: String },
+    #[error("window bounds are invalid: {0}")]
+    InvalidWindowBounds(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -127,6 +134,7 @@ impl AppPreferences {
 pub struct MacOsAppPaths {
     pub app_home: PathBuf,
     pub preferences_file: PathBuf,
+    pub window_state_file: PathBuf,
     pub legacy_settings_file: PathBuf,
     pub legacy_config_file: PathBuf,
     pub legacy_profiles_dir: PathBuf,
@@ -155,6 +163,7 @@ impl MacOsAppPaths {
         let app_home = app_home.into();
         Self {
             preferences_file: app_home.join(PREFERENCES_FILE_NAME),
+            window_state_file: app_home.join(WINDOW_STATE_FILE_NAME),
             legacy_settings_file: app_home.join(LEGACY_SETTINGS_FILE_NAME),
             legacy_config_file: app_home.join(LEGACY_CONFIG_FILE_NAME),
             legacy_profiles_dir: app_home.join(LEGACY_PROFILES_DIR_NAME),
@@ -168,6 +177,77 @@ impl MacOsAppPaths {
 
     pub fn managed_dirs(&self) -> [&Path; 3] {
         [&self.app_home, &self.profiles_dir, &self.logs_dir]
+    }
+}
+
+/// Physical window position and inner content size persisted by the native shell.
+///
+/// The renderer never reads or writes this type. Coordinates and dimensions are
+/// bounded here before a later shell-level monitor clamp, so corrupted state
+/// cannot reach a platform window API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl WindowBounds {
+    pub fn new(x: i32, y: i32, width: u32, height: u32) -> Result<Self, SettingsStoreError> {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+        .validate()
+    }
+
+    fn validate(self) -> Result<Self, SettingsStoreError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(SettingsStoreError::InvalidWindowBounds(
+                "width and height must be non-zero",
+            ));
+        }
+        if self.width > MAX_WINDOW_DIMENSION || self.height > MAX_WINDOW_DIMENSION {
+            return Err(SettingsStoreError::InvalidWindowBounds(
+                "width or height exceeds the fixed bound",
+            ));
+        }
+        if self.x.unsigned_abs() > MAX_WINDOW_COORDINATE_MAGNITUDE as u32
+            || self.y.unsigned_abs() > MAX_WINDOW_COORDINATE_MAGNITUDE as u32
+        {
+            return Err(SettingsStoreError::InvalidWindowBounds(
+                "position exceeds the fixed bound",
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredWindowState {
+    schema_version: u16,
+    bounds: WindowBounds,
+}
+
+impl StoredWindowState {
+    fn new(bounds: WindowBounds) -> Result<Self, SettingsStoreError> {
+        Ok(Self {
+            schema_version: WINDOW_STATE_SCHEMA_VERSION,
+            bounds: bounds.validate()?,
+        })
+    }
+
+    fn validate(self) -> Result<Self, SettingsStoreError> {
+        if self.schema_version != WINDOW_STATE_SCHEMA_VERSION {
+            return Err(SettingsStoreError::UnsupportedSchema(self.schema_version));
+        }
+        self.bounds.validate()?;
+        Ok(self)
     }
 }
 
@@ -222,6 +302,33 @@ impl SettingsStore {
             PREFERENCES_FILE_NAME,
             &bytes,
             MAX_PREFERENCES_BYTES,
+        )
+    }
+
+    pub fn window_bounds(&self) -> Result<Option<WindowBounds>, SettingsStoreError> {
+        let directory = SecureDirectory::open_or_create(&self.paths.app_home)?;
+        let Some(stored) = directory.read_optional(
+            WINDOW_STATE_FILE_NAME,
+            MAX_WINDOW_STATE_BYTES,
+            FilePolicy::Private,
+        )?
+        else {
+            return Ok(None);
+        };
+        let state = serde_json::from_slice::<StoredWindowState>(&stored.bytes)?.validate()?;
+        if serde_json::to_vec(&state)? != stored.bytes {
+            return Err(SettingsStoreError::NonCanonicalJson);
+        }
+        Ok(Some(state.bounds))
+    }
+
+    pub fn write_window_bounds(&self, bounds: WindowBounds) -> Result<(), SettingsStoreError> {
+        self.ensure_layout()?;
+        let bytes = serde_json::to_vec(&StoredWindowState::new(bounds)?)?;
+        SecureDirectory::open_or_create(&self.paths.app_home)?.write_atomic(
+            WINDOW_STATE_FILE_NAME,
+            &bytes,
+            MAX_WINDOW_STATE_BYTES,
         )
     }
 

@@ -110,7 +110,7 @@ PINNED_MANIFEST_FIELDS = frozenset(
 # complete path-to-fragment mapping. It is an exact policy checksum, not an
 # authentication mechanism or a claim that the repository resists its owner.
 REQUIRED_ARTIFACT_BINDINGS_SHA256 = (
-    "d7d201da995b1aa25b29c04ad0f5783a440024a4ca1b3e34bcf75e28be3df1dc"
+    "8022aff8052e54fbb68476d99d801b8cbf1d248fe300e71d7dff9da27c741e1b"
 )
 # Level 1 identity of the complete path-to-source-digest release-freeze map.
 # It detects accidental or unreviewed drift; it is not authentication and does

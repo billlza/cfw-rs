@@ -153,6 +153,17 @@ not silently accept both spellings for the same schema field.
 | External transaction outcome cannot be uniquely recovered | Already consumed; quarantine | Record `quarantined_outcome_unknown`; do not fresh-submit or overwrite an official path |
 | Assurance work after GA publication | No new GA build | Reference the immutable GA manifest; never rebuild, re-sign, or relabel it |
 
+For notarization only, a failed upload that never durably bound a submission ID
+may proceed after read-only reconciliation finds the externally observed ID
+unavailable. Preserve the old unknown prefix and upload the identical retained
+archive through one explicit new upload operation. Keep its actual successful
+upload response and observed time window as a separately identified observation;
+never rewrite the original upload as successful. The adopted observation binds
+the same frozen app and signature bytes, and normal recovery still requires an
+Apple Accepted log for that exact archive. This exception does not permit
+reassigning an already bound ID, replacing a signed artifact, blind retry of an
+unknown external operation, or a new application build number for upload failure.
+
 ## Design and review workflow
 
 Before proposing or changing a build number, the author and reviewer must

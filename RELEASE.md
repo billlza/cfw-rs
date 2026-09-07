@@ -944,6 +944,26 @@ wire proof.
    CFW_BUILD_NUMBER=40044 NOTARY_PROFILE=clashformac-notary \
      scripts/build_signed_candidate.sh --recover-notarization-id UUID
    ```
+
+   A failed upload with no durable submission observation, submission receipt,
+   or recovery intent has a separate explicit recovery option. First reconcile
+   the previously observed ID through Apple info/history. If it is unavailable,
+   retain the original unknown attempt and upload the byte-identical retained
+   ZIP once, preserving the real command, start/completion times, exit status,
+   stdout and stderr. Apple's documented `--no-s3-acceleration` option selects
+   its regional S3 endpoint without changing the archive or signing bytes.
+
+   Run the operator's `scripts/run_notarization_transaction.sh` with the existing
+   recovery arguments and `--adopt-upload-observation /absolute/private/observation.json`.
+   The v2 observation explicitly identifies a same-archive resubmission and the
+   prior unknown event; it is not an observation of the original failed upload.
+   Admission requires a real successful upload response for the exact retained
+   path and new ID. The original four events remain unchanged. Existing bound
+   submission IDs cannot be reassigned through this option. Apple must still
+   return an Accepted log for the exact archive digest and new upload window,
+   followed by normal stapling, Gatekeeper and application verification.
+   Import the observation only once; subsequent recovery uses its bound ID
+   without the adoption flag and never uploads again.
 5. regenerate and legally review the fixed publication source/SBOM closure,
    then seal `prepackage`. Only that immutable stage may authorize DMG and
    updater package creation:

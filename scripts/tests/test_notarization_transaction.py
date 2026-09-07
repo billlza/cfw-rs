@@ -8728,6 +8728,197 @@ class AttemptConcurrencyTests(unittest.TestCase):
         self.assertEqual(fixture.runner.calls.count(CommandRole.SUBMIT), 1)
 
 
+class NotarizationAdoptedUploadTests(unittest.TestCase):
+    STARTED = "2026-07-29T04:02:00Z"
+    COMPLETED = "2026-07-29T04:03:00Z"
+
+    def setUp(self) -> None:
+        self.fixture = Fixture()
+        self.addCleanup(self.fixture.close)
+        self.fixture.runner.fail_role = CommandRole.SUBMIT
+        with self.assertRaises(TransactionError) as failed:
+            self.fixture.execute()
+        self.assertEqual(failed.exception.code, "submit_failed")
+        self.fixture.runner.fail_role = None
+        self.fixture.runner.calls.clear()
+        self.fixture.runner.command_calls.clear()
+        self.fixture.runner.role_counts.clear()
+        self.fixture.runner.info_created_at = self.STARTED
+        self.fixture.runner.log["uploadDate"] = self.STARTED
+        self.fixture.clock = lambda: "2026-07-29T04:04:00Z"
+        self.path = self.fixture.repository / "actual-upload-observation.json"
+        self.observation = self.make_observation(self.fixture)
+        self.write_observation()
+
+    @classmethod
+    def make_observation(cls, fixture: Fixture) -> dict:
+        attempt = fixture.context.attempt_root
+        intent_path = attempt / "intent.json"
+        intent = json.loads(intent_path.read_bytes())
+        archive = attempt / "work" / fixture.context.archive_name
+        return {
+            "schema_version": 2,
+            "document": transaction_module.RESUBMISSION_OBSERVATION_DOCUMENT,
+            "attempt_id": intent["attempt_id"],
+            "submission_id": SUBMISSION_ID,
+            "intent_sha256": hashlib.sha256(intent_path.read_bytes()).hexdigest(),
+            "archive_name": fixture.context.archive_name,
+            "archive_sha256": intent["archive_sha256"],
+            "path_binding": transaction_module.RESUBMISSION_PATH_BINDING,
+            "observed_at": cls.COMPLETED,
+            "resubmission": {
+                "prior_unknown_event_sha256": hashlib.sha256(
+                    (attempt / "events/00000004.json").read_bytes()
+                ).hexdigest(),
+                "missing_submission_id": "aaaaaaaa-2222-3333-4444-555555555555",
+                "started_at": cls.STARTED,
+                "completed_at": cls.COMPLETED,
+                "command": [
+                    "/usr/bin/xcrun", "notarytool", "submit", str(archive),
+                    "--no-wait", "--no-s3-acceleration", "--keychain-profile",
+                    fixture.context.notary_profile, "--output-format", "json",
+                ],
+                "exit_code": 0,
+                "stdout": submit_response(str(archive)),
+                "stderr": "",
+            },
+        }
+
+    def write_observation(self) -> None:
+        self.path.write_text(transaction_module._canonical_json(self.observation))
+        self.path.chmod(0o600)
+
+    def test_completed_same_archive_upload_recovers_publishes_and_reopens(self) -> None:
+        events = self.fixture.context.attempt_root / "events"
+        originals = [path.read_bytes() for path in sorted(events.iterdir())]
+        source_observation = self.path.read_bytes()
+        final_app = self.fixture.recover(adopt_upload_observation=self.path)
+        self.assertTrue(final_app.is_dir())
+        self.assertEqual([path.read_bytes() for path in sorted(events.iterdir())[:4]], originals)
+        self.assertEqual(self.path.read_bytes(), source_observation)
+        self.assertNotIn(CommandRole.SUBMIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.WAIT, self.fixture.runner.calls)
+        self.assertNotIn(CommandRole.HISTORY, self.fixture.runner.calls)
+        receipt = json.loads(
+            (self.fixture.context.attempt_root / "submission-receipt.json").read_bytes()
+        )
+        self.assertEqual(receipt["causal_binding"], transaction_module.RESUBMISSION_CAUSAL_BINDING)
+        self.assertEqual(receipt["notary_created_at"], self.STARTED)
+        reopened = PublishedTransactionReceiptValidationTests._validate(self.fixture)
+        self.assertEqual(reopened.receipt["submission_id"], SUBMISSION_ID)
+        self.assertEqual(reopened.receipt["archive_sha256"], ARCHIVE_SHA256)
+        self.assertEqual(self.fixture.recover(), final_app)
+
+    def test_misbound_archive_id_and_original_outcome_are_rejected_before_adoption(self) -> None:
+        for field, value in (
+            ("archive_sha256", "0" * 64),
+            ("archive_name", "different.zip"),
+            ("submission_id", "bbbbbbbb-2222-3333-4444-555555555555"),
+            ("intent_sha256", "0" * 64),
+        ):
+            with self.subTest(field=field):
+                original = self.observation[field]
+                self.observation[field] = value
+                self.write_observation()
+                with self.assertRaises(TransactionError):
+                    self.fixture.recover(adopt_upload_observation=self.path)
+                self.observation[field] = original
+        self.assertFalse((self.fixture.context.attempt_root / "submission-observation.json").exists())
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_invalid_upload_response_and_windows_do_not_enter_recovery(self) -> None:
+        evidence = self.observation["resubmission"]
+        for field, value in (
+            ("prior_unknown_event_sha256", "0" * 64),
+            ("missing_submission_id", SUBMISSION_ID),
+            ("started_at", "2026-07-27T04:02:00Z"),
+            ("completed_at", "2026-07-29T04:01:00Z"),
+            ("exit_code", 1),
+            ("stderr", "upload failed"),
+            ("stdout", response("In Progress")),
+            ("stdout", submit_response("/different/archive.zip")),
+            ("command", ["/bin/echo", "uploaded"]),
+        ):
+            with self.subTest(field=field, value=value):
+                original = evidence[field]
+                evidence[field] = value
+                self.write_observation()
+                with self.assertRaises(TransactionError):
+                    self.fixture.recover(adopt_upload_observation=self.path)
+                evidence[field] = original
+        self.assertFalse((self.fixture.context.attempt_root / "submission-observation.json").exists())
+        self.assertEqual(self.fixture.runner.calls, [])
+
+    def test_actual_apple_info_must_fall_within_new_upload_window(self) -> None:
+        self.fixture.runner.info_created_at = "2026-07-28T04:02:00Z"
+        with self.assertRaises(TransactionError) as rejected:
+            self.fixture.recover(adopt_upload_observation=self.path)
+        self.assertEqual(rejected.exception.code, "submission_causal_binding_unproven")
+        self.assertFalse(self.fixture.context.final_root.exists())
+        self.assertNotIn(CommandRole.FETCH_LOG, self.fixture.runner.calls)
+
+    def test_actual_apple_log_must_bind_new_window_job_and_archive(self) -> None:
+        for field, value in (
+            ("uploadDate", "2026-07-29T04:05:00Z"),
+            ("jobId", "bbbbbbbb-2222-3333-4444-555555555555"),
+            ("sha256", "0" * 64),
+        ):
+            with self.subTest(field=field):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                fixture.create_orphaned_submit_attempt()
+                fixture.runner.info_created_at = self.STARTED
+                fixture.runner.log["uploadDate"] = self.STARTED
+                fixture.runner.log[field] = value
+                observation_path = fixture.repository / "upload.json"
+                observation_path.write_text(transaction_module._canonical_json(self.make_observation(fixture)))
+                observation_path.chmod(0o600)
+                with self.assertRaises(TransactionError):
+                    fixture.recover(
+                        adopt_upload_observation=observation_path,
+                        clock=lambda: "2026-07-29T04:04:00Z",
+                    )
+                self.assertFalse(fixture.context.final_root.exists())
+
+    def test_repeated_adoption_is_rejected_and_normal_recovery_resumes(self) -> None:
+        self.fixture.runner.info_status = "In Progress"
+        with self.assertRaises(TransactionError):
+            self.fixture.recover(adopt_upload_observation=self.path)
+        destination = self.fixture.context.attempt_root / "submission-observation.json"
+        retained = destination.read_bytes()
+        with self.assertRaises(TransactionError) as rejected:
+            self.fixture.recover(adopt_upload_observation=self.path)
+        self.assertEqual(rejected.exception.code, "resubmission_adoption_forbidden")
+        self.assertEqual(destination.read_bytes(), retained)
+        self.fixture.runner.info_status = "Accepted"
+        self.assertTrue(self.fixture.recover().is_dir())
+
+    def test_changed_retained_raw_response_is_rejected_on_publication_replay(self) -> None:
+        self.fixture.recover(adopt_upload_observation=self.path)
+        destination = self.fixture.context.attempt_root / "submission-observation.json"
+        observation = json.loads(destination.read_bytes())
+        observation["resubmission"]["stdout"] = submit_response("/different/archive.zip")
+        destination.write_text(transaction_module._canonical_json(observation))
+        with self.assertRaises(TransactionError):
+            PublishedTransactionReceiptValidationTests._validate(self.fixture)
+
+    def test_known_submission_and_already_published_attempt_cannot_be_reassigned(self) -> None:
+        for published in (False, True):
+            with self.subTest(published=published):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                if published:
+                    fixture.execute()
+                else:
+                    fixture.runner.fail_role = CommandRole.WAIT
+                    with self.assertRaises(TransactionError):
+                        fixture.execute()
+                    fixture.runner.fail_role = None
+                with self.assertRaises(TransactionError) as rejected:
+                    fixture.recover(adopt_upload_observation=self.path)
+                self.assertEqual(rejected.exception.code, "resubmission_adoption_forbidden")
+
+
 class NotarizationCliTests(unittest.TestCase):
     def _common_arguments(
         self,
@@ -8811,6 +9002,33 @@ class NotarizationCliTests(unittest.TestCase):
         result = self._run(["--recover-submission-id", SUBMISSION_ID])
         self.assertEqual(result.returncode, 2)
         self.assertIn("recovery requires --artifact-repository", result.stderr)
+
+    def test_upload_adoption_requires_explicit_recovery_mode(self) -> None:
+        result = self._run([
+            "--staged-app", "/tmp/Clash for Mac.app",
+            "--adopt-upload-observation", "/tmp/upload.json",
+        ])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--adopt-upload-observation requires --recover-submission-id", result.stderr)
+
+    def test_recovery_dispatch_preserves_exact_upload_observation_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            observation = root / "actual-upload.json"
+            argv = [
+                "notarization_transaction.py", *self._common_arguments(),
+                "--recover-submission-id", SUBMISSION_ID,
+                "--artifact-repository", str(root), "--toolchain-root", str(root),
+                "--adopt-upload-observation", str(observation),
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.dict(os.environ, {}, clear=False),
+                patch.object(transaction_module, "recover_transaction", return_value=root / "app") as recover,
+                patch("builtins.print"),
+            ):
+                transaction_module.main()
+            self.assertEqual(recover.call_args.kwargs["adopt_upload_observation"], observation)
 
     def test_recovery_requires_explicit_toolchain_root(self) -> None:
         result = self._run(
@@ -9069,7 +9287,10 @@ class NotarizationCliTests(unittest.TestCase):
             )
             self.assertEqual(
                 recover.call_args.kwargs,
-                {"toolchain_metadata_reader": transaction_module.production_artifact_toolchain_metadata_reader},
+                {
+                    "adopt_upload_observation": None,
+                    "toolchain_metadata_reader": transaction_module.production_artifact_toolchain_metadata_reader,
+                },
             )
 
 

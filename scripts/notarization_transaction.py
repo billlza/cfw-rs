@@ -169,6 +169,9 @@ EVENT_DOCUMENT = "cfw-notarization-event-v1"
 EVENT_DOCUMENT_V2 = "cfw-notarization-event-v2"
 SUBMISSION_DOCUMENT = "cfw-notarization-submission-receipt-v5"
 SUBMISSION_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v1"
+RESUBMISSION_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v2"
+RESUBMISSION_PATH_BINDING = "exact-same-archive-resubmission"
+RESUBMISSION_CAUSAL_BINDING = "same-archive-resubmission-and-log"
 RECEIPT_DOCUMENT = "cfw-notarization-publish-ready-receipt-v5"
 RECOVERY_DOCUMENT = "cfw-notarization-recovery-intent-v2"
 RECOVERY_CONTINUATION_DOCUMENT = (
@@ -255,6 +258,10 @@ SUBMISSION_OBSERVATION_FIELDS = {
     "archive_sha256",
     "path_binding",
     "observed_at",
+}
+RESUBMISSION_FIELDS = {
+    "prior_unknown_event_sha256", "missing_submission_id", "started_at",
+    "completed_at", "command", "exit_code", "stdout", "stderr",
 }
 SUBMISSION_RECEIPT_FIELDS = {
     "schema_version",
@@ -2979,6 +2986,164 @@ def _decode_attempt_inventory(
     )
 
 
+def _validate_submission_observation(
+    data: bytes,
+    path: Path,
+    *,
+    context: TransactionContext,
+    intent: dict[str, Any],
+    intent_sha256: str,
+    journal: EventJournal,
+    window_start: datetime,
+    window_end: datetime,
+    window_end_rendered: str,
+) -> tuple[dict[str, Any], datetime, datetime, str]:
+    observation = _decode_json_bytes(data, path)
+    resubmitted = (
+        isinstance(observation, dict)
+        and observation.get("schema_version") == 2
+        and observation.get("document") == RESUBMISSION_OBSERVATION_DOCUMENT
+    )
+    fields = SUBMISSION_OBSERVATION_FIELDS | ({"resubmission"} if resubmitted else set())
+    if (
+        not isinstance(observation, dict)
+        or set(observation) != fields
+        or data != _canonical_json(observation).encode("utf-8")
+        or type(observation["schema_version"]) is not int
+        or observation["schema_version"] != (2 if resubmitted else 1)
+        or observation["document"] != (
+            RESUBMISSION_OBSERVATION_DOCUMENT if resubmitted else SUBMISSION_OBSERVATION_DOCUMENT
+        )
+        or observation["attempt_id"] != intent["attempt_id"]
+        or observation["intent_sha256"] != intent_sha256
+        or observation["archive_name"] != context.archive_name
+        or observation["archive_sha256"] != intent["archive_sha256"]
+        or observation["path_binding"] != (
+            RESUBMISSION_PATH_BINDING if resubmitted else "exact"
+        )
+    ):
+        raise TransactionError(
+            "submission_observation_identity_drift",
+            "submission observation differs from the retained attempt",
+        )
+    submission_id = _canonical_uuid(observation["submission_id"], "observed submission id")
+    if resubmitted:
+        prefix = _decode_recoverable_event_prefix(journal)
+        evidence = observation["resubmission"]
+        if (
+            prefix.recovery_event_start != 4
+            or any(event["submission_id"] is not None for event in journal.documents[:4])
+            or journal.documents[3]["state"] != "outcome_unknown"
+            or not isinstance(evidence, dict)
+            or set(evidence) != RESUBMISSION_FIELDS
+            or evidence["prior_unknown_event_sha256"] != prefix.prior_event_sha256
+            or type(evidence["exit_code"]) is not int
+            or evidence["exit_code"] != 0
+            or evidence["stderr"] != ""
+        ):
+            raise TransactionError(
+                "resubmission_observation_invalid",
+                "same-archive upload does not follow an unbound unknown submission",
+            )
+        missing_id = _canonical_uuid(evidence["missing_submission_id"], "missing submission id")
+        original_archive = context.attempt_root / "work" / context.archive_name
+        command = [
+            "/usr/bin/xcrun", "notarytool", "submit", str(original_archive), "--no-wait",
+            "--keychain-profile", context.notary_profile, "--output-format", "json",
+        ]
+        alternate_command = command[:5] + ["--no-s3-acceleration"] + command[5:]
+        if (
+            missing_id == submission_id
+            or evidence["command"] not in (command, alternate_command)
+            or not isinstance(evidence["stdout"], str)
+            or _parse_notary_submit_response(evidence["stdout"], original_archive) != submission_id
+        ):
+            raise TransactionError(
+                "resubmission_observation_invalid",
+                "same-archive upload lacks its exact successful submission response",
+            )
+        _, started = _parse_utc_timestamp(evidence["started_at"], "resubmission started_at")
+        ended_text, ended = _parse_utc_timestamp(evidence["completed_at"], "resubmission completed_at")
+        if (
+            started < prefix.submit_window_end
+            or ended < started
+            or observation["observed_at"] != ended_text
+        ):
+            raise TransactionError(
+                "resubmission_observation_invalid",
+                "same-archive upload has an inconsistent observed time window",
+            )
+        window_start, window_end, window_end_rendered = started, ended, ended_text
+    observed_at = _parse_utc_timestamp(observation["observed_at"], "submission observation observed_at")[1]
+    if not _timestamp_within_recorded_window(
+        observed_at, window_start=window_start, window_end=window_end,
+        window_end_rendered=window_end_rendered,
+    ):
+        raise TransactionError(
+            "submission_observation_identity_drift",
+            "submission observation falls outside the submit outcome window",
+        )
+    return observation, window_start, window_end, window_end_rendered
+
+
+def _recovery_causal_binding(context: TransactionContext, observation_sha256: str | None) -> str:
+    if observation_sha256 is None:
+        return "unique-history-window-and-log"
+    path = context.attempt_root / "submission-observation.json"
+    data = _read_regular_bytes(path)
+    if hashlib.sha256(data).hexdigest() != observation_sha256:
+        raise TransactionError("submission_observation_identity_drift", "submission observation changed")
+    observation = _decode_json_bytes(data, path)
+    if not isinstance(observation, dict) or type(observation.get("schema_version")) is not int:
+        raise TransactionError("submission_observation_identity_drift", "submission observation schema is invalid")
+    if observation["schema_version"] == 2 and observation.get("document") == RESUBMISSION_OBSERVATION_DOCUMENT:
+        return RESUBMISSION_CAUSAL_BINDING
+    if observation["schema_version"] == 1 and observation.get("document") == SUBMISSION_OBSERVATION_DOCUMENT:
+        return "direct-submit-observation-and-log"
+    raise TransactionError("submission_observation_identity_drift", "submission observation schema is unsupported")
+
+
+def _adopt_upload_observation(
+    attempt: RecoverableAttempt, observation_path: Path, submission_id: str
+) -> RecoverableAttempt:
+    """Adopt a completed external upload; this operation never submits bytes."""
+    if (
+        len(attempt.journal.documents) != 4
+        or {path.name for path in attempt.context.attempt_root.iterdir()}
+        != {"events", "intent.json", "work"}
+        or attempt.observed_submission_id is not None
+        or attempt.journal_submission_id is not None
+        or not observation_path.is_absolute()
+        or observation_path.resolve(strict=True) != observation_path
+    ):
+        raise TransactionError(
+            "resubmission_adoption_forbidden",
+            "upload adoption requires the original unbound unknown attempt and no prior recovery",
+        )
+    data = _read_regular_bytes(observation_path)
+    observation, started, ended, ended_text = _validate_submission_observation(
+        data, observation_path, context=attempt.context, intent=attempt.intent,
+        intent_sha256=attempt.intent_sha256, journal=attempt.journal,
+        window_start=attempt.submit_window_start, window_end=attempt.submit_window_end,
+        window_end_rendered=attempt.submit_window_end_rendered,
+    )
+    if (
+        observation["document"] != RESUBMISSION_OBSERVATION_DOCUMENT
+        or observation["submission_id"] != submission_id
+    ):
+        raise TransactionError("resubmission_adoption_forbidden", "adopted upload id or observation mode differs")
+    destination = attempt.context.attempt_root / "submission-observation.json"
+    _write_json_exclusive(destination, observation)
+    if _read_regular_bytes(destination) != data:
+        raise TransactionError("submission_observation_identity_drift", "adopted observation readback differs")
+    return replace(
+        attempt, observed_submission_id=submission_id,
+        submission_observation_sha256=hashlib.sha256(data).hexdigest(),
+        submit_window_start=started, submit_window_end=ended,
+        submit_window_end_rendered=ended_text,
+    )
+
+
 def _load_recoverable_attempt(
     context: TransactionContext,
     *,
@@ -3135,27 +3300,14 @@ def _load_recoverable_attempt(
     submission_observation_sha256: str | None = None
     if os.path.lexists(submission_observation_path):
         observation_data = _read_regular_bytes(submission_observation_path)
-        observation = _decode_json_bytes(
-            observation_data,
-            submission_observation_path,
-        )
-        if (
-            not isinstance(observation, dict)
-            or set(observation) != SUBMISSION_OBSERVATION_FIELDS
-            or observation_data != _canonical_json(observation).encode("utf-8")
-            or type(observation["schema_version"]) is not int
-            or observation["schema_version"] != 1
-            or observation["document"] != SUBMISSION_OBSERVATION_DOCUMENT
-            or observation["attempt_id"] != intent["attempt_id"]
-            or observation["intent_sha256"] != intent_sha256
-            or observation["archive_name"] != context.archive_name
-            or observation["archive_sha256"] != archive_sha256
-            or observation["path_binding"] != "exact"
-        ):
-            raise TransactionError(
-                "submission_observation_identity_drift",
-                "submission observation differs from the retained attempt",
+        observation, submit_window_start, submit_window_end, submit_window_end_rendered = (
+            _validate_submission_observation(
+                observation_data, submission_observation_path, context=context,
+                intent=intent, intent_sha256=intent_sha256, journal=journal,
+                window_start=submit_window_start, window_end=submit_window_end,
+                window_end_rendered=submit_window_end_rendered,
             )
+        )
         observed_submission_id = _canonical_uuid(
             observation["submission_id"],
             "observed submission id",
@@ -3164,16 +3316,6 @@ def _load_recoverable_attempt(
             observation["observed_at"],
             "submission observation observed_at",
         )[1]
-        if not _timestamp_within_recorded_window(
-            observed_at,
-            window_start=submit_window_start,
-            window_end=submit_window_end,
-            window_end_rendered=submit_window_end_rendered,
-        ):
-            raise TransactionError(
-                "submission_observation_identity_drift",
-                "submission observation falls outside the submit outcome window",
-            )
         if recovery_event_start == 3:
             submit_window_end = observed_at
             submit_window_end_rendered = observation["observed_at"]
@@ -3296,11 +3438,7 @@ def _load_recoverable_attempt(
         elif acquisition == "explicit-recovery":
             recovery_sha256 = receipt["recovery_intent_sha256"]
             recovery_intent_path = context.attempt_root / "recovery-intent.json"
-            expected_causal_binding = (
-                "direct-submit-observation-and-log"
-                if submission_observation_sha256 is not None
-                else "unique-history-window-and-log"
-            )
+            expected_causal_binding = _recovery_causal_binding(context, submission_observation_sha256)
             notary_created_at = _parse_utc_timestamp(
                 receipt["notary_created_at"],
                 "submission receipt notary_created_at",
@@ -3974,11 +4112,7 @@ def _require_submission_acquisition_evidence(
             receipt["notary_created_at"],
             "submission receipt notary_created_at",
         )
-        expected_causal_binding = (
-            "direct-submit-observation-and-log"
-            if observation_sha256 is not None
-            else "unique-history-window-and-log"
-        )
+        expected_causal_binding = _recovery_causal_binding(prepared.context, observation_sha256)
         if receipt["causal_binding"] != expected_causal_binding:
             raise TransactionError(
                 "submission_receipt_identity_drift",
@@ -8060,6 +8194,7 @@ def recover_transaction(
     submission_id: str,
     recovery_tool_repository: Path,
     *,
+    adopt_upload_observation: Path | None = None,
     command_runner: CommandRunner = production_command_runner,
     archive_validator: ArchiveValidator = production_archive_validator,
     gatekeeper_capture: GatekeeperCapture = production_gatekeeper_capture,
@@ -8135,6 +8270,17 @@ def recover_transaction(
     direct_receipt_pending_path = (
         context.attempt_root / PUBLISH_READY_RECEIPT_PENDING_FILENAME
     )
+    if adopt_upload_observation is not None and any(
+        os.path.lexists(path)
+        for path in (
+            direct_receipt_path, direct_receipt_pending_path,
+            context.attempt_root / "publish-ready", context.final_root,
+        )
+    ):
+        raise TransactionError(
+            "resubmission_adoption_forbidden",
+            "a finalized notarization attempt cannot adopt another upload",
+        )
     if os.path.lexists(context.attempt_root / "publish-ready") or (
         os.path.lexists(context.final_root)
         and (
@@ -8159,6 +8305,8 @@ def recover_transaction(
         toolchain_metadata_reader=toolchain_metadata_reader,
         clock=clock,
     )
+    if adopt_upload_observation is not None:
+        attempt = _adopt_upload_observation(attempt, adopt_upload_observation, submission_id)
     if (
         attempt.journal_submission_id is not None
         and attempt.journal_submission_id != submission_id
@@ -8361,10 +8509,8 @@ def recover_transaction(
                     "recovery_intent_sha256": recovery_intent_sha256,
                     "notary_created_at": info_created_at,
                     "notary_profile": context.notary_profile,
-                    "causal_binding": (
-                        "direct-submit-observation-and-log"
-                        if attempt.observed_submission_id is not None
-                        else "unique-history-window-and-log"
+                    "causal_binding": _recovery_causal_binding(
+                        context, attempt.submission_observation_sha256
                     ),
                     "archive_sha256": attempt.archive_sha256,
                     "candidate_freeze_intent_sha256": attempt.intent[
@@ -9396,6 +9542,7 @@ def main() -> None:
     mode.add_argument("--staged-app", type=Path)
     mode.add_argument("--submit-frozen-candidate", action="store_true")
     mode.add_argument("--recover-submission-id")
+    parser.add_argument("--adopt-upload-observation", type=Path)
     parser.add_argument("--artifact-repository", type=Path)
     parser.add_argument("--toolchain-root", type=Path)
     parser.add_argument("--native-products", type=Path, required=True)
@@ -9413,6 +9560,8 @@ def main() -> None:
     parser.add_argument("--ui-dependencies-tree-sha256", required=True)
     parser.add_argument("--xcodegen-toolchain-tree-sha256", required=True)
     arguments = parser.parse_args()
+    if arguments.adopt_upload_observation is not None and arguments.recover_submission_id is None:
+        parser.error("--adopt-upload-observation requires --recover-submission-id")
     tool_repository = Path(__file__).resolve().parent.parent
     if arguments.staged_app is not None:
         if arguments.artifact_repository is not None:
@@ -9469,6 +9618,7 @@ def main() -> None:
                 context,
                 arguments.recover_submission_id,
                 tool_repository,
+                adopt_upload_observation=arguments.adopt_upload_observation,
                 toolchain_metadata_reader=(
                     production_toolchain_metadata_reader
                     if repository == tool_repository

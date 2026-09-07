@@ -122,9 +122,9 @@ class StageFixture:
         return {
             "hosted-ci.json": canonical_json(
                 {
-                    "document": "cfw-github-hosted-ci-receipt-v3",
+                    "document": "cfw-github-hosted-ci-receipt-v4",
                     "run": {"id": 1, "run_attempt": 1},
-                    "schema_version": 3,
+                    "schema_version": 4,
                 }
             ),
             "manifest.json": canonical_json(manifest),
@@ -728,7 +728,7 @@ class AdapterContractTests(unittest.TestCase):
             ):
                 _repo_relative(repository, path)
 
-    def test_hosted_ci_source_binding_requires_v3_workflow_identity(self) -> None:
+    def test_hosted_ci_source_binding_keeps_exact_frozen_workflow_identity(self) -> None:
         expected_source = {
             "candidate_freeze_intent_sha256": "a" * 64,
             "release_source_sha256": "b" * 64,

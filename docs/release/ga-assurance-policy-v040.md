@@ -316,7 +316,7 @@ source, without changing the failed bundle, re-signing, or submitting again.
 
 Every GA-required gate is explicit and fail closed. The GA manifest must bind:
 
-- one clean repository commit, product-input identity, and exact-head hosted CI
+- one clean repository commit, product-input identity, and explicitly bound hosted CI
   result with successful build, test, lint, and dependency-policy lanes;
 - the arm64 application and nested products, inside-out Developer ID signing,
   the expected Team and bundle identities, reviewed provisioning profiles,
@@ -409,8 +409,17 @@ Legacy maintenance remains an explicit action with its original confirmation and
 recovery boundaries; ordinary startup neither advances that transaction nor
 deletes its data. Runtime acceptance must exercise the normal startup controls.
 
-Prepackage v3 requires the complete successful hosted CI receipt for the frozen
-product commit. The 27-command local CI reproduction is optional assurance and
+Prepackage v3 requires a complete successful hosted CI receipt. Receipt v4
+retains the frozen product source and separately records the actual tested
+commit. A different tested commit is admitted only when both complete immutable
+Git trees differ solely in regular files under `scripts/tests/`; application,
+build, dependency, workflow, mode and unclassified changes remain rejected.
+The actual tested head, source digest and changed paths are rederived during
+capture and replay. All three jobs, required steps and zero-annotation checks
+remain mandatory. A failed original run is never relabelled successful, and a
+later release-tool executor is not presented as the tested source. Earlier v3
+receipts remain with their original frozen verifier and are not rewritten.
+The 27-command local CI reproduction is optional assurance and
 is excluded from the prepackage file set, CI binding, and mandatory publication
 artifact closure. Hosted validation uses the pinned validation Python entry;
 the product's actual release toolchain remains independently bound by its frozen

@@ -434,5 +434,86 @@ class RepositorySourceIdentityTests(unittest.TestCase):
             identity_at_commit(self.root, commit)
 
 
+    def test_release_test_changes_compare_history_not_the_current_executor(self) -> None:
+        candidate = repository_commit(self.root)
+        test = self.root / "scripts/tests/test_release.py"
+        test.parent.mkdir()
+        test.write_text("assert 1 == 1\n", encoding="utf-8")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "correct release harness")
+        tested = repository_commit(self.root)
+        (self.root / "apps/app.rs").write_text("fn main() { panic!(); }\n")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "later source change")
+        self.assertEqual(
+            source_identity.release_test_source_changes(self.root, candidate, tested),
+            ("scripts/tests/test_release.py",),
+        )
+        self.assertEqual(
+            source_identity.release_test_source_changes(self.root, candidate, candidate), ()
+        )
+        with self.assertRaisesRegex(SourceIdentityError, "outside"):
+            source_identity.release_test_source_changes(
+                self.root, candidate, repository_commit(self.root)
+            )
+
+    def test_release_test_scope_rejects_other_paths_including_unclassified_inputs(self) -> None:
+        for name in (
+            "apps/app.rs", "Cargo.lock", ".github/workflows/ci.yml",
+            "scripts/build_signed_candidate.sh", "README.md",
+            "scripts/tests-other/test_release.py", "unclassified-input.txt",
+        ):
+            with self.subTest(path=name):
+                before = repository_commit(self.root)
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("changed input\n", encoding="utf-8")
+                git(self.root, "add", ".")
+                git(self.root, "commit", "-q", "-m", "change outside release tests")
+                with self.assertRaisesRegex(SourceIdentityError, "outside"):
+                    source_identity.release_test_source_changes(
+                        self.root, before, repository_commit(self.root)
+                    )
+
+    def test_release_test_scope_rejects_product_executable_mode_drift(self) -> None:
+        before = repository_commit(self.root)
+        (self.root / "apps/app.rs").chmod(0o755)
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "change product executable mode")
+        with self.assertRaisesRegex(SourceIdentityError, "outside"):
+            source_identity.release_test_source_changes(
+                self.root, before, repository_commit(self.root)
+            )
+
+    def test_release_test_scope_rejects_symlink_even_inside_tests(self) -> None:
+        before = repository_commit(self.root)
+        path = self.root / "scripts/tests/test_link.py"
+        path.parent.mkdir()
+        path.symlink_to("../../apps/app.rs")
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-q", "-m", "add test path alias")
+        with self.assertRaisesRegex(SourceIdentityError, "non-regular"):
+            source_identity.release_test_source_changes(
+                self.root, before, repository_commit(self.root)
+            )
+
+    def test_release_test_scope_rejects_gitlink_even_inside_tests(self) -> None:
+        before = repository_commit(self.root)
+        git(self.root, "update-index", "--add", "--cacheinfo", "160000", before,
+            "scripts/tests/foreign")
+        git(self.root, "commit", "-q", "-m", "add test gitlink")
+        with self.assertRaisesRegex(SourceIdentityError, "non-regular"):
+            source_identity.release_test_source_changes(
+                self.root, before, repository_commit(self.root)
+            )
+
+    def test_release_test_scope_rejects_missing_or_noncanonical_commit(self) -> None:
+        for tested in ("HEAD", "a" * 40, repository_commit(self.root) + "\n"):
+            with self.subTest(tested=tested), self.assertRaises(SourceIdentityError):
+                source_identity.release_test_source_changes(
+                    self.root, repository_commit(self.root), tested
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

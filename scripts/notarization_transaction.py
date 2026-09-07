@@ -178,6 +178,11 @@ EVENT_DOCUMENT_V2 = "cfw-notarization-event-v2"
 SUBMISSION_DOCUMENT = "cfw-notarization-submission-receipt-v5"
 SUBMISSION_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v1"
 RESUBMISSION_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v2"
+PENDING_UPLOAD_OBSERVATION_DOCUMENT = "cfw-notarization-submission-observation-v3"
+RESUBMISSION_OBSERVATION_DOCUMENTS = {
+    2: RESUBMISSION_OBSERVATION_DOCUMENT,
+    3: PENDING_UPLOAD_OBSERVATION_DOCUMENT,
+}
 RESUBMISSION_PATH_BINDING = "exact-same-archive-resubmission"
 RESUBMISSION_CAUSAL_BINDING = "same-archive-resubmission-and-log"
 RECEIPT_DOCUMENT = "cfw-notarization-publish-ready-receipt-v5"
@@ -270,6 +275,9 @@ SUBMISSION_OBSERVATION_FIELDS = {
 RESUBMISSION_FIELDS = {
     "prior_unknown_event_sha256", "missing_submission_id", "started_at",
     "completed_at", "command", "exit_code", "stdout", "stderr",
+}
+PENDING_UPLOAD_FIELDS = (RESUBMISSION_FIELDS - {"missing_submission_id"}) | {
+    "prior_submission_id", "prior_info", "prior_observed_at",
 }
 SUBMISSION_RECEIPT_FIELDS = {
     "schema_version",
@@ -3007,10 +3015,9 @@ def _validate_submission_observation(
     window_end_rendered: str,
 ) -> tuple[dict[str, Any], datetime, datetime, str]:
     observation = _decode_json_bytes(data, path)
+    schema = observation.get("schema_version") if isinstance(observation, dict) else None
     resubmitted = (
-        isinstance(observation, dict)
-        and observation.get("schema_version") == 2
-        and observation.get("document") == RESUBMISSION_OBSERVATION_DOCUMENT
+        type(schema) is int and schema in RESUBMISSION_OBSERVATION_DOCUMENTS
     )
     fields = SUBMISSION_OBSERVATION_FIELDS | ({"resubmission"} if resubmitted else set())
     if (
@@ -3018,9 +3025,9 @@ def _validate_submission_observation(
         or set(observation) != fields
         or data != _canonical_json(observation).encode("utf-8")
         or type(observation["schema_version"]) is not int
-        or observation["schema_version"] != (2 if resubmitted else 1)
+        or observation["schema_version"] != (schema if resubmitted else 1)
         or observation["document"] != (
-            RESUBMISSION_OBSERVATION_DOCUMENT if resubmitted else SUBMISSION_OBSERVATION_DOCUMENT
+            RESUBMISSION_OBSERVATION_DOCUMENTS[schema] if resubmitted else SUBMISSION_OBSERVATION_DOCUMENT
         )
         or observation["attempt_id"] != intent["attempt_id"]
         or observation["intent_sha256"] != intent_sha256
@@ -3043,17 +3050,21 @@ def _validate_submission_observation(
             or any(event["submission_id"] is not None for event in journal.documents[:4])
             or journal.documents[3]["state"] != "outcome_unknown"
             or not isinstance(evidence, dict)
-            or set(evidence) != RESUBMISSION_FIELDS
+            or set(evidence) != (PENDING_UPLOAD_FIELDS if schema == 3 else RESUBMISSION_FIELDS)
             or evidence["prior_unknown_event_sha256"] != prefix.prior_event_sha256
             or type(evidence["exit_code"]) is not int
             or evidence["exit_code"] != 0
             or evidence["stderr"] != ""
+            or (schema == 3 and not isinstance(evidence["prior_info"], str))
         ):
             raise TransactionError(
                 "resubmission_observation_invalid",
                 "same-archive upload does not follow an unbound unknown submission",
             )
-        missing_id = _canonical_uuid(evidence["missing_submission_id"], "missing submission id")
+        prior_id = _canonical_uuid(
+            evidence["prior_submission_id"] if schema == 3 else evidence["missing_submission_id"],
+            "prior submission id",
+        )
         original_archive = context.attempt_root / "work" / context.archive_name
         command = [
             "/usr/bin/xcrun", "notarytool", "submit", str(original_archive), "--no-wait",
@@ -3061,7 +3072,7 @@ def _validate_submission_observation(
         ]
         alternate_command = command[:5] + ["--no-s3-acceleration"] + command[5:]
         if (
-            missing_id == submission_id
+            prior_id == submission_id
             or evidence["command"] not in (command, alternate_command)
             or not isinstance(evidence["stdout"], str)
             or _parse_notary_submit_response(evidence["stdout"], original_archive) != submission_id
@@ -3072,6 +3083,27 @@ def _validate_submission_observation(
             )
         _, started = _parse_utc_timestamp(evidence["started_at"], "resubmission started_at")
         ended_text, ended = _parse_utc_timestamp(evidence["completed_at"], "resubmission completed_at")
+        if schema == 3:
+            _, prior_created = _parse_notary_info_response(
+                evidence["prior_info"], submission_id=prior_id,
+                archive_name=context.archive_name, allowed_statuses={"In Progress"},
+            )
+            _, prior_observed = _parse_utc_timestamp(
+                evidence["prior_observed_at"], "prior submission observed_at"
+            )
+            if (
+                not _timestamp_within_recorded_window(
+                    _parse_utc_timestamp(prior_created, "prior submission createdDate")[1],
+                    window_start=prefix.submit_window_start,
+                    window_end=prefix.submit_window_end,
+                    window_end_rendered=journal.documents[3]["recorded_at"],
+                )
+                or not prefix.submit_window_end <= prior_observed <= started
+            ):
+                raise TransactionError(
+                    "resubmission_observation_invalid",
+                    "prior pending submission is not bound to the original failed upload",
+                )
         if (
             started < prefix.submit_window_end
             or ended < started
@@ -3104,7 +3136,10 @@ def _recovery_causal_binding(context: TransactionContext, observation_sha256: st
     observation = _decode_json_bytes(data, path)
     if not isinstance(observation, dict) or type(observation.get("schema_version")) is not int:
         raise TransactionError("submission_observation_identity_drift", "submission observation schema is invalid")
-    if observation["schema_version"] == 2 and observation.get("document") == RESUBMISSION_OBSERVATION_DOCUMENT:
+    if (
+        observation["schema_version"] in RESUBMISSION_OBSERVATION_DOCUMENTS
+        and observation.get("document") == RESUBMISSION_OBSERVATION_DOCUMENTS[observation["schema_version"]]
+    ):
         return RESUBMISSION_CAUSAL_BINDING
     if observation["schema_version"] == 1 and observation.get("document") == SUBMISSION_OBSERVATION_DOCUMENT:
         return "direct-submit-observation-and-log"
@@ -3112,7 +3147,8 @@ def _recovery_causal_binding(context: TransactionContext, observation_sha256: st
 
 
 def _adopt_upload_observation(
-    attempt: RecoverableAttempt, observation_path: Path, submission_id: str
+    attempt: RecoverableAttempt, observation_path: Path, submission_id: str,
+    *, command_runner: CommandRunner,
 ) -> RecoverableAttempt:
     """Adopt a completed external upload; this operation never submits bytes."""
     if (
@@ -3136,10 +3172,35 @@ def _adopt_upload_observation(
         window_end_rendered=attempt.submit_window_end_rendered,
     )
     if (
-        observation["document"] != RESUBMISSION_OBSERVATION_DOCUMENT
+        observation["document"] not in RESUBMISSION_OBSERVATION_DOCUMENTS.values()
         or observation["submission_id"] != submission_id
     ):
         raise TransactionError("resubmission_adoption_forbidden", "adopted upload id or observation mode differs")
+    if observation["schema_version"] == 3:
+        evidence = observation["resubmission"]
+        prior_id = evidence["prior_submission_id"]
+        prior = _recovery_read_result(
+            command_runner, CommandRole.INFO,
+            ["/usr/bin/xcrun", "notarytool", "info", prior_id, "--keychain-profile",
+             attempt.context.notary_profile, "--output-format", "json"],
+            300,
+        )
+        status, created = _parse_notary_info_response(
+            prior.stdout, submission_id=prior_id, archive_name=attempt.context.archive_name,
+            allowed_statuses={"In Progress", "Accepted", "Invalid", "Rejected"},
+        )
+        if status in {"Invalid", "Rejected"}:
+            raise TransactionError(
+                "notary_submission_rejected",
+                "Apple rejected the prior submission; inspect its log before proceeding",
+                terminal_state="rejected",
+            )
+        _, observed_created = _parse_notary_info_response(
+            evidence["prior_info"], submission_id=prior_id,
+            archive_name=attempt.context.archive_name, allowed_statuses={"In Progress"},
+        )
+        if created != observed_created:
+            raise TransactionError("submission_causal_binding_unproven", "prior Apple submission identity changed")
     destination = attempt.context.attempt_root / "submission-observation.json"
     _write_json_exclusive(destination, observation)
     if _read_regular_bytes(destination) != data:
@@ -8314,7 +8375,9 @@ def recover_transaction(
         clock=clock,
     )
     if adopt_upload_observation is not None:
-        attempt = _adopt_upload_observation(attempt, adopt_upload_observation, submission_id)
+        attempt = _adopt_upload_observation(
+            attempt, adopt_upload_observation, submission_id, command_runner=command_runner
+        )
     if (
         attempt.journal_submission_id is not None
         and attempt.journal_submission_id != submission_id

@@ -353,19 +353,14 @@ def _historical_blob_digests(
     return digests
 
 
-def identity_at_commit(
+def _historical_source_files(
     repository: Path,
     commit: str,
     environment: Mapping[str, str] | None = None,
-) -> dict[str, str]:
-    """Recompute a clean historical release identity from immutable Git blobs.
-
-    Notarization recovery may be performed by a later clean checkout.  Its
-    receipt binds that recovery-tool commit and release-source digest, but the
-    original checkout path is intentionally not persisted.  This reader proves
-    the exact historical bytes from the current repository's object database
-    without checking out, executing, or trusting a caller-supplied worktree.
-    """
+    *,
+    paths: tuple[str, ...] | None = None,
+) -> list[_HistoricalSourceFile]:
+    """Read regular Git inputs; an empty path tuple selects the complete tree."""
     if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
         raise SourceIdentityError("historical release commit is not canonical")
     resolved = _run_git(
@@ -375,7 +370,10 @@ def identity_at_commit(
     )
     if resolved.decode("ascii", errors="strict").strip() != commit:
         raise SourceIdentityError("historical release commit is unavailable")
-    release_paths = _historical_release_paths(repository, commit, environment)
+    release_paths = (
+        _historical_release_paths(repository, commit, environment)
+        if paths is None else paths
+    )
     listing = _run_git(
         repository,
         ["ls-tree", "-rlz", "--full-tree", commit, "--", *release_paths],
@@ -411,6 +409,58 @@ def identity_at_commit(
         )
     if not files:
         raise SourceIdentityError("historical release source closure is empty")
+    return files
+
+
+def release_test_source_changes(
+    repository: Path,
+    candidate_commit: str,
+    tested_commit: str,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Require a CI source to differ only in the release-only test harness.
+
+    Compare the complete Git trees, including modes and paths outside the
+    release-source digest. The source-owned scripts/tests directory is the only
+    admitted difference; callers cannot supply exclusions or product aliases.
+    """
+    candidate = {
+        entry.path: entry
+        for entry in _historical_source_files(
+            repository, candidate_commit, environment, paths=()
+        )
+    }
+    tested = {
+        entry.path: entry
+        for entry in _historical_source_files(
+            repository, tested_commit, environment, paths=()
+        )
+    }
+    changed = tuple(sorted(
+        path for path in candidate.keys() | tested.keys()
+        if candidate.get(path) != tested.get(path)
+    ))
+    if any(not path.startswith("scripts/tests/") for path in changed):
+        raise SourceIdentityError(
+            "tested CI source differs outside the release-only scripts/tests harness"
+        )
+    return changed
+
+
+def identity_at_commit(
+    repository: Path,
+    commit: str,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Recompute a clean historical release identity from immutable Git blobs.
+
+    Notarization recovery may be performed by a later clean checkout.  Its
+    receipt binds that recovery-tool commit and release-source digest, but the
+    original checkout path is intentionally not persisted.  This reader proves
+    the exact historical bytes from the current repository's object database
+    without checking out, executing, or trusting a caller-supplied worktree.
+    """
+    files = _historical_source_files(repository, commit, environment)
     blob_digests = _historical_blob_digests(repository, files, environment)
     digest = hashlib.sha256()
     for entry in sorted(files, key=lambda value: value.path):

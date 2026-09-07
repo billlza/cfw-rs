@@ -14,6 +14,8 @@ from unittest.mock import Mock, patch
 
 from scripts import candidate_freeze
 from scripts import github_hosted_ci_receipt as hosted
+from scripts import repository_source_identity as source_identity
+from scripts.tests.test_repository_source_identity import git, git_output
 from scripts.publication.common import PublicationError
 from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
@@ -276,7 +278,7 @@ class HostedCIReceiptTests(unittest.TestCase):
     def _write_receipt(self, api: StableAPI | None = None) -> dict[str, object]:
         selected = api or StableAPI()
         with patch.object(hosted, "_fetch_api_json", side_effect=selected):
-            receipt = hosted._live_receipt(dict(SOURCE), RUN_ID, WORKFLOW_BYTES)
+            receipt = hosted._live_receipt(self.repository, dict(SOURCE), RUN_ID, WORKFLOW_BYTES)
         self.output.write_bytes(hosted._canonical_json(receipt))
         self.output.chmod(0o600)
         return receipt
@@ -996,6 +998,145 @@ class HostedCICommandSessionTests(unittest.TestCase):
         self.assertTrue(self.output_path.is_file())
         self.assertEqual(self.events[-2:], ["session-close", "sources-unchanged"])
         self.assertEqual(self.output.getvalue(), "")
+
+
+class HistoricalTestedSourceReceiptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.repository = Path(temporary.name).resolve()
+        git(self.repository, "init", "-q")
+        git(self.repository, "config", "user.name", "Release Test")
+        git(self.repository, "config", "user.email", "release-test@example.invalid")
+        (self.repository / ".gitignore").write_text("target/\n")
+        workflow = self.repository / hosted.WORKFLOW_PATH
+        workflow.parent.mkdir(parents=True)
+        workflow.write_bytes(WORKFLOW_BYTES)
+        (self.repository / "Cargo.toml").write_text("[workspace]\nmembers = []\n")
+        tests = self.repository / "scripts/tests"
+        tests.mkdir(parents=True)
+        (self.repository / "scripts/repository_source_identity.py").write_text(
+            f"RELEASE_PATHS = {source_identity.RELEASE_PATHS!r}\n"
+        )
+        (tests / "test_release.py").write_text("assert original_convention\n")
+        git(self.repository, "add", ".")
+        git(self.repository, "commit", "-q", "-m", "frozen product source")
+        candidate = source_identity.current_identity(self.repository, require_clean=True)
+        self.source = {
+            **SOURCE,
+            "repository_commit": candidate["repositoryCommit"],
+            "release_source_sha256": candidate["releaseSourceSha256"],
+        }
+        (tests / "test_release.py").write_text("assert corrected_convention\n")
+        git(self.repository, "add", ".")
+        git(self.repository, "commit", "-q", "-m", "correct release harness")
+        self.tested_commit = git_output(self.repository, "rev-parse", "HEAD")
+        self.tested_identity = source_identity.identity_at_commit(
+            self.repository, self.tested_commit
+        )
+        # Collection may run from a later tool commit H. CI actually ran G;
+        # neither its head nor its tree proof may be replaced with H or F.
+        (self.repository / "scripts/capture_tool.py").write_text("# evidence tool update\n")
+        git(self.repository, "add", ".")
+        git(self.repository, "commit", "-q", "-m", "update evidence collector")
+        self.collector_commit = git_output(self.repository, "rev-parse", "HEAD")
+        self.output = self.repository / hosted.RECEIPT_RELATIVE
+        self.output.parent.mkdir(parents=True, mode=0o700)
+        self.output.parent.parent.chmod(0o700)
+        self.output.parent.chmod(0o700)
+
+    def api(self, head: str | None = None) -> StableAPI:
+        selected = self.tested_commit if head is None else head
+        jobs = jobs_response()
+        for job in jobs["jobs"]:
+            job["head_sha"] = selected
+        return StableAPI(run=run_response(head_sha=selected), jobs=jobs)
+
+    def capture(self, api: StableAPI | None = None) -> dict[str, object]:
+        with (
+            patch.object(hosted, "_source_binding", return_value=dict(self.source)),
+            patch.object(hosted, "_fetch_api_json", side_effect=self.api() if api is None else api),
+        ):
+            return hosted.capture_receipt(self.repository, RUN_ID)
+
+    def test_capture_offline_and_live_replay_keep_frozen_and_tested_sources_distinct(self) -> None:
+        receipt = self.capture()
+        self.assertEqual((receipt["schema_version"], receipt["document"]),
+                         (4, "cfw-github-hosted-ci-receipt-v4"))
+        self.assertEqual(receipt["source"], self.source)
+        self.assertEqual(receipt["tested_source"], {
+            "repository_commit": self.tested_commit,
+            "release_source_sha256": self.tested_identity["releaseSourceSha256"],
+            "changed_paths": ["scripts/tests/test_release.py"],
+        })
+        self.assertEqual(receipt["run"]["head_sha"], self.tested_commit)
+        self.assertNotEqual(self.tested_commit, self.collector_commit)
+        self.assertTrue(all(item["head_sha"] == self.tested_commit for item in receipt["jobs"]))
+        self.assertTrue(all(item["head_sha"] == self.tested_commit for item in receipt["check_runs"]))
+        with (
+            patch.object(hosted, "_source_binding", return_value=dict(self.source)),
+            patch.object(hosted, "_fetch_api_json", side_effect=AssertionError("offline network")),
+        ):
+            self.assertEqual(hosted.validate_receipt_offline(self.repository), receipt)
+        with (
+            patch.object(hosted, "_source_binding", return_value=dict(self.source)),
+            patch.object(hosted, "_fetch_api_json", side_effect=self.api()),
+        ):
+            self.assertEqual(hosted.verify_receipt(self.repository), receipt)
+
+    def test_capture_rejects_non_test_tool_changes_and_missing_historical_objects(self) -> None:
+        for head in (self.collector_commit, "f" * 40):
+            with self.subTest(head=head), self.assertRaisesRegex(hosted.HostedCIReceiptError, "tested CI source"):
+                self.capture(self.api(head))
+            self.assertFalse(self.output.exists())
+
+    def test_stored_tested_identity_or_delta_cannot_be_relabelled(self) -> None:
+        receipt = self.capture()
+        mutations = (
+            lambda value: value["tested_source"].update(release_source_sha256="f" * 64),
+            lambda value: value["tested_source"].update(changed_paths=[]),
+            lambda value: value["tested_source"].update(changed_paths=["apps/app.rs"]),
+            lambda value: value["tested_source"].update(repository_commit=self.collector_commit),
+            lambda value: value["run"].update(head_sha=self.source["repository_commit"]),
+            lambda value: value["source"].update(repository_commit=self.tested_commit),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                changed = copy.deepcopy(receipt)
+                mutate(changed)
+                self.output.write_bytes(hosted._canonical_json(changed))
+                with (
+                    patch.object(hosted, "_source_binding", return_value=dict(self.source)),
+                    self.assertRaises(hosted.HostedCIReceiptError),
+                ):
+                    hosted.validate_receipt_offline(self.repository)
+
+    def test_old_v3_is_rejected_without_rewriting_its_bytes(self) -> None:
+        receipt = self.capture()
+        receipt.update(document="cfw-github-hosted-ci-receipt-v3", schema_version=3)
+        receipt.pop("tested_source")
+        original = hosted._canonical_json(receipt)
+        self.output.write_bytes(original)
+        with (
+            patch.object(hosted, "_source_binding", return_value=dict(self.source)),
+            self.assertRaises(hosted.HostedCIReceiptError),
+        ):
+            hosted.validate_receipt_offline(self.repository)
+        self.assertEqual(self.output.read_bytes(), original)
+
+    def test_test_only_source_still_requires_successful_complete_checks(self) -> None:
+        failed_run = self.api()
+        failed_run.run["conclusion"] = "failure"
+        skipped_step = self.api()
+        skipped_step.jobs["jobs"][0]["steps"][0]["conclusion"] = "skipped"
+        old_job = self.api()
+        old_job.jobs["jobs"][0]["head_sha"] = self.source["repository_commit"]
+        annotated = self.api()
+        annotated.check_runs["check_runs"][0]["output"]["annotations_count"] = 1
+        for api in (failed_run, skipped_step, old_job, annotated):
+            with self.subTest(api=api), self.assertRaises(hosted.HostedCIReceiptError):
+                self.capture(api)
+            self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":

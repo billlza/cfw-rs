@@ -318,7 +318,7 @@ for contract in \
   'scripts/release_artifact_set_cli.py:verify_publication_authorization' \
   'scripts/publication/ga_release_contract.py:def verify_stage(' \
   'scripts/publication/ga_release_contract.py:def derive_runtime_expectation(' \
-  'scripts/github_hosted_ci_receipt.py:cfw-github-hosted-ci-receipt-v3' \
+  'scripts/github_hosted_ci_receipt.py:cfw-github-hosted-ci-receipt-v4' \
   'scripts/github_hosted_ci_receipt.py:REPOSITORY_ID: Final = 1_306_403_473' \
   'scripts/github_hosted_ci_receipt.py:WORKFLOW_ID: Final = 316_580_234' \
   'scripts/github_hosted_ci_receipt.py:WORKFLOW_SOURCE_STEP_PREFIX: Final =' \

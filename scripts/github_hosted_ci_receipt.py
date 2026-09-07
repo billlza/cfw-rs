@@ -7,7 +7,9 @@ never satisfy this receipt.  Production access is read-only, unauthenticated,
 fixed to one public repository/workflow, and revalidates one run and its fixed
 Check Suite around the attempt-specific jobs and zero-annotation responses so
 a rerun, workflow-file source drift, or successful job carrying diagnostics
-cannot be mistaken for the retained attempt.
+cannot be mistaken for the retained attempt. The artifact source stays frozen;
+its tested CI head may differ only in the source-owned scripts/tests harness.
+Every reopened receipt rederives that distinction from immutable Git inputs.
 """
 
 from __future__ import annotations
@@ -51,7 +53,12 @@ if __package__:
         read_private_pending_locked,
         write_private_pending_locked,
     )
-    from .repository_source_identity import SourceIdentityError, current_identity
+    from .repository_source_identity import (
+        SourceIdentityError,
+        current_identity,
+        identity_at_commit,
+        release_test_source_changes,
+    )
     from .release_executor_source import (
         capture_frozen_release_sources,
         require_frozen_sources_unchanged,
@@ -75,7 +82,12 @@ else:
         read_private_pending_locked,
         write_private_pending_locked,
     )
-    from repository_source_identity import SourceIdentityError, current_identity
+    from repository_source_identity import (
+        SourceIdentityError,
+        current_identity,
+        identity_at_commit,
+        release_test_source_changes,
+    )
     from release_executor_source import (
         capture_frozen_release_sources,
         require_frozen_sources_unchanged,
@@ -86,8 +98,8 @@ class HostedCIReceiptError(PublicationError):
     """The hosted-CI receipt is unavailable, ambiguous, or not successful."""
 
 
-SCHEMA_VERSION: Final = 3
-DOCUMENT: Final = "cfw-github-hosted-ci-receipt-v3"
+SCHEMA_VERSION: Final = 4
+DOCUMENT: Final = "cfw-github-hosted-ci-receipt-v4"
 PRODUCT_VERSION: Final = "0.4.0"
 GA_BUILD: Final = "40046"
 
@@ -868,16 +880,47 @@ def _source_binding(
     }
 
 
+def _tested_source_binding(
+    repository: Path, source: dict[str, str], tested_commit: object
+) -> dict[str, Any]:
+    """Bind the real CI head without changing the frozen artifact provenance."""
+    if not isinstance(tested_commit, str) or not COMMIT_RE.fullmatch(tested_commit):
+        raise _error("tested CI source commit is not canonical")
+    if tested_commit == source["repository_commit"]:
+        return {
+            "repository_commit": tested_commit,
+            "release_source_sha256": source["release_source_sha256"],
+            "changed_paths": [],
+        }
+    try:
+        identity = identity_at_commit(repository, tested_commit)
+        changed = release_test_source_changes(
+            repository, source["repository_commit"], tested_commit
+        )
+    except (SourceIdentityError, OSError, ValueError) as error:
+        raise _error(
+            "tested CI source is unavailable or changes inputs outside scripts/tests"
+        ) from error
+    return {
+        "repository_commit": identity["repositoryCommit"],
+        "release_source_sha256": identity["releaseSourceSha256"],
+        "changed_paths": list(changed),
+    }
+
+
 def _live_receipt(
+    repository: Path,
     source: dict[str, str],
     run_id: int,
     workflow_bytes: bytes,
 ) -> dict[str, Any]:
     if source.get("workflow_sha256") != sha256_bytes(workflow_bytes):
         raise _error("local workflow-file bytes differ from the source binding")
-    run_before = _project_run(
-        _fetch_api_json(_run_api_path(run_id)), source["repository_commit"], run_id
-    )
+    raw_run = _fetch_api_json(_run_api_path(run_id))
+    if not isinstance(raw_run, dict):
+        raise _error("GitHub workflow run response is not an object")
+    tested_source = _tested_source_binding(repository, source, raw_run.get("head_sha"))
+    run_before = _project_run(raw_run, tested_source["repository_commit"], run_id)
     jobs = _project_jobs(
         _fetch_api_json(_jobs_api_path(run_id, run_before["run_attempt"])),
         run_before,
@@ -899,7 +942,7 @@ def _live_receipt(
             check_run,
         )
     run_after = _project_run(
-        _fetch_api_json(_run_api_path(run_id)), source["repository_commit"], run_id
+        _fetch_api_json(_run_api_path(run_id)), tested_source["repository_commit"], run_id
     )
     check_runs_after = _project_check_runs(
         _fetch_api_json(_check_runs_api_path(run_after["check_suite_id"])),
@@ -921,6 +964,7 @@ def _live_receipt(
         "run": run_before,
         "schema_version": SCHEMA_VERSION,
         "source": dict(source),
+        "tested_source": tested_source,
         "workflow": {
             "event": EVENT,
             "id": WORKFLOW_ID,
@@ -932,6 +976,7 @@ def _live_receipt(
 
 
 def _validated_stored_receipt(
+    repository: Path,
     value: object,
     expected_source: dict[str, str],
     workflow_bytes: bytes,
@@ -947,10 +992,21 @@ def _validated_stored_receipt(
             "run",
             "schema_version",
             "source",
+            "tested_source",
             "workflow",
         },
         "hosted CI receipt",
     )
+    retained_tested_source = _exact_object(
+        receipt["tested_source"],
+        {"repository_commit", "release_source_sha256", "changed_paths"},
+        "hosted CI tested source",
+    )
+    tested_source = _tested_source_binding(
+        repository, expected_source, retained_tested_source["repository_commit"]
+    )
+    if retained_tested_source != tested_source:
+        raise _error("hosted CI tested source differs from immutable Git inputs")
     workflow = _exact_object(
         receipt["workflow"],
         {"event", "id", "name", "path", "source"},
@@ -1018,7 +1074,7 @@ def _validated_stored_receipt(
         "workflow_id": WORKFLOW_ID,
     }
     normalized_run = _project_run(
-        run_api_value, expected_source["repository_commit"], run_id
+        run_api_value, tested_source["repository_commit"], run_id
     )
     if normalized_run != run_value:
         raise _error("hosted CI receipt run schema or fixed identity is invalid")
@@ -1118,7 +1174,7 @@ def _load_receipt(
     value = _strict_json(raw, "hosted CI receipt")
     if _canonical_json(value) != raw:
         raise _error("hosted CI receipt is not canonical JSON")
-    validated, run_id = _validated_stored_receipt(value, source, workflow_bytes)
+    validated, run_id = _validated_stored_receipt(repository, value, source, workflow_bytes)
     return validated, raw, run_id
 
 
@@ -1150,11 +1206,15 @@ def capture_receipt(
     workflow_before = _workflow_source_bytes(repository)
     if source_before.get("workflow_sha256") != sha256_bytes(workflow_before):
         raise _error("release workflow changed before hosted CI capture")
-    receipt = _live_receipt(source_before, run_id, workflow_before)
+    receipt = _live_receipt(repository, source_before, run_id, workflow_before)
     source_after = _source_binding(repository, freeze_verifier=freeze_verifier)
     workflow_after = _workflow_source_bytes(repository)
     if source_after != source_before or workflow_after != workflow_before:
         raise _error("release source changed while hosted CI was being captured")
+    if _tested_source_binding(
+        repository, source_after, receipt["run"]["head_sha"]
+    ) != receipt["tested_source"]:
+        raise _error("tested CI source changed before receipt publication")
     _publish_receipt(repository, _canonical_json(receipt))
     verified = validate_receipt_offline(repository, freeze_verifier=freeze_verifier)
     if verified != receipt:
@@ -1197,7 +1257,7 @@ def verify_receipt(
     source = retained["source"]
     run_id = _positive_int(retained["run"].get("id"), "retained workflow run id")
     workflow_bytes = _workflow_source_bytes(repository)
-    live = _live_receipt(source, run_id, workflow_bytes)
+    live = _live_receipt(repository, source, run_id, workflow_bytes)
     reopened = validate_receipt_offline(repository, freeze_verifier=freeze_verifier)
     if reopened != retained:
         raise _error("hosted CI receipt changed during live verification")

@@ -884,12 +884,14 @@ wire proof.
    `stage-inputs/notarization-executor.json` with the frozen/signing receipt
    identities. This immutable record is provenance, not an Apple success
    receipt. Product source, app bytes, prior receipts, and receipt schemas remain
-   unchanged. Executor CI does not replace the original product's exact-SHA CI.
+   unchanged. CI for unrelated executor changes does not replace validation of
+   the frozen product inputs.
    An existing app-notary attempt must use its explicit recovery protocol;
    never use this entry to retry an unknown submission or rerun the builder;
 3. capture the hosted run through the fixed public GitHub API after freeze.
-   One complete successful hosted run for the frozen product commit satisfies
-   ordinary GA's deterministic CI requirement. It runs the same 27 lane
+   One complete successful hosted run for the frozen product commit, or for an
+   immutable commit differing only in `scripts/tests/`, satisfies ordinary GA's
+   deterministic CI requirement. It runs the same 27 lane
    commands. A second full local reproduction is optional assurance evidence,
    not a prepackage or corresponding-source prerequisite. The signed product
    still binds its actual build toolchain; installed-app and network acceptance
@@ -898,8 +900,18 @@ wire proof.
 
    ```bash
    scripts/release_publication_gate.sh --capture-hosted-ci RUN_ID
-   scripts/release_publication_gate.sh --verify-hosted-ci
    ```
+
+   Capture reopens its result. `scripts/release_publication_gate.sh --verify-hosted-ci`
+   remains available for independent read-only investigation. Receipt v4 keeps
+   the frozen application `source` separate from the real CI `tested_source`.
+   Every read compares both complete Git trees, including modes, and rederives
+   the tested source identity. Only regular-file changes in the existing
+   release-only `scripts/tests/` harness are allowed. Changes to application,
+   build, dependency, workflow or other inputs fail admission. The complete
+   successful run, all job steps and zero-annotation checks remain mandatory;
+   a previous failed run is retained with its actual result. The later capture
+   tool's identity remains the separate stage executor identity.
 
    Optional local reproduction uses its own explicit journal and produces only
    a local record; it cannot substitute for hosted CI or runtime acceptance:
@@ -938,7 +950,7 @@ wire proof.
    but all jobs must agree and the fixed public Contents API must return a
    `ci.yml` at that commit whose decoded bytes equal the clean tested source.
    They read the run both before and after its attempt-specific jobs.
-   `prepackage`, final publication, and upload live-revalidate the v3 receipt;
+   `prepackage`, final publication, and upload live-revalidate the v4 receipt;
    ordinary sealed-stage verification performs no network access and instead
    reopens the retained workflow projection against the local clean source.
    The local 27-lane record remains corroborating toolchain evidence and can
@@ -974,16 +986,21 @@ wire proof.
 
    A failed upload with no durable submission observation, submission receipt,
    or recovery intent has a separate explicit recovery option. First reconcile
-   the previously observed ID through Apple info/history. If it is unavailable,
-   retain the original unknown attempt and upload the byte-identical retained
+   the previously observed ID through Apple info/history. If it is unavailable
+   or a failed upload has left it In Progress, retain its truthful observation
+   and the original unknown attempt and upload the byte-identical retained
    ZIP once, preserving the real command, start/completion times, exit status,
    stdout and stderr. Apple's documented `--no-s3-acceleration` option selects
    its regional S3 endpoint without changing the archive or signing bytes.
 
    Run the operator's `scripts/run_notarization_transaction.sh` with the existing
    recovery arguments and `--adopt-upload-observation /absolute/private/observation.json`.
-   The v2 observation explicitly identifies a same-archive resubmission and the
-   prior unknown event; it is not an observation of the original failed upload.
+   The v2 observation retains its unavailable-ID case. A v3 observation records
+   `prior_submission_id`, the actual pending Apple info response and its
+   observation time. It ties that ID to the original upload window and rechecks
+   the prior status before adoption; Invalid or Rejected requires investigation.
+   Both identify the same-archive resubmission and the prior unknown event;
+   neither pretends the retry was the original failed upload.
    Admission requires a real successful upload response for the exact retained
    path and new ID. The original four events remain unchanged. Existing bound
    submission IDs cannot be reassigned through this option. Apple must still

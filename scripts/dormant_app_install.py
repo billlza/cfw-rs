@@ -273,11 +273,24 @@ INSTALLED_40043_PREDECESSOR: Final = PredecessorProfile(
     unregister_authority_action="unregister-global-authority",
     authority_recovery=None,
 )
+# Build 40044 completed installation with the current service vocabulary. Its
+# signed tree remains bound by the original app manifest, both package seals
+# and the closed 40043 -> 40044 install journal.
+INSTALLED_40044_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40044",
+    tree_sha256="41ae01c3903f8ab644d74c5ff185a282a5978e4b0a8376198518046408745248",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
         INSTALLED_40041_PREDECESSOR.build_number: INSTALLED_40041_PREDECESSOR,
         INSTALLED_40043_PREDECESSOR.build_number: INSTALLED_40043_PREDECESSOR,
+        INSTALLED_40044_PREDECESSOR.build_number: INSTALLED_40044_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

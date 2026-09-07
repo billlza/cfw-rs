@@ -25,15 +25,15 @@ PREVIOUS = install.AppIdentity(
 # speak the same vocabulary the production path selects.
 BOUND = install.BoundInstallProfile.recorded(install.GA_INSTALL_PROFILE, PREVIOUS)
 CANDIDATE = install.CandidateIdentity(
-    app=install.AppIdentity("0.4.0", "40044", "b" * 64),
+    app=install.AppIdentity("0.4.0", "40045", "b" * 64),
     manifest_sha256="c" * 64,
     repository_commit="d" * 40,
     release_source_sha256="e" * 64,
 )
-# The installed 40043 with its real frozen tree identity: the production
+# The installed 40044 with its real frozen tree identity: the production
 # predecessor of this build, which selects the current service vocabulary.
 INSTALLED_PREVIOUS = install.AppIdentity(
-    "0.4.0", "40043", install.INSTALLED_40043_PREDECESSOR.tree_sha256
+    "0.4.0", "40044", install.INSTALLED_40044_PREDECESSOR.tree_sha256
 )
 GA_ENVIRONMENT = {
     "architecture": "arm64",
@@ -172,7 +172,7 @@ class ServiceEventStoreTests(unittest.TestCase):
         paths = service.ServicePaths.production()
 
         self.assertEqual(paths.install_paths.profile, install.GA_INSTALL_PROFILE)
-        self.assertEqual(paths.install_paths.profile.build_number, "40044")
+        self.assertEqual(paths.install_paths.profile.build_number, "40045")
         # The predecessor is observed and bound, never declared on the profile.
         self.assertFalse(hasattr(paths.install_paths.profile, "previous_build_number"))
         self.assertEqual(
@@ -181,6 +181,7 @@ class ServiceEventStoreTests(unittest.TestCase):
                 "40019": install.INSTALLED_40019_PREDECESSOR,
                 "40041": install.INSTALLED_40041_PREDECESSOR,
                 "40043": install.INSTALLED_40043_PREDECESSOR,
+                "40044": install.INSTALLED_40044_PREDECESSOR,
             },
         )
         self.assertEqual(
@@ -1514,8 +1515,9 @@ class CurrentServiceTransactionTests(unittest.TestCase):
             (CANDIDATE, install.AppIdentity("0.4.0", "40030", "a" * 64), "predecessor_unsupported"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40019", "f" * 64), "predecessor_identity_mismatch"),
             # The GA build itself is never a predecessor.
-            (CANDIDATE, install.AppIdentity("0.4.0", "40044", "a" * 64), "predecessor_unsupported"),
+            (CANDIDATE, install.AppIdentity("0.4.0", "40045", "a" * 64), "predecessor_unsupported"),
             (CANDIDATE, install.AppIdentity("0.4.0", "40043", "a" * 64), "predecessor_identity_mismatch"),
+            (CANDIDATE, install.AppIdentity("0.4.0", "40044", "a" * 64), "predecessor_identity_mismatch"),
             (CANDIDATE, install.AppIdentity("0.3.5", "40019", PREVIOUS.tree_sha256), "install_identity_mismatch"),
             (
                 install.CandidateIdentity(
@@ -1574,12 +1576,21 @@ class CurrentServiceTransactionTests(unittest.TestCase):
         self.addCleanup(successor.cleanup)
         historical = ServiceFixture()
         self.addCleanup(historical.cleanup)
+        prior_installed = ServiceFixture()
+        self.addCleanup(prior_installed.cleanup)
         cases = (
             (self.fixture, CANDIDATE, PREVIOUS, "prove-installed-40019-off", install.INSTALLED_40019_OFF_PROOF_PROFILE),
             (
                 historical,
                 CANDIDATE,
                 install.AppIdentity("0.4.0", "40041", install.INSTALLED_40041_PREDECESSOR.tree_sha256),
+                "prove-off",
+                install.CURRENT_OFF_PROOF_PROFILE,
+            ),
+            (
+                prior_installed,
+                CANDIDATE,
+                install.AppIdentity("0.4.0", "40043", install.INSTALLED_40043_PREDECESSOR.tree_sha256),
                 "prove-off",
                 install.CURRENT_OFF_PROOF_PROFILE,
             ),

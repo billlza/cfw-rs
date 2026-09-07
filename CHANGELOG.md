@@ -126,7 +126,13 @@
   corruption. Receipt encoding and decoding now share the canonical audience
   contract, and vault corruption has a distinct typed error. Build 40043 is
   retired after install before GA runtime collection, with its original bytes,
-  seals and journals retained. Build 40044 is the only active GA successor;
+  seals and journals retained. Build 40044 then completed signing, notarization,
+  both package sets and the 40043→40044 installation. Its migration handoff
+  child closed after the parent's normal exit because the Darwin process
+  identity query misclassified `ESRCH`. Correcting the product code requires
+  successor 40045; 40044 retains its original application, package seals,
+  receipts and installation journals. No Tunnel confirmation, legacy deletion,
+  GA acceptance or publication completed. Build 40045 is the only active GA;
   source and CI retries before freeze do not consume additional builds.
 - Let a confirmed fresh installation proceed without an old proxy port that
   never existed. Preparation and recovery recheck that legacy settings,

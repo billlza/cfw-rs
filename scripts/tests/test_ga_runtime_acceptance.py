@@ -283,7 +283,7 @@ def launchctl_output(
     domain_target: str,
     program_identifier: str,
     service_label: str,
-    parent_bundle_version: str = "40044",
+    parent_bundle_version: str = "40045",
 ) -> str:
     """Reproduce the exact `launchctl print` shape for an SMAppService job.
 
@@ -325,7 +325,7 @@ def system_extension_output() -> str:
         "--- com.apple.system_extension.network_extension\n"
         "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]\n"
         "*\t*\tYKUPL7Z869\tcom.bill.clashformac.packet-tunnel "
-        "(0.4.0/40044)\tCFWPacketTunnel\t[activated enabled]\n"
+        "(0.4.0/40045)\tCFWPacketTunnel\t[activated enabled]\n"
     )
 
 
@@ -537,7 +537,7 @@ class RuntimeFixture:
                         "context:primary-signature",
                         "-vv",
                         (
-                            "target/candidates/0.4.0/ga/40044/packages/dmg/v0.4.0/"
+                            "target/candidates/0.4.0/ga/40045/packages/dmg/v0.4.0/"
                             "Clash.for.Mac_0.4.0_arm64.dmg"
                         ),
                     ],
@@ -937,7 +937,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_contract_has_fixed_paths_and_twelve_raw_derived_checks(self) -> None:
         self_check()
-        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40043", "40044"))
+        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40044", "40045"))
         self.assertEqual(
             (ga_runtime.MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS),
             (15 * 60, 30 * 60),
@@ -965,28 +965,28 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             ACCEPTANCE_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
                 "runtime-acceptance.json"
             ),
         )
         self.assertEqual(
             RAW_ROOT_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
                 "runtime-evidence"
             ),
         )
         self.assertEqual(
             ENVIRONMENT_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
                 "migration-journals/service-transaction/environment.json"
             ),
         )
         self.assertEqual(
             INSTALL_JOURNAL_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40044/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
                 "migration-journals/dormant-install.json"
             ),
         )
@@ -994,8 +994,11 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
     def test_historical_migration_bindings_cannot_seal_the_active_candidate(self) -> None:
         for from_build, to_build in (
             ("40041", "40043"),
-            ("40041", "40044"),
+            ("40041", "40045"),
             ("40043", "40043"),
+            ("40043", "40044"),
+            ("40043", "40045"),
+            ("40044", "40044"),
         ):
             with self.subTest(from_build=from_build, to_build=to_build):
                 self.fixture.expected["from_build"] = from_build
@@ -1081,7 +1084,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             GARuntimeAcceptanceError,
-            "installed 40044 launch command command identity, exit, or duration is invalid",
+            "installed 40045 launch command command identity, exit, or duration is invalid",
         ):
             self.fixture.seal()
 
@@ -1296,12 +1299,12 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_service_registration_rejects_a_different_parent_bundle_build(self) -> None:
         original = self._service_stdout("proxy_agent")
-        for build in ("40041", "40043"):
+        for build in ("40041", "40043", "40044"):
             with self.subTest(build=build):
                 self._set_service_stdout(
                     "proxy_agent",
                     original.replace(
-                        "parent bundle version = 40044",
+                        "parent bundle version = 40045",
                         f"parent bundle version = {build}",
                     ),
                 )

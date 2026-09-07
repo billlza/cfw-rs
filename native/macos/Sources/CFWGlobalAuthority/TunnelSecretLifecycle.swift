@@ -141,6 +141,29 @@ public final class AuthorityRedeemedTunnelTransport: @unchecked Sendable {
   }
 }
 
+/// Metadata recovered exclusively from the Authority-owned pending ticket
+/// record. The Provider never supplies or predicts the private operation or
+/// lease identity carried by an opaque Start Ticket.
+public struct AuthorityTicketRedemption: @unchecked Sendable {
+  public let operation: OperationContext
+  public let leaseID: AuthorityIdentifier
+  public let transport: AuthorityRedeemedTunnelTransport
+
+  public func withMaterial<Result>(
+    _ body: (SensitiveBytes, AuthoritySecretMaterial) throws -> Result
+  ) throws -> Result {
+    try transport.withMaterial(body)
+  }
+
+  public func erase() {
+    transport.erase()
+  }
+
+  var isErasedForTesting: Bool {
+    transport.isErasedForTesting
+  }
+}
+
 /// Machine-global in-memory owner for one pending Tunnel preparation.
 /// Only a ticket digest and bounded mutable buffers are retained.
 public final class TunnelSecretLifecycle: @unchecked Sendable {
@@ -231,10 +254,8 @@ public final class TunnelSecretLifecycle: @unchecked Sendable {
   }
 
   public func redeem(
-    ticket: StartTicket,
-    operation: OperationContext,
-    leaseID: AuthorityIdentifier
-  ) throws -> AuthorityRedeemedTunnelTransport {
+    ticket: StartTicket
+  ) throws -> AuthorityTicketRedemption {
     defer { ticket.erase() }
     let digest: SHA256Digest
     do {
@@ -253,20 +274,25 @@ public final class TunnelSecretLifecycle: @unchecked Sendable {
         return .reject(nil, .ticketAlreadyRedeemed)
       }
       guard let value = pending else { return .reject(nil, .ticketInvalid) }
-      pending = nil
       guard now < value.expiresMonotonic else {
+        pending = nil
         return .reject(value, .ticketExpired)
       }
-      guard value.ticketSHA256 == digest,
-        value.operation == operation, value.leaseID == leaseID
-      else { return .reject(value, .ticketInvalid) }
+      guard value.ticketSHA256 == digest else {
+        return .reject(nil, .ticketInvalid)
+      }
+      pending = nil
       consumedTicketHashes[digest] = value.expiresMonotonic
       return .redeem(value)
     }
     switch decision {
     case .redeem(let value):
-      return AuthorityRedeemedTunnelTransport(
-        configuration: value.configuration, secrets: value.secrets)
+      return AuthorityTicketRedemption(
+        operation: value.operation,
+        leaseID: value.leaseID,
+        transport: AuthorityRedeemedTunnelTransport(
+          configuration: value.configuration, secrets: value.secrets)
+      )
     case .reject(let value, let error):
       value?.erase()
       throw error
@@ -352,8 +378,12 @@ public final class TunnelSecretLifecycle: @unchecked Sendable {
     lock.withLock { pending?.ticketSHA256 }
   }
 
-  var hasPendingMaterialForTesting: Bool {
+  var hasPendingMaterial: Bool {
     lock.withLock { pending != nil }
+  }
+
+  var hasPendingMaterialForTesting: Bool {
+    hasPendingMaterial
   }
 }
 

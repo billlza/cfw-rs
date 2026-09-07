@@ -1,6 +1,7 @@
 import CFWSharedProtocol
 import Darwin
 import Foundation
+import Security
 import Testing
 
 import struct CryptoKit.SHA256
@@ -10,6 +11,29 @@ import struct CryptoKit.SHA256
 private enum JournalFixtureError: Error {
   case injected
   case setup
+}
+
+private final class ConcurrentJournalStoreResults: @unchecked Sendable {
+  private let lock = NSLock()
+  private var retainedStores: [DescriptorRelativeAuthorityJournalStore] = []
+  private var retainedErrors: [Error] = []
+
+  func record(_ result: Result<DescriptorRelativeAuthorityJournalStore, Error>) {
+    lock.withLock {
+      switch result {
+      case .success(let store): retainedStores.append(store)
+      case .failure(let error): retainedErrors.append(error)
+      }
+    }
+  }
+
+  var stores: [DescriptorRelativeAuthorityJournalStore] {
+    lock.withLock { retainedStores }
+  }
+
+  var errors: [Error] {
+    lock.withLock { retainedErrors }
+  }
 }
 
 private func identifier(_ value: String) throws -> AuthorityIdentifier {
@@ -43,6 +67,23 @@ private func committedState(
       ? identifier("33333333-3333-3333-3333-333333333333") : nil,
     ownerUID: hasOwner ? 501 : nil
   )
+}
+
+private func enrollmentState(
+  revision: UInt64 = 1
+) throws -> AuthorityCommittedState {
+  try AuthorityCommittedState(
+    installationID: identifier("11111111-1111-1111-1111-111111111111"),
+    epoch: 0,
+    generation: 0,
+    revision: revision,
+    transition: .enrollOff,
+    state: .off,
+    operationID: nil,
+    mode: nil,
+    configSHA256: nil,
+    leaseID: nil,
+    ownerUID: nil)
 }
 
 private func journalImage(
@@ -89,6 +130,23 @@ private func withTemporaryJournalDirectory<T>(
   let root = try temporaryJournalDirectory()
   defer { try? FileManager.default.removeItem(at: root) }
   return try body(root)
+}
+
+private func writeSecuredJournalFixture(_ data: Data, to url: URL) throws {
+  try data.write(to: url)
+  guard chmod(url.path, 0o600) == 0 else { throw JournalFixtureError.setup }
+}
+
+private func journalGenerations(in root: URL) throws -> Set<UInt64> {
+  let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
+  return Set(
+    names.compactMap { name in
+      let components = name.split(separator: ".")
+      guard components.count >= 4,
+        components[0] == "authority", components[1] == "v2"
+      else { return nil }
+      return UInt64(components[2])
+    })
 }
 
 private func isQuarantined(
@@ -243,6 +301,208 @@ private func isQuarantined(
   }
 }
 
+@Test func descriptorRelativeStoreSecurelyCreatesAndReopensMissingLeaf() throws {
+  try withTemporaryJournalDirectory { parent in
+    let leaf = parent.appendingPathComponent("authority", isDirectory: true)
+    let anchor = InMemoryAuthorityJournalAnchorStore()
+    #expect(!FileManager.default.fileExists(atPath: leaf.path))
+
+    var first: DescriptorRelativeAuthorityJournalStore? =
+      try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: leaf.path,
+        expectedOwnerUID: getuid(),
+        anchorStore: anchor)
+    let state = try enrollmentState()
+    try first?.appendCommitted(state)
+
+    var status = stat()
+    guard lstat(leaf.path, &status) == 0 else { throw JournalFixtureError.setup }
+    #expect((status.st_mode & S_IFMT) == S_IFDIR)
+    #expect(status.st_uid == getuid())
+    #expect((status.st_mode & 0o777) == 0o700)
+
+    first = nil
+    let reopened = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: leaf.path,
+      expectedOwnerUID: getuid(),
+      anchorStore: anchor)
+    #expect(reopened.recover().committedState == state)
+  }
+}
+
+@Test func productionJournalPathUsesADedicatedSystemOwnedLeaf() {
+  #expect(
+    DescriptorRelativeAuthorityJournalStore.productionRootPath
+      == "/Library/Application Support/com.bill.clashformac.global-authority")
+  #expect(
+    !DescriptorRelativeAuthorityJournalStore.productionRootPath.contains(
+      "/com.bill.clashformac/"))
+}
+
+@Test func descriptorRelativeStoreNeverCreatesMissingIntermediateDirectories() throws {
+  try withTemporaryJournalDirectory { parent in
+    let nestedLeaf =
+      parent
+      .appendingPathComponent("missing-parent", isDirectory: true)
+      .appendingPathComponent("authority", isDirectory: true)
+    #expect(throws: AuthorityJournalStorageError.self) {
+      _ = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: nestedLeaf.path,
+        expectedOwnerUID: getuid())
+    }
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: parent.appendingPathComponent("missing-parent").path))
+  }
+}
+
+@Test func concurrentRootCreatorEEXISTIsReopenedAndVerified() throws {
+  try withTemporaryJournalDirectory { parent in
+    let leaf = parent.appendingPathComponent("authority", isDirectory: true)
+    var injected = false
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: leaf.path,
+      expectedOwnerUID: getuid(),
+      faultInjector: { point in
+        guard point == .beforeStoreLeafCreation else { return }
+        injected = true
+        try FileManager.default.createDirectory(
+          at: leaf, withIntermediateDirectories: false)
+        guard chmod(leaf.path, 0o700) == 0 else { throw JournalFixtureError.setup }
+      })
+
+    #expect(injected)
+    let state = try enrollmentState()
+    try store.appendCommitted(state)
+    #expect(store.recover().committedState == state)
+  }
+}
+
+@Test func concurrentUntrustedLeafIsRejectedWithoutPermissionRepair() throws {
+  try withTemporaryJournalDirectory { parent in
+    let leaf = parent.appendingPathComponent("authority", isDirectory: true)
+    #expect(throws: AuthorityJournalStorageError.insecureDirectory) {
+      _ = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: leaf.path,
+        expectedOwnerUID: getuid(),
+        faultInjector: { point in
+          guard point == .beforeStoreLeafCreation else { return }
+          try FileManager.default.createDirectory(
+            at: leaf, withIntermediateDirectories: false)
+          guard chmod(leaf.path, 0o755) == 0 else {
+            throw JournalFixtureError.setup
+          }
+        })
+    }
+
+    var status = stat()
+    guard lstat(leaf.path, &status) == 0 else { throw JournalFixtureError.setup }
+    #expect((status.st_mode & 0o7777) == 0o755)
+  }
+}
+
+@Test func descriptorRelativeStoreRejectsUnsafeAncestorAndLeafMetadata() throws {
+  try withTemporaryJournalDirectory { root in
+    let unsafeAncestor = root.appendingPathComponent("unsafe", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: unsafeAncestor, withIntermediateDirectories: false)
+    guard chmod(unsafeAncestor.path, 0o770) == 0 else {
+      throw JournalFixtureError.setup
+    }
+    let descendant = unsafeAncestor.appendingPathComponent("authority", isDirectory: true)
+    #expect(throws: AuthorityJournalStorageError.insecureDirectory) {
+      _ = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: descendant.path,
+        expectedOwnerUID: getuid())
+    }
+
+    let wrongMode = root.appendingPathComponent("wrong-mode", isDirectory: true)
+    try FileManager.default.createDirectory(at: wrongMode, withIntermediateDirectories: false)
+    guard chmod(wrongMode.path, 0o755) == 0 else { throw JournalFixtureError.setup }
+    #expect(throws: AuthorityJournalStorageError.insecureDirectory) {
+      _ = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: wrongMode.path,
+        expectedOwnerUID: getuid())
+    }
+
+    let specialMode = root.appendingPathComponent("special-mode", isDirectory: true)
+    try FileManager.default.createDirectory(at: specialMode, withIntermediateDirectories: false)
+    guard chmod(specialMode.path, 0o1700) == 0 else { throw JournalFixtureError.setup }
+    #expect(throws: AuthorityJournalStorageError.insecureDirectory) {
+      _ = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: specialMode.path,
+        expectedOwnerUID: getuid())
+    }
+
+    let wrongOwner = root.appendingPathComponent("wrong-owner", isDirectory: true)
+    try FileManager.default.createDirectory(at: wrongOwner, withIntermediateDirectories: false)
+    guard chmod(wrongOwner.path, 0o700) == 0 else { throw JournalFixtureError.setup }
+    #expect(throws: AuthorityJournalStorageError.insecureDirectory) {
+      _ = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: wrongOwner.path,
+        expectedOwnerUID: getuid() &+ 1,
+        allowedAncestorOwnerUIDs: [0, getuid()])
+    }
+  }
+}
+
+@Test func descriptorRelativeStoreRejectsAncestorAndLeafSymlinks() throws {
+  try withTemporaryJournalDirectory { root in
+    let realAncestor = root.appendingPathComponent("real", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: realAncestor, withIntermediateDirectories: false)
+    guard chmod(realAncestor.path, 0o700) == 0 else { throw JournalFixtureError.setup }
+
+    let ancestorLink = root.appendingPathComponent("ancestor-link", isDirectory: true)
+    guard symlink(realAncestor.path, ancestorLink.path) == 0 else {
+      throw JournalFixtureError.setup
+    }
+    #expect(throws: AuthorityJournalStorageError.self) {
+      _ = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: ancestorLink.appendingPathComponent("authority").path,
+        expectedOwnerUID: getuid())
+    }
+
+    let realLeaf = root.appendingPathComponent("real-leaf", isDirectory: true)
+    try FileManager.default.createDirectory(at: realLeaf, withIntermediateDirectories: false)
+    guard chmod(realLeaf.path, 0o700) == 0 else { throw JournalFixtureError.setup }
+    let leafLink = root.appendingPathComponent("leaf-link", isDirectory: true)
+    guard symlink(realLeaf.path, leafLink.path) == 0 else {
+      throw JournalFixtureError.setup
+    }
+    #expect(throws: AuthorityJournalStorageError.self) {
+      _ = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: leafLink.path,
+        expectedOwnerUID: getuid())
+    }
+  }
+}
+
+@Test func concurrentMissingLeafCreationProducesOneLockedDurableStore() throws {
+  try withTemporaryJournalDirectory { parent in
+    let leaf = parent.appendingPathComponent("authority", isDirectory: true)
+    let results = ConcurrentJournalStoreResults()
+
+    DispatchQueue.concurrentPerform(iterations: 2) { _ in
+      results.record(
+        Result {
+          try DescriptorRelativeAuthorityJournalStore(
+            testingRootPath: leaf.path,
+            expectedOwnerUID: getuid())
+        })
+    }
+
+    #expect(results.stores.count == 1)
+    #expect(results.errors.count == 1)
+    #expect(results.errors.first as? AuthorityJournalStorageError == .storeLocked)
+
+    let store = try #require(results.stores.first)
+    let state = try enrollmentState()
+    try store.appendCommitted(state)
+    #expect(store.recover().committedState == state)
+  }
+}
+
 @Test func appendUsesRecordHeadDirectoryDurabilityOrder() throws {
   try withTemporaryJournalDirectory { root in
     var observed: [AuthorityJournalFaultPoint] = []
@@ -251,12 +511,14 @@ private func isQuarantined(
       expectedOwnerUID: getuid(),
       faultInjector: { observed.append($0) }
     )
-    let state = try committedState(revision: 1)
+    let state = try enrollmentState()
     let head = try store.appendCommitted(state)
 
     #expect(
       observed == [
-        .recordSynchronized, .temporaryHeadSynchronized, .headRenamed,
+        .anchorPendingSynchronized, .recordSynchronized,
+        .temporaryHeadSynchronized, .headRenamed,
+        .anchorCommittedSynchronized,
       ])
     #expect(head.sequence == 1)
     let recovery = store.recover()
@@ -265,7 +527,97 @@ private func isQuarantined(
   }
 }
 
-@Test func crashAfterRecordSyncQuarantinesUncommittedTail() throws {
+@Test func prepareAtCapacityCompactsAndPreservesSevenFinishSlots() throws {
+  try withTemporaryJournalDirectory { root in
+    let anchor = InMemoryAuthorityJournalAnchorStore()
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path,
+      expectedOwnerUID: getuid(),
+      anchorStore: anchor,
+      recordCapacity: 10)
+    _ = try store.appendCommitted(enrollmentState())
+    _ = try store.appendCommitted(committedState(revision: 2, generation: 2))
+    _ = try store.appendCommitted(committedState(revision: 3, generation: 3))
+    let generationOneAnchor = try #require(try anchor.load())
+    let prepared = try store.appendCommitted(
+      committedState(
+        revision: 4, generation: 4,
+        state: .preparing, transition: .prepare))
+
+    #expect(prepared.sequence == 2)
+    #expect(try anchor.load()?.committed?.generation == 2)
+    #expect(
+      10 - prepared.sequence
+        >= UInt64(AuthorityJournalLimits.minimumLifecycleFinishRecords))
+    let recovery = store.recover()
+    #expect(recovery.head == prepared)
+    #expect(recovery.committedState?.revision == 4)
+    #expect(recovery.posture == .recovering(.stopOwner))
+
+    anchor.replaceForTesting(generationOneAnchor)
+    #expect(isQuarantined(store.recover(), reason: .rollback))
+  }
+}
+
+@Test func repeatedCompactionRetainsOnlyActiveAndPreviousGenerations() throws {
+  try withTemporaryJournalDirectory { root in
+    let anchor = InMemoryAuthorityJournalAnchorStore()
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path,
+      expectedOwnerUID: getuid(),
+      anchorStore: anchor,
+      recordCapacity: 10)
+
+    _ = try store.appendCommitted(enrollmentState())
+    _ = try store.appendCommitted(committedState(revision: 2))
+    _ = try store.appendCommitted(committedState(revision: 3))
+    _ = try store.appendCommitted(
+      committedState(
+        revision: 4, state: .preparing, transition: .prepare))
+    let generationTwoAnchor = try #require(try anchor.load())
+    #expect(try journalGenerations(in: root) == [1, 2])
+
+    _ = try store.appendCommitted(committedState(revision: 5))
+    _ = try store.appendCommitted(
+      committedState(
+        revision: 6, state: .preparing, transition: .prepare))
+    #expect(try journalGenerations(in: root) == [2, 3])
+
+    _ = try store.appendCommitted(committedState(revision: 7))
+    let generationThreeFinalAnchor = try #require(try anchor.load())
+    _ = try store.appendCommitted(
+      committedState(
+        revision: 8, state: .preparing, transition: .prepare))
+    let generationFourAnchor = try #require(try anchor.load())
+    #expect(try journalGenerations(in: root) == [3, 4])
+    #expect(store.recover().committedState?.revision == 8)
+
+    anchor.replaceForTesting(generationThreeFinalAnchor)
+    #expect(isQuarantined(store.recover(), reason: .rollback))
+
+    anchor.replaceForTesting(generationTwoAnchor)
+    #expect(isQuarantined(store.recover(), reason: .anchorMismatch))
+
+    anchor.replaceForTesting(generationFourAnchor)
+    #expect(store.recover().committedState?.revision == 8)
+  }
+}
+
+@Test func nonAdjacentFutureGenerationDetectsAnchorRollback() throws {
+  try withTemporaryJournalDirectory { root in
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path, expectedOwnerUID: getuid())
+    _ = try store.appendCommitted(enrollmentState())
+
+    let nonAdjacentFuture = root.appendingPathComponent(
+      "authority.v2.00000000000000000003.journal")
+    try writeSecuredJournalFixture(Data(), to: nonAdjacentFuture)
+
+    #expect(isQuarantined(store.recover(), reason: .rollback))
+  }
+}
+
+@Test func crashAfterRecordSyncRollsForwardTheAnchoredPendingCommit() throws {
   try withTemporaryJournalDirectory { root in
     var failAt: AuthorityJournalFaultPoint?
     let store = try DescriptorRelativeAuthorityJournalStore(
@@ -275,30 +627,33 @@ private func isQuarantined(
         if point == failAt { throw JournalFixtureError.injected }
       }
     )
-    let first = try committedState(revision: 1)
+    let first = try enrollmentState()
     try store.appendCommitted(first)
     failAt = .recordSynchronized
 
     #expect(throws: JournalFixtureError.injected) {
-      try store.appendCommitted(committedState(revision: 2))
+      try store.appendCommitted(committedState(revision: 2, generation: 2))
     }
     let recovery = store.recover()
-    #expect(isQuarantined(recovery, reason: .trailingData))
-    #expect(recovery.committedState == first)
+    #expect(recovery.committedState == (try committedState(revision: 2, generation: 2)))
+    #expect(recovery.posture == .recovering(.verifyOff))
     #expect(!recovery.permitsStart)
   }
 }
 
 @Test func headRenameFaultRecoversOnlyTheDurableCanonicalCommit() throws {
   try withTemporaryJournalDirectory { root in
-    let state = try committedState(revision: 1)
+    var failAt: AuthorityJournalFaultPoint?
+    let state = try committedState(revision: 2, generation: 2)
     let store = try DescriptorRelativeAuthorityJournalStore(
       testingRootPath: root.path,
       expectedOwnerUID: getuid(),
       faultInjector: { point in
-        if point == .headRenamed { throw JournalFixtureError.injected }
+        if point == failAt { throw JournalFixtureError.injected }
       }
     )
+    _ = try store.appendCommitted(enrollmentState())
+    failAt = .headRenamed
     #expect(throws: JournalFixtureError.injected) {
       try store.appendCommitted(state)
     }
@@ -313,15 +668,368 @@ private func isQuarantined(
   try withTemporaryJournalDirectory { root in
     let store = try DescriptorRelativeAuthorityJournalStore(
       testingRootPath: root.path, expectedOwnerUID: getuid())
-    try store.appendCommitted(committedState(revision: 1, generation: 7))
+    try store.appendCommitted(enrollmentState())
+    try store.appendCommitted(committedState(revision: 2, generation: 7))
 
     #expect(throws: AuthorityJournalStorageError.nonMonotonicCommit) {
-      try store.appendCommitted(committedState(revision: 3, generation: 8))
+      try store.appendCommitted(committedState(revision: 4, generation: 8))
     }
     #expect(throws: AuthorityJournalStorageError.nonMonotonicCommit) {
-      try store.appendCommitted(committedState(revision: 2, generation: 6))
+      try store.appendCommitted(committedState(revision: 3, generation: 6))
     }
-    #expect(store.recover().committedState?.revision == 1)
+    #expect(store.recover().committedState?.revision == 2)
+  }
+}
+
+@Test func systemDaemonAnchorQueryStaysInTheFileBasedSystemKeychain() {
+  let identity = SystemKeychainAuthorityJournalAnchorStore.itemIdentity
+  #expect(identity[kSecUseDataProtectionKeychain] == nil)
+  #expect(identity[kSecAttrAccessGroup] == nil)
+  #expect(identity[kSecAttrSynchronizable] == nil)
+}
+
+@Test func unavailableAnchorKeepsAuthorityRecoveringUntilAccessReturns() throws {
+  try withTemporaryJournalDirectory { root in
+    let anchor = InMemoryAuthorityJournalAnchorStore()
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path,
+      expectedOwnerUID: getuid(),
+      anchorStore: anchor)
+    _ = try store.appendCommitted(enrollmentState())
+
+    anchor.setUnavailableStatusForTesting(errSecNotAvailable)
+    let unavailable = store.recover()
+    #expect(unavailable.posture == .recovering(.restoreAnchorAccess))
+    #expect(unavailable.committedState == nil)
+    #expect(
+      try GlobalAuthorityReducer.reconciled(from: unavailable).state
+        == .recovering)
+
+    anchor.setUnavailableStatusForTesting(nil)
+    let restored = store.recover()
+    #expect(restored.committedState == (try enrollmentState()))
+    #expect(
+      try GlobalAuthorityReducer.reconciled(from: restored).state == .off)
+  }
+}
+
+@Test func missingAnchorAndDiskRollbackAlwaysQuarantine() throws {
+  try withTemporaryJournalDirectory { root in
+    let anchor = InMemoryAuthorityJournalAnchorStore()
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path,
+      expectedOwnerUID: getuid(),
+      anchorStore: anchor)
+    _ = try store.appendCommitted(enrollmentState())
+    let journalURL = root.appendingPathComponent(
+      "authority.v2.00000000000000000001.journal")
+    let headURL = root.appendingPathComponent(
+      "authority.v2.00000000000000000001.head")
+    let enrolledJournal = try Data(contentsOf: journalURL)
+    let enrolledHead = try Data(contentsOf: headURL)
+
+    _ = try store.appendCommitted(committedState(revision: 2, generation: 2))
+    try enrolledJournal.write(to: journalURL)
+    try enrolledHead.write(to: headURL)
+    guard chmod(journalURL.path, 0o600) == 0,
+      chmod(headURL.path, 0o600) == 0
+    else { throw JournalFixtureError.setup }
+    #expect(isQuarantined(store.recover(), reason: .anchorMismatch))
+
+    anchor.replaceForTesting(nil)
+    #expect(isQuarantined(store.recover(), reason: .anchorMissing))
+  }
+}
+
+@Test func unanchoredGenerationStateCannotBeTreatedAsAFreshStore() throws {
+  try withTemporaryJournalDirectory { root in
+    let orphanedJournal = root.appendingPathComponent(
+      "authority.v2.00000000000000000001.journal")
+    try writeSecuredJournalFixture(Data(), to: orphanedJournal)
+
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path,
+      expectedOwnerUID: getuid(),
+      anchorStore: InMemoryAuthorityJournalAnchorStore())
+    #expect(
+      isQuarantined(
+        store.recover(), reason: .orphanedGenerationState))
+    #expect(throws: AuthorityJournalValidationError.orphanedGenerationState) {
+      try store.appendCommitted(enrollmentState())
+    }
+  }
+}
+
+@Test func malformedV2GenerationNamespaceIsQuarantined() throws {
+  try withTemporaryJournalDirectory { root in
+    let malformed = root.appendingPathComponent("authority.v2.latest.journal")
+    try writeSecuredJournalFixture(Data(), to: malformed)
+
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path,
+      expectedOwnerUID: getuid(),
+      anchorStore: InMemoryAuthorityJournalAnchorStore())
+    #expect(
+      isQuarantined(
+        store.recover(), reason: .invalidGenerationEntry))
+  }
+}
+
+@Test func nonemptyLegacyV1StateRequiresExplicitMigration() throws {
+  try withTemporaryJournalDirectory { root in
+    let legacy = root.appendingPathComponent("authority.journal")
+    try Data("legacy-v1".utf8).write(to: legacy)
+    guard chmod(legacy.path, 0o600) == 0 else {
+      throw JournalFixtureError.setup
+    }
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path,
+      expectedOwnerUID: getuid(),
+      anchorStore: InMemoryAuthorityJournalAnchorStore())
+    #expect(
+      isQuarantined(
+        store.recover(), reason: .legacyStateRequiresMigration))
+  }
+}
+
+@Test func everyAnchorCommitCrashBoundaryRecoversDeterministically() throws {
+  let cases: [(AuthorityJournalFaultPoint, UInt64)] = [
+    (.anchorPendingSynchronized, 1),
+    (.recordSynchronized, 2),
+    (.temporaryHeadSynchronized, 2),
+    (.headRenamed, 2),
+    (.anchorCommittedSynchronized, 2),
+  ]
+  for (point, expectedRevision) in cases {
+    try withTemporaryJournalDirectory { root in
+      let anchor = InMemoryAuthorityJournalAnchorStore()
+      var failAt: AuthorityJournalFaultPoint?
+      let store = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: root.path,
+        expectedOwnerUID: getuid(),
+        anchorStore: anchor,
+        faultInjector: { observed in
+          if observed == failAt { throw JournalFixtureError.injected }
+        })
+      _ = try store.appendCommitted(enrollmentState())
+      failAt = point
+      #expect(throws: JournalFixtureError.injected) {
+        try store.appendCommitted(committedState(revision: 2, generation: 2))
+      }
+      failAt = nil
+      let recovery = store.recover()
+      #expect(recovery.committedState?.revision == expectedRevision)
+      #expect(recovery.posture == .recovering(.verifyOff))
+      #expect(try anchor.load()?.pending == nil)
+    }
+  }
+}
+
+@Test func everyCompactionCommitCrashBoundaryRecoversAndRetries() throws {
+  let points: [AuthorityJournalFaultPoint] = [
+    .anchorPendingSynchronized,
+    .recordSynchronized,
+    .temporaryHeadSynchronized,
+    .headRenamed,
+    .anchorCommittedSynchronized,
+  ]
+  for point in points {
+    try withTemporaryJournalDirectory { root in
+      let anchor = InMemoryAuthorityJournalAnchorStore()
+      var failAt: AuthorityJournalFaultPoint?
+      let store = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: root.path,
+        expectedOwnerUID: getuid(),
+        anchorStore: anchor,
+        recordCapacity: 10,
+        faultInjector: { observed in
+          if observed == failAt { throw JournalFixtureError.injected }
+        })
+      _ = try store.appendCommitted(enrollmentState())
+      _ = try store.appendCommitted(committedState(revision: 2))
+      _ = try store.appendCommitted(committedState(revision: 3))
+
+      failAt = point
+      #expect(throws: JournalFixtureError.injected) {
+        try store.appendCommitted(
+          committedState(
+            revision: 4, state: .preparing, transition: .prepare))
+      }
+      failAt = nil
+
+      let recoveredCheckpoint = store.recover()
+      #expect(recoveredCheckpoint.committedState?.revision == 3)
+      #expect(try anchor.load()?.pending == nil)
+      _ = try store.appendCommitted(
+        committedState(
+          revision: 4, state: .preparing, transition: .prepare))
+      #expect(store.recover().committedState?.revision == 4)
+      #expect(try journalGenerations(in: root) == [1, 2])
+    }
+  }
+}
+
+@Test func everyCompactionCleanupCrashBoundaryRecoversAndRetries() throws {
+  let points: [AuthorityJournalFaultPoint] = [
+    .generationCleanupStarted,
+    .generationEntryUnlinked,
+    .generationCleanupDirectorySynchronized,
+  ]
+  for point in points {
+    try withTemporaryJournalDirectory { root in
+      let anchor = InMemoryAuthorityJournalAnchorStore()
+      var failAt: AuthorityJournalFaultPoint?
+      let store = try DescriptorRelativeAuthorityJournalStore(
+        testingRootPath: root.path,
+        expectedOwnerUID: getuid(),
+        anchorStore: anchor,
+        recordCapacity: 10,
+        faultInjector: { observed in
+          if observed == failAt { throw JournalFixtureError.injected }
+        })
+      _ = try store.appendCommitted(enrollmentState())
+      _ = try store.appendCommitted(committedState(revision: 2))
+      _ = try store.appendCommitted(committedState(revision: 3))
+      _ = try store.appendCommitted(
+        committedState(
+          revision: 4, state: .preparing, transition: .prepare))
+      _ = try store.appendCommitted(committedState(revision: 5))
+
+      failAt = point
+      #expect(throws: JournalFixtureError.injected) {
+        try store.appendCommitted(
+          committedState(
+            revision: 6, state: .preparing, transition: .prepare))
+      }
+      failAt = nil
+
+      let recoveredCheckpoint = store.recover()
+      #expect(recoveredCheckpoint.committedState?.revision == 5)
+      #expect(try anchor.load()?.pending == nil)
+      _ = try store.appendCommitted(
+        committedState(
+          revision: 6, state: .preparing, transition: .prepare))
+      #expect(store.recover().committedState?.revision == 6)
+      #expect(try journalGenerations(in: root) == [2, 3])
+    }
+  }
+}
+
+@Test func cleanupFailureIsObservableAndBlocksRecoveryAndMutation() throws {
+  try withTemporaryJournalDirectory { root in
+    let failure = AuthorityJournalStorageError.generationCleanupFailed(
+      operation: "injected cleanup", code: EIO)
+    var cleanupFailureEnabled = false
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path,
+      expectedOwnerUID: getuid(),
+      anchorStore: InMemoryAuthorityJournalAnchorStore(),
+      recordCapacity: 10,
+      faultInjector: { point in
+        if cleanupFailureEnabled, point == .generationCleanupStarted {
+          throw failure
+        }
+      })
+    _ = try store.appendCommitted(enrollmentState())
+    _ = try store.appendCommitted(committedState(revision: 2))
+    _ = try store.appendCommitted(committedState(revision: 3))
+    _ = try store.appendCommitted(
+      committedState(
+        revision: 4, state: .preparing, transition: .prepare))
+    _ = try store.appendCommitted(committedState(revision: 5))
+
+    cleanupFailureEnabled = true
+    #expect(throws: failure) {
+      try store.appendCommitted(
+        committedState(
+          revision: 6, state: .preparing, transition: .prepare))
+    }
+    let failedRecovery = store.recover()
+    #expect(
+      isQuarantined(
+        failedRecovery, reason: .generationCleanupFailed))
+    #expect(!failedRecovery.permitsStart)
+    #expect(throws: failure) {
+      try store.appendCommitted(
+        committedState(
+          revision: 6, state: .preparing, transition: .prepare))
+    }
+
+    cleanupFailureEnabled = false
+    _ = try store.appendCommitted(
+      committedState(
+        revision: 6, state: .preparing, transition: .prepare))
+    #expect(store.recover().committedState?.revision == 6)
+    #expect(try journalGenerations(in: root) == [2, 3])
+  }
+}
+
+@Test func insecureObsoleteGenerationIsNeverUnlinked() throws {
+  try withTemporaryJournalDirectory { root in
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path,
+      expectedOwnerUID: getuid(),
+      recordCapacity: 10)
+    _ = try store.appendCommitted(enrollmentState())
+    _ = try store.appendCommitted(committedState(revision: 2))
+    _ = try store.appendCommitted(committedState(revision: 3))
+    _ = try store.appendCommitted(
+      committedState(
+        revision: 4, state: .preparing, transition: .prepare))
+    _ = try store.appendCommitted(committedState(revision: 5))
+
+    let obsoleteJournal = root.appendingPathComponent(
+      "authority.v2.00000000000000000001.journal")
+    let secondLink = root.appendingPathComponent("obsolete-journal-second-link")
+    guard link(obsoleteJournal.path, secondLink.path) == 0 else {
+      throw JournalFixtureError.setup
+    }
+    #expect(throws: AuthorityJournalValidationError.invalidGenerationEntry) {
+      try store.appendCommitted(
+        committedState(
+          revision: 6, state: .preparing, transition: .prepare))
+    }
+    #expect(
+      isQuarantined(
+        store.recover(), reason: .invalidGenerationEntry))
+    #expect(FileManager.default.fileExists(atPath: obsoleteJournal.path))
+    #expect(FileManager.default.fileExists(atPath: secondLink.path))
+  }
+}
+
+@Test func synchronizedTemporaryHeadCompletesThePendingCAS() throws {
+  try withTemporaryJournalDirectory { root in
+    let anchor = InMemoryAuthorityJournalAnchorStore()
+    var failAt: AuthorityJournalFaultPoint?
+    let store = try DescriptorRelativeAuthorityJournalStore(
+      testingRootPath: root.path,
+      expectedOwnerUID: getuid(),
+      anchorStore: anchor,
+      faultInjector: { point in
+        if point == failAt { throw JournalFixtureError.injected }
+      })
+    _ = try store.appendCommitted(enrollmentState())
+    failAt = .recordSynchronized
+    #expect(throws: JournalFixtureError.injected) {
+      try store.appendCommitted(committedState(revision: 2, generation: 2))
+    }
+    failAt = nil
+    let pending = try #require(anchor.load()?.pending)
+    let pendingHead = try AuthorityJournalHead(
+      sequence: pending.sequence,
+      committedLength: pending.committedLength,
+      recordSHA256: pending.recordSHA256)
+    let temporaryHead = root.appendingPathComponent(
+      ".authority.v2.00000000000000000001.head.tmp")
+    try AuthorityJournalCodec.encodeHead(pendingHead).write(to: temporaryHead)
+    guard chmod(temporaryHead.path, 0o600) == 0 else {
+      throw JournalFixtureError.setup
+    }
+
+    let recovery = store.recover()
+    #expect(recovery.committedState?.revision == 2)
+    #expect(try anchor.load()?.pending == nil)
+    #expect(!FileManager.default.fileExists(atPath: temporaryHead.path))
   }
 }
 
@@ -330,7 +1038,7 @@ private func frameForTesting(
   sequence: UInt64,
   previous: SHA256Digest
 ) throws -> (frame: Data, digest: SHA256Digest) {
-  var prefix = Data("CFWAJR01".utf8)
+  var prefix = Data("CFWAJR02".utf8)
   prefix.appendInteger(UInt32(payload.count))
   prefix.appendInteger(sequence)
   prefix.append(try #require(Data(testHex: previous.hex)))

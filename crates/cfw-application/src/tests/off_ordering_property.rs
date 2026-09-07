@@ -170,7 +170,12 @@ async fn property_off_precedes_every_cross_mode_start() {
             let generation_before = coordinator.snapshot().generation;
 
             let snapshot = coordinator
-                .set_mode(target, direct(), EngineSettings::default())
+                .set_mode(
+                    target,
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                    direct(),
+                    EngineSettings::default(),
+                )
                 .await
                 .unwrap_or_else(|error| {
                     panic!(
@@ -346,7 +351,12 @@ async fn property_unproven_off_never_starts_other_mode() {
         let use_owner_present = rng.below(2) == 0;
 
         coordinator
-            .set_mode(initial_mode, direct(), EngineSettings::default())
+            .set_mode(
+                initial_mode,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                direct(),
+                EngineSettings::default(),
+            )
             .await
             .unwrap_or_else(|error| {
                 panic!("case {case} (seed {seed:#x}): initial start must succeed, got {error:?}")
@@ -368,7 +378,12 @@ async fn property_unproven_off_never_starts_other_mode() {
         }
 
         let error = coordinator
-            .set_mode(target_mode, direct(), EngineSettings::default())
+            .set_mode(
+                target_mode,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                direct(),
+                EngineSettings::default(),
+            )
             .await
             .expect_err("an unproven Off barrier must block the target mode");
 
@@ -429,7 +444,12 @@ async fn property_unproven_off_never_starts_other_mode() {
         // A newer operation is blocked by the sticky quarantine and touches the
         // native backend for no new start.
         let blocked = coordinator
-            .set_mode(target_mode, direct(), EngineSettings::default())
+            .set_mode(
+                target_mode,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                direct(),
+                EngineSettings::default(),
+            )
             .await
             .expect_err("quarantine blocks a newer operation");
         assert_eq!(

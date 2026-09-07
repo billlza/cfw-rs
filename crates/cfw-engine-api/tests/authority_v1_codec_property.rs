@@ -19,7 +19,8 @@
 
 use cfw_engine_api::authority_v1::*;
 use cfw_engine_api::{
-    CredentialKind, CredentialRef, CredentialSlot, CredentialTarget, TunnelNetworkOptions,
+    CredentialAudience, CredentialKind, CredentialRef, CredentialSlot, CredentialTarget,
+    DirectIpv4HostRoutes, TunnelNetworkOptions,
 };
 use uuid::Uuid;
 
@@ -175,6 +176,7 @@ fn configuration_of(
         Some(TunnelNetworkOptions {
             ipv6_enabled: true,
             bypass_private_networks: false,
+            direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
             mtu: choices.mtu as u16,
         })
     } else {
@@ -183,6 +185,11 @@ fn configuration_of(
     ConfigurationDescriptor {
         byte_count: choices.byte_count as u32,
         config_sha256: operation.config_sha256.clone(),
+        credential_audience: CredentialAudience::new(
+            operation.root.installation_id.hyphenated().to_string(),
+            operation.identity_sha256.clone(),
+        )
+        .expect("canonical credential audience"),
         credential_slots: credential_slots(choices),
         identity_sha256: operation.identity_sha256.clone(),
         tunnel_options,
@@ -317,7 +324,7 @@ fn malformed_envelopes(choices: &CaseChoices, canonical: &[u8]) -> Vec<(String, 
     if let Some(bytes) = replace_once(canonical, "\"major\":1", "\"major\":9") {
         cases.push(("unsupported_major".into(), bytes));
     }
-    if let Some(bytes) = replace_once(canonical, "\"minor\":0", "\"minor\":7") {
+    if let Some(bytes) = replace_once(canonical, "\"minor\":1", "\"minor\":7") {
         cases.push(("unsupported_minor".into(), bytes));
     }
     if let Some(bytes) = replace_once(
@@ -329,7 +336,7 @@ fn malformed_envelopes(choices: &CaseChoices, canonical: &[u8]) -> Vec<(String, 
     }
 
     // Invalid type: a fractional number where an integer is required.
-    if let Some(bytes) = replace_once(canonical, "\"minor\":0", "\"minor\":0.0") {
+    if let Some(bytes) = replace_once(canonical, "\"minor\":1", "\"minor\":1.0") {
         cases.push(("float_number".into(), bytes));
     }
 

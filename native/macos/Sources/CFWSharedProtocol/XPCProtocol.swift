@@ -11,9 +11,14 @@ import Foundation
     reply: @escaping (Data?, Data?, Data?, NSError?) -> Void)
   func attestReady(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func beginStop(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
+  func completeStop(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
+  func reconcileOff(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func attestStopped(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func cancelPrepared(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
   func snapshot(_ request: Data, reply: @escaping (Data?, NSError?) -> Void)
+  /// Renews only the liveness of the already authenticated, already bound owner.
+  /// No role, operation, lease, or caller identity is accepted from wire bytes.
+  func ownerHeartbeat(_ reply: @escaping (NSError?) -> Void)
 }
 
 @objc public protocol CFWGlobalAuthorityEventSinkProtocol {
@@ -26,6 +31,19 @@ import Foundation
   /// identifier. Domain failures use a typed ResponseEnvelope instead.
   func execute(
     _ request: Data,
+    withReply reply: @escaping (Data?, NSError?) -> Void
+  )
+
+  /// Starts System Proxy with one Authority-issued owner capability. The
+  /// capability remains a separate bounded Data argument; `context` carries
+  /// only canonical non-secret operation/lease metadata, `configuration`
+  /// carries bounded runtime bytes in memory only, and `request` carries the
+  /// exact configuration descriptor.
+  func startSystemProxy(
+    _ capability: Data,
+    context: Data,
+    configuration: Data,
+    request: Data,
     withReply reply: @escaping (Data?, NSError?) -> Void
   )
 

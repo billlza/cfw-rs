@@ -22,26 +22,17 @@ final class UnleasedEngineOwnership: EngineLeaseHolding, @unchecked Sendable {
   func markStopFailed() throws {}
 }
 
-/// Fail-closed owner client used until the authenticated Provider owner XPC channel
-/// is wired end to end. Every entry point erases sensitive inputs and reports the
-/// Authority as unavailable so no start can proceed without a real redemption.
-struct FailClosedEngineOwnerAuthorityClient: EngineOwnerAuthorityClient {
-  func bind(_ capability: OwnerCapability) async throws -> LeaseView {
-    capability.erase()
-    throw AuthorityDomainError(code: .globalAuthorityUnavailable)
+final class TunnelRevocationChannel: @unchecked Sendable {
+  private let lock = NSLock()
+  private var handler: (@Sendable () -> Void)?
+
+  func onRevoke(_ handler: @escaping @Sendable () -> Void) {
+    lock.withLock { self.handler = handler }
   }
 
-  func redeem(_ ticket: StartTicket) async throws -> RedeemedTunnelStart {
-    ticket.erase()
-    throw AuthorityDomainError(code: .globalAuthorityUnavailable)
-  }
-
-  func attestReady(_ attestation: ReadyAttestation) async throws {
-    throw AuthorityDomainError(code: .globalAuthorityUnavailable)
-  }
-
-  func attestStopped(_ attestation: StoppedAttestation) async throws {
-    throw AuthorityDomainError(code: .globalAuthorityUnavailable)
+  func revoke() {
+    let handler = lock.withLock { self.handler }
+    handler?()
   }
 }
 
@@ -69,26 +60,76 @@ enum ProviderPacketPumpLimits {
 /// All Authority (XPC), libbox, and OS side effects live behind injected seams so the
 /// coordinator can be driven deterministically with fakes.
 final class TunnelTicketStartCoordinator: @unchecked Sendable {
+  private typealias StopCompletion =
+    @Sendable (
+      Result<Void, PacketTunnelStopError>
+    ) -> Void
+
   private enum Phase {
     case idle
     case busy
   }
 
+  private struct ActiveContext {
+    let operation: OperationContext
+    let leaseID: AuthorityIdentifier
+    let descriptor: ConfigurationDescriptor
+  }
+
+  private struct StopFlight {
+    let id: UUID
+    let context: ActiveContext?
+    var completions: [StopCompletion]
+    var revocationRequested: Bool
+  }
+
+  private enum PendingCancellation: Equatable {
+    case explicitStop
+    case authorityRevocation
+  }
+
+  private struct PendingStart {
+    let id: UUID
+    var cancellation: PendingCancellation?
+    var stopCompletions: [StopCompletion] = []
+  }
+
+  private struct PendingStartResolution {
+    let cancellation: PendingCancellation?
+    let stopCompletions: [StopCompletion]
+  }
+
   private let authority: any EngineOwnerAuthorityClient
   private let sessionLifecycle: PacketTunnelSessionLifecycle
   private let clock: any ProviderMonotonicClock
+  private let reportRevocationFailure: @Sendable (PacketTunnelStopError) -> Void
+  private let completeRevocation: @Sendable () -> Void
+  private let revocation: TunnelRevocationChannel
   private let stateLock = NSLock()
   private var phase = Phase.idle
-  private var activeContext: (operation: OperationContext, leaseID: AuthorityIdentifier)?
+  private var pendingStart: PendingStart?
+  private var activeContext: ActiveContext?
+  private var pendingReadyLeaseID: AuthorityIdentifier?
+  private var pendingReadyCancellation: PendingCancellation?
+  private var locallyStoppedLeaseID: AuthorityIdentifier?
+  private var locallyStoppedProof: PacketTunnelStopProof?
+  private var stopFlight: StopFlight?
 
   init(
     authority: any EngineOwnerAuthorityClient,
     sessionLifecycle: PacketTunnelSessionLifecycle,
-    clock: any ProviderMonotonicClock = SystemProviderMonotonicClock()
+    revocation: TunnelRevocationChannel = TunnelRevocationChannel(),
+    clock: any ProviderMonotonicClock = SystemProviderMonotonicClock(),
+    reportRevocationFailure: @escaping @Sendable (PacketTunnelStopError) -> Void = { _ in },
+    completeRevocation: @escaping @Sendable () -> Void = {}
   ) {
     self.authority = authority
     self.sessionLifecycle = sessionLifecycle
     self.clock = clock
+    self.reportRevocationFailure = reportRevocationFailure
+    self.completeRevocation = completeRevocation
+    self.revocation = revocation
+    revocation.onRevoke { [weak self] in self?.handleRevocation() }
   }
 
   /// Redeems `ticket` and starts the tunnel. `ticket` is consumed (erased) on every
@@ -99,9 +140,12 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
     descriptor: ConfigurationDescriptor,
     completion: @escaping @Sendable (Error?) -> Void
   ) {
+    let startID = UUID()
     let admitted = stateLock.withLock { () -> Bool in
       guard case .idle = phase else { return false }
       phase = .busy
+      pendingStart = PendingStart(
+        id: startID, cancellation: nil)
       return true
     }
     guard admitted else {
@@ -110,34 +154,53 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
       return
     }
     Task { [self] in
-      await performStart(ticket: ticket, descriptor: descriptor, completion: completion)
+      await performStart(
+        ticket: ticket, descriptor: descriptor,
+        startID: startID, completion: completion)
     }
   }
 
-  func stop(completion: @escaping @Sendable () -> Void) {
-    let context = stateLock.withLock { activeContext }
-    sessionLifecycle.stop { [self] in
-      Task { [self] in
-        await attestStoppedIfNeeded(context)
-        stateLock.withLock {
-          activeContext = nil
-          phase = .idle
-        }
-        completion()
+  func stop(
+    completion: @escaping @Sendable (Result<Void, PacketTunnelStopError>) -> Void
+  ) {
+    let deferred = stateLock.withLock { () -> Bool in
+      guard activeContext == nil, var pending = pendingStart else { return false }
+      if pending.cancellation == nil {
+        pending.cancellation = .explicitStop
       }
+      pending.stopCompletions.append(completion)
+      pendingStart = pending
+      return true
     }
+    guard !deferred else { return }
+    requestStop(completion: completion, revocationRequested: false)
+  }
+
+  private func handleRevocation() {
+    let hasActiveContext = stateLock.withLock { () -> Bool in
+      if var pending = pendingStart {
+        pending.cancellation = .authorityRevocation
+        pendingStart = pending
+        return false
+      }
+      return activeContext != nil
+    }
+    guard hasActiveContext else { return }
+    requestStop(completion: nil, revocationRequested: true)
   }
 
   private func performStart(
     ticket: StartTicket,
     descriptor: ConfigurationDescriptor,
+    startID: UUID,
     completion: @escaping @Sendable (Error?) -> Void
   ) async {
     let redeemed: RedeemedTunnelStart
     do {
       redeemed = try await authority.redeem(ticket)
     } catch {
-      finishFailure(Self.mapRedeemError(error), completion: completion)
+      finishUnboundFailure(
+        Self.mapRedeemError(error), startID: startID, completion: completion)
       return
     }
     // The redeemed configuration and secrets are the Authority transport buffers.
@@ -153,13 +216,24 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
 
     let operation = redeemed.operation
     let leaseID = redeemed.lease.leaseID
-    guard operation.mode == .tunnel,
+    let context = ActiveContext(
+      operation: operation, leaseID: leaseID, descriptor: descriptor)
+    guard redeemed.lease.state == .starting,
+      operation.mode == .tunnel,
+      operation.root.installationID.rawValue == descriptor.installationID,
+      operation.root.epoch == descriptor.epoch,
+      operation.root.generation == descriptor.generation,
       operation.configSHA256 == descriptor.sha256,
       operation.identitySHA256 == descriptor.identitySHA256,
       descriptor.slot == .tunnel
     else {
       eraseRedeemedTransport()
-      finishFailure(.invalidConfigurationSlot, completion: completion)
+      let pending = installBoundContext(context, startID: startID)
+      finishBoundFailure(
+        .invalidConfigurationSlot,
+        completion: completion,
+        revocationRequested: pending.cancellation == .authorityRevocation,
+        additionalStopCompletions: pending.stopCompletions)
       return
     }
 
@@ -171,29 +245,67 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
     } catch {
       configurationTemplate = Data()
       eraseRedeemedTransport()
-      finishFailure(.configuration(String(describing: error)), completion: completion)
+      let pending = installBoundContext(context, startID: startID)
+      finishBoundFailure(
+        .configuration(String(describing: error)),
+        completion: completion,
+        revocationRequested: pending.cancellation == .authorityRevocation,
+        additionalStopCompletions: pending.stopCompletions)
       return
     }
     // Nothing below reads the Authority transport buffers again, so wipe them before
     // the session lifecycle can call back and complete the start.
     eraseRedeemedTransport()
+    let injectedConfiguration = configurationTemplate
+    let injectedCredentials = credentialMaterial
 
-    stateLock.withLock { activeContext = (operation, leaseID) }
-
-    sessionLifecycle.start(
-      descriptor: descriptor,
-      configuration: configurationTemplate,
-      credentialMaterial: credentialMaterial
-    ) { [self] error in
-      if let error {
-        finishFailure(mappedStartError(error), completion: completion)
-        return
+    var pendingResolution = PendingStartResolution(
+      cancellation: nil, stopCompletions: [])
+    let mayStart = stateLock.withLock { () -> Bool in
+      guard let pending = pendingStart, pending.id == startID else { return false }
+      pendingResolution = PendingStartResolution(
+        cancellation: pending.cancellation,
+        stopCompletions: pending.stopCompletions)
+      pendingStart = nil
+      activeContext = context
+      locallyStoppedLeaseID = nil
+      locallyStoppedProof = nil
+      guard pending.cancellation == nil else { return false }
+      pendingReadyLeaseID = context.leaseID
+      pendingReadyCancellation = nil
+      // This enqueue is the claim→start barrier. Stop/revoke use the same lock,
+      // so either cancellation is recorded first or teardown observes the newly
+      // installed exact context after the enqueue.
+      sessionLifecycle.start(
+        descriptor: descriptor,
+        configuration: injectedConfiguration,
+        credentialMaterial: injectedCredentials
+      ) { [self] error in
+        if let error {
+          finishBoundFailure(mappedStartError(error), completion: completion)
+          return
+        }
+        Task { [self] in
+          await completeReadyAttestation(
+            operation: operation, leaseID: leaseID,
+            descriptor: descriptor, completion: completion)
+        }
       }
-      Task { [self] in
-        await completeReadyAttestation(
-          operation: operation, leaseID: leaseID,
-          descriptor: descriptor, completion: completion)
-      }
+      return true
+    }
+    guard mayStart else {
+      configurationTemplate.resetBytes(
+        in: configurationTemplate.startIndex..<configurationTemplate.endIndex)
+      credentialMaterial.erase()
+      let failure: PacketTunnelProviderError =
+        pendingResolution.cancellation == .explicitStop
+        ? .startupCancelled : .globalAuthorityUnavailable
+      finishBoundFailure(
+        failure,
+        completion: completion,
+        revocationRequested: pendingResolution.cancellation == .authorityRevocation,
+        additionalStopCompletions: pendingResolution.stopCompletions)
+      return
     }
     // The session lifecycle captured value copies of the injection inputs above,
     // so erasing these working copies here (copy-on-write) cannot corrupt libbox
@@ -223,50 +335,233 @@ final class TunnelTicketStartCoordinator: @unchecked Sendable {
         monotonicTimestamp: monotonicTimestamp()
       )
       try await authority.attestReady(attestation)
-      completion(nil)
+      let cancellation = stateLock.withLock { () -> PendingCancellation? in
+        guard pendingReadyLeaseID == leaseID else { return .authorityRevocation }
+        pendingReadyLeaseID = nil
+        let cancellation = pendingReadyCancellation
+        pendingReadyCancellation = nil
+        return cancellation
+      }
+      guard let cancellation else {
+        completion(nil)
+        return
+      }
+      let failure: PacketTunnelProviderError =
+        cancellation == .explicitStop ? .startupCancelled : .globalAuthorityUnavailable
+      finishBoundFailure(failure, completion: completion)
     } catch {
+      stateLock.withLock {
+        guard pendingReadyLeaseID == leaseID else { return }
+        pendingReadyLeaseID = nil
+        pendingReadyCancellation = nil
+      }
       // Exact readiness could not be attested; tear the runtime down and fail closed.
       // The failure is reported only after the teardown barrier completes, so no
       // caller can observe a failed start while libbox and the transport are still
       // owned, and no retry can be admitted before the coordinator is idle again.
       let failure = Self.mapAttestationError(error)
-      sessionLifecycle.stop { [self] in
-        stateLock.withLock {
-          activeContext = nil
-          phase = .idle
+      finishBoundFailure(failure, completion: completion)
+    }
+  }
+
+  private func attestStopped(
+    proof: PacketTunnelStopProof,
+    context: ActiveContext
+  ) async -> Result<Void, PacketTunnelStopError> {
+    do {
+      let attestation = try StoppedAttestation(
+        operation: context.operation,
+        leaseID: context.leaseID,
+        libboxStopped: proof.libboxStopped,
+        transportClosed: proof.transportClosed,
+        osRestored: proof.osRestored,
+        monotonicTimestamp: monotonicTimestamp())
+      try await authority.attestStopped(attestation)
+      return .success(())
+    } catch {
+      // Local resources remain stopped, but the Authority still owns the exact
+      // operation until it accepts this proof. Preserve activeContext/phase so
+      // another stop retries only the missing attestation barrier.
+      return .failure(.authorityAttestation(Self.mapAttestationError(error)))
+    }
+  }
+
+  private func finishUnboundFailure(
+    _ error: PacketTunnelProviderError,
+    startID: UUID,
+    completion: @escaping @Sendable (Error?) -> Void
+  ) {
+    let pending = stateLock.withLock { () -> PendingStartResolution in
+      guard let pending = pendingStart, pending.id == startID else {
+        return PendingStartResolution(cancellation: nil, stopCompletions: [])
+      }
+      pendingStart = nil
+      activeContext = nil
+      pendingReadyLeaseID = nil
+      pendingReadyCancellation = nil
+      phase = .idle
+      return PendingStartResolution(
+        cancellation: pending.cancellation,
+        stopCompletions: pending.stopCompletions)
+    }
+    completion(error)
+    for stopCompletion in pending.stopCompletions {
+      stopCompletion(.success(()))
+    }
+    if pending.cancellation == .authorityRevocation {
+      completeRevocation()
+    }
+  }
+
+  private func finishBoundFailure(
+    _ error: PacketTunnelProviderError,
+    completion: @escaping @Sendable (Error?) -> Void,
+    revocationRequested: Bool = false,
+    additionalStopCompletions: [StopCompletion] = []
+  ) {
+    var completions = additionalStopCompletions
+    completions.append { result in
+      switch result {
+      case .success:
+        completion(error)
+      case .failure(let stopError):
+        completion(stopError.providerError)
+      }
+    }
+    requestStop(
+      completions: completions,
+      revocationRequested: revocationRequested)
+  }
+
+  private func requestStop(
+    completion: StopCompletion?,
+    revocationRequested: Bool
+  ) {
+    requestStop(
+      completions: completion.map { [$0] } ?? [],
+      revocationRequested: revocationRequested)
+  }
+
+  private func requestStop(
+    completions incomingCompletions: [StopCompletion],
+    revocationRequested: Bool
+  ) {
+    var flightToStart: StopFlight?
+    var existingProof: PacketTunnelStopProof?
+    stateLock.withLock {
+      if var current = stopFlight {
+        current.completions.append(contentsOf: incomingCompletions)
+        current.revocationRequested = current.revocationRequested || revocationRequested
+        stopFlight = current
+        return
+      }
+      let context = activeContext
+      if let context, pendingReadyLeaseID == context.leaseID {
+        if pendingReadyCancellation == nil || revocationRequested {
+          pendingReadyCancellation = revocationRequested ? .authorityRevocation : .explicitStop
         }
-        completion(failure)
+      }
+      let flight = StopFlight(
+        id: UUID(), context: context,
+        completions: incomingCompletions,
+        revocationRequested: revocationRequested)
+      stopFlight = flight
+      if let context, locallyStoppedLeaseID == context.leaseID {
+        existingProof = locallyStoppedProof
+      }
+      flightToStart = flight
+    }
+    guard let flight = flightToStart else { return }
+    if let proof = existingProof, let context = flight.context {
+      attestStopFlight(flight, proof: proof, context: context)
+      return
+    }
+    sessionLifecycle.stop { [self] result in
+      switch result {
+      case .failure(let error):
+        finishStopFlight(flight.id, result: .failure(error))
+      case .success(let proof):
+        guard let context = flight.context else {
+          finishStopFlight(flight.id, result: .success(()))
+          return
+        }
+        stateLock.withLock {
+          guard activeContext?.leaseID == context.leaseID else { return }
+          locallyStoppedLeaseID = context.leaseID
+          locallyStoppedProof = proof
+        }
+        attestStopFlight(flight, proof: proof, context: context)
       }
     }
   }
 
-  private func attestStoppedIfNeeded(
-    _ context: (operation: OperationContext, leaseID: AuthorityIdentifier)?
-  ) async {
-    guard let context else { return }
-    guard
-      let attestation = try? StoppedAttestation(
-        operation: context.operation,
-        leaseID: context.leaseID,
-        libboxStopped: true,
-        transportClosed: true,
-        osRestored: true,
-        monotonicTimestamp: monotonicTimestamp())
-    else { return }
-    // The local stop already closed libbox and the transport; a failed attestation
-    // does not reopen them. The Host/Authority prove the global Off barrier.
-    try? await authority.attestStopped(attestation)
+  private func attestStopFlight(
+    _ flight: StopFlight,
+    proof: PacketTunnelStopProof,
+    context: ActiveContext
+  ) {
+    Task { [self] in
+      let result = await attestStopped(proof: proof, context: context)
+      finishStopFlight(flight.id, result: result)
+    }
   }
 
-  private func finishFailure(
-    _ error: PacketTunnelProviderError,
-    completion: @escaping @Sendable (Error?) -> Void
+  private func finishStopFlight(
+    _ id: UUID,
+    result: Result<Void, PacketTunnelStopError>
   ) {
-    stateLock.withLock {
-      activeContext = nil
-      phase = .idle
+    let outcome = stateLock.withLock {
+      () -> (completions: [StopCompletion], revocation: Bool)? in
+      guard let current = stopFlight, current.id == id else { return nil }
+      stopFlight = nil
+      if let context = current.context,
+        activeContext?.leaseID == context.leaseID,
+        case .success = result
+      {
+        activeContext = nil
+        locallyStoppedLeaseID = nil
+        locallyStoppedProof = nil
+        if pendingReadyLeaseID != context.leaseID {
+          phase = .idle
+        }
+      } else if current.context == nil,
+        pendingReadyLeaseID == nil,
+        case .success = result
+      {
+        phase = .idle
+      }
+      return (current.completions, current.revocationRequested)
     }
-    completion(error)
+    guard let outcome else { return }
+    if outcome.revocation {
+      switch result {
+      case .success:
+        completeRevocation()
+      case .failure(let error):
+        reportRevocationFailure(error)
+      }
+    }
+    for completion in outcome.completions {
+      completion(result)
+    }
+  }
+
+  private func installBoundContext(
+    _ context: ActiveContext,
+    startID: UUID
+  ) -> PendingStartResolution {
+    stateLock.withLock {
+      guard let pending = pendingStart, pending.id == startID else {
+        return PendingStartResolution(cancellation: nil, stopCompletions: [])
+      }
+      pendingStart = nil
+      activeContext = context
+      locallyStoppedLeaseID = nil
+      locallyStoppedProof = nil
+      return PendingStartResolution(
+        cancellation: pending.cancellation,
+        stopCompletions: pending.stopCompletions)
+    }
   }
 
   private func monotonicTimestamp() -> UInt64 {

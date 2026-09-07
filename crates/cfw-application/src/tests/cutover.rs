@@ -36,6 +36,7 @@ async fn cutover_preparation_rejects_off_and_direct_only_profiles() {
         coordinator
             .prepare_cutover(
                 EngineMode::Tunnel,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
                 ValidatedSingBoxProfile::direct(),
                 settings.clone(),
             )
@@ -44,7 +45,12 @@ async fn cutover_preparation_rejects_off_and_direct_only_profiles() {
     ));
     assert!(matches!(
         coordinator
-            .prepare_cutover(EngineMode::Off, replacement_profile(), settings)
+            .prepare_cutover(
+                EngineMode::Off,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                replacement_profile(),
+                settings
+            )
             .await,
         Err(EngineCoordinatorError::InvalidCutoverPreparation(_))
     ));
@@ -57,7 +63,12 @@ async fn cutover_preparation_is_read_only_and_binds_both_next_generation_project
     let settings = EngineSettings::default();
     let profile = replacement_profile();
     let request = coordinator
-        .prepare_cutover(EngineMode::SystemProxy, profile.clone(), settings.clone())
+        .prepare_cutover(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            profile.clone(),
+            settings.clone(),
+        )
         .await
         .expect("prepare cutover");
 
@@ -72,7 +83,12 @@ async fn cutover_preparation_is_read_only_and_binds_both_next_generation_project
     assert!(backend.operations().is_empty());
 
     let active = coordinator
-        .set_mode(EngineMode::SystemProxy, profile, settings)
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            profile,
+            settings,
+        )
         .await
         .expect("start the preflighted projection");
     assert!(matches!(active.state, EngineState::ProxyActive { .. }));
@@ -89,13 +105,23 @@ async fn active_runtime_cannot_issue_a_cutover_preparation() {
     let profile = replacement_profile();
     let settings = EngineSettings::default();
     coordinator
-        .set_mode(EngineMode::SystemProxy, profile.clone(), settings.clone())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            profile.clone(),
+            settings.clone(),
+        )
         .await
         .expect("start proxy");
 
     assert!(matches!(
         coordinator
-            .prepare_cutover(EngineMode::Tunnel, profile, settings)
+            .prepare_cutover(
+                EngineMode::Tunnel,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                profile,
+                settings
+            )
             .await,
         Err(EngineCoordinatorError::CutoverRequiresOff)
     ));

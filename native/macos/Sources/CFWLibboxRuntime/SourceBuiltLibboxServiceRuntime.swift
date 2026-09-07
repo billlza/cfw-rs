@@ -338,8 +338,13 @@
 
     public func start(configuration: Data, packetFileDescriptor: Int32?) throws {
       let configurationText: String
+      let expectedReceipt: LibboxRuntimeStartReceipt
       do {
         configurationText = try LibboxConfigurationDocument.text(from: configuration)
+        expectedReceipt = try LibboxRuntimeStartReceipt.parse(
+          configuration: configuration,
+          role: role
+        )
       } catch {
         if let packetFileDescriptor, packetFileDescriptor >= 0 {
           Darwin.close(packetFileDescriptor)
@@ -392,7 +397,25 @@
         let options = LibboxOverrideOptions()
         options.autoRedirect = false
         do {
-          try server.startOrReloadService(configurationText, options: options)
+          if let reportedConflict = try server.startOrReloadServiceReportingConflict(
+            configurationText,
+            options: options
+          ) {
+            let conflict = try LibboxRuntimeEndpointConflict.validated(
+              kind: reportedConflict.kind,
+              port: reportedConflict.port,
+              mixedKind: LibboxRuntimeEndpointConflictMixed,
+              controllerKind: LibboxRuntimeEndpointConflictController,
+              receipt: expectedReceipt,
+              runtimeRole: role
+            )
+            throw LibboxRuntimeError.endpointConflict(
+              role: conflict.role,
+              port: conflict.port
+            )
+          }
+        } catch let error as LibboxRuntimeError {
+          throw error
         } catch {
           throw LibboxRuntimeError.serviceStartFailed(error.localizedDescription)
         }

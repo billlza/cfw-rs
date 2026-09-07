@@ -12,6 +12,7 @@ pub(crate) fn prepare_cutover_request(
     state: &CoordinatorState,
     session: &EngineSessionIdentity,
     target: EngineMode,
+    profile_id: &str,
     profile: &ValidatedSingBoxProfile,
     settings: &EngineSettings,
 ) -> Result<CutoverPreflightRequest, EngineCoordinatorError> {
@@ -36,8 +37,8 @@ pub(crate) fn prepare_cutover_request(
         .checked_add(1)
         .ok_or(EngineCoordinatorError::GenerationExhausted)?;
     let context = EngineCommandContext::new(session, generation);
-    let system_proxy = profile.project(ProjectionMode::SystemProxy, settings)?;
-    let tunnel = profile.project(ProjectionMode::Tunnel, settings)?;
+    let system_proxy = profile.project(profile_id, ProjectionMode::SystemProxy, settings)?;
+    let tunnel = profile.project(profile_id, ProjectionMode::Tunnel, settings)?;
     CutoverPreflightRequest::new(
         target,
         start_request(&system_proxy, settings, context.clone()),
@@ -53,6 +54,7 @@ pub(crate) fn start_request(
 ) -> EngineStartRequest {
     EngineStartRequest {
         context,
+        credential_audience: projected.credential_audience().clone(),
         config_json: projected.as_json().to_owned(),
         config_content_digest: projected.configuration_digest().to_owned(),
         config_digest: projected.digest().to_owned(),
@@ -62,6 +64,7 @@ pub(crate) fn start_request(
             ProjectionMode::Tunnel => Some(TunnelNetworkOptions {
                 ipv6_enabled: settings.enable_ipv6,
                 bypass_private_networks: settings.bypass_private_networks,
+                direct_ipv4_hosts: projected.direct_ipv4_hosts(),
                 mtu: settings.tunnel_mtu,
             }),
         },

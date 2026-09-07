@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "apps/cfw-tauri-shell",
+  "crates/cfw-controller",
   "crates/cfw-core",
   "crates/cfw-engine-api",
   "crates/cfw-singbox-config",
@@ -38,21 +39,30 @@ strip = true
 
 [workspace.dependencies]
 anyhow = "1.0"
-base64 = "0.22.1"
+base64 = { version = "0.23.0", default-features = false, features = ["std"] }
 futures-util = "0.3.33"
-flate2 = "1.1.9"
 libc = "0.2.189"
 minisign-verify = "0.2.5"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std"] }
 plist = "1.10.0"
+# Pure-Rust QR encoder for the profile subscription QR code. The image and
+# bitmap renderers are not needed: only the SVG renderer is used.
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+# Pure-Rust event-level YAML parser for Clash subscription conversion. The
+# event API is used deliberately: the importer owns its own alias, depth, and
+# event budgets instead of trusting a document-level loader.
+saphyr-parser = "0.0.11"
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11"
 thiserror = "2.0.19"
 tempfile = "3.27.0"
-tar = "0.4.46"
 tokio = { version = "1.53.1", features = ["macros", "sync", "time"] }
+# Loopback-only websocket client for the clash-compatible controller streams.
+# No TLS feature is enabled: the controller is reachable at ws://127.0.0.1 only.
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
+urlencoding = "2.1.3"
 uuid = { version = "1", features = ["serde", "v4"] }
 zeroize = "1.9.0"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Create an isolated libbox source tree from the immutable upstream tag and the
-# repository-owned, digest-pinned security, packet-flow, and DNS patches.
+# repository-owned, digest-pinned security, packet-flow, DNS, and endpoint patches.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,7 +25,7 @@ if [[ ! -d "$source_root/.git" || -L "$source_root/.git" ]]; then
   exit 1
 fi
 actual_gitlinks="$(
-  git -C "$source_root" ls-files --stage |
+  libbox_git "$source_root" ls-files --stage |
     awk '$1 == "160000" { print $2 " " $4 }'
 )"
 expected_gitlinks="$SING_BOX_ANDROID_REFERENCE_COMMIT clients/android
@@ -73,7 +73,7 @@ mkdir "$staging/checkout"
 COPYFILE_DISABLE=1 /bin/cp -R "$source_root/.git" "$staging/checkout/.git"
 (
   cd "$source_root"
-  git ls-files -z | COPYFILE_DISABLE=1 tar --null -cf - -T -
+  libbox_git "$source_root" ls-files -z | COPYFILE_DISABLE=1 tar --null -cf - -T -
 ) | (
   cd "$staging/checkout"
   COPYFILE_DISABLE=1 tar -xf -
@@ -81,14 +81,21 @@ COPYFILE_DISABLE=1 /bin/cp -R "$source_root/.git" "$staging/checkout/.git"
 security_patch_path="$(libbox_security_patch_path "$repo_root")"
 raw_packet_patch_path="$(libbox_raw_packet_patch_path "$repo_root")"
 dns_failover_patch_path="$(libbox_dns_failover_patch_path "$repo_root")"
-git -C "$staging/checkout" apply --check \
+endpoint_conflict_patch_path="$(libbox_endpoint_conflict_patch_path "$repo_root")"
+# The security dependency patch is emitted with zero-context scalar replacements
+# so the regenerated module-version patch stays deterministic. This is safe only
+# because libbox_validate_upstream_source has already pinned the exact commit and
+# exact go.mod/go.sum digests before this point.
+libbox_git "$staging/checkout" apply --whitespace=error-all --unidiff-zero --check \
   "$security_patch_path" \
   "$raw_packet_patch_path" \
-  "$dns_failover_patch_path"
-git -C "$staging/checkout" apply \
+  "$dns_failover_patch_path" \
+  "$endpoint_conflict_patch_path"
+libbox_git "$staging/checkout" apply --whitespace=error-all --unidiff-zero \
   "$security_patch_path" \
   "$raw_packet_patch_path" \
-  "$dns_failover_patch_path"
+  "$dns_failover_patch_path" \
+  "$endpoint_conflict_patch_path"
 libbox_validate_patched_source "$repo_root" "$staging/checkout"
 
 /bin/mv "$staging/checkout" "$output_root"
@@ -101,3 +108,4 @@ echo "upstream commit: $SING_BOX_COMMIT"
 echo "security patch: $SING_BOX_SECURITY_PATCH_SHA256"
 echo "raw packet patch: $SING_BOX_RAW_PACKET_PATCH_SHA256"
 echo "DNS failover patch: $SING_BOX_DNS_FAILOVER_PATCH_SHA256"
+echo "endpoint conflict patch: $SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256"

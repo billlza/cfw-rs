@@ -6,13 +6,22 @@ license.workspace = true
 build = "build.rs"
 autobins = false
 
+[features]
+physical-release-evidence = []
+
 [[bin]]
 name = "clash-for-mac"
 path = "src/main.rs"
 
+[[test]]
+name = "service_maintenance_main_run_loop"
+path = "tests/service_maintenance_main_run_loop.rs"
+harness = false
+
 [dependencies]
 cfw-application = { path = "../../crates/cfw-application" }
 cfw-apple-network = { path = "../../crates/cfw-apple-network" }
+cfw-controller = { path = "../../crates/cfw-controller" }
 cfw-core = { path = "../../crates/cfw-core" }
 cfw-engine-api = { path = "../../crates/cfw-engine-api" }
 cfw-platform = { path = "../../crates/cfw-platform" }
@@ -20,26 +29,37 @@ cfw-profiles = { path = "../../crates/cfw-profiles" }
 cfw-singbox-config = { path = "../../crates/cfw-singbox-config" }
 base64.workspace = true
 futures-util.workspace = true
-flate2.workspace = true
 libc.workspace = true
-minisign-verify.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 plist.workspace = true
+qrcode.workspace = true
+saphyr-parser.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tauri = { version = "=2.11.5", features = ["tray-icon"] }
 tauri-plugin-single-instance = "=2.4.3"
 thiserror.workspace = true
 tempfile.workspace = true
-tar.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }
+tokio-tungstenite.workspace = true
+urlencoding.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]
+cc = "=1.4.0"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 tauri-build = { version = "=2.6.3", features = [] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "=0.10.1"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication"] }
+security-framework = { version = "=3.7.0", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+dispatch2 = "=0.3.1"

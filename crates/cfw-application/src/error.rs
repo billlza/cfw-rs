@@ -1,6 +1,6 @@
 use cfw_engine_api::{
-    BackendError, CutoverPreflightRequestError, EngineCommandContext, EngineMode, EngineOwner,
-    NativeEngineStatus, RuntimeIdentity,
+    BackendError, BackendErrorKind, CutoverPreflightRequestError, EngineCommandContext, EngineMode,
+    EngineOwner, NativeEngineStatus, RuntimeIdentity,
 };
 use cfw_singbox_config::ConfigError;
 use thiserror::Error;
@@ -112,11 +112,31 @@ pub enum EngineCoordinatorError {
         cleanup_operation: EngineOperation,
         cleanup_error: BackendError,
     },
+    #[error(
+        "native start {start_operation} failed: {start_error}; independent global Off proof also failed: {proof_error}"
+    )]
+    StartAndOffProofFailed {
+        start_operation: EngineOperation,
+        start_error: BackendError,
+        proof_error: Box<EngineCoordinatorError>,
+    },
+    #[error(
+        "native start {operation} encountered {conflict:?}; exact cleanup and independent global Off were proven, so a fresh endpoint projection is required"
+    )]
+    StartEndpointConflictAfterOff {
+        operation: EngineOperation,
+        conflict: BackendErrorKind,
+    },
     #[error("{validation_error}; cleanup {cleanup_operation} also failed: {cleanup_error}")]
     ValidationAndCleanupFailed {
         validation_error: Box<EngineCoordinatorError>,
         cleanup_operation: EngineOperation,
         cleanup_error: BackendError,
+    },
+    #[error("{validation_error}; independent global Off proof also failed: {proof_error}")]
+    ValidationAndOffProofFailed {
+        validation_error: Box<EngineCoordinatorError>,
+        proof_error: Box<EngineCoordinatorError>,
     },
     #[error("engine generation counter is exhausted")]
     GenerationExhausted,
@@ -126,4 +146,10 @@ pub enum EngineCoordinatorError {
     JournalGenerationMismatch { expected: u64, actual: u64 },
     #[error("engine lineage is invalid: {0}")]
     InvalidLineage(String),
+    #[error("engine snapshot changed before the conditional mode transition")]
+    SnapshotPreconditionChanged,
+    #[error(
+        "release evidence restore is unproven; explicit Off reconciliation is required before another non-Off transition"
+    )]
+    ReleaseEvidenceRestoreUnproven,
 }

@@ -1,0 +1,251 @@
+"""Bounded subprocess execution with complete process-group cleanup."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import selectors
+import signal
+import subprocess
+import time
+from typing import Mapping, Sequence
+
+
+MAX_INPUT_BYTES = 4 * 1024 * 1024
+
+
+class BoundedProcessError(RuntimeError):
+    """A command exceeded a hard boundary or could not be cleaned up."""
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _group_exists(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # macOS can transiently report EPERM for an orphaned group while a
+        # killed descendant is being reparented and reaped. Treat that as
+        # "possibly still present" and keep the bounded cleanup wait armed.
+        return True
+    return True
+
+
+def _terminate_group(process: subprocess.Popen[bytes]) -> None:
+    # Reap an already-exited leader before addressing its process group. macOS
+    # may return EPERM while an exited group is being removed. A denied signal
+    # is never proof of cleanup: both wait() and group disappearance must finish.
+    process.poll()
+    signal_error: PermissionError | None = None
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError as error:
+        signal_error = error
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired as error:
+        raise BoundedProcessError(
+            "cleanup",
+            "bounded command leader did not exit during cleanup",
+        ) from (signal_error if signal_error is not None else error)
+    deadline = time.monotonic() + 5
+    while _group_exists(process.pid):
+        if time.monotonic() >= deadline:
+            raise BoundedProcessError(
+                "cleanup",
+                "bounded command descendants did not exit during cleanup",
+            ) from signal_error
+        time.sleep(0.01)
+
+
+def run_bounded_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    timeout: float,
+    output_limit: int,
+    input_bytes: bytes | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    if (
+        not command
+        or any(not isinstance(value, str) or not value for value in command)
+        or not cwd.is_absolute()
+        or not environment
+        or timeout <= 0
+        or output_limit <= 0
+        or (
+            input_bytes is not None
+            and (type(input_bytes) is not bytes or len(input_bytes) > MAX_INPUT_BYTES)
+        )
+    ):
+        raise BoundedProcessError("invalid", "bounded command contract is invalid")
+    try:
+        process = subprocess.Popen(
+            list(command),
+            cwd=cwd,
+            env=dict(environment),
+            stdin=subprocess.DEVNULL if input_bytes is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise BoundedProcessError("start", "bounded command could not start") from error
+    if (
+        process.stdout is None or process.stderr is None
+        or (input_bytes is not None and process.stdin is None)
+    ):
+        try:
+            _terminate_group(process)
+        finally:
+            for stream in (process.stdout, process.stderr, process.stdin):
+                if stream is not None:
+                    stream.close()
+        raise BoundedProcessError("start", "bounded command pipes are unavailable")
+
+    streams = (process.stdout, process.stderr)
+    input_pipe = process.stdin if input_bytes is not None else None
+    input_offset = 0
+    buffers: dict[int, bytearray] = {}
+    selector: selectors.BaseSelector | None = None
+    try:
+        buffers = {
+            process.stdout.fileno(): bytearray(),
+            process.stderr.fileno(): bytearray(),
+        }
+        selector = selectors.DefaultSelector()
+        for stream in streams:
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ)
+        if input_pipe is not None:
+            if input_bytes:
+                os.set_blocking(input_pipe.fileno(), False)
+                selector.register(input_pipe, selectors.EVENT_WRITE)
+            else:
+                input_pipe.close()
+        deadline = time.monotonic() + timeout
+        failure: BoundedProcessError | None = None
+        while selector.get_map() or process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failure = BoundedProcessError("timeout", "bounded command timed out")
+                break
+            try:
+                events = selector.select(min(remaining, 0.25))
+            except InterruptedError:
+                continue
+            for key, _events in events:
+                if (
+                    input_bytes is not None
+                    and input_pipe is not None
+                    and key.fileobj is input_pipe
+                ):
+                    try:
+                        written = os.write(
+                            key.fd, input_bytes[input_offset:input_offset + 64 * 1024]
+                        )
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        failure = BoundedProcessError(
+                            "input", "bounded command closed stdin before receiving all input"
+                        )
+                        break
+                    if written <= 0:
+                        failure = BoundedProcessError(
+                            "input", "bounded command stdin made no progress"
+                        )
+                        break
+                    input_offset += written
+                    if input_offset == len(input_bytes):
+                        selector.unregister(input_pipe)
+                        input_pipe.close()
+                    continue
+                while True:
+                    try:
+                        chunk = os.read(key.fd, 64 * 1024)
+                    except BlockingIOError:
+                        break
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        break
+                    current_size = sum(len(value) for value in buffers.values())
+                    if len(chunk) > output_limit - current_size:
+                        failure = BoundedProcessError(
+                            "output-limit",
+                            "bounded command output exceeded its fixed limit",
+                        )
+                        break
+                    buffers[key.fd].extend(chunk)
+                if failure is not None:
+                    break
+            if failure is not None:
+                break
+        if failure is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failure = BoundedProcessError("timeout", "bounded command timed out")
+            else:
+                try:
+                    returncode = process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    failure = BoundedProcessError(
+                        "timeout", "bounded command timed out"
+                    )
+        if failure is not None:
+            _terminate_group(process)
+            raise BoundedProcessError(
+                failure.reason,
+                str(failure),
+                stdout=bytes(buffers[process.stdout.fileno()]),
+                stderr=bytes(buffers[process.stderr.fileno()]),
+            )
+        if _group_exists(process.pid):
+            _terminate_group(process)
+            raise BoundedProcessError(
+                "descendant",
+                "bounded command left a descendant process running",
+                stdout=bytes(buffers[process.stdout.fileno()]),
+                stderr=bytes(buffers[process.stderr.fileno()]),
+            )
+        return subprocess.CompletedProcess(
+            list(command),
+            returncode,
+            bytes(buffers[process.stdout.fileno()]),
+            bytes(buffers[process.stderr.fileno()]),
+        )
+    except BoundedProcessError:
+        if process.poll() is None or _group_exists(process.pid):
+            _terminate_group(process)
+        raise
+    except BaseException:
+        _terminate_group(process)
+        raise
+    finally:
+        try:
+            if selector is not None:
+                selector.close()
+        finally:
+            if input_pipe is not None:
+                input_pipe.close()
+            for stream in streams:
+                stream.close()
+
+
+__all__ = ["BoundedProcessError", "run_bounded_process"]

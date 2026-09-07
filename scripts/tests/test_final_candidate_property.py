@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Property-based fail-closed test for the final-candidate binder.
 
-Exercises ``publication.final_candidate`` as a black box (Task 12.2,
-Requirements 4.1, 5.1, 6.1, 6.2, 6.3, 6.4, 6.5, 8.1). It is deterministic: the
-stdlib ``random`` module is seeded with fixed integers so any failure
-reproduces exactly. ``hypothesis`` is intentionally not required; at least 100
-generated bindings are validated per property and, on failure, the reproducing
-seed and offending document are printed.
+Exercises the public ``publication.final_candidate`` build/validate surface
+(Task 12.2, Requirements 4.1, 5.1, 6.1, 6.2, 6.3, 6.4, 6.5, 8.1). It is
+deterministic: the stdlib ``random`` module is seeded with fixed integers so any
+failure reproduces exactly. ``hypothesis`` is intentionally not required; at
+least 100 generated bindings are validated per property and, on failure, the
+reproducing seed and offending document are printed. Unchanged source and
+physical fixtures are validated for real at property-class entry and exit,
+then served by strict test-only snapshots inside the high-cardinality loop.
+Dedicated raw-evidence drift and TOCTOU suites remain uncached.
 
 Two properties are checked:
 
@@ -20,9 +23,9 @@ Two properties are checked:
   wrong Team ID, unaccepted notarization/Gatekeeper, unstapled ticket, foreign
   target, stale report, unbound app-tree hash, manifest digest drift, missing
   identity, a foreign physical app tree, a drifted or off-pin libbox
-  XCFramework, a component linked against another XCFramework, a superseded
-  artifact-manifest binding, a superseded raw report, or an app-tree hash that
-  drifted after verification) is rejected.
+  XCFramework, a component linked against another XCFramework, a legacy
+  caller-only evidence binding, or an app-tree hash that drifted after
+  verification) is rejected.
 """
 
 from __future__ import annotations
@@ -34,35 +37,64 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.publication.common import PublicationError, tree_digest
+from scripts.publication import final_candidate as final_candidate_module
+from scripts.publication.common import PublicationError
 from scripts.publication.final_candidate import (
     BLOCKED,
     PHYSICAL_INPUTS,
     REPORT_CATEGORIES,
     REQUIRED_NESTED_CODE,
     TEAM_ID,
-    UPDATER_KEY_BLOCK,
+    WORKSPACE_SECRET_BLOCK,
     VERIFIED,
-    build_final_candidate_binding,
-    validate_final_candidate_binding,
+    build_final_candidate_binding as _build_final_candidate_binding,
+    validate_final_candidate_binding as _validate_final_candidate_binding,
 )
 from scripts.publication.sealed_closure import derive_supply_chain
+from scripts.repository_source_identity import repository_commit
 from scripts.tests.test_physical_evidence_aggregator import (
     APP_MANIFEST,
     BUILD_NUMBER,
     BUILT_AT,
+    PHYSICAL_EVIDENCE_ROOT,
+    PHYSICAL_TRUST_POLICY,
     SIGNED_TREE,
     fixture as physical_fixture,
+    foreign_tree_fixture,
+)
+from scripts.tests.physical_evidence_fixture import (
+    XCFRAMEWORK_MANIFEST_SHA,
+    XCFRAMEWORK_SHA,
+    final_artifact_hash_manifest,
+    fixture_packet_policy,
+)
+from scripts.tests.gatekeeper_fixture import fixture as gatekeeper_fixture
+from scripts.tests.release_property_snapshots import (
+    PhysicalSnapshotInput,
+    StrictReleasePropertySnapshots,
 )
 
 REPOSITORY = Path(__file__).resolve().parent.parent.parent
+REPOSITORY_COMMIT = repository_commit(REPOSITORY)
 ACCEPT_CASES = 120
 REJECT_CASES = 200
 PHYSICAL = PHYSICAL_INPUTS
 PINNED = derive_supply_chain(REPOSITORY)["patched_source"]
-XCFRAMEWORK_SHA = "1" * 64
-XCFRAMEWORK_MANIFEST_SHA = "2" * 64
 OBSERVED_AT = "2026-08-01T00:00:00Z"
+
+
+def build_final_candidate_binding(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    with fixture_packet_policy():
+        return _build_final_candidate_binding(*args, **kwargs)
+
+
+def validate_final_candidate_binding(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    with fixture_packet_policy():
+        return _validate_final_candidate_binding(*args, **kwargs)
 
 
 def _sha(rng: random.Random) -> str:
@@ -79,19 +111,8 @@ def _captured_at(rng: random.Random) -> str:
 
 
 def _artifact_manifest(rng: random.Random) -> dict:
-    entries = [
-        {"path": "artifacts/Clash-for-Mac.app.tree.json", "sha256": SIGNED_TREE},
-        {"path": "artifacts/app-manifest.json", "sha256": APP_MANIFEST},
-        {"path": "artifacts/Libbox.xcframework.tree.json", "sha256": XCFRAMEWORK_SHA},
-        {
-            "path": "artifacts/Libbox.xcframework.manifest.json",
-            "sha256": XCFRAMEWORK_MANIFEST_SHA,
-        },
-    ]
-    for index in range(rng.randint(0, 3)):
-        entries.append({"path": f"artifacts/extra-{index}.bin", "sha256": _sha(rng)})
-    entries.sort(key=lambda item: item["path"])
-    return {"entries": entries, "sha256": tree_digest(entries)}
+    _ = rng
+    return copy.deepcopy(final_artifact_hash_manifest())
 
 
 def _xcframework() -> dict:
@@ -129,7 +150,7 @@ def _request(rng: random.Random, drop_physical: str | None = None) -> dict:
     manifest = _artifact_manifest(rng)
     request = {
         "product": {"version": "0.4.0", "build_number": BUILD_NUMBER},
-        "commit": _sha(rng)[:40],
+        "commit": REPOSITORY_COMMIT,
         "final_artifacts": {
             "signed_app_tree_sha256": SIGNED_TREE,
             "app_manifest_sha256": APP_MANIFEST,
@@ -138,10 +159,6 @@ def _request(rng: random.Random, drop_physical: str | None = None) -> dict:
         },
         "xcframework": _xcframework(),
         "nested_code": _nested_code(rng),
-        "evidence_binding": {
-            "artifact_hash_manifest_sha256": manifest["sha256"],
-            "superseded_report_hashes": [],
-        },
         "post_verification": {"app_tree_sha256": SIGNED_TREE, "observed_at": OBSERVED_AT},
         "notarization": {
             "status": "Accepted",
@@ -155,12 +172,7 @@ def _request(rng: random.Random, drop_physical: str | None = None) -> dict:
             "target_signed_app_tree_sha256": SIGNED_TREE,
             "captured_at": captured,
         },
-        "gatekeeper": {
-            "assessment": "accepted",
-            "source": "spctl",
-            "target_signed_app_tree_sha256": SIGNED_TREE,
-            "captured_at": captured,
-        },
+        "gatekeeper": gatekeeper_fixture(SIGNED_TREE, captured),
         "physical_evidence": physical_fixture(),
     }
     if drop_physical is not None:
@@ -200,6 +212,16 @@ def mutate_gatekeeper_rejected(request, rng):
     return request, "gatekeeper-rejected"
 
 
+def mutate_gatekeeper_disabled(request, rng):
+    request["gatekeeper"]["assessments_enabled"] = False
+    return request, "gatekeeper-disabled"
+
+
+def mutate_gatekeeper_output_digest(request, rng):
+    request["gatekeeper"]["assessment_output_sha256"] = _sha(rng)
+    return request, "gatekeeper-output-digest"
+
+
 def mutate_foreign_target(request, rng):
     request["notarization"]["target_signed_app_tree_sha256"] = _sha(rng)
     return request, "foreign-target"
@@ -226,7 +248,8 @@ def mutate_missing_identity(request, rng):
 
 
 def mutate_foreign_physical_tree(request, rng):
-    request["physical_evidence"]["candidate"]["signed_app_tree_sha256"] = "f" * 64
+    _ = rng
+    request["physical_evidence"] = foreign_tree_fixture()
     return request, "foreign-physical-tree"
 
 
@@ -245,16 +268,12 @@ def mutate_linked_other_libbox(request, rng):
     return request, "linked-other-libbox"
 
 
-def mutate_superseded_manifest_binding(request, rng):
-    request["evidence_binding"]["artifact_hash_manifest_sha256"] = _sha(rng)
-    return request, "superseded-manifest-binding"
-
-
-def mutate_superseded_report(request, rng):
-    # Retire a raw report that the aggregate still carries.
-    report = request["physical_evidence"]["runs"][0]["reports"]["packet"]["report_sha256"]
-    request["evidence_binding"]["superseded_report_hashes"] = [report]
-    return request, "superseded-report"
+def mutate_legacy_caller_evidence_binding(request, rng):
+    request["evidence_binding"] = {
+        "artifact_hash_manifest_sha256": _sha(rng),
+        "superseded_report_hashes": [],
+    }
+    return request, "legacy-caller-evidence-binding"
 
 
 def mutate_post_verification_drift(request, rng):
@@ -268,7 +287,7 @@ def mutate_post_verification_precedes_evidence(request, rng):
 
 
 def mutate_missing_soak(request, rng):
-    del request["physical_evidence"]["runs"][0]["reports"]["performance"]["document"]["soak"]
+    del request["physical_evidence"]["size"]
     return request, "missing-soak"
 
 
@@ -278,6 +297,8 @@ MUTATORS = (
     mutate_notarization_unaccepted,
     mutate_unstapled,
     mutate_gatekeeper_rejected,
+    mutate_gatekeeper_disabled,
+    mutate_gatekeeper_output_digest,
     mutate_foreign_target,
     mutate_stale_report,
     mutate_unbound_tree,
@@ -287,8 +308,7 @@ MUTATORS = (
     mutate_unbound_xcframework,
     mutate_offpin_xcframework,
     mutate_linked_other_libbox,
-    mutate_superseded_manifest_binding,
-    mutate_superseded_report,
+    mutate_legacy_caller_evidence_binding,
     mutate_post_verification_drift,
     mutate_post_verification_precedes_evidence,
     mutate_missing_soak,
@@ -296,6 +316,40 @@ MUTATORS = (
 
 
 class _CleanWorkspace(unittest.TestCase):
+    register_foreign_fixture = False
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        descriptors = [physical_fixture()]
+        if cls.register_foreign_fixture:
+            descriptors.append(foreign_tree_fixture())
+        cls._property_snapshots = StrictReleasePropertySnapshots(
+            repository=REPOSITORY,
+            source_deriver=final_candidate_module.derive_supply_chain,
+            source_consumers=((final_candidate_module, "derive_supply_chain"),),
+            physical_loader=final_candidate_module.load_physical_evidence_artifact,
+            physical_consumers=(
+                (final_candidate_module, "load_physical_evidence_artifact"),
+            ),
+            physical_inputs=tuple(
+                PhysicalSnapshotInput(
+                    descriptor=descriptor,
+                    evidence_root=PHYSICAL_EVIDENCE_ROOT,
+                    trust_policy=PHYSICAL_TRUST_POLICY,
+                )
+                for descriptor in descriptors
+            ),
+        )
+        cls._property_snapshots.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        try:
+            cls._property_snapshots.__exit__(None, None, None)
+        finally:
+            super().tearDownClass()
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self._tmp.name)
@@ -377,10 +431,30 @@ class FinalCandidateRoundTripProperty(_CleanWorkspace):
                     REPOSITORY, _request(rng), fixture=True, workspace_root=workspace
                 )
                 self.assertEqual(binding["status"], BLOCKED)
-                self.assertIn(UPDATER_KEY_BLOCK, binding["blocked_inputs"])
+                self.assertIn(WORKSPACE_SECRET_BLOCK, binding["blocked_inputs"])
 
 
 class FinalCandidateFailClosedProperty(_CleanWorkspace):
+    register_foreign_fixture = True
+
+    def test_schema_numeric_type_is_fail_closed_across_generated_bindings(self) -> None:
+        for seed in range(40):
+            rng = random.Random(55_000 + seed)
+            binding = build_final_candidate_binding(
+                REPOSITORY,
+                _request(rng),
+                fixture=True,
+                workspace_root=self.workspace,
+            )
+            binding["schema_version"] = rng.choice((3.0, True))
+            with self.assertRaisesRegex(PublicationError, "unsupported schema/document"):
+                validate_final_candidate_binding(
+                    REPOSITORY,
+                    binding,
+                    fixture=True,
+                    workspace_root=self.workspace,
+                )
+
     def test_single_defect_bindings_are_rejected(self) -> None:
         mutator_hits = {m.__name__: 0 for m in MUTATORS}
         cases = 0

@@ -5,6 +5,7 @@
   "identifier": "com.bill.clashformac",
   "build": {
     "frontendDist": "ui/dist",
+    "features": ["physical-release-evidence"],
     "beforeBuildCommand": "../../scripts/build_ui_with_pinned_node.sh",
     "beforeDevCommand": "../../scripts/build_ui_with_pinned_node.sh"
   },
@@ -53,14 +54,14 @@
         "Library/LaunchDaemons/com.bill.clashformac.helper.plist": "macos/legacy-tombstone/com.bill.clashformac.helper.plist",
         "Library/LaunchAgents/com.bill.clashformac.proxy-agent.plist": "../../native/macos/Config/com.bill.clashformac.proxy-agent.plist",
         "Library/LoginItems/CFWProxyAgent.app": "../../target/native-products/CFWProxyAgent.app",
-        "Library/SystemExtensions/CFWPacketTunnel.systemextension": "../../target/native-products/CFWPacketTunnel.systemextension"
+        "Library/SystemExtensions/com.bill.clashformac.packet-tunnel.systemextension": "../../target/native-products/com.bill.clashformac.packet-tunnel.systemextension"
       }
     },
     "resources": []
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQxNjc4ODQ3NDhENTIwREQKUldUZElOVklSNGhuUWM1NnlCMS9qNGtyQm56L3JHSnFwYy9ZRm9iMHpQYzdBeTBqYmU0ZXNsMHUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIzM0U5MjQ1ODFGMjBBQ0IKUldUTEN2S0JSWkkrSXhYUFFZTWFUWkI2d2tycWVFcnJTVmVZcTFwdndKSVB3aXhnWWhaTW5UL0oK",
       "endpoints": [
         "https://github.com/billlza/cfw-rs/releases/latest/download/latest.json"
       ]

@@ -6,7 +6,10 @@ import Foundation
 extension NativeBridgeCoordinator {
   func preflightCredentials(_ request: EngineStartRequest) throws {
     do {
-      var material = try credentialVault.resolve(slots: request.credentialSlots)
+      var material = try credentialVault.resolve(
+        audience: request.credentialAudience,
+        slots: request.credentialSlots
+      )
       material.erase()
     } catch {
       throw Self.map(error)
@@ -15,9 +18,9 @@ extension NativeBridgeCoordinator {
 
   func provisionCredentials(
     _ request: CredentialProvisionRequest
-  ) throws -> NativeCredentialReceipt {
-    try beginMutation()
-    defer { endMutation() }
+  ) async throws -> NativeCredentialReceipt {
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
     var request = request
     defer { request.erase() }
     var material: CredentialMaterial
@@ -35,11 +38,16 @@ extension NativeBridgeCoordinator {
     defer { material.erase() }
     do {
       let receipt = try credentialVault.provision(
-        profileID: request.profileID.uuidString.lowercased(),
+        audience: request.audience,
         requiredReferences: request.requiredReferences,
         material: material
       )
-      return NativeCredentialReceipt(profileID: receipt.profileID)
+      return NativeCredentialReceipt(
+        audience: CredentialAudience(
+          profileID: receipt.profileID,
+          profileDigest: receipt.profileDigest
+        )
+      )
     } catch {
       throw Self.map(error)
     }
@@ -47,9 +55,14 @@ extension NativeBridgeCoordinator {
 
   func queryCredentialPresence(
     _ request: CredentialPresenceRequest
-  ) throws -> [NativeCredentialPresence] {
+  ) async throws -> [NativeCredentialPresence] {
+    let operationID = try beginOperation()
+    defer { endOperation(operationID) }
     do {
-      return try credentialVault.presence(of: request.references).map {
+      return try credentialVault.presence(
+        audience: request.audience,
+        of: request.references
+      ).map {
         NativeCredentialPresence(reference: $0.reference, present: $0.present)
       }
     } catch {
@@ -60,16 +73,16 @@ extension NativeBridgeCoordinator {
   func previewCredentialGarbageCollection(
     _ request: CredentialGarbageCollectionRequest
   ) async throws -> CredentialGarbageCollectionPreview {
-    try beginMutation()
-    defer { endMutation() }
-    let references = try await protectedCredentialReferences(
-      repositoryReferences: request.liveReferences
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    let catalog = try await protectedCredentialCatalog(
+      repositoryCatalog: request.catalog
     )
     do {
       return try credentialVault.previewGarbageCollection(
         CredentialGarbageCollectionRequest(
           snapshotDigest: request.snapshotDigest,
-          liveReferences: references
+          catalog: catalog
         )
       )
     } catch {
@@ -80,22 +93,29 @@ extension NativeBridgeCoordinator {
   func preflightCutover(
     _ request: CutoverPreflightRequest
   ) async throws -> CutoverPreflightOutcome {
-    try beginMutation()
-    defer { endMutation() }
-    if let pendingInstallationContext {
-      guard pendingInstallationContext == request.tunnelRequest.context else {
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    if let pendingTunnelInstallation {
+      guard pendingTunnelInstallation.context == request.tunnelRequest.context else {
         throw NativeBridgeExecutionError.failure(
           .busy,
           "A different System Extension approval request is still pending."
         )
       }
-      // A user-approval callback may have completed after the earlier caller
-      // returned AwaitingApproval. Cancel only any local wait, preserve the OS
-      // request identity, and submit a fresh readiness check. If the original
-      // request is still pending, the installer fails Busy without data-plane
-      // mutation.
-      await tunnel.cancelTunnelInstallationWait()
-      self.pendingInstallationContext = nil
+      if request.target == .tunnel {
+        guard pendingTunnelInstallation.state == .retryable else {
+          throw NativeBridgeExecutionError.failure(
+            .busy,
+            "The pending System Extension installation requires exact cancellation before retry."
+          )
+        }
+      } else {
+        // Switching away from Tunnel abandons only local request identity. The
+        // public API cannot withdraw the submitted activation request, but its
+        // eventual callback is isolated from all later mutations.
+        await tunnel.cancelTunnelInstallationWait()
+        self.pendingTunnelInstallation = nil
+      }
     }
     guard case .off = try await queryStatus() else {
       throw NativeBridgeExecutionError.failure(
@@ -109,18 +129,20 @@ extension NativeBridgeCoordinator {
     if request.target == .tunnel {
       let installResult: SystemExtensionInstallResult
       do {
-        installResult = try await tunnel.installTunnel()
+        installResult = try await awaitTunnelInstallation(
+          context: request.tunnelRequest.context
+        )
       } catch {
         throw Self.map(error)
       }
       switch installResult {
       case .awaitingApproval:
-        pendingInstallationContext = request.tunnelRequest.context
         return .awaitingApproval(
           target: request.target,
           context: request.tunnelRequest.context,
           systemProxyConfigDigest: request.systemProxyRequest.configDigest,
-          tunnelConfigDigest: request.tunnelRequest.configDigest
+          tunnelConfigDigest: request.tunnelRequest.configDigest,
+          credentialAudience: request.tunnelRequest.credentialAudience
         )
       case .requiresRestart:
         throw NativeBridgeExecutionError.failure(
@@ -147,6 +169,7 @@ extension NativeBridgeCoordinator {
         context: request.tunnelRequest.context,
         systemProxyConfigDigest: request.systemProxyRequest.configDigest,
         tunnelConfigDigest: request.tunnelRequest.configDigest,
+        credentialAudience: request.tunnelRequest.credentialAudience,
         credentialReferences: references,
         validForMillis: CutoverPreflightAttestation.maximumValidityMilliseconds
       )
@@ -156,7 +179,10 @@ extension NativeBridgeCoordinator {
   func checkConfiguration(_ request: EngineStartRequest) async throws {
     var material: CredentialMaterial
     do {
-      material = try credentialVault.resolve(slots: request.credentialSlots)
+      material = try credentialVault.resolve(
+        audience: request.credentialAudience,
+        slots: request.credentialSlots
+      )
     } catch {
       throw Self.map(error)
     }
@@ -193,18 +219,18 @@ extension NativeBridgeCoordinator {
   func commitCredentialGarbageCollection(
     _ request: CredentialGarbageCollectionCommitRequest
   ) async throws -> CredentialGarbageCollectionReceipt {
-    try beginMutation()
-    defer { endMutation() }
-    let references = try await protectedCredentialReferences(
-      repositoryReferences: request.liveReferences
+    let mutationID = try await beginMutation()
+    defer { endMutation(mutationID) }
+    let catalog = try await protectedCredentialCatalog(
+      repositoryCatalog: request.catalog
     )
     do {
       return try credentialVault.commitGarbageCollection(
         CredentialGarbageCollectionCommitRequest(
           snapshotDigest: request.snapshotDigest,
-          liveReferences: references,
+          catalog: catalog,
           expectedVaultRevision: request.expectedVaultRevision,
-          expectedOrphanReferences: request.expectedOrphanReferences
+          expectedOrphanBindings: request.expectedOrphanBindings
         )
       )
     } catch {
@@ -212,12 +238,12 @@ extension NativeBridgeCoordinator {
     }
   }
 
-  /// Unions repository references with every descriptor still observed by an
+  /// Unions the repository catalog with every descriptor still observed by an
   /// endpoint or persisted Tunnel manager. If any native state cannot be
   /// observed safely, GC fails closed without deleting Keychain material.
-  func protectedCredentialReferences(
-    repositoryReferences: [CredentialReference]
-  ) async throws -> [CredentialReference] {
+  func protectedCredentialCatalog(
+    repositoryCatalog: [CredentialProfileCatalogEntry]
+  ) async throws -> [CredentialProfileCatalogEntry] {
     async let proxyObservation = Self.observe { try await self.proxy.snapshot() }
     async let tunnelObservation = Self.observe { try await self.tunnel.snapshot() }
     async let tunnelManagerConfiguration = Self.observe {
@@ -234,18 +260,26 @@ extension NativeBridgeCoordinator {
       managerConfigurationValue,
       component: "Tunnel manager configuration"
     )
-    var referencesByID: [UUID: CredentialReference] = [:]
-    func preserve(_ reference: CredentialReference) throws {
-      if let existing = referencesByID[reference.id], existing.kind != reference.kind {
+    var referencesByAudience: [CredentialAudience: [UUID: CredentialReference]] = [:]
+    func preserve(
+      _ reference: CredentialReference,
+      audience: CredentialAudience
+    ) throws {
+      var references = referencesByAudience[audience, default: [:]]
+      if let existing = references[reference.id], existing.kind != reference.kind {
         throw NativeBridgeExecutionError.failure(
           .configurationRejected,
           "Credential reference kind conflicts across protected native state."
         )
       }
-      referencesByID[reference.id] = reference
+      references[reference.id] = reference
+      referencesByAudience[audience] = references
     }
-    for reference in repositoryReferences {
-      try preserve(reference)
+    for entry in repositoryCatalog {
+      referencesByAudience[entry.audience] = [:]
+      for reference in entry.references {
+        try preserve(reference, audience: entry.audience)
+      }
     }
     for descriptor in [
       proxySnapshot.configuration,
@@ -253,16 +287,14 @@ extension NativeBridgeCoordinator {
       managerConfiguration,
     ].compactMap({ $0 }) {
       for slot in descriptor.credentialSlots {
-        try preserve(slot.reference)
+        try preserve(slot.reference, audience: descriptor.credentialAudience)
       }
     }
-    return referencesByID.values.sorted {
-      let leftID = $0.id.uuidString.lowercased()
-      let rightID = $1.id.uuidString.lowercased()
-      if leftID != rightID {
-        return leftID < rightID
-      }
-      return $0.kind.rawValue < $1.kind.rawValue
-    }
+    return try referencesByAudience.map { audience, references in
+      try CredentialProfileCatalogEntry(
+        audience: audience,
+        references: references.values.sorted(by: CredentialReference.canonicalPrecedes)
+      )
+    }.sorted(by: CredentialGarbageCollectionRequest.catalogEntryPrecedes)
   }
 }

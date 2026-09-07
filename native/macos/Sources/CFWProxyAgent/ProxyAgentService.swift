@@ -1,3 +1,4 @@
+import CFWCredentialTransport
 import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
@@ -57,35 +58,15 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
         )
       }
     case .startSystemProxy:
-      do {
-        try GlobalAuthorityReleaseGate.requireStartAuthorization()
-      } catch {
-        respond(
-          requestID: request.requestID,
-          failure: EngineFailure(
-            code: GlobalAuthorityGateError.stableCode,
-            message: GlobalAuthorityGateError.stableMessage,
-            isRetryable: false
-          ),
-          reply: reply
-        )
-        return
-      }
-      guard let configuration = request.command.configuration else {
-        respond(
-          requestID: request.requestID,
-          failure: EngineFailure(
-            code: "missing-start-configuration",
-            message: "System proxy start requires an exact configuration descriptor.",
-            isRetryable: false
-          ),
-          reply: reply
-        )
-        return
-      }
-      lifecycle.start(configuration: configuration) { [self] result in
-        respondToOperation(requestID: request.requestID, result: result, reply: reply)
-      }
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          code: "authority-authorization-required",
+          message: "System proxy start requires a one-use Authority authorization.",
+          isRetryable: false
+        ),
+        reply: reply
+      )
     case .stop:
       guard let configuration = request.command.configuration else {
         respond(
@@ -112,6 +93,96 @@ final class ProxyAgentService: NSObject, CFWProxyAgentXPCProtocol, @unchecked Se
         ),
         reply: reply
       )
+    }
+  }
+
+  func startSystemProxy(
+    _ capabilityData: Data,
+    context contextData: Data,
+    configuration configurationData: Data,
+    request requestData: Data,
+    withReply reply: @escaping (Data?, NSError?) -> Void
+  ) {
+    let reply = ProxyXPCReply(reply)
+    let request: RequestEnvelope
+    let context: ProxyOwnerContext
+    var capabilityBytes = capabilityData
+    var configurationBytes = configurationData
+    defer {
+      capabilityBytes.resetBytes(
+        in: capabilityBytes.startIndex..<capabilityBytes.endIndex)
+      capabilityBytes.removeAll(keepingCapacity: false)
+      configurationBytes.resetBytes(
+        in: configurationBytes.startIndex..<configurationBytes.endIndex)
+      configurationBytes.removeAll(keepingCapacity: false)
+    }
+    do {
+      request = try ProtocolCodec.decodeRequest(requestData)
+      context = try AuthorityV1Codec.decodeCanonical(
+        ProxyOwnerContext.self, from: contextData)
+    } catch {
+      reply.finish(data: nil, error: protocolError())
+      return
+    }
+    guard request.command.kind == .startSystemProxy,
+      let descriptor = request.command.configuration,
+      capabilityBytes.count == AuthorityV1Limits.capabilityBytes,
+      context.operation.root.installationID.rawValue == descriptor.installationID,
+      context.operation.root.epoch == descriptor.epoch,
+      context.operation.root.generation == descriptor.generation,
+      context.operation.configSHA256 == descriptor.sha256,
+      context.operation.identitySHA256 == descriptor.identitySHA256
+    else {
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          code: "invalid-owner-authorization",
+          message: "System proxy owner authorization does not match the start request.",
+          isRetryable: false
+        ),
+        reply: reply
+      )
+      return
+    }
+    do {
+      try descriptor.validateConfigurationBytes(configurationBytes)
+    } catch {
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          code: "invalid-runtime-configuration",
+          message: "System proxy runtime bytes do not match the authorized descriptor.",
+          isRetryable: false
+        ),
+        reply: reply
+      )
+      return
+    }
+    let capability: OwnerCapability
+    do {
+      capability = try OwnerCapability(copying: capabilityBytes)
+    } catch {
+      respond(
+        requestID: request.requestID,
+        failure: EngineFailure(
+          code: "invalid-owner-authorization",
+          message: "System proxy owner authorization is malformed.",
+          isRetryable: false
+        ),
+        reply: reply
+      )
+      return
+    }
+    let authorization = ProxyOwnerAuthorization(
+      context: context, capability: capability)
+    let runtimeConfiguration = SensitiveDataBuffer(copying: configurationBytes)
+    lifecycle.start(
+      configuration: runtimeConfiguration,
+      descriptor: descriptor,
+      authorization: authorization
+    ) { [self] result in
+      authorization.erase()
+      respondToOperation(requestID: request.requestID, result: result, reply: reply)
     }
   }
 

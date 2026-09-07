@@ -9,7 +9,7 @@ use tokio::{sync::watch, time::timeout};
 use uuid::Uuid;
 
 use crate::RecoveredRuntimeMismatch;
-use crate::{EngineCoordinatorError, EngineOperation};
+use crate::{EngineCoordinatorError, EngineOperation, EngineRestartSpec};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum NativeLeaseKind {
@@ -35,6 +35,9 @@ pub(crate) struct CoordinatorState {
     /// backend; only an explicit Off reconciliation that proves the stop
     /// barrier clears it. Ambiguity is never treated as Off.
     pub(crate) quarantine: Option<EngineCoordinatorError>,
+    /// Last accepted source inputs, retained only by this process so a closed
+    /// maintenance transaction can restore an exact active baseline.
+    pub(crate) restart_spec: Option<EngineRestartSpec>,
 }
 
 /// Classifies a native failure whose only safe recovery is an explicit Off
@@ -44,7 +47,7 @@ pub(crate) struct CoordinatorState {
 pub(crate) fn requires_explicit_reconciliation(kind: BackendErrorKind) -> bool {
     matches!(
         kind.retry_directive(),
-        RetryDirective::ExplicitReconciliation
+        RetryDirective::ExplicitReconciliation | RetryDirective::MaintenanceRequired
     )
 }
 

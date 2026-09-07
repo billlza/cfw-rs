@@ -3,10 +3,10 @@
 
 This is the CLI front end for ``publication.final_candidate`` (Task 12.2). It
 extends the existing offline publication tooling; it consumes the wave-11
-physical-evidence aggregate and the path/name-only updater-key blocker, never
-opens the workspace updater key, and never fabricates acceptance. When
+physical-evidence aggregate and the path/name-only secret-material blocker,
+never opens workspace secret material, and never fabricates acceptance. When
 notarization, staple, Gatekeeper, or the physical evidence is unavailable, or an
-updater-key file is present in the workspace, the produced binding is
+secret material is present in the workspace, the produced binding is
 environment-gated to ``blocked`` and ``validate --require-verified`` fails
 closed.
 
@@ -16,7 +16,7 @@ Usage:
     final_candidate_binding.py status [--evidence-dir DIR] [--strict]
 
 ``status`` reports, without fabricating anything, which environment-gated inputs
-exist (``present``/``not-run``) and which updater-key files block release
+exist (``present``/``not-run``) and which secret-material files block release
 (path/name only). With ``--strict`` a blocked candidate exits nonzero.
 """
 
@@ -66,13 +66,14 @@ def command_status(arguments: argparse.Namespace) -> None:
     for name in sorted(report["inputs"]):
         entry = report["inputs"][name]
         print(f"  {name}: {entry['state']} ({entry['path']})")
-    for block in report["updater_key_blocks"]:
-        # Path and name only; the key is never opened (Requirement 8.1).
+    for block in report["workspace_secret_blocks"]:
+        # Path and name only; secret material is never opened (Requirement 8.1).
         print(
-            f"  updater-key release blocker: {block['path']} (name={block['name']}) "
+            f"  release secret blocker: {block['path']} (name={block['name']}) "
+            f"kind={block['credential_kind']} "
             f"relocate to {block['relocation_target']}; "
             f"rotation_required={block['rotation_required']} "
-            f"trust_migration_required={block['trust_migration_required']}"
+            f"required_trust_action={block['required_trust_action']}"
         )
     print(
         f"final candidate status: {report['status']} blocked={report['blocked_inputs']}"

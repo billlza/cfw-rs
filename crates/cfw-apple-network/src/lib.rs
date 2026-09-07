@@ -15,7 +15,7 @@ mod generation_store;
 mod native_bridge;
 
 pub use generation_store::{GenerationStoreError, KeychainEngineGenerationStore};
-pub use native_bridge::NativeFrameworkBridge;
+pub use native_bridge::{NATIVE_BRIDGE_OUTER_WATCHDOG, NativeFrameworkBridge};
 
 pub type NativeBridgeFuture<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, NativeBridgeError>> + Send + 'a>>;
@@ -24,13 +24,17 @@ pub type NativeBridgeFuture<'a, T> =
 pub enum NativeBridgeErrorCode {
     Busy,
     ResourceExhausted,
+    JournalCapacityExhausted,
     PermissionDenied,
     ApprovalDenied,
     ConfigurationRejected,
     CredentialsUnavailable,
     CredentialConflict,
     CredentialVaultMissing,
+    CredentialVaultCorrupt,
+    CredentialMigrationRequired,
     CredentialGcConflict,
+    ProxyAgentApprovalRequired,
     GlobalAuthorityUnavailable,
     GlobalAuthorityRegistrationRequired,
     GlobalAuthorityApprovalRequired,
@@ -56,6 +60,8 @@ pub enum NativeBridgeErrorCode {
     IdentityRejected,
     Timeout,
     Unavailable,
+    MixedEndpointInUse,
+    ControllerEndpointInUse,
     Internal,
 }
 
@@ -64,13 +70,17 @@ impl From<NativeBridgeErrorCode> for BackendErrorKind {
         match code {
             NativeBridgeErrorCode::Busy => Self::Busy,
             NativeBridgeErrorCode::ResourceExhausted => Self::ResourceExhausted,
+            NativeBridgeErrorCode::JournalCapacityExhausted => Self::JournalCapacityExhausted,
             NativeBridgeErrorCode::PermissionDenied => Self::PermissionDenied,
             NativeBridgeErrorCode::ApprovalDenied => Self::ApprovalDenied,
             NativeBridgeErrorCode::ConfigurationRejected => Self::ConfigurationRejected,
             NativeBridgeErrorCode::CredentialsUnavailable => Self::CredentialsUnavailable,
             NativeBridgeErrorCode::CredentialConflict => Self::CredentialConflict,
             NativeBridgeErrorCode::CredentialVaultMissing => Self::CredentialVaultMissing,
+            NativeBridgeErrorCode::CredentialVaultCorrupt => Self::CredentialVaultCorrupt,
+            NativeBridgeErrorCode::CredentialMigrationRequired => Self::CredentialMigrationRequired,
             NativeBridgeErrorCode::CredentialGcConflict => Self::CredentialGcConflict,
+            NativeBridgeErrorCode::ProxyAgentApprovalRequired => Self::ProxyAgentApprovalRequired,
             NativeBridgeErrorCode::GlobalAuthorityUnavailable => Self::GlobalAuthorityUnavailable,
             NativeBridgeErrorCode::GlobalAuthorityRegistrationRequired => {
                 Self::GlobalAuthorityRegistrationRequired
@@ -104,6 +114,8 @@ impl From<NativeBridgeErrorCode> for BackendErrorKind {
             NativeBridgeErrorCode::IdentityRejected => Self::IdentityRejected,
             NativeBridgeErrorCode::Timeout => Self::Timeout,
             NativeBridgeErrorCode::Unavailable => Self::Unavailable,
+            NativeBridgeErrorCode::MixedEndpointInUse => Self::MixedEndpointInUse,
+            NativeBridgeErrorCode::ControllerEndpointInUse => Self::ControllerEndpointInUse,
             NativeBridgeErrorCode::Internal => Self::Internal,
         }
     }
@@ -114,13 +126,17 @@ impl From<BackendErrorKind> for NativeBridgeErrorCode {
         match kind {
             BackendErrorKind::Busy => Self::Busy,
             BackendErrorKind::ResourceExhausted => Self::ResourceExhausted,
+            BackendErrorKind::JournalCapacityExhausted => Self::JournalCapacityExhausted,
             BackendErrorKind::PermissionDenied => Self::PermissionDenied,
             BackendErrorKind::ApprovalDenied => Self::ApprovalDenied,
             BackendErrorKind::ConfigurationRejected => Self::ConfigurationRejected,
             BackendErrorKind::CredentialsUnavailable => Self::CredentialsUnavailable,
             BackendErrorKind::CredentialConflict => Self::CredentialConflict,
             BackendErrorKind::CredentialVaultMissing => Self::CredentialVaultMissing,
+            BackendErrorKind::CredentialVaultCorrupt => Self::CredentialVaultCorrupt,
+            BackendErrorKind::CredentialMigrationRequired => Self::CredentialMigrationRequired,
             BackendErrorKind::CredentialGcConflict => Self::CredentialGcConflict,
+            BackendErrorKind::ProxyAgentApprovalRequired => Self::ProxyAgentApprovalRequired,
             BackendErrorKind::GlobalAuthorityUnavailable => Self::GlobalAuthorityUnavailable,
             BackendErrorKind::GlobalAuthorityRegistrationRequired => {
                 Self::GlobalAuthorityRegistrationRequired
@@ -154,6 +170,8 @@ impl From<BackendErrorKind> for NativeBridgeErrorCode {
             BackendErrorKind::IdentityRejected => Self::IdentityRejected,
             BackendErrorKind::Timeout => Self::Timeout,
             BackendErrorKind::Unavailable => Self::Unavailable,
+            BackendErrorKind::MixedEndpointInUse => Self::MixedEndpointInUse,
+            BackendErrorKind::ControllerEndpointInUse => Self::ControllerEndpointInUse,
             BackendErrorKind::Internal => Self::Internal,
         }
     }
@@ -369,7 +387,7 @@ impl NativeBridge for MissingNativeBridge {
 mod tests {
     use std::sync::Mutex;
 
-    use cfw_engine_api::{EngineOwner, TunnelNetworkOptions};
+    use cfw_engine_api::{DirectIpv4HostRoutes, EngineOwner, TunnelNetworkOptions};
 
     use super::*;
 
@@ -466,6 +484,7 @@ mod tests {
                         .config_digest
                         .clone(),
                     tunnel_config_digest: request.tunnel_request().config_digest.clone(),
+                    credential_audience: request.tunnel_request().credential_audience.clone(),
                 })
             })
         }
@@ -482,6 +501,11 @@ mod tests {
     fn tunnel_request() -> EngineStartRequest {
         EngineStartRequest {
             context: context(),
+            credential_audience: cfw_engine_api::CredentialAudience::new(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "c".repeat(64),
+            )
+            .expect("audience"),
             config_json: "{\"inbounds\":[]}".to_owned(),
             config_content_digest: "b".repeat(64),
             config_digest: "a".repeat(64),
@@ -489,6 +513,7 @@ mod tests {
             tunnel_options: Some(TunnelNetworkOptions {
                 ipv6_enabled: true,
                 bypass_private_networks: true,
+                direct_ipv4_hosts: DirectIpv4HostRoutes::none(),
                 mtu: 1_500,
             }),
         }
@@ -500,6 +525,14 @@ mod tests {
             let bridge = NativeBridgeErrorCode::from(kind);
             assert_eq!(BackendErrorKind::from(bridge), kind);
         }
+    }
+
+    #[test]
+    fn proxy_agent_approval_mapping_is_one_to_one() {
+        let kind = BackendErrorKind::ProxyAgentApprovalRequired;
+        let bridge = NativeBridgeErrorCode::from(kind);
+        assert_eq!(bridge, NativeBridgeErrorCode::ProxyAgentApprovalRequired);
+        assert_eq!(BackendErrorKind::from(bridge), kind);
     }
 
     #[tokio::test]

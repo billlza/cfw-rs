@@ -1,4 +1,5 @@
 import CFWCredentialTransport
+import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
 
@@ -7,8 +8,7 @@ protocol ProxyEngineLeaseHolding: AnyObject {
   func markStopFailed() throws
 }
 
-struct PreparedProxyConfiguration {
-  let configuration: Data
+struct PreparedProxyOwnership {
   let lease: any ProxyEngineLeaseHolding
 }
 
@@ -22,6 +22,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
   case configuration(String)
   case engineCreation(String)
   case engineStart(String)
+  case endpointConflict(role: LibboxRuntimeEndpointRole, port: UInt16)
   case listenerReadinessTimedOut
   case engineStop(String)
   case engineFailed(ProxyEngineFailure)
@@ -42,6 +43,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
     case .configuration: code = "proxy-configuration-failed"
     case .engineCreation: code = "proxy-engine-creation-failed"
     case .engineStart: code = "proxy-engine-start-failed"
+    case .endpointConflict(let role, _):
+      code = role == .mixed ? "mixed-endpoint-in-use" : "controller-endpoint-in-use"
     case .listenerReadinessTimedOut: code = "proxy-listener-readiness-timeout"
     case .engineStop: code = "proxy-engine-stop-failed"
     case .engineFailed: code = "proxy-engine-crashed"
@@ -77,6 +80,8 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
       "System Proxy runtime creation failed."
     case .engineStart:
       "System Proxy runtime startup failed."
+    case .endpointConflict(let role, let port):
+      "The System Proxy \(role.rawValue) endpoint could not bind to port \(port)."
     case .listenerReadinessTimedOut:
       "System Proxy listener did not become ready before the bounded timeout."
     case .engineStop:
@@ -96,7 +101,7 @@ enum ProxySessionLifecycleError: Error, Equatable, Sendable {
 }
 
 struct ProxySessionDependencies: @unchecked Sendable {
-  let prepareConfiguration: (ConfigurationDescriptor) throws -> PreparedProxyConfiguration
+  let prepareOwnership: (ConfigurationDescriptor) throws -> PreparedProxyOwnership
   let resolveConfiguration: (Data, ConfigurationDescriptor) throws -> Data
   let recoverCleanupLease: (ConfigurationDescriptor) throws -> any ProxyEngineLeaseHolding
   let engineFactory: any ProxyEngineFactory
@@ -105,7 +110,7 @@ struct ProxySessionDependencies: @unchecked Sendable {
   let readinessTimeout: TimeInterval
 
   init(
-    prepareConfiguration: @escaping (ConfigurationDescriptor) throws -> PreparedProxyConfiguration,
+    prepareOwnership: @escaping (ConfigurationDescriptor) throws -> PreparedProxyOwnership,
     resolveConfiguration: @escaping (Data, ConfigurationDescriptor) throws -> Data = {
       configuration,
       _ in configuration
@@ -116,7 +121,7 @@ struct ProxySessionDependencies: @unchecked Sendable {
     journalStore: any ProxyOwnershipJournalStoring,
     readinessTimeout: TimeInterval
   ) {
-    self.prepareConfiguration = prepareConfiguration
+    self.prepareOwnership = prepareOwnership
     self.resolveConfiguration = resolveConfiguration
     self.recoverCleanupLease = recoverCleanupLease
     self.engineFactory = engineFactory
@@ -192,7 +197,8 @@ final class ProxySessionLifecycle: @unchecked Sendable {
   }
 
   func start(
-    configuration: ConfigurationDescriptor,
+    configuration: SensitiveDataBuffer,
+    descriptor: ConfigurationDescriptor,
     completionHandler:
       @escaping @Sendable (
         Result<Void, ProxySessionLifecycleError>
@@ -200,7 +206,10 @@ final class ProxySessionLifecycle: @unchecked Sendable {
   ) {
     let completion = ProxyOperationCompletion(completionHandler)
     stateQueue.async { [self] in
-      beginStart(configuration: configuration, completion: completion)
+      beginStart(
+        configuration: configuration,
+        descriptor: descriptor,
+        completion: completion)
     }
   }
 
@@ -244,10 +253,12 @@ final class ProxySessionLifecycle: @unchecked Sendable {
   }
 
   private func beginStart(
-    configuration: ConfigurationDescriptor,
+    configuration: SensitiveDataBuffer,
+    descriptor: ConfigurationDescriptor,
     completion: ProxyOperationCompletion
   ) {
-    guard configuration.slot == .systemProxy else {
+    defer { configuration.erase() }
+    guard descriptor.slot == .systemProxy else {
       completion.finish(.failure(.invalidConfigurationSlot))
       return
     }
@@ -264,17 +275,17 @@ final class ProxySessionLifecycle: @unchecked Sendable {
     lifecycle = .starting(sessionID)
     startCompletion = completion
     sequence &+= 1
-    currentSnapshot = .proxyStarting(configuration: configuration, sequence: sequence)
+    currentSnapshot = .proxyStarting(configuration: descriptor, sequence: sequence)
     lastStoppedConfiguration = nil
     lastFailedConfiguration = nil
 
-    let prepared: PreparedProxyConfiguration
+    let prepared: PreparedProxyOwnership
     do {
-      prepared = try dependencies.prepareConfiguration(configuration)
+      prepared = try dependencies.prepareOwnership(descriptor)
     } catch {
       failStartWithoutOwnedSession(
         .engineLease(error.localizedDescription),
-        configuration: configuration,
+        configuration: descriptor,
         completion: completion
       )
       return
@@ -282,45 +293,53 @@ final class ProxySessionLifecycle: @unchecked Sendable {
 
     let startingSession = Session(
       id: sessionID,
-      configuration: configuration,
+      configuration: descriptor,
       engine: nil,
       lease: prepared.lease,
       journal: nil
     )
     session = startingSession
     do {
-      var resolvedConfiguration: Data
-      do {
-        resolvedConfiguration = try dependencies.resolveConfiguration(
-          prepared.configuration,
-          configuration
-        )
-      } catch {
-        throw ProxySessionLifecycleError.configuration(error.localizedDescription)
-      }
-      let sensitiveConfiguration = SensitiveDataBuffer(copying: resolvedConfiguration)
-      resolvedConfiguration.resetBytes(
-        in: resolvedConfiguration.startIndex..<resolvedConfiguration.endIndex
-      )
-      resolvedConfiguration.removeAll(keepingCapacity: false)
-      try sensitiveConfiguration.withErasingData { configurationData in
-        let engine: any ProxyEngine
+      try configuration.withErasingData { template in
+        var resolvedConfiguration: Data
         do {
-          engine = try dependencies.engineFactory.makeEngine(
-            configuration: configurationData
+          resolvedConfiguration = try dependencies.resolveConfiguration(
+            template,
+            descriptor
           )
         } catch {
-          throw ProxySessionLifecycleError.engineCreation(error.localizedDescription)
+          throw ProxySessionLifecycleError.configuration(error.localizedDescription)
         }
-        startingSession.engine = engine
-        do {
-          try engine.start(configuration: configurationData) { [weak self] event in
-            self?.stateQueue.async { [weak self] in
-              self?.handleEngineEvent(event, sessionID: sessionID)
-            }
+        let sensitiveResolvedConfiguration = SensitiveDataBuffer(
+          copying: resolvedConfiguration)
+        resolvedConfiguration.resetBytes(
+          in: resolvedConfiguration.startIndex..<resolvedConfiguration.endIndex
+        )
+        resolvedConfiguration.removeAll(keepingCapacity: false)
+        try sensitiveResolvedConfiguration.withErasingData { runtimeConfiguration in
+          let engine: any ProxyEngine
+          do {
+            engine = try dependencies.engineFactory.makeEngine(
+              configuration: runtimeConfiguration
+            )
+          } catch {
+            throw ProxySessionLifecycleError.engineCreation(error.localizedDescription)
           }
-        } catch {
-          throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
+          startingSession.engine = engine
+          do {
+            try engine.start(configuration: runtimeConfiguration) { [weak self] event in
+              self?.stateQueue.async { [weak self] in
+                self?.handleEngineEvent(event, sessionID: sessionID)
+              }
+            }
+          } catch let error as ProxyEngineError {
+            if case .endpointConflict(let role, let port) = error {
+              throw ProxySessionLifecycleError.endpointConflict(role: role, port: port)
+            }
+            throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
+          } catch {
+            throw ProxySessionLifecycleError.engineStart(error.localizedDescription)
+          }
         }
       }
       stateQueue.asyncAfter(deadline: .now() + dependencies.readinessTimeout) { [weak self] in

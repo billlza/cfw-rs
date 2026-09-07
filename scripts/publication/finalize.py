@@ -34,13 +34,16 @@ def finalize(
     review_path: Path,
     output: Path,
     fixture: bool,
+    *,
+    repository: Path | None = None,
 ) -> None:
-    prepared = prepared.resolve(strict=True)
-    app = app.resolve(strict=True)
     if not fixture:
-        repository = Path(__file__).resolve().parent.parent.parent
-        require_fixed_path(output, evidence_root(repository), "publication evidence")
-    machine = build_machine_closure(prepared, app, fixture)
+        if repository is None:
+            raise PublicationError("production finalization requires an explicit artifact repository")
+        require_fixed_path(
+            output, evidence_root(repository), "publication evidence", repository=repository
+        )
+    machine = build_machine_closure(prepared, app, fixture, repository=repository)
     machine_bytes = canonical_json(machine)
     closure_digest = sha256_bytes(machine_bytes)
     component_ids = [item["id"] for item in machine["components"]]

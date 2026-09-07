@@ -48,6 +48,10 @@ private enum NativeBridgeRequestShape {
     switch opcode {
     case "query_status":
       try exactKeys(command, ["opcode"])
+    case "maintain_current_services":
+      try exactKeys(command, ["opcode", "payload"])
+      let payload = try object(command["payload"])
+      try exactKeys(payload, ["action"])
     case "start_system_proxy", "start_tunnel":
       try exactKeys(command, ["opcode", "payload"])
       try validateEngineStartRequest(requestPayload(command))
@@ -59,7 +63,8 @@ private enum NativeBridgeRequestShape {
     case "provision_credentials":
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
-      try exactKeys(request, ["profile_id", "required_references", "entries"])
+      try exactKeys(request, ["audience", "required_references", "entries"])
+      try validateAudience(request["audience"])
       try validateReferences(request["required_references"])
       guard let entries = request["entries"] as? [Any] else {
         throw NativeBridgeProtocolError.invalidCommand
@@ -72,7 +77,8 @@ private enum NativeBridgeRequestShape {
     case "query_credential_presence":
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
-      try exactKeys(request, ["profile_id", "references"])
+      try exactKeys(request, ["audience", "references"])
+      try validateAudience(request["audience"])
       try validateReferences(request["references"])
     case "preflight_cutover":
       try exactKeys(command, ["opcode", "payload"])
@@ -83,20 +89,28 @@ private enum NativeBridgeRequestShape {
     case "preview_credential_garbage_collection":
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
-      try exactKeys(request, ["snapshot_digest", "live_references"])
-      try validateReferences(request["live_references"])
+      try exactKeys(request, ["snapshot_digest", "catalog"])
+      try validateCatalog(request["catalog"])
     case "commit_credential_garbage_collection":
       try exactKeys(command, ["opcode", "payload"])
       let request = try requestPayload(command)
       try exactKeys(
         request,
         [
-          "snapshot_digest", "live_references", "expected_vault_revision",
-          "expected_orphan_references",
+          "snapshot_digest", "catalog", "expected_vault_revision",
+          "expected_orphan_bindings",
         ]
       )
-      try validateReferences(request["live_references"])
-      try validateReferences(request["expected_orphan_references"])
+      try validateCatalog(request["catalog"])
+      guard let bindings = request["expected_orphan_bindings"] as? [Any] else {
+        throw NativeBridgeProtocolError.invalidCommand
+      }
+      for value in bindings {
+        let binding = try object(value)
+        try exactKeys(binding, ["audience", "reference"])
+        try validateAudience(binding["audience"])
+        try validateReference(binding["reference"])
+      }
     default:
       throw NativeBridgeProtocolError.invalidCommand
     }
@@ -116,16 +130,17 @@ private enum NativeBridgeRequestShape {
     try exactKeys(
       request,
       [
-        "context", "config_json", "config_content_digest", "config_digest",
-        "credential_slots", "tunnel_options",
+        "context", "credential_audience", "config_json", "config_content_digest",
+        "config_digest", "credential_slots", "tunnel_options",
       ]
     )
     try validateContext(request["context"])
+    try validateAudience(request["credential_audience"])
     try validateCredentialSlots(request["credential_slots"])
     if let options = request["tunnel_options"], !(options is NSNull) {
       try exactKeys(
         object: options,
-        ["ipv6_enabled", "bypass_private_networks", "mtu"]
+        ["ipv6_enabled", "bypass_private_networks", "direct_ipv4_hosts", "mtu"]
       )
     }
   }
@@ -150,6 +165,22 @@ private enum NativeBridgeRequestShape {
     }
     for reference in references {
       try validateReference(reference)
+    }
+  }
+
+  private static func validateAudience(_ value: Any?) throws {
+    try exactKeys(object: value, ["profile_id", "profile_digest"])
+  }
+
+  private static func validateCatalog(_ value: Any?) throws {
+    guard let entries = value as? [Any] else {
+      throw NativeBridgeProtocolError.invalidCommand
+    }
+    for value in entries {
+      let entry = try object(value)
+      try exactKeys(entry, ["audience", "references"])
+      try validateAudience(entry["audience"])
+      try validateReferences(entry["references"])
     }
   }
 

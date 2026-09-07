@@ -1,0 +1,9 @@
+{
+  "rules": [
+    {
+      "type": "Default",
+      "payload": "final",
+      "proxy": "route(proxy)"
+    }
+  ]
+}

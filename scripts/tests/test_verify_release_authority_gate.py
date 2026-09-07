@@ -5,20 +5,46 @@ import unittest
 from scripts.verify_release_authority_gate import (
     AuthorityGateContractError,
     reject_insecure_or_fallback,
-    require_guard_before,
+    require_authority_before,
     require_text,
 )
 
 
 class ReleaseAuthorityGateTests(unittest.TestCase):
-    def test_missing_release_definition_fails_closed(self) -> None:
+    def test_missing_production_authority_composition_fails_closed(self) -> None:
         with self.assertRaisesRegex(AuthorityGateContractError, "missing"):
-            require_text("Release", "CFW_GLOBAL_AUTHORITY_REQUIRED=1", "build")
+            require_text(
+                "NativeBridge",
+                "RegistrationGatedAuthorityClient(",
+                "NativeBridge composition",
+            )
 
-    def test_guard_after_mutation_is_rejected(self) -> None:
-        source = "func startTunnel { startVPNTunnel(); GlobalAuthorityReleaseGate.requireStartAuthorization() }"
+    def test_authority_proof_after_mutation_is_rejected(self) -> None:
+        source = (
+            "func startTunnel { startVPNTunnel(); "
+            "preparer.prepareTunnelStart() }"
+        )
         with self.assertRaisesRegex(AuthorityGateContractError, "before startVPNTunnel"):
-            require_guard_before(source, "func startTunnel", "startVPNTunnel", "Host Tunnel")
+            require_authority_before(
+                source,
+                "func startTunnel",
+                "preparer.prepareTunnelStart()",
+                "startVPNTunnel",
+                "Host Tunnel",
+            )
+
+    def test_authority_proof_before_mutation_is_allowed(self) -> None:
+        source = (
+            "func startTunnel { preparer.prepareTunnelStart(); "
+            "startVPNTunnel() }"
+        )
+        require_authority_before(
+            source,
+            "func startTunnel",
+            "preparer.prepareTunnelStart()",
+            "startVPNTunnel",
+            "Host Tunnel",
+        )
 
     def test_insecure_override_is_rejected(self) -> None:
         insecure_forms = (
@@ -35,7 +61,7 @@ class ReleaseAuthorityGateTests(unittest.TestCase):
     def test_authority_error_fallback_is_rejected(self) -> None:
         sources = (
             "catch let error as GlobalAuthorityGateError { startVPNTunnel() }",
-            "do { GlobalAuthorityReleaseGate.requireStartAuthorization() } catch { lifecycle.start() }",
+            "do { authority.redeem(ticket) } catch { lifecycle.start() }",
             "case .globalAuthorityUnavailable: engine.start()\ncase .internal: break",
         )
         for source in sources:
@@ -46,7 +72,7 @@ class ReleaseAuthorityGateTests(unittest.TestCase):
 
     def test_typed_authority_failure_without_mutation_is_allowed(self) -> None:
         source = (
-            "do { GlobalAuthorityReleaseGate.requireStartAuthorization() } "
+            "do { authority.bind(request) } "
             "catch { throw GlobalAuthorityGateError.proofMissing(.availabilityUnproven) }"
         )
         reject_insecure_or_fallback(source, "fixture")

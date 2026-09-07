@@ -22,6 +22,38 @@ struct PreparedTunnelConfiguration {
   let lease: any EngineLeaseHolding
 }
 
+/// Evidence produced only after every provider-owned tunnel resource has crossed
+/// its synchronous teardown barrier. The initializer is file-private so callers
+/// cannot manufacture a successful stop without going through the lifecycle.
+struct PacketTunnelStopProof: Equatable, Sendable {
+  let libboxStopped: Bool
+  let transportClosed: Bool
+  let osRestored: Bool
+
+  fileprivate init() {
+    libboxStopped = true
+    transportClosed = true
+    // The provider never owns persistent system-proxy preferences. Once its
+    // engine, packet transport, staged configuration, and lease are gone, no
+    // provider-owned OS configuration remains for it to restore.
+    osRestored = true
+  }
+}
+
+enum PacketTunnelStopError: Error, Equatable, Sendable {
+  case localRuntime(PacketTunnelProviderError)
+  case authorityAttestation(PacketTunnelProviderError)
+
+  var providerError: PacketTunnelProviderError {
+    switch self {
+    case .localRuntime(let error), .authorityAttestation(let error):
+      return error
+    }
+  }
+}
+
+typealias PacketTunnelStopResult = Result<PacketTunnelStopProof, PacketTunnelStopError>
+
 struct PacketTunnelSessionDependencies: @unchecked Sendable {
   let prepareConfiguration:
     (ConfigurationDescriptor, Data, CredentialMaterial) throws -> PreparedTunnelConfiguration
@@ -135,7 +167,7 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     }
   }
 
-  func stop(completionHandler: @escaping @Sendable () -> Void) {
+  func stop(completionHandler: @escaping @Sendable (PacketTunnelStopResult) -> Void) {
     stateQueue.async { [self] in
       performStop(completionHandler: completionHandler)
     }
@@ -326,6 +358,11 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
           )
         }
         self.configuration = nil
+      } catch let error as PacketEngineError {
+        if case .controllerEndpointConflict(let port) = error {
+          throw PacketTunnelProviderError.controllerEndpointConflict(port: port)
+        }
+        throw PacketTunnelProviderError.engineStart(error.localizedDescription)
       } catch {
         throw PacketTunnelProviderError.engineStart(error.localizedDescription)
       }
@@ -355,7 +392,9 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     }
   }
 
-  private func performStop(completionHandler: @escaping @Sendable () -> Void) {
+  private func performStop(
+    completionHandler: @escaping @Sendable (PacketTunnelStopResult) -> Void
+  ) {
     let hadOwnedRuntime = engine != nil || packetPump != nil || engineLease != nil
     let pendingStart = startCompletion
     startCompletion = nil
@@ -370,12 +409,17 @@ final class PacketTunnelSessionLifecycle: @unchecked Sendable {
     if let stopError {
       lifecycle = .failedOwned(lifecycle.sessionID ?? UUID())
       transitionToFailure(stopError)
-      cancelTunnel(stopError)
+      completionHandler(.failure(.localRuntime(stopError)))
     } else {
+      precondition(
+        packetPump == nil && engine == nil && !engineStarted && configuration == nil
+          && engineLease == nil,
+        "A successful packet-tunnel stop must release every provider-owned resource."
+      )
       lifecycle = .idle
       transitionToOff()
+      completionHandler(.success(PacketTunnelStopProof()))
     }
-    completionHandler()
   }
 
   private func packetPumpFailed(_ error: PacketPumpError, sessionID: UUID) {

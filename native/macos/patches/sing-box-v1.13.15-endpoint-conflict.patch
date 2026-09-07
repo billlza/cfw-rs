@@ -1,0 +1,357 @@
+diff --git a/adapter/endpoint_conflict.go b/adapter/endpoint_conflict.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..af7ffce8767178b4a9eff5b3c17a24750be47427
+--- /dev/null
++++ b/adapter/endpoint_conflict.go
+@@ -0,0 +1,54 @@
++package adapter
++
++import "errors"
++
++type EndpointConflictRole int32
++
++const (
++	EndpointConflictNone EndpointConflictRole = iota
++	EndpointConflictMixed
++	EndpointConflictController
++)
++
++type EndpointConflictError struct {
++	role  EndpointConflictRole
++	port  uint16
++	cause error
++}
++
++func (e *EndpointConflictError) Error() string {
++	if e == nil || e.cause == nil {
++		return "endpoint conflict has no cause"
++	}
++	return e.cause.Error()
++}
++
++func (e *EndpointConflictError) Unwrap() error {
++	if e == nil {
++		return nil
++	}
++	return e.cause
++}
++
++func NewEndpointConflictError(role EndpointConflictRole, port uint16, err error) error {
++	if err == nil {
++		return errors.New("endpoint conflict cause is required")
++	}
++	if port == 0 {
++		return errors.New("endpoint conflict port is required")
++	}
++	switch role {
++	case EndpointConflictMixed, EndpointConflictController:
++	default:
++		return errors.New("endpoint conflict role is invalid")
++	}
++	return &EndpointConflictError{role: role, port: port, cause: err}
++}
++
++func EndpointConflictFromError(err error) (EndpointConflictRole, uint16, bool) {
++	var conflict *EndpointConflictError
++	if errors.As(err, &conflict) && conflict != nil && conflict.cause != nil {
++		return conflict.role, conflict.port, true
++	}
++	return EndpointConflictNone, 0, false
++}
+diff --git a/adapter/endpoint_conflict_test.go b/adapter/endpoint_conflict_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8685643aceb8cea919b3eeccd6910868284d5c49
+--- /dev/null
++++ b/adapter/endpoint_conflict_test.go
+@@ -0,0 +1,39 @@
++package adapter
++
++import (
++	"errors"
++	"fmt"
++	"syscall"
++	"testing"
++)
++
++func TestEndpointConflictRoleSurvivesWrapping(t *testing.T) {
++	err := fmt.Errorf("start mixed inbound: %w", NewEndpointConflictError(EndpointConflictMixed, 7891, syscall.EADDRINUSE))
++	role, port, ok := EndpointConflictFromError(err)
++	if !ok || role != EndpointConflictMixed || port != 7891 {
++		t.Fatalf("unexpected conflict: role=%v port=%d ok=%v", role, port, ok)
++	}
++	if !errors.Is(err, syscall.EADDRINUSE) {
++		t.Fatal("wrapped conflict lost EADDRINUSE")
++	}
++}
++
++func TestUnclassifiedAddressInUseIsNotAConflict(t *testing.T) {
++	role, port, ok := EndpointConflictFromError(syscall.EADDRINUSE)
++	if ok || role != EndpointConflictNone || port != 0 {
++		t.Fatalf("bare errno was classified as a product endpoint: role=%v port=%d ok=%v", role, port, ok)
++	}
++}
++
++func TestInvalidEndpointConflictsAreNotClassified(t *testing.T) {
++	for _, err := range []error{
++		NewEndpointConflictError(EndpointConflictMixed, 7890, nil),
++		NewEndpointConflictError(EndpointConflictNone, 7890, syscall.EADDRINUSE),
++		NewEndpointConflictError(EndpointConflictMixed, 0, syscall.EADDRINUSE),
++	} {
++		role, port, ok := EndpointConflictFromError(err)
++		if ok || role != EndpointConflictNone || port != 0 {
++			t.Fatalf("invalid conflict was classified: role=%v port=%d ok=%v", role, port, ok)
++		}
++	}
++}
+diff --git a/box.go b/box.go
+index c88a9bc9a882ae05e4c184ee14a70b174163f01e..3900e826ee3a0319518117aa378bcbeb508646e3 100644
+--- a/box.go
++++ b/box.go
+@@ -423 +423 @@ func (s *Box) Start() error {
+-	err := s.start()
++	err := s.StartWithExternalCleanup()
+@@ -436,0 +437,9 @@ func (s *Box) Start() error {
++	return nil
++}
++
++// StartWithExternalCleanup leaves failed-start cleanup to the lifecycle owner.
++func (s *Box) StartWithExternalCleanup() error {
++	err := s.start()
++	if err != nil {
++		return err
++	}
+diff --git a/daemon/instance.go b/daemon/instance.go
+index 3acf75ccf99eba5cc688338b14180c46f0e24753..97b077312a0e52e88ab1648c5575590d66a7af3c 100644
+--- a/daemon/instance.go
++++ b/daemon/instance.go
+@@ -125 +125 @@ func (i *Instance) Start() error {
+-	return i.instance.Start()
++	return i.instance.StartWithExternalCleanup()
+diff --git a/experimental/clashapi/endpoint_conflict_test.go b/experimental/clashapi/endpoint_conflict_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fc4e119b199fd8c12f5dd1c5b13a758bf89d66d6
+--- /dev/null
++++ b/experimental/clashapi/endpoint_conflict_test.go
+@@ -0,0 +1,37 @@
++package clashapi
++
++import (
++	"errors"
++	"fmt"
++	"syscall"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++)
++
++func TestClassifyControllerListenError(t *testing.T) {
++	cause := fmt.Errorf("listen failed: %w", syscall.EADDRINUSE)
++	err := classifyControllerListenError("127.0.0.1:9092", cause)
++	role, port, ok := adapter.EndpointConflictFromError(err)
++	if !ok || role != adapter.EndpointConflictController || port != 9092 || !errors.Is(err, cause) {
++		t.Fatalf("unexpected controller conflict: role=%v port=%d ok=%v err=%v", role, port, ok, err)
++	}
++}
++
++func TestClassifyControllerListenErrorRejectsOtherAndMalformedErrors(t *testing.T) {
++	ordinary := errors.New("permission denied")
++	for _, test := range []struct {
++		address string
++		err     error
++	}{
++		{"127.0.0.1:9092", ordinary},
++		{"127.0.0.1", syscall.EADDRINUSE},
++		{"127.0.0.1:0", syscall.EADDRINUSE},
++		{"127.0.0.1:65536", syscall.EADDRINUSE},
++	} {
++		classified := classifyControllerListenError(test.address, test.err)
++		if classified != test.err {
++			t.Fatalf("unexpected classification for %q: %v", test.address, classified)
++		}
++	}
++}
+diff --git a/experimental/clashapi/server.go b/experimental/clashapi/server.go
+index 950dca0408f22431f1d89604e4a4f4b8b2dcac94..d5d32186b41cfff548bc21b15d456854bb49f042 100644
+--- a/experimental/clashapi/server.go
++++ b/experimental/clashapi/server.go
+@@ -10,0 +11 @@ import (
++	"strconv"
+@@ -175,0 +177 @@ func (s *Server) Start(stage adapter.StartStage) error {
++				err = classifyControllerListenError(s.httpServer.Addr, err)
+@@ -190,0 +193,16 @@ func (s *Server) Start(stage adapter.StartStage) error {
++func classifyControllerListenError(address string, err error) error {
++	if !errors.Is(err, syscall.EADDRINUSE) {
++		return err
++	}
++	_, portText, splitErr := net.SplitHostPort(address)
++	port, portErr := strconv.ParseUint(portText, 10, 16)
++	if splitErr != nil || portErr != nil || port == 0 {
++		return err
++	}
++	return adapter.NewEndpointConflictError(
++		adapter.EndpointConflictController,
++		uint16(port),
++		err,
++	)
++}
++
+diff --git a/experimental/libbox/command_server.go b/experimental/libbox/command_server.go
+index 1ecf9a1f0b982a8b7b4ed817176f578595879805..2d351c118fadebeb58b6068a1992836d32792f82 100644
+--- a/experimental/libbox/command_server.go
++++ b/experimental/libbox/command_server.go
+@@ -204,0 +205,46 @@ func (s *CommandServer) CloseService() error {
++const (
++	RuntimeEndpointConflictMixed      int32 = int32(adapter.EndpointConflictMixed)
++	RuntimeEndpointConflictController int32 = int32(adapter.EndpointConflictController)
++)
++
++type RuntimeStartConflict struct {
++	Kind int32
++	Port int32
++}
++
++// StartOrReloadServiceReportingConflict preserves every ordinary start error.
++// Only an exact product listener EADDRINUSE is converted to structured data so
++// the embedding application can retry after its own cleanup and Off proof.
++func (s *CommandServer) StartOrReloadServiceReportingConflict(configContent string, options *OverrideOptions) (*RuntimeStartConflict, error) {
++	err := s.StartOrReloadService(configContent, options)
++	if err == nil {
++		return nil, nil
++	}
++	conflict := runtimeStartConflict(err)
++	if conflict == nil {
++		return nil, err
++	}
++	return conflict, nil
++}
++
++func runtimeStartConflict(err error) *RuntimeStartConflict {
++	if containsMultiError(err) || !errors.Is(err, syscall.EADDRINUSE) {
++		return nil
++	}
++	role, port, isConflict := adapter.EndpointConflictFromError(err)
++	if !isConflict || port == 0 || (role != adapter.EndpointConflictMixed && role != adapter.EndpointConflictController) {
++		return nil
++	}
++	return &RuntimeStartConflict{Kind: int32(role), Port: int32(port)}
++}
++
++func containsMultiError(err error) bool {
++	for err != nil {
++		if _, ok := err.(interface{ Unwrap() []error }); ok {
++			return true
++		}
++		err = errors.Unwrap(err)
++	}
++	return false
++}
++
+diff --git a/experimental/libbox/endpoint_conflict_test.go b/experimental/libbox/endpoint_conflict_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..34e4602ab060d563349c153be9cb942e6d6518c7
+--- /dev/null
++++ b/experimental/libbox/endpoint_conflict_test.go
+@@ -0,0 +1,41 @@
++package libbox
++
++import (
++	"errors"
++	"fmt"
++	"syscall"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++func TestRuntimeStartConflictPreservesExactRoleAndPort(t *testing.T) {
++	err := fmt.Errorf(
++		"start service: %w",
++		adapter.NewEndpointConflictError(adapter.EndpointConflictController, 9092, syscall.EADDRINUSE),
++	)
++	conflict := runtimeStartConflict(err)
++	if conflict == nil || conflict.Kind != RuntimeEndpointConflictController || conflict.Port != 9092 {
++		t.Fatalf("unexpected runtime conflict: %#v", conflict)
++	}
++}
++
++func TestRuntimeStartConflictRejectsOrdinaryAndMalformedErrors(t *testing.T) {
++	for _, err := range []error{
++		syscall.EADDRINUSE,
++		errors.New("ordinary startup failure"),
++		adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, 7890, errors.New("wrong cause")),
++		adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, 7890, nil),
++		adapter.NewEndpointConflictError(adapter.EndpointConflictNone, 9090, syscall.EADDRINUSE),
++		adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, 0, syscall.EADDRINUSE),
++		E.Errors(
++			adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, 7890, syscall.EADDRINUSE),
++			errors.New("cleanup failed"),
++		),
++	} {
++		if conflict := runtimeStartConflict(err); conflict != nil {
++			t.Fatalf("unexpected retryable conflict for %v: %#v", err, conflict)
++		}
++	}
++}
+diff --git a/protocol/mixed/endpoint_conflict_test.go b/protocol/mixed/endpoint_conflict_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f74d12c5aeeb267e9e7f4669ab3a5972f128c0d1
+--- /dev/null
++++ b/protocol/mixed/endpoint_conflict_test.go
+@@ -0,0 +1,35 @@
++package mixed
++
++import (
++	"errors"
++	"fmt"
++	"syscall"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++)
++
++func TestClassifyMixedListenError(t *testing.T) {
++	cause := fmt.Errorf("listen failed: %w", syscall.EADDRINUSE)
++	err := classifyMixedListenError(7892, cause)
++	role, port, ok := adapter.EndpointConflictFromError(err)
++	if !ok || role != adapter.EndpointConflictMixed || port != 7892 || !errors.Is(err, cause) {
++		t.Fatalf("unexpected mixed conflict: role=%v port=%d ok=%v err=%v", role, port, ok, err)
++	}
++}
++
++func TestClassifyMixedListenErrorRejectsOtherAndMalformedErrors(t *testing.T) {
++	ordinary := errors.New("permission denied")
++	for _, test := range []struct {
++		port uint16
++		err  error
++	}{
++		{7892, ordinary},
++		{0, syscall.EADDRINUSE},
++	} {
++		classified := classifyMixedListenError(test.port, test.err)
++		if classified != test.err {
++			t.Fatalf("unexpected classification for port %d: %v", test.port, classified)
++		}
++	}
++}
+diff --git a/protocol/mixed/inbound.go b/protocol/mixed/inbound.go
+index 64c3edb5b63ad01adf7f3b4d3c05f7a950b9cee3..e4dadcaff786bc63884ca151a5eb5980b4ec5e47 100644
+--- a/protocol/mixed/inbound.go
++++ b/protocol/mixed/inbound.go
+@@ -5,0 +6 @@ import (
++	"errors"
+@@ -6,0 +8 @@ import (
++	"syscall"
+@@ -91 +93,11 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
+-	return h.listener.Start()
++	return classifyMixedListenError(
++		h.listener.ListenOptions().ListenPort,
++		h.listener.Start(),
++	)
++}
++
++func classifyMixedListenError(port uint16, err error) error {
++	if !errors.Is(err, syscall.EADDRINUSE) || port == 0 {
++		return err
++	}
++	return adapter.NewEndpointConflictError(adapter.EndpointConflictMixed, port, err)

@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Property-based fail-closed test for the sealed outer Evidence Manifest.
 
-Exercises ``publication.sealed_manifest`` as a black box (Task 12.3,
-Requirements 1.1, 1.2, 4.1, 5.1, 6.5, 7.5, 8.1). It is deterministic: the stdlib
-``random`` module is seeded with fixed integers so every failure reproduces
-exactly. ``hypothesis`` is intentionally not required. At least 100 accept cases
-and 100 single-defect reject cases run per property, and on failure the
-reproducing seed, the defect label, and the offending document are printed.
+Exercises the public ``publication.sealed_manifest`` build/validate surface
+(Task 12.3, Requirements 1.1, 1.2, 4.1, 5.1, 6.5, 7.5, 8.1). It is deterministic:
+the stdlib ``random`` module is seeded with fixed integers so every failure
+reproduces exactly. ``hypothesis`` is intentionally not required. At least 100
+accept cases and 100 single-defect reject cases run per property, and on failure
+the reproducing seed, the defect label, and the offending document are printed.
+Unchanged source and physical fixtures are validated for real at property-class
+entry and exit, then served by strict test-only snapshots inside the
+high-cardinality loop. The substituted-aggregate defect explicitly uses the
+real loader, and dedicated raw-evidence drift and TOCTOU suites remain uncached.
 
 Two properties are checked:
 
@@ -28,6 +32,7 @@ functions of that seed.
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 import json
 import random
 import tempfile
@@ -35,7 +40,11 @@ import unittest
 from pathlib import Path
 
 from scripts.evidence_manifest import LEVEL_ORDER
+from scripts.publication import final_candidate as final_candidate_module
+from scripts.publication import sealed_closure as sealed_closure_module
+from scripts.publication import sealed_manifest as sealed_manifest_module
 from scripts.publication.common import PublicationError
+from scripts.release_capability_inventory import CAPABILITY_IDS
 from scripts.publication.sealed_manifest import (
     BLOCKED,
     COMPOSED_INPUTS,
@@ -43,13 +52,24 @@ from scripts.publication.sealed_manifest import (
     PASSED,
     SEALED,
     SEALED_LEVEL,
-    authorize_publication_artifacts,
-    build_sealed_evidence_manifest,
+    authorize_publication_artifacts as _authorize_publication_artifacts,
+    build_sealed_evidence_manifest as _build_sealed_evidence_manifest,
     load_sealed_manifest,
     seal_manifest,
-    validate_sealed_evidence_manifest,
+    validate_sealed_evidence_manifest as _validate_sealed_evidence_manifest,
+)
+from scripts.tests.test_physical_evidence_aggregator import (
+    PHYSICAL_EVIDENCE_ROOT,
+    PHYSICAL_TRUST_POLICY,
+    fixture as physical_fixture,
+)
+from scripts.tests.physical_evidence_fixture import fixture_packet_policy
+from scripts.tests.release_property_snapshots import (
+    PhysicalSnapshotInput,
+    StrictReleasePropertySnapshots,
 )
 from scripts.tests.test_sealed_manifest import (
+    COMMIT,
     REPOSITORY,
     ci_lanes,
     inner_manifest,
@@ -60,14 +80,25 @@ from scripts.tests.test_sealed_manifest import (
 
 ACCEPT_CASES = 120
 REJECT_CASES = 200
-CAPABILITY_POOL = (
-    "global-authority",
-    "ticket-only-tunnel",
-    "authority-owned-lease",
-    "global-off-barrier",
-    "one-way-migration",
-    "release-evidence",
-)
+
+
+def build_sealed_evidence_manifest(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    with fixture_packet_policy():
+        return _build_sealed_evidence_manifest(*args, **kwargs)
+
+
+def validate_sealed_evidence_manifest(*args, **kwargs):
+    kwargs.setdefault("physical_evidence_root", PHYSICAL_EVIDENCE_ROOT)
+    kwargs.setdefault("physical_trust_policy", PHYSICAL_TRUST_POLICY)
+    with fixture_packet_policy():
+        return _validate_sealed_evidence_manifest(*args, **kwargs)
+
+
+def authorize_publication_artifacts(*args, **kwargs):
+    with fixture_packet_policy():
+        return _authorize_publication_artifacts(*args, **kwargs)
 
 
 def _commit(rng: random.Random) -> str:
@@ -79,15 +110,16 @@ def _sha(rng: random.Random) -> str:
 
 
 def _capabilities(rng: random.Random) -> tuple[str, ...]:
-    count = rng.randint(1, 4)
-    return tuple(sorted(rng.sample(CAPABILITY_POOL, count)))
+    capabilities = list(CAPABILITY_IDS)
+    rng.shuffle(capabilities)
+    return tuple(capabilities)
 
 
 def _accept_request(rng: random.Random, workspace: Path, depth: int) -> dict:
     return request(
         depth,
         workspace,
-        commit=_commit(rng),
+        commit=COMMIT,
         capabilities=_capabilities(rng),
     )
 
@@ -148,6 +180,11 @@ def mutate_stale_lane_toolchain(payload, rng, workspace):
     return "stale-lane-toolchain"
 
 
+def mutate_stale_lane_release_source(payload, rng, workspace):
+    rng.choice(payload["unsigned_ci"]["lanes"])["release_source_sha256"] = _sha(rng)
+    return "stale-lane-release-source"
+
+
 def mutate_stale_source_gate_commit(payload, rng, workspace):
     rng.choice(payload["p0_source"]["gates"])["commit"] = _commit(rng)
     return "stale-source-gate-commit"
@@ -178,9 +215,9 @@ def mutate_stale_closure_signed_app(payload, rng, workspace):
 
 
 def mutate_substituted_aggregate(payload, rng, workspace):
-    aggregate = copy.deepcopy(payload["signed_installed"])
-    aggregate["runs"][0]["captured_at"] = "2026-07-25T12:00:00Z"
-    payload["signed_installed"] = aggregate
+    artifact = copy.deepcopy(payload["signed_installed"])
+    artifact["sha256"] = _sha(rng)
+    payload["signed_installed"] = artifact
     return "substituted-aggregate"
 
 
@@ -230,6 +267,7 @@ REQUEST_MUTATORS = (
     mutate_masked_inner_report,
     mutate_stale_lane_commit,
     mutate_stale_lane_toolchain,
+    mutate_stale_lane_release_source,
     mutate_stale_source_gate_commit,
     mutate_stale_inner_toolchain,
     mutate_stale_inner_signed_app,
@@ -321,6 +359,12 @@ def tamper_unknown_field(document, rng):
     return "tampered-unknown-field"
 
 
+def tamper_schema_numeric_type(document, rng):
+    document["schema_version"] = rng.choice((1.0, True))
+    reseal(document)
+    return "tampered-schema-numeric-type"
+
+
 DOCUMENT_MUTATORS = (
     tamper_capability_level,
     tamper_duplicate_capability,
@@ -334,12 +378,45 @@ DOCUMENT_MUTATORS = (
     tamper_field_without_reseal,
     tamper_platform,
     tamper_unknown_field,
+    tamper_schema_numeric_type,
 )
 
 UPDATER_KEY_DEFECT = "updater-key-present"
 
 
 class _CleanWorkspace(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls._property_snapshots = StrictReleasePropertySnapshots(
+            repository=REPOSITORY,
+            source_deriver=sealed_closure_module.derive_supply_chain,
+            source_consumers=(
+                (sealed_closure_module, "derive_supply_chain"),
+                (final_candidate_module, "derive_supply_chain"),
+            ),
+            physical_loader=sealed_manifest_module.load_physical_evidence_artifact,
+            physical_consumers=(
+                (sealed_manifest_module, "load_physical_evidence_artifact"),
+                (final_candidate_module, "load_physical_evidence_artifact"),
+            ),
+            physical_inputs=(
+                PhysicalSnapshotInput(
+                    descriptor=physical_fixture(),
+                    evidence_root=PHYSICAL_EVIDENCE_ROOT,
+                    trust_policy=PHYSICAL_TRUST_POLICY,
+                ),
+            ),
+        )
+        cls._property_snapshots.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        try:
+            cls._property_snapshots.__exit__(None, None, None)
+        finally:
+            super().tearDownClass()
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self._tmp.name)
@@ -380,10 +457,14 @@ class SealedManifestRoundTripProperty(_CleanWorkspace):
             if depth == len(LEVEL_ORDER) - 1:
                 self.assertEqual(manifest["status"], SEALED, f"seed={seed}")
                 self.assertEqual(manifest["blocked_inputs"], [], f"seed={seed}")
-                self.assertTrue(manifest["publication"]["artifacts_permitted"], f"seed={seed}")
-                authorize_publication_artifacts(
-                    REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
+                self.assertFalse(
+                    manifest["publication"]["artifacts_permitted"], f"seed={seed}"
                 )
+                self.assertIn("fixture-mode", manifest["publication"]["refusals"])
+                with self.assertRaisesRegex(PublicationError, "fixture evidence"):
+                    authorize_publication_artifacts(
+                        REPOSITORY, manifest, workspace_root=self.workspace
+                    )
             else:
                 self.assertEqual(manifest["status"], BLOCKED, f"seed={seed}")
                 self.assertNotEqual(manifest["blocked_inputs"], [], f"seed={seed}")
@@ -403,7 +484,7 @@ class SealedManifestRoundTripProperty(_CleanWorkspace):
                     )
                 with self.assertRaises(PublicationError, msg=f"seed={seed}"):
                     authorize_publication_artifacts(
-                        REPOSITORY, manifest, fixture=True, workspace_root=self.workspace
+                        REPOSITORY, manifest, workspace_root=self.workspace
                     )
             depth_hits[depth] += 1
             cases += 1
@@ -453,19 +534,28 @@ class SealedManifestFailClosedProperty(_CleanWorkspace):
             rng = random.Random(seed)
             key = f"{kind}:{'updater-key' if mutator is None else mutator.__name__}"
             if kind == "request":
-                payload = request(3, self.workspace, commit=_commit(rng))
+                payload = request(3, self.workspace, commit=COMMIT)
                 pristine = copy.deepcopy(payload)
                 label = mutator(payload, rng, self.workspace)
                 if payload == pristine:
                     continue
-                try:
-                    document = build_sealed_evidence_manifest(
-                        REPOSITORY, payload, fixture=True, workspace_root=self.workspace
-                    )
-                except PublicationError:
-                    hits[key] += 1
-                    cases += 1
-                    continue
+                physical_validation = (
+                    self._property_snapshots.uncached_physical_validation()
+                    if mutator is mutate_substituted_aggregate
+                    else nullcontext()
+                )
+                with physical_validation:
+                    try:
+                        document = build_sealed_evidence_manifest(
+                            REPOSITORY,
+                            payload,
+                            fixture=True,
+                            workspace_root=self.workspace,
+                        )
+                    except PublicationError:
+                        hits[key] += 1
+                        cases += 1
+                        continue
                 self.fail(
                     "a single-defect sealed manifest request was wrongly ACCEPTED\n"
                     f"seed={seed} defect={label}\nmanifest=\n{_dump(document)}"
@@ -504,7 +594,7 @@ class SealedManifestFailClosedProperty(_CleanWorkspace):
                     target = workspace / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text("never-read", encoding="utf-8")
-                    payload = request(3, workspace, commit=_commit(rng))
+                    payload = request(3, workspace, commit=COMMIT)
                     try:
                         document = build_sealed_evidence_manifest(
                             REPOSITORY, payload, fixture=True, workspace_root=workspace

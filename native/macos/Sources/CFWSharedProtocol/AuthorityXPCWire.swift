@@ -7,6 +7,8 @@ public enum AuthorityXPCMethod: Equatable, Sendable {
   case redeemTunnelTicket
   case attestReady
   case beginStop
+  case completeStop
+  case reconcileOff
   case attestStopped
   case cancelPrepared
   case snapshot
@@ -36,7 +38,18 @@ public protocol AuthorityRemoteCalling: Sendable {
     method: AuthorityXPCMethod, request: Data,
     configuration: Data?, secretPayload: Data?
   ) async throws -> AuthorityXPCReply
+  /// Starts owner liveness only after the typed client has validated the exact
+  /// claim response. A transport-level reply alone is not ownership proof.
+  func confirmOwnerClaim() async throws
+  /// Stops owner liveness as soon as the caller has locally proven teardown,
+  /// before the stopped attestation can time out or lose its reply.
+  func noteOwnerStopped() async
   func invalidate() async
+}
+
+extension AuthorityRemoteCalling {
+  public func confirmOwnerClaim() async throws {}
+  public func noteOwnerStopped() async {}
 }
 
 public protocol AuthorityClient: Sendable {
@@ -46,10 +59,12 @@ public protocol AuthorityClient: Sendable {
   ) async throws -> PreparedStart
   func cancelPrepared(_ context: OperationContext, revision: UInt64) async throws
   func beginStop(_ request: BeginStopRequest) async throws -> StopDirective
+  func completeStop(_ request: CompleteStopRequest) async throws
+  func reconcileOff(_ request: ReconcileOffRequest) async throws -> ReconcileOffReceipt
   func snapshot() async throws -> AuthoritySnapshot
 }
 public protocol EngineOwnerAuthorityClient: Sendable {
-  func bind(_ capability: OwnerCapability) async throws -> LeaseView
+  func bind(_ capability: OwnerCapability, context: ProxyOwnerContext) async throws -> LeaseView
   func redeem(_ ticket: StartTicket) async throws -> RedeemedTunnelStart
   func attestReady(_ attestation: ReadyAttestation) async throws
   func attestStopped(_ attestation: StoppedAttestation) async throws
@@ -65,6 +80,7 @@ public struct RedeemedTunnelMetadata: Codable, Equatable, Sendable {
     configuration: AuthorityConfigurationDescriptor
   ) throws {
     guard operation.mode == .tunnel, lease.operation == operation,
+      lease.state == .starting,
       configuration.configSHA256 == operation.configSHA256,
       configuration.identitySHA256 == operation.identitySHA256
     else { throw AuthorityV1ValidationError.invalidState }
@@ -134,6 +150,7 @@ extension PreparedStartWire: AuthorityV1WireModel {
     guard expiresMonotonic > 0,
       (operation.mode == .tunnel) == (ticket != nil),
       (operation.mode == .systemProxy) == (ownerCapability != nil),
+      preferenceDescriptorSHA256 == operation.identitySHA256,
       ticket?.count ?? AuthorityV1Limits.ticketBytes == AuthorityV1Limits.ticketBytes,
       ownerCapability?.count ?? AuthorityV1Limits.capabilityBytes
         == AuthorityV1Limits.capabilityBytes

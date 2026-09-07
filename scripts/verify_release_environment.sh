@@ -1,22 +1,47 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+unset CDPATH
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=scripts/dependency_pins.env
 source "$repo_root/scripts/dependency_pins.env"
+# shellcheck source=scripts/release_tool_environment.sh
+source "$repo_root/scripts/release_tool_environment.sh"
+cfw_seal_release_tool_environment production
+readonly python_bin="$CFW_RELEASE_PYTHON_EXECUTABLE"
+# shellcheck source=scripts/release_toolchain_contract.sh
+source "$repo_root/scripts/release_toolchain_contract.sh"
+cfw_select_release_apple_toolchain
 toolchain_root="${CFW_TOOLCHAIN_ROOT:-$repo_root/target/toolchains}"
 go_bin="$toolchain_root/go-$GO_VERSION/bin/go"
 node_bin="$toolchain_root/node-$NODE_VERSION/bin/node"
 xcodegen_root="$toolchain_root/xcodegen-$XCODEGEN_VERSION"
 xcodegen_bin="$xcodegen_root/bin/xcodegen"
-xcodegen_manifest="$toolchain_root/xcodegen-$XCODEGEN_VERSION.manifest.json"
+tauri_bin="$toolchain_root/tauri-cli-$TAURI_CLI_VERSION/bin/cargo-tauri"
 
 # shellcheck source=scripts/release_workspace_secret_gate.sh
 source "$repo_root/scripts/release_workspace_secret_gate.sh"
 verify_release_workspace_has_no_key_material "$repo_root"
 
 "$repo_root/scripts/assert_apple_silicon.sh"
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_version_contract.py"
+cfw_require_supported_python "$python_bin"
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/verify_version_contract.py"
+cfw_run_release_python_script "$repo_root" \
+  "$repo_root/scripts/verify_physical_capture_readiness.py"
+PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - "$repo_root" <<'PY'
+import importlib
+import sys
+
+repository = sys.argv[1]
+sys.path.insert(0, repository)
+adapter = importlib.import_module(
+    "scripts.physical_capture.ios_packet_lan_peer_adapter"
+)
+
+adapter.validate_source_identity(adapter.load_source_identity())
+print("iPhone Packet LAN source identity and source tree verified")
+PY
 
 macos_major="$(sw_vers -productVersion | cut -d. -f1)"
 if (( macos_major < 15 )); then
@@ -27,6 +52,12 @@ if [[ "$(rustc --version | awk '{print $2}')" != "$RUST_VERSION" ]]; then
   echo "error: rustc $RUST_VERSION is required" >&2
   exit 1
 fi
+cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_node_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_xcodegen_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_release_tools_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_module_cache_tree "$repo_root" "$toolchain_root"
 if [[ "$("$go_bin" version)" != "go version go$GO_VERSION darwin/arm64" ]]; then
   echo "error: pinned Go $GO_VERSION toolchain is unavailable" >&2
   exit 1
@@ -35,7 +66,8 @@ if [[ "$("$node_bin" --version)" != "v$NODE_VERSION" ]]; then
   echo "error: pinned Node.js $NODE_VERSION toolchain is unavailable" >&2
   exit 1
 fi
-if [[ "$(xcodebuild -version)" != "Xcode $XCODE_VERSION"$'\n'"Build version $XCODE_BUILD_VERSION" ]]; then
+if [[ "$(/usr/bin/xcodebuild -version)" != \
+  "Xcode $XCODE_VERSION"$'\n'"Build version $XCODE_BUILD_VERSION" ]]; then
   echo "error: Xcode $XCODE_VERSION ($XCODE_BUILD_VERSION) is required" >&2
   exit 1
 fi
@@ -43,39 +75,50 @@ if [[ "$("$xcodegen_bin" --version)" != "Version: $XCODEGEN_VERSION" ]]; then
   echo "error: pinned XcodeGen $XCODEGEN_VERSION toolchain is unavailable" >&2
   exit 1
 fi
-if [[ "$(lipo -archs "$xcodegen_bin")" != "arm64" ]]; then
+if [[ "$(/usr/bin/lipo -archs "$xcodegen_bin")" != "arm64" ]]; then
   echo "error: pinned XcodeGen must be thin arm64" >&2
   exit 1
 fi
-PYTHONDONTWRITEBYTECODE=1 python3 -B "$repo_root/scripts/verify_artifact_manifest.py" \
-  "$xcodegen_root" \
-  "$xcodegen_manifest" \
-  --metadata "sourceArchiveSha256=$XCODEGEN_SOURCE_SHA256" \
-  --metadata "sourceCommit=$XCODEGEN_COMMIT" \
-  --metadata "version=$XCODEGEN_VERSION" \
-  --metadata "xcodeBuild=$XCODE_BUILD_VERSION" \
-  --metadata "xcodeVersion=$XCODE_VERSION"
-if [[ "$(cargo audit --version)" != "cargo-audit-audit $CARGO_AUDIT_VERSION" ]]; then
+if [[ "$($CFW_RELEASE_CARGO_AUDIT_EXECUTABLE --version)" != \
+  "cargo-audit $CARGO_AUDIT_VERSION" ]]; then
   echo "error: cargo-audit $CARGO_AUDIT_VERSION is required" >&2
   exit 1
 fi
-if [[ "$(cargo deny --version)" != "cargo-deny $CARGO_DENY_VERSION" ]]; then
+if [[ "$($CFW_RELEASE_CARGO_DENY_EXECUTABLE --version)" != \
+  "cargo-deny $CARGO_DENY_VERSION" ]]; then
   echo "error: cargo-deny $CARGO_DENY_VERSION is required" >&2
   exit 1
 fi
-if [[ "$(cargo tauri --version)" != "tauri-cli $TAURI_CLI_VERSION" ]]; then
+if [[ "$("$tauri_bin" --version)" != "tauri-cli $TAURI_CLI_VERSION" ]]; then
   echo "error: tauri-cli $TAURI_CLI_VERSION is required" >&2
   exit 1
 fi
 
-swift_version="$(swift --version 2>&1)"
-swift_major="$(printf '%s\n' "$swift_version" | awk 'NR == 1 {for (i=1; i<=NF; i++) if ($i == "version") {split($(i+1), v, "."); print v[1]; exit}}')"
-if [[ "$swift_major" != "6" ]]; then
-  echo "error: Swift 6 is required" >&2
+swift_identity="$(
+  PYTHONDONTWRITEBYTECODE=1 "$python_bin" -I -S -B -W error - \
+    "$repo_root" "$MACOS_DEPLOYMENT_TARGET" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+repository = Path(sys.argv[1]).resolve(strict=True)
+sys.path.insert(0, str(repository))
+
+from scripts.publication.release_environment import swift_toolchain_identity
+
+identity = swift_toolchain_identity(repository, dict(os.environ), sys.argv[2])
+print(identity.canonical)
+PY
+)" || {
+  echo "error: selected Xcode Swift identity is invalid" >&2
+  exit 1
+}
+if [[ -z "$swift_identity" ]]; then
+  echo "error: selected Xcode Swift identity is empty" >&2
   exit 1
 fi
 
-python3 - \
+"$python_bin" -I -S -B -W error - \
   "$repo_root/native/macos/Dependencies.lock.json" \
   "$repo_root/apps/cfw-tauri-shell/package.json" \
   "$repo_root/apps/cfw-tauri-shell/tauri.conf.json" \
@@ -91,6 +134,8 @@ python3 - \
   "$SING_BOX_RAW_PACKET_PATCH_SHA256" \
   "$SING_BOX_DNS_FAILOVER_PATCH_PATH" \
   "$SING_BOX_DNS_FAILOVER_PATCH_SHA256" \
+  "$SING_BOX_ENDPOINT_CONFLICT_PATCH_PATH" \
+  "$SING_BOX_ENDPOINT_CONFLICT_PATCH_SHA256" \
   "$SING_BOX_PATCHED_DIFF_SHA256" \
   "$SING_BOX_COMBINED_DIFF_SHA256" \
   "$SING_BOX_PATCHED_GO_MOD_SHA256" \
@@ -117,6 +162,8 @@ from pathlib import Path
     raw_packet_patch_sha256,
     dns_failover_patch_path,
     dns_failover_patch_sha256,
+    endpoint_conflict_patch_path,
+    endpoint_conflict_patch_sha256,
     patched_diff_sha256,
     combined_diff_sha256,
     patched_go_mod_sha256,
@@ -146,6 +193,10 @@ expected_native = {
         "dnsFailoverPatch": {
             "path": dns_failover_patch_path,
             "sha256": dns_failover_patch_sha256,
+        },
+        "endpointConflictPatch": {
+            "path": endpoint_conflict_patch_path,
+            "sha256": endpoint_conflict_patch_sha256,
         },
         "combinedDiffSha256": combined_diff_sha256,
     },
@@ -178,6 +229,11 @@ verify_repository_patch(
     "sing-box security patch",
 )
 verify_repository_patch(
+    endpoint_conflict_patch_path,
+    endpoint_conflict_patch_sha256,
+    "sing-box endpoint conflict patch",
+)
+verify_repository_patch(
     raw_packet_patch_path,
     raw_packet_patch_sha256,
     "sing-box raw packet patch",
@@ -206,5 +262,15 @@ if tauri.get("bundle", {}).get("createUpdaterArtifacts") is not False:
 if tauri.get("build", {}).get("frontendDist") != "ui/dist":
     raise SystemExit("error: Tauri must consume generated ui/dist output")
 PY
+
+# Identity probes and policy validation execute files inside the managed trees.
+# Re-verify the complete payloads so self-modification or concurrent drift can
+# never be accepted as a valid release environment.
+cfw_verify_go_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_node_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_xcodegen_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_tauri_toolchain_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_release_tools_tree "$repo_root" "$toolchain_root"
+cfw_verify_go_module_cache_tree "$repo_root" "$toolchain_root"
 
 echo "release environment verified"

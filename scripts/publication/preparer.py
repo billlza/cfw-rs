@@ -17,8 +17,10 @@ from .common import (
     write_new,
 )
 from .graph_collectors import collect_all
-from .graph_model import CollectedGraphs, ComponentSeed, RELEASE_VERSION, run
+from .graph_model import CollectedGraphs, ComponentSeed, RELEASE_VERSION, load_pins, run
 from .license_resolution import resolve_license
+from .release_app_verifier import verify_release_app
+from .release_environment import release_tool_environment
 from .release_contract import (
     PRODUCT_NAME,
     blocker_report,
@@ -32,8 +34,13 @@ from .release_contract import (
 from .source_preparation import source_input_evidence
 if __package__.startswith("scripts."):
     from scripts.release_build_identity import bundle_build_identity
+    from scripts.repository_source_identity import (
+        SourceIdentityError,
+        require_clean_repository,
+    )
 else:
     from release_build_identity import bundle_build_identity
+    from repository_source_identity import SourceIdentityError, require_clean_repository
 
 
 def expected_signed_app(repository: Path) -> Path:
@@ -60,18 +67,20 @@ def require_fixed_signed_app(repository: Path, app: Path) -> Path:
     expected = signed_app(repository)
     if app.is_symlink() or not app.is_dir():
         raise PublicationError("0.4.0 signed app is absent or is a symlink")
-    require_fixed_path(app, expected, "signed app")
+    require_fixed_path(app, expected, "signed app", repository=repository)
     return app.resolve(strict=True)
 
 
-def _require_clean_repository(repository: Path) -> None:
-    status = run(
-        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], repository
-    )
-    if status:
+def _require_clean_repository(
+    repository: Path, release_environment: dict[str, str]
+) -> None:
+    try:
+        require_clean_repository(repository, release_environment)
+    except SourceIdentityError as error:
         raise PublicationError(
-            "release source tree is not clean; corresponding source must bind a committed state"
-        )
+            "cannot prove a clean release source tree for corresponding-source preparation: "
+            f"{error}"
+        ) from error
 
 
 def _application_seed(repository: Path) -> ComponentSeed:
@@ -94,10 +103,15 @@ def _application_seed(repository: Path) -> ComponentSeed:
     )
 
 
-def _complete_collected_graphs(repository: Path, libbox_source: Path) -> CollectedGraphs:
+def _complete_collected_graphs(
+    repository: Path,
+    libbox_source: Path,
+    release_environment: dict[str, str],
+) -> CollectedGraphs:
     run(
         [
             "/bin/bash",
+            "-p",
             "-c",
             'source "$1/scripts/dependency_pins.env"; '
             'source "$1/scripts/libbox_source_contract.sh"; '
@@ -107,8 +121,9 @@ def _complete_collected_graphs(repository: Path, libbox_source: Path) -> Collect
             str(libbox_source),
         ],
         repository,
+        release_environment,
     )
-    collected = collect_all(repository, libbox_source)
+    collected = collect_all(repository, libbox_source, release_environment)
     application = _application_seed(repository)
     collected.components[application.identifier] = application
     by_name = {seed.name: seed.identifier for seed in collected.components.values()}
@@ -160,10 +175,15 @@ def _review_records(path: Path, seeds: dict[str, ComponentSeed]) -> dict[str, di
     document = require_exact_keys(
         load_json(path), {"schema_version", "product", "components"}, "reviewed component input"
     )
-    if document["schema_version"] != 1 or document["product"] != {
-        "name": PRODUCT_NAME,
-        "version": RELEASE_VERSION,
-    }:
+    if (
+        type(document["schema_version"]) is not int
+        or document["schema_version"] != 1
+        or document["product"]
+        != {
+            "name": PRODUCT_NAME,
+            "version": RELEASE_VERSION,
+        }
+    ):
         raise PublicationError("reviewed component input is not for the fixed 0.4.0 product")
     raw_records = document["components"]
     if not isinstance(raw_records, list):
@@ -213,24 +233,27 @@ def prepare(
     reviewed_components: Path,
     output: Path,
 ) -> Path:
-    repository = repository.resolve(strict=True)
     app = require_fixed_signed_app(repository, app)
     fixed_output = prepared_root(repository)
-    require_fixed_path(output, fixed_output, "prepared evidence")
+    require_fixed_path(output, fixed_output, "prepared evidence", repository=repository)
     if output.exists() or output.is_symlink():
         raise PublicationError(f"refusing to replace prepared publication evidence: {output}")
-    build_identity = bundle_build_identity(app)
-    native_products = release_native_products_root(repository, build_identity.build_version)
-    run(
-        [
-            str(repository / "scripts/verify_release_app.sh"),
-            str(app),
-            str(native_products),
-        ],
-        repository,
+    pins = load_pins(repository / "scripts/dependency_pins.env")
+    release_environment = release_tool_environment(repository, pins)
+    verify_release_app(
+        repository=repository,
+        environment=release_environment,
     )
-    _require_clean_repository(repository)
-    collected = _complete_collected_graphs(repository, libbox_source.resolve(strict=True))
+    build_identity = bundle_build_identity(app)
+    native_products = release_native_products_root(
+        repository, build_identity.build_version
+    )
+    _require_clean_repository(repository, release_environment)
+    collected = _complete_collected_graphs(
+        repository,
+        libbox_source.resolve(strict=True),
+        release_environment,
+    )
     reviews = _review_records(reviewed_components.resolve(strict=True), collected.components)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.parent.is_symlink():
@@ -245,8 +268,19 @@ def prepare(
                 "version": RELEASE_VERSION,
                 "build_number": build_identity.build_version,
             },
-            "components": component_specs(repository, staging, collected.components, reviews),
-            "build_tools": build_tool_specs(repository, collected.components, reviews),
+            "components": component_specs(
+                repository,
+                staging,
+                collected.components,
+                reviews,
+                release_environment,
+            ),
+            "build_tools": build_tool_specs(
+                repository,
+                collected.components,
+                reviews,
+                release_environment,
+            ),
             "relationships": [
                 {"source": source, "target": target, "type": relation_type}
                 for source, target, relation_type in sorted(collected.relationships)
@@ -258,6 +292,7 @@ def prepare(
                 native_products,
                 app,
                 build_identity.build_version,
+                release_environment,
             ),
             "graphs": write_graphs(staging, collected),
         }
@@ -341,7 +376,7 @@ _SOURCE_CLOSURE_PLANS = {
     "go": {
         "classification": "external-build-tool-pinned-binary",
         "upstream": "https://go.dev/dl/",
-        "reference": "go1.24.7.darwin-arm64",
+        "reference": "go1.26.6.darwin-arm64",
         "closure_action": (
             "retain version, executable SHA-256, module verification, and the official release "
             "archive checksum as build provenance; do not add the compiler to corresponding source"
@@ -351,7 +386,7 @@ _SOURCE_CLOSURE_PLANS = {
     "gomobile": {
         "classification": "external-build-tool-pinned-module",
         "upstream": "https://github.com/sagernet/gomobile",
-        "reference": "v0.1.12",
+        "reference": "v0.1.13",
         "closure_action": (
             "retain the pinned Go module sum, executable SHA-256, and version -m identity as build "
             "provenance; do not add the tool binary to corresponding source"
@@ -385,14 +420,16 @@ _SOURCE_CLOSURE_PLANS = {
     },
     "tauri-cli": {
         "classification": "official-registry-source-archive",
-        "upstream": "https://crates.io/crates/tauri-cli/2.10.1",
-        "reference": "tauri-cli-2.10.1.crate",
+        "upstream": "https://crates.io/crates/tauri-cli/2.11.4",
+        "reference": "tauri-cli-2.11.4.crate",
         "closure_action": (
-            "bind the crates.io checksum, cargo-install record, executable SHA-256, and version as "
-            "external build-tool provenance"
+            "bind the crates.io checksum, published Cargo.lock checksum, digest-pinned spin lock "
+            "update, patched Cargo.lock checksum, cargo-install record, executable SHA-256, and "
+            "version as external build-tool provenance"
         ),
         "acceptance": (
-            "bind crate checksum, extracted tree digest, cargo-install identity, and binary version"
+            "bind crate checksum, extracted tree digest, both lock checksums, lock-patch checksum, "
+            "cargo-install identity, and binary version"
         ),
     },
     "xcode": {
@@ -411,9 +448,9 @@ _SOURCE_CLOSURE_PLANS = {
     "xcodegen": {
         "classification": "prepared-official-tag-needs-safe-dereference",
         "upstream": "https://github.com/yonaskolb/XcodeGen",
-        "reference": "2.45.4",
+        "reference": "2.46.0",
         "closure_action": (
-            "bind v2.45.4 tag/commit, executable SHA-256, and version output as external "
+            "bind v2.46.0 tag/commit, executable SHA-256, and version output as external "
             "build-tool provenance; its upstream source symlink is not copied into app source"
         ),
         "acceptance": "bind upstream commit, tag, original tree digest, and dereferenced tree digest",
@@ -459,19 +496,16 @@ def _blocker_document(
         for record in shipped_records
         if record["source_evidence"]["method"] == "missing-source"
     ]
-    copyright_blockers = [
+    copyright_noassertion = [
         {
             "id": record["id"],
             "name": record["name"],
             "version": record["version"],
             "ecosystem": record["id"].split(":", 1)[0],
-            "reason": (
-                "component copyright attribution requires human legal confirmation; "
-                "license boilerplate is not treated as package copyright"
-            ),
+            "status": "informational-no-objective-attribution",
         }
         for record in shipped_records
-        if not record["copyright_text"].strip()
+        if record["copyright_text"] == "NOASSERTION"
     ]
     build_tools = [
         {
@@ -487,6 +521,9 @@ def _blocker_document(
         for record in records
         if seeds[record["id"]].external_build_tool
     ]
+    build_tool_license_blockers = [
+        item for item in build_tools if item["license_metadata_status"] != "automatic"
+    ]
     return {
         "schema_version": 1,
         "product": {"name": PRODUCT_NAME, "version": RELEASE_VERSION},
@@ -495,26 +532,36 @@ def _blocker_document(
         "external_build_tool_count": len(build_tools),
         "automatic_license_count": len(shipped_records) - len(license_blockers),
         "license_review_required_count": len(license_blockers),
-        "copyright_review_required_count": len(copyright_blockers),
+        "external_build_tool_license_review_required_count": len(
+            build_tool_license_blockers
+        ),
+        "copyright_noassertion_count": len(copyright_noassertion),
         "corresponding_source_missing_count": len(source_blockers),
         "external_nonredistributable_prerequisite_count": sum(
             item["name"] in {"swift", "xcode"} for item in build_tools
         ),
         "license_review_required": license_blockers,
-        "copyright_review_required": copyright_blockers,
+        "external_build_tool_license_review_required": build_tool_license_blockers,
+        "copyright_noassertion": copyright_noassertion,
         "corresponding_source_missing": source_blockers,
         "external_build_tools": build_tools,
     }
 
 
 def write_review_template(repository: Path, libbox_source: Path, output: Path) -> Path:
-    repository = repository.resolve(strict=True)
     fixed_output = review_template(repository)
-    require_fixed_path(output, fixed_output, "review template")
+    require_fixed_path(output, fixed_output, "review template", repository=repository)
     blocker_path = blocker_report(repository)
+    require_fixed_path(blocker_path, blocker_path, "blocker report", repository=repository)
     if output.exists() or output.is_symlink() or blocker_path.exists() or blocker_path.is_symlink():
         raise PublicationError("refusing to replace an existing component review or blocker report")
-    collected = _complete_collected_graphs(repository, libbox_source.resolve(strict=True))
+    pins = load_pins(repository / "scripts/dependency_pins.env")
+    release_environment = release_tool_environment(repository, pins)
+    collected = _complete_collected_graphs(
+        repository,
+        libbox_source.resolve(strict=True),
+        release_environment,
+    )
     records = []
     for identifier in sorted(collected.components):
         seed = collected.components[identifier]
@@ -524,10 +571,15 @@ def write_review_template(repository: Path, libbox_source: Path, output: Path) -
                 "name": seed.name,
                 "version": seed.version,
                 "purl": seed.purl,
-                "copyright_text": "",
+                "copyright_text": "NOASSERTION",
                 "license_resolution": resolve_license(seed),
                 "source_override": None,
-                "source_evidence": source_input_evidence(repository, seed, seed.source_root),
+                "source_evidence": source_input_evidence(
+                    repository,
+                    seed,
+                    seed.source_root,
+                    release_environment,
+                ),
             }
         )
     document = {

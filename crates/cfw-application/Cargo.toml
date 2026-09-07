@@ -5,6 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
+cfw-controller = { path = "../cfw-controller" }
 cfw-engine-api = { path = "../cfw-engine-api" }
 cfw-singbox-config = { path = "../cfw-singbox-config" }
 thiserror.workspace = true

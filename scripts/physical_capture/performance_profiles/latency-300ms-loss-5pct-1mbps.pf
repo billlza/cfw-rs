@@ -1,0 +1,2 @@
+dummynet in quick all pipe 40002
+dummynet out quick all pipe 40002

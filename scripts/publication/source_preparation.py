@@ -16,7 +16,13 @@ from .common import (
     safe_relative,
     tree_digest,
 )
-from .graph_model import ComponentSeed, run
+from .graph_model import ComponentSeed
+if __package__.startswith("scripts."):
+    from scripts.release_git import ReleaseGitError, run_release_git
+    from scripts.repository_source_identity import RELEASE_PATHS
+else:
+    from release_git import ReleaseGitError, run_release_git
+    from repository_source_identity import RELEASE_PATHS
 
 
 MAX_COPY_FILE_BYTES = 256 * 1024 * 1024
@@ -47,12 +53,31 @@ def _destination_name(seed: ComponentSeed) -> str:
     return f"{slug}-{suffix}"
 
 
-def _run_git_files(repository: Path, source: Path) -> list[tuple[Path, PurePosixPath]]:
+def _run_git_files(
+    repository: Path,
+    source: Path,
+    environment: dict[str, str] | None,
+) -> list[tuple[Path, PurePosixPath]]:
     relative_root = source.relative_to(repository)
-    command = ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"]
+    command = ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"]
     if relative_root.parts:
         command.append(relative_root.as_posix())
-    payload = run(command, repository)
+    else:
+        command.extend(RELEASE_PATHS)
+    try:
+        protected_roots = (
+            RELEASE_PATHS if not relative_root.parts else (relative_root.parts[0],)
+        )
+        payload = run_release_git(
+            repository,
+            command,
+            environment=environment,
+            protected_roots=protected_roots,
+        )
+    except ReleaseGitError as error:
+        raise PublicationError(
+            f"cannot enumerate repository source files: {error}"
+        ) from error
     files: list[tuple[Path, PurePosixPath]] = []
     prefix_length = len(relative_root.parts)
     for raw_path in payload.split(b"\0"):
@@ -107,15 +132,21 @@ def _tree_files(source: Path) -> list[tuple[Path, PurePosixPath]]:
 
 
 def _source_files(
-    repository: Path, seed: ComponentSeed, source_root: Path
+    repository: Path,
+    seed: ComponentSeed,
+    source_root: Path,
+    environment: dict[str, str] | None,
 ) -> tuple[list[tuple[Path, PurePosixPath]], str]:
     if seed.repository_source and source_root.is_relative_to(repository):
-        return _run_git_files(repository, source_root), "git-tracked-files-v1"
+        return _run_git_files(repository, source_root, environment), "git-tracked-files-v1"
     return _tree_files(source_root), "bounded-source-tree-v1"
 
 
 def source_input_evidence(
-    repository: Path, seed: ComponentSeed, source_root: Path | None
+    repository: Path,
+    seed: ComponentSeed,
+    source_root: Path | None,
+    environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if seed.external_build_tool:
         return {
@@ -133,7 +164,7 @@ def source_input_evidence(
             "file_count": 0,
             "total_bytes": 0,
         }
-    files, method = _source_files(repository, seed, source_root)
+    files, method = _source_files(repository, seed, source_root, environment)
     entries = []
     total = 0
     for path, relative in files:
@@ -152,12 +183,16 @@ def source_input_evidence(
 
 
 def stage_source(
-    repository: Path, staging: Path, seed: ComponentSeed, source_root: Path
+    repository: Path,
+    staging: Path,
+    seed: ComponentSeed,
+    source_root: Path,
+    environment: dict[str, str] | None = None,
 ) -> tuple[str, list[dict[str, object]]]:
     source_relative = f"source/{seed.ecosystem}/{_destination_name(seed)}"
     destination = staging.joinpath(*PurePosixPath(source_relative).parts)
     destination.mkdir(parents=True)
-    files, _ = _source_files(repository, seed, source_root)
+    files, _ = _source_files(repository, seed, source_root, environment)
     count = 0
     total = 0
     for source, relative in files:

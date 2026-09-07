@@ -21,6 +21,25 @@ private final class ServiceJournal: AuthorityJournalCommitting, @unchecked Senda
   var count: Int { lock.withLock { states.count } }
 }
 
+private struct ExhaustedServiceJournal: AuthorityJournalCommitting {
+  func appendCommitted(_ state: AuthorityCommittedState) throws -> AuthorityJournalHead {
+    throw AuthorityJournalStorageError.capacityExhausted
+  }
+}
+
+private final class OperationObservationBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [ReleaseObservationAuthenticatedDecision] = []
+
+  func append(_ value: ReleaseObservationAuthenticatedDecision) {
+    lock.withLock { values.append(value) }
+  }
+
+  var snapshot: [ReleaseObservationAuthenticatedDecision] {
+    lock.withLock { values }
+  }
+}
+
 private struct ServiceRandomness: AuthorityTicketRandomness {
   func randomBytes(count: Int) throws -> Data { Data(repeating: 0x5a, count: count) }
 }
@@ -38,12 +57,9 @@ private func serviceDigest(_ data: Data) throws -> CFWSharedProtocol.SHA256Diges
 
 private func servicePeer(_ role: AuthorityRole = .host) throws -> PeerIdentity {
   PeerIdentity(
-    auditTokenDigest: try serviceDigest(Data("audit".utf8)),
+    connectionIdentityDigest: try serviceDigest(Data("connection".utf8)),
     pid: 42, euid: role == .provider ? 0 : 501,
     auditSessionID: role == .provider ? 0 : 7,
-    teamID: "YKUPL7Z869", signingID: role.rawValue,
-    designatedRequirementDigest: try serviceDigest(Data("requirement".utf8)),
-    entitlementDigest: try serviceDigest(Data("entitlements".utf8)),
     role: role, consoleUID: 501)
 }
 private struct ServiceFixture {
@@ -70,7 +86,9 @@ private func serviceFixture() throws -> ServiceFixture {
     authorityRevision: 1)
   let descriptor = try AuthorityConfigurationDescriptor(
     byteCount: UInt32(configuration.count), configSHA256: configDigest,
-    identitySHA256: identityDigest, credentialSlots: [slot],
+    identitySHA256: identityDigest,
+    credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: identityDigest),
+    credentialSlots: [slot],
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true))
   let request = try PrepareStartRequest(
     operation: operation, expectedRevision: 1,
@@ -126,6 +144,32 @@ private func authorityError(_ value: NSError?) -> AuthorityErrorCode? {
   #expect(exports == 1)
 }
 
+@Test func journalCapacityExhaustionIsExplicitAndDoesNotMutateAuthorityState() throws {
+  let fixture = try serviceFixture()
+  let core = GlobalAuthorityServiceCore(
+    reducer: try .unEnrolledOff(),
+    journal: ExhaustedServiceJournal(),
+    randomness: ServiceRandomness(),
+    clock: ServiceClock())
+  let peer = try servicePeer()
+
+  do {
+    _ = try core.prepare(
+      fixture.request,
+      configuration: fixture.configuration,
+      secretPayload: fixture.secretPayload,
+      peer: peer)
+    Issue.record("Journal capacity exhaustion must reject the prepare")
+  } catch let error as AuthorityDomainError {
+    #expect(error.code == .journalCapacityExhausted)
+  }
+
+  let snapshot = try core.snapshot(peer: peer)
+  #expect(snapshot.state == .off)
+  #expect(snapshot.revision == 1)
+  #expect(snapshot.leaseView == nil)
+}
+
 @Test func malformedOversizeAndWrongCommandFailBeforeMutation() throws {
   let objects = try serviceObjects()
   let fixture = try serviceFixture()
@@ -151,6 +195,34 @@ private func authorityError(_ value: NSError?) -> AuthorityErrorCode? {
 
   #expect(observed == [.invalidMessage, .invalidMessage, .invalidMessage])
   #expect(objects.journal.count == 0)
+}
+
+@Test func rejectedOperationObservationUsesActualRequestAndStableCode() throws {
+  let journal = ServiceJournal()
+  let core = GlobalAuthorityServiceCore(
+    reducer: try .unEnrolledOff(), journal: journal,
+    randomness: ServiceRandomness(), clock: ServiceClock())
+  let peer = try servicePeer()
+  let observations = OperationObservationBox()
+  let service = AuthenticatedAuthorityPeerService(
+    peerID: UUID(), peer: peer, reauthorize: { peer }, core: core,
+    concurrency: AuthorityConcurrencyGate(), events: AuthorityEventHub(),
+    recordOperationDecision: { observations.append($0) })
+  let request = Data("{}".utf8)
+  var responseError: NSError?
+  service.snapshot(request) { _, error in responseError = error }
+
+  #expect(authorityError(responseError) == .invalidMessage)
+  #expect(observations.snapshot.count == 1)
+  let observation = try #require(observations.snapshot.first)
+  #expect(observation.accepted == false)
+  #expect(observation.actualCode == .invalidMessage)
+  #expect(observation.peerPID == peer.pid)
+  #expect(
+    observation.requestSHA256
+      == SHA256.hash(data: request).map { String(format: "%02x", $0) }.joined())
+  #expect(observation.preStateSHA256 == observation.postStateSHA256)
+  #expect(observation.cleanupState == .off)
 }
 
 @Test func prepareUsesCanonicalCorrelationAndSnapshotContainsNoSecret() throws {
@@ -190,5 +262,10 @@ private func authorityError(_ value: NSError?) -> AuthorityErrorCode? {
     AuthoritySnapshot.self, from: bytes)
   #expect(snapshot.requestID == snapshotID)
   #expect(snapshot.result.state == .preparing)
-  #expect(objects.journal.count == 1)
+  #expect(objects.journal.count == 2)
+  #expect(objects.journal.states.first?.transition == .enrollOff)
+  #expect(objects.journal.states.first?.state == .off)
+  #expect(objects.journal.states.first?.epoch == 0)
+  #expect(objects.journal.states.first?.generation == 0)
+  #expect(objects.journal.states.last?.transition == .prepare)
 }

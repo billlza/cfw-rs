@@ -37,7 +37,8 @@ private final class RecordingPreparer: TunnelStartPreparing, @unchecked Sendable
       copying: Data(repeating: ticketByte, count: AuthorityV1Limits.ticketBytes))
     return HostPreparedTunnelStart(
       ticket: ticket,
-      descriptor: descriptorOverride ?? preparation.descriptor)
+      descriptor: descriptorOverride ?? preparation.descriptor,
+      operationID: UUID())
   }
 }
 
@@ -61,7 +62,10 @@ private final class FakeManagedTunnel: ManagedTunnelOperating, @unchecked Sendab
   var startCount: Int { lock.withLock { startCountValue } }
   var startedTicket: Data? { lock.withLock { startedTicketValue } }
 
-  func saveDescriptorOnly(_ descriptor: ConfigurationDescriptor) async throws {
+  func saveDescriptorOnly(
+    _ descriptor: ConfigurationDescriptor,
+    operationID: UUID
+  ) async throws {
     lock.withLock {
       saveCountValue += 1
       savedDescriptor = descriptor
@@ -95,6 +99,7 @@ private func tunnelDescriptor(
   try ConfigurationDescriptor(
     slot: .tunnel,
     tunnelOptions: TunnelNetworkOptions(ipv6Enabled: true, mtu: 1_500),
+    credentialAudience: try appleCredentialAudience(),
     installationID: UUID(),
     epoch: 1,
     generation: 1,
@@ -162,7 +167,8 @@ struct TicketOnlyTunnelStartTests {
     let allowedKeys: Set<String> = [
       "schemaVersion", "slot", "installationID", "epoch", "generation",
       "byteCount", "sha256", "identitySha256", "credentialSlots",
-      "ipv6Enabled", "bypassPrivateNetworks", "mtu",
+      "credentialProfileID", "credentialProfileDigest",
+      "ipv6Enabled", "bypassPrivateNetworks", "directIPv4Hosts", "mtu",
     ]
     #expect(Set(providerConfig.keys).isSubset(of: allowedKeys))
 

@@ -1,11 +1,17 @@
 import io
+import gzip
+import hashlib
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.validate_updater_archive import ArchiveContractError, validate_archive
+from scripts.validate_updater_archive import (
+    ArchiveContractError,
+    build_archive_app_manifest,
+    validate_archive,
+)
 from scripts.validate_updater_archive import MAX_EXTENSION_ENTRY_BYTES
 
 
@@ -67,6 +73,17 @@ class UpdaterArchiveContractTests(unittest.TestCase):
             count, expanded = validate_archive(archive.close(), ROOT)
             self.assertEqual(count, 6)
             self.assertEqual(expanded, len(b"plistbinary"))
+            manifest = build_archive_app_manifest(str(archive.path), ROOT)
+            self.assertEqual(manifest["algorithm"], "sha256-tree-v2")
+            self.assertEqual(manifest["root"], ROOT)
+            self.assertRegex(str(manifest["sha256"]), r"^[0-9a-f]{64}$")
+            by_path = {
+                entry["path"]: entry for entry in manifest["entries"]
+            }
+            self.assertEqual(
+                by_path["Contents/Info.plist"]["sha256"],
+                hashlib.sha256(b"plist").hexdigest(),
+            )
         finally:
             archive.cleanup()
 
@@ -159,6 +176,46 @@ class UpdaterArchiveContractTests(unittest.TestCase):
             archive.add(entry, io.BytesIO(metadata))
             archive.add_layout()
             with self.assertRaises(ArchiveContractError):
+                validate_archive(archive.close(), ROOT)
+        finally:
+            archive.cleanup()
+
+    def test_rejects_nonzero_decompressed_bytes_after_tar_termination(self) -> None:
+        archive = ArchiveBuilder()
+        try:
+            archive.add_layout()
+            path = Path(archive.close())
+            raw_tar = gzip.decompress(path.read_bytes())
+            path.write_bytes(gzip.compress(raw_tar + b"hidden-after-tar", mtime=0))
+            with self.assertRaisesRegex(ArchiveContractError, "after its termination"):
+                validate_archive(str(path), ROOT)
+        finally:
+            archive.cleanup()
+
+    def test_rejects_concatenated_gzip_member_and_compressed_suffix(self) -> None:
+        for suffix in (gzip.compress(b"second-member", mtime=0), b"raw-suffix"):
+            with self.subTest(suffix=suffix[:8]):
+                archive = ArchiveBuilder()
+                try:
+                    archive.add_layout()
+                    path = Path(archive.close())
+                    path.write_bytes(path.read_bytes() + suffix)
+                    with self.assertRaisesRegex(
+                        ArchiveContractError,
+                        "concatenated member or trailing bytes",
+                    ):
+                        validate_archive(str(path), ROOT)
+                finally:
+                    archive.cleanup()
+
+    def test_rejects_unbound_pax_metadata(self) -> None:
+        archive = ArchiveBuilder()
+        try:
+            archive.add_layout()
+            entry, body = regular(f"{ROOT}/Contents/extra", b"extra")
+            entry.pax_headers = {"comment": "hidden-metadata"}
+            archive.add(entry, body)
+            with self.assertRaisesRegex(ArchiveContractError, "extended metadata"):
                 validate_archive(archive.close(), ROOT)
         finally:
             archive.cleanup()

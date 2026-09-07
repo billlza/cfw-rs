@@ -15,6 +15,7 @@ from .license_resolution import canonical_spdx_expression
 
 
 FORBIDDEN_LICENSE_VALUES = {"", "NONE", "NOASSERTION", "UNKNOWN", "UNLICENSED"}
+FORBIDDEN_COPYRIGHT_VALUES = {"", "NONE", "UNKNOWN", "UNLICENSED"}
 ALLOWED_ECOSYSTEMS = {"cargo", "npm", "go", "swift", "native", "application", "toolchain"}
 ALLOWED_SCOPES = {"runtime", "build", "toolchain"}
 ALLOWED_RELATIONSHIPS = {"DEPENDS_ON", "BUILD_DEPENDENCY_OF", "CONTAINS"}
@@ -90,7 +91,11 @@ def validate_components(value: object) -> list[dict[str, Any]]:
         copyright_text = bounded_text(
             component["copyright_text"], f"component {component_id}.copyright_text", 4096
         )
-        if copyright_text.upper() in FORBIDDEN_LICENSE_VALUES:
+        if (
+            copyright_text != "NOASSERTION"
+            and copyright_text.upper()
+            in FORBIDDEN_COPYRIGHT_VALUES | {"NOASSERTION"}
+        ):
             raise PublicationError(f"component {component_id} lacks reviewed copyright text")
         require_sha256(component["source_sha256"], f"component {component_id}.source_sha256")
         license_files = component["license_files"]
@@ -389,7 +394,11 @@ def build_cyclonedx(
                 "purl": item["purl"],
                 "hashes": [{"alg": "SHA-256", "content": item["source_sha256"]}],
                 "licenses": [{"expression": item["license_expression"]}],
-                "copyright": item["copyright_text"],
+                **(
+                    {}
+                    if item["copyright_text"] == "NOASSERTION"
+                    else {"copyright": item["copyright_text"]}
+                ),
                 "properties": [
                     {"name": "cfw:ecosystem", "value": item["ecosystem"]},
                     {"name": "cfw:scope", "value": item["scope"]},
@@ -412,15 +421,16 @@ def build_cyclonedx(
 def reject_unreviewed_values(value: object, path: str = "$") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
-            if (
-                key == "copyrightText"
-                and child == "NOASSERTION"
-                and value.get("primaryPackagePurpose") == "BUILD_TOOL"
-            ):
+            if key == "copyrightText" and child == "NOASSERTION":
                 continue
             reject_unreviewed_values(child, f"{path}.{key}")
     elif isinstance(value, list):
         for index, child in enumerate(value):
             reject_unreviewed_values(child, f"{path}[{index}]")
-    elif isinstance(value, str) and value.upper() in {"NOASSERTION", "UNKNOWN", "UNLICENSED"}:
+    elif isinstance(value, str) and value.upper() in {
+        "NONE",
+        "NOASSERTION",
+        "UNKNOWN",
+        "UNLICENSED",
+    }:
         raise PublicationError(f"unreviewed SBOM value at {path}")

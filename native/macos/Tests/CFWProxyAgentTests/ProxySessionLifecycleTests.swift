@@ -1,3 +1,4 @@
+import CFWCredentialTransport
 import CFWLibboxRuntime
 import CFWSharedProtocol
 import Foundation
@@ -24,10 +25,114 @@ private struct SecretEchoConfigurationChecker: LibboxConfigurationChecking {
   }
 }
 
+/// Keeps this validation-only service test behind the same Authority-owned
+/// surface as production. An accidental start fails explicitly instead of
+/// bypassing the one-use owner authorization contract.
+private final class ValidationOnlyProxyOwner: ProxySystemProxyOwning, @unchecked Sendable {
+  private let lifecycle: ProxySessionLifecycle
+  private let lock = NSLock()
+  private var startCountValue = 0
+
+  init(lifecycle: ProxySessionLifecycle) {
+    self.lifecycle = lifecycle
+  }
+
+  func start(
+    configuration: SensitiveDataBuffer,
+    descriptor: ConfigurationDescriptor,
+    authorization: ProxyOwnerAuthorization,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    lock.withLock { startCountValue += 1 }
+    configuration.erase()
+    _ = descriptor
+    authorization.erase()
+    completionHandler(
+      .failure(.engineLease("Validation-only owner cannot authorize a start.")))
+  }
+
+  var startCount: Int { lock.withLock { startCountValue } }
+
+  func stop(
+    expectedConfiguration: ConfigurationDescriptor,
+    completionHandler: @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    lifecycle.stop(
+      expectedConfiguration: expectedConfiguration,
+      completionHandler: completionHandler)
+  }
+
+  func snapshot(
+    completionHandler: @escaping @Sendable (EngineSnapshot) -> Void
+  ) {
+    lifecycle.snapshot(completionHandler: completionHandler)
+  }
+}
+
+@Test func proxyStartRejectsMismatchedRuntimeBytesBeforeOwnerBinding() throws {
+  let owner = ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle)
+  let service = ProxyAgentService(
+    lifecycle: owner,
+    configurationChecker: SecretEchoConfigurationChecker(secret: "unused")
+  )
+  let configurationDescriptor = try descriptor()
+  let operation = try OperationContext(
+    operationID: AuthorityIdentifier(UUID()),
+    root: RootContext(
+      installationID: AuthorityIdentifier(configurationDescriptor.installationID),
+      epoch: configurationDescriptor.epoch,
+      generation: configurationDescriptor.generation),
+    mode: .systemProxy,
+    configSHA256: configurationDescriptor.sha256,
+    identitySHA256: configurationDescriptor.identitySHA256,
+    ownerUID: 501,
+    authorityRevision: 1)
+  let context = try ProxyOwnerContext(
+    operation: operation,
+    leaseID: AuthorityIdentifier(UUID()))
+  let request = RequestEnvelope(
+    command: try NativeCommand(
+      kind: .startSystemProxy,
+      configuration: configurationDescriptor))
+  var responseData: Data?
+  var responseError: NSError?
+
+  service.startSystemProxy(
+    Data(repeating: 0x5, count: AuthorityV1Limits.capabilityBytes),
+    context: try AuthorityV1Codec.encodeCanonical(context),
+    configuration: Data("{}".utf8),
+    request: try ProtocolCodec.encode(request)
+  ) { data, error in
+    responseData = data
+    responseError = error
+  }
+
+  #expect(responseError == nil)
+  let response = try ProtocolCodec.decodeResponse(try #require(responseData))
+  #expect(response.failure?.code == "invalid-runtime-configuration")
+  #expect(owner.startCount == 0)
+}
+
+/// Test-only adapter that always supplies a fresh one-use in-memory template.
+/// Production has no descriptor-only start overload and cannot read a template
+/// back from disk.
+extension ProxySessionLifecycle {
+  fileprivate func start(
+    configuration descriptor: ConfigurationDescriptor,
+    completionHandler:
+      @escaping @Sendable (Result<Void, ProxySessionLifecycleError>) -> Void
+  ) {
+    start(
+      configuration: SensitiveDataBuffer(copying: Data("{}".utf8)),
+      descriptor: descriptor,
+      completionHandler: completionHandler)
+  }
+}
+
 @Test func proxyValidationResponseNeverEchoesUnderlyingSecretError() throws {
   let secret = "credential-that-must-never-leave-agent"
   let service = ProxyAgentService(
-    lifecycle: makeFixture().lifecycle,
+    lifecycle: ValidationOnlyProxyOwner(lifecycle: makeFixture().lifecycle),
     configurationChecker: SecretEchoConfigurationChecker(secret: secret)
   )
   let request = RequestEnvelope(
@@ -424,6 +529,9 @@ private func descriptor(generation: UInt64 = 1) throws -> ConfigurationDescripto
   return try ConfigurationDescriptor(
     slot: .systemProxy,
     tunnelOptions: nil,
+    credentialAudience: CredentialAudience(
+      profileID: installationID,
+      profileDigest: SHA256Digest(hex: String(repeating: "ee", count: 32))),
     installationID: installationID,
     epoch: 1,
     generation: generation,
@@ -442,8 +550,8 @@ private func makeFixture(
   let lease = FakeLease()
   let lifecycle = ProxySessionLifecycle(
     dependencies: ProxySessionDependencies(
-      prepareConfiguration: { _ in
-        PreparedProxyConfiguration(configuration: Data("{}".utf8), lease: lease)
+      prepareOwnership: { _ in
+        PreparedProxyOwnership(lease: lease)
       },
       recoverCleanupLease: { _ in lease },
       engineFactory: FakeProxyEngineFactory(
@@ -482,8 +590,8 @@ private func recoveryLifecycle(
   let lease = FakeLease()
   return ProxySessionLifecycle(
     dependencies: ProxySessionDependencies(
-      prepareConfiguration: { _ in
-        PreparedProxyConfiguration(configuration: Data("{}".utf8), lease: lease)
+      prepareOwnership: { _ in
+        PreparedProxyOwnership(lease: lease)
       },
       recoverCleanupLease: { _ in lease },
       engineFactory: FakeProxyEngineFactory(engine: engine, creationFails: false),
@@ -865,8 +973,8 @@ struct ProxySessionLifecycleTests {
     let lease = FakeLease()
     let lifecycle = ProxySessionLifecycle(
       dependencies: ProxySessionDependencies(
-        prepareConfiguration: { _ in
-          PreparedProxyConfiguration(configuration: Data("{}".utf8), lease: lease)
+        prepareOwnership: { _ in
+          PreparedProxyOwnership(lease: lease)
         },
         recoverCleanupLease: { _ in lease },
         engineFactory: FakeProxyEngineFactory(engine: engine, creationFails: false),

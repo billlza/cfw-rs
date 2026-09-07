@@ -1,24 +1,18 @@
-mod archive;
 mod contract;
-mod download;
 mod error;
-mod install_admission;
 mod metadata;
 mod state;
 
-use std::time::Duration;
+use semver::Version;
+use tauri::{AppHandle, Emitter, Manager};
 
-use cfw_engine_api::{EngineEvent, EngineMode, EngineSnapshot, EngineState};
-use cfw_singbox_config::{EngineSettings, ValidatedSingBoxProfile};
-use tauri::{AppHandle, Emitter, Manager, State};
-
-use crate::engine::ManagedEngine;
-use archive::install_verified_archive;
-use download::download_verified_update;
+use crate::commands::open_trusted_external_url;
+use contract::UpdateAuthorization;
 use error::{Result, UpdateError};
-use install_admission::validate_install_environment;
 use metadata::check_bounded_update;
 pub(crate) use state::UpdaterSecurityState;
+
+const RELEASE_PAGE_PREFIX: &str = "https://github.com/billlza/cfw-rs/releases/tag/v";
 
 #[tauri::command]
 pub(crate) async fn check_for_updates(
@@ -31,7 +25,7 @@ pub(crate) async fn check_for_updates(
 
 async fn check_for_updates_inner(app: AppHandle) -> Result<serde_json::Value> {
     let security = app.state::<UpdaterSecurityState>();
-    let _serialized_check = security.serialize_checks().await;
+    let _serialized_check = security.try_serialize_checks()?;
     security.clear_authorization()?;
     let update = check_bounded_update().await?;
     let payload = match update {
@@ -50,30 +44,35 @@ async fn check_for_updates_inner(app: AppHandle) -> Result<serde_json::Value> {
             "current": env!("CARGO_PKG_VERSION"),
         }),
     };
-    if let Err(error) = app.emit("cfw://update-available", payload.clone()) {
+    if app.emit("cfw://update-available", payload.clone()).is_err() {
         security.clear_authorization()?;
-        let _ = error;
         return Err(UpdateError::ProgressEvent);
     }
     Ok(payload)
 }
 
+/// Opens the exact GitHub release page authorized by the update metadata.
+///
+/// v0.4.0 deliberately does not replace its own application bundle: the bundle
+/// owns an SMAppService Agent and Daemon, and an in-process swap without a
+/// crash-safe unregister/register transaction can leave launchd executing the
+/// previous helpers. The signed DMG remains the supported installation path.
 #[tauri::command]
-pub(crate) async fn install_available_update(
+pub(crate) async fn open_available_update(
     app: AppHandle,
     expected_version: String,
 ) -> std::result::Result<serde_json::Value, String> {
-    install_available_update_inner(app, expected_version)
+    open_available_update_inner(app, expected_version)
         .await
         .map_err(|error| error.to_string())
 }
 
-async fn install_available_update_inner(
+async fn open_available_update_inner(
     app: AppHandle,
     expected_version: String,
 ) -> Result<serde_json::Value> {
     let security = app.state::<UpdaterSecurityState>();
-    let _serialized_check = security.serialize_checks().await;
+    let _serialized_check = security.try_serialize_checks()?;
     let authorized = security.authorization(&expected_version)?;
     let update = match check_bounded_update().await {
         Ok(Some(update)) => update,
@@ -86,156 +85,56 @@ async fn install_available_update_inner(
             return Err(error);
         }
     };
-    let current = update.authorization;
-    validate_install_environment()?;
-    let lease = security.begin_download(&authorized, &current)?;
-    let version = current.version.clone();
-    emit_progress(&app, &version, "downloading", 0, None, None)?;
+    let version = update.authorization.version.clone();
+    let release_url = release_page_url(&update.authorization)?;
 
-    let mut last_percent = None;
-    let mut next_unknown_length_event = 0_u64;
-    let bytes = download_verified_update(
-        &current,
-        &lease.cancellation,
-        |downloaded, total, percent| {
-            let should_emit = match percent {
-                Some(value) => last_percent.replace(value) != Some(value),
-                None => {
-                    if downloaded >= next_unknown_length_event {
-                        next_unknown_length_event = downloaded.saturating_add(512 * 1024);
-                        true
-                    } else {
-                        false
-                    }
-                }
-            };
-            if should_emit {
-                emit_progress(&app, &version, "downloading", downloaded, total, percent)?;
-            }
-            Ok(())
-        },
-    )
-    .await?;
+    // Validate and consume atomically before the external side effect. A
+    // mismatch or failed opener therefore requires a fresh check and can never
+    // replay metadata that changed after it was presented.
+    security.consume_if_current(&authorized, &update.authorization)?;
+    open_trusted_external_url(&release_url).map_err(|_| UpdateError::OpenReleasePage)?;
+    Ok(serde_json::json!({
+        "opened": true,
+        "installed": false,
+        "version": version,
+    }))
+}
 
-    // This mutex-protected phase change is the cancellation linearization
-    // point. A cancellation that wins here returns before any network change;
-    // once commit wins, later cancellation is rejected explicitly.
-    lease.begin_commit()?;
-    emit_progress(
-        &app,
-        &version,
-        "stopping-network",
-        bytes.len() as u64,
-        Some(bytes.len() as u64),
-        Some(100),
-    )?;
-    let (coordinator, maintenance) = {
-        let engine = app.state::<ManagedEngine>();
-        let maintenance = engine
-            .reserve_maintenance()
-            .map_err(|_| UpdateError::EngineMaintenanceUnavailable)?;
-        (engine.coordinator.clone(), maintenance)
-    };
-    maintenance
-        .wait_for_idle()
-        .await
-        .map_err(|_| UpdateError::EngineMaintenanceUnavailable)?;
-    let stopped = coordinator
-        .set_mode(
-            EngineMode::Off,
-            ValidatedSingBoxProfile::direct(),
-            EngineSettings::default(),
-        )
-        .await
-        .map_err(|_| UpdateError::EngineStop)?;
-    require_engine_off(&stopped)?;
-
-    // Revalidate immediately before the non-cancellable synchronous commit.
-    validate_install_environment()?;
-    emit_progress(
-        &app,
-        &version,
-        "installing",
-        bytes.len() as u64,
-        Some(bytes.len() as u64),
-        Some(100),
-    )?;
-    let install_version = version.clone();
-    let outcome =
-        tokio::task::spawn_blocking(move || install_verified_archive(&bytes, &install_version))
-            .await
-            .map_err(|_| UpdateError::InstallationWorkerFailed)??;
-    if let Some(kind) = outcome.cleanup_warning
-        && let Err(error) = app.emit(
-            "cfw://engine-event",
-            EngineEvent::boundary_failure(
-                "update_cleanup_failed",
-                format!("the new app was committed but post-commit cleanup failed ({kind:?})"),
-            ),
-        )
-    {
-        eprintln!("failed to publish post-commit update cleanup warning: {error}");
+fn release_page_url(authorization: &UpdateAuthorization) -> Result<String> {
+    let parsed =
+        Version::parse(&authorization.version).map_err(|_| UpdateError::InvalidReleaseVersion)?;
+    if parsed.to_string() != authorization.version {
+        return Err(UpdateError::InvalidReleaseVersion);
     }
-
-    tokio::time::sleep(Duration::from_millis(350)).await;
-    app.restart();
-}
-
-#[tauri::command]
-pub(crate) fn cancel_update_install(
-    security: State<'_, UpdaterSecurityState>,
-) -> std::result::Result<serde_json::Value, String> {
-    security
-        .cancel_download()
-        .map(|cancelled| serde_json::json!({ "cancelled": cancelled }))
-        .map_err(|error| error.to_string())
-}
-
-fn emit_progress(
-    app: &AppHandle,
-    version: &str,
-    phase: &str,
-    downloaded: u64,
-    total: Option<u64>,
-    percent: Option<u64>,
-) -> Result<()> {
-    app.emit(
-        "cfw://update-progress",
-        serde_json::json!({
-            "phase": phase,
-            "version": version,
-            "downloaded": downloaded,
-            "total": total,
-            "percent": percent,
-        }),
-    )
-    .map_err(|_| UpdateError::ProgressEvent)
-}
-
-fn require_engine_off(snapshot: &EngineSnapshot) -> Result<()> {
-    if snapshot.state != EngineState::Off
-        || snapshot.desired_mode != EngineMode::Off
-        || snapshot.config_digest.is_some()
-    {
-        return Err(UpdateError::EngineNotOff);
-    }
-    Ok(())
+    Ok(format!("{RELEASE_PAGE_PREFIX}{}", authorization.version))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn authorization(version: &str) -> UpdateAuthorization {
+        UpdateAuthorization {
+            version: version.to_owned(),
+            archive_name: format!("Clash.for.Mac_{version}_aarch64.app.tar.gz"),
+            download_url: format!(
+                "https://github.com/billlza/cfw-rs/releases/download/v{version}/archive.tar.gz"
+            ),
+            signature: "signature".to_owned(),
+        }
+    }
+
     #[test]
-    fn update_commit_requires_a_proven_off_engine_snapshot() {
-        require_engine_off(&EngineSnapshot::default()).expect("default Off snapshot");
-        let invalid = EngineSnapshot {
-            desired_mode: EngineMode::Tunnel,
-            ..EngineSnapshot::default()
-        };
-        assert!(matches!(
-            require_engine_off(&invalid),
-            Err(UpdateError::EngineNotOff)
-        ));
+    fn release_page_is_derived_only_from_a_canonical_version() {
+        assert_eq!(
+            release_page_url(&authorization("0.4.1")).expect("canonical release"),
+            "https://github.com/billlza/cfw-rs/releases/tag/v0.4.1"
+        );
+        for rejected in ["01.4.1", "0.4", "0.4.1+build.1/"] {
+            assert!(
+                release_page_url(&authorization(rejected)).is_err(),
+                "accepted unsafe release version {rejected:?}"
+            );
+        }
     }
 }

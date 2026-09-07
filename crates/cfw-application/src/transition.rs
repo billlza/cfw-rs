@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use cfw_engine_api::{
-    BackendError, EngineBackend, EngineCommandContext, EngineGenerationStore, EngineMode,
-    EngineOwner, EngineSnapshot, EngineState, TunnelInstallOutcome,
+    BackendError, BackendErrorKind, EngineBackend, EngineCommandContext, EngineGenerationStore,
+    EngineMode, EngineOwner, EngineSnapshot, EngineState, TunnelInstallOutcome,
 };
 use cfw_singbox_config::{EngineSettings, ProjectionMode, ValidatedSingBoxProfile};
 use tokio::sync::watch;
@@ -22,6 +22,7 @@ pub(crate) async fn transition(
     context: TransitionContext<'_>,
     state: &mut CoordinatorState,
     target: EngineMode,
+    profile_id: &str,
     profile: &ValidatedSingBoxProfile,
     settings: &EngineSettings,
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
@@ -51,8 +52,10 @@ pub(crate) async fn transition(
         return Err(quarantine.clone());
     }
     let projected = match target {
-        EngineMode::SystemProxy => profile.project(ProjectionMode::SystemProxy, settings)?,
-        EngineMode::Tunnel => profile.project(ProjectionMode::Tunnel, settings)?,
+        EngineMode::SystemProxy => {
+            profile.project(profile_id, ProjectionMode::SystemProxy, settings)?
+        }
+        EngineMode::Tunnel => profile.project(profile_id, ProjectionMode::Tunnel, settings)?,
         EngineMode::Off => unreachable!("off returned before projection"),
     };
 
@@ -118,6 +121,7 @@ pub(crate) async fn transition(
                         EngineOperation::StartSystemProxy,
                         source,
                         operation_timeout,
+                        status_query_timeout,
                     )
                     .await;
                 }
@@ -128,7 +132,15 @@ pub(crate) async fn transition(
                 &context,
                 &request.config_digest,
             ) {
-                return fail_identity(backend, state, snapshots, error, operation_timeout).await;
+                return fail_identity(
+                    backend,
+                    state,
+                    snapshots,
+                    error,
+                    operation_timeout,
+                    status_query_timeout,
+                )
+                .await;
             }
             state.snapshot.state = EngineState::ProxyActive { runtime };
         }
@@ -158,6 +170,7 @@ pub(crate) async fn transition(
                         operation,
                         source,
                         operation_timeout,
+                        status_query_timeout,
                     )
                     .await;
                 }
@@ -191,6 +204,7 @@ pub(crate) async fn transition(
                         EngineOperation::StartTunnel,
                         source,
                         operation_timeout,
+                        status_query_timeout,
                     )
                     .await;
                 }
@@ -201,7 +215,15 @@ pub(crate) async fn transition(
                 &context,
                 &request.config_digest,
             ) {
-                return fail_identity(backend, state, snapshots, error, operation_timeout).await;
+                return fail_identity(
+                    backend,
+                    state,
+                    snapshots,
+                    error,
+                    operation_timeout,
+                    status_query_timeout,
+                )
+                .await;
             }
             state.snapshot.state = EngineState::TunnelActive { runtime };
         }
@@ -289,6 +311,7 @@ async fn fail_backend(
     operation: EngineOperation,
     source: BackendError,
     operation_timeout: Duration,
+    status_query_timeout: Duration,
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
     let target = state.snapshot.desired_mode;
     let generation = state.snapshot.generation;
@@ -302,8 +325,35 @@ async fn fail_backend(
         set_failed(state, snapshots, target, generation, &error);
         return Err(error);
     }
+    let endpoint_conflict = matches!(
+        (operation, source.kind),
+        (
+            EngineOperation::StartSystemProxy,
+            BackendErrorKind::MixedEndpointInUse | BackendErrorKind::ControllerEndpointInUse
+        ) | (
+            EngineOperation::StartTunnel,
+            BackendErrorKind::ControllerEndpointInUse
+        )
+    );
     let error = match stop_owned_runtime(backend, state, snapshots, operation_timeout).await {
-        Ok(()) => backend_error(operation, source),
+        Ok(()) => {
+            let start_error = source.clone();
+            match prove_global_off(backend, state, snapshots, status_query_timeout).await {
+                Ok(()) if endpoint_conflict => {
+                    set_off(state, snapshots);
+                    return Err(EngineCoordinatorError::StartEndpointConflictAfterOff {
+                        operation,
+                        conflict: source.kind,
+                    });
+                }
+                Ok(()) => backend_error(operation, source),
+                Err(proof_error) => EngineCoordinatorError::StartAndOffProofFailed {
+                    start_operation: operation,
+                    start_error,
+                    proof_error: Box::new(proof_error),
+                },
+            }
+        }
         Err(EngineCoordinatorError::Backend {
             operation: cleanup_operation,
             source: cleanup_error,
@@ -325,6 +375,7 @@ async fn fail_identity(
     snapshots: &watch::Sender<EngineSnapshot>,
     error: EngineCoordinatorError,
     operation_timeout: Duration,
+    status_query_timeout: Duration,
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
     let target = state.snapshot.desired_mode;
     let generation = state.snapshot.generation;
@@ -346,6 +397,16 @@ async fn fail_identity(
         set_failed(state, snapshots, target, generation, &combined);
         return Err(combined);
     }
+    if let Err(proof_error) =
+        prove_global_off(backend, state, snapshots, status_query_timeout).await
+    {
+        let combined = EngineCoordinatorError::ValidationAndOffProofFailed {
+            validation_error: Box::new(error),
+            proof_error: Box::new(proof_error),
+        };
+        set_failed(state, snapshots, target, generation, &combined);
+        return Err(combined);
+    }
     set_failed(state, snapshots, target, generation, &error);
     Err(error)
 }
@@ -357,15 +418,17 @@ pub(crate) async fn transition_to_off(
     operation_timeout: Duration,
     generation_store: Option<&dyn EngineGenerationStore>,
 ) -> Result<EngineSnapshot, EngineCoordinatorError> {
-    let was_already_off = state.native_lease.is_none() && state.snapshot.state == EngineState::Off;
+    let was_already_off = state.native_lease.is_none()
+        && state.quarantine.is_none()
+        && state.snapshot.state == EngineState::Off;
     state.snapshot.desired_mode = EngineMode::Off;
-    let owned_previous_runtime = state.native_lease.is_some();
+    let requires_off_proof = state.native_lease.is_some() || state.quarantine.is_some();
     stop_owned_runtime(backend, state, snapshots, operation_timeout).await?;
     // Route stop through owner revocation/stopped attestation (the stop above)
     // and an independent OS-state observation before committing Off. A lingering
     // owner or an unavailable observation keeps the coordinator fail-closed and
     // leaves any quarantine in place; it never becomes Off from ambiguity.
-    if owned_previous_runtime {
+    if requires_off_proof {
         prove_global_off(backend, state, snapshots, operation_timeout).await?;
     }
     // The stop barrier plus the proven Off observation above are the explicit

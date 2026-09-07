@@ -34,7 +34,12 @@ async fn expect_backend_kind(
     expected: BackendErrorKind,
 ) -> EngineCoordinatorError {
     let error = coordinator
-        .set_mode(target, direct(), EngineSettings::default())
+        .set_mode(
+            target,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect_err("typed authority failure");
     match &error {
@@ -101,7 +106,12 @@ async fn replay_rejection_surfaces_typed_error_and_stays_recoverable() {
         .lock()
         .expect("tunnel start error lock") = None;
     let active = coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("fresh context starts after replay rejection");
     assert!(matches!(active.state, EngineState::TunnelActive { .. }));
@@ -123,6 +133,210 @@ async fn registration_required_surfaces_typed_error() {
         BackendErrorKind::GlobalAuthorityRegistrationRequired,
     )
     .await;
+}
+
+#[tokio::test]
+async fn system_proxy_endpoint_conflict_returns_off_for_a_fresh_projection() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend
+        .proxy_start_error
+        .lock()
+        .expect("proxy start error lock") = Some(BackendErrorKind::MixedEndpointInUse);
+    let coordinator = coordinator(backend.clone());
+
+    let error = coordinator
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect_err("occupied mixed endpoint requires a fresh projection");
+
+    assert_eq!(
+        error,
+        EngineCoordinatorError::StartEndpointConflictAfterOff {
+            operation: crate::EngineOperation::StartSystemProxy,
+            conflict: BackendErrorKind::MixedEndpointInUse,
+        }
+    );
+    assert_eq!(backend.operations(), vec!["start_proxy", "stop_proxy"]);
+    assert_eq!(coordinator.snapshot().state, EngineState::Off);
+}
+
+#[tokio::test]
+async fn tunnel_controller_conflict_requires_stop_and_independent_off_proof() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend
+        .tunnel_start_error
+        .lock()
+        .expect("tunnel start error lock") = Some(BackendErrorKind::ControllerEndpointInUse);
+    let coordinator = coordinator(backend.clone());
+
+    let error = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect_err("occupied controller endpoint requires a fresh projection");
+
+    assert_eq!(
+        error,
+        EngineCoordinatorError::StartEndpointConflictAfterOff {
+            operation: crate::EngineOperation::StartTunnel,
+            conflict: BackendErrorKind::ControllerEndpointInUse,
+        }
+    );
+    assert_eq!(
+        backend.operations(),
+        vec!["install_tunnel", "start_tunnel", "stop_tunnel"]
+    );
+    assert_eq!(coordinator.snapshot().state, EngineState::Off);
+}
+
+#[tokio::test]
+async fn impossible_tunnel_mixed_conflict_is_not_admitted_for_endpoint_retry() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend
+        .tunnel_start_error
+        .lock()
+        .expect("tunnel start error lock") = Some(BackendErrorKind::MixedEndpointInUse);
+    let coordinator = coordinator(backend.clone());
+
+    let error = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect_err("mixed conflicts cannot originate from Tunnel");
+
+    assert!(matches!(
+        error,
+        EngineCoordinatorError::Backend {
+            operation: crate::EngineOperation::StartTunnel,
+            source: cfw_engine_api::BackendError {
+                kind: BackendErrorKind::MixedEndpointInUse,
+                ..
+            },
+        }
+    ));
+    assert!(matches!(
+        coordinator.snapshot().state,
+        EngineState::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn endpoint_code_from_tunnel_install_is_not_admitted_for_endpoint_retry() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend
+        .tunnel_install_error
+        .lock()
+        .expect("tunnel install error lock") = Some(BackendErrorKind::ControllerEndpointInUse);
+    let coordinator = coordinator(backend.clone());
+
+    let error = coordinator
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect_err("install cannot report a runtime endpoint conflict");
+
+    assert!(matches!(
+        error,
+        EngineCoordinatorError::Backend {
+            operation: crate::EngineOperation::InstallTunnel,
+            source: cfw_engine_api::BackendError {
+                kind: BackendErrorKind::ControllerEndpointInUse,
+                ..
+            },
+        }
+    ));
+    assert_eq!(
+        backend.operations(),
+        vec!["install_tunnel", "cancel_tunnel_install"]
+    );
+    assert!(matches!(
+        coordinator.snapshot().state,
+        EngineState::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn endpoint_conflict_with_failed_cleanup_stays_failed_and_is_not_retryable() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend
+        .proxy_start_error
+        .lock()
+        .expect("proxy start error lock") = Some(BackendErrorKind::ControllerEndpointInUse);
+    *backend.fail_proxy_stop.lock().expect("proxy stop lock") = true;
+    let coordinator = coordinator(backend.clone());
+
+    let error = coordinator
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect_err("failed cleanup cannot authorize endpoint retry");
+
+    assert!(matches!(
+        error,
+        EngineCoordinatorError::StartAndCleanupFailed { .. }
+    ));
+    assert!(matches!(
+        coordinator.snapshot().state,
+        EngineState::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn endpoint_conflict_with_lingering_owner_stays_quarantined() {
+    let backend = Arc::new(FakeBackend::default());
+    *backend
+        .proxy_start_error
+        .lock()
+        .expect("proxy start error lock") = Some(BackendErrorKind::MixedEndpointInUse);
+    *backend
+        .stop_leaves_owner_present
+        .lock()
+        .expect("owner observation lock") = true;
+    *backend
+        .start_error_leaves_owner_present
+        .lock()
+        .expect("start error owner lock") = true;
+    let coordinator = coordinator(backend.clone());
+
+    let error = coordinator
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
+        .await
+        .expect_err("lingering owner cannot authorize endpoint retry");
+
+    assert!(
+        matches!(error, EngineCoordinatorError::StartAndOffProofFailed { .. }),
+        "unexpected lingering-owner classification: {error:?}"
+    );
+    assert!(matches!(
+        coordinator.snapshot().state,
+        EngineState::Failed { .. }
+    ));
 }
 
 #[tokio::test]
@@ -153,7 +367,12 @@ async fn compensation_conflict_quarantines_and_blocks_newer_operations() {
         .lock()
         .expect("tunnel start error lock") = None;
     let blocked = coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect_err("quarantine blocks a newer operation");
     assert_eq!(
@@ -169,7 +388,12 @@ async fn compensation_conflict_quarantines_and_blocks_newer_operations() {
     // Only an explicit Off reconciliation that proves the stop barrier clears
     // the quarantine; afterwards a fresh start is permitted.
     coordinator
-        .set_mode(EngineMode::Off, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("explicit Off reconciliation proves the stop barrier");
     assert_eq!(
@@ -178,7 +402,12 @@ async fn compensation_conflict_quarantines_and_blocks_newer_operations() {
     );
 
     let active = coordinator
-        .set_mode(EngineMode::SystemProxy, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::SystemProxy,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("reconciled coordinator accepts a fresh start");
     assert!(matches!(active.state, EngineState::ProxyActive { .. }));
@@ -205,7 +434,12 @@ async fn cleanup_unproven_quarantine_survives_repeated_start_attempts() {
     // and never touch the backend again.
     for target in [EngineMode::SystemProxy, EngineMode::Tunnel] {
         let blocked = coordinator
-            .set_mode(target, direct(), EngineSettings::default())
+            .set_mode(
+                target,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+                direct(),
+                EngineSettings::default(),
+            )
             .await
             .expect_err("quarantine is sticky until reconciliation");
         assert_eq!(blocked, quarantine);
@@ -239,7 +473,12 @@ async fn quarantine_clears_only_after_a_proven_off_stop() {
         .expect("tunnel install error lock") = None;
 
     coordinator
-        .set_mode(EngineMode::Off, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Off,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("Off reconciliation cancels the retained installation and proves Off");
     assert_eq!(
@@ -249,7 +488,12 @@ async fn quarantine_clears_only_after_a_proven_off_stop() {
     assert_eq!(coordinator.snapshot().state, EngineState::Off);
 
     let active = coordinator
-        .set_mode(EngineMode::Tunnel, direct(), EngineSettings::default())
+        .set_mode(
+            EngineMode::Tunnel,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
+            direct(),
+            EngineSettings::default(),
+        )
         .await
         .expect("fresh start after proven Off");
     assert!(matches!(active.state, EngineState::TunnelActive { .. }));

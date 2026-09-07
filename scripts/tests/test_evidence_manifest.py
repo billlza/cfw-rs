@@ -117,6 +117,14 @@ class EvidenceManifestValidTests(unittest.TestCase):
 
 
 class EvidenceManifestRejectionTests(unittest.TestCase):
+    def test_schema_version_rejects_float_and_bool(self) -> None:
+        for invalid in (1.0, True):
+            with self.subTest(invalid=invalid):
+                value = fixture()
+                value["schema_version"] = invalid
+                with self.assertRaisesRegex(EvidenceManifestError, "schema_version"):
+                    validate_evidence_manifest(value)
+
     def test_missing_predecessor_fails_closed(self) -> None:
         value = copy.deepcopy(fixture())
         cap = value["capabilities"][0]

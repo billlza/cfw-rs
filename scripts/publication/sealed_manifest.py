@@ -7,7 +7,8 @@ black box, into one canonical, self-sealing, immutable document:
 * the P0 source / build-boundary gates (``scripts/verify_release_authority_gate.py``,
   ``scripts/verify_production_boundary_removal.py``,
   ``scripts/verify_native_product_graph.py``,
-  ``scripts/verify_pinned_build_inputs.py``,
+  ``scripts/verify_pinned_source_contract.py``,
+  ``scripts/verify_physical_capture_readiness.py``,
   ``scripts/verify_build_boundaries.sh``,
   ``scripts/release_workspace_secret_gate.sh``) recorded as content-addressed
   command results bound to one commit;
@@ -20,8 +21,8 @@ black box, into one canonical, self-sealing, immutable document:
   (``publication.sealed_closure``);
 * the task-12.2 final-candidate notarization / installed binding
   (``publication.final_candidate``);
-* the path/name-only updater-key release blocker
-  (``updater_key_release_blocker``), which never opens a key file; and
+* the path/name-only workspace secret-material blocker
+  (``release_secret_material_blocker``), which never opens a key file; and
 * the canonical inner Evidence_Manifest validator (``scripts/evidence_manifest.py``),
   which owns per-capability level closure, content-addressed report bindings,
   and identity binding.
@@ -46,7 +47,7 @@ On top of those it enforces the rules that only the outer seal can enforce
    field is rejected.
 5. **Publication is fail closed.** Publication artifacts may be created only
    when the P0 source, unsigned-CI, signed-installed, sealed-closure,
-   final-candidate, and updater-key-custody gates all pass and every capability
+   final-candidate, and release-secret-custody gates all pass and every capability
    has reached the sealed level. There is no fallback, no override flag, and no
    way to convert an unavailable input into success.
 
@@ -86,11 +87,22 @@ try:  # pragma: no cover - import shim exercised by both invocation styles
     from scripts.harness.physical_evidence_aggregator import (
         GRANTED_LEVEL as PHYSICAL_GRANTED_LEVEL,
         PhysicalEvidenceError,
-        validate_physical_evidence,
+        load_physical_evidence_artifact,
     )
-    from scripts.release_build_identity import BuildIdentityError, canonical_build_version
-    from scripts.updater_key_release_blocker import (
-        UpdaterKeyReleaseBlock,
+    from scripts.harness.raw_artifacts import (
+        CollectorTrustNotConfiguredError,
+        CollectorTrustPolicy,
+        RawArtifactError,
+        load_release_trust_policy,
+        parse_descriptor,
+    )
+    from scripts.release_build_identity import (
+        BuildIdentityError,
+        canonical_build_version,
+        ga_root,
+    )
+    from scripts.release_secret_material_blocker import (
+        SecretMaterialReleaseBlock,
         evaluate_workspace,
     )
 except ImportError:  # pragma: no cover - CLI invocation style
@@ -106,27 +118,49 @@ except ImportError:  # pragma: no cover - CLI invocation style
     from scripts.harness.physical_evidence_aggregator import (
         GRANTED_LEVEL as PHYSICAL_GRANTED_LEVEL,
         PhysicalEvidenceError,
-        validate_physical_evidence,
+        load_physical_evidence_artifact,
     )
-    from scripts.release_build_identity import BuildIdentityError, canonical_build_version
-    from scripts.updater_key_release_blocker import (
-        UpdaterKeyReleaseBlock,
+    from scripts.harness.raw_artifacts import (
+        CollectorTrustNotConfiguredError,
+        CollectorTrustPolicy,
+        RawArtifactError,
+        load_release_trust_policy,
+        parse_descriptor,
+    )
+    from scripts.release_build_identity import (
+        BuildIdentityError,
+        canonical_build_version,
+        ga_root,
+    )
+    from scripts.release_secret_material_blocker import (
+        SecretMaterialReleaseBlock,
         evaluate_workspace,
     )
 
 from scripts.publication.final_candidate import (  # noqa: E402
     PRODUCT_VERSION,
     VERIFIED as CANDIDATE_VERIFIED,
+    self_check as final_candidate_self_check,
     validate_final_candidate_binding,
 )
 from scripts.publication.sealed_closure import (  # noqa: E402
     SEALED as CLOSURE_SEALED,
     validate_sealed_closure,
 )
+from scripts.release_capability_inventory import (  # noqa: E402
+    INVENTORY_PATH as CAPABILITY_INVENTORY_PATH,
+    require_complete_capability_set,
+    require_fixed_evidence_mapping,
+)
+from scripts.repository_source_identity import (  # noqa: E402
+    SourceIdentityError,
+    current_identity,
+)
 
 
 SCHEMA_VERSION = 1
 DOCUMENT_KIND = "sealed-outer-evidence-manifest-v1"
+DOCUMENT_VISIBILITY = "private-release-operations"
 
 # Outer manifest statuses. ``sealed`` is only reachable when every composed gate
 # passes; otherwise the manifest seals to ``blocked``.
@@ -153,6 +187,12 @@ RESULT_STATUSES = frozenset(
 MACOS_MIN = "15.0"
 ARCH = "arm64"
 LICENSE = "GPL-3.0-or-later"
+SOURCE_GATE_SCHEMA_VERSION = 3
+SOURCE_GATE_DOCUMENT = "p0-source-gates-v3"
+SOURCE_GATE_MAX_ATTEMPTS = 64
+SOURCE_GATE_MAX_DOCUMENT_BYTES = 256 * 1024
+SOURCE_GATE_COMPLETED = "completed"
+SOURCE_GATE_OUTCOME_UNKNOWN = "outcome-unknown"
 
 # The evidence hierarchy is imported from the canonical Evidence_Manifest so the
 # level names can never drift: Source_Implemented < Unsigned_CI_Verified <
@@ -168,7 +208,7 @@ GATE_ORDER = (
     "signed_installed",
     "sealed_closure",
     "final_candidate",
-    "updater_key_custody",
+    "release_secret_custody",
 )
 GATE_LEVEL: dict[str, str] = {
     "p0_source": SOURCE_LEVEL,
@@ -176,13 +216,12 @@ GATE_LEVEL: dict[str, str] = {
     "signed_installed": INSTALLED_LEVEL,
     "sealed_closure": SEALED_LEVEL,
     "final_candidate": SEALED_LEVEL,
-    # Updater-key custody is a release blocker (Requirement 8.1): unresolved
-    # custody blocks the sealed level and publication.
-    "updater_key_custody": SEALED_LEVEL,
+    # Workspace secret custody is a release blocker (Requirement 8.1).
+    "release_secret_custody": SEALED_LEVEL,
 }
 
 # The gates whose input is supplied per environment (``None`` means "not
-# available here"). Updater-key custody is always derived from the workspace.
+# available here"). Secret custody is always derived from the workspace.
 COMPOSED_INPUTS = (
     "p0_source",
     "unsigned_ci",
@@ -190,7 +229,7 @@ COMPOSED_INPUTS = (
     "sealed_closure",
     "final_candidate",
 )
-UPDATER_KEY_GATE = "updater_key_custody"
+RELEASE_SECRET_GATE = "release_secret_custody"
 
 # The P0 source / boundary gates that must all pass before any capability may
 # claim Source_Implemented. Each entry is a real repository gate script; a
@@ -199,7 +238,8 @@ REQUIRED_SOURCE_GATES: dict[str, str] = {
     "release-authority-gate": "scripts/verify_release_authority_gate.py",
     "production-boundary-removal": "scripts/verify_production_boundary_removal.py",
     "native-product-graph": "scripts/verify_native_product_graph.py",
-    "pinned-build-inputs": "scripts/verify_pinned_build_inputs.py",
+    "pinned-source-contract": "scripts/verify_pinned_source_contract.py",
+    "physical-capture-readiness": "scripts/verify_physical_capture_readiness.py",
     "build-script-boundary": "scripts/verify_build_boundaries.sh",
     "workspace-secret-gate": "scripts/release_workspace_secret_gate.sh",
 }
@@ -218,6 +258,7 @@ REQUIRED_CI_LANES: tuple[str, ...] = (
     "rust-test",
     "rust-target-audit",
     "cargo-deny",
+    "packet-lan-peer",
     "node-install",
     "node-test",
     "node-build",
@@ -239,9 +280,10 @@ REQUIRED_CI_LANES: tuple[str, ...] = (
 # Feature documents bound by content digest. The manifest records the exact
 # reviewed specification it was sealed against, so a later edit invalidates it.
 REQUIRED_DOCUMENTS: dict[str, str] = {
-    "requirements": ".kiro/specs/macos15-network-extension-migration/requirements.md",
-    "design": ".kiro/specs/macos15-network-extension-migration/design.md",
-    "tasks": ".kiro/specs/macos15-network-extension-migration/tasks.md",
+    "requirements": "docs/release/macos15-network-extension-migration/requirements.md",
+    "design": "docs/release/macos15-network-extension-migration/design.md",
+    "tasks": "docs/release/macos15-network-extension-migration/tasks.md",
+    "capability-inventory": CAPABILITY_INVENTORY_PATH,
 }
 
 # Publication documents bound by content digest from the sealed closure. Each
@@ -256,9 +298,12 @@ PUBLICATION_DOCUMENTS: tuple[tuple[str, str, str], ...] = (
     ("cyclonedx-sbom", "sbom", "cyclonedx_sha256"),
 )
 
-# Where the release pipeline stages the composed inputs and the one sealed
-# manifest, alongside the existing 0.4.0 candidate/publication layout.
-DEFAULT_EVIDENCE_DIRECTORY = "target/candidates/0.4.0/release/sealed-manifest"
+# The outer-manifest validator is still callable by its dedicated CLI and by
+# source/CI collectors.  Keep its default state inside the one active GA stage
+# input root; the retired parallel ``release`` namespace is never recreated.
+DEFAULT_EVIDENCE_DIRECTORY = str(
+    ga_root(Path()) / "stage-inputs/sealed-manifest"
+)
 DEFAULT_MANIFEST_NAME = "sealed-evidence-manifest.json"
 DEFAULT_MANIFEST_PATH = f"{DEFAULT_EVIDENCE_DIRECTORY}/{DEFAULT_MANIFEST_NAME}"
 
@@ -334,6 +379,7 @@ def _result_entry(
     fields: set[str],
     commit: str,
     toolchain_sha256: str | None,
+    release_source_sha256: str | None,
 ) -> dict[str, Any]:
     """Normalize one recorded command result and reject every masking shape."""
     entry = require_exact_keys(raw, fields, f"{label}[{index}]")
@@ -387,6 +433,16 @@ def _result_entry(
                 f"{label} {identifier!r} is bound to a different toolchain than the manifest"
             )
         normalized["toolchain_sha256"] = bound
+    if release_source_sha256 is not None:
+        source_bound = require_sha256(
+            entry["release_source_sha256"],
+            f"{label} {identifier!r} release_source_sha256",
+        )
+        if source_bound != release_source_sha256:
+            raise PublicationError(
+                f"{label} {identifier!r} is bound to different release source bytes"
+            )
+        normalized["release_source_sha256"] = source_bound
     return normalized
 
 
@@ -397,6 +453,7 @@ def _result_set(
     required: tuple[str, ...],
     commit: str,
     toolchain_sha256: str | None,
+    release_source_sha256: str | None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if not isinstance(raw, list) or not raw:
         raise PublicationError(f"{label} must be a non-empty list of recorded results")
@@ -405,7 +462,15 @@ def _result_set(
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, item in enumerate(raw):
-        entry = _result_entry(item, index, label, fields, commit, toolchain_sha256)
+        entry = _result_entry(
+            item,
+            index,
+            label,
+            fields,
+            commit,
+            toolchain_sha256,
+            release_source_sha256,
+        )
         if entry["id"] in seen:
             raise PublicationError(f"{label} repeats the {entry['id']!r} result")
         seen.add(entry["id"])
@@ -423,17 +488,92 @@ def _result_set(
 
 
 def _source_gate_document(
-    repository: Path, value: object, commit: str
+    repository: Path,
+    value: object,
+    commit: str,
+    expected_release_source_sha256: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    payload = require_exact_keys(value, {"gates"}, "p0 source gate document")
-    gates, failures = _result_set(
-        payload["gates"],
-        "p0 source gate",
-        {"id", "script", "status", "exit_code", "log_sha256", "commit"},
-        tuple(REQUIRED_SOURCE_GATES),
-        commit,
-        None,
+    payload = require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "document",
+            "attempt_number",
+            "attempt_outcome",
+            "prior_attempt_sha256s",
+            "repository_commit",
+            "release_source_sha256",
+            "gates",
+        },
+        "p0 source gate document",
     )
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != SOURCE_GATE_SCHEMA_VERSION
+        or payload["document"] != SOURCE_GATE_DOCUMENT
+    ):
+        raise PublicationError("p0 source gate document has an unsupported schema")
+    attempt_number = payload["attempt_number"]
+    if (
+        type(attempt_number) is not int
+        or attempt_number < 1
+        or attempt_number > SOURCE_GATE_MAX_ATTEMPTS
+    ):
+        raise PublicationError("p0 source gate attempt number is outside its fixed bound")
+    attempt_outcome = payload["attempt_outcome"]
+    if not isinstance(attempt_outcome, str) or attempt_outcome not in {
+        SOURCE_GATE_COMPLETED,
+        SOURCE_GATE_OUTCOME_UNKNOWN,
+    }:
+        raise PublicationError("p0 source gate attempt outcome is unsupported")
+    prior_attempt_sha256s = payload["prior_attempt_sha256s"]
+    if (
+        not isinstance(prior_attempt_sha256s, list)
+        or len(prior_attempt_sha256s) != attempt_number - 1
+    ):
+        raise PublicationError("p0 source gate prior-attempt closure is malformed")
+    normalized_prior_attempts = [
+        require_sha256(value, f"p0 source gate prior attempt {index} SHA-256")
+        for index, value in enumerate(prior_attempt_sha256s, start=1)
+    ]
+    document_commit = _require_commit(
+        payload["repository_commit"], "p0 source gate repository commit"
+    )
+    if document_commit != commit:
+        raise PublicationError("p0 source gate document is bound to a different commit")
+    release_source_sha256 = require_sha256(
+        payload["release_source_sha256"], "p0 source gate release_source_sha256"
+    )
+    if (
+        expected_release_source_sha256 is not None
+        and release_source_sha256 != expected_release_source_sha256
+    ):
+        raise PublicationError(
+            "p0 source gate document is bound to a different release source"
+        )
+    if attempt_outcome == SOURCE_GATE_OUTCOME_UNKNOWN:
+        if payload["gates"] != []:
+            raise PublicationError("outcome-unknown p0 source gate attempt has results")
+        gates: list[dict[str, Any]] = []
+        failures = [SOURCE_GATE_OUTCOME_UNKNOWN]
+    else:
+        gates, failures = _result_set(
+            payload["gates"],
+            "p0 source gate",
+            {
+                "id",
+                "script",
+                "status",
+                "exit_code",
+                "log_sha256",
+                "commit",
+                "release_source_sha256",
+            },
+            tuple(REQUIRED_SOURCE_GATES),
+            commit,
+            None,
+            release_source_sha256,
+        )
     for gate in gates:
         expected = REQUIRED_SOURCE_GATES[gate["id"]]
         if gate["script"] != expected:
@@ -444,21 +584,98 @@ def _source_gate_document(
         if path.is_symlink() or not path.is_file():
             # The gate cannot be proven if the gate script is absent.
             raise PublicationError(f"p0 source gate script is missing: {expected}")
-    return {"gates": gates}, failures
+    return {
+        "schema_version": SOURCE_GATE_SCHEMA_VERSION,
+        "document": SOURCE_GATE_DOCUMENT,
+        "attempt_number": attempt_number,
+        "attempt_outcome": attempt_outcome,
+        "prior_attempt_sha256s": normalized_prior_attempts,
+        "repository_commit": document_commit,
+        "release_source_sha256": release_source_sha256,
+        "gates": gates,
+    }, failures
 
 
-def _ci_lane_document(value: object, commit: str) -> tuple[dict[str, Any], list[str]]:
-    payload = require_exact_keys(value, {"toolchain_sha256", "lanes"}, "unsigned CI lane document")
+def _ci_lane_document(
+    value: object,
+    commit: str,
+    expected_release_source_sha256: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    payload = require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "document",
+            "release_source_sha256",
+            "toolchain_sha256",
+            "lanes",
+        },
+        "unsigned CI lane document",
+    )
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != 2
+        or payload["document"] != "unsigned-ci-lanes-v2"
+    ):
+        raise PublicationError("unsigned CI lane document has an unsupported schema")
+    release_source_sha256 = require_sha256(
+        payload["release_source_sha256"], "unsigned CI release_source_sha256"
+    )
+    if (
+        expected_release_source_sha256 is not None
+        and release_source_sha256 != expected_release_source_sha256
+    ):
+        raise PublicationError("unsigned CI evidence is bound to different release source bytes")
     toolchain = require_sha256(payload["toolchain_sha256"], "unsigned CI toolchain_sha256")
     lanes, failures = _result_set(
         payload["lanes"],
         "unsigned CI lane",
-        {"id", "command", "status", "exit_code", "log_sha256", "commit", "toolchain_sha256"},
+        {
+            "id",
+            "command",
+            "status",
+            "exit_code",
+            "log_sha256",
+            "commit",
+            "release_source_sha256",
+            "toolchain_sha256",
+        },
         REQUIRED_CI_LANES,
         commit,
         toolchain,
+        release_source_sha256,
     )
-    return {"toolchain_sha256": toolchain, "lanes": lanes}, failures
+    return {
+        "schema_version": 2,
+        "document": "unsigned-ci-lanes-v2",
+        "release_source_sha256": release_source_sha256,
+        "toolchain_sha256": toolchain,
+        "lanes": lanes,
+    }, failures
+
+
+def validate_source_gate_document(
+    repository: Path,
+    value: object,
+    commit: str,
+    expected_release_source_sha256: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Public composition boundary for the fixed P0 source-gate document."""
+    return _source_gate_document(
+        repository,
+        value,
+        commit,
+        expected_release_source_sha256,
+    )
+
+
+def validate_ci_lane_document(
+    value: object,
+    commit: str,
+    expected_release_source_sha256: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Public composition boundary for the fixed unsigned-CI lane document."""
+    return _ci_lane_document(value, commit, expected_release_source_sha256)
 
 
 # --------------------------------------------------------------------------
@@ -472,21 +689,33 @@ def _gate(status: str, evidence: Any) -> dict[str, Any]:
     return {"status": status, "evidence": evidence}
 
 
-def _updater_key_gate(workspace_root: Path) -> dict[str, Any]:
-    """Derive the updater-key custody gate by path/name only (Requirement 8.1)."""
+def _release_secret_gate(workspace_root: Path) -> dict[str, Any]:
+    """Derive typed workspace secret custody by path/name only."""
     try:
         responses = list(evaluate_workspace(workspace_root))
-    except UpdaterKeyReleaseBlock as error:
-        raise PublicationError(f"updater-key release blocker failed closed: {error}") from error
+    except SecretMaterialReleaseBlock as error:
+        raise PublicationError(
+            f"release secret-material blocker failed closed: {error}"
+        ) from error
     blocks = [
         {
             # Path and name only; the key file is never opened or read.
             "path": response.detected_path,
             "name": response.detected_name,
+            "credential_kind": response.credential_kind.value,
             "relocation_target": response.relocation_target,
             "exposure_plausible": response.exposure_plausible,
             "rotation_required": response.rotation_required,
-            "trust_migration_required": response.trust_migration_required,
+            "required_trust_action": response.required_trust_action.value,
+            "updater_trust_migration_required": (
+                response.updater_trust_migration_required
+            ),
+            "notary_profile_reprovision_required": (
+                response.notary_profile_reprovision_required
+            ),
+            "trust_domain_identification_required": (
+                response.trust_domain_identification_required
+            ),
         }
         for response in responses
     ]
@@ -494,12 +723,36 @@ def _updater_key_gate(workspace_root: Path) -> dict[str, Any]:
     return _gate(status, {"blocks": blocks})
 
 
-def _signed_installed_gate(value: object, product: dict[str, str]) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise PublicationError("signed-installed aggregate must be a JSON object")
+def _signed_installed_gate(
+    value: object,
+    product: dict[str, str],
+    *,
+    evidence_root: Path,
+    trust_policy: CollectorTrustPolicy | None,
+    fixture: bool,
+) -> dict[str, Any]:
     try:
-        summary = validate_physical_evidence(value)
-    except PhysicalEvidenceError as error:
+        aggregate_artifact = parse_descriptor(
+            value,
+            expected_kinds={"physical-aggregate"},
+            label="signed-installed aggregate artifact",
+        ).as_dict()
+    except RawArtifactError as error:
+        raise PublicationError(f"signed-installed descriptor is invalid: {error}") from error
+    try:
+        policy = load_release_trust_policy() if trust_policy is None else trust_policy
+    except CollectorTrustNotConfiguredError:
+        return _gate(BLOCKED, None)
+    except RawArtifactError as error:
+        raise PublicationError(f"collector trust policy is invalid: {error}") from error
+    try:
+        summary = load_physical_evidence_artifact(
+            aggregate_artifact,
+            evidence_root=evidence_root,
+            trust_policy=policy,
+            fixture=fixture,
+        )
+    except (PhysicalEvidenceError, RawArtifactError) as error:
         raise PublicationError(f"signed-installed evidence is invalid: {error}") from error
     if summary["granted_level"] != INSTALLED_LEVEL:
         raise PublicationError("signed-installed aggregate does not grant the installed level")
@@ -516,6 +769,9 @@ def _signed_installed_gate(value: object, product: dict[str, str]) -> dict[str, 
             "reports": summary["reports"],
             "signed_app_tree_sha256": candidate["signed_app_tree_sha256"],
             "app_manifest_sha256": candidate["app_manifest_sha256"],
+            "trust_policy_sha256": summary["trust_policy_sha256"],
+            "aggregate_artifact": summary["aggregate_artifact"],
+            "private_archive": summary["private_archive"],
         },
     )
 
@@ -554,10 +810,17 @@ def _final_candidate_gate(
     commit: str,
     fixture: bool,
     workspace_root: Path,
+    physical_evidence_root: Path,
+    physical_trust_policy: CollectorTrustPolicy | None,
 ) -> dict[str, Any]:
     try:
         binding = validate_final_candidate_binding(
-            repository, value, fixture=fixture, workspace_root=workspace_root
+            repository,
+            value,
+            fixture=fixture,
+            workspace_root=workspace_root,
+            physical_evidence_root=physical_evidence_root,
+            physical_trust_policy=physical_trust_policy,
         )
     except PublicationError as error:
         raise PublicationError(f"final candidate binding is invalid: {error}") from error
@@ -582,6 +845,9 @@ def _final_candidate_gate(
             ),
             "report_bindings": len(binding["report_bindings"]),
             "installed_runs": [entry["os"] for entry in binding["installed_runs"]],
+            "trust_policy_sha256": binding["physical_trust_policy_sha256"],
+            "aggregate_artifact": binding["physical_evidence"],
+            "private_archive": binding["physical_archive"],
         },
     )
 
@@ -614,12 +880,25 @@ def _cross_bind_gates(gates: dict[str, dict[str, Any]], payload: dict[str, Any])
             raise PublicationError(
                 "signed-installed evidence and final candidate bind different app manifests"
             )
-        # The final candidate embeds the aggregate it was bound to; a different
-        # aggregate here is a stale or substituted run set.
+        if installed["trust_policy_sha256"] != candidate["trust_policy_sha256"]:
+            raise PublicationError(
+                "signed-installed evidence and final candidate bind different "
+                "collector trust policies"
+            )
+        if installed["aggregate_artifact"] != candidate["aggregate_artifact"]:
+            raise PublicationError(
+                "final candidate binds a different physical aggregate artifact than the manifest"
+            )
+        if installed["private_archive"] != candidate["private_archive"]:
+            raise PublicationError(
+                "signed-installed and final-candidate gates derived different private archives"
+            )
+        # Both public inputs carry only the same strict aggregate descriptor;
+        # the raw aggregate and descendants stay in the retained private root.
         embedded = payload["final_candidate"].get("physical_evidence")
         if embedded != payload["signed_installed"]:
             raise PublicationError(
-                "final candidate embeds a different physical evidence aggregate than the manifest"
+                "final candidate binds a different physical evidence descriptor than the manifest"
             )
 
 
@@ -629,7 +908,12 @@ def _cross_bind_gates(gates: dict[str, dict[str, Any]], payload: dict[str, Any])
 
 
 def _inner_manifest(
-    value: object, commit: str, gates: dict[str, dict[str, Any]]
+    repository: Path,
+    value: object,
+    commit: str,
+    gates: dict[str, dict[str, Any]],
+    *,
+    fixture: bool,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     """Validate the canonical inner Evidence_Manifest and derive its claims."""
     if not isinstance(value, dict):
@@ -638,6 +922,23 @@ def _inner_manifest(
         summary = validate_evidence_manifest(value)
     except EvidenceManifestError as error:
         raise PublicationError(f"inner Evidence_Manifest is invalid: {error}") from error
+
+    capability_ids = [capability["id"] for capability in summary["capabilities"]]
+    require_complete_capability_set(repository, capability_ids)
+    require_fixed_evidence_mapping(value)
+
+    # Production seals reopen every raw report from the release repository.
+    # The generic inner validator accepts content-addressed descriptors without
+    # a reports root, but the publication boundary must not seal hashes whose
+    # bytes are missing. Fixture mode remains hermetic and is never publishable.
+    if not fixture:
+        for report in summary["reports"].values():
+            relative = safe_relative(report["path"], f"report {report['id']} path")
+            path = repository.joinpath(*relative.parts)
+            if sha256_file(path) != report["sha256"]:
+                raise PublicationError(
+                    f"inner Evidence_Manifest raw report differs from its binding: {report['id']}"
+                )
 
     identity = summary["identity"]
     if identity["commit"] != commit:
@@ -773,13 +1074,16 @@ def _documents(repository: Path, gates: dict[str, dict[str, Any]], closure: obje
 
 
 def publication_decision(
-    gates: dict[str, dict[str, Any]], capabilities: list[dict[str, Any]]
+    gates: dict[str, dict[str, Any]],
+    capabilities: list[dict[str, Any]],
+    *,
+    fixture: bool = False,
 ) -> dict[str, Any]:
     """Decide whether publication artifacts may be created. Fail closed.
 
     Publication requires every composed gate to pass - P0 source implementation,
     unsigned CI, signed-installed evidence, sealed closure, the final-candidate
-    binding, and updater-key custody - and every capability to have reached
+    binding, and workspace secret custody - and every capability to have reached
     ``Sealed_Release_Evidence``. There is no override and no fallback.
     """
     refusals = [
@@ -792,6 +1096,10 @@ def publication_decision(
         for capability in capabilities
         if capability["highest_level"] != SEALED_LEVEL
     )
+    if fixture:
+        # Fixtures may prove that every substantive gate would pass, but a test
+        # document must never itself authorize creation of publication assets.
+        refusals.append("fixture-mode")
     refusals.sort()
     allowed = not refusals
     return {
@@ -824,6 +1132,7 @@ REQUEST_FIELDS = {
 DOCUMENT_FIELDS = {
     "schema_version",
     "document",
+    "visibility",
     "fixture",
     "status",
     "blocked_inputs",
@@ -845,7 +1154,13 @@ DOCUMENT_FIELDS = {
 
 
 def build_sealed_evidence_manifest(
-    repository: Path, request: object, *, fixture: bool, workspace_root: Path | None = None
+    repository: Path,
+    request: object,
+    *,
+    fixture: bool,
+    workspace_root: Path | None = None,
+    physical_evidence_root: Path | None = None,
+    physical_trust_policy: CollectorTrustPolicy | None = None,
 ) -> dict[str, Any]:
     """Assemble the canonical, self-sealing outer Evidence Manifest.
 
@@ -855,6 +1170,7 @@ def build_sealed_evidence_manifest(
     acceptance.
     """
     root = repository if workspace_root is None else workspace_root
+    evidence_root = repository if physical_evidence_root is None else physical_evidence_root
     payload = require_exact_keys(request, REQUEST_FIELDS, "sealed evidence manifest request")
     product = _product(payload["product"])
     commit = _require_commit(payload["commit"], "repository commit")
@@ -869,7 +1185,11 @@ def build_sealed_evidence_manifest(
         source_document, failures = _source_gate_document(repository, payload["p0_source"], commit)
         gates["p0_source"] = _gate(
             PASSED if not failures else FAILED,
-            {"gates": len(source_document["gates"]), "failed": failures},
+            {
+                "release_source_sha256": source_document["release_source_sha256"],
+                "gates": len(source_document["gates"]),
+                "failed": failures,
+            },
         )
     if payload["unsigned_ci"] is None:
         gates["unsigned_ci"] = _gate(NOT_RUN, None)
@@ -878,15 +1198,54 @@ def build_sealed_evidence_manifest(
         gates["unsigned_ci"] = _gate(
             PASSED if not failures else FAILED,
             {
+                "release_source_sha256": ci_document["release_source_sha256"],
                 "toolchain_sha256": ci_document["toolchain_sha256"],
                 "lanes": len(ci_document["lanes"]),
                 "failed": failures,
             },
         )
+    if (
+        source_document is not None
+        and ci_document is not None
+        and source_document["release_source_sha256"]
+        != ci_document["release_source_sha256"]
+    ):
+        raise PublicationError(
+            "P0 source gates and unsigned CI bind different release sources"
+        )
+    if not fixture:
+        try:
+            observed_source = current_identity(repository, require_clean=True)
+        except (OSError, SourceIdentityError) as error:
+            raise PublicationError(
+                "non-fixture sealing requires one clean release source identity"
+            ) from error
+        if observed_source["repositoryCommit"] != commit:
+            raise PublicationError(
+                "non-fixture sealing request is bound to a different repository commit"
+            )
+        for label, document in (
+            ("P0 source gates", source_document),
+            ("unsigned CI", ci_document),
+        ):
+            if (
+                document is not None
+                and document["release_source_sha256"]
+                != observed_source["releaseSourceSha256"]
+            ):
+                raise PublicationError(
+                    f"non-fixture {label} bind a different release source"
+                )
     if payload["signed_installed"] is None:
         gates["signed_installed"] = _gate(NOT_RUN, None)
     else:
-        gates["signed_installed"] = _signed_installed_gate(payload["signed_installed"], product)
+        gates["signed_installed"] = _signed_installed_gate(
+            payload["signed_installed"],
+            product,
+            evidence_root=evidence_root,
+            trust_policy=physical_trust_policy,
+            fixture=fixture,
+        )
     if payload["sealed_closure"] is None:
         gates["sealed_closure"] = _gate(NOT_RUN, None)
     else:
@@ -897,14 +1256,25 @@ def build_sealed_evidence_manifest(
         gates["final_candidate"] = _gate(NOT_RUN, None)
     else:
         gates["final_candidate"] = _final_candidate_gate(
-            repository, payload["final_candidate"], product, commit, fixture, root
+            repository,
+            payload["final_candidate"],
+            product,
+            commit,
+            fixture,
+            root,
+            evidence_root,
+            physical_trust_policy,
         )
-    gates[UPDATER_KEY_GATE] = _updater_key_gate(root)
+    gates[RELEASE_SECRET_GATE] = _release_secret_gate(root)
 
     _cross_bind_gates(gates, payload)
 
     identity, capabilities, report_digests = _inner_manifest(
-        payload["evidence_manifest"], commit, gates
+        repository,
+        payload["evidence_manifest"],
+        commit,
+        gates,
+        fixture=fixture,
     )
     # No level skipping and no masking: every claimed level must be authorized by
     # its own gate and every predecessor gate.
@@ -917,6 +1287,11 @@ def build_sealed_evidence_manifest(
 
     bindings = {
         "commit": commit,
+        "release_source_sha256": (
+            source_document["release_source_sha256"]
+            if source_document is not None
+            else None if ci_document is None else ci_document["release_source_sha256"]
+        ),
         "product": product,
         "identity": identity,
         "documents_sha256": sha256_bytes(canonical_json(documents)),
@@ -943,15 +1318,31 @@ def build_sealed_evidence_manifest(
             [] if candidate_evidence is None else candidate_evidence["final_artifact_hashes"]
         ),
         "installed_runs": [] if installed_evidence is None else installed_evidence["runs"],
+        "physical_trust_policy_sha256": (
+            None
+            if installed_evidence is None
+            else installed_evidence["trust_policy_sha256"]
+        ),
+        "physical_aggregate_sha256": (
+            None
+            if installed_evidence is None
+            else installed_evidence["aggregate_artifact"]["sha256"]
+        ),
+        "physical_private_archive_sha256": (
+            None
+            if installed_evidence is None
+            else installed_evidence["private_archive"]["binding_sha256"]
+        ),
     }
 
     blocked_inputs = sorted(name for name in GATE_ORDER if gates[name]["status"] != PASSED)
     status = SEALED if not blocked_inputs else BLOCKED
-    publication = publication_decision(gates, capabilities)
+    publication = publication_decision(gates, capabilities, fixture=fixture)
 
     body = {
         "schema_version": SCHEMA_VERSION,
         "document": DOCUMENT_KIND,
+        "visibility": DOCUMENT_VISIBILITY,
         "fixture": bool(fixture),
         "status": status,
         "blocked_inputs": blocked_inputs,
@@ -981,6 +1372,8 @@ def validate_sealed_evidence_manifest(
     *,
     fixture: bool,
     workspace_root: Path | None = None,
+    physical_evidence_root: Path | None = None,
+    physical_trust_policy: CollectorTrustPolicy | None = None,
     require_sealed: bool = False,
 ) -> dict[str, Any]:
     """Fail-closed validation of a sealed outer Evidence Manifest.
@@ -995,8 +1388,14 @@ def validate_sealed_evidence_manifest(
     parsed = require_exact_keys(
         document, DOCUMENT_FIELDS | {"manifest_sha256"}, "sealed evidence manifest"
     )
-    if parsed["schema_version"] != SCHEMA_VERSION or parsed["document"] != DOCUMENT_KIND:
+    if (
+        type(parsed["schema_version"]) is not int
+        or parsed["schema_version"] != SCHEMA_VERSION
+        or parsed["document"] != DOCUMENT_KIND
+    ):
         raise PublicationError("sealed evidence manifest has an unsupported schema/document kind")
+    if parsed["visibility"] != DOCUMENT_VISIBILITY:
+        raise PublicationError("sealed evidence manifest is not private release-operations evidence")
     if parsed["fixture"] is not bool(fixture):
         raise PublicationError("sealed evidence manifest fixture mode mismatch")
     if parsed["status"] not in STATUSES:
@@ -1015,7 +1414,12 @@ def validate_sealed_evidence_manifest(
         "final_candidate": parsed["final_candidate"],
     }
     rebuilt = build_sealed_evidence_manifest(
-        repository, request, fixture=fixture, workspace_root=root
+        repository,
+        request,
+        fixture=fixture,
+        workspace_root=root,
+        physical_evidence_root=physical_evidence_root,
+        physical_trust_policy=physical_trust_policy,
     )
 
     if sorted(parsed["blocked_inputs"]) != rebuilt["blocked_inputs"]:
@@ -1053,8 +1457,8 @@ def authorize_publication_artifacts(
     repository: Path,
     document: object,
     *,
-    fixture: bool = False,
     workspace_root: Path | None = None,
+    physical_evidence_root: Path | None = None,
 ) -> dict[str, Any]:
     """Authorize creating publication artifacts, or refuse. There is no override.
 
@@ -1062,11 +1466,21 @@ def authorize_publication_artifacts(
     validates the sealed manifest, refuses a ``blocked`` manifest, and refuses
     any manifest whose gates or capability levels are not fully sealed.
     """
+    if not isinstance(document, dict) or document.get("fixture") is not False:
+        raise PublicationError("fixture evidence can never authorize publication artifacts")
+    try:
+        production_policy = load_release_trust_policy()
+    except (CollectorTrustNotConfiguredError, RawArtifactError) as error:
+        raise PublicationError(
+            "production collector trust policy is unavailable for publication authorization"
+        ) from error
     result = validate_sealed_evidence_manifest(
         repository,
         document,
-        fixture=fixture,
+        fixture=False,
         workspace_root=workspace_root,
+        physical_evidence_root=physical_evidence_root,
+        physical_trust_policy=production_policy,
         require_sealed=True,
     )
     decision = result["publication"]
@@ -1137,16 +1551,16 @@ def environment_status(
         inputs[name] = {"path": str(candidate), "state": PRESENT if present else NOT_RUN}
         if not present:
             blocked.append(name)
-    gate = _updater_key_gate(root)
+    gate = _release_secret_gate(root)
     if gate["status"] != PASSED:
-        blocked.append(UPDATER_KEY_GATE)
+        blocked.append(RELEASE_SECRET_GATE)
     sealed_present = manifest.is_file() and not manifest.is_symlink()
     return {
         "evidence_directory": str(directory),
         "manifest_path": str(manifest),
         "manifest_state": PRESENT if sealed_present else NOT_RUN,
         "inputs": inputs,
-        "updater_key_blocks": gate["evidence"]["blocks"],
+        "workspace_secret_blocks": gate["evidence"]["blocks"],
         "blocked_inputs": sorted(blocked),
         "status": BLOCKED if blocked else "inputs-present",
     }
@@ -1154,6 +1568,7 @@ def environment_status(
 
 def self_check() -> None:
     """Verify the outer seal's wiring without any evidence file."""
+    final_candidate_self_check()
     if LEVEL_ORDER != (
         "Source_Implemented",
         "Unsigned_CI_Verified",
@@ -1165,7 +1580,7 @@ def self_check() -> None:
         raise PublicationError("the physical aggregator no longer grants the installed level")
     if set(GATE_LEVEL) != set(GATE_ORDER) or len(GATE_ORDER) != 6:
         raise PublicationError("publication gate wiring is inconsistent")
-    if set(COMPOSED_INPUTS) | {UPDATER_KEY_GATE} != set(GATE_ORDER):
+    if set(COMPOSED_INPUTS) | {RELEASE_SECRET_GATE} != set(GATE_ORDER):
         raise PublicationError("composed input wiring is inconsistent")
     if set(ENVIRONMENT_INPUT_FILES) != set(COMPOSED_INPUTS):
         raise PublicationError("composed input file wiring is inconsistent")
@@ -1181,7 +1596,7 @@ def self_check() -> None:
         raise PublicationError("an empty gate table must authorize no evidence level")
     if publication_decision(empty, [])["allowed"]:
         raise PublicationError("an empty gate table must refuse publication")
-    if validate_physical_evidence is None or evaluate_workspace is None:
+    if load_physical_evidence_artifact is None or evaluate_workspace is None:
         raise PublicationError("outer seal is not wired to its dependencies")
     if validate_sealed_closure is None or validate_final_candidate_binding is None:
         raise PublicationError("outer seal is not wired to the sealed closure / final candidate")

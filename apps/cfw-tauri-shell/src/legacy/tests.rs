@@ -1,22 +1,264 @@
 use std::fs;
 use std::os::unix::fs::symlink;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use cfw_core::{LegacyNetworkState, MacOsAppPaths};
+use cfw_core::{LegacyNetworkState, MacOsAppPaths, SettingsStore};
 use cfw_engine_api::{
     EngineCommandContext, EngineMode, EngineOwner, EngineSnapshot, EngineState, RuntimeIdentity,
 };
-use cfw_platform::ServiceModeStatus;
+use cfw_platform::{LegacyServiceJobObservation, LegacyServiceJobProgram, ServiceModeStatus};
 use cfw_profiles::ProfileRepository;
 
 use super::migration::{
-    launch_preflight_with, remove_managed_path, require_enabled_login_item, restore_legacy_dns,
+    LaunchRecoveryFailureCategory, bounded_diagnostic_cause, classify_replacement_active_proof,
+    launch_preflight_with, remove_managed_path, require_enabled_login_item,
+    require_explicit_pre_network_recovery, restore_legacy_dns,
 };
 use super::process_cleanup::{
-    ProcessRecord, parse_loopback_listener_owners, parse_managed_process, require_path_absent,
+    ProcessRecord, parse_loopback_listener_owners, parse_managed_process,
+    require_no_launchable_legacy_helper, require_no_legacy_runtime_processes, require_path_absent,
     validate_unique_root_managed_process,
 };
 use super::state_gate::{LegacyCleanupAction, LegacyRetirementGate, LegacyRetirementStatus};
-use super::{require_explicit_cutover_confirmation, require_replacement_active};
+use super::{
+    require_explicit_cutover_confirmation, require_network_start_with, require_normal_start_phase,
+    require_replacement_active, spawn_supervised_app_result,
+};
+
+#[test]
+fn normal_start_leaves_legacy_files_and_missing_marker_untouched() {
+    let root = tempfile::tempdir().expect("temporary app home");
+    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path()));
+    store.ensure_layout().expect("modern layout");
+    let old_settings = b"unparsed legacy settings retained for optional cleanup";
+    fs::write(&store.paths().legacy_settings_file, old_settings).expect("old settings");
+    fs::create_dir(&store.paths().legacy_cores_dir).expect("old core directory");
+    fs::write(
+        store.paths().legacy_cores_dir.join("mihomo"),
+        b"unused old executable",
+    )
+    .expect("old executable");
+    let gate = LegacyRetirementGate::default();
+    let mut observed = false;
+    require_network_start_with(&gate, &store, |cores| {
+        assert_eq!(cores, store.paths().legacy_cores_dir);
+        observed = true;
+        Ok(())
+    })
+    .expect("legacy data is not a network start prerequisite");
+    assert!(observed);
+    assert!(
+        !store
+            .legacy_retirement_completed()
+            .expect("marker remains absent")
+    );
+    assert_eq!(
+        fs::read(&store.paths().legacy_settings_file).expect("retained settings"),
+        old_settings
+    );
+    assert!(store.paths().legacy_cores_dir.join("mihomo").is_file());
+}
+
+#[test]
+fn normal_start_preserves_runtime_observation_failure() {
+    let root = tempfile::tempdir().expect("temporary app home");
+    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path()));
+    store.ensure_layout().expect("modern layout");
+    let refused = "legacy process observation was denied by the operating system";
+    let error = require_network_start_with(&LegacyRetirementGate::default(), &store, |_| {
+        Err(refused.to_owned())
+    })
+    .expect_err("unobservable runtime cannot be admitted as inactive");
+    assert_eq!(error, refused);
+    assert!(
+        !store
+            .legacy_retirement_completed()
+            .expect("marker unchanged")
+    );
+}
+
+#[test]
+fn normal_start_rejects_corrupt_journal_before_runtime_observation() {
+    let root = tempfile::tempdir().expect("temporary app home");
+    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path()));
+    store.ensure_layout().expect("modern layout");
+    let journal = root.path().join("legacy-cutover-journal-v1.json");
+    fs::write(&journal, b"broken journal").expect("corrupt journal");
+    let error = require_network_start_with(&LegacyRetirementGate::default(), &store, |_| {
+        panic!("corrupt journal cannot proceed to runtime admission")
+    })
+    .expect_err("journal is authoritative even when its bytes are invalid");
+    assert!(error.contains("journal"));
+    assert_eq!(
+        fs::read(journal).expect("unchanged journal"),
+        b"broken journal"
+    );
+}
+
+#[test]
+fn unfinished_network_phases_cannot_be_skipped_by_optional_cleanup_status() {
+    use super::journal::CutoverPhase;
+    let optional = LegacyRetirementStatus::AwaitingConfirmation;
+    for phase in [
+        CutoverPhase::Prepared,
+        CutoverPhase::GuiStopped,
+        CutoverPhase::NetworkRetiring,
+        CutoverPhase::LegacyRetired,
+        CutoverPhase::ReplacementActive,
+    ] {
+        assert!(
+            require_normal_start_phase(Some(phase), &optional).is_err(),
+            "{phase:?}"
+        );
+    }
+    assert!(require_normal_start_phase(None, &optional).is_ok());
+    assert!(require_normal_start_phase(Some(CutoverPhase::CleanupComplete), &optional).is_ok());
+    assert!(
+        require_normal_start_phase(
+            Some(CutoverPhase::ReplacementActive),
+            &LegacyRetirementStatus::PostCutoverCleanupRequired {
+                message: "old YAML remains".into()
+            }
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn normal_start_rejects_real_legacy_runtime_but_not_cfw_or_unused_files() {
+    let cores = Path::new("/Users/test/Library/Application Support/Clash for Mac/cores");
+    let other = "0 17 Mon Sep 7 10:00:00 2026 /Applications/Clash for Windows.app/Contents/Resources/static/files/darwin/x64/clash-darwin";
+    require_no_legacy_runtime_processes(other, cores).expect("CFW is a different application");
+    for executable in [
+        cores.join("mihomo"),
+        PathBuf::from("/Library/PrivilegedHelperTools/com.bill.clashformac.helper"),
+    ] {
+        let output = format!(
+            "0 18 Mon Sep 7 10:00:00 2026 {} --service",
+            executable.display()
+        );
+        assert!(require_no_legacy_runtime_processes(&output, cores).is_err());
+    }
+    assert!(require_no_legacy_runtime_processes("invalid process record", cores).is_err());
+}
+
+#[test]
+fn only_network_capable_legacy_jobs_block_normal_start() {
+    require_no_launchable_legacy_helper(LegacyServiceJobObservation::Unloaded).expect("unloaded");
+    for program in [
+        LegacyServiceJobProgram::LegacyHelper,
+        LegacyServiceJobProgram::RetirementTombstone,
+    ] {
+        for job in [
+            LegacyServiceJobObservation::LoadedInactive { program },
+            LegacyServiceJobObservation::LoadedActive { program },
+        ] {
+            assert_eq!(
+                require_no_launchable_legacy_helper(job).is_ok(),
+                program == LegacyServiceJobProgram::RetirementTombstone
+            );
+        }
+    }
+}
+
+#[test]
+fn optional_cleanup_does_not_hide_start_but_active_maintenance_still_serializes_it() {
+    let gate = LegacyRetirementGate::default();
+    gate.require_start_allowed()
+        .expect("new install can start normally");
+    let mut attempt = gate
+        .begin_attempt()
+        .expect("maintenance state")
+        .expect("new attempt");
+    assert!(gate.require_start_allowed().is_err());
+    attempt
+        .mark_failed(LegacyCleanupAction::ReviewDns, "optional old DNS setting")
+        .expect("cleanup failed");
+    gate.require_start_allowed()
+        .expect("cleanup error is not proof of a live conflict");
+    gate.apply_launch_preflight(LegacyRetirementStatus::RecoveryStartRequired {
+        target: EngineMode::Tunnel,
+        message: "unfinished network mutation".into(),
+    })
+    .expect("recovery state");
+    assert!(gate.require_start_allowed().is_err());
+}
+
+#[test]
+fn later_legacy_cleanup_preserves_modern_preferences() {
+    use cfw_core::{AppearanceTheme, UiPreferences};
+    let root = tempfile::tempdir().expect("temporary app home");
+    let store = SettingsStore::new(MacOsAppPaths::from_app_home(root.path()));
+    let legacy = UiPreferences {
+        theme: AppearanceTheme::Light,
+        launch_at_login: true,
+        ..UiPreferences::default()
+    };
+    assert_eq!(
+        super::migration::preferences_for_legacy_cleanup(&store, &legacy)
+            .expect("unwritten modern preferences"),
+        legacy
+    );
+    let modern = UiPreferences {
+        theme: AppearanceTheme::Dark,
+        launch_at_login: false,
+        ..UiPreferences::default()
+    };
+    store
+        .write(&modern)
+        .expect("user writes modern preferences");
+    assert_eq!(
+        super::migration::preferences_for_legacy_cleanup(&store, &legacy)
+            .expect("existing modern preferences win"),
+        modern
+    );
+}
+
+#[tokio::test]
+async fn renderer_response_cancellation_cannot_cancel_the_app_owned_task() {
+    let (release, released) = tokio::sync::oneshot::channel();
+    let completed = Arc::new(AtomicBool::new(false));
+    let after_response = Arc::new(AtomicBool::new(false));
+    let operation_completed = completed.clone();
+    let response_completed = after_response.clone();
+    let receiver = spawn_supervised_app_result(
+        async move {
+            released.await.expect("release app task");
+            operation_completed.store(true, Ordering::Release);
+        },
+        |operation| operation,
+        move || response_completed.store(true, Ordering::Release),
+    );
+    drop(receiver);
+    release.send(()).expect("release sender");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !completed.load(Ordering::Acquire) || !after_response.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached task must reach terminal side effects");
+}
+
+#[tokio::test]
+async fn supervised_app_task_turns_worker_panic_into_a_terminal_error() {
+    let receiver = spawn_supervised_app_result(
+        async move {
+            panic!("injected migration worker panic");
+        },
+        |operation| operation,
+        || {},
+    );
+    let error = receiver
+        .await
+        .expect("supervisor response")
+        .expect_err("worker panic must fail");
+    assert_eq!(error, "migration handoff application task panicked");
+}
 
 #[test]
 fn legacy_retirement_gate_serializes_attempts_and_preserves_post_cutover_access() {
@@ -34,7 +276,10 @@ fn legacy_retirement_gate_serializes_attempts_and_preserves_post_cutover_access(
     attempt
         .mark_post_cutover_cleanup_required("old YAML remains")
         .expect("record post cleanup");
-    assert!(gate.require_cleared().is_ok(), "new engine remains usable");
+    assert!(
+        gate.require_start_allowed().is_ok(),
+        "new engine remains usable"
+    );
     let mut cleanup_retry = gate
         .begin_attempt()
         .expect("query state")
@@ -82,6 +327,82 @@ fn launch_preflight_is_read_only_and_distinguishes_network_from_data_cleanup() {
         launch_preflight_with(|| Ok(true), || Ok(()), || Ok(())),
         LegacyRetirementStatus::Cleared
     );
+}
+
+#[test]
+fn launch_recovery_classifies_a_non_handoff_process_before_other_checks() {
+    let failure = require_explicit_pre_network_recovery(
+        false,
+        || panic!("role rejection must precede admission"),
+        || panic!("role rejection must precede recovery"),
+    )
+    .expect_err("dashboard process must fail closed");
+
+    assert_eq!(failure.category(), LaunchRecoveryFailureCategory::Role);
+    assert!(failure.user_message().contains("Open Recovery"));
+    assert!(failure.user_message().len() <= 512);
+}
+
+#[test]
+fn launch_recovery_classifies_canonical_admission_without_exposing_its_cause() {
+    let failure = require_explicit_pre_network_recovery(
+        true,
+        || Err("private admission detail: /Users/alice/secret".into()),
+        || panic!("recovery must not run after failed admission"),
+    )
+    .expect_err("untrusted install must fail closed");
+
+    assert_eq!(failure.category(), LaunchRecoveryFailureCategory::Admission);
+    assert!(failure.user_message().contains("/Applications"));
+    assert!(!failure.user_message().contains("alice"));
+    assert!(failure.user_message().len() <= 512);
+}
+
+#[test]
+fn launch_recovery_classifies_pre_network_recovery_without_exposing_its_cause() {
+    let failure = require_explicit_pre_network_recovery(
+        true,
+        || Ok(()),
+        || Err("private recovery detail: token=secret".into()),
+    )
+    .expect_err("unproven legacy identity must fail closed");
+
+    assert_eq!(failure.category(), LaunchRecoveryFailureCategory::Recovery);
+    assert!(
+        failure
+            .user_message()
+            .contains("durably seal NetworkRetiring")
+    );
+    assert!(!failure.user_message().contains("secret"));
+    assert!(failure.user_message().len() <= 512);
+}
+
+#[test]
+fn launch_recovery_classifies_replacement_active_proof_without_exposing_its_cause() {
+    let failure =
+        classify_replacement_active_proof(Err("private runtime detail: digest=secret".into()))
+            .expect_err("unproven ReplacementActive must fail closed");
+
+    assert_eq!(
+        failure.category(),
+        LaunchRecoveryFailureCategory::ActiveProof
+    );
+    assert!(failure.user_message().contains("owner, context, digest"));
+    assert!(!failure.user_message().contains("secret"));
+    assert!(failure.user_message().len() <= 512);
+}
+
+#[test]
+fn launch_recovery_cause_is_redacted_by_debug_and_bounded_at_the_diagnostic_boundary() {
+    let failure = classify_replacement_active_proof(Err("token=private\nline two".into()))
+        .expect_err("injected proof failure");
+    let debug = format!("{failure:?}");
+    assert!(!debug.contains("private"));
+
+    let diagnostic = bounded_diagnostic_cause(&format!("first line\n{}", "x".repeat(4096)));
+    assert!(!diagnostic.contains('\n'));
+    assert!(diagnostic.len() <= 2 * 1024);
+    assert!(diagnostic.ends_with(" [truncated]"));
 }
 
 #[test]

@@ -91,10 +91,8 @@ private func activeSystemProxyCore(
 
 private func hostPeer(ownerUID: UInt32) -> PeerIdentity {
   PeerIdentity(
-    auditTokenDigest: livenessDigest(Data("audit".utf8)), pid: 7, euid: ownerUID,
-    auditSessionID: 3, teamID: "YKUPL7Z869", signingID: AuthorityRole.host.rawValue,
-    designatedRequirementDigest: livenessDigest(Data("dr".utf8)),
-    entitlementDigest: livenessDigest(Data("ent".utf8)),
+    connectionIdentityDigest: livenessDigest(Data("connection".utf8)),
+    pid: 7, euid: ownerUID, auditSessionID: 3,
     role: .host, consoleUID: ownerUID)
 }
 
@@ -112,7 +110,9 @@ private func systemProxyPrepare(
     ownerUID: ownerUID, authorityRevision: revision)
   let descriptor = try AuthorityConfigurationDescriptor(
     byteCount: UInt32(configuration.count), configSHA256: configDigest,
-    identitySHA256: livenessIdentity, credentialSlots: [], tunnelOptions: nil)
+    identitySHA256: livenessIdentity,
+    credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: livenessIdentity),
+    credentialSlots: [], tunnelOptions: nil)
   let request = try PrepareStartRequest(
     operation: operation, expectedRevision: revision, configuration: descriptor)
   return (request, configuration)
@@ -175,6 +175,7 @@ private func prepareForRecovering(
     ownerUID: 501, authorityRevision: revision)
   let descriptor = try AuthorityConfigurationDescriptor(
     byteCount: 3, configSHA256: configDigest, identitySHA256: livenessIdentity,
+    credentialAudience: CredentialAudience(profileID: UUID(), profileDigest: livenessIdentity),
     credentialSlots: [], tunnelOptions: nil)
   let request = try PrepareStartRequest(
     operation: operation, expectedRevision: revision, configuration: descriptor)
@@ -230,6 +231,50 @@ private func prepareForRecovering(
 
   // Owner does not attest stopped within five seconds -> Quarantined (cleanup unproven).
   clock.set(13_000)
+  #expect(try supervisor.evaluate() == .quarantinedForUnprovenCleanup)
+  #expect(fixture.core.authorityState == .quarantined)
+}
+
+@Test func repeatedStopDeliveryCannotExtendTheOriginalQuarantineDeadline() throws {
+  let clock = MutableClock(1_000)
+  let fixture = try activeSystemProxyCore(clock: clock)
+  let supervisor = AuthorityLivenessSupervisor(
+    core: fixture.core, clock: clock,
+    consoleResolver: FixedConsoleResolver(uid: 501))
+
+  #expect(try supervisor.forceStop(.connectionLoss) == .forcedStop(.connectionLoss))
+  let stopRevision = fixture.core.currentRevision
+  #expect(fixture.core.authorityState == .stopping)
+
+  // A replay of the same durable stop claim must not restart its five-second
+  // timeout. Otherwise an ACK retry loop could keep an unproven owner forever.
+  clock.set(4_000)
+  supervisor.noteStopOrdered(
+    revision: stopRevision,
+    deadlineMonotonic: 9_000)
+  clock.set(6_001)
+  #expect(try supervisor.evaluate() == .quarantinedForUnprovenCleanup)
+  #expect(fixture.core.authorityState == .quarantined)
+}
+
+@Test func delayedStopDeliveryStillUsesTheDurableDirectiveDeadline() throws {
+  let clock = MutableClock(1_000)
+  let fixture = try activeSystemProxyCore(clock: clock)
+  let supervisor = AuthorityLivenessSupervisor(
+    core: fixture.core, clock: clock,
+    consoleResolver: FixedConsoleResolver(uid: 501))
+  let outcome = try #require(
+    try fixture.core.forceStop(trigger: .connectionLoss))
+  let directive = try #require(outcome.directive)
+  #expect(directive.deadlineMonotonic == 6_000)
+
+  // Recording is deliberately delayed. Enforcement remains tied to the
+  // Authority's directive, not to local delivery latency.
+  clock.set(4_000)
+  supervisor.noteStopOrdered(
+    revision: directive.revision,
+    deadlineMonotonic: directive.deadlineMonotonic)
+  clock.set(6_001)
   #expect(try supervisor.evaluate() == .quarantinedForUnprovenCleanup)
   #expect(fixture.core.authorityState == .quarantined)
 }

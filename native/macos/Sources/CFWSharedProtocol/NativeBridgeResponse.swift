@@ -112,13 +112,19 @@ public enum NativeTunnelInstallOutcome: String, Codable, Sendable {
 public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
   case busy
   case resourceExhausted = "resource_exhausted"
+  case journalCapacityExhausted = "journal_capacity_exhausted"
   case permissionDenied = "permission_denied"
   case approvalDenied = "approval_denied"
   case configurationRejected = "configuration_rejected"
+  case mixedEndpointInUse = "mixed_endpoint_in_use"
+  case controllerEndpointInUse = "controller_endpoint_in_use"
   case credentialsUnavailable = "credentials_unavailable"
   case credentialConflict = "credential_conflict"
   case credentialVaultMissing = "credential_vault_missing"
+  case credentialVaultCorrupt = "credential_vault_corrupt"
+  case credentialMigrationRequired = "credential_migration_required"
   case credentialGCConflict = "credential_gc_conflict"
+  case proxyAgentApprovalRequired = "proxy_agent_approval_required"
   case globalAuthorityUnavailable = "global_authority_unavailable"
   case globalAuthorityRegistrationRequired = "global_authority_registration_required"
   case globalAuthorityApprovalRequired = "global_authority_approval_required"
@@ -150,13 +156,21 @@ public enum NativeBridgeErrorCode: String, Codable, CaseIterable, Sendable {
     switch self {
     case .busy: "Global Authority mutation is busy."
     case .resourceExhausted: "Global Authority read capacity is exhausted."
+    case .journalCapacityExhausted:
+      "The Global Authority journal reached its fixed capacity and requires maintenance."
     case .permissionDenied: "The native operation was denied."
     case .approvalDenied: "Required operating-system approval was denied."
     case .configurationRejected: "The native configuration was rejected."
+    case .mixedEndpointInUse: "The mixed listener endpoint is already in use."
+    case .controllerEndpointInUse: "The controller endpoint is already in use."
     case .credentialsUnavailable: "Required credentials are unavailable."
     case .credentialConflict: "Credential material conflicts with an immutable entry."
     case .credentialVaultMissing: "The credential vault is unavailable."
+    case .credentialVaultCorrupt: "The credential vault data is corrupt."
+    case .credentialMigrationRequired:
+      "The credential vault uses an unsupported schema and must be cleared and reprovisioned."
     case .credentialGCConflict: "Credential cleanup requires a fresh preview."
+    case .proxyAgentApprovalRequired: "ProxyAgent approval is required in System Settings."
     case .globalAuthorityUnavailable: "Global Authority is unavailable."
     case .globalAuthorityRegistrationRequired: "Global Authority registration is required."
     case .globalAuthorityApprovalRequired: "Global Authority approval is required."
@@ -247,6 +261,7 @@ public enum NativeBridgeResult: Equatable, Sendable {
   case credentialGarbageCollectionPreview(CredentialGarbageCollectionPreview)
   case credentialGarbageCollectionReceipt(CredentialGarbageCollectionReceipt)
   case cutoverPreflight(CutoverPreflightOutcome)
+  case serviceMaintenance(NativeServiceMaintenanceResult)
 }
 
 extension NativeBridgeResult: Codable {
@@ -265,6 +280,7 @@ extension NativeBridgeResult: Codable {
     case credentialGarbageCollectionPreview = "credential_garbage_collection_preview"
     case credentialGarbageCollectionReceipt = "credential_garbage_collection_receipt"
     case cutoverPreflight = "cutover_preflight"
+    case serviceMaintenance = "service_maintenance"
   }
 
   public init(from decoder: Decoder) throws {
@@ -298,6 +314,10 @@ extension NativeBridgeResult: Codable {
       self = .cutoverPreflight(
         try container.decode(CutoverPreflightOutcome.self, forKey: .value)
       )
+    case .serviceMaintenance:
+      self = .serviceMaintenance(
+        try container.decode(NativeServiceMaintenanceResult.self, forKey: .value)
+      )
     }
   }
 
@@ -330,6 +350,9 @@ extension NativeBridgeResult: Codable {
     case .cutoverPreflight(let outcome):
       try container.encode(Kind.cutoverPreflight, forKey: .kind)
       try container.encode(outcome, forKey: .value)
+    case .serviceMaintenance(let result):
+      try container.encode(Kind.serviceMaintenance, forKey: .kind)
+      try container.encode(result, forKey: .value)
     }
   }
 }

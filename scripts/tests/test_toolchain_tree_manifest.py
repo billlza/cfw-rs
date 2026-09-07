@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -1379,9 +1380,7 @@ LIBBOX_VET_PACKAGES=(".")
         ordered_commands = (
             "scripts/run_current_service_transaction.sh --recommission",
             "scripts/run_ga_acceptance_journal_export.sh --export",
-            "scripts/run_ga_acceptance_journal_export.sh --verify",
             "scripts/run_ga_runtime_acceptance.sh collect",
-            "scripts/run_ga_runtime_acceptance.sh verify",
             "scripts/release_publication_gate.sh --seal-ga-acceptance",
         )
         positions = [runbook.index(command) for command in ordered_commands]
@@ -1389,6 +1388,18 @@ LIBBOX_VET_PACKAGES=(".")
         self.assertIn(
             "`--recover` is not a normal post-export step",
             runbook,
+        )
+        runtime_section = runbook[
+            runbook.index("7. after the atomic journal export verifies"):
+            runbook.index("8. the two-clean-OS physical aggregate")
+        ]
+        self.assertIn(
+            "investigation, `scripts/run_ga_runtime_acceptance.sh verify` remains available",
+            runtime_section,
+        )
+        self.assertIn(
+            "it is not an extra step after successful collection",
+            runtime_section,
         )
         for required in (
             "service-transaction/environment.json",
@@ -1409,6 +1420,48 @@ LIBBOX_VET_PACKAGES=(".")
             with self.subTest(required=required):
                 self.assertIn(required, policy)
         self.assertNotIn("migration-journals/environment.json", policy)
+
+    def test_runtime_collect_success_returns_sealed_and_reopened_evidence(self) -> None:
+        source = (SCRIPTS / "ga_runtime_acceptance.py").read_text(encoding="utf-8")
+        functions = {
+            node.name: node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef)
+        }
+        collect = functions["collect_ga_runtime_acceptance"]
+        success = next(node for node in collect.body if isinstance(node, ast.Try))
+        calls = {
+            node.func.id: node.lineno
+            for statement in success.body
+            for node in ast.walk(statement)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        positions = [calls[name] for name in (
+            "_validate_raw_evidence", "_publish_collected_raw", "seal_ga_runtime_acceptance"
+        )]
+        self.assertEqual(positions, sorted(positions))
+        sealing, completed = success.body[-2:]
+        self.assertIsInstance(sealing, ast.Assign)
+        self.assertIsInstance(sealing.value, ast.Call)
+        self.assertEqual(ast.unparse(sealing.value.func), "seal_ga_runtime_acceptance")
+        self.assertIsInstance(completed, ast.Return)
+        self.assertIsInstance(completed.value, ast.Name)
+        self.assertEqual([ast.unparse(target) for target in sealing.targets], [completed.value.id])
+
+        seal = functions["seal_ga_runtime_acceptance"]
+        reopened = seal.body[-1]
+        self.assertIsInstance(reopened, ast.Return)
+        self.assertIsInstance(reopened.value, ast.Call)
+        self.assertEqual(ast.unparse(reopened.value.func), "validate_ga_runtime_acceptance")
+        self.assertTrue(any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_parser"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "verify"
+            for node in ast.walk(functions["_arguments"])
+        ))
 
     def test_release_runbook_documents_candidate_identity_lifecycle(self) -> None:
         runbook = (REPOSITORY / "RELEASE.md").read_text(encoding="utf-8")

@@ -890,6 +890,10 @@ def _read_source_identity(repository: Path) -> dict[str, str]:
             "source_identity_unavailable",
             "candidate freeze requires one clean release source identity",
         ) from error
+    return _validate_source_identity(value)
+
+
+def _validate_source_identity(value: Any) -> dict[str, str]:
     if (
         type(value) is not dict
         or set(value) != {"repositoryCommit", "releaseSourceSha256"}
@@ -1638,6 +1642,76 @@ def recover_candidate(repository: Path) -> FrozenCandidate:
             "candidate recovery durability remains unknown"
         ) from error
     return _receipt(final_root, verified_raw, recovered=True)
+
+
+def read_frozen_toolchain_metadata(
+    repository: Path,
+    *,
+    source_identity: dict[str, str],
+    expected_intent_sha256: str | None = None,
+) -> dict[str, str]:
+    """Read the consumed build's provenance without rerunning build tools.
+
+    Evidence consumers supply their independently checked artifact source.
+    A consumer already bound to a freeze intent must also supply that digest.
+    This checks the fixed frozen documents on every call; it neither caches a
+    successful verification nor replaces live admission of executing tools.
+    """
+    repository = _require_canonical_repository(repository)
+    preflight_root, root = _fixed_roots(repository)
+    if _require_only_one_root(preflight_root, root) != "final":
+        raise CandidateFreezeQuarantined(
+            "build metadata is available only from the published frozen candidate"
+        )
+    source_identity = _validate_source_identity(source_identity)
+    if expected_intent_sha256 is not None and (
+        not isinstance(expected_intent_sha256, str)
+        or not SHA256_RE.fullmatch(expected_intent_sha256)
+    ):
+        raise CandidateFreezeError(
+            "intent_identity_invalid", "expected candidate-freeze digest is malformed"
+        )
+
+    # Check each fixed ancestor, including the claim directory: leaf-only
+    # regular-file checks must not admit an aliased candidate namespace.
+    claim = root / INTENT_RELATIVE_PATH.parent
+    current = repository
+    for component in claim.relative_to(repository).parts:
+        current /= component
+        _require_canonical_repository(current)
+    _require_exact_private_material_directory(claim, frozenset({"intent.json"}))
+    intent, intent_raw = _load_intent(root)
+    if expected_intent_sha256 is not None and (
+        hashlib.sha256(intent_raw).hexdigest() != expected_intent_sha256
+    ):
+        raise CandidateFreezeQuarantined(
+            "frozen build metadata differs from the receipt-bound candidate-freeze intent"
+        )
+    if (
+        intent["repository_commit"] != source_identity["repositoryCommit"]
+        or intent["release_source_sha256"] != source_identity["releaseSourceSha256"]
+    ):
+        raise CandidateFreezeQuarantined(
+            "frozen build metadata source differs from the checked artifact source"
+        )
+    product_path = root / "product-input.json"
+    product, product_raw = _read_canonical_json(
+        product_path, label="frozen product input"
+    )
+    _validate_product_input(product, source_identity)
+    if hashlib.sha256(product_raw).hexdigest() != intent["product_input_document_sha256"]:
+        raise CandidateFreezeQuarantined(
+            "frozen product input bytes differ from the consumed candidate-freeze intent"
+        )
+    if (
+        _read_regular_file(product_path, maximum=MAX_JSON_BYTES) != product_raw
+        or _load_intent(root)[1] != intent_raw
+    ):
+        raise CandidateFreezeQuarantined(
+            "frozen build metadata changed during read-only verification"
+        )
+    _require_canonical_repository(claim)
+    return dict(product["toolchain"])
 
 
 def verify_frozen_candidate(

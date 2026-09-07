@@ -951,6 +951,142 @@ class CandidateFreezeTests(unittest.TestCase):
         verifier.assert_called_once_with(self.repository, self.final)
         self.assertEqual(caught.exception.code, "updater_verifier_unavailable")
 
+    def test_frozen_build_metadata_reopens_original_provenance_without_tool_or_tree_scan(self) -> None:
+        frozen = self.freeze()
+        with (
+            patch.object(candidate_freeze, "_expected_intent") as full_inputs,
+            patch.object(candidate_freeze, "_tree_identity") as trees,
+            patch.object(candidate_freeze, "verify_possession_proof") as verifier,
+            patch.object(candidate_freeze, "_read_source_identity") as source,
+        ):
+            for expected in (None, frozen.intent_sha256):
+                metadata = candidate_freeze.read_frozen_toolchain_metadata(
+                    self.repository,
+                    source_identity=SOURCE_IDENTITY,
+                    expected_intent_sha256=expected,
+                )
+                self.assertEqual(metadata, TOOLCHAIN)
+            full_inputs.assert_not_called()
+            trees.assert_not_called()
+            verifier.assert_not_called()
+            source.assert_not_called()
+
+    def test_frozen_build_metadata_rejects_source_shape_bytes_and_consumption_drift(self) -> None:
+        frozen = self.freeze()
+        product_path = self.final / "product-input.json"
+        intent_path = frozen.intent_path
+        product_raw, intent_raw = product_path.read_bytes(), intent_path.read_bytes()
+        for attack in (
+            "product-source", "intent-source", "missing-tree", "extra-tree",
+            "invalid-digest", "changed-digest", "product-identity", "product-schema",
+            "product-bytes", "intent-state", "intent-fields", "intent-schema",
+        ):
+            with self.subTest(attack=attack):
+                product, intent = json.loads(product_raw), json.loads(intent_raw)
+                if attack == "product-source":
+                    product["source"]["repository_commit"] = "c" * 40
+                elif attack == "intent-source":
+                    intent["release_source_sha256"] = "c" * 64
+                elif attack == "missing-tree":
+                    del product["toolchain"]["goToolchainTreeSha256"]
+                elif attack == "extra-tree":
+                    product["toolchain"]["unexpectedTreeSha256"] = "c" * 64
+                elif attack == "invalid-digest":
+                    product["toolchain"]["goToolchainTreeSha256"] = "invalid"
+                elif attack == "changed-digest":
+                    product["toolchain"]["goToolchainTreeSha256"] = "c" * 64
+                elif attack == "product-identity":
+                    product["product"]["build_number"] = "40043"
+                elif attack == "product-schema":
+                    product["schema_version"] = True
+                elif attack == "intent-state":
+                    intent["consumption_state"] = "unconsumed"
+                elif attack == "intent-fields":
+                    del intent["product_input_sha256"]
+                elif attack == "intent-schema":
+                    intent["schema_version"] = 2
+                product_bytes = _canonical_json(product)
+                if attack == "product-bytes":
+                    product_bytes += b"\n"
+                product_path.write_bytes(product_bytes)
+                intent_path.write_bytes(_canonical_json(intent))
+                with self.assertRaises(candidate_freeze.CandidateFreezeError):
+                    candidate_freeze.read_frozen_toolchain_metadata(
+                        self.repository, source_identity=SOURCE_IDENTITY
+                    )
+                self.assertEqual(product_path.read_bytes(), product_bytes)
+                product_path.write_bytes(product_raw)
+                intent_path.write_bytes(intent_raw)
+
+    def test_frozen_build_metadata_rejects_wrong_external_bindings_and_partial_source(self) -> None:
+        self.freeze()
+        for source, digest in (
+            (SOURCE_IDENTITY, "c" * 64),
+            (SOURCE_IDENTITY, "invalid"),
+            ({**SOURCE_IDENTITY, "repositoryCommit": "c" * 40}, None),
+            ({"repositoryCommit": "a" * 40}, None),
+            ({**SOURCE_IDENTITY, "releaseSourceSha256": None}, None),
+        ):
+            with self.subTest(source=source, digest=digest):
+                with self.assertRaises(candidate_freeze.CandidateFreezeError):
+                    candidate_freeze.read_frozen_toolchain_metadata(
+                        self.repository,
+                        source_identity=source,
+                        expected_intent_sha256=digest,
+                    )
+
+    def test_frozen_build_metadata_rejects_aliased_root_claim_and_product_file(self) -> None:
+        frozen = self.freeze()
+        for path in (self.final, frozen.intent_path.parent, self.final / "product-input.json"):
+            with self.subTest(path=path):
+                retained = path.with_name(path.name + "-retained")
+                path.rename(retained)
+                path.symlink_to(retained, target_is_directory=retained.is_dir())
+                try:
+                    with self.assertRaises(candidate_freeze.CandidateFreezeError):
+                        candidate_freeze.read_frozen_toolchain_metadata(
+                            self.repository, source_identity=SOURCE_IDENTITY
+                        )
+                finally:
+                    path.unlink()
+                    retained.rename(path)
+
+    def test_frozen_build_metadata_has_no_success_cache_and_rejects_midread_change(self) -> None:
+        frozen = self.freeze()
+        product_path = self.final / "product-input.json"
+        original = product_path.read_bytes()
+        self.assertEqual(
+            candidate_freeze.read_frozen_toolchain_metadata(
+                self.repository, source_identity=SOURCE_IDENTITY
+            ),
+            TOOLCHAIN,
+        )
+        value = json.loads(original)
+        value["toolchain"]["goToolchainTreeSha256"] = "c" * 64
+        product_path.write_bytes(_canonical_json(value))
+        with self.assertRaises(candidate_freeze.CandidateFreezeError):
+            candidate_freeze.read_frozen_toolchain_metadata(
+                self.repository, source_identity=SOURCE_IDENTITY
+            )
+        product_path.write_bytes(original)
+        read = candidate_freeze._read_canonical_json
+
+        def mutate_after_read(path: Path, *, label: str):
+            result = read(path, label=label)
+            if path == product_path:
+                product_path.write_bytes(_canonical_json(value))
+            return result
+
+        with (
+            patch.object(candidate_freeze, "_read_canonical_json", side_effect=mutate_after_read),
+            self.assertRaisesRegex(candidate_freeze.CandidateFreezeError, "changed during"),
+        ):
+            candidate_freeze.read_frozen_toolchain_metadata(
+                self.repository,
+                source_identity=SOURCE_IDENTITY,
+                expected_intent_sha256=frozen.intent_sha256,
+            )
+
     def test_verification_session_reopens_every_freeze_and_detects_changed_input(self) -> None:
         frozen = self.freeze()
         proof = candidate_freeze.verify_possession_proof(self.repository, self.final)

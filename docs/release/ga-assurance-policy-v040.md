@@ -373,6 +373,15 @@ remain mandatory. Local records and failed attempts retain their own truthful
 status. Any concrete defect they expose must still be resolved. No prior seal
 or retired candidate is rewritten by this policy change.
 
+Published-app receipt verification and dormant installation read build-tool
+provenance from the consumed candidate's fixed product-input document. They
+reopen its bytes and freeze intent on every call, bind the independently checked
+artifact source, and check the original receipt's freeze digest when present.
+They do not rerun historical SDK inventory scans. Build, signing and notarization
+submission or recovery still validate their required live tools; admission of
+the tools executing later verification is unchanged. There is no persistent
+success cache, metadata fallback, or change to application and package checks.
+
 The mandatory order is service recommission, journal `--export`, journal
 `--verify`, runtime `collect`, runtime `verify`, and GA-acceptance sealing.
 Journal `--recover` is admitted only after a recovery-required or

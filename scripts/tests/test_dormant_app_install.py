@@ -17,7 +17,8 @@ import time
 import unittest
 from unittest.mock import Mock, call, patch
 
-from scripts.candidate_artifact_binding import ArtifactToolchainError, CandidateBindingError
+from scripts.candidate_artifact_binding import CandidateBindingError
+from scripts.candidate_freeze import CandidateFreezeError
 from scripts import dormant_app_install as install
 from scripts import ga_acceptance_environment as ga_environment
 
@@ -1463,7 +1464,7 @@ class DormantInstallValidationTests(unittest.TestCase):
         ), self.assertRaises(CandidateBindingError):
             _clean_profile_sources(operator, Path("/other-worktree"))
 
-    def test_artifact_toolchain_failure_stops_admission_before_app_or_service_actions(self) -> None:
+    def test_frozen_metadata_failure_stops_admission_before_app_or_service_actions(self) -> None:
         from scripts.release_executor_source import ExecutorSource, FrozenReleaseSources
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1487,14 +1488,14 @@ class DormantInstallValidationTests(unittest.TestCase):
                     executor=ExecutorSource(operator, "a" * 40, "b" * 64),
                     artifact=ExecutorSource(paths.repository, "c" * 40, "d" * 64),
                 )
-                failure = ArtifactToolchainError(
-                    "artifact_toolchain_verification_failed", "frozen toolchain rejected"
+                failure = CandidateFreezeError(
+                    "product_input_source_mismatch", "frozen build metadata rejected"
                 )
                 runner = Mock(side_effect=AssertionError("no application or service command"))
                 with (
                     patch.object(install, "_clean_profile_sources", return_value=sources),
                     patch.object(
-                        install, "derive_artifact_toolchain_metadata", side_effect=failure
+                        install, "read_frozen_toolchain_metadata", side_effect=failure
                     ) as reader,
                     patch.object(install, "validate_candidate_app_manifest") as validate_app,
                     self.assertRaises(InstallError) as captured,
@@ -1502,7 +1503,9 @@ class DormantInstallValidationTests(unittest.TestCase):
                     admit_fixed_candidate(paths, runner)
                 self.assertEqual(captured.exception.code, "candidate_binding_invalid")
                 self.assertIs(captured.exception.__cause__, failure)
-                reader.assert_called_once_with(paths.repository)
+                reader.assert_called_once_with(
+                    paths.repository, source_identity=sources.artifact.identity
+                )
                 validate_app.assert_not_called()
                 runner.assert_not_called()
 

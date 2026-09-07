@@ -45,10 +45,10 @@ import uuid
 if __package__:
     from .candidate_artifact_binding import (
         CandidateBindingError,
-        derive_artifact_toolchain_metadata,
         load_strict_json,
         validate_candidate_app_manifest,
     )
+    from .candidate_freeze import CandidateFreezeError, read_frozen_toolchain_metadata
     from .gatekeeper_assessment import (
         GatekeeperEvidenceError,
         validate_evidence as validate_gatekeeper_evidence,
@@ -80,10 +80,10 @@ if __package__:
 else:
     from candidate_artifact_binding import (
         CandidateBindingError,
-        derive_artifact_toolchain_metadata,
         load_strict_json,
         validate_candidate_app_manifest,
     )
+    from candidate_freeze import CandidateFreezeError, read_frozen_toolchain_metadata
     from gatekeeper_assessment import (
         GatekeeperEvidenceError,
         validate_evidence as validate_gatekeeper_evidence,
@@ -2026,7 +2026,9 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
             raise CandidateBindingError(
                 f"signed candidate is not fixed build {profile.build_number}"
             )
-        toolchain = derive_artifact_toolchain_metadata(paths.repository)
+        toolchain = read_frozen_toolchain_metadata(
+            paths.repository, source_identity=source
+        )
         validated = validate_candidate_app_manifest(
             paths.candidate_manifest,
             paths.candidate_app,
@@ -2039,6 +2041,7 @@ def admit_fixed_candidate(paths: InstallPaths, runner: CommandRunner) -> Candida
         bundle = bundle_build_identity(paths.candidate_app)
     except (
         CandidateBindingError,
+        CandidateFreezeError,
         ExecutorSourceError,
         SourceIdentityError,
         BuildIdentityError,

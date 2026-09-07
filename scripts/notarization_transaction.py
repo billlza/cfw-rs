@@ -32,7 +32,11 @@ from typing import Any, Callable, Iterator
 import uuid
 
 if __package__:
-    from .candidate_freeze import FrozenCandidate, verify_frozen_candidate
+    from .candidate_freeze import (
+        FrozenCandidate,
+        read_frozen_toolchain_metadata,
+        verify_frozen_candidate,
+    )
     from .candidate_artifact_binding import (
         ArtifactToolchainError,
         TOOLCHAIN_METADATA_ORDER,
@@ -96,7 +100,11 @@ if __package__:
         validate_notarization_zip,
     )
 else:
-    from candidate_freeze import FrozenCandidate, verify_frozen_candidate
+    from candidate_freeze import (
+        FrozenCandidate,
+        read_frozen_toolchain_metadata,
+        verify_frozen_candidate,
+    )
     from candidate_artifact_binding import (
         ArtifactToolchainError,
         TOOLCHAIN_METADATA_ORDER,
@@ -9120,7 +9128,16 @@ def _validate_published_transaction_receipt_once(
     """
     _validate_context(context, recovery=True)
     _require_source_identity(context, production_source_identity_reader)
-    _require_toolchain_identity(context, production_artifact_toolchain_metadata_reader)
+    original_intent, _, _ = _load_recovery_intent_document(context)
+
+    def frozen_toolchain_metadata_reader(repository: Path) -> dict[str, str]:
+        return read_frozen_toolchain_metadata(
+            repository,
+            source_identity=context.source_identity,
+            expected_intent_sha256=original_intent["candidate_freeze_intent_sha256"],
+        )
+
+    _require_toolchain_identity(context, frozen_toolchain_metadata_reader)
     publication_root = context.final_root
     _require_real_directory(publication_root, private=True)
     direct_receipt_path = context.attempt_root / "receipt.json"
@@ -9209,7 +9226,7 @@ def _validate_published_transaction_receipt_once(
             receipt_path=direct_receipt_path,
             manifest_verifier=production_manifest_verifier,
             source_identity_reader=production_source_identity_reader,
-            toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
+            toolchain_metadata_reader=frozen_toolchain_metadata_reader,
             allow_direct_publish_failure=True,
             allow_receipt_durability_unknown=True,
         )
@@ -9225,7 +9242,7 @@ def _validate_published_transaction_receipt_once(
         archive_validator=production_archive_validator,
         manifest_verifier=production_manifest_verifier,
         source_identity_reader=production_source_identity_reader,
-        toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
+        toolchain_metadata_reader=frozen_toolchain_metadata_reader,
         clock=_utc_now,
     )
     reduction = _reduce_attempt_events(attempt.journal)
@@ -9278,7 +9295,7 @@ def _validate_published_transaction_receipt_once(
             publication_root=publication_root,
             manifest_verifier=production_manifest_verifier,
             source_identity_reader=production_source_identity_reader,
-            toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
+            toolchain_metadata_reader=frozen_toolchain_metadata_reader,
         )
         direct_receipt = _validate_sealed_publication(
             prepared_direct,
@@ -9287,7 +9304,7 @@ def _validate_published_transaction_receipt_once(
             receipt_path=matching_direct_receipt,
             manifest_verifier=production_manifest_verifier,
             source_identity_reader=production_source_identity_reader,
-            toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
+            toolchain_metadata_reader=frozen_toolchain_metadata_reader,
         )
         return PublishedTransactionEvidence(
             receipt=direct_receipt,
@@ -9430,7 +9447,7 @@ def _validate_published_transaction_receipt_once(
         publication_root=publication_root,
         manifest_verifier=production_manifest_verifier,
         source_identity_reader=production_source_identity_reader,
-        toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
+        toolchain_metadata_reader=frozen_toolchain_metadata_reader,
     )
     receipt = _validate_sealed_publication(
         prepared,
@@ -9439,7 +9456,7 @@ def _validate_published_transaction_receipt_once(
         receipt_path=matching_receipt,
         manifest_verifier=production_manifest_verifier,
         source_identity_reader=production_source_identity_reader,
-        toolchain_metadata_reader=production_artifact_toolchain_metadata_reader,
+        toolchain_metadata_reader=frozen_toolchain_metadata_reader,
     )
     return PublishedTransactionEvidence(
         receipt=receipt,

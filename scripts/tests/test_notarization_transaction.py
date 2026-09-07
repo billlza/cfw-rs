@@ -22,6 +22,7 @@ from unittest.mock import patch
 import uuid
 
 import scripts.gatekeeper_assessment as gatekeeper_module
+import scripts.candidate_freeze as freeze_module
 import scripts.notarization_transaction as transaction_module
 from scripts.gatekeeper_assessment import validate_evidence as validate_gatekeeper_evidence
 from scripts.hash_artifact import build_manifest
@@ -281,7 +282,9 @@ class Fixture:
                 transaction_module.FrozenCandidate(
                     root=self.build,
                     intent_path=self.build / "candidate-freeze/intent.json",
-                    intent_sha256="f" * 64,
+                    intent_sha256=self.signing_transformation_receipt[
+                        "candidate_freeze_intent_sha256"
+                    ],
                     product_version="0.4.0",
                     build_number="40044",
                     recovered=False,
@@ -9301,7 +9304,7 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
         return build_manifest(root, algorithm="sha256-tree-v2")["sha256"]
 
     @staticmethod
-    def _validate(fixture: Fixture):
+    def _validate(fixture: Fixture, *, real_frozen_metadata: bool = False):
         def historical_identity(_repository: Path, commit: str) -> dict[str, str]:
             if commit == "c" * 40:
                 digest = "d" * 64
@@ -9312,6 +9315,25 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
             return {"repositoryCommit": commit, "releaseSourceSha256": digest}
 
         context = replace(fixture.context, staged_app=None)
+        def fixture_metadata(
+            repository: Path,
+            *,
+            source_identity: dict[str, str],
+            expected_intent_sha256: str,
+        ) -> dict[str, str]:
+            if (
+                repository != fixture.repository
+                or source_identity != fixture.context.source_identity
+                or expected_intent_sha256
+                != fixture.signing_transformation_receipt["candidate_freeze_intent_sha256"]
+            ):
+                raise AssertionError("frozen build metadata request is misbound")
+            return dict(fixture.context.toolchain_metadata)
+
+        reader = (
+            freeze_module.read_frozen_toolchain_metadata
+            if real_frozen_metadata else fixture_metadata
+        )
         with (
             patch.object(
                 transaction_module,
@@ -9320,9 +9342,19 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
             ),
             patch.object(
                 transaction_module,
-                "production_artifact_toolchain_metadata_reader",
-                side_effect=lambda _repository: fixture.context.toolchain_metadata,
+                "read_frozen_toolchain_metadata",
+                side_effect=reader,
             ),
+            patch.object(
+                transaction_module,
+                "production_artifact_toolchain_metadata_reader",
+                side_effect=AssertionError("published artifacts must not rederive build SDKs"),
+            ) as artifact_policy,
+            patch.object(
+                transaction_module,
+                "derive_artifact_toolchain_metadata",
+                side_effect=AssertionError("published artifacts must not launch the build verifier"),
+            ) as artifact_derivation,
             patch.object(
                 transaction_module,
                 "production_toolchain_metadata_reader",
@@ -9341,7 +9373,91 @@ class PublishedTransactionReceiptValidationTests(unittest.TestCase):
         ):
             evidence = transaction_module.validate_published_transaction_receipt(context)
         operator_policy.assert_not_called()
+        artifact_policy.assert_not_called()
+        artifact_derivation.assert_not_called()
         return evidence
+
+    @staticmethod
+    def _write_frozen_metadata(fixture: Fixture) -> None:
+        product = {
+            "document": "cfm-ga-product-input-v1",
+            "product": {"build_number": "40044", "version": "0.4.0"},
+            "schema_version": 1,
+            "source": {
+                "release_source_sha256": fixture.context.release_source_sha256,
+                "repository_commit": fixture.context.repository_commit,
+            },
+            "toolchain": dict(fixture.context.toolchain_metadata),
+        }
+        product_raw = freeze_module._canonical_json(product)
+        (fixture.build / "product-input.json").write_bytes(product_raw)
+        claim = fixture.build / "candidate-freeze"
+        claim.mkdir(mode=0o700)
+        intent = {name: "0" * 64 for name in freeze_module._INTENT_FIELDS}
+        intent.update(
+            build_number="40044",
+            consumption_state=freeze_module.CONSUMPTION_STATE,
+            document=freeze_module.DOCUMENT,
+            product_input_document_sha256=hashlib.sha256(product_raw).hexdigest(),
+            product_version="0.4.0",
+            release_source_sha256=fixture.context.release_source_sha256,
+            repository_commit=fixture.context.repository_commit,
+            schema_version=freeze_module.SCHEMA_VERSION,
+        )
+        intent_raw = freeze_module._canonical_json(intent)
+        intent_path = claim / "intent.json"
+        intent_path.write_bytes(intent_raw)
+        intent_path.chmod(0o600)
+        fixture.signing_transformation_receipt["candidate_freeze_intent_sha256"] = (
+            hashlib.sha256(intent_raw).hexdigest()
+        )
+
+    def test_published_direct_and_recovered_replay_reopen_frozen_metadata_without_sdk_scan(self) -> None:
+        for recovered in (False, True):
+            with self.subTest(recovered=recovered):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                self._write_frozen_metadata(fixture)
+                if recovered:
+                    fixture.create_orphaned_submit_attempt()
+                    fixture.recover()
+                else:
+                    fixture.execute()
+                before = self._tree_digest(fixture.build)
+                evidence = self._validate(fixture, real_frozen_metadata=True)
+                self.assertEqual(evidence.receipt_path, sole_finalization_receipt(fixture))
+                self.assertEqual(self._tree_digest(fixture.build), before)
+
+    def test_published_replay_rejects_frozen_intent_replacement_and_context_metadata_drift(self) -> None:
+        for attack in ("freeze-intent", "context-metadata"):
+            with self.subTest(attack=attack):
+                fixture = Fixture()
+                self.addCleanup(fixture.close)
+                self._write_frozen_metadata(fixture)
+                fixture.create_orphaned_submit_attempt()
+                fixture.recover()
+                if attack == "freeze-intent":
+                    path = fixture.build / "candidate-freeze/intent.json"
+                    intent = json.loads(path.read_bytes())
+                    intent["signing_plan_sha256"] = "a" * 64
+                    path.write_bytes(freeze_module._canonical_json(intent))
+                else:
+                    fixture.context = replace(
+                        fixture.context,
+                        toolchain_metadata={
+                            **fixture.context.toolchain_metadata,
+                            "toolchainSha256": "a" * 64,
+                        },
+                    )
+                before = self._tree_digest(fixture.build)
+                with self.assertRaises(TransactionError) as captured:
+                    self._validate(fixture, real_frozen_metadata=True)
+                self.assertEqual(
+                    captured.exception.code,
+                    "toolchain_identity_unavailable"
+                    if attack == "freeze-intent" else "toolchain_identity_drift",
+                )
+                self.assertEqual(self._tree_digest(fixture.build), before)
 
     def test_current_direct_publication_validates_without_mutating_attempt(self) -> None:
         fixture = Fixture()

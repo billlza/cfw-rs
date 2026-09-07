@@ -131,13 +131,13 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
         state: { state: "off" },
       },
       capabilities: {
-        system_proxy: false,
-        tunnel: false,
+        system_proxy: true,
+        tunnel: true,
         provider_management: false,
       },
       cutover_ready: false,
       cutover_unavailable_reason: "replacement profile is not staged",
-      unavailable_reason: "legacy network remains unchanged",
+      unavailable_reason: null,
     },
     geoip_database_status: {
       present: false,
@@ -179,7 +179,17 @@ test("the generated dist bundle performs no controller or provider IPC while Eng
   await new Promise((resolve) => setTimeout(resolve, 200));
 
   assert.equal(body.innerHTML.includes("startup_state_unverifiable"), false);
+  assert.doesNotMatch(page.innerHTML, /cfw-migration-banner|Start Migration|Prepare cutover|Finish setup/u);
+  for (const key of ["systemProxy", "tunMode"]) {
+    const input = page.innerHTML.match(new RegExp(`<input type="checkbox" data-toggle="${key}"([^>]*)>`, "u"));
+    assert.ok(input, `${key} is present in the built dashboard`);
+    assert.doesNotMatch(input[1], /disabled/u);
+  }
   for (const command of [
+    "begin_migration_handoff",
+    "prepare_legacy_cutover",
+    "disable_service_mode",
+    "recover_legacy_cutover",
     "controller_snapshot",
     "controller_version",
     "providers_snapshot",

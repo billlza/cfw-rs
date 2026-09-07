@@ -277,7 +277,7 @@ for contract in \
   'scripts/signing_attempt_transaction.py:verify_attempt_receipt' \
   'scripts/signing_attempt_transaction.py:outcome_unknown' \
   'scripts/run_ga_signing_attempt.sh:--transaction-owned' \
-  'scripts/run_ga_signing_attempt.sh:target/candidates/0.4.0/ga/40045' \
+  'scripts/run_ga_signing_attempt.sh:target/candidates/0.4.0/ga/40046' \
   'scripts/verify_signing_transformation.py:cfm-ga-signing-transformation-v2' \
   'scripts/verify_signing_transformation.py:cfm-candidate-freeze-intent-v3' \
   'scripts/verify_signing_transformation.py:RECOVERABLE_VERIFICATION_ERROR_CODES' \
@@ -302,7 +302,7 @@ for contract in \
   'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-acceptance-v2' \
   'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-check-v2' \
   'scripts/ga_runtime_acceptance.py:cfm-ga-command-observation-v2' \
-  'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-collection-intent-v2' \
+  'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-collection-intent-v3' \
   'scripts/ga_runtime_acceptance.py:cfm-ga-runtime-collection-event-v2' \
   'scripts/ga_runtime_acceptance.py:ENVIRONMENT_RELATIVE as JOURNAL_EXPORT_ENVIRONMENT_RELATIVE' \
   'scripts/ga_runtime_acceptance.py:ENVIRONMENT_RELATIVE: Final = JOURNAL_EXPORT_ENVIRONMENT_RELATIVE' \

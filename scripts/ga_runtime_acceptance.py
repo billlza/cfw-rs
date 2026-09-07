@@ -4,7 +4,7 @@
 This module deliberately does not accept a caller-selected evidence path and it
 does not accept a list of boolean outcomes. Collection starts only after the
 existing dormant-install and current-service owners have closed their
-40044 -> 40045 journals. ``collect`` creates a durable CSPRNG challenge intent,
+40045 -> 40046 journals. ``collect`` creates a durable CSPRNG challenge intent,
 owns every runtime command and packet byte, atomically publishes the exact
 raw tree, and seals the adapter. ``recover`` owns only runtime shutdown/restore;
 it never duplicates either installation state machine. ``verify`` reopens
@@ -178,7 +178,7 @@ PrepackageStageVerifier = Callable[[Path], dict[str, Any]]
 
 PRODUCT_VERSION: Final = ACTIVE_RELEASE_IDENTITY.product_version
 TO_BUILD: Final = ACTIVE_RELEASE_IDENTITY.ga_build
-FROM_BUILD: Final = "40044"
+FROM_BUILD: Final = "40045"
 TEAM_ID: Final = "YKUPL7Z869"
 APP_BUNDLE_ID: Final = "com.bill.clashformac"
 PACKET_EXTENSION_BUNDLE_ID: Final = "com.bill.clashformac.packet-tunnel"
@@ -420,9 +420,9 @@ def _require_fixed_paths(
 ) -> None:
     expected_acceptance, expected_raw = _fixed_paths(repository)
     if Path(acceptance_path).absolute() != expected_acceptance:
-        raise _error("GA runtime adapter path is not the fixed 40045 path")
+        raise _error("GA runtime adapter path is not the fixed 40046 path")
     if Path(raw_evidence_root).absolute() != expected_raw:
-        raise _error("GA runtime raw-evidence path is not the fixed 40045 path")
+        raise _error("GA runtime raw-evidence path is not the fixed 40046 path")
 
 
 def _strict_json(data: bytes, label: str) -> dict[str, Any]:
@@ -636,7 +636,7 @@ def _validate_expected(value: object) -> dict[str, Any]:
         or expected["from_build"] != FROM_BUILD
         or expected["to_build"] != TO_BUILD
     ):
-        raise _error("GA runtime expected identity or check set differs from 0.4.0/40045")
+        raise _error("GA runtime expected identity or check set differs from 0.4.0/40046")
     for field in (
         "dmg_gatekeeper_sha256",
         "dmg_set_seal_sha256",
@@ -972,11 +972,11 @@ def _installed_candidate_tree(repository: Path, expected: dict[str, Any]) -> str
         or normalized["candidate"]["build_number"] != TO_BUILD
         or normalized["previous"]["build_number"] != FROM_BUILD
     ):
-        raise _error("GA install journal is not the completed 40044 to 40045 install")
+        raise _error("GA install journal is not the completed 40045 to 40046 install")
     try:
         installed = dormant_app_install.read_app_identity(INSTALLED_APP)
     except dormant_app_install.InstallError as error:
-        raise _error("installed 40045 application tree cannot be identified") from error
+        raise _error("installed 40046 application tree cannot be identified") from error
     if installed.document() != normalized["candidate"]:
         raise _error("installed application bytes differ from the closed install journal")
     return installed.tree_sha256
@@ -1100,7 +1100,7 @@ def _validate_exact_dmg_install(
         or document["installed_app_tree_sha256"] != installed_tree
         or dmg_tree != installed_tree
     ):
-        raise _error("DMG-contained app and installed 40045 app are not the same tree")
+        raise _error("DMG-contained app and installed 40046 app are not the same tree")
     commands = require_exact_keys(
         document["commands"],
         {"dmg_gatekeeper", "dmg_set_verify"},
@@ -1154,7 +1154,7 @@ def _running_host_observation(value: object) -> list[dict[str, Any]]:
         item for item in processes if item["path"] == INSTALLED_EXECUTABLE.as_posix()
     ]
     if len(app_processes) != 1:
-        raise _error("raw process table does not contain exactly one installed 40045 Host")
+        raise _error("raw process table does not contain exactly one installed 40046 Host")
     return processes
 
 
@@ -1172,7 +1172,7 @@ def _host_absence_observation(value: object) -> list[dict[str, Any]]:
     if any(
         process["path"] == INSTALLED_EXECUTABLE.as_posix() for process in processes
     ):
-        raise _error("normal shutdown evidence still contains the installed 40045 Host")
+        raise _error("normal shutdown evidence still contains the installed 40046 Host")
     return processes
 
 
@@ -1184,10 +1184,10 @@ def _validate_launch(value: dict[str, Any]) -> None:
         document["launch_command"],
         expected_argv=["/usr/bin/open", "-a", INSTALLED_APP.as_posix()],
         expected_exit=0,
-        label="installed 40045 launch command",
+        label="installed 40046 launch command",
     )
     if launch["stderr"]:
-        raise _error("installed 40045 launch command emitted an error")
+        raise _error("installed 40046 launch command emitted an error")
     _running_host_observation(document["process_observation"])
 
 
@@ -1209,7 +1209,7 @@ def _require_launchctl_running(
     This is the same fixed job contract the release service transaction already
     proves in `current_service_transaction._registered_job_pid`, and it binds
     strictly more than an absolute path: the running executable is the one
-    inside the installed 40045 bundle, registered through ServiceManagement,
+    inside the installed 40046 bundle, registered through ServiceManagement,
     and signed under the fixed team and service identifiers.
     """
 
@@ -1217,7 +1217,7 @@ def _require_launchctl_running(
         relative = program.relative_to(INSTALLED_APP)
     except ValueError as error:
         raise _error(
-            f"fixed {label} executable is outside the installed 40045 bundle"
+            f"fixed {label} executable is outside the installed 40046 bundle"
         ) from error
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     required = (
@@ -1280,7 +1280,7 @@ def _validate_system_extension(value: dict[str, Any]) -> None:
     except dormant_app_install.InstallError as error:
         raise _error("raw systemextensionsctl output is malformed") from error
     if (TEAM_ID, PACKET_EXTENSION_BUNDLE_ID) not in identities:
-        raise _error("raw system extension output lacks the fixed 40045 extension")
+        raise _error("raw system extension output lacks the fixed 40046 extension")
     matching = [
         line
         for line in receipt["stdout"].splitlines()
@@ -1446,7 +1446,7 @@ def _validate_legacy_cfw(
     repository: Path,
     expected: dict[str, Any],
     shutdown_guards: tuple[dict[str, Any], dict[str, Any]],
-) -> None:
+) -> bytes:
     document = _check_document(
         value,
         "legacy_cfw_preserved",
@@ -1466,15 +1466,21 @@ def _validate_legacy_cfw(
         or (before, after) != shutdown_guards
     ):
         raise _error("legacy CFW preservation is not bound to the exact install/runtime run")
-    journal_baseline = _installed_guard_baseline(repository, expected)
-    if before != journal_baseline:
-        raise _error("runtime CFW baseline differs from the closed install journal")
+    intent, collection = _load_collection_intent(
+        repository, repository.joinpath(*COLLECTION_RELATIVE.parts)
+    )
+    if collection != document["collection"]:
+        raise _error("runtime CFW baseline belongs to a different collection")
+    baseline = _collection_guard_baseline(repository, intent, expected)
+    if before != baseline:
+        raise _error("runtime CFW baseline differs from the durable collection intent")
     try:
         dormant_app_install._assert_guard_unchanged(before, after)
     except dormant_app_install.InstallError as error:
         raise _error(
             "legacy Clash for Windows state changed during GA runtime acceptance"
         ) from error
+    return canonical_json(intent)
 
 
 def _traffic_descriptor(
@@ -1877,7 +1883,7 @@ def _validate_raw_evidence(
     snapshots: dict[str, FileSnapshot],
     expected: dict[str, Any],
     prepackage_stage_verifier: PrepackageStageVerifier,
-) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str], bytes]:
     documents = _json_snapshots(snapshots)
     collections = {
         tuple(sorted(_collection_binding(document["collection"], name).items()))
@@ -1903,7 +1909,7 @@ def _validate_raw_evidence(
     _validate_network_extension(documents["network-extension.json"], documents)
     _validate_high_risk_rejections(documents["high-risk-rejections.json"])
     shutdown_guards = _validate_shutdown_restore(documents["shutdown-restore.json"])
-    _validate_legacy_cfw(
+    collection_intent = _validate_legacy_cfw(
         documents["legacy-cfw-preserved.json"],
         repository,
         expected,
@@ -1941,7 +1947,7 @@ def _validate_raw_evidence(
         if check_id in TRAFFIC_CHECKS:
             records.append(snapshots[f"{check_id.replace('_', '-')}.pcap"].record())
         artifacts[check_id] = records
-    return artifacts, collection
+    return artifacts, collection, collection_intent
 
 
 def _adapter_document(
@@ -2034,13 +2040,15 @@ def _validate_ga_runtime_acceptance(
     _require_fixed_paths(repository, acceptance_path, raw_evidence_root)
     normalized_expected = _validate_expected(expected)
     snapshots = _snapshot_raw_tree(raw_evidence_root)
-    artifacts, collection = _validate_raw_evidence(
+    artifacts, collection, collection_intent = _validate_raw_evidence(
         repository,
         snapshots,
         normalized_expected,
         prepackage_stage_verifier,
     )
-    collection_receipt = _validate_collection_receipt(repository, collection)
+    collection_receipt = _validate_collection_receipt(
+        repository, collection, collection_intent
+    )
     _private_regular_metadata(acceptance_path)
     try:
         adapter_data = read_regular(acceptance_path, MAX_JSON_BYTES)
@@ -2056,7 +2064,9 @@ def _validate_ga_runtime_acceptance(
         collection_receipt,
     )
     _confirm_snapshot(raw_evidence_root, snapshots)
-    if _validate_collection_receipt(repository, collection) != collection_receipt:
+    if _validate_collection_receipt(
+        repository, collection, collection_intent
+    ) != collection_receipt:
         raise _error("GA runtime collection receipt changed during verification")
     adapter_digest = sha256_file(acceptance_path)
     if adapter_digest != sha256_bytes(adapter_data):
@@ -2108,13 +2118,15 @@ def seal_ga_runtime_acceptance(
     acceptance_path, raw_root = _fixed_paths(repository)
     normalized_expected = _validate_expected(expected)
     snapshots = _snapshot_raw_tree(raw_root)
-    artifacts, collection = _validate_raw_evidence(
+    artifacts, collection, collection_intent = _validate_raw_evidence(
         repository,
         snapshots,
         normalized_expected,
         prepackage_stage_verifier,
     )
-    collection_receipt = _validate_collection_receipt(repository, collection)
+    collection_receipt = _validate_collection_receipt(
+        repository, collection, collection_intent
+    )
     document = _adapter_document(
         normalized_expected,
         snapshots,
@@ -2179,7 +2191,8 @@ def seal_ga_runtime_acceptance(
     )
 
 
-COLLECTION_DOCUMENT: Final = "cfm-ga-runtime-collection-intent-v2"
+COLLECTION_DOCUMENT: Final = "cfm-ga-runtime-collection-intent-v3"
+COLLECTION_INTENT_SCHEMA_VERSION: Final = 3
 COLLECTION_EVENT_DOCUMENT: Final = "cfm-ga-runtime-collection-event-v2"
 COLLECTION_SUCCESS_STEPS: Final = (
     "dmg-gatekeeper",
@@ -2293,7 +2306,7 @@ class ProductionCollectorRuntime:
                 if waiting_for_operator and not announced_operator_boundary:
                     print(
                         "GA runtime collection is waiting for macOS approval and "
-                        "Tunnel mode in the installed 40045 dashboard",
+                        "Tunnel mode in the installed 40046 dashboard",
                         file=sys.stderr,
                         flush=True,
                     )
@@ -2688,10 +2701,16 @@ def _run_collector_command(
 def _collection_intent(
     expected: dict[str, Any],
     collection: dict[str, str],
+    baseline: dict[str, Any],
 ) -> dict[str, Any]:
     return {
+        "cfw_guard_baseline": _guard(baseline, "collection intent baseline"),
         "collection": collection,
         "document": COLLECTION_DOCUMENT,
+        "journal_bindings": {
+            key: expected[key]
+            for key in ("install_journal_sha256", "service_journal_tree_sha256")
+        },
         "package_bindings": {
             key: expected[key]
             for key in (
@@ -2705,7 +2724,7 @@ def _collection_intent(
             "to_build": TO_BUILD,
             "version": PRODUCT_VERSION,
         },
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": COLLECTION_INTENT_SCHEMA_VERSION,
     }
 
 
@@ -2713,6 +2732,7 @@ def _publish_collection_intent(
     repository: Path,
     expected: dict[str, Any],
     collection: dict[str, str],
+    baseline: dict[str, Any],
 ) -> Path:
     path = repository.joinpath(*COLLECTION_RELATIVE.parts)
     parent = path.parent
@@ -2725,7 +2745,11 @@ def _publish_collection_intent(
             descriptor,
             parent,
             path.name,
-            {"intent.json": canonical_json(_collection_intent(expected, collection))},
+            {
+                "intent.json": canonical_json(
+                    _collection_intent(expected, collection, baseline)
+                )
+            },
         )
     return path
 
@@ -2765,12 +2789,9 @@ def _append_collection_event(
 
 
 def _validate_collection_receipt(
-    repository: Path, collection: dict[str, str]
+    repository: Path, collection: dict[str, str], expected_intent: bytes
 ) -> dict[str, str]:
     path = repository.joinpath(*COLLECTION_RELATIVE.parts)
-    _intent, observed_collection = _load_collection_intent(repository, path)
-    if observed_collection != collection:
-        raise _error("raw evidence collection differs from its durable intent")
     with exclusive_rooted_directory_lock(
         repository, path, require_private=True
     ) as descriptor:
@@ -2783,6 +2804,8 @@ def _validate_collection_receipt(
         intent_data = read_private_pending_locked(
             descriptor, path, "intent.json", MAX_JSON_BYTES
         )
+        if intent_data != expected_intent:
+            raise _error("GA runtime collection intent changed during verification")
         entries = [
             {
                 "path": "intent.json",
@@ -2982,10 +3005,10 @@ def collect_ga_runtime_acceptance(
 ) -> dict[str, dict[str, str]]:
     """Collect runtime evidence after the service and install owners close.
 
-    No raw input path or raw byte payload is accepted.  A durable challenge
-    intent is published before observation; all raw documents are held by this
-    process and the exact 15-file tree is atomically published only after the
-    complete shutdown/restore boundary succeeds.
+    No raw input path or raw byte payload is accepted.  The fresh CFW baseline
+    and challenge are durably published before any runtime mutation. Raw
+    documents are held by this process and the exact 15-file tree is atomically
+    published only after the complete shutdown/restore boundary succeeds.
     """
 
     repository = _canonical_repository(repository)
@@ -3013,13 +3036,15 @@ def collect_ga_runtime_acceptance(
         },
         "GA runtime collection",
     )
-    collection_path = _publish_collection_intent(repository, initial, collection)
+    # Installation and collection are separate transactions. Validate the closed
+    # installation history, then bind this run to the current complete CFW guard.
+    _installed_guard_baseline(repository, initial)
+    before_guard = _guard(selected_runtime.capture_guard(), "collection baseline")
+    collection_path = _publish_collection_intent(
+        repository, initial, collection, before_guard
+    )
     mutation_started = False
     try:
-        before_guard = selected_runtime.capture_guard()
-        _guard(before_guard, "collection baseline")
-        if before_guard != _installed_guard_baseline(repository, initial):
-            raise _error("current CFW guard differs from the closed install journal")
         gatekeeper_argv = [
             "/usr/sbin/spctl",
             "--assess",
@@ -3405,8 +3430,10 @@ def _load_collection_intent(
     intent = require_exact_keys(
         _strict_json(data, "GA runtime collection intent"),
         {
+            "cfw_guard_baseline",
             "collection",
             "document",
+            "journal_bindings",
             "package_bindings",
             "product",
             "schema_version",
@@ -3417,7 +3444,7 @@ def _load_collection_intent(
     if (
         intent["document"] != COLLECTION_DOCUMENT
         or type(intent["schema_version"]) is not int
-        or intent["schema_version"] != SCHEMA_VERSION
+        or intent["schema_version"] != COLLECTION_INTENT_SCHEMA_VERSION
         or intent["product"]
         != {
             "from_build": FROM_BUILD,
@@ -3426,7 +3453,27 @@ def _load_collection_intent(
         }
     ):
         raise _error("GA runtime collection intent identity is invalid")
+    _guard(intent["cfw_guard_baseline"], "collection intent baseline")
     return intent, collection
+
+
+def _collection_guard_baseline(
+    repository: Path,
+    intent: dict[str, Any],
+    expected: dict[str, Any],
+) -> dict[str, Any]:
+    if intent["package_bindings"] != {
+        key: expected[key]
+        for key in ("dmg_gatekeeper_sha256", "dmg_set_seal_sha256", "dmg_sha256")
+    }:
+        raise _error("GA runtime collection intent binds different package evidence")
+    _installed_guard_baseline(repository, expected)
+    if intent["journal_bindings"] != {
+        key: expected[key]
+        for key in ("install_journal_sha256", "service_journal_tree_sha256")
+    }:
+        raise _error("GA runtime collection intent binds different migration journals")
+    return _guard(intent["cfw_guard_baseline"], "collection intent baseline")
 
 
 def _archive_recovered_collection(
@@ -3473,7 +3520,7 @@ def recover_ga_runtime_collection(
     collection_path = repository.joinpath(*COLLECTION_RELATIVE.parts)
     if not os.path.lexists(collection_path):
         raise _error("there is no active GA runtime collection to recover")
-    _intent, collection = _load_collection_intent(repository, collection_path)
+    intent, collection = _load_collection_intent(repository, collection_path)
     normalized_expected = _validate_expected(expected)
     if (
         collection["ga_environment_sha256"]
@@ -3487,7 +3534,7 @@ def recover_ga_runtime_collection(
         normalized_expected["ga_environment_sha256"],
         label="GA runtime recovery admission environment",
     )
-    baseline = _installed_guard_baseline(repository, normalized_expected)
+    baseline = _collection_guard_baseline(repository, intent, normalized_expected)
     initial = _run_collector_command(
         selected_runtime,
         list(PROCESS_OBSERVATION_COMMAND),
@@ -3547,7 +3594,7 @@ def recover_ga_runtime_collection(
     restored = selected_runtime.capture_guard()
     _guard(restored, "runtime recovery")
     if restored != baseline:
-        raise _error("runtime recovery did not restore the install-journal CFW guard")
+        raise _error("runtime recovery did not restore the collection's fixed CFW guard")
     _require_current_environment(
         repository,
         selected_runtime,
@@ -3573,7 +3620,7 @@ def self_check() -> None:
     except OSError as error:
         raise _error("GA runtime collector source/build registry is unavailable") from error
     if (
-        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40044", "40045")
+        (PRODUCT_VERSION, FROM_BUILD, TO_BUILD) != ("0.4.0", "40045", "40046")
         or (MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS)
         != (15 * 60, 30 * 60)
         or len(CHECKS) != 12
@@ -3585,6 +3632,7 @@ def self_check() -> None:
             CHECK_DOCUMENT,
             COMMAND_DOCUMENT,
             COLLECTION_DOCUMENT,
+            COLLECTION_INTENT_SCHEMA_VERSION,
             COLLECTION_EVENT_DOCUMENT,
         )
         != (
@@ -3592,27 +3640,28 @@ def self_check() -> None:
             2,
             "cfm-ga-runtime-check-v2",
             "cfm-ga-command-observation-v2",
-            "cfm-ga-runtime-collection-intent-v2",
+            "cfm-ga-runtime-collection-intent-v3",
+            3,
             "cfm-ga-runtime-collection-event-v2",
         )
         or ACCEPTANCE_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
+            "target/candidates/0.4.0/ga/40046/stage-inputs/ga-acceptance/"
             "runtime-acceptance.json"
         )
         or RAW_ROOT_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
+            "target/candidates/0.4.0/ga/40046/stage-inputs/ga-acceptance/"
             "runtime-evidence"
         )
         or ENVIRONMENT_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
+            "target/candidates/0.4.0/ga/40046/stage-inputs/ga-acceptance/"
             "migration-journals/service-transaction/environment.json"
         )
         or INSTALL_JOURNAL_RELATIVE
         != Path(
-            "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
+            "target/candidates/0.4.0/ga/40046/stage-inputs/ga-acceptance/"
             "migration-journals/dormant-install.json"
         )
         or not stat.S_ISREG(runner_metadata.st_mode)

@@ -1399,7 +1399,7 @@ LIBBOX_VET_PACKAGES=(".")
             "cfm-ga-runtime-acceptance-v2",
             "cfm-ga-runtime-check-v2",
             "cfm-ga-command-observation-v2",
-            "cfm-ga-runtime-collection-intent-v2",
+            "cfm-ga-runtime-collection-intent-v3",
             "cfm-ga-runtime-collection-event-v2",
             "cfm-ga-prepackage-seal-v3",
             "cfm-ga-acceptance-seal-v3",

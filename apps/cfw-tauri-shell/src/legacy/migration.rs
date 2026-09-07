@@ -86,7 +86,7 @@ impl LaunchRecoveryFailure {
     }
 }
 
-pub(super) fn require_pre_network_launch_recovery<Admission, Recovery>(
+pub(super) fn require_explicit_pre_network_recovery<Admission, Recovery>(
     migration_handoff: bool,
     require_admission: Admission,
     seal_recovery: Recovery,
@@ -120,34 +120,16 @@ pub(super) fn run_launch_preflight(app: &AppHandle) -> Result<(), String> {
     let store = settings_store()?;
     if let Some(journal) = CutoverJournalStore::new(store.paths().app_home.clone()).load()? {
         let status = match journal.phase {
-            CutoverPhase::Prepared | CutoverPhase::GuiStopped => {
-                let launch = app.state::<crate::LaunchContext>();
-                match require_pre_network_launch_recovery(
-                    launch.is_migration_handoff(),
-                    super::admission::require_canonical_handoff_candidate,
-                    || {
-                        super::recovery::seal_pre_network_cutover_for_recovery(&journal, &store)
-                    },
-                ) {
-                    Ok(()) => LegacyRetirementStatus::RecoveryStartRequired {
-                        target: journal.target,
-                        message: "the confirmed one-way cutover was safely sealed as NetworkRetiring and the journal-bound legacy GUI exited; use Recover Replacement to finish without relaunching the legacy app"
-                            .into(),
-                    },
-                    Err(failure) => {
-                        recovery_required_status(journal.phase, journal.target, failure)
-                    }
-                }
-            }
-            CutoverPhase::NetworkRetiring | CutoverPhase::LegacyRetired => {
-                LegacyRetirementStatus::RecoveryStartRequired {
-                    target: journal.target,
-                    message: format!(
-                        "cutover was interrupted in phase {:?}; use Recover Replacement. The old helper is never restarted automatically",
-                        journal.phase
-                    ),
-                }
-            }
+            CutoverPhase::Prepared
+            | CutoverPhase::GuiStopped
+            | CutoverPhase::NetworkRetiring
+            | CutoverPhase::LegacyRetired => LegacyRetirementStatus::RecoveryStartRequired {
+                target: journal.target,
+                message: format!(
+                    "legacy maintenance was interrupted in phase {:?}; open Recovery to continue. Launch did not change the journal, stop any process, or alter networking",
+                    journal.phase
+                ),
+            },
             CutoverPhase::ReplacementActive => {
                 let engine = app.state::<crate::engine::ManagedEngine>();
                 let digest = match journal.target {
@@ -213,7 +195,10 @@ fn recovery_required_status(
 /// Raw launch-recovery causes never cross the IPC/event boundary. This local
 /// diagnostic boundary removes log-control characters and caps the rendered
 /// cause before it reaches the application log.
-fn emit_launch_recovery_diagnostic(phase: CutoverPhase, failure: &LaunchRecoveryFailure) {
+pub(super) fn emit_launch_recovery_diagnostic(
+    phase: CutoverPhase,
+    failure: &LaunchRecoveryFailure,
+) {
     eprintln!(
         "legacy launch recovery failed (phase={phase:?}, category={}): {}",
         failure.category().diagnostic_code(),
@@ -324,13 +309,14 @@ fn finalize_legacy_data_state(
     legacy_settings: Option<&cfw_core::LegacySettingsMigration>,
     preferences: &UiPreferences,
 ) -> Result<(), String> {
+    let preferences = preferences_for_legacy_cleanup(store, preferences)?;
     let snapshot = complete_legacy_data_retirement(
         retirement_completed,
         || {
             ProfileRepository::new(store.paths().legacy_profiles_dir.clone())
                 .clear_managed_profiles()
                 .map_err(|error| format!("failed to clear managed legacy profiles: {error}"))?;
-            reconcile_main_app_login_item(preferences)?;
+            reconcile_main_app_login_item(&preferences)?;
             sanitize_legacy_preferences(store, preferences.clone())
         },
         || {
@@ -360,6 +346,21 @@ fn finalize_legacy_data_state(
     )?;
     app.emit("cfw://settings-changed", snapshot)
         .map_err(|error| format!("failed to publish migrated settings: {error}"))
+}
+
+/// Modern preferences may have been edited before optional legacy cleanup.
+/// They remain authoritative; cleanup imports old preferences only when the
+/// user has not written a modern preferences document yet.
+pub(super) fn preferences_for_legacy_cleanup(
+    store: &SettingsStore,
+    legacy_preferences: &UiPreferences,
+) -> Result<UiPreferences, String> {
+    let snapshot = store.snapshot().map_err(|error| error.to_string())?;
+    Ok(if snapshot.persisted {
+        snapshot.settings
+    } else {
+        legacy_preferences.clone()
+    })
 }
 
 /// Completes the durable data-retirement transaction in dependency order.

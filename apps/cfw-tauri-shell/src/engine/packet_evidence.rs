@@ -43,7 +43,7 @@ pub enum PacketEvidenceTransactionError {
     #[error("release Packet evidence is blocked by network maintenance: {0}")]
     Maintenance(String),
     #[cfg(feature = "physical-release-evidence")]
-    #[error("legacy network retirement is not complete: {0}")]
+    #[error("legacy network start admission failed: {0}")]
     LegacyRetirement(String),
     #[cfg(feature = "physical-release-evidence")]
     #[error("Tunnel mode is unavailable: {0}")]
@@ -283,14 +283,13 @@ impl ManagedEngine {
         case: ReleasePacketEvidenceCase,
         stages: PacketEvidenceStages,
     ) -> Result<PacketEvidenceTransactionOutcome, PacketEvidenceTransactionError> {
-        retirement
-            .require_cleared()
-            .map_err(PacketEvidenceTransactionError::LegacyRetirement)?;
         self.require_capability(EngineMode::Tunnel)
             .map_err(PacketEvidenceTransactionError::TunnelUnavailable)?;
         let maintenance = self
             .reserve_maintenance()
             .map_err(|error| PacketEvidenceTransactionError::Maintenance(error.to_string()))?;
+        crate::legacy::require_network_start_allowed(retirement)
+            .map_err(PacketEvidenceTransactionError::LegacyRetirement)?;
         let coordinator = self.coordinator.clone();
         let completion = maintenance.run_to_completion(async move {
             execute_packet_evidence_transaction(coordinator, case, stages).await

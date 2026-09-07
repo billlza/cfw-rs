@@ -104,17 +104,6 @@ fn write_renderer_preferences(
     write_preferences(store, preferences)
 }
 
-fn require_completed_migration(store: &SettingsStore) -> Result<(), String> {
-    if store
-        .legacy_retirement_completed()
-        .map_err(|error| error.to_string())?
-    {
-        Ok(())
-    } else {
-        Err("legacy settings migration is still pending; preferences remain read-only".into())
-    }
-}
-
 pub(crate) fn sanitize_legacy_preferences(
     store: &SettingsStore,
     preferences: UiPreferences,
@@ -145,7 +134,6 @@ pub(crate) fn write_settings_snapshot(
     settings: UiPreferences,
 ) -> Result<UiSettingsSnapshot, String> {
     let store = settings_store()?;
-    require_completed_migration(&store)?;
     let retain_window_bounds = settings.retain_window_bounds;
     window_bounds.commit_retention(&app, retain_window_bounds, || {
         let snapshot = write_renderer_preferences(&store, settings)?;
@@ -159,7 +147,6 @@ pub(crate) fn write_settings_snapshot(
 #[tauri::command]
 pub(crate) fn set_launch_at_login_enabled(enabled: bool) -> Result<UiSettingsSnapshot, String> {
     let store = settings_store()?;
-    require_completed_migration(&store)?;
     let mut preferences = store.read_or_default().map_err(|error| error.to_string())?;
     let platform = MacOsPlatformService;
     let original_status = platform.login_item_status();
@@ -460,6 +447,32 @@ mod tests {
         assert_eq!(snapshot.settings.theme, AppearanceTheme::Dark);
         assert!(!snapshot.settings.launch_at_login);
 
+        fs::remove_dir_all(root).expect("remove settings test root");
+    }
+
+    #[test]
+    fn modern_preferences_are_writable_without_retiring_legacy_settings() {
+        let (root, store) = test_settings_store("independent-preferences");
+        store.ensure_layout().expect("modern layout");
+        let old = b"legacy content is not a prerequisite for modern preferences";
+        fs::write(&store.paths().legacy_settings_file, old).expect("retained legacy settings");
+        let changed = UiPreferences {
+            theme: AppearanceTheme::Dark,
+            silent_start: true,
+            ..UiPreferences::default()
+        };
+        let result = write_renderer_preferences(&store, changed).expect("modern preferences write");
+        assert_eq!(result.settings.theme, AppearanceTheme::Dark);
+        assert!(result.settings.silent_start);
+        assert!(
+            !store
+                .legacy_retirement_completed()
+                .expect("no retirement marker")
+        );
+        assert_eq!(
+            fs::read(&store.paths().legacy_settings_file).expect("retained source"),
+            old
+        );
         fs::remove_dir_all(root).expect("remove settings test root");
     }
 }

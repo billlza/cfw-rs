@@ -285,12 +285,25 @@ INSTALLED_40044_PREDECESSOR: Final = PredecessorProfile(
     unregister_authority_action="unregister-global-authority",
     authority_recovery=None,
 )
+# Build 40045 retains the current engine v6 / Authority v1.1 vocabulary. Its
+# exact notarized signed tree is preserved by the original application
+# manifest and the completed 40044 -> 40045 installation.
+INSTALLED_40045_PREDECESSOR: Final = PredecessorProfile(
+    build_number="40045",
+    tree_sha256="c5bf15b493b90b846705d93456c7695c3522f72d465a6dab47f70a6bdbcc4baf",
+    off_proof_profile=CURRENT_OFF_PROOF_PROFILE,
+    prove_off_action="prove-off",
+    unregister_proxy_action="unregister-proxy-agent",
+    unregister_authority_action="unregister-global-authority",
+    authority_recovery=None,
+)
 SUPPORTED_PREDECESSORS: Final = MappingProxyType(
     {
         INSTALLED_40019_PREDECESSOR.build_number: INSTALLED_40019_PREDECESSOR,
         INSTALLED_40041_PREDECESSOR.build_number: INSTALLED_40041_PREDECESSOR,
         INSTALLED_40043_PREDECESSOR.build_number: INSTALLED_40043_PREDECESSOR,
         INSTALLED_40044_PREDECESSOR.build_number: INSTALLED_40044_PREDECESSOR,
+        INSTALLED_40045_PREDECESSOR.build_number: INSTALLED_40045_PREDECESSOR,
     }
 )
 SERVICE_DECOMMISSION_PHASES: Final = (

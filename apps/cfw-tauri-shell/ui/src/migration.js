@@ -254,6 +254,21 @@ export function migrationRoute(retirement, migrationHandoff) {
   }
 }
 
+/// Ordinary networking does not depend on optional legacy cleanup. A durable
+/// unfinished operation or an unreadable status still exposes its recovery
+/// surface without requiring the user to discover the maintenance entry.
+export function legacyMaintenanceRoute(retirement, migrationHandoff, maintenanceOpen = false) {
+  const route = migrationRoute(retirement, migrationHandoff);
+  if (route === "none") return maintenanceOpen ? "complete" : "none";
+  if (migrationHandoff || maintenanceOpen
+    || retirement?.state === "cleaning"
+    || retirement?.state === "recovery_start_required"
+    || route === "unverifiable") {
+    return route;
+  }
+  return "none";
+}
+
 export function migrationHandoffRendererAckArguments(
   bootPayload,
   retirement,

@@ -44,6 +44,51 @@ pub(crate) use journal::MigrationHandoffLease;
 pub use state_gate::LegacyRetirementGate;
 pub(crate) use state_gate::LegacyRetirementStatus;
 
+/// Normal networking does not depend on deleting legacy data. The existing
+/// mode/maintenance permit serializes this observation with explicit cleanup.
+pub(crate) fn require_network_start_allowed(
+    retirement: &LegacyRetirementGate,
+) -> Result<(), String> {
+    require_network_start_with(
+        retirement,
+        &crate::settings_store()?,
+        process_cleanup::require_legacy_runtime_inactive,
+    )
+}
+
+fn require_network_start_with(
+    retirement: &LegacyRetirementGate,
+    store: &cfw_core::SettingsStore,
+    observe_runtime: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    retirement.require_start_allowed()?;
+    let phase = CutoverJournalStore::new(store.paths().app_home.clone())
+        .load()?
+        .map(|journal| journal.phase);
+    require_normal_start_phase(phase, &retirement.status()?)?;
+    observe_runtime(&store.paths().legacy_cores_dir)
+}
+
+fn require_normal_start_phase(
+    phase: Option<CutoverPhase>,
+    status: &LegacyRetirementStatus,
+) -> Result<(), String> {
+    match phase {
+        None | Some(CutoverPhase::CleanupComplete) => Ok(()),
+        Some(CutoverPhase::ReplacementActive)
+            if matches!(
+                status,
+                LegacyRetirementStatus::PostCutoverCleanupRequired { .. }
+            ) =>
+        {
+            Ok(())
+        }
+        Some(phase) => Err(format!(
+            "an interrupted legacy network transaction in phase {phase:?} requires explicit recovery; no network start was attempted"
+        )),
+    }
+}
+
 /// Returns the exact non-secret replacement settings bound to an interrupted
 /// cutover. A completed journal no longer governs a future engine start; a
 /// live recovery phase does, so a restarted process cannot silently choose a
@@ -468,7 +513,6 @@ pub(crate) async fn recover_legacy_cutover(
         );
     }
     launch.require_renderer_ready_published()?;
-    admission::require_canonical_handoff_candidate()?;
     launch.require_handoff_parent_absent()?;
     let _maintenance = engine
         .reserve_maintenance()
@@ -484,10 +528,20 @@ pub(crate) async fn recover_legacy_cutover(
         journal.phase,
         CutoverPhase::Prepared | CutoverPhase::GuiStopped
     ) {
-        recovery::seal_pre_network_cutover_for_recovery(&journal, &store)?;
+        migration::require_explicit_pre_network_recovery(
+            launch.is_migration_handoff(),
+            admission::require_canonical_handoff_candidate,
+            || recovery::seal_pre_network_cutover_for_recovery(&journal, &store),
+        )
+        .map_err(|failure| {
+            migration::emit_launch_recovery_diagnostic(journal.phase, &failure);
+            failure.user_message().to_owned()
+        })?;
         journal = journal_store
             .load()?
             .ok_or_else(|| "sealed legacy cutover journal disappeared".to_owned())?;
+    } else {
+        admission::require_canonical_handoff_candidate()?;
     }
     if journal.phase == CutoverPhase::CleanupComplete {
         migration::run_launch_preflight(&app)?;

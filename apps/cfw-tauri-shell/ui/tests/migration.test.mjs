@@ -6,6 +6,7 @@ import {
   clearCutoverReceipt,
   cutoverConfirmArguments,
   cutoverReceiptIsCurrent,
+  legacyMaintenanceRoute,
   migrationHandoffRendererAckArguments,
   migrationRoute,
   newCutoverState,
@@ -233,6 +234,30 @@ test("every durable retirement status has one explicit migration route", () => {
   const unreadable = unverifiableRetirementStatus("journal unreadable");
   assert.equal(migrationRoute(unreadable, false), "unverifiable");
   assert.equal(migrationRoute(unreadable, true), "unverifiable");
+});
+
+test("ordinary networking is independent of optional legacy maintenance", () => {
+  const optional = [
+    [{ state: "awaiting_confirmation" }, "launch_prepare"],
+    [{ state: "manual_cleanup_required", action: "review_dns", message: "review" }, "launch_prepare"],
+    [{ state: "manual_cleanup_required", action: "retry", message: "retry" }, "launch_recovery"],
+    [{ state: "post_cutover_cleanup_required", message: "old data" }, "launch_recovery"],
+  ];
+  for (const [status, openedRoute] of optional) {
+    assert.equal(legacyMaintenanceRoute(status, false), "none");
+    assert.equal(legacyMaintenanceRoute(status, false, true), openedRoute);
+    assert.equal(legacyMaintenanceRoute(status, true), migrationRoute(status, true));
+  }
+  for (const [status, route] of [
+    [{ state: "recovery_start_required", target: "tunnel", message: "unfinished" }, "launch_recovery"],
+    [{ state: "cleaning" }, "busy"],
+    [unverifiableRetirementStatus("journal unreadable"), "unverifiable"],
+  ]) {
+    assert.equal(legacyMaintenanceRoute(status, false), route);
+    assert.equal(legacyMaintenanceRoute(status, false, true), route);
+  }
+  assert.equal(legacyMaintenanceRoute({ state: "cleared" }, false), "none");
+  assert.equal(legacyMaintenanceRoute({ state: "cleared" }, false, true), "complete");
 });
 
 test("unknown or structurally ambiguous status fails instead of routing to Prepare", () => {

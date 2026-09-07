@@ -8,14 +8,16 @@
   installation, scripts, and PAC execution as runtime paths.
 - Replace the old helper with a one-release, non-operational tombstone descriptor that can only
   stop, verify, clean, and unregister legacy state; it can never start a core.
-- Remove automatic first-launch retirement. Startup leaves the existing VPN
-  untouched, permits replacement profiles to be staged in a physically
-  separate repository; the app performs the verified false-first retirement transaction only after explicit user
-  confirmation plus a fail-closed native/profile cutover preflight.
-- Block every new network mode until legacy helper/session/process state is
-  gone and legacy System Proxy and DNS state has been explicitly verified.
-  Ambiguous proxy or DNS ownership requires user review instead of an
-  automatic overwrite.
+- Keep legacy retirement in an optional maintenance entry. Startup leaves the
+  existing VPN and historical data untouched and permits replacement profiles
+  to be staged in a separate repository. The destructive retirement transaction
+  requires explicit confirmation and native/profile checks only when that
+  maintenance operation is selected.
+- Start normal System Proxy and TUN requests directly through the existing
+  native coordinator, without legacy Prepare or Confirm. Actual legacy runtime
+  or service conflicts, foreign System Proxy ownership and unfinished cutover
+  journals still reject the request with a visible error. Permission and
+  credential checks remain required, and unrelated proxy settings are preserved.
 - Add a release-only, signed-Host maintenance transaction that proves global
   Off, unregisters ProxyAgent before GlobalAuthority, preserves the inactive
   one-way legacy tombstone, atomically installs the fixed candidate, and then
@@ -132,8 +134,13 @@
   identity query misclassified `ESRCH`. Correcting the product code requires
   successor 40045; 40044 retains its original application, package seals,
   receipts and installation journals. No Tunnel confirmation, legacy deletion,
-  GA acceptance or publication completed. Build 40045 is the only active GA;
-  source and CI retries before freeze do not consume additional builds.
+  GA acceptance or publication completed. Build 40045 then completed application
+  notarization and the 40044→40045 install. The requested removal of mandatory
+  legacy setup from normal startup, together with actual foreign System Proxy
+  conflict handling, changes the application and requires successor 40046.
+  Build 40045 retains its frozen app, source/legal evidence and installation
+  journals without GA acceptance or publication. Build 40046 is the only active
+  GA; source and CI retries before freeze do not consume additional builds.
 - Let a confirmed fresh installation proceed without an old proxy port that
   never existed. Preparation and recovery recheck that legacy settings,
   managed files, privileged services and network state remain absent. Upgrade

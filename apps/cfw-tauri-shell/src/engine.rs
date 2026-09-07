@@ -25,9 +25,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::ManagedProfiles;
-use crate::legacy::{
-    LegacyRetirementGate, LegacyRetirementStatus, load_replacement_engine_settings,
-};
+use crate::legacy::{LegacyRetirementGate, load_replacement_engine_settings};
 use crate::settings_store;
 use cutover::CutoverPreparationGate;
 use endpoints::{EndpointCandidateCursor, EndpointRole, select_process_engine_settings};
@@ -298,54 +296,15 @@ impl ManagedEngine {
         &self,
         retirement: &LegacyRetirementGate,
     ) -> Result<EngineStatusPayload, String> {
-        let retirement_status = retirement.status()?;
-        let (capabilities, retirement_reason) = match retirement_status {
-            LegacyRetirementStatus::Cleared => (self.capabilities, None),
-            LegacyRetirementStatus::PostCutoverCleanupRequired { message } => (
-                self.capabilities,
-                Some(format!(
-                    "replacement networking is active; post-cutover data cleanup must be retried: {message}"
-                )),
-            ),
-            LegacyRetirementStatus::AwaitingConfirmation => (
-                EngineCapabilities {
-                    system_proxy: false,
-                    tunnel: false,
-                    provider_management: false,
-                },
-                Some(
-                    "legacy network remains unchanged while replacement configuration is staged"
-                        .to_owned(),
-                ),
-            ),
-            LegacyRetirementStatus::Cleaning => (
-                EngineCapabilities {
-                    system_proxy: false,
-                    tunnel: false,
-                    provider_management: false,
-                },
-                Some("the explicitly confirmed legacy network cutover is running".to_owned()),
-            ),
-            LegacyRetirementStatus::RecoveryStartRequired { message, .. } => (
-                EngineCapabilities {
-                    system_proxy: false,
-                    tunnel: false,
-                    provider_management: false,
-                },
-                Some(format!(
-                    "an interrupted cutover requires explicit replacement recovery: {message}"
-                )),
-            ),
-            LegacyRetirementStatus::ManualCleanupRequired { message, .. } => (
-                EngineCapabilities {
-                    system_proxy: false,
-                    tunnel: false,
-                    provider_management: false,
-                },
-                Some(format!(
-                    "legacy network cleanup requires manual intervention: {message}"
-                )),
-            ),
+        let retirement_reason = retirement.status()?.start_block_reason();
+        let capabilities = if retirement_reason.is_some() {
+            EngineCapabilities {
+                system_proxy: false,
+                tunnel: false,
+                provider_management: false,
+            }
+        } else {
+            self.capabilities
         };
         let (cutover_ready, mut cutover_reason) = self.cutover.readiness(Instant::now())?;
         if self.unavailable_reason.is_some() {
@@ -490,7 +449,7 @@ pub(crate) fn engine_snapshot(
 /// single-flight transition permit.
 ///
 /// Every renderer mutation first acquires an exact target or current-mode
-/// admission, then funnels through here so the legacy-retirement gate,
+/// admission, then funnels through here so the live legacy-runtime admission,
 /// capability check, selected profile, and app-owned settings cannot be
 /// skipped. The permit outlives renderer cancellation until the coordinator
 /// actor responds, so accepted native work cannot escape maintenance.
@@ -502,7 +461,7 @@ pub(crate) async fn apply_admitted_engine_mode(
     mode_lease: EngineModeChangeLease,
 ) -> Result<EngineStatusPayload, String> {
     if mode != EngineMode::Off {
-        retirement.require_cleared()?;
+        crate::legacy::require_network_start_allowed(retirement)?;
         engine.require_capability(mode)?;
     }
     let (profile_id, profile) = selected_profile_for_mode(profiles.repository(), mode)

@@ -144,10 +144,10 @@ class ReleaseCapabilityInventoryTests(unittest.TestCase):
         self.assertEqual(len(reports), len(CAPABILITY_IDS))
         self.assertEqual(
             {report["path"] for report in reports},
-            {"target/candidates/0.4.0/ga/40045/stage-inputs/local-ci-lanes.json"},
+            {"target/candidates/0.4.0/ga/40046/stage-inputs/local-ci-lanes.json"},
         )
         require_fixed_evidence_mapping(value)
-        reports[0]["path"] = "target/candidates/0.4.0/ga/40045/prepackage/local-ci-lanes.json"
+        reports[0]["path"] = "target/candidates/0.4.0/ga/40046/prepackage/local-ci-lanes.json"
         with self.assertRaisesRegex(PublicationError, "report policy drifted"):
             require_fixed_evidence_mapping(value)
 

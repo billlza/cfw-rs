@@ -368,14 +368,6 @@ pub(crate) fn reset_settings_snapshot(
     window_bounds: State<'_, WindowBoundsManager>,
 ) -> Result<UiSettingsSnapshot, String> {
     let store = settings_store()?;
-    if !store
-        .legacy_retirement_completed()
-        .map_err(|error| error.to_string())?
-    {
-        return Err(
-            "legacy settings migration is still pending; preferences remain read-only".into(),
-        );
-    }
     let current = store.read_or_default().map_err(|error| error.to_string())?;
     let defaults = UiPreferences {
         launch_at_login: current.launch_at_login,

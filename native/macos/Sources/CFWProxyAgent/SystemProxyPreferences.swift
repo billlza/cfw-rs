@@ -17,6 +17,7 @@ enum SystemProxyPreferencesError: Error, Equatable, Sendable {
   case proxyProtocolMissing(String)
   case missingAppliedValue(SystemProxyField)
   case unsupportedValue(serviceID: String, field: SystemProxyField)
+  case existingProxyConfiguration(serviceID: String, field: SystemProxyField)
   case concurrentModification(serviceID: String, field: SystemProxyField)
   case setConfigurationFailed(serviceID: String, code: Int32)
   case commitFailed(Int32)
@@ -56,6 +57,9 @@ extension SystemProxyPreferencesError: LocalizedError {
       return "The product proxy value for \(field.rawValue) is missing."
     case .unsupportedValue(let serviceID, let field):
       return "Network service \(serviceID) has an unsupported \(field.rawValue) value."
+    case .existingProxyConfiguration(let serviceID, let field):
+      return
+        "Network service \(serviceID) already has \(field.rawValue) enabled. Turn off the existing system proxy in its app or System Settings before enabling Clash for Mac. Existing proxy settings were not changed."
     case .concurrentModification(let serviceID, let field):
       return "Network service \(serviceID) changed \(field.rawValue) during proxy activation."
     case .setConfigurationFailed(let serviceID, let code):
@@ -153,6 +157,13 @@ struct SCPreferencesAuthorizationOperations: @unchecked Sendable {
 }
 
 struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
+  struct ServiceRestoration {
+    let configuration: [String: Any]
+    let restoredFields: [OwnedSystemProxyField]
+    let conflicts: [ProxyOwnershipConflict]
+    let changed: Bool
+  }
+
   private struct ServiceRecord {
     let serviceID: String
     let proxyProtocol: SCNetworkProtocol?
@@ -184,7 +195,9 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
         throw SystemProxyPreferencesError.noEligibleNetworkServices
       }
       let services = try records.map { record in
-        try SystemProxyServiceOwnership(
+        try Self.requireInactiveProxyConfiguration(
+          record.configuration, serviceID: record.serviceID)
+        return try SystemProxyServiceOwnership(
           serviceID: record.serviceID,
           fields: try SystemProxyField.allCases.map { field in
             guard let appliedValue = appliedValues[field] else {
@@ -225,6 +238,8 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
         guard record.proxyProtocol != nil else {
           throw SystemProxyPreferencesError.proxyProtocolMissing(service.serviceID)
         }
+        try Self.requireInactiveProxyConfiguration(
+          record.configuration, serviceID: service.serviceID)
         for ownedField in service.fields {
           let currentValue = try Self.value(
             record.configuration[ownedField.field.rawValue],
@@ -330,32 +345,15 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
           )
           continue
         }
-        var updated = record.configuration
-        var serviceChanged = false
-        for ownedField in service.fields {
-          let currentValue = try Self.value(
-            record.configuration[ownedField.field.rawValue],
-            serviceID: service.serviceID,
-            field: ownedField.field
-          )
-          if currentValue == ownedField.appliedValue {
-            Self.set(ownedField.originalValue, field: ownedField.field, in: &updated)
-            restoredFields.append((service.serviceID, ownedField))
-            serviceChanged = true
-          } else if currentValue == ownedField.originalValue {
-            restoredFields.append((service.serviceID, ownedField))
-          } else {
-            conflicts.append(
-              ProxyOwnershipConflict(
-                serviceID: service.serviceID,
-                field: ownedField.field,
-                reason: .valueChanged(current: currentValue)
-              )
-            )
-          }
-        }
-        if serviceChanged {
-          guard SCNetworkProtocolSetConfiguration(proxyProtocol, updated as CFDictionary)
+        let restoration = try Self.restoration(
+          for: service, configuration: record.configuration)
+        conflicts.append(contentsOf: restoration.conflicts)
+        restoredFields.append(
+          contentsOf: restoration.restoredFields.map { (service.serviceID, $0) })
+        if restoration.changed {
+          guard
+            SCNetworkProtocolSetConfiguration(
+              proxyProtocol, restoration.configuration as CFDictionary)
           else {
             throw SystemProxyPreferencesError.setConfigurationFailed(
               serviceID: service.serviceID,
@@ -392,7 +390,11 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
             serviceID: serviceID,
             field: ownedField.field
           )
-          guard currentValue == ownedField.originalValue else {
+          let originalValue = try Self.value(
+            ownedField.originalValue.map(Self.foundationValue),
+            serviceID: serviceID,
+            field: ownedField.field)
+          guard currentValue == originalValue else {
             throw SystemProxyPreferencesError.verificationFailed(
               serviceID: serviceID,
               field: ownedField.field
@@ -414,6 +416,63 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
       try verifyEffectiveRestoredValues(journal)
     }
     return outcome.result
+  }
+
+  static func restoration(
+    for service: SystemProxyServiceOwnership,
+    configuration: [String: Any]
+  ) throws -> ServiceRestoration {
+    var updated = configuration
+    var restoredFields: [OwnedSystemProxyField] = []
+    var conflicts: [ProxyOwnershipConflict] = []
+    var changed = false
+    let observations = try service.fields.map { ownedField in
+      let current = try value(
+        configuration[ownedField.field.rawValue],
+        serviceID: service.serviceID,
+        field: ownedField.field)
+      guard ownedField.field.acceptsOriginalValue(current) else {
+        throw SystemProxyPreferencesError.unsupportedValue(
+          serviceID: service.serviceID, field: ownedField.field)
+      }
+      let original = try value(
+        ownedField.originalValue.map(foundationValue),
+        serviceID: service.serviceID,
+        field: ownedField.field)
+      return (ownership: ownedField, current: current, original: original)
+    }
+    // An enable flag alone is not ownership: another app can enable the retained
+    // original endpoint after preparation, or replace a running proxy's endpoint.
+    // Restore each protocol only while its entire endpoint is still ours.
+    for enableField in SystemProxyField.allCases where enableField.isEnableFlag {
+      let group = observations.filter {
+        $0.ownership.field == enableField
+          || controllingEnableField(for: $0.ownership.field) == enableField
+      }
+      if group.allSatisfy({ $0.current == $0.original }) {
+        restoredFields.append(contentsOf: group.map(\.ownership))
+      } else if group.allSatisfy({ $0.current == $0.ownership.appliedValue }) {
+        for observation in group {
+          let ownedField = observation.ownership
+          set(ownedField.originalValue, field: ownedField.field, in: &updated)
+          restoredFields.append(ownedField)
+        }
+        changed = true
+      } else {
+        for observation in group where observation.current != observation.ownership.appliedValue {
+          conflicts.append(
+            ProxyOwnershipConflict(
+              serviceID: service.serviceID,
+              field: observation.ownership.field,
+              reason: .valueChanged(current: observation.current)))
+        }
+      }
+    }
+    return ServiceRestoration(
+      configuration: updated,
+      restoredFields: restoredFields,
+      conflicts: conflicts,
+      changed: changed)
   }
 
   func withAuthorizedPreferences<T>(
@@ -650,6 +709,26 @@ struct SCPreferencesSystemProxyPreferences: SystemProxyPreferences {
       return enabled != 0
     case .none, .string:
       return false
+    }
+  }
+
+  /// A fresh ownership journal cannot authorize replacing an existing proxy.
+  /// Check again under the preferences lock before any service is changed.
+  /// Disabled endpoints may remain configured and are preserved by the journal.
+  static func requireInactiveProxyConfiguration(
+    _ configuration: [String: Any],
+    serviceID: String
+  ) throws {
+    for field in SystemProxyField.allCases where field.isEnableFlag {
+      switch try value(configuration[field.rawValue], serviceID: serviceID, field: field) {
+      case .none, .boolean(false), .integer(0):
+        continue
+      case .boolean(true), .integer:
+        throw SystemProxyPreferencesError.existingProxyConfiguration(
+          serviceID: serviceID, field: field)
+      case .string:
+        throw SystemProxyPreferencesError.unsupportedValue(serviceID: serviceID, field: field)
+      }
     }
   }
 

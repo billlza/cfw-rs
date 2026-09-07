@@ -21,6 +21,7 @@ from scripts.ga_runtime_acceptance import (
     COLLECTION_RELATIVE,
     COLLECTION_DOCUMENT,
     COLLECTION_EVENT_DOCUMENT,
+    COLLECTION_INTENT_SCHEMA_VERSION,
     COLLECTION_SUCCESS_STEPS,
     COMMAND_DOCUMENT,
     DOCUMENT,
@@ -258,6 +259,15 @@ def guard() -> dict[str, object]:
     }
 
 
+def restarted_guard() -> dict[str, object]:
+    current = guard()
+    for process in current["cfw_processes"]:
+        process["pid"] += 1_000
+        process["started_at"] = "Mon Jul 27 11:30:00 2026"
+    current["tun_sha256"] = "e" * 64
+    return current
+
+
 def process_table(*, running: bool) -> str:
     lines = [
         (
@@ -283,7 +293,7 @@ def launchctl_output(
     domain_target: str,
     program_identifier: str,
     service_label: str,
-    parent_bundle_version: str = "40045",
+    parent_bundle_version: str = "40046",
 ) -> str:
     """Reproduce the exact `launchctl print` shape for an SMAppService job.
 
@@ -325,7 +335,7 @@ def system_extension_output() -> str:
         "--- com.apple.system_extension.network_extension\n"
         "enabled\tactive\tteamID\tbundleID (version)\tname\t[state]\n"
         "*\t*\tYKUPL7Z869\tcom.bill.clashformac.packet-tunnel "
-        "(0.4.0/40045)\tCFWPacketTunnel\t[activated enabled]\n"
+        "(0.4.0/40046)\tCFWPacketTunnel\t[activated enabled]\n"
     )
 
 
@@ -537,7 +547,7 @@ class RuntimeFixture:
                         "context:primary-signature",
                         "-vv",
                         (
-                            "target/candidates/0.4.0/ga/40045/packages/dmg/v0.4.0/"
+                            "target/candidates/0.4.0/ga/40046/packages/dmg/v0.4.0/"
                             "Clash.for.Mac_0.4.0_arm64.dmg"
                         ),
                     ],
@@ -719,12 +729,17 @@ class RuntimeFixture:
         root = self.repository.joinpath(*COLLECTION_RELATIVE.parts)
         root.mkdir(mode=0o700)
         intent = {
+            "cfw_guard_baseline": guard(),
             "collection": {
                 "challenge": CHALLENGE,
                 "ga_environment_sha256": GA_ENVIRONMENT_SHA256,
                 "session_id": SESSION_ID,
             },
             "document": COLLECTION_DOCUMENT,
+            "journal_bindings": {
+                key: DIGESTS[key]
+                for key in ("install_journal_sha256", "service_journal_tree_sha256")
+            },
             "package_bindings": {
                 key: DIGESTS[key]
                 for key in (
@@ -738,7 +753,7 @@ class RuntimeFixture:
                 "to_build": TO_BUILD,
                 "version": PRODUCT_VERSION,
             },
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": COLLECTION_INTENT_SCHEMA_VERSION,
         }
         intent_path = root / "intent.json"
         intent_path.write_bytes(canonical_json(intent))
@@ -937,7 +952,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_contract_has_fixed_paths_and_twelve_raw_derived_checks(self) -> None:
         self_check()
-        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40044", "40045"))
+        self.assertEqual((PRODUCT_VERSION, FROM_BUILD, TO_BUILD), ("0.4.0", "40045", "40046"))
         self.assertEqual(
             (ga_runtime.MAX_COMMAND_SECONDS, DMG_BYTE_PROOF_TIMEOUT_SECONDS),
             (15 * 60, 30 * 60),
@@ -949,6 +964,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
                 CHECK_DOCUMENT,
                 COMMAND_DOCUMENT,
                 COLLECTION_DOCUMENT,
+                COLLECTION_INTENT_SCHEMA_VERSION,
                 COLLECTION_EVENT_DOCUMENT,
             ),
             (
@@ -956,7 +972,8 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
                 2,
                 "cfm-ga-runtime-check-v2",
                 "cfm-ga-command-observation-v2",
-                "cfm-ga-runtime-collection-intent-v2",
+                "cfm-ga-runtime-collection-intent-v3",
+                3,
                 "cfm-ga-runtime-collection-event-v2",
             ),
         )
@@ -965,28 +982,28 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             ACCEPTANCE_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40046/stage-inputs/ga-acceptance/"
                 "runtime-acceptance.json"
             ),
         )
         self.assertEqual(
             RAW_ROOT_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40046/stage-inputs/ga-acceptance/"
                 "runtime-evidence"
             ),
         )
         self.assertEqual(
             ENVIRONMENT_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40046/stage-inputs/ga-acceptance/"
                 "migration-journals/service-transaction/environment.json"
             ),
         )
         self.assertEqual(
             INSTALL_JOURNAL_RELATIVE,
             Path(
-                "target/candidates/0.4.0/ga/40045/stage-inputs/ga-acceptance/"
+                "target/candidates/0.4.0/ga/40046/stage-inputs/ga-acceptance/"
                 "migration-journals/dormant-install.json"
             ),
         )
@@ -994,11 +1011,14 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
     def test_historical_migration_bindings_cannot_seal_the_active_candidate(self) -> None:
         for from_build, to_build in (
             ("40041", "40043"),
-            ("40041", "40045"),
+            ("40041", "40046"),
             ("40043", "40043"),
             ("40043", "40044"),
-            ("40043", "40045"),
+            ("40043", "40046"),
             ("40044", "40044"),
+            ("40044", "40045"),
+            ("40044", "40046"),
+            ("40045", "40045"),
         ):
             with self.subTest(from_build=from_build, to_build=to_build):
                 self.fixture.expected["from_build"] = from_build
@@ -1061,6 +1081,69 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual([entry["id"] for entry in adapter["checks"]], list(CHECKS))
         self.assertNotIn("passed", self.fixture.acceptance.read_text(encoding="utf-8"))
 
+    def test_matching_raw_guards_cannot_replace_the_durable_baseline(self) -> None:
+        for name in ("shutdown-restore.json", "legacy-cfw-preserved.json"):
+            document = self.fixture.documents[name]
+            document["before_guard"]["tun_sha256"] = "e" * 64
+            document["after_guard"]["tun_sha256"] = "e" * 64
+        self.fixture.write_all()
+        with self.assertRaisesRegex(
+            GARuntimeAcceptanceError, "differs from the durable collection intent"
+        ):
+            self.fixture.seal()
+        self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_collection_intent_tampering_cannot_rebind_successful_raw_evidence(self) -> None:
+        path = self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts) / "intent.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        cases = (
+            ("cfw_guard_baseline", "tun_sha256", "e" * 64, "durable collection intent"),
+            ("journal_bindings", "install_journal_sha256", "e" * 64, "migration journals"),
+            ("journal_bindings", "service_journal_tree_sha256", "e" * 64, "migration journals"),
+            ("package_bindings", "dmg_sha256", "e" * 64, "package evidence"),
+            ("collection", "session_id", "12345678-1234-4234-8234-123456789abd", "different collection"),
+        )
+        for section, key, value, error in cases:
+            with self.subTest(section=section, key=key):
+                changed = copy.deepcopy(original)
+                self.assertNotEqual(changed[section][key], value)
+                changed[section][key] = value
+                path.write_bytes(canonical_json(changed))
+                with self.assertRaisesRegex(GARuntimeAcceptanceError, error):
+                    self.fixture.seal()
+                self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_intent_replacement_between_raw_validation_and_receipt_is_rejected(self) -> None:
+        path = self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts) / "intent.json"
+        original_scan = ga_runtime._validate_credential_scan
+
+        def replace_intent_after_guard_validation(document, snapshots):
+            original_scan(document, snapshots)
+            changed = json.loads(path.read_text(encoding="utf-8"))
+            changed["cfw_guard_baseline"]["tun_sha256"] = "e" * 64
+            path.write_bytes(canonical_json(changed))
+
+        with patch.object(
+            ga_runtime, "_validate_credential_scan",
+            side_effect=replace_intent_after_guard_validation,
+        ), self.assertRaisesRegex(GARuntimeAcceptanceError, "intent changed during verification"):
+            self.fixture.seal()
+        self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_v2_collection_intent_requires_its_original_frozen_verifier(self) -> None:
+        path = self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts) / "intent.json"
+        legacy = json.loads(path.read_text(encoding="utf-8"))
+        del legacy["cfw_guard_baseline"]
+        del legacy["journal_bindings"]
+        legacy["document"] = "cfm-ga-runtime-collection-intent-v2"
+        legacy["schema_version"] = 2
+        data = canonical_json(legacy)
+        path.write_bytes(data)
+        with self.assertRaisesRegex(PublicationError, "unexpected field set"):
+            self.fixture.seal()
+        self.assertEqual(path.read_bytes(), data)
+        self.assertFalse(self.fixture.acceptance.exists())
+
     def test_dmg_byte_proof_alone_accepts_the_extended_bounded_duration(self) -> None:
         verification = self.fixture.documents["exact-dmg-install.json"]["commands"][
             "dmg_set_verify"
@@ -1084,7 +1167,7 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             GARuntimeAcceptanceError,
-            "installed 40045 launch command command identity, exit, or duration is invalid",
+            "installed 40046 launch command command identity, exit, or duration is invalid",
         ):
             self.fixture.seal()
 
@@ -1299,12 +1382,12 @@ class GARuntimeAcceptanceTests(unittest.TestCase):
 
     def test_service_registration_rejects_a_different_parent_bundle_build(self) -> None:
         original = self._service_stdout("proxy_agent")
-        for build in ("40041", "40043", "40044"):
+        for build in ("40041", "40043", "40044", "40045"):
             with self.subTest(build=build):
                 self._set_service_stdout(
                     "proxy_agent",
                     original.replace(
-                        "parent bundle version = 40045",
+                        "parent bundle version = 40046",
                         f"parent bundle version = {build}",
                     ),
                 )
@@ -1686,8 +1769,12 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 self.assertTrue(stdout.closed)
                 self.assertTrue(stderr.closed)
 
-    def _create_recoverable_collection(self) -> None:
+    def _create_recoverable_collection(
+        self, baseline: dict[str, object] | None = None
+    ) -> None:
         failing = FakeCollectorRuntime(self.fixture, fail_launch=True)
+        if baseline is not None:
+            failing.guards = [copy.deepcopy(baseline)]
         source_patches = self._patch_evidence_sources()
         with source_patches[0], source_patches[1], source_patches[2], self.assertRaises(
             GACollectionRecoveryRequired
@@ -1982,6 +2069,132 @@ class GARuntimeCollectorTests(unittest.TestCase):
         self.assertFalse(self.fixture.raw_root.exists())
         self.assertEqual(runtime.calls, [])
 
+    def test_restarted_cfw_is_bound_before_commands_and_reopens_against_its_run(self) -> None:
+        runtime = FakeCollectorRuntime(self.fixture)
+        baseline = restarted_guard()
+        runtime.guards = [copy.deepcopy(baseline), copy.deepcopy(baseline)]
+        intent_path = self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts) / "intent.json"
+        run = runtime.run
+
+        def run_after_durable_baseline(argv, *, timeout):
+            intent = json.loads(intent_path.read_text(encoding="utf-8"))
+            self.assertEqual(intent["cfw_guard_baseline"], baseline)
+            self.assertEqual(intent["schema_version"], 3)
+            self.assertEqual(intent["document"], "cfm-ga-runtime-collection-intent-v3")
+            self.assertEqual(intent_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(
+                intent["journal_bindings"],
+                {key: DIGESTS[key] for key in (
+                    "install_journal_sha256", "service_journal_tree_sha256"
+                )},
+            )
+            return run(argv, timeout=timeout)
+
+        source_patches = self._patch_evidence_sources()
+        with source_patches[0], source_patches[1], source_patches[2] as history, patch.object(
+            runtime, "run", side_effect=run_after_durable_baseline
+        ):
+            result = collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=runtime,
+                challenge_bytes=b"C" * 32,
+                session_id=SESSION_ID,
+            )
+            self.assertGreaterEqual(history.call_count, 2)
+            for call in history.call_args_list:
+                self.assertEqual(call.args, (self.fixture.repository, self.fixture.expected))
+            self.assertEqual(history.return_value, guard())
+        self.assertEqual(runtime.guards, [])
+        self.assertEqual(result, self.fixture.validate())
+        for name in ("legacy-cfw-preserved.json", "shutdown-restore.json"):
+            document = json.loads((self.fixture.raw_root / name).read_text(encoding="utf-8"))
+            self.assertEqual(document["before_guard"], baseline)
+            self.assertEqual(document["after_guard"], baseline)
+
+    def test_collection_guard_drift_never_publishes_acceptance(self) -> None:
+        changes = [
+            ("cfw_processes", field, value)
+            for field, value in (
+                ("pid", 9_999),
+                ("started_at", "Mon Jul 27 11:45:00 2026"),
+                ("binary_sha256", "f" * 64),
+                ("uid", 502),
+                ("path", "/tmp/Clash for Windows"),
+            )
+        ] + [
+            (field, None, "f" * 64)
+            for field in ("dns_sha256", "proxy_sha256", "routes_ipv4_sha256", "routes_ipv6_sha256", "tun_sha256")
+        ]
+        for section, field, value in changes:
+            with self.subTest(section=section, field=field):
+                fixture = RuntimeFixture()
+                self.addCleanup(fixture.cleanup)
+                fixture.remove_unsealed_raw_tree()
+                runtime = FakeCollectorRuntime(fixture)
+                before = restarted_guard()
+                after = copy.deepcopy(before)
+                if field is None:
+                    after[section] = value
+                else:
+                    after[section][0][field] = value
+                runtime.guards = [before, after]
+                source_patches = self._patch_evidence_sources()
+                with source_patches[0], source_patches[1], source_patches[2], self.assertRaises(
+                    GACollectionRecoveryRequired
+                ) as captured:
+                    collect_ga_runtime_acceptance(
+                        repository=fixture.repository,
+                        expected=fixture.expected,
+                        prepackage_stage_verifier=prepackage_stage_verifier,
+                        runtime=runtime,
+                        challenge_bytes=b"C" * 32,
+                        session_id=SESSION_ID,
+                    )
+                self.assertIsInstance(captured.exception.__cause__, GARuntimeAcceptanceError)
+                self.assertFalse(fixture.raw_root.exists())
+                self.assertFalse(fixture.acceptance.exists())
+
+    def test_baseline_observation_errors_do_not_create_intent_or_run_commands(self) -> None:
+        for failure in (PermissionError("guard permission denied"), GARuntimeAcceptanceError("guard unavailable")):
+            with self.subTest(error=type(failure).__name__):
+                runtime = FakeCollectorRuntime(self.fixture)
+                with patch.object(
+                    runtime, "capture_guard", side_effect=failure
+                ), patch.object(
+                    ga_runtime, "_installed_guard_baseline", return_value=guard()
+                ), self.assertRaises(type(failure)) as captured:
+                    collect_ga_runtime_acceptance(
+                        repository=self.fixture.repository,
+                        expected=self.fixture.expected,
+                        prepackage_stage_verifier=prepackage_stage_verifier,
+                        runtime=runtime,
+                        challenge_bytes=b"C" * 32,
+                        session_id=SESSION_ID,
+                    )
+                self.assertIs(captured.exception, failure)
+                self.assertEqual(runtime.calls, [])
+                self.assertFalse(self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts).exists())
+
+    def test_invalid_install_history_still_blocks_collection_before_observation(self) -> None:
+        runtime = FakeCollectorRuntime(self.fixture)
+        with patch.object(
+            ga_runtime, "_installed_guard_baseline",
+            side_effect=GARuntimeAcceptanceError("install guard lineage drifted"),
+        ), self.assertRaisesRegex(GARuntimeAcceptanceError, "install guard lineage drifted"):
+            collect_ga_runtime_acceptance(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                prepackage_stage_verifier=prepackage_stage_verifier,
+                runtime=runtime,
+                challenge_bytes=b"C" * 32,
+                session_id=SESSION_ID,
+            )
+        self.assertEqual(runtime.guards, [guard(), guard()])
+        self.assertEqual(runtime.calls, [])
+        self.assertFalse(self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts).exists())
+
     def test_environment_symlink_is_rejected_before_collection_intent(self) -> None:
         original = self.fixture.environment_path.parent / "environment-original.json"
         self.fixture.environment_path.rename(original)
@@ -2145,6 +2358,119 @@ class GARuntimeCollectorTests(unittest.TestCase):
                 list(PROCESS_OBSERVATION_COMMAND),
             ],
         )
+
+    def test_recovery_restores_the_recorded_run_baseline_without_resampling_it(self) -> None:
+        baseline = restarted_guard()
+        self._create_recoverable_collection(baseline)
+        intent_path = self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts) / "intent.json"
+        intent_bytes = intent_path.read_bytes()
+        recovery = self._absent_host_recovery_runtime([GA_ENVIRONMENT, GA_ENVIRONMENT])
+        recovery.guards = [copy.deepcopy(baseline)]
+        capture = recovery.capture_guard
+
+        def observe_after_cleanup():
+            self.assertEqual(
+                [argv for argv, _timeout in recovery.calls],
+                [list(PROCESS_OBSERVATION_COMMAND), list(PROCESS_OBSERVATION_COMMAND),
+                 list(OFF_PROOF_COMMAND), list(PROCESS_OBSERVATION_COMMAND)],
+            )
+            return capture()
+
+        with patch.object(
+            ga_runtime, "_installed_guard_baseline", return_value=guard()
+        ) as history, patch.object(
+            recovery, "capture_guard", side_effect=observe_after_cleanup
+        ) as observer:
+            archived = recover_ga_runtime_collection(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                runtime=recovery,
+            )
+        history.assert_called_once_with(self.fixture.repository, self.fixture.expected)
+        observer.assert_called_once_with()
+        self.assertEqual((archived / "intent.json").read_bytes(), intent_bytes)
+        self.assertEqual(recovery.guards, [])
+        self.assertFalse(intent_path.exists())
+        self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_recovery_cannot_substitute_the_historical_install_guard(self) -> None:
+        self._create_recoverable_collection(restarted_guard())
+        recovery = self._absent_host_recovery_runtime([GA_ENVIRONMENT, GA_ENVIRONMENT])
+        with patch.object(
+            ga_runtime, "_installed_guard_baseline", return_value=guard()
+        ), self.assertRaisesRegex(GARuntimeAcceptanceError, "collection's fixed CFW guard"):
+            recover_ga_runtime_collection(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                runtime=recovery,
+            )
+        self.assertTrue(self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts).is_dir())
+        self.assertFalse(any(self.fixture.acceptance.parent.glob("runtime-collection-aborted-*")))
+        self.assertFalse(self.fixture.acceptance.exists())
+
+    def test_recovery_rejects_invalid_or_legacy_intent_before_commands(self) -> None:
+        self._create_recoverable_collection(restarted_guard())
+        collection = self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts)
+        path = collection / "intent.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        malformed_guard = {**original, "cfw_guard_baseline": {}}
+        missing_guard = dict(original)
+        del missing_guard["cfw_guard_baseline"]
+        missing_journals = dict(original)
+        del missing_journals["journal_bindings"]
+        wrong_journals = copy.deepcopy(original)
+        wrong_journals["journal_bindings"]["service_journal_tree_sha256"] = "e" * 64
+        wrong_package = copy.deepcopy(original)
+        wrong_package["package_bindings"]["dmg_sha256"] = "e" * 64
+        legacy = {key: value for key, value in original.items()
+                  if key not in {"cfw_guard_baseline", "journal_bindings"}}
+        legacy.update(document="cfm-ga-runtime-collection-intent-v2", schema_version=2)
+        wrong_version = {**original, "schema_version": 2}
+        events = {item.name: item.read_bytes() for item in collection.glob("event-*.json")}
+        for label, intent, error_type in (
+            ("malformed guard", malformed_guard, GARuntimeAcceptanceError),
+            ("missing guard", missing_guard, PublicationError),
+            ("missing journals", missing_journals, PublicationError),
+            ("wrong journals", wrong_journals, GARuntimeAcceptanceError),
+            ("wrong package", wrong_package, GARuntimeAcceptanceError),
+            ("legacy", legacy, PublicationError),
+            ("wrong version", wrong_version, GARuntimeAcceptanceError),
+        ):
+            with self.subTest(case=label):
+                data = canonical_json(intent)
+                path.write_bytes(data)
+                recovery = FakeCollectorRuntime(self.fixture)
+                with patch.object(
+                    ga_runtime, "_installed_guard_baseline", return_value=guard()
+                ), self.assertRaises(error_type):
+                    recover_ga_runtime_collection(
+                        repository=self.fixture.repository,
+                        expected=self.fixture.expected,
+                        runtime=recovery,
+                    )
+                self.assertEqual(recovery.calls, [])
+                self.assertEqual(recovery.guards, [guard(), guard()])
+                self.assertEqual(path.read_bytes(), data)
+                self.assertEqual(
+                    {item.name: item.read_bytes() for item in collection.glob("event-*.json")},
+                    events,
+                )
+
+    def test_recovery_still_rejects_invalid_historical_install_lineage(self) -> None:
+        self._create_recoverable_collection(restarted_guard())
+        recovery = FakeCollectorRuntime(self.fixture)
+        with patch.object(
+            ga_runtime, "_installed_guard_baseline",
+            side_effect=GARuntimeAcceptanceError("install guard lineage drifted"),
+        ), self.assertRaisesRegex(GARuntimeAcceptanceError, "install guard lineage drifted"):
+            recover_ga_runtime_collection(
+                repository=self.fixture.repository,
+                expected=self.fixture.expected,
+                runtime=recovery,
+            )
+        self.assertEqual(recovery.calls, [])
+        self.assertEqual(recovery.guards, [guard(), guard()])
+        self.assertTrue(self.fixture.repository.joinpath(*COLLECTION_RELATIVE.parts).is_dir())
 
     def test_recovery_rejects_environment_drift_before_runtime_mutation(self) -> None:
         self._create_recoverable_collection()

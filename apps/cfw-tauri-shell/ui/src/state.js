@@ -75,10 +75,16 @@ export const state = {
   // Renderer-side feedback only. Rust admission remains the correctness
   // boundary for duplicate shortcuts, direct IPC, and multiple webviews.
   engineMutationBusy: false,
+  // The last refused mode request may leave the coordinator Off. Keep its
+  // bounded diagnostic visible until the next explicit mode request.
+  engineMutationError: null,
   // Whether this process is the controlled `--migration-handoff` instance,
-  // read from `boot_payload`. The default (main) dashboard offers the restart
-  // that enters the handoff; only the handoff instance drives the cutover.
+  // read from `boot_payload`. Optional maintenance offers the restart that
+  // enters the handoff; only that instance drives destructive legacy work.
   migrationHandoff: false,
+  // Optional legacy CFM maintenance is entered from Settings. Unfinished
+  // operations remain visible independently of this presentation preference.
+  legacyMaintenanceOpen: false,
   // Application-owned parent launch status, queried through `boot_payload` so
   // renderer reload cannot lose an in-flight or failed handoff.
   migrationHandoffStatus: { state: "idle" },

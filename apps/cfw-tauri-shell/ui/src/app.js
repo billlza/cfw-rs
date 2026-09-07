@@ -62,8 +62,8 @@ import {
   clearCutoverReceipt,
   cutoverConfirmArguments,
   cutoverReceiptIsCurrent,
+  legacyMaintenanceRoute,
   migrationHandoffRendererAckArguments,
-  migrationRoute,
   newCutoverState,
   normalizeBootPayload,
   normalizeCutoverPreparation,
@@ -729,20 +729,33 @@ function renderRowNote(short, reason) {
   return `<small class="cfw-row-note" title="${escapeHtml(reason)}">${escapeHtml(short)}</small>`;
 }
 
-/// The migration affordance shown while the fresh-install one-way cutover has
-/// not been confirmed. Without it a clean install sits forever on a disabled
-/// network with only a reason string.
+/// Optional maintenance for older Clash for Mac installations.
 ///
-/// The default dashboard cannot run the destructive cutover; it offers the
-/// controlled restart into the `--migration-handoff` instance. That instance
-/// renders the explicit prepare → confirm flow. No control here mutates the
-/// network on its own: prepare only stages and preflights, and confirm requires
-/// an explicit checkbox that maps to the backend's `cutover_confirmed` gate.
+/// Settings exposes the controlled restart into the `--migration-handoff`
+/// instance. Existing unfinished transactions keep their recovery surface.
+/// Destructive actions retain their explicit preparation and confirmation.
 function renderMigrationBanner() {
   const retirement = state.retirement;
   if (!retirement || typeof retirement.state !== "string") return "";
-  const route = migrationRoute(retirement, state.migrationHandoff);
+  const route = legacyMaintenanceRoute(
+    retirement, state.migrationHandoff, state.legacyMaintenanceOpen,
+  );
   if (route === "none") return "";
+  const close = state.legacyMaintenanceOpen && !state.migrationHandoff
+    && legacyMaintenanceRoute(retirement, false) === "none"
+    ? `<button type="button" class="cfw-text-button" data-action="close-legacy-maintenance">Close maintenance</button>`
+    : "";
+  if (route === "complete") {
+    return `
+      <div class="cfw-migration-banner" role="status">
+        <div class="cfw-migration-copy">
+          <strong>Legacy CFM maintenance is complete</strong>
+          <small>No legacy cleanup is pending.</small>
+          ${close}
+        </div>
+      </div>
+    `;
+  }
   let cutover = state.cutover;
   if (cutover.receiptId && !cutoverReceiptIsCurrent(cutover)) {
     state.cutover = clearCutoverReceipt(cutover, {
@@ -755,8 +768,8 @@ function renderMigrationBanner() {
     return `
       <div class="cfw-migration-banner cfw-migration-unverifiable" role="alert">
         <div class="cfw-migration-copy">
-          <strong>Migration state cannot be verified</strong>
-          <small>${escapeHtml(retirement.message ?? "The durable legacy-retirement state could not be read. Networking remains fail-closed.")}</small>
+          <strong>Legacy CFM maintenance state cannot be verified</strong>
+          <small>${escapeHtml(retirement.message ?? "The legacy operation state could not be read. Reload before requesting maintenance.")}</small>
         </div>
       </div>
     `;
@@ -766,8 +779,8 @@ function renderMigrationBanner() {
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
-          <strong>Migration is in progress</strong>
-          <small>The signed handoff is completing the one-way network transition.</small>
+          <strong>Legacy CFM maintenance is in progress</strong>
+          <small>The confirmed legacy operation must finish before another network start.</small>
         </div>
       </div>
     `;
@@ -783,31 +796,32 @@ function renderMigrationBanner() {
       && !profileUnavailable
       && !state.profiles.some((profile) => profile.active === true);
     const detail = starting
-      ? "The signed migration session is starting. This dashboard will close only after the new window is ready and replacement networking is safely Off."
+      ? "The signed maintenance session is starting. This dashboard closes after the new window is ready and the current CFM engine is safely Off."
       : recovery
-        ? "A previous one-way cutover was interrupted. Recovery runs in a separate, signed migration session."
+        ? "Review and resume the previous legacy CFM operation in its signed maintenance session."
         : profileUnavailable
-          ? `Profile state could not be verified: ${profileUnavailable}. Open Profiles and reload it before starting migration.`
+          ? `Profile state could not be verified: ${profileUnavailable}. Open Profiles and reload it before legacy maintenance.`
           : selectedProfileMissing
-            ? "Import and select a replacement profile on Profiles before starting migration. The legacy network remains unchanged until the signed cutover is explicitly confirmed."
-            : "This install has not retired the legacy network yet. The network stays disabled until you complete the one-way cutover, which runs in a separate, signed migration session while the old app keeps running.";
+            ? "Import and select a replacement profile on Profiles before retiring older CFM components. Normal networking uses the System Proxy and TUN switches."
+            : "Optional maintenance retires older Clash for Mac components and managed data. Opening its signed session stops the current CFM engine and closes this dashboard; retirement still requires a separate confirmation. Use the network switches for normal starts.";
     const button = starting
       ? "Starting…"
       : failure
-        ? (recovery ? "Retry Recovery…" : "Retry Migration…")
+        ? (recovery ? "Retry Recovery…" : "Retry Maintenance…")
         : (profileUnavailable || selectedProfileMissing)
           ? "Open Profiles"
-          : (recovery ? "Open Recovery…" : "Start Migration…");
+          : (recovery ? "Open Recovery…" : "Open Legacy Maintenance…");
     const action = profileUnavailable || selectedProfileMissing
       ? "open-migration-profiles"
       : "begin-migration-handoff";
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
-          <strong>${starting ? "Migration session is starting" : recovery ? "Recovery required" : "Finish setup: migrate to the 0.4.0 network"}</strong>
+          <strong>${starting ? "Legacy CFM maintenance session is starting" : recovery ? "Legacy CFM recovery" : "Optional legacy CFM maintenance"}</strong>
           <small>${escapeHtml(detail)}</small>
           ${retirement.message ? `<small>${escapeHtml(retirement.message)}</small>` : ""}
           ${failure ? `<small>${escapeHtml(failure)}</small>` : ""}
+          ${starting ? "" : close}
         </div>
         <button type="button" class="cfw-big-button" data-action="${action}" ${starting ? "disabled" : ""}>${button}</button>
       </div>
@@ -818,8 +832,8 @@ function renderMigrationBanner() {
     return `
       <div class="cfw-migration-banner" role="status">
         <div class="cfw-migration-copy">
-          <strong>Recover the interrupted cutover</strong>
-          <small>${escapeHtml(retirement.message ?? "An interrupted cutover must be recovered before networking is available.")}</small>
+          <strong>Recover the legacy CFM operation</strong>
+          <small>${escapeHtml(retirement.message ?? "The unfinished legacy transaction requires explicit recovery.")}</small>
           ${cutover.message ? `<small>${escapeHtml(cutover.message)}</small>` : ""}
         </div>
         <button type="button" class="cfw-big-button" data-action="recover-cutover" ${cutover.busy ? "disabled" : ""}>${cutover.busy ? "Recovering…" : "Recover Replacement"}</button>
@@ -834,7 +848,7 @@ function renderMigrationBanner() {
     ? `
         <label class="cfw-migration-confirm">
           <input type="checkbox" data-cutover-confirm ${cutover.confirmedReceiptId === cutover.receiptId ? "checked" : ""} />
-          <span>I understand this one-way cutover retires the legacy network and cannot be undone.</span>
+          <span>I understand this one-way cutover retires older CFM components and managed data and cannot be undone.</span>
         </label>
         <label class="cfw-migration-confirm">
           <input type="checkbox" data-cutover-dns-review ${cutover.dnsReviewedReceiptId === cutover.receiptId ? "checked" : ""} />
@@ -851,8 +865,8 @@ function renderMigrationBanner() {
   return `
     <div class="cfw-migration-banner" role="status">
       <div class="cfw-migration-copy">
-        <strong>Migration session — retire the legacy network</strong>
-        <small>The old app keeps running until you confirm. Prepare stages and validates the replacement; nothing on the network changes until you explicitly confirm.</small>
+        <strong>Legacy CFM maintenance session</strong>
+        <small>This optional operation retires older Clash for Mac components and starts the selected replacement mode. Prepare validates that operation; retirement requires your explicit confirmation.</small>
         <label class="cfw-migration-target">
           <span>Replacement</span>
           <select data-cutover-target ${ready || cutover.busy ? "disabled" : ""}>
@@ -903,6 +917,9 @@ function renderGeneral() {
     ? `<button class="cfw-text-button" data-action="retry-system-proxy"${proxyRetryDisabled}>Retry</button>`
     : "";
   const migrationBanner = renderMigrationBanner();
+  const engineReason = engine.state === "Failed"
+    ? engine.availabilityReason
+    : state.engineMutationError ?? engine.availabilityReason;
   const projectionError = projection.error ?? "no active profile is selected";
   const projectionNote = projectionError === "no active profile is selected"
     ? "No profile selected"
@@ -919,7 +936,7 @@ function renderGeneral() {
 
       <section class="cfw-content${migrationBanner ? " cfw-content-migration" : ""}">
         ${migrationBanner}
-        ${engine.availabilityReason ? renderRowReason(engine.availabilityReason) : ""}
+        ${engineReason ? renderRowReason(engineReason) : ""}
         <div class="cfw-row">
           <div class="cfw-row-left">
             <span>Port</span>
@@ -1010,7 +1027,7 @@ function renderGeneral() {
             ${renderInlineSwitch("tunMode", "TUN Mode", {
               reason: tunnelReason,
               disabled: state.engineMutationBusy,
-              allowDisableWhenUnavailable: true,
+              allowDisableWhenUnavailable: !state.migrationHandoff,
             })}
           </div>
         </div>
@@ -1036,7 +1053,7 @@ function renderGeneral() {
             ${renderInlineSwitch("systemProxy", "System Proxy", {
               reason: proxyReason,
               disabled: state.engineMutationBusy,
-              allowDisableWhenUnavailable: true,
+              allowDisableWhenUnavailable: !state.migrationHandoff,
             })}
           </div>
         </div>
@@ -1421,6 +1438,13 @@ function engineIsOff() {
 }
 
 function engineToggleCapability(key) {
+  if ((key === "systemProxy" || key === "tunMode") && state.migrationHandoff) {
+    return {
+      available: false,
+      label: key === "systemProxy" ? "System Proxy" : "TUN Mode",
+      reason: "This window owns legacy CFM maintenance. Use its explicit maintenance or recovery controls.",
+    };
+  }
   if (key === "systemProxy") {
     return {
       available: state.engine.systemProxyAvailable === true,
@@ -1445,6 +1469,10 @@ function engineToggleCapability(key) {
 /// failed or newly unavailable target never traps the switch On.
 function engineToggleChangeAllowed(key, checked, source) {
   const capability = engineToggleCapability(key);
+  if (capability && state.migrationHandoff) {
+    appendLog("info", source, capability.reason);
+    return false;
+  }
   if (!capability || !checked || capability.available) return true;
   appendLog("info", source, `${capability.label} cannot be enabled: ${capability.reason}`);
   return false;
@@ -3089,6 +3117,16 @@ function renderSettings() {
         ),
       ])}
 
+      ${renderSettingsGroup("Legacy maintenance", [
+        renderSettingAction(
+          "Older Clash for Mac",
+          "Optional",
+          "Review cleanup of older CFM components and managed data, or recover an unfinished operation. Normal System Proxy and TUN starts are independent of cleanup.",
+          "open-legacy-maintenance",
+          "Open maintenance",
+        ),
+      ])}
+
       ${renderSettingsGroup("Paths", [
         renderSettingAction("Home Directory", "Application Support", "Open the application home directory in Finder.", "open-home-directory", "Open Folder"),
         renderSettingAction("Logs", "logs", "Open the log directory in Finder.", "reveal-logs", "Open Folder"),
@@ -3826,6 +3864,7 @@ async function applyToggle(key, checked, source) {
   if (isEngineMutation) {
     runtime.engineStatusRequestId = engineRequestId;
     state.engineMutationBusy = true;
+    state.engineMutationError = null;
     renderPage();
   }
   try {
@@ -3870,6 +3909,7 @@ async function applyToggle(key, checked, source) {
       } catch (refreshError) {
         appendLog("error", "engine", `Could not refresh mode state after refusal: ${errorText(refreshError)}`);
       }
+      state.engineMutationError = errorText(error).slice(0, 512);
     }
     throw error;
   } finally {
@@ -3881,6 +3921,19 @@ async function applyToggle(key, checked, source) {
 }
 
 export async function handleAction(action) {
+  if (action === "open-legacy-maintenance") {
+    await loadRetirementStatus();
+    state.legacyMaintenanceOpen = true;
+    state.activePage = "general";
+    await invoke("open_page", { page: "general" });
+    renderPage();
+    return;
+  }
+  if (action === "close-legacy-maintenance") {
+    if (!state.migrationHandoff) state.legacyMaintenanceOpen = false;
+    renderPage();
+    return;
+  }
   if (action === "reload-dashboard") {
     await reloadPayload();
     return;
@@ -4739,6 +4792,9 @@ function applyBootPayload(payload) {
   state.payload = { product: normalized.product };
   state.migrationHandoff = normalized.migration_handoff;
   state.migrationHandoffStatus = normalized.migration_handoff_status;
+  if (state.migrationHandoff || state.migrationHandoffStatus.state === "in_progress") {
+    state.legacyMaintenanceOpen = true;
+  }
   migrationHandoffRendererReady = normalized.migration_handoff_renderer_ready;
 }
 
@@ -4847,9 +4903,9 @@ async function loadEngineStatus() {
   return true;
 }
 
-/// Reads the legacy-retirement state machine so the dashboard can surface the
-/// fresh-install AwaitingConfirmation lock and offer the migration path. A read
-/// or schema failure becomes an explicit fail-closed `unverifiable` state.
+/// Reads optional maintenance and unfinished-operation status. Network start
+/// admission belongs to the engine; unreadable maintenance state remains
+/// visible rather than being represented as completed cleanup.
 async function loadRetirementStatus() {
   try {
     state.retirement = normalizeRetirementStatus(await invoke("legacy_retirement_status"));

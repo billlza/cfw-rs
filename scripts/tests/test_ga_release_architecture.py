@@ -272,7 +272,7 @@ class GAReleaseCompositionRootTests(unittest.TestCase):
             "cfm-ga-runtime-acceptance-v2",
             "cfm-ga-runtime-check-v2",
             "cfm-ga-command-observation-v2",
-            "cfm-ga-runtime-collection-intent-v2",
+            "cfm-ga-runtime-collection-intent-v3",
             "cfm-ga-runtime-collection-event-v2",
             "ACCEPTANCE_INPUT_ROOT: Final = ACCEPTANCE_ROOT_RELATIVE",
             "MIGRATION_JOURNAL_INPUT: Final = MIGRATION_RELATIVE",

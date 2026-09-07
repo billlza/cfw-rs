@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use cfw_core::LegacyControlSession;
 use cfw_platform::{
-    LegacyServiceRetirement, MacOsPlatformService, observe_legacy_process_table,
-    observe_legacy_tcp_listener_table,
+    LegacyServiceJobObservation, LegacyServiceJobProgram, LegacyServiceRetirement,
+    MacOsPlatformService, observe_legacy_process_table, observe_legacy_tcp_listener_table,
 };
 use serde::{Deserialize, Serialize};
 
@@ -154,6 +154,16 @@ pub(super) fn parse_managed_process(
     line: &str,
     cores_dir: &Path,
 ) -> Result<Option<ProcessRecord>, String> {
+    parse_owned_process(
+        line,
+        LEGACY_CORE_NAMES.iter().map(|name| cores_dir.join(name)),
+    )
+}
+
+fn parse_owned_process(
+    line: &str,
+    mut executables: impl Iterator<Item = PathBuf>,
+) -> Result<Option<ProcessRecord>, String> {
     let mut fields = line.split_ascii_whitespace();
     let uid = fields
         .next()
@@ -174,10 +184,7 @@ pub(super) fn parse_managed_process(
         .collect::<Result<Vec<_>, _>>()?
         .join(" ");
     let command = fields.collect::<Vec<_>>().join(" ");
-    let executable = LEGACY_CORE_NAMES
-        .iter()
-        .map(|name| cores_dir.join(name))
-        .find(|path| command_uses_exact_executable(&command, path));
+    let executable = executables.find(|path| command_uses_exact_executable(&command, path));
     Ok(executable.map(|executable| ProcessRecord {
         uid,
         pid,
@@ -185,6 +192,62 @@ pub(super) fn parse_managed_process(
         executable,
         command,
     }))
+}
+
+/// Observe network-capable legacy runtime, not the presence of old user files.
+/// A stale control-session file or an unused helper binary grants no runtime
+/// authority and is left for the explicit maintenance action.
+pub(super) fn require_legacy_runtime_inactive(cores_dir: &Path) -> Result<(), String> {
+    let output = observe_legacy_process_table().map_err(|error| error.to_string())?;
+    require_no_legacy_runtime_processes(&output, cores_dir)?;
+    let job = MacOsPlatformService
+        .legacy_service_job_observation()
+        .map_err(|error| format!("cannot observe the legacy CFM service: {error}"))?;
+    require_no_launchable_legacy_helper(job)
+}
+
+pub(super) fn require_no_legacy_runtime_processes(
+    output: &str,
+    cores_dir: &Path,
+) -> Result<(), String> {
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let executables = LEGACY_CORE_NAMES
+            .iter()
+            .map(|name| cores_dir.join(name))
+            .chain([
+                PathBuf::from(LEGACY_HELPER_BINARY),
+                PathBuf::from("/Applications/Clash for Mac.app/Contents/Resources/resources/helpers/cfw-helper"),
+            ]);
+        if let Some(process) = parse_owned_process(line, executables)? {
+            return Err(format!(
+                "legacy Clash for Mac runtime is still running (pid {}); stop that runtime before starting networking",
+                process.pid
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn require_no_launchable_legacy_helper(
+    job: LegacyServiceJobObservation,
+) -> Result<(), String> {
+    match job {
+        LegacyServiceJobObservation::Unloaded
+        | LegacyServiceJobObservation::LoadedInactive {
+            program: LegacyServiceJobProgram::RetirementTombstone,
+        }
+        | LegacyServiceJobObservation::LoadedActive {
+            program: LegacyServiceJobProgram::RetirementTombstone,
+        } => Ok(()),
+        LegacyServiceJobObservation::LoadedInactive {
+            program: LegacyServiceJobProgram::LegacyHelper,
+        }
+        | LegacyServiceJobObservation::LoadedActive {
+            program: LegacyServiceJobProgram::LegacyHelper,
+        } => Err(
+            "the legacy Clash for Mac service can still start its old runtime; stop or unregister that service before starting networking".into(),
+        ),
+    }
 }
 
 pub(super) fn parse_loopback_listener_owners(

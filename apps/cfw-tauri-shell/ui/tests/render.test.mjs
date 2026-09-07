@@ -851,6 +851,151 @@ test("unavailable network capabilities block every enable path but never trap an
   }
 });
 
+test("normal mode switches call the existing backend without preparing or cleaning legacy data", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalRetirement = state.retirement;
+  const originalHandoff = state.migrationHandoff;
+  const originalMaintenance = state.legacyMaintenanceOpen;
+  const originalError = state.engineMutationError;
+  const originalCutover = structuredClone(state.cutover);
+  const commands = ["set_system_proxy_enabled", "set_tun_enabled"];
+  const originalResponses = new Map(commands.map((command) => [command, responses[command]]));
+  const presentResponses = new Set(commands.filter((command) => Object.hasOwn(responses, command)));
+  try {
+    state.retirement = { state: "awaiting_confirmation" };
+    state.migrationHandoff = false;
+    state.legacyMaintenanceOpen = false;
+    for (const [key, command, desired, status] of [
+      ["systemProxy", "set_system_proxy_enabled", "system_proxy", "proxy_starting"],
+      ["tunMode", "set_tun_enabled", "tunnel", "awaiting_approval"],
+    ]) {
+      await setEngine(OFF_ENGINE);
+      const input = interactiveElement("input");
+      input.dataset.toggle = key;
+      querySelectorAllElements.set("[data-toggle]", [input]);
+      const html = await renderPage("general");
+      const rendered = html.match(new RegExp(`<input type="checkbox" data-toggle="${key}"([^>]*)>`, "u"));
+      assert.ok(rendered);
+      assert.doesNotMatch(rendered[1], /disabled/u);
+      assert.doesNotMatch(html, /cfw-migration-banner|Start Migration|Prepare cutover|Finish setup/u);
+      responses[command] = {
+        snapshot: { desired_mode: desired, generation: 1, config_digest: null, state: { state: status, generation: 1 } },
+        capabilities: { system_proxy: true, tunnel: true },
+        unavailable_reason: null,
+      };
+      invocationDetails.length = 0;
+      input.checked = true;
+      await input.trigger("change");
+      assert.deepEqual(invocationDetails.filter((entry) => entry.command === command), [
+        { command, args: { enabled: true } },
+      ]);
+      for (const forbidden of [
+        "begin_migration_handoff", "prepare_legacy_cutover", "disable_service_mode",
+        "recover_legacy_cutover", "write_settings_snapshot", "reset_settings_snapshot",
+      ]) {
+        assert.equal(invocationDetails.some((entry) => entry.command === forbidden), false, forbidden);
+      }
+      assert.deepEqual(state.retirement, { state: "awaiting_confirmation" });
+      assert.deepEqual(state.cutover, originalCutover);
+      assert.equal(state.engine.active, false, "an accepted request is not proof of active networking");
+    }
+  } finally {
+    querySelectorAllElements.clear();
+    for (const command of commands) {
+      if (presentResponses.has(command)) responses[command] = originalResponses.get(command);
+      else delete responses[command];
+    }
+    state.retirement = originalRetirement;
+    state.migrationHandoff = originalHandoff;
+    state.legacyMaintenanceOpen = originalMaintenance;
+    state.engineMutationError = originalError;
+    await setEngine(originalEngine);
+  }
+});
+
+test("a backend mode refusal remains visible while Off and is cleared by the next request", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalRetirement = state.retirement;
+  const originalHandoff = state.migrationHandoff;
+  const originalMaintenance = state.legacyMaintenanceOpen;
+  const originalError = state.engineMutationError;
+  const commands = ["set_system_proxy_enabled", "set_tun_enabled"];
+  const originalResponses = new Map(commands.map((command) => [command, responses[command]]));
+  const presentResponses = new Set(commands.filter((command) => Object.hasOwn(responses, command)));
+  try {
+    state.retirement = { state: "awaiting_confirmation" };
+    state.migrationHandoff = false;
+    state.legacyMaintenanceOpen = false;
+    for (const [key, command, reason] of [
+      ["systemProxy", "set_system_proxy_enabled", "A system proxy is already enabled; password=private-value"],
+      ["tunMode", "set_tun_enabled", "The selected profile credential is missing"],
+    ]) {
+      await setEngine(OFF_ENGINE);
+      const input = interactiveElement("input");
+      input.dataset.toggle = key;
+      querySelectorAllElements.set("[data-toggle]", [input]);
+      await renderPage("general");
+      rejected[command] = reason;
+      input.checked = true;
+      await input.trigger("change");
+      assert.equal(state.engine.state, "Off");
+      assert.equal(state.engine.active, false);
+      assert.ok(page.innerHTML.includes(reason.split(";")[0]));
+      assert.doesNotMatch(page.innerHTML, /private-value|Start Migration|Prepare cutover/u);
+      assert.ok(state.engineMutationError.length <= 512);
+      delete rejected[command];
+      responses[command] = OFF_ENGINE;
+      await renderPage("general");
+      input.checked = true;
+      await input.trigger("change");
+      assert.equal(state.engineMutationError, null);
+      assert.equal(page.innerHTML.includes(reason.split(";")[0]), false);
+    }
+  } finally {
+    querySelectorAllElements.clear();
+    for (const command of commands) {
+      delete rejected[command];
+      if (presentResponses.has(command)) responses[command] = originalResponses.get(command);
+      else delete responses[command];
+    }
+    state.retirement = originalRetirement;
+    state.migrationHandoff = originalHandoff;
+    state.legacyMaintenanceOpen = originalMaintenance;
+    state.engineMutationError = originalError;
+    await setEngine(originalEngine);
+  }
+});
+
+test("handoff windows keep ordinary mode mutations outside their command authority", async () => {
+  const originalEngine = responses.engine_snapshot;
+  const originalRetirement = state.retirement;
+  const originalHandoff = state.migrationHandoff;
+  try {
+    state.migrationHandoff = true;
+    state.retirement = { state: "awaiting_confirmation" };
+    await setEngine(OFF_ENGINE);
+    for (const key of ["systemProxy", "tunMode"]) {
+      const input = interactiveElement("input");
+      input.dataset.toggle = key;
+      querySelectorAllElements.set("[data-toggle]", [input]);
+      const html = await renderPage("general");
+      const rendered = html.match(new RegExp(`<input type="checkbox" data-toggle="${key}"([^>]*)>`, "u"));
+      assert.match(rendered[1], /disabled/u);
+      invocationDetails.length = 0;
+      for (const checked of [true, false]) {
+        input.checked = checked;
+        await input.trigger("change");
+      }
+      assert.deepEqual(invocationDetails, []);
+    }
+  } finally {
+    querySelectorAllElements.clear();
+    state.retirement = originalRetirement;
+    state.migrationHandoff = originalHandoff;
+    await setEngine(originalEngine);
+  }
+});
+
 test("proxy modes stay discoverable while Off and emit no controller mutation", async () => {
   const originalEngine = responses.engine_snapshot;
   const modeMutationsBefore = invocationDetails.filter(
@@ -2294,7 +2439,7 @@ test("General routes recovery, post-cutover cleanup and unreadable state without
 
   state.retirement = { state: "unverifiable", message: "journal unreadable" };
   html = await renderPage("general");
-  assert.ok(html.includes("Migration state cannot be verified"));
+  assert.ok(html.includes("Legacy CFM maintenance state cannot be verified"));
   assert.equal(html.includes("Prepare cutover"), false);
 
   state.retirement = { state: "awaiting_confirmation" };
@@ -2312,17 +2457,30 @@ test("General routes recovery, post-cutover cleanup and unreadable state without
   state.retirement = { state: "cleared" };
 });
 
-test("migration setup routes an unconfigured install to Profiles before starting the handoff", async () => {
+test("legacy maintenance is an explicit Settings action and keeps its profile precondition", async () => {
   const originalProfiles = state.profiles;
   const originalRetirement = state.retirement;
   const originalHandoff = state.migrationHandoff;
+  const originalMaintenance = state.legacyMaintenanceOpen;
+  const originalRetirementResponse = responses.legacy_retirement_status;
 
   try {
     state.profiles = [];
     state.retirement = { state: "awaiting_confirmation" };
     state.migrationHandoff = false;
-    const html = await renderPage("general");
+    state.legacyMaintenanceOpen = false;
+    responses.legacy_retirement_status = state.retirement;
+    assert.doesNotMatch(await renderPage("general"), /cfw-content-migration|Start Migration|Finish setup/u);
+    assert.match(await renderPage("settings"), /data-action="open-legacy-maintenance"/u);
+    invocationDetails.length = 0;
+    await appModule.handleAction("open-legacy-maintenance");
+    assert.deepEqual(invocationDetails, [
+      { command: "legacy_retirement_status", args: {} },
+      { command: "open_page", args: { page: "general" } },
+    ]);
+    const html = page.innerHTML;
     assert.match(html, /cfw-content-migration/u);
+    assert.match(html, /Optional legacy CFM maintenance/u);
     assert.match(html, /Import and select a replacement profile/u);
     assert.match(html, /data-action="open-migration-profiles"/u);
     assert.doesNotMatch(html, /data-action="begin-migration-handoff"/u);
@@ -2333,10 +2491,36 @@ test("migration setup routes an unconfigured install to Profiles before starting
       command: "open_page",
       args: { page: "profiles" },
     });
+    await appModule.handleAction("close-legacy-maintenance");
+    assert.equal(state.legacyMaintenanceOpen, false);
+    assert.doesNotMatch(await renderPage("general"), /cfw-migration-banner/u);
   } finally {
     state.profiles = originalProfiles;
     state.retirement = originalRetirement;
     state.migrationHandoff = originalHandoff;
+    state.legacyMaintenanceOpen = originalMaintenance;
+    responses.legacy_retirement_status = originalRetirementResponse;
+  }
+});
+
+test("an unfinished legacy transaction exposes recovery even when maintenance was not opened", async () => {
+  const originalRetirement = state.retirement;
+  const originalHandoff = state.migrationHandoff;
+  const originalMaintenance = state.legacyMaintenanceOpen;
+  try {
+    state.retirement = { state: "recovery_start_required", target: "tunnel", message: "durable journal remains" };
+    state.migrationHandoff = false;
+    state.legacyMaintenanceOpen = false;
+    const html = await renderPage("general");
+    assert.match(html, /durable journal remains/u);
+    assert.match(html, /data-action="begin-migration-handoff"[^>]*>Open Recovery/u);
+    assert.doesNotMatch(html, /Prepare cutover|Finish setup/u);
+    await appModule.handleAction("close-legacy-maintenance");
+    assert.match(page.innerHTML, /Open Recovery/u);
+  } finally {
+    state.retirement = originalRetirement;
+    state.migrationHandoff = originalHandoff;
+    state.legacyMaintenanceOpen = originalMaintenance;
   }
 });
 
@@ -2351,7 +2535,7 @@ test("renderer refresh recovers app-owned handoff progress and terminal failure"
   });
   let html = await renderPage("general");
   assert.equal(state.migrationHandoffStatus.state, "in_progress");
-  assert.match(html, /Migration session is starting/u);
+  assert.match(html, /Legacy CFM maintenance session is starting/u);
   assert.match(html, /data-action="begin-migration-handoff" disabled>Starting…/u);
 
   responses.boot_payload.migration_handoff_status = {
@@ -2367,7 +2551,7 @@ test("renderer refresh recovers app-owned handoff progress and terminal failure"
   html = await renderPage("general");
   assert.equal(state.migrationHandoffStatus.state, "failed");
   assert.match(html, /No legacy cutover was authorized/u);
-  assert.match(html, /Retry Migration…/u);
+  assert.match(html, /Retry Maintenance…/u);
   assert.doesNotMatch(html, /begin-migration-handoff" disabled/u);
 
   rejected.begin_migration_handoff = "injected readiness failure";
@@ -2380,6 +2564,7 @@ test("renderer refresh recovers app-owned handoff progress and terminal failure"
   responses.boot_payload.migration_handoff_status = { state: "idle" };
   state.migrationHandoffStatus = { state: "idle" };
   state.retirement = { state: "cleared" };
+  state.legacyMaintenanceOpen = false;
 });
 
 test("migration actions invoke exact target, receipt and confirmation arguments", async () => {

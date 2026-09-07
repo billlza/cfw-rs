@@ -23,6 +23,24 @@ pub(crate) enum LegacyRetirementStatus {
     },
 }
 
+impl LegacyRetirementStatus {
+    pub(crate) fn start_block_reason(&self) -> Option<String> {
+        match self {
+            Self::Cleaning => Some(
+                "legacy maintenance is running; wait for it to finish before starting networking"
+                    .into(),
+            ),
+            Self::RecoveryStartRequired { message, .. } => Some(format!(
+                "an interrupted legacy network transaction requires recovery: {message}"
+            )),
+            Self::AwaitingConfirmation
+            | Self::Cleared
+            | Self::PostCutoverCleanupRequired { .. }
+            | Self::ManualCleanupRequired { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LegacyCleanupAction {
@@ -94,24 +112,10 @@ impl LegacyRetirementGate {
             .map_err(|error| format!("legacy retirement gate lock failed: {error}"))
     }
 
-    pub(crate) fn require_cleared(&self) -> Result<(), String> {
-        match self.status()? {
-            LegacyRetirementStatus::Cleared
-            | LegacyRetirementStatus::PostCutoverCleanupRequired { .. } => Ok(()),
-            LegacyRetirementStatus::AwaitingConfirmation => Err(
-                "legacy network remains active until the user explicitly confirms the one-way cutover; new network modes remain blocked"
-                    .into(),
-            ),
-            LegacyRetirementStatus::Cleaning => Err(
-                "the explicitly confirmed legacy network cutover is still running; new network modes remain blocked"
-                    .into(),
-            ),
-            LegacyRetirementStatus::RecoveryStartRequired { message, .. } => Err(format!(
-                "an interrupted one-way cutover requires replacement recovery: {message}"
-            )),
-            LegacyRetirementStatus::ManualCleanupRequired { message, .. } => Err(format!(
-                "legacy network cleanup requires manual intervention: {message}"
-            )),
+    pub(crate) fn require_start_allowed(&self) -> Result<(), String> {
+        match self.status()?.start_block_reason() {
+            Some(reason) => Err(reason),
+            None => Ok(()),
         }
     }
 

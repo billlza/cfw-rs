@@ -86,18 +86,21 @@ build.
 ## Current implementation boundary
 
 The repository fails closed while the native data plane is being completed.
-The legacy privileged TUN path cannot start a core; its one-release tombstone is a non-operational unregister descriptor
-exists only to remove the old control session and unregister the old service.
-Launching 0.4.0 never runs that tombstone. Startup performs only a read-only
-re-verification when a completed retirement marker already exists; otherwise
-the current VPN remains untouched while a replacement profile is staged in a
-separate native-profile directory. The one-way cutover requires an explicit
-user confirmation and is rejected before any network mutation unless the
-selected replacement profile and signed native data plane pass preflight.
-Legacy System Proxy and DNS retirement is verification-first. If ownership or
-the current value is ambiguous, migration reports a manual-cleanup action and
-requires explicit user review instead of rewriting a user or administrator
-setting.
+System Proxy and TUN use the normal network switches. They validate the selected
+profile, credentials, native permissions and runtime ownership when starting;
+missing retirement markers and retained legacy configuration or cache files do
+not disable networking. Startup failures remain visible beside the controls.
+An enabled external system proxy is a real conflict and is rejected before any
+proxy preference is written. A running or launchable old CFM helper also requires
+attention; unrelated applications are not terminated or reconfigured.
+
+Legacy maintenance is a separate, explicit Settings action. The legacy privileged
+TUN path cannot start a core; its one-release tombstone exists only to unregister
+the old service. Normal startup never runs it or deletes legacy data. Unfinished
+network transactions still require explicit recovery, and corrupted journals
+remain errors. Optional one-way retirement retains its ownership, confirmation,
+DNS review and recovery checks. Editing modern preferences does not require
+retirement and later maintenance preserves those edits.
 
 The Swift Network Extension foundation and packet-pump tests are present, but a
 release is blocked until all of the following are proven:

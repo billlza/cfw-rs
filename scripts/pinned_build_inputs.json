@@ -3229,7 +3229,7 @@
     "scripts/prepare_publication_evidence.sh": "79c45634e64965e0b9ca6bb25fd2a0afa96689a0ef0d760099de1bc40604b1a6",
     "scripts/verify_ci_no_masking.py": "8917a0c8d24f5d5e6ba0db7dec46362bb0771f0a7ef820653ffa8758f1f452f8",
     ".github/workflows/ci.yml": "b0881faa331b4072b1d0e9d957fe5db99920aef0e7ee8d6284accb6531d3a724",
-    "scripts/dormant_app_install.py": "fbb0a247eee02491f86cb1eca4b214c9c945768b3afa16814936ab512f043023",
+    "scripts/dormant_app_install.py": "71b5fe7b1bc0a7183b8aff1386432327acec5d6d7e97742be181c2879690a8df",
     "scripts/current_service_transaction.py": "e132f91d18c77c52ca12a7d485f7f3674d9d0a4e644c70b044fadedf66a5bd1e",
     "scripts/gatekeeper_assessment.py": "a4cee29500d0ada05455b5fed984253f99a484601c70c68cf2117792305ee433",
     "scripts/notarization_transaction.py": "c450f424d6def57002cd872ef6ef55e590fe4c74d71af21b0ad211689b10d0b3",

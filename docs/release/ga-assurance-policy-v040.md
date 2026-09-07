@@ -382,6 +382,11 @@ submission or recovery still validate their required live tools; admission of
 the tools executing later verification is unchanged. There is no persistent
 success cache, metadata fallback, or change to application and package checks.
 
+The dormant install's fixed application-verifier child retains the validated
+`global` or `private` Rust selection and independently re-admits that SDK. Other
+maintenance commands retain their minimal environment; no caller-selected tool
+path, startup hook, or credential is forwarded.
+
 The mandatory order is service recommission, journal `--export`, journal
 `--verify`, runtime `collect`, runtime `verify`, and GA-acceptance sealing.
 Journal `--recover` is admitted only after a recovery-required or

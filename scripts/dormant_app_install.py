@@ -39,7 +39,7 @@ import subprocess
 import sys
 import time
 from types import MappingProxyType
-from typing import Any, Callable, Final, Iterator
+from typing import Any, Callable, Final, Iterator, Literal
 import uuid
 
 if __package__:
@@ -1192,10 +1192,20 @@ def _terminate_process_group(
 
 
 def _run_bounded_process(
-    arguments: tuple[str, ...], *, timeout: float = 600
+    arguments: tuple[str, ...],
+    *,
+    timeout: float = 600,
+    release_rust_toolchain: Literal["global", "private"] | None = None,
 ) -> CommandResult:
     if not arguments or timeout <= 0:
         raise InstallError("command_invalid", "bounded command arguments are invalid")
+    if release_rust_toolchain is not None and release_rust_toolchain not in (
+        "global", "private"
+    ):
+        raise InstallError(
+            "release_rust_selection_invalid",
+            "release verifier Rust selection must be global or private",
+        )
     try:
         account = pwd.getpwuid(os.geteuid())
         home = Path(account.pw_dir)
@@ -1221,6 +1231,8 @@ def _run_bounded_process(
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
         "USER": account.pw_name,
     }
+    if release_rust_toolchain is not None:
+        environment["CFW_RELEASE_RUST_TOOLCHAIN"] = release_rust_toolchain
     try:
         process = subprocess.Popen(
             arguments,
@@ -2142,8 +2154,22 @@ def _run_fixed_release_verifier(
             "release_verifier_invalid",
             "release verifier ownership or mode is unsafe",
         )
+    # The wrapper re-admits the selected SDK itself. Forward only its existing
+    # fixed-location choice; maintenance commands retain the minimal environment.
+    rust_toolchain: Literal["global", "private"]
+    match os.environ.get("CFW_RELEASE_RUST_TOOLCHAIN", "global"):
+        case "global":
+            rust_toolchain = "global"
+        case "private":
+            rust_toolchain = "private"
+        case _:
+            raise InstallError(
+                "release_rust_selection_invalid",
+                "release verifier Rust selection must be global or private",
+            )
     result = _run_bounded_process(
-        ("/bin/bash", "-p", str(verifier))
+        ("/bin/bash", "-p", str(verifier)),
+        release_rust_toolchain=rust_toolchain,
     )
     if result.returncode == 0:
         try:

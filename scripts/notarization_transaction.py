@@ -8819,6 +8819,7 @@ def execute_transaction(
             "submit",
             str(archive),
             "--no-wait",
+            "--no-s3-acceleration",
             "--keychain-profile",
             context.notary_profile,
             "--output-format",

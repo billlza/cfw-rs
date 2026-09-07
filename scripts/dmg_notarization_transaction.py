@@ -1608,6 +1608,7 @@ def _direct_submit(
         "submit",
         str(attempt.dmg_path),
         "--no-wait",
+        "--no-s3-acceleration",
         "--keychain-profile",
         context.notary_profile,
         "--output-format",

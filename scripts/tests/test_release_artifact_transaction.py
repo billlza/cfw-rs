@@ -841,6 +841,7 @@ class DmgNotarizationTransactionTests(unittest.TestCase):
             if role == CommandRole.SUBMIT
         )
         self.assertIn("--no-wait", submit)
+        self.assertIn("--no-s3-acceleration", submit)
         self.assertNotIn("--wait", submit)
         self.assertEqual(
             self.fixture.verify(destination)["submission_id"],

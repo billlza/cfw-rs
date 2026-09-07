@@ -1063,6 +1063,7 @@ class NotarizationTransactionSuccessTests(unittest.TestCase):
         self.assertEqual(submit[0], CommandRole.SUBMIT)
         self.assertEqual(submit[2], 1800)
         self.assertIn("--no-wait", submit[1])
+        self.assertIn("--no-s3-acceleration", submit[1])
         self.assertIn(self.fixture.context.notary_profile, submit[1])
         self.assertIn(
             str(
